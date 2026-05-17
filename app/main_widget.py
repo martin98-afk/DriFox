@@ -272,7 +272,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 app.aboutToQuit.connect(self._auto_save_current_session)
             except Exception:
-                pass
+                logger.warning("[MainWidget] 自动保存会话信号连接失败")
 
         # 设置文件操作记录的会话上下文
         if self.backend.tool_executor:
@@ -503,7 +503,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if ref is not None and not sip.isdeleted(ref) and ref.isVisible():
                         valid_refs.append(ref)
                 except Exception:
-                    pass
+                    logger.warning("[MainWidget] 清理弹窗引用时发生异常")
             self._popup_refs = valid_refs
 
             # 限制最大引用数量，防止无限增长
@@ -1079,7 +1079,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if scroll_areas:
                 scroll_areas[0].verticalScrollBar().setValue(0)
         except Exception:
-            pass
+            logger.warning("[MainWidget] 设置窗口滚动位置失败")
 
     def _expand_provider_list_card(self):
         """展开服务商列表卡片"""
@@ -1087,7 +1087,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self._settings_popup, 'llmProviderCard'):
                 self._settings_popup.llmProviderCard.toggleExpand()
         except Exception:
-            pass
+            logger.warning("[MainWidget] 展开服务商列表卡片失败")
 
     def _on_model_selected_from_popup(self, provider_name: str, model_name: str):
         """从弹窗选中模型后切换"""
@@ -1590,7 +1590,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     session["last_time"] = data.get("last_time", data.get("saved_at", ""))
                     session["preview"] = get_message_preview(messages) if messages else ""
             except Exception:
-                pass
+                logger.warning("[MainWidget] 加载归档会话时跳过异常条目")
 
         self._history_popup_card.set_archived_sessions(archived_list)
 
@@ -2168,12 +2168,12 @@ class OpenAIChatToolWindow(ToolWindow):
                         try:
                             card.cleanup()
                         except Exception:
-                            pass
+                            logger.warning("[MainWidget] card.cleanup() 失败")
                     if hasattr(card, 'deleteLater'):
                         try:
                             card.deleteLater()
                         except Exception:
-                            pass
+                            logger.warning("[MainWidget] card.deleteLater() 失败")
 
     def _cleanup_session_card_cache(self):
         from app.constants import (
@@ -2695,7 +2695,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 widget.heightChanged.disconnect(self._on_message_card_height_changed)
             except Exception:
-                pass
+                logger.warning("[MainWidget] 断开 heightChanged 信号失败")
             widget.heightChanged.connect(self._on_message_card_height_changed)
             if self._resize_preview_active:
                 widget.set_resize_preview_mode(True)
@@ -4949,7 +4949,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             self._auto_save_current_session()
         except Exception:
-            pass
+            logger.warning("[MainWidget] closeEvent 自动保存会话失败")
         super().closeEvent(event)
 
     def _toggle_send_stop(self, is_sending: bool):
