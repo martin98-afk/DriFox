@@ -81,6 +81,9 @@ class GatewayEngine(QObject):
         self._current_worker: Optional[OpenAIChatWorker] = None
         self._is_streaming = False
 
+        # ===== 消息队列（流式中到达的新消息排队依次处理）=====
+        self._pending_queue: List[tuple] = []  # [(session, text, callbacks), ...]
+
         # ===== Gateway 会话级配置 =====
         self._current_agent: Optional[str] = "plan"
 
@@ -360,11 +363,10 @@ class GatewayEngine(QObject):
     ) -> bool:
         """发送消息到 AI（使用独立 worker）"""
         if self._is_streaming:
-            logger.warning("[GatewayEngine] Already streaming, ignoring")
-            cb = callbacks.get("error")
-            if cb:
-                cb("上一个请求正在处理中，请稍候。")
-            return False
+            # 排队，不丢弃消息
+            self._pending_queue.append((session, text, callbacks))
+            logger.info(f"[GatewayEngine] Message queued ({len(self._pending_queue)} pending)")
+            return True
 
         # 添加用户消息
         session.add_user_message(content=text)
@@ -422,6 +424,14 @@ class GatewayEngine(QObject):
         worker.start()
         self.worker_started.emit()
         return True
+
+    def _process_next(self) -> None:
+        """从队列中取出下一条消息处理"""
+        if not self._pending_queue:
+            return
+        session, text, callbacks = self._pending_queue.pop(0)
+        logger.info(f"[GatewayEngine] Processing queued message ({len(self._pending_queue)} remaining)")
+        self._send_to_ai(session, text, callbacks)
 
     def _build_messages(self, session: ChatSession, llm_config: Dict) -> List[Dict]:
         """构建消息列表"""
@@ -496,11 +506,17 @@ class GatewayEngine(QObject):
             cb_finished(final_response)
             self.worker_finished.emit(final_response)
 
+            # 处理队列中的下一条消息
+            self._process_next()
+
         def on_error(error: str):
             self._is_streaming = False
             self._current_worker = None
             cb_error(error)
             self.worker_error.emit(error)
+
+            # 处理队列中的下一条消息
+            self._process_next()
 
         worker.content_received.connect(on_content)
         worker.finished_with_content.connect(on_finished)

@@ -23,6 +23,7 @@ from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 class HookItem(QWidget):
     """单个 Hook 条目"""
     removed = pyqtSignal(int)  # 发送 hook 索引
+    edited = pyqtSignal(int)  # 发送 hook 索引
     toggled = pyqtSignal(int, bool)  # 索引, 启用状态
     
     def __init__(self, event_name: str, hook_data: dict, index: int, parent=None):
@@ -76,6 +77,8 @@ class HookItem(QWidget):
     
     def _show_menu(self, pos):
         menu = QMenu(self)
+        menu.addAction("编辑", lambda: self.edited.emit(self.index))
+        menu.addSeparator()
         menu.addAction("删除", lambda: self.removed.emit(self.index))
         menu.exec_(self.mapToGlobal(pos))
 
@@ -341,6 +344,9 @@ class HookListSettingCard(ExpandSettingCard):
                     item.removed.connect(
                         lambda idx, en=event_name, ri=rule_index: self._remove_hook(en, ri, idx)
                     )
+                    item.edited.connect(
+                        lambda idx, en=event_name, ri=rule_index, hi=hook_index, hk=hook, rl=rule: self._edit_hook(en, ri, hi, hk, rl)
+                    )
                     item.toggled.connect(
                         lambda idx, enabled, en=event_name, ri=rule_index, hi=hook_index: self._toggle_hook(en, ri, hi, enabled)
                     )
@@ -380,6 +386,12 @@ class HookListSettingCard(ExpandSettingCard):
         self._refresh()
         self.hooksChanged.emit()
     
+    def _edit_hook(self, event: str, rule_index: int, hook_index: int, hook: dict, rule: dict):
+        """编辑 hook：只读的 skill hook 不可编辑，发出编辑信号"""
+        if rule.get("_readonly", False):
+            return
+        self.showEditHookCard.emit(hook)
+
     def _remove_hook(self, event: str, rule_index: int, hook_index: int):
         """删除 hook（直接修改 self.all_hooks 并持久化）"""
         if event in self.all_hooks:

@@ -121,10 +121,11 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 设置顶部 Tab 导航
         self.setup_tabs([
+            ("llm", "大模型"),
             ("common", "通用设置"),
             ("appearance", "外观样式"),
             ("update", "版本更新"),
-        ], default_tab="common")
+        ], default_tab="llm")
         self.tabChanged.connect(self._on_tab_changed)
 
         self._setup_content()
@@ -147,6 +148,11 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout = self.content_layout
         content_layout.setContentsMargins(0, 4, 0, 4)
         content_layout.setSpacing(6)
+
+        # ---- 大模型分隔标签 ----
+        self._sep_llm_label = self._make_sep_label("大模型")
+        self._section_anchors["llm"] = self._sep_llm_label
+        content_layout.addWidget(self._sep_llm_label)
 
         self.llmProviderCard = ProviderListSettingCard(
             icon=get_icon("大模型"),

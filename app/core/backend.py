@@ -662,13 +662,19 @@ class ChatBackend(QObject):
             def on_stream_finished(response):
                 """AI 完成回调"""
                 content = response or "".join(gateway_chunks)
-                if not future.done():
-                    future.set_result(content or "抱歉，我没有生成有效回复，请重试。")
+                try:
+                    if not future.done():
+                        future.set_result(content or "抱歉，我没有生成有效回复，请重试。")
+                except Exception:
+                    pass  # future 已被其他线程完成，忽略
 
             def on_error(error):
                 logger.error(f"[Gateway] AI error: {error}")
-                if not future.done():
-                    future.set_result(f"处理消息时出错: {error}")
+                try:
+                    if not future.done():
+                        future.set_result(f"处理消息时出错: {error}")
+                except Exception:
+                    pass  # future 已被其他线程完成，忽略
 
             callbacks = {
                 "content_received": on_content_received,
@@ -676,28 +682,31 @@ class ChatBackend(QObject):
                 "error": on_error,
             }
 
-            result = self._gateway_engine.process(
+            self._gateway_engine.process(
                 session=chat_session,
                 text=text,
                 callbacks=callbacks,
             )
 
-            if not result:
-                logger.error("[Gateway] GatewayEngine.process failed")
-                future.set_result("抱歉，消息处理失败。")
+            # process() 返回 True 表示消息已被接收（排队或正在处理）
+            # 返回 False 只在真正出错时发生，此时通知调用方
 
         except Exception as e:
             logger.error(f"[Gateway] Processing error: {e}", exc_info=True)
-            if not future.done():
-                future.set_exception(e)
+            try:
+                if not future.done():
+                    future.set_exception(e)
+            except Exception:
+                pass  # future 已被其他线程完成，忽略
     
     def _init_gateway_async(self):
         """异步初始化 Gateway（后台进行）"""
         import asyncio
         from functools import partial
-        
+
         def _do_init():
             try:
+                # 延迟导入，避免主线程加载 adapter 模块（import 有阻塞风险）
                 from app.gateway.config import get_gateway_config
                 from app.gateway.manager import create_platform_manager
                 
@@ -720,18 +729,15 @@ class ChatBackend(QObject):
                     """发送消息到平台"""
                     return await self._gateway_send_message(platform, chat_id, content, **kwargs)
                 
-                # 创建管理器
+                # 创建管理器（PlatformManager 是单例，连接逻辑在其后台事件循环）
                 config = get_gateway_config()
                 self._gateway_manager = create_platform_manager(process_message, send_message)
-                
+
                 self._gateway_initialized = True
-                logger.info("[ChatBackend] Gateway 初始化完成")
-                
-                # 自动启动已启用的平台
-                try:
-                    self._gateway_manager.start_all()
-                except Exception as e:
-                    logger.warning(f"[ChatBackend] Gateway auto-start failed: {e}")
+                logger.info("[ChatBackend] Gateway 管理器创建完成")
+
+                # 启动连接：纯异步调度，不等待结果（避免 WebSocket 连接慢时卡住后台线程）
+                self._gateway_manager.start_all_async()
                     
             except Exception as e:
                 logger.error(f"[ChatBackend] Gateway 初始化失败: {e}", exc_info=True)

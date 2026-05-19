@@ -152,12 +152,20 @@ class PlatformManager:
     
     def start_all(self) -> Dict[Platform, bool]:
         """
-        启动所有启用的平台
-        
+        启动所有启用的平台（同步，等待结果）
+
         Returns:
             启动结果: platform -> success
         """
         return self._run_coro(self._start_all_async())
+
+    def start_all_async(self) -> None:
+        """
+        启动所有启用的平台（纯异步，不等待结果）
+
+        避免 WebSocket 连接慢时卡住调用线程。
+        """
+        self._schedule_coro(self._start_all_async())
     
     def stop_all(self) -> None:
         """停止所有平台"""
