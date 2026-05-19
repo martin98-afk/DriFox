@@ -671,33 +671,14 @@ class ChatBackend(QObject):
                 except Exception as e:
                     logger.debug(f"[Gateway] Stream push error: {e}")
 
-            def _is_tool_content(text: str) -> bool:
-                """判断是否为工具调用的中间输出"""
-                tool_keywords = [
-                    "📋 分析结果：", "🔍 搜索结果", "📄 文件内容", "💻 执行结果",
-                    "工具调用开始", "工具调用完成", "🔧 正在使用",
-                    "正在搜索", "正在读取", "正在执行",
-                ]
-                return any(kw in text for kw in tool_keywords)
-
             # 4. 流式回调
+            # 注意：钉钉/企微不支持编辑已发送消息，流式中间推送会与最终回复内容重叠。
+            # 因此只保留工具进度推送，流式内容只在 on_stream_finished 一次性发送。
             gateway_chunks = []
-            last_stream_push = 0
-            MIN_STREAM_INTERVAL = 2.0  # 最少间隔 2 秒推送一次
-            MIN_STREAM_LENGTH = 15     # 至少积累 15 个字符再推送
 
             def on_content_received(chunk):
-                """AI 流式输出到达"""
-                nonlocal last_stream_push
+                """AI 流式输出到达——不推送中间内容，避免与最终回复重复"""
                 gateway_chunks.append(chunk)
-                full_text = "".join(gateway_chunks)
-
-                # 每 2 秒推送一次累积内容（>15字符）
-                now = time.time()
-                if (now - last_stream_push >= MIN_STREAM_INTERVAL
-                        and len(full_text) >= MIN_STREAM_LENGTH):
-                    last_stream_push = now
-                    _push_to_platform(f"💭 {full_text}")
 
             def on_tool_call(tool_data: dict):
                 """工具调用时发送进度"""
@@ -721,8 +702,8 @@ class ChatBackend(QObject):
                 content = response or "".join(gateway_chunks)
                 final = content or "抱歉，我没有生成有效回复，请重试。"
 
-                # 发送最终回复
-                _push_to_platform(f"{final}")
+                # 发送最终回复（替换之前的流式预览，不重复）
+                _push_to_platform(f"💬 **DriFox 助手**\n\n{final}")
 
                 # 通知异步等待的 future
                 try:
@@ -846,10 +827,13 @@ class ChatBackend(QObject):
         try:
             # 异步等待 AI 结果（不超时，AI 回复多久等多久）
             response = await asyncio.wrap_future(future)
-            return response
+
+            # 注意：on_stream_finished 回调已通过 _push_to_platform 发送了最终回复
+            # 所以这里返回空字符串，避免 message_handler 重复发送
+            return ""
         except Exception as e:
             logger.error(f"[Gateway] AI processing error: {e}")
-            return "处理消息时出错，请重试。"
+            return ""
     
     async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:
         """发送消息到平台"""
