@@ -5847,11 +5847,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_destroyed = True
         
         # 设置关闭标志，阻止 Settings.save() 写入磁盘（防止覆盖用户粘贴的配置）
-        try:
-            self.cfg._set_closing_down()
-        except Exception:
-            pass
-        
         if hasattr(self, 'backend') and self.backend:
             try:
                 self.backend.set_ui_valid(False)

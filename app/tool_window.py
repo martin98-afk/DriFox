@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
-from typing import Optional
 
 import psutil
 from PyQt5.QtCore import pyqtSignal, QTimer, Qt
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel
-from qfluentwidgets import TransparentToolButton
+from qfluentwidgets import (
+    IconWidget,
+)
+from qfluentwidgets import (
+    isDarkTheme,
+    FluentIcon as FIF,
+    TransparentToolButton,
+)
 
 from app.utils.config import Settings
-from app.utils.utils import get_icon, get_font_family_css
-from app.utils.design_tokens import scale_font_size, get_font_family_css
+from app.utils.design_tokens import get_font_family_css
 from app.utils.design_tokens import scale_font_size
+from app.utils.utils import get_icon
 
 
 class ToolWindowTitleBar(QWidget):
-    switchLayoutRequested = pyqtSignal()
     popupRequested = pyqtSignal()
     lockRequested = pyqtSignal(bool)
 
@@ -26,12 +31,6 @@ class ToolWindowTitleBar(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        from qfluentwidgets import (
-            IconWidget,
-            isDarkTheme,
-        )
-        from app.utils.utils import get_icon
-
         self.setFixedHeight(32)
 
         layout = QHBoxLayout(self)
@@ -69,14 +68,15 @@ class ToolWindowTitleBar(QWidget):
         self._memory_timer.timeout.connect(self._update_memory_label)
         self._memory_refreshing = False
 
-        self._switch_layout_btn = TransparentToolButton(get_icon("上下切换"), self)
-        self._switch_layout_btn.setFixedSize(24, 24)
-        self._switch_layout_btn.setToolTip("切换到上/下半区")
-        self._switch_layout_btn.clicked.connect(self._on_switch_clicked)
+        # 设置按钮已移除（移到主窗口内）
 
-        self._popup_btn = TransparentToolButton(get_icon("弹出窗"), self)
+        self._min_btn = TransparentToolButton(get_icon("最小化"), self)
+        self._min_btn.setFixedSize(24, 24)
+        self._min_btn.setToolTip("最小化")
+
+        self._popup_btn = TransparentToolButton(FIF.CLOSE, self)
         self._popup_btn.setFixedSize(24, 24)
-        self._popup_btn.setToolTip("弹出窗口")
+        self._popup_btn.setToolTip("关闭")
         self._popup_btn.clicked.connect(self._on_popup_clicked)
 
         # 锁定按钮 - 用于穿透模式
@@ -85,7 +85,7 @@ class ToolWindowTitleBar(QWidget):
         self._lock_btn.setToolTip("锁定窗口（鼠标穿透）")
         self._lock_btn.clicked.connect(self._on_lock_clicked)
 
-        layout.addWidget(self._switch_layout_btn)
+        layout.addWidget(self._min_btn)
         layout.addWidget(self._popup_btn)
         layout.addWidget(self._lock_btn)
 
@@ -166,32 +166,6 @@ class ToolWindowTitleBar(QWidget):
             self._custom_buttons.remove(widget)
         widget.setParent(None)
 
-    def add_popup_button(self, widget):
-        title_layout = self.layout()
-        if not title_layout:
-            return
-        switch_index = title_layout.indexOf(self._switch_layout_btn)
-        title_layout.insertWidget(switch_index, widget)
-        self._popup_mode_buttons.append(widget)
-
-    def clear_popup_buttons(self):
-        title_layout = self.layout()
-        if not title_layout:
-            return
-        for btn in self._popup_mode_buttons:
-            title_layout.removeWidget(btn)
-            btn.setParent(None)
-        self._popup_mode_buttons.clear()
-
-    def set_compact(self, compact):
-        self._is_compact = compact
-        self._switch_layout_btn.setVisible(not compact)
-        self._popup_btn.setVisible(not compact)
-        self.setFixedHeight(24 if compact else 32)
-
-    def _on_switch_clicked(self):
-        self.switchLayoutRequested.emit()
-
     def _on_popup_clicked(self):
         self.popupRequested.emit()
 
@@ -271,7 +245,6 @@ class ToolWindow(QWidget):
         self._title_bar = ToolWindowTitleBar(self)
         self._title_bar.set_icon(self.icon)
         self._title_bar.set_title(self.name)
-        self._title_bar.switchLayoutRequested.connect(self._handle_switch_layout)
         self._title_bar.popupRequested.connect(self._request_popup)
         self._title_bar.lockRequested.connect(self._on_window_lock_changed)
         self._title_bar.hide()
@@ -279,15 +252,6 @@ class ToolWindow(QWidget):
 
     def _setup_title_bar(self):
         pass
-
-    switchLayoutRequested = pyqtSignal()
-
-    def _handle_switch_layout(self):
-        self._layout_mode = (
-            "horizontal" if self._layout_mode == "vertical" else "vertical"
-        )
-        self._on_layout_changed()
-        self.switchLayoutRequested.emit()
 
     def _toggle_layout(self):
         if self._layout_mode == "vertical":

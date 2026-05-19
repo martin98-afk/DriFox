@@ -346,7 +346,7 @@ def create_platform_manager(
     send_message: Callable[[Platform, str, str, Any], SendResult],
 ) -> PlatformManager:
     """
-    创建平台管理器
+    创建或获取平台管理器（全局单例）
     
     Args:
         process_message: 处理消息回调
@@ -357,6 +357,9 @@ def create_platform_manager(
     """
     global _manager_instance
     
+    if _manager_instance is not None:
+        return _manager_instance
+    
     # 使用全局单例，确保 UI 保存的配置能被读取
     config = get_gateway_config()
     _manager_instance = PlatformManager(
@@ -364,6 +367,8 @@ def create_platform_manager(
         process_message_callback=process_message,
         send_message_callback=send_message,
     )
+    
+    logger.info("[PlatformManager] Created singleton instance")
     
     return _manager_instance
 

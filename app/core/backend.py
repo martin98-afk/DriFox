@@ -611,32 +611,76 @@ class ChatBackend(QObject):
         try:
             # 创建网关专用会话
             session = self._session_manager.create_new_session()
-            
-            # 切换到该会话
             self._session_manager.set_current_session(session)
+            logger.debug(f"[Gateway] Created session: {session.session_id}")
             
             # 保存原有回调
             old_finished = self._chat_engine._callbacks.get("stream_finished")
+            old_error = self._chat_engine._callbacks.get("error")
+            old_content = self._chat_engine._callbacks.get("content_received")
+            
+            # 记录流式内容（用于调试）
+            gateway_content_chunks = []
+            
+            def on_content_received(chunk):
+                gateway_content_chunks.append(chunk)
             
             def on_stream_finished(response):
                 """AI 完成时回调"""
-                logger.info(f"[Gateway] AI response ready, len={len(response)}")
+                content = response or ""
+                logger.info(f"[Gateway] AI on_stream_finished response='{content[:100]}', chunks={len(gateway_content_chunks)}")
+                
                 if not future.done():
-                    future.set_result(response)
+                    # 优先使用 chunks 合并
+                    if not content.strip() and gateway_content_chunks:
+                        content = ''.join(gateway_content_chunks)
+                        logger.info(f"[Gateway] Using chunks: '{content[:100]}'")
+                    
+                    # 从 session 获取最后一条 assistant 消息
+                    if not content.strip():
+                        try:
+                            msgs = session.get_context_messages()
+                            for msg in reversed(msgs):
+                                if msg.get("role") == "assistant" and msg.get("content", "").strip():
+                                    content = msg["content"]
+                                    logger.info(f"[Gateway] From session: '{content[:100]}'")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"[Gateway] Session fallback error: {e}")
+                    
+                    if content.strip():
+                        future.set_result(content)
+                    else:
+                        future.set_result(content or "抱歉，我没有生成有效回复，请重试。")
+                
                 # 恢复原有回调
                 if old_finished:
                     self._chat_engine._callbacks["stream_finished"] = old_finished
+                if old_content:
+                    self._chat_engine._callbacks["content_received"] = old_content
+            
+            def on_error(error):
+                logger.error(f"[Gateway] AI error: {error}")
+                if not future.done():
+                    future.set_exception(RuntimeError(error))
+                if old_error:
+                    self._chat_engine._callbacks["error"] = old_error
             
             self._chat_engine._callbacks["stream_finished"] = on_stream_finished
+            self._chat_engine._callbacks["content_received"] = on_content_received
+            self._chat_engine._callbacks["error"] = on_error
             
             # 发送消息到引擎
             result = self._chat_engine.send_message(text)
             if not result:
-                if not future.done():
-                    future.set_exception(RuntimeError("send_message failed"))
-                # 恢复回调
+                logger.error("[Gateway] send_message failed")
+                future.set_result("抱歉，发送消息到 AI 引擎失败。")
                 if old_finished:
                     self._chat_engine._callbacks["stream_finished"] = old_finished
+                if old_error:
+                    self._chat_engine._callbacks["error"] = old_error
+                if old_content:
+                    self._chat_engine._callbacks["content_received"] = old_content
             
         except Exception as e:
             logger.error(f"[Gateway] Processing error: {e}", exc_info=True)
@@ -676,11 +720,14 @@ class ChatBackend(QObject):
                 config = get_gateway_config()
                 self._gateway_manager = create_platform_manager(process_message, send_message)
                 
-                # 注册状态变化回调
-                self._gateway_manager.on_status_change(self._on_gateway_status_changed)
-                
                 self._gateway_initialized = True
                 logger.info("[ChatBackend] Gateway 初始化完成")
+                
+                # 自动启动已启用的平台
+                try:
+                    self._gateway_manager.start_all()
+                except Exception as e:
+                    logger.warning(f"[ChatBackend] Gateway auto-start failed: {e}")
                     
             except Exception as e:
                 logger.error(f"[ChatBackend] Gateway 初始化失败: {e}", exc_info=True)
@@ -702,9 +749,14 @@ class ChatBackend(QObject):
         """
         处理 Gateway 消息 - 调用 AI
         
-        通过信号将消息发送到主线程处理，然后等待结果。
+        先发送"思考中"提示，然后等待 AI 结果。
         """
         logger.info(f"[Gateway] Processing message from {platform.value}:{user_id}: {text[:50]}...")
+        
+        # 先发送"思考中"占位回复
+        await self._gateway_send_message(
+            platform, chat_id, "🤔 正在思考，请稍候..."
+        )
         
         # 使用同步 Future 等待主线程处理结果
         import concurrent.futures

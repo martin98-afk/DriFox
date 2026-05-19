@@ -17,6 +17,7 @@ from qfluentwidgets import (
     FluentIcon,
 )
 
+from app.tray_manager import TrayManager
 from app.utils.config import Settings
 from app.utils.utils import get_icon
 
@@ -293,28 +294,15 @@ class ToolPopupDialog(QDialog):
         main_layout.setSpacing(0)
 
         title_bar = tool_instance.get_title_bar()
-        title_bar.set_compact(False)
-        title_bar.show()
-        title_bar.clear_popup_buttons()
         title_bar.popupRequested.disconnect()
         title_bar.popupRequested.connect(self.close)
-        self._popup_btn = title_bar._popup_btn
-        self._popup_btn.setIcon(FIF.CLOSE)
-        self._popup_btn.setToolTip("关闭")
-        self._switch_btn = title_bar._switch_layout_btn
-        self._switch_btn.hide()
+        title_bar.show()
 
-        # 设置按钮已移除（移到主窗口内）
-
-        self._min_btn = TransparentToolButton(get_icon("最小化"), self)
-        self._min_btn.setFixedSize(24, 24)
-        self._min_btn.setToolTip("最小化")
         # macOS: 使用 hide/show 代替 showMinimized/showNormal
         if platform.system() == "Darwin":
-            self._min_btn.clicked.connect(self.hide)
+            title_bar._min_btn.clicked.connect(self.hide)
         else:
-            self._min_btn.clicked.connect(self.showMinimized)
-        title_bar.add_popup_button(self._min_btn)
+            title_bar._min_btn.clicked.connect(self.showMinimized)
 
         # 隐藏标题栏的锁定按钮，改用独立的 LockButtonWidget
         lock_btn = title_bar._lock_btn
@@ -337,7 +325,6 @@ class ToolPopupDialog(QDialog):
         self._slider_desktop_pos = None
 
         # 注册到全局 TrayManager（确保只有一个托盘图标）
-        from app.tray_manager import TrayManager
         TrayManager.get_instance().register_window(self)
 
         # 创建独立的锁定按钮（在穿透模式下仍可交互）
@@ -503,8 +490,7 @@ class ToolPopupDialog(QDialog):
         # 关闭时同时隐藏锁定按钮
         if self._lock_btn_widget:
             self._lock_btn_widget.hide()
-        Settings.get_instance().save()
-        
+
         # 通知 tool_instance 标记为已销毁，防止异步回调继续执行
         try:
             from PyQt5 import sip
