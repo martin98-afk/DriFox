@@ -14,6 +14,8 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
+import aiohttp
+
 from app.gateway.base import (
     BasePlatformAdapter,
     Platform,
@@ -458,7 +460,6 @@ class WeComAdapter(BasePlatformAdapter):
         
         try:
             from pathlib import Path
-            from gateway.platforms.base import cache_image_from_url
             import httpx
             
             image_path = str(image_path)

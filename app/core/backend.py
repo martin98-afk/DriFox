@@ -609,10 +609,46 @@ class ChatBackend(QObject):
         logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
         
         try:
-            # 创建网关专用会话
-            session = self._session_manager.create_new_session()
-            self._session_manager.set_current_session(session)
-            logger.debug(f"[Gateway] Created session: {session.session_id}")
+            from app.gateway.base import Platform as GatewayPlatform, MessageEvent, MessageType
+            
+            # 获取或创建 Gateway 会话（持久映射 user → chat_session_id）
+            gw_platform = GatewayPlatform(platform)
+            
+            # 查找已有 Gateway 会话
+            gw_session = self._gateway_manager.session_manager.get_session_by_platform_user(
+                gw_platform, user_id
+            )
+            
+            stored_session_id = gw_session.metadata.get("chat_session_id") if gw_session else None
+            
+            # 查找已有 ChatSession 或创建新的
+            existing = None
+            if stored_session_id:
+                for s in self._session_manager.get_all_sessions():
+                    if s.session_id == stored_session_id:
+                        existing = s
+                        break
+            
+            if existing:
+                session = existing
+                self._session_manager.set_current_session(session)
+                logger.debug(f"[Gateway] Reusing session: {session.session_id}")
+            else:
+                session = self._session_manager.create_new_session()
+                # 创建或更新 Gateway 会话的映射
+                if not gw_session:
+                    gw_session = self._gateway_manager.session_manager.get_or_create_session(
+                        MessageEvent(
+                            text=text,
+                            message_type=MessageType.TEXT,
+                            message_id=user_id,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            platform=gw_platform,
+                        )
+                    )
+                gw_session.metadata["chat_session_id"] = session.session_id
+                logger.debug(f"[Gateway] Created new session: {session.session_id}")
             
             # 保存原有回调
             old_finished = self._chat_engine._callbacks.get("stream_finished")
