@@ -6,16 +6,17 @@ from pathlib import Path
 
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QVBoxLayout, QMenu, QLineEdit
+from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout
 from qfluentwidgets import (
     ExpandSettingCard,
     PushButton,
     FluentIcon,
     SwitchButton,
+    ToolButton,
 )
 
 from app.utils.utils import get_app_data_dir, get_font_family_css
-from app.utils.design_tokens import scale_font_size
+from app.utils.design_tokens import scale_font_size, Sizes, ButtonStyles, SwitchStyles
 from app.widgets.mcp_setting_card import _ElidedLabel
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
@@ -57,30 +58,31 @@ class HookItem(QWidget):
         
         # 启用开关
         self.switch = SwitchButton(self)
-        from app.utils.design_tokens import SwitchStyles
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(self.hook_data.get("enabled", True))
+        
+        # 编辑 / 删除按钮
+        self.editBtn = ToolButton(FluentIcon.EDIT)
+        self.editBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
+        self.editBtn.setStyleSheet(ButtonStyles.tool_button())
+        self.editBtn.clicked.connect(lambda: self.edited.emit(self.index))
+        
+        self.delBtn = ToolButton(FluentIcon.CLOSE)
+        self.delBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
+        self.delBtn.setStyleSheet(ButtonStyles.tool_button())
+        self.delBtn.clicked.connect(lambda: self.removed.emit(self.index))
         
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(48, 0, 16, 0)
         self.hBoxLayout.addWidget(self.commandLabel, 1)
         self.hBoxLayout.addWidget(self.matcherLabel, 0)
         self.hBoxLayout.addSpacing(12)
-        self.hBoxLayout.addWidget(self.switch, 0, Qt.AlignRight)
+        self.hBoxLayout.addWidget(self.switch, 0)
+        self.hBoxLayout.addWidget(self.editBtn, 0)
+        self.hBoxLayout.addWidget(self.delBtn, 0)
         self.hBoxLayout.setAlignment(Qt.AlignVCenter)
         
         self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.index, checked))
-        
-        # 右键菜单
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._show_menu)
-    
-    def _show_menu(self, pos):
-        menu = QMenu(self)
-        menu.addAction("编辑", lambda: self.edited.emit(self.index))
-        menu.addSeparator()
-        menu.addAction("删除", lambda: self.removed.emit(self.index))
-        menu.exec_(self.mapToGlobal(pos))
 
 
 class HookEditCard(QWidget):
@@ -99,6 +101,10 @@ class HookEditCard(QWidget):
         self._setup_ui()
         if not self._is_new:
             self._load_data()
+    
+    def get_original_data(self) -> dict:
+        """返回原始 hook 数据（编辑时使用），新增时返回空 dict"""
+        return dict(self._hook_data) if not self._is_new else {}
     
     def _setup_ui(self):
         from app.widgets.mcp_setting_card import EDIT_CARD_STYLE, _make_row
@@ -186,7 +192,7 @@ class HookListSettingCard(ExpandSettingCard):
     
     hooksChanged = pyqtSignal()
     showAddHookCard = pyqtSignal()  # 显示添加 Hook 卡片
-    showEditHookCard = pyqtSignal(dict)  # 显示编辑 Hook 卡片
+    showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (event_name, hook_data)
     
     def __init__(self, icon: QIcon, title: str, content: str = None, parent=None, home=None,
                  hook_manager=None):
@@ -385,12 +391,59 @@ class HookListSettingCard(ExpandSettingCard):
         
         self._refresh()
         self.hooksChanged.emit()
-    
+
+    def _update_hook(self, original_event: str, original_command: str, original_matcher: str, new_values: dict):
+        """更新已有 hook（根据原始信息查找并替换）"""
+        # 查找原始 hook 所在规则和位置
+        for event_name, rules in list(self.all_hooks.items()):
+            for ri, rule in enumerate(rules):
+                if rule.get("_readonly", False):
+                    continue
+                rule_matcher = rule.get("matcher", "")
+                hooks = rule.get("hooks", [])
+                for hi, hook in enumerate(hooks):
+                    if (hook.get("command", "") == original_command
+                            and event_name == original_event
+                            and rule_matcher == original_matcher):
+                        event = new_values.get("event", original_event)
+                        command = new_values.get("command", "")
+                        matcher = new_values.get("matcher", "")
+                        hook_type = new_values.get("type", "command")
+                        enabled = new_values.get("enabled", True)
+
+                        if event != original_event or matcher != original_matcher:
+                            # 事件或 matcher 变了，移动到新位置
+                            hooks.pop(hi)
+                            if not hooks:
+                                rules.pop(ri)
+                            if event not in self.all_hooks:
+                                self.all_hooks[event] = []
+                            new_hook = {"type": hook_type, "command": command, "enabled": enabled}
+                            new_rule = {"hooks": [new_hook]}
+                            if matcher:
+                                new_rule["matcher"] = matcher
+                            self.all_hooks[event].append(new_rule)
+                        else:
+                            hook["type"] = hook_type
+                            hook["command"] = command
+                            hook["enabled"] = enabled
+                        break
+                else:
+                    continue
+                break
+
+        self._save_hooks()
+        self._refresh()
+        self.hooksChanged.emit()
+
     def _edit_hook(self, event: str, rule_index: int, hook_index: int, hook: dict, rule: dict):
         """编辑 hook：只读的 skill hook 不可编辑，发出编辑信号"""
         if rule.get("_readonly", False):
             return
-        self.showEditHookCard.emit(hook)
+        # 将事件名附带到 hook 数据中传递
+        hook_with_event = dict(hook)
+        hook_with_event["_event"] = event
+        self.showEditHookCard.emit(event, hook_with_event)
 
     def _remove_hook(self, event: str, rule_index: int, hook_index: int):
         """删除 hook（直接修改 self.all_hooks 并持久化）"""

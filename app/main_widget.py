@@ -860,6 +860,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 连接 Hook 添加/编辑信号
         self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
+        self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
 
         # 连接 MCP 添加/编辑信号
         self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
@@ -1405,18 +1406,51 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._hook_edit_card.show()
 
+    def _show_hook_edit_card(self, event: str, hook_data: dict):
+        """显示编辑 Hook 卡片"""
+        from app.widgets.hook_setting_card import HookEditCard
+        self._settings_popup.hide()
+        self._hook_edit_card.set_title("✏️ 编辑 Hook")
+        # 创建携带原始数据的 HookEditCard
+        self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self)
+        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        while self._hook_edit_card.content_layout.count():
+            item = self._hook_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
+        self._hook_edit_card.set_save_button_handler(
+            lambda: self._hook_edit_popup._on_save()
+        )
+        self._hook_edit_card.show()
+
     def _on_hook_edit_saved(self, values: dict):
         """Hook 保存回调"""
         self._hook_edit_card.hide()
-        # 先刷新再显示弹窗，避免布局异步计算导致内容不可见
         if hasattr(self._settings_popup, 'hookListCard'):
-            self._settings_popup.hookListCard._add_hook(
-                event=values["event"],
-                command=values["command"],
-                matcher=values["matcher"],
-                hook_type=values["type"],
-                enabled=values["enabled"]
-            )
+            from app.widgets.hook_setting_card import HookListSettingCard
+            original = self._hook_edit_popup.get_original_data()
+            if original:
+                # 编辑已有 hook
+                orig_event = original.get("_event", values["event"])
+                orig_command = original.get("command", "")
+                orig_matcher = original.get("matcher", "")
+                self._settings_popup.hookListCard._update_hook(
+                    original_event=orig_event,
+                    original_command=orig_command,
+                    original_matcher=orig_matcher,
+                    new_values=values
+                )
+            else:
+                # 新增 hook
+                self._settings_popup.hookListCard._add_hook(
+                    event=values["event"],
+                    command=values["command"],
+                    matcher=values["matcher"],
+                    hook_type=values["type"],
+                    enabled=values["enabled"]
+                )
         self._settings_popup.show()
 
     def _on_hook_edit_closed(self):
