@@ -21,6 +21,7 @@ class ChatSession:
         self.compaction_state: Dict = self._default_compaction_state()
         self.compaction_cache: Dict = self._default_compaction_cache()
         self.system_prompt: str = ""
+        self.metadata: Dict[str, Any] = {}  # 扩展元数据（如模型/Agent 覆盖）
 
     @staticmethod
     def _default_compaction_state() -> Dict:
@@ -141,6 +142,8 @@ class ChatSession:
             "message_count": self.message_count,
             "compaction_state": self.compaction_state,
             "compaction_cache": self.compaction_cache,
+            "system_prompt": self.system_prompt,
+            "metadata": self.metadata,
         }
 
     @classmethod
@@ -156,6 +159,7 @@ class ChatSession:
         session.set_compaction_state(data.get("compaction_state"))
         session.set_compaction_cache(data.get("compaction_cache"))
         session.system_prompt = data.get("system_prompt", "") or ""
+        session.metadata = data.get("metadata", {}) or {}
         return session
 
 

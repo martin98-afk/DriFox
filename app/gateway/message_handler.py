@@ -3,6 +3,7 @@
 Gateway 消息处理器
 
 处理来自企业微信/钉钉的消息。
+将所有消息（包括命令）委托给 process_message 回调。
 """
 from __future__ import annotations
 
@@ -26,14 +27,14 @@ logger = logging.getLogger(__name__)
 class MessageHandler:
     """
     Gateway 消息处理器
-    
+
     负责：
     1. 接收平台消息
-    2. 获取/创建会话
-    3. 调用 AI 处理
+    2. 获取/创建 Gateway 会话
+    3. 委托给 process_message 回调处理（含命令和 AI 对话）
     4. 发送响应
     """
-    
+
     def __init__(
         self,
         session_manager: GatewaySessionManager,
@@ -42,34 +43,28 @@ class MessageHandler:
     ):
         """
         初始化消息处理器
-        
+
         Args:
-            session_manager: 会话管理器
-            process_message_callback: 处理消息的回调，签名为：
+            session_manager: Gateway 会话管理器（管理 WeCom/钉钉用户映射）
+            process_message_callback: 处理消息的回调（含命令），签名为：
                 async def process(session_id: str, text: str, ...) -> str
-            send_message_callback: 发送消息的回调，签名为：
-                async def send(platform: Platform, chat_id: str, content: str, ...) -> SendResult
+            send_message_callback: 发送消息的回调
         """
         self._session_manager = session_manager
         self._process_message = process_message_callback
         self._send_message = send_message_callback
-    
+
     async def handle(self, event: MessageEvent) -> None:
         """
-        处理消息
-        
+        处理消息 — 统一入口，命令和文本都由主引擎处理
+
         Args:
             event: 消息事件
         """
-        # 处理命令
-        if event.is_command:
-            await self._handle_command(event)
-            return
-        
-        # 获取或创建会话
+        # 获取或创建 Gateway 会话
         session = self._session_manager.get_or_create_session(event)
-        
-        # 调用 AI 处理
+
+        # 委托给主引擎处理（含命令解析和 AI 对话）
         try:
             response = await self._process_message(
                 session_id=session.session_id,
@@ -79,7 +74,7 @@ class MessageHandler:
                 user_id=event.user_id,
                 media_urls=event.media_urls,
             )
-            
+
             if response:
                 # 发送响应
                 result = await self._send_message(
@@ -87,10 +82,12 @@ class MessageHandler:
                     chat_id=event.chat_id,
                     content=response,
                 )
-                
+
                 if not result.success:
-                    logger.warning("[MessageHandler] Failed to send response: %s", result.error)
-                    
+                    logger.warning(
+                        "[MessageHandler] Failed to send response: %s", result.error
+                    )
+
         except asyncio.TimeoutError:
             logger.error("[MessageHandler] AI processing timeout")
             await self._send_message(
@@ -99,80 +96,11 @@ class MessageHandler:
                 content="抱歉，AI 处理超时了。请稍后重试。",
             )
         except Exception as e:
-            logger.error("[MessageHandler] Processing error: %s", e, exc_info=True)
+            logger.error(
+                "[MessageHandler] Processing error: %s", e, exc_info=True
+            )
             await self._send_message(
                 platform=event.platform,
                 chat_id=event.chat_id,
                 content=f"处理消息时出错: {str(e)[:200]}",
             )
-    
-    async def _handle_command(self, event: MessageEvent) -> None:
-        """处理命令"""
-        command = event.command_name
-        args = event.command_args
-        
-        if command in ("new", "reset"):
-            # 获取会话
-            session = self._session_manager.get_session_by_platform_user(
-                event.platform, event.user_id
-            )
-            
-            if session:
-                # 重置会话
-                self._session_manager.reset_session(session.session_id)
-                
-                await self._send_message(
-                    platform=event.platform,
-                    chat_id=event.chat_id,
-                    content="✅ 会话已重置，开始新的对话！",
-                )
-            else:
-                await self._send_message(
-                    platform=event.platform,
-                    chat_id=event.chat_id,
-                    content="没有找到现有会话，直接开始新的对话吧！",
-                )
-        
-        elif command == "clear":
-            session = self._session_manager.get_session_by_platform_user(
-                event.platform, event.user_id
-            )
-            
-            if session:
-                self._session_manager.reset_session(session.session_id)
-                
-            await self._send_message(
-                platform=event.platform,
-                chat_id=event.chat_id,
-                content="✅ 聊天记录已清除！",
-            )
-        
-        elif command == "help":
-            help_text = """
-🤖 **DriFox Gateway 命令**
-
-- `/new` - 开始新会话
-- `/reset` - 重置当前会话
-- `/clear` - 清除聊天记录
-- `/help` - 显示帮助
-
-**注意**: 企业微信/钉钉的会话与桌面端是隔离的。
-"""
-            await self._send_message(
-                platform=event.platform,
-                chat_id=event.chat_id,
-                content=help_text.strip(),
-            )
-        
-        else:
-            # 未知命令，转发给 AI
-            await self.handle(MessageEvent(
-                text=f"/{command} {args}",
-                message_type=event.message_type,
-                message_id=event.message_id,
-                chat_id=event.chat_id,
-                user_id=event.user_id,
-                user_name=event.user_name,
-                platform=event.platform,
-                chat_type=event.chat_type,
-            ))

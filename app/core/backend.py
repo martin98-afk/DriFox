@@ -13,6 +13,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool
 from loguru import logger
 
 from app.core.store import SessionStore
+from app.core.gateway_engine import GatewayEngine
 from app.core.agent import AgentManager
 from app.core.chat_engine import ChatEngine
 from app.core.chat_session import SessionManager, ChatSession
@@ -91,6 +92,7 @@ class ChatBackend(QObject):
         
         # Gateway 组件
         self._gateway_manager = None
+        self._gateway_engine: Optional[GatewayEngine] = None
         self._gateway_initialized = False
     
     # ========== 属性访问 ==========
@@ -257,6 +259,15 @@ class ChatBackend(QObject):
             backend=self,  # 暂时设为 None，后面通过 setter 设置
         )
         logger.info("[ChatBackend] ChatEngine 创建完成")
+
+        # 创建 GatewayEngine（全局单例，多个窗口共享）
+        self._gateway_engine = GatewayEngine.get_instance(
+            get_model_config=get_model_config,
+            tool_executor=self._tool_executor,
+            agent_manager=self._agent_manager,
+            session_store=self._session_store,
+        )
+        logger.info("[ChatBackend] GatewayEngine 创建完成")
         
         self._get_memory_context_getter = None
 
@@ -596,7 +607,9 @@ class ChatBackend(QObject):
     def _on_gateway_input(self, data: dict):
         """
         处理 Gateway 发来的消息（在主线程运行）
-        
+
+        委托给 GatewayEngine 处理，不碰 UI 的 SessionManager/current_index。
+
         Args:
             data: {text, chat_id, user_id, platform, future}
         """
@@ -605,119 +618,74 @@ class ChatBackend(QObject):
         user_id = data["user_id"]
         platform = data["platform"]
         future = data["future"]
-        
+
         logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
-        
+
         try:
             from app.gateway.base import Platform as GatewayPlatform, MessageEvent, MessageType
-            
-            # 获取或创建 Gateway 会话（持久映射 user → chat_session_id）
+
             gw_platform = GatewayPlatform(platform)
-            
-            # 查找已有 Gateway 会话
-            gw_session = self._gateway_manager.session_manager.get_session_by_platform_user(
-                gw_platform, user_id
+
+            # 1. 获取或创建 GatewaySession（WeCom/钉钉用户映射）
+            gw_session = self._gateway_manager.session_manager.get_or_create_session(
+                MessageEvent(
+                    text=text,
+                    message_type=MessageType.TEXT,
+                    message_id=user_id,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    platform=gw_platform,
+                )
             )
-            
-            stored_session_id = gw_session.metadata.get("chat_session_id") if gw_session else None
-            
-            # 查找已有 ChatSession 或创建新的
-            existing = None
-            if stored_session_id:
-                for s in self._session_manager.get_all_sessions():
-                    if s.session_id == stored_session_id:
-                        existing = s
-                        break
-            
-            if existing:
-                session = existing
-                self._session_manager.set_current_session(session)
-                logger.debug(f"[Gateway] Reusing session: {session.session_id}")
-            else:
-                session = self._session_manager.create_new_session()
-                # 创建或更新 Gateway 会话的映射
-                if not gw_session:
-                    gw_session = self._gateway_manager.session_manager.get_or_create_session(
-                        MessageEvent(
-                            text=text,
-                            message_type=MessageType.TEXT,
-                            message_id=user_id,
-                            chat_id=chat_id,
-                            user_id=user_id,
-                            platform=gw_platform,
-                        )
-                    )
-                gw_session.metadata["chat_session_id"] = session.session_id
-                logger.debug(f"[Gateway] Created new session: {session.session_id}")
-            
-            # 保存原有回调
-            old_finished = self._chat_engine._callbacks.get("stream_finished")
-            old_error = self._chat_engine._callbacks.get("error")
-            old_content = self._chat_engine._callbacks.get("content_received")
-            
-            # 记录流式内容（用于调试）
-            gateway_content_chunks = []
-            
+
+            # 2. 查找或创建 Gateway 自己的 ChatSession（完全独立于 UI）
+            stored_chat_id = gw_session.metadata.get("chat_session_id")
+            chat_session = None
+            if stored_chat_id:
+                chat_session = self._gateway_engine.find_session(stored_chat_id)
+
+            if not chat_session:
+                user_name = gw_session.user_name or user_id[:8]
+                chat_session = ChatSession(
+                    name=f"[{platform}] {user_name}"
+                )
+                self._gateway_engine.add_session(chat_session)
+                gw_session.metadata["chat_session_id"] = chat_session.session_id
+                logger.debug(f"[Gateway] Created ChatSession: {chat_session.session_id} for {platform}:{user_id}")
+
+            # 3. 使用 GatewayEngine 独立处理（不碰 UI 的 ChatEngine）
+            gateway_chunks = []
+
             def on_content_received(chunk):
-                gateway_content_chunks.append(chunk)
-            
+                gateway_chunks.append(chunk)
+
             def on_stream_finished(response):
-                """AI 完成时回调"""
-                content = response or ""
-                logger.info(f"[Gateway] AI on_stream_finished response='{content[:100]}', chunks={len(gateway_content_chunks)}")
-                
+                """AI 完成回调"""
+                content = response or "".join(gateway_chunks)
                 if not future.done():
-                    # 优先使用 chunks 合并
-                    if not content.strip() and gateway_content_chunks:
-                        content = ''.join(gateway_content_chunks)
-                        logger.info(f"[Gateway] Using chunks: '{content[:100]}'")
-                    
-                    # 从 session 获取最后一条 assistant 消息
-                    if not content.strip():
-                        try:
-                            msgs = session.get_context_messages()
-                            for msg in reversed(msgs):
-                                if msg.get("role") == "assistant" and msg.get("content", "").strip():
-                                    content = msg["content"]
-                                    logger.info(f"[Gateway] From session: '{content[:100]}'")
-                                    break
-                        except Exception as e:
-                            logger.debug(f"[Gateway] Session fallback error: {e}")
-                    
-                    if content.strip():
-                        future.set_result(content)
-                    else:
-                        future.set_result(content or "抱歉，我没有生成有效回复，请重试。")
-                
-                # 恢复原有回调
-                if old_finished:
-                    self._chat_engine._callbacks["stream_finished"] = old_finished
-                if old_content:
-                    self._chat_engine._callbacks["content_received"] = old_content
-            
+                    future.set_result(content or "抱歉，我没有生成有效回复，请重试。")
+
             def on_error(error):
                 logger.error(f"[Gateway] AI error: {error}")
                 if not future.done():
-                    future.set_exception(RuntimeError(error))
-                if old_error:
-                    self._chat_engine._callbacks["error"] = old_error
-            
-            self._chat_engine._callbacks["stream_finished"] = on_stream_finished
-            self._chat_engine._callbacks["content_received"] = on_content_received
-            self._chat_engine._callbacks["error"] = on_error
-            
-            # 发送消息到引擎
-            result = self._chat_engine.send_message(text)
+                    future.set_result(f"处理消息时出错: {error}")
+
+            callbacks = {
+                "content_received": on_content_received,
+                "stream_finished": on_stream_finished,
+                "error": on_error,
+            }
+
+            result = self._gateway_engine.process(
+                session=chat_session,
+                text=text,
+                callbacks=callbacks,
+            )
+
             if not result:
-                logger.error("[Gateway] send_message failed")
-                future.set_result("抱歉，发送消息到 AI 引擎失败。")
-                if old_finished:
-                    self._chat_engine._callbacks["stream_finished"] = old_finished
-                if old_error:
-                    self._chat_engine._callbacks["error"] = old_error
-                if old_content:
-                    self._chat_engine._callbacks["content_received"] = old_content
-            
+                logger.error("[Gateway] GatewayEngine.process failed")
+                future.set_result("抱歉，消息处理失败。")
+
         except Exception as e:
             logger.error(f"[Gateway] Processing error: {e}", exc_info=True)
             if not future.done():
@@ -876,7 +844,12 @@ class ChatBackend(QObject):
     def gateway_manager(self):
         """获取 Gateway 管理器"""
         return self._gateway_manager
-    
+
+    @property
+    def gateway_engine(self) -> Optional[GatewayEngine]:
+        """获取 Gateway 引擎（与 ChatEngine 完全独立）"""
+        return self._gateway_engine
+
     @property
     def gateway_initialized(self) -> bool:
         """Gateway 是否已初始化"""
