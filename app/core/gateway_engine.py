@@ -443,7 +443,7 @@ class GatewayEngine(QObject):
         messages = self._build_messages(session, llm_config)
 
         # 获取工具
-        tools = self._get_tools()
+        tools = self._get_tools(session=session)
 
         # 创建 worker
         try:
@@ -497,18 +497,45 @@ class GatewayEngine(QObject):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
+        # Gateway 专用约束（追加在 agent 提示词后面，覆盖主智能体中对 question 的推荐）
+        gateway_constraints = """
+## Gateway 模式约束
+你正在通过 Gateway 对外提供 AI 服务（当前平台可能为钉钉/企业微信等）。
+以下是必须遵守的规则：
+
+### 【禁止使用的工具】
+- ❌ **禁止** 使用 `question` 工具 —— 这是交互式提问工具，Gateway 模式下无法与用户交互
+- ❌ **禁止** 使用 `task_batch` 和 `task_status` 工具 —— 不支持发布子智能体任务
+- ❌ **禁止** 使用 `todowrite` 工具 —— 不支持待办事项功能
+
+### 【必须遵守】
+- 所有任务必须**一次性完成**，不支持中途暂停、等待确认或来回交互
+- 如果信息不足，使用 `websearch` 或 `webfetch` 自行搜索，不要问用户
+- 直接输出最终结果，不要问"是否需要"、"是否继续"之类的问题
+- 回答要简洁、完整、可直接使用
+"""
+        if system_prompt:
+            # 追加到现有 system prompt 后面
+            messages[0]["content"] = messages[0]["content"] + "\n\n" + gateway_constraints.strip()
+        else:
+            messages.append({"role": "system", "content": gateway_constraints.strip()})
+
         # 会话自身消息
         messages.extend(session.get_context_messages())
 
         return messages
 
-    def _get_tools(self) -> List[Dict]:
-        """获取工具 schema（过滤掉 Gateway 不适用的交互式工具）"""
+    def _get_tools(self, session: Optional[ChatSession] = None) -> List[Dict]:
+        """获取工具 schema（过滤掉 Gateway 不适用的交互式工具）
+
+        Args:
+            session: 当前处理的会话（用于获取 agent 名称）
+        """
         agent_name = None
         if self._agent_manager:
-            session = self.get_current_session()
-            if session:
-                agent_name = session.metadata.get("agent") or self._current_agent
+            s = session or self.get_current_session()
+            if s:
+                agent_name = s.metadata.get("agent") or self._current_agent
 
         if agent_name and self._agent_manager:
             tools = self._agent_manager.get_agent_tools_schema(agent_name)
@@ -519,8 +546,15 @@ class GatewayEngine(QObject):
             )
 
         # 过滤掉 Gateway 不适用的交互式工具
+        before = len(tools)
         filtered = [t for t in tools if t.get("function", {}).get("name") not in GATEWAY_DISABLED_TOOLS
                     and t.get("name") not in GATEWAY_DISABLED_TOOLS]
+        removed = before - len(filtered)
+        if removed > 0:
+            removed_names = [t.get("function", {}).get("name") or t.get("name", "?") for t in tools
+                             if t.get("function", {}).get("name") in GATEWAY_DISABLED_TOOLS
+                             or t.get("name") in GATEWAY_DISABLED_TOOLS]
+            logger.info(f"[GatewayEngine] Filtered {removed} tool(s): {removed_names}")
         return filtered
 
     def _connect_worker_signals(
@@ -575,8 +609,20 @@ class GatewayEngine(QObject):
         worker.finished_with_content.connect(on_finished)
         worker.error_occurred.connect(on_error)
 
-        # Gateway 不需要 tool_call_started / tool_result_received 等 UI 信号
-        # 但需要处理工具调用的结果（自动完成）和 messages_updated
+        # Gateway 需要工具调用跟踪（推送进度到平台）
+        cb_tool_call = callbacks.get("tool_call_started")
+        cb_tool_result = callbacks.get("tool_result_received")
+
+        if cb_tool_call:
+            def on_tool_call(tool_call_id: str, tool_name: str, args: dict, round_id: str):
+                cb_tool_call({"tool_name": tool_name, "arguments": args})
+            worker.tool_call_started.connect(on_tool_call)
+
+        if cb_tool_result:
+            def on_tool_result(tool_call_id: str, tool_name: str, args: dict, result: object):
+                cb_tool_result({"tool_name": tool_name, "result": result})
+            worker.tool_result_received.connect(on_tool_result)
+
         def on_messages_updated(messages: List[Dict]):
             """工具调用后消息更新"""
             if messages:

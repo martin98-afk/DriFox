@@ -3,7 +3,9 @@
 ChatBackend - 统一后端接口
 后端自己创建和管理所有组件，前端只负责 UI 调用
 """
+import asyncio
 import os
+import time
 
 import orjson as json
 from pathlib import Path
@@ -623,6 +625,7 @@ class ChatBackend(QObject):
 
         try:
             from app.gateway.base import Platform as GatewayPlatform, MessageEvent, MessageType
+            import asyncio
 
             gw_platform = GatewayPlatform(platform)
 
@@ -653,31 +656,94 @@ class ChatBackend(QObject):
                 gw_session.metadata["chat_session_id"] = chat_session.session_id
                 logger.debug(f"[Gateway] Created ChatSession: {chat_session.session_id} for {platform}:{user_id}")
 
-            # 3. 使用 GatewayEngine 独立处理（不碰 UI 的 ChatEngine）
+            # 3. 流式发送辅助函数（在主线程调用，调度到事件循环执行）
+            _ev_loop = getattr(self._gateway_manager, "_loop", None)
+
+            def _push_to_platform(content: str) -> None:
+                """发送中间更新到平台"""
+                if not _ev_loop or not content.strip():
+                    return
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._gateway_send_message(gw_platform, chat_id, content),
+                        _ev_loop,
+                    )
+                except Exception as e:
+                    logger.debug(f"[Gateway] Stream push error: {e}")
+
+            def _is_tool_content(text: str) -> bool:
+                """判断是否为工具调用的中间输出"""
+                tool_keywords = [
+                    "📋 分析结果：", "🔍 搜索结果", "📄 文件内容", "💻 执行结果",
+                    "工具调用开始", "工具调用完成", "🔧 正在使用",
+                    "正在搜索", "正在读取", "正在执行",
+                ]
+                return any(kw in text for kw in tool_keywords)
+
+            # 4. 流式回调
             gateway_chunks = []
+            last_stream_push = 0
+            MIN_STREAM_INTERVAL = 2.0  # 最少间隔 2 秒推送一次
+            MIN_STREAM_LENGTH = 15     # 至少积累 15 个字符再推送
 
             def on_content_received(chunk):
+                """AI 流式输出到达"""
+                nonlocal last_stream_push
                 gateway_chunks.append(chunk)
+                full_text = "".join(gateway_chunks)
+
+                # 每 2 秒推送一次累积内容（>15字符）
+                now = time.time()
+                if (now - last_stream_push >= MIN_STREAM_INTERVAL
+                        and len(full_text) >= MIN_STREAM_LENGTH):
+                    last_stream_push = now
+                    _push_to_platform(f"💭 {full_text}")
+
+            def on_tool_call(tool_data: dict):
+                """工具调用时发送进度"""
+                name = tool_data.get("tool_name", tool_data.get("name", "未知工具"))
+                args = tool_data.get("arguments", tool_data.get("args", ""))
+                if isinstance(args, dict):
+                    args_str = str(list(args.keys())) if args else ""
+                else:
+                    args_str = str(args)[:80]
+                _push_to_platform(f"🔧 正在使用 **{name}**...\n参数: {args_str}")
+
+            def on_tool_result(tool_data: dict):
+                """工具返回结果时发送摘要"""
+                name = tool_data.get("tool_name", tool_data.get("name", "未知工具"))
+                result = tool_data.get("result", "")
+                summary = str(result)[:200] if result else ""
+                _push_to_platform(f"✅ **{name}** 完成\n{summary}")
 
             def on_stream_finished(response):
-                """AI 完成回调"""
+                """AI 完成 → 发送最终完整回复"""
                 content = response or "".join(gateway_chunks)
+                final = content or "抱歉，我没有生成有效回复，请重试。"
+
+                # 发送最终回复
+                _push_to_platform(f"{final}")
+
+                # 通知异步等待的 future
                 try:
                     if not future.done():
-                        future.set_result(content or "抱歉，我没有生成有效回复，请重试。")
+                        future.set_result(final)
                 except Exception:
-                    pass  # future 已被其他线程完成，忽略
+                    pass
 
             def on_error(error):
                 logger.error(f"[Gateway] AI error: {error}")
+                _push_to_platform(f"❌ 处理出错: {error}")
                 try:
                     if not future.done():
                         future.set_result(f"处理消息时出错: {error}")
                 except Exception:
-                    pass  # future 已被其他线程完成，忽略
+                    pass
 
             callbacks = {
                 "content_received": on_content_received,
+                "tool_call_started": on_tool_call,
+                "tool_result_received": on_tool_result,
                 "stream_finished": on_stream_finished,
                 "error": on_error,
             }
@@ -688,16 +754,13 @@ class ChatBackend(QObject):
                 callbacks=callbacks,
             )
 
-            # process() 返回 True 表示消息已被接收（排队或正在处理）
-            # 返回 False 只在真正出错时发生，此时通知调用方
-
         except Exception as e:
             logger.error(f"[Gateway] Processing error: {e}", exc_info=True)
             try:
                 if not future.done():
                     future.set_exception(e)
             except Exception:
-                pass  # future 已被其他线程完成，忽略
+                pass
     
     def _init_gateway_async(self):
         """异步初始化 Gateway（后台进行）"""
