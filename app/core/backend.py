@@ -758,21 +758,20 @@ class ChatBackend(QObject):
     ) -> str:
         """
         处理 Gateway 消息 - 调用 AI
-        
+
         先发送"思考中"提示，然后等待 AI 结果。
         """
         logger.info(f"[Gateway] Processing message from {platform.value}:{user_id}: {text[:50]}...")
-        
+
         # 先发送"思考中"占位回复
         await self._gateway_send_message(
             platform, chat_id, "🤔 正在思考，请稍候..."
         )
-        
-        # 使用同步 Future 等待主线程处理结果
+
+        # 用 signal 发送到主线程
         import concurrent.futures
         future = concurrent.futures.Future()
-        
-        # 用信号发送到主线程
+
         self.gateway_input_received.emit({
             "text": text,
             "chat_id": chat_id,
@@ -780,17 +779,14 @@ class ChatBackend(QObject):
             "platform": platform.value,
             "future": future,
         })
-        
+
         try:
-            # 等待结果（最多60秒）
-            response = future.result(timeout=60)
+            # 异步等待 AI 结果（不超时，AI 回复多久等多久）
+            response = await asyncio.wrap_future(future)
             return response
-        except concurrent.futures.TimeoutError:
-            logger.error("[Gateway] AI processing timeout")
-            return "抱歉，AI 处理超时了，请稍后重试。"
         except Exception as e:
             logger.error(f"[Gateway] AI processing error: {e}")
-            return f"处理消息时出错，请重试。"
+            return "处理消息时出错，请重试。"
     
     async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:
         """发送消息到平台"""

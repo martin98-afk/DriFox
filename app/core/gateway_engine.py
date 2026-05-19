@@ -232,8 +232,9 @@ class GatewayEngine(QObject):
 - `/session <id>` — 切换到指定会话
 
 **模型 & Agent**
-- `/model` — 查看当前使用的模型
-- `/model <名称>` — 切换到指定模型
+- `/model` — 查看所有服务商及当前模型
+- `/model 服务商名` — 查看该服务商的可用模型
+- `/model 服务商名 模型名` — 切换服务商和模型
 - `/agent` — 查看当前使用的 Agent
 - `/agent <名称>` — 切换到指定 Agent
 
@@ -247,43 +248,75 @@ class GatewayEngine(QObject):
     def _cmd_model(self, args: str, session: ChatSession) -> str:
         """处理 /model 命令"""
         cfg = Settings.get_instance()
-        providers = cfg.llm_saved_providers.value or {}
+
+        # 当前选中的服务商和模型
+        current_provider = cfg.llm_selected_model.value or cfg.llm_model.value or ""
+        saved_providers = cfg.llm_saved_providers.value or {}
+
+        # 会话级覆盖
+        session_meta = session.metadata.get("model") or ""
+        # session_meta 格式：{"provider": "...", "model": "..."} 或旧格式字符串
+        session_provider = session_meta.get("provider", "") if isinstance(session_meta, dict) else ""
+        session_model = session_meta.get("model", "") if isinstance(session_meta, dict) else session_meta
 
         if not args:
-            # 列出所有模型
-            if not providers:
-                current = cfg.llm_selected_model.value or cfg.llm_model.value
-                return f"📋 **当前模型**: `{current}`\n\n（无可用模型列表）"
+            # 列出所有服务商及其模型
+            if not saved_providers:
+                return "📋 **当前模型**: 暂无配置的服务商\n请在桌面端设置中添加服务商。"
 
-            lines = [f"📋 **可用模型** ({len(providers)} 个):\n"]
-            current = cfg.llm_selected_model.value or ""
-            session_model = session.metadata.get("model", "")
+            lines = ["📋 **可用模型**:\n"]
+            for name in sorted(saved_providers.keys()):
+                models = saved_providers[name].get("模型列表", [])
+                model_name = saved_providers[name].get("模型名称", "")
+                marker = " ◀ 当前服务商" if name == current_provider else ""
+                session_marker = " ⚡ 会话覆盖" if name == session_provider else ""
 
-            for name in sorted(providers.keys()):
-                marker = " ◀ 当前" if name == current else ""
-                session_marker = " ⚡ 会话级" if name == session_model else ""
-                lines.append(f"- `{name}`{marker}{session_marker}")
+                if models:
+                    lines.append(f"**{name}**{marker}{session_marker}")
+                    lines.append(f"  模型: `{model_name}`")
+                    if len(models) > 1:
+                        lines.append(f"  可选: {', '.join(f'`{m}`' for m in models[:8])}")
+                else:
+                    lines.append(f"**{name}**{marker}{session_marker} — `{model_name}`")
 
-            if session_model and session_model != current:
-                lines.append(f"\n⚡ 会话级覆盖模型: `{session_model}`")
-                lines.append("（发送 `/model` 取消覆盖，使用全局模型）")
+                if session_provider == name:
+                    lines.append(f"  ⚡ 会话级模型: `{session_model}`")
 
-            return "\n".join(lines)
+                lines.append("")
 
-        # /model <name> — 切换到指定模型
-        if args in providers:
-            # 设置为会话级覆盖
-            session.metadata["model"] = args
-            return f"✅ 当前会话已切换到模型: `{args}`\n（仅当前 Gateway 会话生效）"
-        else:
-            # 尝试模糊匹配
-            matches = [n for n in providers if args.lower() in n.lower()]
-            if matches:
-                lines = [f"找到 {len(matches)} 个匹配:\n"]
-                for m in matches[:10]:
-                    lines.append(f"- `{m}`")
-                return "\n".join(lines)
-            return f"❌ 未找到模型 `{args}`\n发送 `/model` 查看可用模型列表。"
+            return "\n".join(lines).strip()
+
+        # 解析参数：/model 服务商名 [模型名]
+        parts = args.strip().split(maxsplit=1)
+        provider_name = parts[0]
+        model_name = parts[1] if len(parts) > 1 else ""
+
+        # 模糊匹配服务商
+        matches = [n for n in saved_providers if provider_name.lower() in n.lower()]
+        if not matches:
+            return f"❌ 未找到服务商 `{provider_name}`\n发送 `/model` 查看服务商列表。"
+
+        provider = matches[0]
+        config = saved_providers[provider]
+
+        if not model_name:
+            # 只指定了服务商，显示该服务商的模型
+            model_name = config.get("模型名称", "")
+            available = config.get("模型列表", [])
+            if available:
+                opt_list = ", ".join(f"`{m}`" for m in available[:10])
+                return (f"📋 **{provider}** 当前模型: `{model_name}`\n"
+                        f"可选: {opt_list}")
+            return f"📋 **{provider}** 当前模型: `{model_name}`"
+
+        # 指定了服务商 + 模型，切换
+        if provider not in saved_providers:
+            return f"❌ 未找到服务商 `{provider}`"
+
+        # 设置会话级覆盖
+        session.metadata["model"] = {"provider": provider, "model": model_name}
+        return (f"✅ 已切换到 **{provider}** 的模型: `{model_name}`\n"
+                f"（仅当前 Gateway 会话生效）")
 
     def _cmd_agent(self, args: str, session: ChatSession) -> str:
         """处理 /agent 命令"""
@@ -382,9 +415,29 @@ class GatewayEngine(QObject):
             return False
 
         # 会话级模型覆盖
-        session_model = session.metadata.get("model")
-        if session_model:
-            llm_config = {**llm_config, "model": session_model}
+        session_model_meta = session.metadata.get("model")
+        if session_model_meta:
+            # 新格式：{"provider": "...", "model": "..."}
+            if isinstance(session_model_meta, dict):
+                override_provider = session_model_meta.get("provider", "")
+                override_model = session_model_meta.get("model", "")
+                if override_provider and override_model:
+                    llm_config = {
+                        **llm_config,
+                        "model": override_model,
+                    }
+                    # provider 覆盖需要替换 api_base 等
+                    saved_providers = Settings.get_instance().llm_saved_providers.value or {}
+                    if override_provider in saved_providers:
+                        provider_cfg = saved_providers[override_provider].copy()
+                        provider_cfg.pop("备注", None)
+                        provider_cfg.pop("获取地址", None)
+                        provider_cfg.pop("模型列表", None)
+                        provider_cfg["模型名称"] = override_model
+                        llm_config = provider_cfg
+            # 旧格式：直接是模型名
+            elif isinstance(session_model_meta, str) and session_model_meta:
+                llm_config = {**llm_config, "model": session_model_meta}
 
         # 构建消息
         messages = self._build_messages(session, llm_config)
