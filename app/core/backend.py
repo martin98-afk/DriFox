@@ -878,8 +878,8 @@ class ChatBackend(QObject):
         def _do_start():
             try:
                 if self._gateway_manager and self._gateway_initialized:
-                    self._gateway_manager.start_all()
-                    logger.info("[ChatBackend] Gateway 已启动")
+                    self._gateway_manager.start_all_async()
+                    logger.info("[ChatBackend] Gateway 已启动（后台连接中）")
             except Exception as e:
                 logger.error(f"[ChatBackend] Gateway 启动失败: {e}", exc_info=True)
         

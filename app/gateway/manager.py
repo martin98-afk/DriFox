@@ -250,8 +250,12 @@ class PlatformManager:
         self._notify_status()
     
     def start_platform(self, platform: Platform) -> bool:
-        """启动指定平台"""
+        """启动指定平台（同步，等待结果）"""
         return self._run_coro(self._start_platform_async(platform))
+    
+    def start_platform_async(self, platform: Platform) -> None:
+        """启动指定平台（异步，不等待结果）"""
+        self._schedule_coro(self._start_platform_async(platform))
     
     def stop_platform(self, platform: Platform) -> None:
         """停止指定平台"""
