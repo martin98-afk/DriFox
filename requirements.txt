@@ -19,3 +19,5 @@ requests
 orjson>=3.8.0
 pypinyin
 mcp>=1.0.0
+aiohttp
+dingtalk-stream
