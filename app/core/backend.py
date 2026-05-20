@@ -669,7 +669,7 @@ class ChatBackend(QObject):
                         _ev_loop,
                     )
                 except Exception as e:
-                    logger.debug(f"[Gateway] Stream push error: {e}")
+                    logger.error(f"[Gateway] Stream push error: {e}")
 
             # 4. 流式回调
             # 注意：钉钉/企微不支持编辑已发送消息，流式中间推送会与最终回复内容重叠。
@@ -838,15 +838,11 @@ class ChatBackend(QObject):
     async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:
         """发送消息到平台"""
         from app.gateway.base import SendResult
-        
-        logger.debug(f"[Gateway] _gateway_send_message called: platform={platform}, chat_id={chat_id[:30]}")
-        
+
         adapter = self._gateway_manager.get_adapter(platform)
         if adapter:
             try:
-                logger.debug(f"[Gateway] Found adapter: {type(adapter).__name__}")
                 result = await adapter.send(chat_id, content)
-                logger.debug(f"[Gateway] Send result: success={result.success}, error={result.error}")
                 return result
             except Exception as e:
                 logger.error(f"[Gateway] Send failed: {e}")

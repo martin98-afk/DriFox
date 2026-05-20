@@ -76,6 +76,13 @@ def main():
         except Exception:
             font_family = "Segoe UI"
 
+    # 启动时同步开机自启注册表状态
+    try:
+        from app.utils.startup_manager import sync_auto_start_from_config
+        sync_auto_start_from_config()
+    except Exception:
+        pass
+
     try:
         from app.utils.design_tokens import scale_font_size
         tooltip_font_size = scale_font_size(12)

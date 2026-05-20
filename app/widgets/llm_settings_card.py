@@ -28,6 +28,7 @@ from app.utils.design_tokens import (
 from app.utils.design_tokens import get_ui_font_size, apply_font_size_to_widget
 from app.utils.startup_manager import set_auto_start
 from app.utils.utils import get_icon, get_unified_font, get_font_family_css
+from app.widgets.gateway_setting_card import GatewaySettingCard
 from app.widgets.base_settings_card import BaseSettingsCard
 from app.widgets.list_setting_card import SkillListSettingCard
 from app.widgets.mcp_setting_card import MCPListSettingCard
@@ -201,9 +202,12 @@ class LLMSettingsCard(SystemCardFrame):
         )
         content_layout.addWidget(self.mcpListCard)
 
-        # Gateway 通讯平台接入
-        from app.widgets.gateway_setting_card import GatewaySettingCard
+        # ---- 通用设置分隔标签 ----
+        self._sep_common_label = self._make_sep_label("通用设置")
+        self._section_anchors["common"] = self._sep_common_label
+        content_layout.addWidget(self._sep_common_label)
 
+        # Gateway 通讯平台接入
         self.gatewayCard = GatewaySettingCard(
             icon=get_icon("云通信"),
             title="通讯平台接入",
@@ -212,11 +216,6 @@ class LLMSettingsCard(SystemCardFrame):
             home=self,
         )
         content_layout.addWidget(self.gatewayCard)
-
-        # ---- 通用设置分隔标签 ----
-        self._sep_common_label = self._make_sep_label("通用设置")
-        self._section_anchors["common"] = self._sep_common_label
-        content_layout.addWidget(self._sep_common_label)
 
         # 开机自启
         self.autoStartCard = SwitchSettingCard(
@@ -499,9 +498,12 @@ class LLMSettingsCard(SystemCardFrame):
 
         try:
             set_auto_start(enabled)
+            # 确保配置持久化到 Settings 文件（.drifox/app.config）
+            self.cfg.save()
         except Exception as exc:
-            # 失败时回退开关状态
+            # 失败时回退开关状态和 ConfigItem 值
             self.autoStartCard.switchButton.setChecked(not enabled)
+            self.cfg.set(self.cfg.auto_start, not enabled, save=True)
             from qfluentwidgets import InfoBar, InfoBarPosition
             InfoBar.error(
                 title="开机自启设置失败",
