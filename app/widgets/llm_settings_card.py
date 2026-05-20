@@ -290,10 +290,12 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.addStretch(1)
 
         # 连接信号
+        # 注意：只有真正影响外观或模型列表的变更才走 _on_config_changed（触发全量刷新）
+        # 技能、通知、提示音等不涉及外观的变更走轻量级保存路径
         self.llmProviderCard.providerChanged.connect(self._on_config_changed)
-        self.llmSkillsCard.skillsChanged.connect(self._on_config_changed)
-        self.cfg.llm_notify_enabled.valueChanged.connect(self._on_config_changed)
-        self.llmSoundCard.optionChanged.connect(self._on_config_changed)
+        self.llmSkillsCard.skillsChanged.connect(self._on_skills_changed)
+        self.cfg.llm_notify_enabled.valueChanged.connect(self._on_settings_changed)
+        self.llmSoundCard.optionChanged.connect(self._on_settings_changed)
         self.cfg.llm_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_font_size.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_theme_style.valueChanged.connect(self._on_config_changed)
@@ -326,6 +328,7 @@ class LLMSettingsCard(SystemCardFrame):
                 self.label_by_value = {key: data["label"] for key, data in options.items()}
 
                 self.comboBox = NoWheelComboBox(self)
+                self.comboBox.setMaxVisibleItems(6)
                 self.comboBox.addItems([data["label"] for data in options.values()])
                 self.comboBox.setCurrentText(self.label_by_value.get(config_item.value, next(iter(self.value_by_label))))
                 self.comboBox.setMinimumWidth(130)
@@ -447,7 +450,16 @@ class LLMSettingsCard(SystemCardFrame):
         self.setVisible(False)
         self.closed.emit()
 
+    def _on_skills_changed(self, enabled_skills):
+        """技能变更 — 仅保存，不需要刷新外观或模型列表"""
+        self._save_timer.start()
+
+    def _on_settings_changed(self, _value=None):
+        """非外观类设置变更（通知、提示音等）— 仅保存，不需要刷新外观"""
+        self._save_timer.start()
+
     def _on_config_changed(self):
+        """外观/模型相关设置变更 — 需要全量刷新"""
         self.configChanged.emit()
         self._save_timer.start()
         # 立即刷新字体大小和主题样式（不等待保存定时器）
@@ -528,7 +540,7 @@ class LLMSettingsCard(SystemCardFrame):
         else:
             if is_service_running():
                 stop_llm_api_service()
-        self._on_config_changed()
+        self._on_settings_changed()
 
     def _on_llm_api_port_changed(self, port):
         from app.api import (

@@ -231,14 +231,38 @@ class MemoryManagerCore:
             for doc in docs:
                 file_name = doc.get("file_name", "")
                 file_path = doc.get("file_path", "")
-                prefix = "（项目根目录）" if file_path == wd_path else ""
-                if prefix:
-                    lines.append(f"- {file_name} ({prefix} {file_path})")
+                is_wd = file_path == wd_path
+                if is_wd:
+                    lines.append(f"- {file_name} （项目根目录）{file_path}")
                 else:
                     lines.append(f"- {file_name} ({file_path})")
         else:
             lines.append("- 暂无关键文档")
         lines.append("")
+
+        # 4. Worktree 上下文（仅当工作目录在 git 仓库中且有 worktree 时）
+        if wd_path:
+            try:
+                from app.utils.git_worktree import GitWorktreeDetector
+                repo_info = GitWorktreeDetector.get_repo_info(wd_path)
+                if repo_info and len(repo_info.worktrees) > 0:
+                    lines.append("### 当前 Worktree")
+                    lines.append(f"- 仓库: {os.path.basename(repo_info.root)}")
+                    lines.append(f"- 当前分支: {repo_info.current_branch}")
+                    lines.append(f"- 工作目录: {wd_path}")
+                    is_on_worktree = wd_path != repo_info.root
+                    if is_on_worktree:
+                        lines.append("- ⚠️ 当前在 worktree 分支上工作，文件操作不影响主仓库代码")
+                    # 列出其他分支
+                    other_branches = [
+                        wt.branch for wt in repo_info.worktrees
+                        if not wt.is_current
+                    ]
+                    if other_branches:
+                        lines.append(f"- 其他分支: {', '.join(other_branches)}")
+                    lines.append("")
+            except Exception:
+                pass
 
         lines.append("请优先遵循高置信度的记忆。")
         return "\n".join(lines)
