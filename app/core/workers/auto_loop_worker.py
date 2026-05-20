@@ -14,26 +14,22 @@ AutoLoop Worker — 后台循环工作线程
 - 执行阶段：允许所有工具，但每步必须验证通过才能前进
 """
 import re
-import threading
 import time
 from typing import Dict, List, Optional, Any, Callable
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from loguru import logger
 
-from app.core.auto_loop_config import AutoLoopConfig
-from app.core.auto_loop_engine import AutoLoopEngine, LoopState
-from app.core.auto_loop_prompt_composer import AutoLoopPromptComposer
-from app.core.workers import OpenAIChatWorker
-
-
-# ========== 规划阶段受限工具集 ==========
-# PLANNING_TOOLS = {
-#     # 扫描工具
-#     "scan_repo", "glob", "grep", "list", "read", "websearch", "webfetch", ""
-#     # 笔记写入工具
-#     "write",
-# }
+from app.core.engines.auto_loop import (
+    AutoLoopConfig,
+    AutoLoopEngine,
+    LoopState,
+    AutoLoopPromptComposer,
+)
+from app.core.conversation import ConversationExecutor
+from app.core.conversation.core import ConversationCore
+from app.core.conversation.config import ConversationConfig, PermissionStrategy, filter_interactive_tools
+from app.core.conversation.adapters import AutoLoopConversationAdapter
 
 
 class AutoLoopWorker(QThread):
@@ -71,23 +67,31 @@ class AutoLoopWorker(QThread):
         self._is_cancelled = False
         self._engine: Optional[AutoLoopEngine] = None
         self._prompt_composer: Optional[AutoLoopPromptComposer] = None
-        self._current_worker: Optional[OpenAIChatWorker] = None
 
         # 执行阶段的步骤追踪
         self._last_step = 0  # 上次完成的步骤
         
-        # 规划阶段标志：记录首次规划后的状态，防止模型一次性完成
-        self._first_planning_done = False
-        
-        # 汇总的完整消息列表（从每个 ChatWorker 获取）
+        # 汇总的完整消息列表（从每个 ChatWorker 获取，跨轮累积）
         self._all_messages: List[Dict] = []
         
-        # Worker 完成事件（用于同步等待 finished_with_messages 信号）
-        self._worker_done_event = threading.Event()
+        # 每轮独立的消息列表（每轮开始时清空，仅记录本轮产生的消息）
+        self._round_messages: List[Dict] = []
+        
+        # 上一次 on_messages_updated 的消息 token 数（用于增量累加）
+        self._last_message_token_count = 0
+        
+        # 本轮开始前的消息基数（用于截取本轮新增消息）
+        self._prev_message_count = 0
+        
+        # Worker 同步事件（由 AutoLoopConversationAdapter 管理）
 
     def _configure_tools_for_phase(self, tools_schema: List[Dict]) -> List[Dict]:
-        """根据当前阶段配置工具集"""
-        return self._all_tools_schema or tools_schema
+        """根据当前阶段和权限策略配置工具集
+
+        AutoLoop 使用 AUTO_ALLOW 策略，交互类工具必须被过滤。
+        """
+        raw = self._all_tools_schema or tools_schema
+        return filter_interactive_tools(raw, PermissionStrategy.AUTO_ALLOW)
 
     def configure(
             self,
@@ -96,6 +100,7 @@ class AutoLoopWorker(QThread):
             tool_executor: Any,
             tools_schema: List[Dict],
             agent_system_prompt_getter: Callable[[str], str],
+            agent_manager: Any = None,
             permission_check_callback: Callable[[str, dict], str] = None,
             permission_cache: Any = None,
             compactor: Any = None,
@@ -111,11 +116,31 @@ class AutoLoopWorker(QThread):
         self._permission_cache = permission_cache
         self._compactor = compactor
 
+        # ===== ConversationCore + AutoLoopConversationAdapter（统一执行基础设施）=====
+        self._conversation_core = ConversationCore.create(
+            get_model_config=model_config_getter,
+            agent_manager=agent_manager,
+            backend=None,
+        )
+        conv_config = ConversationConfig(
+            permission_strategy=PermissionStrategy.AUTO_ALLOW,
+        )
+        self._conversation_executor = ConversationExecutor(
+            core=self._conversation_core,
+            config=conv_config,
+            tool_executor=tool_executor,
+            agent_manager=agent_manager,
+        )
+        self._adapter = AutoLoopConversationAdapter(
+            core=self._conversation_core,
+            executor=self._conversation_executor,
+        )
+
     def cancel(self):
         """取消循环"""
         self._is_cancelled = True
-        if self._current_worker and self._current_worker.isRunning():
-            self._current_worker._is_cancelled = True
+        if self._conversation_executor:
+            self._conversation_executor.stop()
         if self._engine:
             self._engine.stop()
 
@@ -130,10 +155,21 @@ class AutoLoopWorker(QThread):
         self._prompt_composer = AutoLoopPromptComposer(self._engine)
         self._engine.start()
         self._last_step = 0
-        self._first_planning_done = False
-        
         # 清空消息列表
         self._all_messages = []
+        self._round_messages = []
+        self._prev_message_count = 0
+        self._last_message_token_count = 0
+
+        # 确保 ConversationCore 的 SessionManager 有当前会话
+        # 这样 ConversationExecutor.execute() 才能正确获取 session → session_messages 不为空
+        sm = self._conversation_core.session_manager
+        if not sm.get_current_session():
+            from app.core.chat_session import ChatSession
+            auto_loop_session = ChatSession(name="AutoLoop")
+            sm.sessions.append(auto_loop_session)
+            sm.current_index = 0
+            sm._touch_session(auto_loop_session.session_id)
         
         # 发送阶段信号：规划中
         self.phase_changed.emit("planning")
@@ -149,53 +185,70 @@ class AutoLoopWorker(QThread):
             self.iteration_started.emit(iteration, self._config.max_iterations)
             self._emit_progress()
             
+            # 本轮独立消息追踪：记录当前消息基数，清空本轮消息列表
+            self._prev_message_count = len(self._all_messages)
+            self._round_messages = []
+            
             # 给主线程时间处理信号并创建 assistant card
             time.sleep(0.2)
 
             # 构建本轮消息
             messages = self._build_messages(task_prompt, iteration)
-            
+
+            # 同步到 AutoLoop 的 session，确保 ConversationExecutor.execute()
+            # 能通过 session.get_context_messages() 获取 session_messages，
+            # 从而 Worker 的 finished_with_messages 信号携带完整消息（含 user）
+            auto_loop_session = self._conversation_core.session_manager.get_current_session()
+            if auto_loop_session:
+                # 只在首次迭代时同步 user 消息（后续由 on_messages_updated 维护）
+                if iteration == 1 and not auto_loop_session.messages:
+                    for msg in messages:
+                        if msg.get("role") == "user":
+                            auto_loop_session.add_user_message(content=msg.get("content", ""))
+
             # 根据阶段获取对应的工具集
             current_tools = self._configure_tools_for_phase(self._all_tools_schema or self._tools_schema)
 
-            # 创建并运行 worker
+            # 创建并运行 worker（通过统一 Executor）
             try:
-                # 重置完成事件和消息列表
-                self._worker_finished_messages = []
-                self._worker_done_event.clear()
-                
-                self._current_worker = self._create_worker(messages, current_tools)
-                
-                # 使用本地事件循环等待 worker 完成，保持事件循环运行以便信号转发
-                from PyQt5.QtCore import QEventLoop
-                loop = QEventLoop()
-                self._current_worker.finished.connect(loop.quit)
-                self._current_worker.start()
-                loop.exec_()  # 等待 worker 完成，但保持事件循环处理信号，这样日志可以正常更新
-                
-                # 检查是否被取消（token 超限等）
-                if self._is_cancelled:
-                    self.log_signal.emit("⏹ 达到限制，AutoLoop 停止")
-                    self.loop_stopped.emit()
-                    return
-                
-                # 等待 finished_with_messages 信号（最多等待 30 秒）
-                if not self._worker_done_event.wait(timeout=30):
-                    logger.warning(f"[AutoLoop] Iteration {iteration}: timeout waiting for finished_with_messages")
+                self._adapter.reset()
 
-                response = self._current_worker.full_response or ""
-                self._extract_usage_from_full_response()
-                real_usage = self._get_token_usage()
-                if real_usage > 0:
-                    token_usage = real_usage
+                # 构建包装回调
+                wrapped_callbacks = self._make_autoloop_callbacks()
+
+                # 获取模型配置
+                llm_config = self._model_config_getter() if self._model_config_getter else {}
+
+                success = self._conversation_executor.execute(
+                    messages=messages,
+                    llm_config=llm_config,
+                    tools=current_tools,
+                    callbacks=wrapped_callbacks,
+                )
+                if not success:
+                    self.log_signal.emit("⚠️ Worker 启动失败，重试...")
+                    continue
+
+                # 使用 QEventLoop 等待 Worker 完成（Qt 信号需要事件循环才能跨线程投递）
+                from PyQt5.QtCore import QEventLoop
+                worker = self._conversation_executor.get_current_worker()
+                if worker:
+                    loop = QEventLoop()
+                    worker.finished.connect(loop.quit)
+                    # 防止竞态：如果 worker 在 connect 之前已完成，立即退出 loop
+                    if not worker.isRunning():
+                        loop.quit()
+                    loop.exec_()  # 阻塞直到 worker 线程结束
                 else:
-                    token_usage = max(1, len(response) // 4)
-                self._engine.add_tokens(token_usage)
+                    # fallback: 等待 adapter 的事件
+                    self._adapter.wait_for_completion(timeout=300)
+
+                response = self._adapter.get_response() or ""
                 self._emit_progress()
                 
-                # 获取 ChatWorker 的完整消息并追加到列表
-                if self._worker_finished_messages:
-                    self._all_messages.extend(self._worker_finished_messages)
+                # ⚡ 关键：每次 LLM 对话结束后立即检查取消信号，避免走后续流程
+                if self._is_cancelled:
+                    continue
                     
                 # 【新增】强制检查接力文档更新
                 if not self._check_relay_doc_updated(iteration):
@@ -205,16 +258,26 @@ class AutoLoopWorker(QThread):
                     # 重新构建消息，注入强制更新提示
                     force_messages = self._build_messages(task_prompt, iteration, force_update=True)
                     
-                    # 创建新的 worker 执行强制更新
-                    self._worker_finished_messages = []
-                    self._worker_done_event.clear()
-                    self._current_worker = self._create_worker(force_messages, current_tools)
-                    
-                    from PyQt5.QtCore import QEventLoop
-                    loop = QEventLoop()
-                    self._current_worker.finished.connect(loop.quit)
-                    self._current_worker.start()
-                    loop.exec_()
+                    try:
+                        # 使用统一 Executor 执行强制更新
+                        self._adapter.reset()
+                        self._conversation_executor.execute(
+                            messages=force_messages,
+                            llm_config=llm_config,
+                            tools=current_tools,
+                            callbacks=self._make_autoloop_callbacks(),
+                        )
+                        from PyQt5.QtCore import QEventLoop
+                        worker = self._conversation_executor.get_current_worker()
+                        if worker:
+                            loop = QEventLoop()
+                            worker.finished.connect(loop.quit)
+                            # 防止竞态：如果 worker 在 connect 之前已完成，立即退出 loop
+                            if not worker.isRunning():
+                                loop.quit()
+                            loop.exec_()
+                    except Exception as e:
+                        self.log_signal.emit(f"⚠️ 强制更新失败: {e}")
                     
                     # 再次检查接力文档
                     if self._check_relay_doc_updated(iteration):
@@ -223,6 +286,9 @@ class AutoLoopWorker(QThread):
                         self.log_signal.emit("⚠️ 接力文档仍未更新，将继续强制要求")
                         # 允许继续（避免死循环），但会在下一轮继续检查
                     
+                    # 补充迭代完成信号，确保 UI 进度更新
+                    summary = self._extract_summary(response, iteration)
+                    self.iteration_completed.emit(iteration, summary)
                     self._emit_progress()
                     continue
             except Exception as e:
@@ -239,17 +305,18 @@ class AutoLoopWorker(QThread):
             summary = self._extract_summary(response, iteration)
             self.iteration_completed.emit(iteration, summary)
 
-            # 写入本轮完整日志到独立文件
+            # 写入本轮完整日志到独立文件（仅含本轮对话，不包含历史轮次）
             timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            messages_section = self._format_messages_for_log(self._round_messages) if self._round_messages else response
             log_content = f"""# AutoLoop 轮次 {iteration} 日志
 
 - 时间: {timestamp_str}
 - 阶段: {'PLANNING' if self._engine.is_planning_phase() else 'EXECUTING'}
-- 当前步骤: {self._engine.current_step} / {self._engine.total_steps}
+- 当前步骤: {self._engine.display_step if not self._engine.is_planning_phase() else self._engine.current_step} / {self._engine.total_steps}
 
-## 完整响应
+## 完整对话
 
-{response}
+{messages_section}
 """
             self._engine.write_round_log(iteration, log_content)
 
@@ -263,7 +330,6 @@ class AutoLoopWorker(QThread):
                 planning_done = self._engine.check_planning_complete(response, notes)
                 
                 if planning_done:
-                    self._first_planning_done = True
                     self._engine.enter_execution_phase()
                     current, max_verified, total = self._engine.parse_current_and_next_step(notes)
                     # 从笔记同步已勾选完成的步骤到缓存
@@ -300,35 +366,25 @@ class AutoLoopWorker(QThread):
                 current_step, max_verified, total_steps = self._engine.parse_current_and_next_step(notes)
                 
                 if total_steps > 0:
-                    self._engine.set_step_progress(
-                        current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step,
-                        total_steps,
-                    )
+                    # 更新步骤进度（仅用于 UI 显示，不影响结束）
+                    display_step = current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step
+                    self._engine.set_step_progress(display_step, total_steps)
                     
-                    # 检测当前步骤是否已完成
+                    # 检测当前步骤是否已完成（仅用于前进到下一步显示，不决定结束）
                     step_completed = self._check_step_completed(response, notes, self._engine.current_step)
                     
                     if step_completed:
                         self._last_step = self._engine.current_step
                         self.log_signal.emit(f"✓ 步骤 {self._engine.current_step}/{total_steps} 完成")
-                        
-                        if self._engine.current_step >= total_steps:
-                            # 所有步骤完成，输出 DONE
-                            self.log_signal.emit("🎉 所有步骤完成！任务结束")
-                            self.phase_changed.emit("completed")
-                            self.loop_completed.emit("所有计划步骤已完成！🎉")
-                            return
-                        else:
-                            # 前进到下一步
-                            self._engine.advance_to_step(self._engine.current_step + 1)
-                            self.log_signal.emit(f"📋 执行步骤 {self._engine.current_step}/{total_steps}: {self._get_next_step_preview(notes, self._engine.current_step)}")
+                        # 前进到下一步（仅用于 UI 进度显示）
+                        self._engine.advance_to_step(self._engine.current_step + 1)
+                        self.log_signal.emit(f"📋 执行步骤 {self._engine.current_step}/{total_steps}: {self._get_next_step_preview(notes, self._engine.current_step)}")
                     else:
                         # 步骤未完成，可能需要继续执行或验证
-                        # 检查是否有验证失败的情况
                         if "验证失败" in response or "failed" in response.lower():
                             self.log_signal.emit("⚠️ 检测到验证失败，模型应修复后重试")
                 
-                # 检查完成信号（可能在响应中直接输出 DONE）
+                # 检查完成信号（可能在响应中直接输出 MISSION_COMPLETE）
                 if self._engine.check_completion(response):
                     self.phase_changed.emit("completed")
                     self.loop_completed.emit("任务完成 — 检测到完成信号！🎉")
@@ -342,8 +398,12 @@ class AutoLoopWorker(QThread):
 
             self._emit_progress()
 
-        # 达到最大迭代次数
-        if not self._is_cancelled:
+        # 循环终止处理：区分取消 vs 正常完成
+        if self._is_cancelled:
+            self._engine.state = LoopState.STOPPED
+            self.loop_stopped.emit()
+        elif self._engine.state != LoopState.COMPLETED:
+            # 未手动取消也未收到完成信号 → 达到最大迭代次数自然结束
             self._engine.state = LoopState.COMPLETED
             self.loop_completed.emit(f"达到最大迭代次数 ({self._config.max_iterations})，已停止")
 
@@ -382,121 +442,59 @@ class AutoLoopWorker(QThread):
         messages.append({"role": "user", "content": task_prompt})
         return messages
 
-    def _create_worker(self, messages: List[Dict], tools: List[Dict] = None) -> OpenAIChatWorker:
-        """创建 ChatWorker"""
-        llm_config = self._model_config_getter() if self._model_config_getter else {}
-        session_messages = []
-        
-        # 用于接收 worker 完成的信号和数据
-        self._worker_finished_messages: List[Dict] = []
-        
-        def on_worker_finished(msgs: list):
-            self._worker_finished_messages = list(msgs) if msgs else []
-            
-            # 实时计算消息列表的 token 数并更新 UI
-            if self._engine and msgs:
-                from app.core.token_estimator import count_messages_tokens
-                token_count = count_messages_tokens(msgs)
-                self._engine.add_tokens(token_count)
-                self.tokens_updated.emit(self._engine.total_tokens)
-                
-                # 检查是否超预算，超预算则取消
-                reason = self._engine.check_budget()
-                if reason:
-                    self.log_signal.emit(f"⚠️ {reason}，正在停止...")
-                    self._is_cancelled = True
-                    if self._current_worker:
-                        self._current_worker._is_cancelled = True
-            
-            self._worker_done_event.set()
-        
-        # 使用传入的 tools（已根据阶段过滤），如果没有则使用默认
-        effective_tools = tools if tools is not None else (self._all_tools_schema or self._tools_schema or [])
+    def _make_autoloop_callbacks(self) -> Dict[str, Callable]:
+        """构建 AutoLoop 的回调包装（日志转发 + 预算检查 + token 追踪）"""
+        from app.core.token_estimator import count_messages_tokens
 
-        worker = OpenAIChatWorker(
-            messages=messages,
-            session_messages=session_messages,
-            llm_config=llm_config,
-            tools=effective_tools,
-            stream=True,
-            tool_executor=self._tool_executor,
-            permission_check_callback=self._permission_check_callback,
-            permission_cache=self._permission_cache,
-            compactor=self._compactor,
-        )
-        
-        # 连接完成信号，等待消息
-        worker.finished_with_messages.connect(on_worker_finished)
+        # 以 Adapter 的回调为基础（包含 finished → 设置 _worker_done_event，作为 QEventLoop 的 fallback）
+        callbacks = dict(self._adapter.get_callbacks())
 
-        # 只转发日志信号到运行卡显示
-        worker.content_received.connect(lambda t: self.log_signal.emit(f"生成内容..."))
-        worker.reasoning_content_received.connect(lambda t: self.log_signal.emit(f"思考中..."))
-        worker.thinking_started.connect(lambda: self.log_signal.emit(f"开始推理"))
-        worker.tool_call_started.connect(lambda tid, name, args, rid: self.log_signal.emit(f"调用工具: {name}"))
-        worker.tool_result_received.connect(lambda tid, name, args, res: self.log_signal.emit(f"工具完成: {name}"))
-        worker.error_occurred.connect(lambda e: self.log_signal.emit(f"错误: {e}"))
+        # 日志转发（覆盖 adapter 的 content_received no-op）
+        callbacks["content_received"] = lambda p: self.log_signal.emit(f"生成内容...")
+        callbacks["reasoning_content_received"] = lambda p: self.log_signal.emit(f"思考中...")
+        callbacks["thinking_started"] = lambda: self.log_signal.emit(f"开始推理")
+        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"调用工具: {n}")
+        callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(f"工具完成: {n}")
 
-        return worker
+        # Token 追踪 + 预算检查 + 消息收集（在 messages_updated 回调中）
+        def on_messages_updated(messages: list):
+            # 收集每轮 Worker 的完整消息（含 assistant + tool_calls）
+            # 每轮覆盖而非追加，因为 messages_updated 发送的是累积的会话消息
+            if messages:
+                self._all_messages = list(messages)
+                # 提取本轮新增的消息（从 prev_message_count 开始截取）
+                self._round_messages = list(messages[self._prev_message_count:])
+                # 同步到 ConversationCore 的 session，确保后续迭代时
+                # session_messages 有内容（含历史 user + assistant + tool）
+                session = self._conversation_core.session_manager.get_current_session()
+                if session:
+                    session.set_messages(messages, preserve_compaction=True)
+            # Token 增量追踪（只加新增部分，避免重复累加）
+            if self._engine and messages:
+                current_count = count_messages_tokens(messages)
+                delta = max(0, current_count - self._last_message_token_count)
+                if delta > 0:
+                    self._engine.add_tokens(delta)
+                    self.tokens_updated.emit(self._engine.total_tokens)
+                    self._last_message_token_count = current_count
+                    # 预算检查
+                    reason = self._engine.check_budget()
+                    if reason:
+                        self.log_signal.emit(f"⚠️ {reason}，正在停止...")
+                        self._is_cancelled = True
+                        self._conversation_executor.stop()
 
-    def _extract_usage_from_full_response(self):
-        """从完整API响应中提取 token usage，放到 _current_worker._last_usage"""
-        try:
-            if not self._current_worker or not hasattr(self._current_worker, 'response'):
-                return
-            
-            response = getattr(self._current_worker, 'response', None)
-            if not response:
-                return
-                
-            # 对于非流式响应，usage 在 response 对象上
-            if hasattr(response, 'usage'):
-                usage = response.usage
-                if usage:
-                    self._current_worker._last_usage = {
-                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(usage, "completion_tokens", 0),
-                        "total_tokens": getattr(usage, "total_tokens", 0),
-                    }
-                    # 累加到 _accumulated_tokens
-                    total = getattr(usage, "total_tokens", 0) or 0
-                    if hasattr(self._current_worker, '_accumulated_tokens'):
-                        self._current_worker._accumulated_tokens += total
-                    return
-            # 有些实现在 choices 里
-            if hasattr(response, 'choices') and response.choices:
-                first_choice = response.choices[0]
-                if hasattr(first_choice, 'usage'):
-                    usage = first_choice.usage
-                    self._current_worker._last_usage = {
-                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(usage, "completion_tokens", 0),
-                        "total_tokens": getattr(usage, "total_tokens", 0),
-                    }
-                    # 累加到 _accumulated_tokens
-                    total = getattr(usage, "total_tokens", 0) or 0
-                    if hasattr(self._current_worker, '_accumulated_tokens'):
-                        self._current_worker._accumulated_tokens += total
-                    return
-        except Exception as e:
-            logger.warning(f"[AutoLoop] Failed to extract usage from full response: {e}")
-            pass
-            
-    def _get_token_usage(self) -> int:
-        """获取本轮 token 使用量（包含所有内部工具迭代调用）"""
-        try:
-            if hasattr(self._current_worker, 'llm_config') and self._current_worker.llm_config:
-                # 如果有累加后的总 token 数，优先使用（包含所有内部工具迭代调用）
-                if hasattr(self._current_worker, '_accumulated_tokens'):
-                    accumulated = getattr(self._current_worker, '_accumulated_tokens', 0)
-                    if accumulated > 0:
-                        return accumulated
-                # 否则回退到使用最后一次 usage
-                usage = getattr(self._current_worker, '_last_usage', None)
-                if usage:
-                    return (usage.get("prompt_tokens", 0) or 0) + (usage.get("completion_tokens", 0) or 0)
-        except Exception:
-            pass
-        return 0
+        callbacks["messages_updated"] = on_messages_updated
+
+        # 错误日志
+        orig_error = callbacks.get("error")
+        if orig_error:
+            def on_error_wrapper(e):
+                self.log_signal.emit(f"错误: {e}")
+                orig_error(e)
+            callbacks["error"] = on_error_wrapper
+
+        return callbacks
 
     def _extract_summary(self, response: str, iteration: int) -> str:
         """从响应中提取摘要"""
@@ -511,8 +509,55 @@ class AutoLoopWorker(QThread):
             self.progress_updated.emit(self._engine.get_progress())
 
     def get_all_messages(self) -> List[Dict]:
-        """获取所有消息（用于保存到会话）"""
+        """获取所有消息（用于保存到会话）
+
+        优先从 ConversationCore 的 SessionManager 读取（由 on_messages_updated 维护），
+        其次使用 _all_messages（每轮 on_messages_updated 覆盖更新）。
+        """
+        # 优先从 ConversationCore 的 SessionManager 读取
+        if self._conversation_core:
+            session = self._conversation_core.session_manager.get_current_session()
+            if session and session.messages:
+                return list(session.messages)
+        # fallback
         return self._all_messages.copy()
+
+    @staticmethod
+    def _format_messages_for_log(messages: List[Dict]) -> str:
+        """将消息列表格式化为可读的日志文本"""
+        lines = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            tool_calls = msg.get("tool_calls", None)
+            tool_call_id = msg.get("tool_call_id", None)
+            name = msg.get("name", None)
+
+            prefix = {
+                "system": "【系统】",
+                "user": "【用户】",
+                "assistant": "【助手】",
+                "tool": f"【工具 {name or tool_call_id or ''}】",
+            }.get(role, f"【{role}】")
+
+            lines.append(f"\n{'='*60}")
+            lines.append(f"{prefix}  #{i}")
+            lines.append(f"{'='*60}")
+
+            if content:
+                lines.append(content)
+
+            if tool_calls:
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    args = func.get("arguments", "")
+                    lines.append(f"\n  ▶ 调用工具: {func.get('name', '?')}")
+                    lines.append(f"     参数: {args[:500]}")
+
+            if role == "tool" and content:
+                lines.append(f"  结果: {content[:300]}")
+
+        return "\n".join(lines)
 
     # ========== 公共接口（供 main_widget 等外部调用）==========
 

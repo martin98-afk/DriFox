@@ -80,9 +80,13 @@ class SessionRepository:
         except Exception as e:
             logger.warning(f"Failed to deserialize compaction_cache: {e}")
 
+        # 统一字段名：DB 的 title 列映射到 name 和 topic_summary
+        raw_title = d.get("title", "") or ""
         return {
             "session_id": d.get("session_id", ""),
-            "title": d.get("title", ""),
+            "name": raw_title,       # ChatSession.name
+            "title": raw_title,      # HistoryManager 兼容
+            "topic_summary": raw_title,  # ChatSession.topic_summary
             "project": d.get("project", "默认项目"),
             "messages": messages,
             "system_prompt": d.get("system_prompt", ""),
@@ -122,7 +126,8 @@ class SessionRepository:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             session_data = {
                 "session_id": session_id,
-                "title": session.get("title", ""),
+                # 优先使用 topic_summary（UI/Agent生成），其次 name（Gateway创建），兜底空字符串
+                "title": session.get("topic_summary") or session.get("name") or session.get("title", ""),
                 "project": session.get("project", "默认项目"),
                 "messages": json.dumps(session.get("messages", [])).decode('utf-8'),
                 "system_prompt": session.get("system_prompt", ""),

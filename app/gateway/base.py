@@ -187,6 +187,9 @@ class BasePlatformAdapter(ABC):
         # 会话活跃状态
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
+        
+        # 消息去重：记录当前正在处理的消息 ID，防止平台重复投递
+        self._active_message_ids: Dict[str, str] = {}  # session_key -> message_id
     
     @property
     def is_connected(self) -> bool:
@@ -291,8 +294,20 @@ class BasePlatformAdapter(ABC):
         
         session_key = self._get_session_key(event)
         
+        # 消息去重：如果正在处理的消息 ID 与新消息相同，丢弃重复投递
+        active_msg_id = self._active_message_ids.get(session_key)
+        if active_msg_id and event.message_id and active_msg_id == event.message_id:
+            logger.info("[%s] Dropping duplicate message %s for session: %s",
+                        self.name, event.message_id[:12], session_key)
+            return
+        
         # 检查是否有活跃会话
         if session_key in self._active_sessions:
+            # 活跃会话中：排队消息，但跳过与当前处理中相同 ID 的重复消息
+            if event.message_id and active_msg_id == event.message_id:
+                logger.info("[%s] Dropping queued duplicate %s for busy session: %s",
+                            self.name, event.message_id[:12], session_key)
+                return
             logger.info("[%s] Queuing message for busy session: %s", self.name, session_key)
             self._pending_messages[session_key] = event
             self._active_sessions[session_key].set()
@@ -300,16 +315,25 @@ class BasePlatformAdapter(ABC):
         
         # 启动新会话处理
         self._active_sessions[session_key] = asyncio.Event()
+        if event.message_id:
+            self._active_message_ids[session_key] = event.message_id
         try:
             await self._message_handler(event)
         except Exception as e:
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
         finally:
             self._active_sessions.pop(session_key, None)
+            self._active_message_ids.pop(session_key, None)
             
-            # 处理待处理消息
+            # 处理待处理消息（跳过与刚完成的重复消息）
             if session_key in self._pending_messages:
                 pending = self._pending_messages.pop(session_key)
+                # 去重检查：排队的消息是否与刚处理完的消息相同
+                if (event.message_id and pending.message_id
+                        and event.message_id == pending.message_id):
+                    logger.info("[%s] Dropping pending duplicate %s after session completed: %s",
+                                self.name, pending.message_id[:12], session_key)
+                    return
                 await self.handle_message(pending)
     
     def _get_session_key(self, event: MessageEvent) -> str:
@@ -369,6 +393,7 @@ class BasePlatformAdapter(ABC):
         self._connected = False
         self._active_sessions.clear()
         self._pending_messages.clear()
+        self._active_message_ids.clear()
         logger.info("[%s] Stopped", self.name)
 
 

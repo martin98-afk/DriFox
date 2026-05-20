@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
@@ -14,13 +14,15 @@ class ChatSession:
         self.session_id: str = uuid.uuid4().hex
         self.name = name or f"对话 {datetime.now().strftime('%m-%d %H:%M')}"
         self.messages: List[Dict[str, str]] = consolidate_messages(messages or [])
-        self.topic_summary: str = ""
+        # topic_summary 初始化为 name 的副本，确保首次保存时 title 字段不为空
+        self.topic_summary: str = self.name
         self.created_at: str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.last_updated: str = self.created_at
         self.message_count: int = len(self.messages)
         self.compaction_state: Dict = self._default_compaction_state()
         self.compaction_cache: Dict = self._default_compaction_cache()
         self.system_prompt: str = ""
+        self.metadata: Dict[str, Any] = {}  # 扩展元数据（如模型/Agent 覆盖）
 
     @staticmethod
     def _default_compaction_state() -> Dict:
@@ -98,6 +100,9 @@ class ChatSession:
 
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
+        # 同步更新 name，使 DB 保存时 title 字段一致
+        if summary and not summary.startswith("对话 "):
+            self.name = summary
 
     def set_compaction_state(self, state: Optional[Dict] = None):
         merged = self._default_compaction_state()
@@ -141,13 +146,20 @@ class ChatSession:
             "message_count": self.message_count,
             "compaction_state": self.compaction_state,
             "compaction_cache": self.compaction_cache,
+            "system_prompt": self.system_prompt,
+            "metadata": self.metadata,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ChatSession":
-        session = cls(name=data.get("name"), messages=data.get("messages", []))
+        # 使用 data 中的 name 或 topic_summary 初始化（两者在 DB 层已统一）
+        raw_name = data.get("name") or data.get("topic_summary") or data.get("name", "")
+        session = cls(name=raw_name, messages=data.get("messages", []))
         session.session_id = data.get("session_id") or session.session_id
-        session.topic_summary = data.get("topic_summary", "")
+        # 通过 set_topic_summary 同步 name 和 topic_summary
+        summary = data.get("topic_summary", "")
+        if summary:
+            session.set_topic_summary(summary)
         session.created_at = data.get(
             "created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
@@ -156,6 +168,7 @@ class ChatSession:
         session.set_compaction_state(data.get("compaction_state"))
         session.set_compaction_cache(data.get("compaction_cache"))
         session.system_prompt = data.get("system_prompt", "") or ""
+        session.metadata = data.get("metadata", {}) or {}
         return session
 
 

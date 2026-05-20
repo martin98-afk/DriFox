@@ -47,9 +47,9 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.auto_loop_config import AutoLoopConfig
+from app.core.engines.auto_loop import AutoLoopConfig
 from app.core.workers.auto_loop_worker import AutoLoopWorker
-from app.tool_window import ToolWindow
+from app.tool_popup import ToolWindow
 from app.tools import get_builtin_tools_schema
 from app.update_checker import UpdateChecker
 from app.utils.config import Settings
@@ -176,7 +176,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def __init__(self, homepage, button):
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
-        super().__init__(homepage, button)
+        super().__init__(homepage)
         # 需要在 super().__init__() 之前初始化所有依赖项
         self.homepage = homepage  # 必须在 super() 之前设置，供 backend.initialize 使用
         self.cfg = Settings.get_instance()
@@ -192,6 +192,9 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir=str(Path(__file__).parent.parent.parent),
         )
         self.backend._current_project = self._current_project
+        # 同步项目到 tool_executor，确保 BuiltinTools.edit_project_note 等工具使用正确项目名
+        if self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(self._current_project)
         # 从后端获取组件（前端只负责 UI 逻辑）
         self.history_manager = self.backend.history_manager
         self.session_store = self.backend.session_store
@@ -511,7 +514,7 @@ class OpenAIChatToolWindow(ToolWindow):
             new_instance._skip_restore_history = True  # 跳过历史会话恢复
 
             # 以弹窗方式显示
-            from app.side_dock_area import ToolPopupDialog
+            from app.tool_popup import ToolPopupDialog
 
             popup = ToolPopupDialog(new_instance, None)
             if branch:
@@ -757,6 +760,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.backend.create_session()
         session.messages = messages
         session.name = name
+        session.topic_summary = name  # 同步 topic_summary，避免 _display_current_session 覆盖 title_edit
         self._current_session_id = session.session_id
 
         # 清空聊天区域
@@ -860,6 +864,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 连接 Hook 添加/编辑信号
         self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
+        self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
 
         # 连接 MCP 添加/编辑信号
         self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
@@ -914,7 +919,7 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._settings_popup)
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(10)
+        self.chat_scroll_area.setMinimumHeight(1)
         self.chat_scroll_area.setMinimumWidth(400)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)
@@ -1405,18 +1410,51 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._hook_edit_card.show()
 
+    def _show_hook_edit_card(self, event: str, hook_data: dict):
+        """显示编辑 Hook 卡片"""
+        from app.widgets.hook_setting_card import HookEditCard
+        self._settings_popup.hide()
+        self._hook_edit_card.set_title("✏️ 编辑 Hook")
+        # 创建携带原始数据的 HookEditCard
+        self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self)
+        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        while self._hook_edit_card.content_layout.count():
+            item = self._hook_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
+        self._hook_edit_card.set_save_button_handler(
+            lambda: self._hook_edit_popup._on_save()
+        )
+        self._hook_edit_card.show()
+
     def _on_hook_edit_saved(self, values: dict):
         """Hook 保存回调"""
         self._hook_edit_card.hide()
-        # 先刷新再显示弹窗，避免布局异步计算导致内容不可见
         if hasattr(self._settings_popup, 'hookListCard'):
-            self._settings_popup.hookListCard._add_hook(
-                event=values["event"],
-                command=values["command"],
-                matcher=values["matcher"],
-                hook_type=values["type"],
-                enabled=values["enabled"]
-            )
+            from app.widgets.hook_setting_card import HookListSettingCard
+            original = self._hook_edit_popup.get_original_data()
+            if original:
+                # 编辑已有 hook
+                orig_event = original.get("_event", values["event"])
+                orig_command = original.get("command", "")
+                orig_matcher = original.get("matcher", "")
+                self._settings_popup.hookListCard._update_hook(
+                    original_event=orig_event,
+                    original_command=orig_command,
+                    original_matcher=orig_matcher,
+                    new_values=values
+                )
+            else:
+                # 新增 hook
+                self._settings_popup.hookListCard._add_hook(
+                    event=values["event"],
+                    command=values["command"],
+                    matcher=values["matcher"],
+                    hook_type=values["type"],
+                    enabled=values["enabled"]
+                )
         self._settings_popup.show()
 
     def _on_hook_edit_closed(self):
@@ -5291,7 +5329,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
-            self._current_assistant_card.set_error_state(True)
+            self._current_assistant_card.set_error_state(True, error_message=error)
             self._current_assistant_card.update_content(error)
 
         self._is_streaming = False
@@ -5847,11 +5885,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_destroyed = True
         
         # 设置关闭标志，阻止 Settings.save() 写入磁盘（防止覆盖用户粘贴的配置）
-        try:
-            self.cfg._set_closing_down()
-        except Exception:
-            pass
-        
         if hasattr(self, 'backend') and self.backend:
             try:
                 self.backend.set_ui_valid(False)
@@ -6078,12 +6111,30 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_loop_worker.start()
 
     def _on_auto_loop_stop(self):
-        """停止 AutoLoop（用户主动停止）"""
+        """停止 AutoLoop（用户主动停止）
+        
+        不再阻塞 UI 线程！通过 loop_stopped 信号异步处理清理。
+        只在 looper 线程退出后(通过信号)才执行 _finish_auto_loop，
+        避免 UI 卡死和二次清理导致的闪退。
+        """
         if self._auto_loop_worker and self._auto_loop_worker.isRunning():
+            # 1. 立即发送取消信号给 worker 线程
             self._auto_loop_worker.cancel()
-            self._auto_loop_worker.wait(5000)
+            # 2. UI 立即反馈，不阻塞
+            if self._auto_loop_running_card:
+                self._auto_loop_running_card.set_status("⏹ 正在停止...")
+            # 3. 安全兜底：5 秒后如果还没停，强制清理（避免永久卡住）
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(5000, self._force_cleanup_autoloop)
 
-        self._finish_auto_loop("⏹ 用户手动停止")
+    def _force_cleanup_autoloop(self):
+        """兜底清理：如果 worker 线程未正常结束，强制清理"""
+        if not self._is_auto_loop_running:
+            return  # 已经通过信号正常清理了
+        logger.warning("[AutoLoop] Force cleanup after timeout")
+        if self._auto_loop_worker and self._auto_loop_worker.isRunning():
+            self._auto_loop_worker.wait(2000)
+        self._finish_auto_loop("⏹ 强制停止（超时）")
 
     def _on_auto_loop_phase_changed(self, phase: str):
         """AutoLoop 阶段变更"""
@@ -6158,18 +6209,24 @@ class OpenAIChatToolWindow(ToolWindow):
         self._finish_auto_loop("⏹ 已停止")
 
     def _finish_auto_loop(self, message: str):
-        """清理 AutoLoop 状态"""
+        """清理 AutoLoop 状态
+        
+        注意：可能被多个路径调用（loop_completed/loop_error/loop_stopped 信号 + 兜底定时器），
+        必须在顶部做防重入保护。
+        """
+        if not self._is_auto_loop_running:
+            # 防止二次清理导致 worker.deleteLater 冲突和闪退
+            return
         self._is_auto_loop_running = False
 
         # 恢复为当前项目配置的工作目录
         self._sync_working_directory()
 
-        # 停止动画
+        # 停止动画（只调用一次，移除重复调用）
         if self._auto_loop_running_card:
             self._auto_loop_running_card.stop_animation()
 
         # 隐藏运行卡
-        self._auto_loop_running_card.stop_animation()
         self._auto_loop_running_card.hide()
         self._restore_after_system_close()
 
@@ -6225,12 +6282,13 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if not session:
             return
-        
-        # 获取当前会话已有的消息
-        existing_messages = list(session.messages or [])
-        
+
+        # messages 来自 AutoLoopWorker.get_all_messages()，
+        # 包含 on_messages_updated 收集的完整消息（含 user + assistant + tool_calls）
+        auto_loop_messages = list(messages or [])
+
         # 确保 user 消息存在（第一条 user 消息）
-        has_user = any(msg.get("role") == "user" for msg in existing_messages + messages)
+        has_user = any(msg.get("role") == "user" for msg in auto_loop_messages)
         if not has_user and self._auto_loop_worker:
             task_prompt = self._auto_loop_worker.get_task_prompt()
             if task_prompt:
@@ -6240,20 +6298,17 @@ class OpenAIChatToolWindow(ToolWindow):
                     "content": task_prompt,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
-                existing_messages.append(user_msg)
-        
-        # 追加 AutoLoop 消息
-        existing_messages.extend(messages)
-        
-        # 更新会话
-        session.set_messages(existing_messages, preserve_compaction=True)
-        
-        logger.info(f"[AutoLoop] 保存 {len(messages)} 条消息到会话: {self._current_project}")
-        
+                auto_loop_messages.insert(0, user_msg)
+
+        # 更新会话（preserve_compaction=True 避免压缩状态被破坏）
+        session.set_messages(auto_loop_messages, preserve_compaction=True)
+
+        logger.info(f"[AutoLoop] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
+
         # 触发 topic_summary 生成标题（如果还没有标题）
         session = self.session_manager.get_current_session()
         if session and not session.topic_summary:
             self._maybe_generate_topic_summary()
-        
+
         # 同步保存到历史记录
         self._save_current_session_to_history()

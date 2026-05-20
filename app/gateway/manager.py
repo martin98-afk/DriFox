@@ -152,12 +152,20 @@ class PlatformManager:
     
     def start_all(self) -> Dict[Platform, bool]:
         """
-        启动所有启用的平台
-        
+        启动所有启用的平台（同步，等待结果）
+
         Returns:
             启动结果: platform -> success
         """
         return self._run_coro(self._start_all_async())
+
+    def start_all_async(self) -> None:
+        """
+        启动所有启用的平台（纯异步，不等待结果）
+
+        避免 WebSocket 连接慢时卡住调用线程。
+        """
+        self._schedule_coro(self._start_all_async())
     
     def stop_all(self) -> None:
         """停止所有平台"""
@@ -242,8 +250,12 @@ class PlatformManager:
         self._notify_status()
     
     def start_platform(self, platform: Platform) -> bool:
-        """启动指定平台"""
+        """启动指定平台（同步，等待结果）"""
         return self._run_coro(self._start_platform_async(platform))
+    
+    def start_platform_async(self, platform: Platform) -> None:
+        """启动指定平台（异步，不等待结果）"""
+        self._schedule_coro(self._start_platform_async(platform))
     
     def stop_platform(self, platform: Platform) -> None:
         """停止指定平台"""
@@ -346,7 +358,7 @@ def create_platform_manager(
     send_message: Callable[[Platform, str, str, Any], SendResult],
 ) -> PlatformManager:
     """
-    创建平台管理器
+    创建或获取平台管理器（全局单例）
     
     Args:
         process_message: 处理消息回调
@@ -357,6 +369,9 @@ def create_platform_manager(
     """
     global _manager_instance
     
+    if _manager_instance is not None:
+        return _manager_instance
+    
     # 使用全局单例，确保 UI 保存的配置能被读取
     config = get_gateway_config()
     _manager_instance = PlatformManager(
@@ -364,6 +379,8 @@ def create_platform_manager(
         process_message_callback=process_message,
         send_message_callback=send_message,
     )
+    
+    logger.info("[PlatformManager] Created singleton instance")
     
     return _manager_instance
 

@@ -1,15 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 AutoLoop Prompt 组合器 — 集中管理所有 prompt 模板
-
-将分散在 Engine 和 Worker 中的 prompt 模板统一管理：
-- 阶段约束（PLANNING_CONSTRAINT / EXECUTING_CONSTRAINT）
-- 工作流上下文（规划/执行阶段的 prompt 模板）
-- 强制更新提示
-- 工作目录信息
-- 笔记内容注入
 """
 import re
+import time
 from typing import Optional
 
 from loguru import logger
@@ -72,15 +66,16 @@ class AutoLoopPromptComposer:
 
     def get_stage_constraint(self) -> str:
         """获取当前阶段的强制约束提示"""
-        import time
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
         if self._engine.is_planning_phase():
             return PLANNING_CONSTRAINT.format(current_time=current_time)
         else:
+            # 使用 display_step（笔记推导值），不直接用 _current_step（内部追踪值）
+            step = self._engine.display_step if self._engine.display_step > 0 else self._engine.current_step
             return EXECUTING_CONSTRAINT.format(
                 current_time=current_time,
-                current=self._engine.current_step,
+                current=step,
                 total=self._engine.total_steps,
             )
 
@@ -88,13 +83,7 @@ class AutoLoopPromptComposer:
 
     def build_workflow_context(self, iteration: int, project_path: str = "",
                                force_update: bool = False) -> str:
-        """根据当前阶段构建工作流上下文
-
-        Args:
-            iteration: 当前迭代轮次
-            project_path: 项目工作目录
-            force_update: 是否强制要求更新接力文档
-        """
+        """根据当前阶段构建工作流上下文"""
         is_planning = self._engine.is_planning_phase()
 
         if is_planning:
@@ -102,7 +91,6 @@ class AutoLoopPromptComposer:
         else:
             lines = self._executing_context()
 
-        # 强制更新提示（插入在阶段上下文之后）
         if force_update:
             lines.extend([
                 "",
@@ -112,7 +100,6 @@ class AutoLoopPromptComposer:
                 "**不更新接力文档就继续是违规行为！**",
             ])
 
-        # 工作目录信息
         if project_path:
             lines.extend([
                 "",
@@ -123,7 +110,6 @@ class AutoLoopPromptComposer:
                 f"  - read(path='src/main.py')    → 读取 {project_path}/src/main.py",
             ])
 
-        # 执行阶段注入笔记内容
         if not is_planning:
             notes = self._engine.read_shared_notes()
             if notes:
@@ -139,7 +125,8 @@ class AutoLoopPromptComposer:
 
     def build_forced_update_prompt(self, iteration: int) -> str:
         """生成强制更新接力文档的提示"""
-        current_step = self._engine.current_step
+        # 使用 display_step（笔记推导值）
+        current_step = self._engine.display_step if self._engine.display_step > 0 else self._engine.current_step
         total_steps = self._engine.total_steps
         notes_preview = self._engine.read_shared_notes()[:500] if self._engine else ""
 
@@ -162,6 +149,7 @@ class AutoLoopPromptComposer:
 请立即使用 `write` 工具更新接力文档，然后输出 `PLANNING_COMPLETE`。
 """
         else:
+            completion_signal = self._engine.config.completion_signal
             return f"""
 ## ⚠️ 【强制】接力文档未更新！
 
@@ -170,7 +158,7 @@ class AutoLoopPromptComposer:
 根据规则，你必须：
 1. 更新 SHARED_TASK_NOTES.md 中的"步骤 {current_step} 结果"章节
 2. 记录本轮执行的改动、验证命令和结果
-3. 然后才能继续下一步或输出 DONE
+3. 然后才能继续下一步或输出 {completion_signal}
 
 当前接力文档状态：
 ```
@@ -185,26 +173,15 @@ class AutoLoopPromptComposer:
     def build_messages(self, task_prompt: str, iteration: int,
                        system_prompt: str, project_path: str = "",
                        force_update: bool = False) -> list:
-        """构建本轮对话消息 — 两阶段上下文注入
-
-        Args:
-            task_prompt: 原始任务提示
-            iteration: 当前迭代轮次
-            system_prompt: Agent 系统提示词
-            project_path: 项目工作目录
-            force_update: 是否强制要求更新接力文档
-        """
-        # 工作流上下文
+        """构建本轮对话消息"""
         workflow_context = self.build_workflow_context(
             iteration, project_path, force_update
         )
 
-        # 在最开头注入阶段强约束（大模型对开头权重更高）
         stage_constraint = self.get_stage_constraint()
         if stage_constraint:
             workflow_context = stage_constraint + "\n\n" + workflow_context
 
-        # 增量执行进度总结（放在末尾，提醒模型只处理当前步骤）
         incremental_summary = self._engine.get_incremental_summary()
         if incremental_summary:
             workflow_context = workflow_context + incremental_summary
@@ -271,7 +248,8 @@ class AutoLoopPromptComposer:
 
     def _executing_context(self) -> list:
         """执行阶段上下文模板"""
-        current_step = self._engine.current_step
+        # 使用 display_step（笔记推导值），不直接用 _current_step（内部追踪值）
+        current_step = self._engine.display_step if self._engine.display_step > 0 else self._engine.current_step
         total_steps = self._engine.total_steps
         notes = self._engine.read_shared_notes()
 
@@ -280,11 +258,11 @@ class AutoLoopPromptComposer:
             "",
             f"**当前进度**: 步骤 {current_step} / {total_steps}",
             "",
-            "### 📋 文档保护规则（必须严格遵守！）",
+            "### 步骤进度（仅用于显示，可随时调整）",
             "",
-            "✅ **允许修改**: `## 当前状态` 和 `## 下一步` 以及新增的 `步骤 X 结果` 章节",
-            "❌ **禁止修改**: `## 任务概述` 和 `## 执行计划` 这两个章节一旦在规划阶段完成，**绝对不能修改或重写**，必须原样保留！",
-            "❌ **禁止简化**: 不得将原详细的多步骤计划简化为少数步骤，必须保留所有原始步骤细节。",
+            "步骤数/步骤内容可以随时修改、增加、合并，不需要固定不变。",
+            "每次输出 `STEP_X/Y_COMPLETE` 中的 X 和 Y 可以自由调整，",
+            "Y 表示总步骤数，X 表示当前完成的步骤序号，这两个数字可以随时根据实际情况变化。",
             "",
             "### 执行规则（严格遵守）",
             "",
@@ -295,27 +273,36 @@ class AutoLoopPromptComposer:
             "2. 读取相关目标文件",
             "3. 执行当前步骤（**只做一件事**）",
             "4. **必须运行验证命令**（不能跳过）",
-            "5. 更新 `SHARED_TASK_NOTES.md`: **只追加/更新当前步骤结果和当前状态，不得改动执行计划部分**",
-            "6. 判断：继续当前步骤 | 前进到下一步 | 输出 DONE",
+            "5. 更新 `SHARED_TASK_NOTES.md` 中的当前步骤结果和状态",
+            f"6. 判断：继续当前步骤 | 前进到下一步 | 输出 STEP_{current_step}/{total_steps}_COMPLETE",
             "",
             "### 验证失败处理",
             "- 验证失败 → 分析原因 → 修复 → 重试",
             "- 连续失败 3 次 → 记录问题 → 尝试降级方案或跳过",
             "- 验证成功 → 前进到下一步",
             "",
-            "### 完成条件",
-            "- 所有计划步骤都验证通过",
-            "- 输出 `DONE`（独占一行）",
+            "### 完成信号",
+            f"- **当前步骤完成** → 输出 `STEP_X/Y_COMPLETE`（X=当前步骤序号, Y=总步骤数，数字可任意调整）",
+            f"- **全部步骤完成** → 输出 `{self._engine.config.completion_signal}`（独占一行，连续出现 {self._engine.config.completion_threshold} 次后自动结束）",
             "",
             "### 当前步骤详情",
         ]
 
-        # 提取当前步骤信息
         if notes:
-            pattern = rf'- \[步骤\s*{current_step}\].*?'
-            match = re.search(pattern, notes)
-            if match:
-                step_text = match.group(0)
+            # 匹配两种实际格式：
+            # 1. - [ ] [步骤 N] <描述> | <文件> | <验证>  （有复选框 + 嵌套方括号）
+            # 2. - [x] [步骤 N] <描述> | <文件> | <验证>  （已勾选 + 嵌套方括号）
+            step_text = None
+            patterns = [
+                rf'- .*?\[步骤\s*{current_step}\].*$',
+                rf'- \[.*?\]\s*步骤\s*{current_step}.*$',
+            ]
+            for p in patterns:
+                m = re.search(p, notes, re.MULTILINE)
+                if m:
+                    step_text = m.group(0).strip()
+                    break
+            if step_text:
                 lines.append("```")
                 lines.append(step_text)
                 lines.append("```")

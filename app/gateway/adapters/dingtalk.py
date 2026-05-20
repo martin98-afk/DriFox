@@ -184,7 +184,13 @@ class DingTalkAdapter(BasePlatformAdapter):
     
     async def _on_message(self, message: Any) -> None:
         """处理收到的消息"""
-        msg_id = getattr(message, "message_id", None) or uuid.uuid4().hex
+        msg_id = getattr(message, "message_id", None) or ""
+        if not msg_id:
+            # 钉钉 SDK 通常会提供 message_id（对应 msgId），
+            # 如果缺失则用 conversation_id + sender_id + text 组合作为去重键
+            sender_id = getattr(message, "sender_id", "") or ""
+            text = self._extract_text(message) or ""
+            msg_id = f"{sender_id}:{text[:50]}"
         conversation_id = getattr(message, "conversation_id", "") or ""
         conversation_type = getattr(message, "conversation_type", "1")
         is_group = str(conversation_type) == "2"
@@ -232,7 +238,11 @@ class DingTalkAdapter(BasePlatformAdapter):
     
     def _on_message_sync(self, message: Any) -> None:
         """同步处理收到的消息（供 ChatbotHandler 调用）"""
-        msg_id = getattr(message, "message_id", None) or uuid.uuid4().hex
+        msg_id = getattr(message, "message_id", None) or ""
+        if not msg_id:
+            sender_id = getattr(message, "sender_id", "") or ""
+            text = self._extract_text(message) or ""
+            msg_id = f"{sender_id}:{text[:50]}"
         conversation_id = getattr(message, "conversation_id", "") or ""
         conversation_type = getattr(message, "conversation_type", "1")
         is_group = str(conversation_type) == "2"

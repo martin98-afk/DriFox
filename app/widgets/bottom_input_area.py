@@ -579,63 +579,41 @@ class SendableTextEdit(TextEdit):
         try:
             # 首先检查是否是真正的文件拖拽（通过 URLs）
             is_file_drop = False
-            component_path = ""
-            extension_path = ""
+            file_paths = []  # 收集所有拖入的文件路径
             
             if source.hasUrls():
-                # 这是真正的文件拖拽
                 urls = source.urls()
                 if urls:
-                    # 取第一个 URL 作为主文件
-                    component_path = urls[0].toLocalFile()
-                    # 如果有多个 URL，第二个作为扩展资源路径
-                    if len(urls) > 1:
-                        extension_path = urls[1].toLocalFile()
+                    file_paths = [url.toLocalFile() for url in urls if url.toLocalFile()]
                     is_file_drop = True
             elif source.hasText():
                 text = source.text()
                 
-                # 对于文本内容，严格判断是否是文件路径
-                # 只有完全符合路径格式且实际存在的路径才被认为是文件
-                
+                # 文本内容拖入：逐行解析文件路径
+                # 只有实际存在的路径才被认为是文件
                 if "file:/" in text:
-                    # 包含 file:/ 的可能是文件路径
                     try:
                         lines = text.split("\n")
-                        candidate_component = lines[0] if lines else ""
-                        candidate_extension = lines[1] if len(lines) > 1 else ""
-                        
-                        # 去除 file:/ 前缀
-                        candidate_component = _FILE_PREFIX_PATTERN.sub('', candidate_component)
-                        candidate_extension = _FILE_PREFIX_PATTERN.sub('', candidate_extension)
-                        
-                        # 验证路径是否存在
-                        if candidate_component and os.path.exists(candidate_component):
-                            component_path = candidate_component
-                            extension_path = candidate_extension
+                        for line in lines:
+                            path = _FILE_PREFIX_PATTERN.sub('', line)
+                            if path and os.path.exists(path):
+                                file_paths.append(path)
+                        if file_paths:
                             is_file_drop = True
                     except Exception:
-                        # 任何解析错误都不作为文件处理
                         pass
                 elif "\n" in text:
-                    # 有换行符时，检查是否是合法的文件路径
                     try:
                         lines = text.split("\n")
-                        if len(lines) >= 1 and lines[0]:
-                            candidate_path = lines[0]
-                            # 严格判断：必须是绝对路径且实际存在
-                            if candidate_path and os.path.isabs(candidate_path) and os.path.exists(candidate_path):
-                                component_path = candidate_path
-                                extension_path = lines[1] if len(lines) > 1 else ""
-                                # 同样检查扩展路径
-                                if extension_path and not os.path.exists(extension_path):
-                                    extension_path = ""
-                                is_file_drop = True
+                        for line in lines:
+                            if line and os.path.isabs(line) and os.path.exists(line):
+                                file_paths.append(line)
+                        if file_paths:
+                            is_file_drop = True
                     except Exception:
-                        # 任何解析错误都不作为文件处理
                         pass
             
-            if is_file_drop and component_path:
+            if is_file_drop and file_paths:
                 try:
                     # 保存默认格式
                     cursor = self.textCursor()
@@ -644,10 +622,8 @@ class SendableTextEdit(TextEdit):
                     # 先插入一个空格占位符，用默认格式
                     cursor.insertText(" ", default_format)
                     
-                    # 准备要插入的文件路径文本
-                    insert_text = f"路径: {component_path}"
-                    if extension_path:
-                        insert_text += f"\n扩展资源路径: {extension_path}"
+                    # 准备要插入的文件路径文本——所有文件
+                    insert_text = "\n".join([f"路径: {p}" for p in file_paths])
                     
                     # 记录文件路径的起始位置
                     path_start = cursor.position()

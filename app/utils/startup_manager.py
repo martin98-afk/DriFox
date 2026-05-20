@@ -112,3 +112,22 @@ def is_auto_start_enabled() -> bool:
             winreg.CloseKey(key)
     except Exception:
         return False
+
+
+def sync_auto_start_from_config():
+    """
+    启动时同步：根据配置文件中的 auto_start 设置，确保注册表状态一致。
+    
+    用于 app 启动入口，防止注册表项被意外删除后自启失效。
+    """
+    if not _is_windows():
+        return
+
+    try:
+        from app.utils.config import Settings
+        cfg = Settings.get_instance()
+        enabled = bool(cfg.auto_start.value)
+        set_auto_start(enabled)
+    except Exception:
+        # 静默失败，不影响启动流程
+        pass

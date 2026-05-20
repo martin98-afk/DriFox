@@ -67,7 +67,9 @@ class BuiltinTools(QObject):
         self._memory_manager = None
         self._get_llm_config = None
         self._get_session_messages = None
-        self._current_project = "默认项目"  # 当前项目
+        self._current_project = "默认项目"  # 当前项目（由 set_current_project() 设置）
+
+
 
         logger.info(f"[BuiltinTools] Workdir: {self.workdir}, loaded {len(self._tools)} tool modules")
 

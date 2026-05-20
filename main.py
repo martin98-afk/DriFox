@@ -9,8 +9,6 @@ import warnings
 
 from qfluentwidgets import setFontFamilies
 
-from app.side_dock_area import ToolPopupDialog
-
 warnings.filterwarnings("ignore")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -75,6 +73,13 @@ def main():
             font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
             font_family = "Segoe UI"
+
+    # 启动时同步开机自启注册表状态
+    try:
+        from app.utils.startup_manager import sync_auto_start_from_config
+        sync_auto_start_from_config()
+    except Exception:
+        pass
 
     try:
         from app.utils.design_tokens import scale_font_size
@@ -141,7 +146,9 @@ def main():
     from app.tray_manager import TrayManager
     TrayManager.get_instance()
 
-    # 使用 ToolPopupDialog 包装
+    # 使用 ToolPopupDialog 包装（延迟导入，确保 QApp 和 theme 已就绪）
+    from app.tool_popup import ToolPopupDialog
+
     popup = ToolPopupDialog(chat_window, None)
     popup.setWindowTitle("Drifox")
 

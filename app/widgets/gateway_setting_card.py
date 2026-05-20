@@ -334,27 +334,31 @@ class PlatformStatusRow(CardWidget):
         self.editRequested.emit(self._platform)
     
     def _on_connect(self):
-        try:
-            from app.gateway.manager import get_platform_manager
-            from app.gateway.base import Platform
-            
-            manager = get_platform_manager()
-            if manager:
-                platform_enum = Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK
+        """连接平台（在后台线程运行，不阻塞 UI）"""
+        from app.gateway.base import Platform
+        import threading
+
+        platform_enum = Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK
+
+        def _do_connect():
+            try:
+                from app.gateway.manager import get_platform_manager
+                manager = get_platform_manager()
+                if not manager:
+                    self.update_status(connected=False, error="管理器未就绪")
+                    return
                 success = manager.start_platform(platform_enum)
-                
                 if success:
                     self.update_status(connected=True)
                 else:
-                    self.update_status(connected=False, error="连接失败")
-                    
-        except Exception as e:
-            self.update_status(connected=False, error=str(e)[:30])
-            InfoBar.error(
-                title="连接失败",
-                content=str(e),
-                parent=self.window()
-            )
+                    error = getattr(manager, "_last_error", None) or "连接失败"
+                    self.update_status(connected=False, error=str(error)[:30])
+            except Exception as e:
+                self.update_status(connected=False, error=str(e)[:30])
+
+        t = threading.Thread(target=_do_connect, daemon=True)
+        t.start()
+        self.update_status(connected=False, error="连接中...")
     
     def _save_enabled(self, enabled: bool):
         try:

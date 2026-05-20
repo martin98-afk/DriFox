@@ -22,7 +22,7 @@ from openai import (
 
 from app.constants import PARAM_SCHEMA
 from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
-from app.core.permission_cache import PermissionCache
+from app.core.conversation.config import PermissionCache
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.workers.worker_event_bus import WorkerEventBus, WorkerEvent

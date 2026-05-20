@@ -27,7 +27,7 @@ class TaskTools:
         self._sub_agent_manager = None
         self._set_stage_callback = None
         self._key_documents_repo = None  # 关键文档仓储
-        self._current_project = "默认项目"  # 当前项目
+        self._current_project = "默认项目"  # 当前项目（由 set_current_project() 设置）
 
     @property
     def workdir(self) -> Path:

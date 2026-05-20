@@ -13,22 +13,30 @@ from typing import Optional, List
 
 from loguru import logger
 
-from app.core.auto_loop_config import AutoLoopConfig
-
+from app.core.engines.base import BaseEngine
+from app.core.engines.auto_loop.config import AutoLoopConfig
 
 
 class LoopState:
     IDLE = "idle"
     RUNNING = "running"
-    PLANNING = "planning"   # 规划阶段：拆解任务
-    EXECUTING = "executing" # 执行阶段：按步骤执行
+    PLANNING = "planning"
+    EXECUTING = "executing"
     COMPLETED = "completed"
     STOPPED = "stopped"
     ERROR = "error"
 
 
-class AutoLoopEngine:
-    """核心循环引擎，不依赖 Qt，纯逻辑层"""
+class AutoLoopEngine(BaseEngine):
+    """核心循环引擎，不依赖 Qt，纯逻辑层
+
+    AutoLoopEngine 是一个状态机，管理 AutoLoop 的两阶段执行流程。
+    它不直接参与 LLM 对话（由 AutoLoopWorker 通过 ConversationCore 驱动），
+    而是提供状态追踪、预算控制、完成检测等逻辑能力。
+
+    注意：AutoLoopEngine 不直接使用 ConversationCore + ConversationExecutor，
+    因此 pass None 到父类构造，子类通过重写相关方法提供实现。
+    """
 
     def __init__(self, config: Optional[AutoLoopConfig] = None):
         self.config = config or AutoLoopConfig()
@@ -38,21 +46,39 @@ class AutoLoopEngine:
         self._start_time = 0.0
         self._total_tokens = 0
         self._consecutive_failures = 0
-        
+
         # 规划状态
-        self._is_planning_phase = True  # 默认在规划阶段
-        self._planning_count = 0        # 规划尝试次数
-        self._current_step = 0          # 当前步骤编号（1-based）
-        self._total_steps = 0           # 总步骤数
-        self._verified_steps: set[int] = set()  # 已验证通过的步骤集合
-        self._step_verified = False      # 当前步骤是否已验证
-        self._verification_failures = 0  # 连续验证失败次数
+        self._is_planning_phase = True
+        self._planning_count = 0
+        # _current_step: 内部步骤追踪，只由 advance_to_step / enter_execution_phase 修改
+        self._current_step = 0
+        # _display_step: UI 显示的步骤值，由 set_step_progress 修改（与 _current_step 分离）
+        self._display_step = 0
+        self._total_steps = 0
+        self._verified_steps: set[int] = set()
+        self._step_verified = False
+        self._verification_failures = 0
+
+        # BaseEngine 不持有 ConversationCore，传 None
+        super().__init__(conversation_core=None, conversation_executor=None)
+
+    # ========== BaseEngine 接口实现 ==========
+
+    def get_current_session(self):
+        """AutoLoopEngine 不直接管理会话，返回 None"""
+        return None
 
     # ========== 公共属性（只读）==========
 
     @property
     def current_step(self) -> int:
+        """内部追踪的当前步骤（由 advance_to_step 控制）"""
         return self._current_step
+
+    @property
+    def display_step(self) -> int:
+        """UI 显示的当前步骤（由 set_step_progress 控制）"""
+        return self._display_step
 
     @property
     def total_steps(self) -> int:
@@ -73,8 +99,12 @@ class AutoLoopEngine:
     # ========== 状态写入方法 ==========
 
     def set_step_progress(self, current: int, total: int):
-        """设置步骤进度（由 Worker 调用）"""
-        self._current_step = current
+        """设置步骤进度（仅用于 UI 显示，不影响步骤推进）
+        
+        ⚡ 只修改 _display_step 和 _total_steps
+        ⚡ 不修改 _current_step（它只由 advance_to_step / enter_execution_phase 控制）
+        """
+        self._display_step = current
         self._total_steps = total
 
     def add_tokens(self, tokens: int):
@@ -101,6 +131,7 @@ class AutoLoopEngine:
         self._is_planning_phase = True
         self._planning_count = 0
         self._current_step = 0
+        self._display_step = 0
         self._total_steps = 0
         self._verified_steps = set()
         self._step_verified = False
@@ -136,22 +167,15 @@ class AutoLoopEngine:
         self._planning_count += 1
         if self._planning_count > 5:
             logger.warning("[AutoLoop] Too many planning attempts, forcing execution")
+            if self._total_steps == 0:
+                self._total_steps = 1
             self.enter_execution_phase()
 
     def parse_steps_from_notes(self, notes: str) -> tuple[int, int]:
-        """从笔记中解析当前步骤和总步骤数
-        
-        支持格式：
-        - [ ] [步骤 1] xxx   (未完成)
-        - [x] [步骤 1] xxx   (已完成)
-        - [步骤 1] xxx
-        """
-        # 匹配各种格式的步骤号：
+        """从笔记中解析当前步骤和总步骤数"""
         patterns = [
-            r'- \[.?\]?\s*\[步骤\s*(\d+)\]',  # - [ ] [步骤 1] 或 - [x] [步骤 1] 或 - [步骤 1]
-            r'- \[.?\]?\s*步骤\s*(\d+)',        # - [ ] 步骤 1 或 - [x] 步骤 1
-            r'- \[x\]\s*\[步骤\s*(\d+)\]',     # - [x] [步骤 1]
-            r'\\[步骤\s*(\d+)\\]',              # [步骤 1]
+            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'- \[.*?\]\s*步骤\s*(\d+)',
         ]
         steps = []
         for pattern in patterns:
@@ -164,48 +188,49 @@ class AutoLoopEngine:
         return 0, 0
 
     def parse_current_and_next_step(self, notes: str) -> tuple[int, int, int]:
-        """从笔记中解析当前步骤、已勾选完成的最大步骤、总步骤数
-        
-        Returns:
-            (current_step, max_verified_step, total_steps)
-            - current_step: 下一个要执行的步骤（已完成的最后一个+1）
-            - max_verified_step: 已勾选 [x] 的最大步骤号
-            - total_steps: 总步骤数
-        """
-        # 匹配所有步骤号（包括 [ ] 和 [x]）
-        all_step_pattern = r'- \[.?\]?\s*\[步骤\s*(\d+)\]'
-        all_steps = re.findall(all_step_pattern, notes, re.IGNORECASE)
-        if not all_steps:
-            all_steps = re.findall(r'- \[.?\]?\s*步骤\s*(\d+)', notes, re.IGNORECASE)
-        
+        """从笔记中解析当前步骤、已勾选完成的最大步骤、总步骤数"""
+        # 同时匹配两种常见格式：
+        # 1. - [ ] [步骤 1] <描述>  (嵌套方括号)
+        # 2. - [ ] 步骤 1 <描述>      (直接)
+        # 匹配三种格式：
+        # 1. - [x] [步骤 1] (嵌套方括号)
+        # 2. - [x] 步骤 1   (直接)
+        # 3. - [步骤 1]     (无复选框)
+        patterns = [
+            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'- \[.*?\]\s*步骤\s*(\d+)',
+        ]
+        all_steps = []
+        for pattern in patterns:
+            matches = re.findall(pattern, notes, re.IGNORECASE)
+            if matches:
+                all_steps = matches
+                break
+
         total_steps = len(all_steps)
         max_step_num = max([int(s) for s in all_steps]) if all_steps else 0
-        
-        # 解析已勾选的步骤
+
         verified_steps = self.parse_checked_steps_from_notes(notes)
         max_verified = max(verified_steps) if verified_steps else 0
-        
-        # 当前应该执行的步骤 = 已完成的最后一个 + 1
+
         current_step = max_verified + 1
-        
         return current_step, max_verified, total_steps
 
     def parse_checked_steps_from_notes(self, notes: str) -> set[int]:
         """从笔记中解析已勾选完成的步骤 [x]
         
-        支持格式：
-        - - [x] [步骤 1] xxx
-        - - [x] 步骤 1 xxx
+        只匹配 [x]（已勾选），不匹配 [ ]（未勾选）。
+        支持 [x] 和 [X] 两种写法。
         """
-        # 匹配已勾选完成的步骤
         patterns = [
-            r'- \[x\]\s*\[步骤\s*(\d+)\]',   # - [x] [步骤 1]
-            r'- \[x\]\s*步骤\s*(\d+)',        # - [x] 步骤 1
-            r'- \[x\]\s*\[Step\s*(\d+)\]',   # - [x] [Step 1]
+            r'- \[x\]\s*\[步骤\s*(\d+)\]',
+            r'- \[X\]\s*\[步骤\s*(\d+)\]',
+            r'- \[x\]\s*步骤\s*(\d+)',
+            r'- \[X\]\s*步骤\s*(\d+)',
         ]
         checked = set()
         for pattern in patterns:
-            for match in re.finditer(pattern, notes, re.IGNORECASE):
+            for match in re.finditer(pattern, notes):
                 checked.add(int(match.group(1)))
         return checked
 
@@ -223,23 +248,24 @@ class AutoLoopEngine:
         return self._current_step in self._verified_steps
 
     def get_incremental_summary(self) -> str:
-        """生成增量执行进度总结，告诉模型哪些已完成，只需要处理当前步骤"""
+        """生成增量执行进度总结"""
         if self._is_planning_phase:
             return ""
-        
+
         verified = sorted(self._verified_steps)
         total = self._total_steps
-        current = self._current_step
+        # 展示给模型看的步骤用 display_step（反映笔记中的实际进度）
+        display = self._display_step if self._display_step > 0 else self._current_step
         remaining = [s for s in range(1, total + 1) if s not in self._verified_steps]
-        
+
         summary = [
             "\n\n📊 **增量执行进度总结**",
             f"- ✅ 已验证完成：{verified if verified else '无'}",
-            f"- 🔄 当前需要处理：步骤 {current}",
+            f"- 🔄 当前需要处理：步骤 {display}",
             f"- ⏭️ 未开始：{remaining if remaining else '无'}",
             "",
             "⚠️ 强制要求：",
-            f"- 你只需要处理**当前步骤 {current}**",
+            f"- 你只需要处理**当前步骤 {display}**",
             "- 已完成步骤不需要重复验证或修改",
             "- **每轮结束必须追加**本轮操作记录到 SHARED_TASK_NOTES.md",
             "- 禁止覆盖原始执行计划，只能在文档末尾追加结果记录",
@@ -265,7 +291,6 @@ class AutoLoopEngine:
             self._verification_failures += 1
             if self._verification_failures >= 3:
                 logger.warning(f"[AutoLoop] Step {self._current_step} failed 3 times, skipping")
-                # 跳过仍标记为已处理，避免卡住
                 self._verified_steps.add(self._current_step)
                 self._verification_failures = 0
 
@@ -273,22 +298,24 @@ class AutoLoopEngine:
         """检查任务是否完成（所有步骤都已验证）"""
         if self._total_steps == 0:
             return False
-        # 所有步骤都在已验证集合中才算完成
         all_steps = set(range(1, self._total_steps + 1))
         return self._verified_steps == all_steps
 
     # ========== 完成检测 ==========
 
     def check_completion(self, response_text: str) -> bool:
-        """检测响应中是否包含完成信号"""
+        """检测响应中是否包含完成信号
+        
+        结束只由 completion_signal 连续出现次数决定，与步骤数无关。
+        步骤数可动态变化，不参与结束判断。
+        """
         signal = self.config.completion_signal
         if not signal:
             return False
+        # 规划阶段忽略完成信号，防止偶然匹配导致误判
+        if not self.is_executing_phase():
+            return False
         if signal in response_text:
-            # 在执行阶段，必须确保所有步骤都已完成
-            if self.is_executing_phase() and not self.is_task_completed():
-                logger.info(f"[AutoLoop] Received DONE but not all steps verified, continuing")
-                return False
             self._completion_count += 1
             if self._completion_count >= self.config.completion_threshold:
                 self.state = LoopState.COMPLETED
@@ -299,15 +326,9 @@ class AutoLoopEngine:
         return False
 
     def check_planning_complete(self, response_text: str, notes: str) -> bool:
-        """检测规划是否完成：必须包含 PLANNING_COMPLETE 且笔记有有效步骤"""
+        """检测规划是否完成"""
         if "PLANNING_COMPLETE" not in response_text.upper():
             return False
-        current, total = self.parse_steps_from_notes(notes)
-        if total == 0:
-            logger.info("[AutoLoop] PLANNING_COMPLETE found but no steps in notes")
-            return False
-        self._total_steps = total
-        self._current_step = 1
         return True
 
     # ========== 预算检查 ==========
@@ -329,9 +350,6 @@ class AutoLoopEngine:
 
         return None
 
-    def add_tokens(self, tokens: int):
-        self._total_tokens += tokens
-
     # ========== 共享笔记 ==========
 
     def get_notes_path(self) -> Optional[Path]:
@@ -350,13 +368,12 @@ class AutoLoopEngine:
             return ""
 
     def get_round_log_path(self, iteration: int) -> Optional[Path]:
-        """获取当前轮次的独立日志文件路径（round_001.md 格式）"""
+        """获取当前轮次的独立日志文件路径"""
         if not self.config.project_path:
             return None
         project_dir = Path(self.config.project_path)
         logs_dir = project_dir / self.config.logs_dir
         logs_dir.mkdir(parents=True, exist_ok=True)
-        # 格式: round_001.md → 自然排序
         return logs_dir / f"round_{iteration:03d}.md"
 
     def write_round_log(self, iteration: int, content: str) -> bool:
@@ -386,7 +403,8 @@ class AutoLoopEngine:
             "max_tokens": self.config.max_tokens,
             "state": self.state,
             "phase": "planning" if self._is_planning_phase else "executing",
-            "current_step": self._current_step,
+            # UI 显示用 _display_step，内部追踪用 _current_step
+            "current_step": self._display_step if not self._is_planning_phase else self._current_step,
             "total_steps": self._total_steps,
         }
 
@@ -398,40 +416,39 @@ class AutoLoopEngine:
             return f"{h}时{m}分{s}秒"
         return f"{m}分{s}秒"
 
-    # ========== 步骤完成检测（统一收归 Engine）==========
+    # ========== 步骤完成检测 ==========
 
     def check_step_completed(self, response: str, notes: str, step_num: int) -> bool:
-        """检测当前步骤是否完成
-        
-        完成条件（满足任一即可）：
-        1. 响应中包含 "步骤 N 完成" / "step N complete" / "完成验证"
-        2. 笔记中该步骤标记为完成（如 [x] 或 ✓）
-        3. 响应末尾包含 DONE
-        4. 笔记中有"步骤 N 结果"或"当前状态"更新
-        """
-        # 条件1：响应中明确提到步骤完成
+        """检测当前步骤是否完成"""
+        # 新增：STEP_X/N_COMPLETE 信号检测
+        total = self._total_steps
+        step_signal = f"STEP_{step_num}/{total}_COMPLETE" if total > 0 else None
+        if step_signal and step_signal in response:
+            return True
+
         patterns = [
             rf'步骤\s*{step_num}\s*(完成|已验证|验证成功)',
             rf'step\s*{step_num}\s*(complete|verified|done)',
-            rf'验证.*?成功|verify.*?success',
+            # 注意：必须绑定 step_num，防止"步骤 3 验证成功"被步骤2的检查误匹配
+            rf'步骤\s*{step_num}.*?验证.*?成功',
+            rf'step\s*{step_num}.*?verify.*?success',
         ]
         for p in patterns:
             if re.search(p, response, re.IGNORECASE):
                 return True
 
-        # 条件2：笔记中该步骤已标记完成
         if notes:
-            pattern = rf'- \[(x|✓)\]\s*步骤\s*{step_num}'
+            # 只匹配 [x]（已勾选），不匹配 [ ]
+            pattern = rf'- \[x\]\s*步骤\s*{step_num}'
             if re.search(pattern, notes, re.IGNORECASE):
+                return True
+            pattern = rf'- \[X\]\s*步骤\s*{step_num}'
+            if re.search(pattern, notes):
                 return True
             if re.search(rf'步骤\s*{step_num}\s+结果', notes):
                 return True
             if re.search(rf'步骤\s*{step_num}.*完成', notes, re.DOTALL):
                 return True
-
-        # 条件3：响应末尾有 DONE
-        if response.strip().endswith("DONE"):
-            return True
 
         return False
 
@@ -448,12 +465,7 @@ class AutoLoopEngine:
         return f"步骤 {step_num}"
 
     def check_relay_doc_updated(self, iteration: int) -> bool:
-        """检查接力文档是否已更新
-        
-        Returns:
-            True: 已更新，可以继续
-            False: 未更新，需要强制要求更新
-        """
+        """检查接力文档是否已更新"""
         notes = self.read_shared_notes()
 
         if not notes or len(notes.strip()) < 50:
@@ -466,7 +478,6 @@ class AutoLoopEngine:
                 return False
             return True
 
-        # 执行阶段
         current_step = self._current_step
         total_steps = self._total_steps
 

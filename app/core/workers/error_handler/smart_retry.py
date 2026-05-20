@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from loguru import logger
 
-from app.core.error_classifier import (
+from app.core.workers.error_handler.error_classifier import (
     ErrorClassifier,
     FailoverReason,
     ClassifiedError,

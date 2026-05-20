@@ -5,7 +5,7 @@ LLM Chatter 核心模块
 """
 
 from app.core.backend import ChatBackend
-from app.core.chat_engine import ChatEngine
+from app.core.engines.ui import ChatEngine
 from app.core.tool_executor import ToolExecutor
 from app.core.memory_manager import MemoryManagerCore
 from app.core.agent import Agent, AgentManager, create_agent_manager
@@ -29,7 +29,17 @@ from app.core.message_content import (
     make_tool_result_block,
     get_user_round_ranges,
 )
-from app.core.retry_helper import create_api_call_with_retry, retry_on_api_error
+from app.core.workers.error_handler import (
+    create_api_call_with_retry,
+    retry_on_api_error,
+    SmartRetryHelper,
+    RetryConfig,
+    RetryResult,
+    ErrorClassifier,
+    ClassifiedError,
+    FailoverReason,
+)
+from app.core.workers import error_handler
 from app.core.token_estimator import estimate_tokens, count_messages_tokens, TokenCounter
 from app.core.chat_session import ChatSession, SessionManager
 
@@ -67,6 +77,14 @@ __all__ = [
     # 重试
     "create_api_call_with_retry",
     "retry_on_api_error",
+    "error_handler",
+    # Smart Retry
+    "SmartRetryHelper",
+    "RetryConfig",
+    "RetryResult",
+    "ErrorClassifier",
+    "ClassifiedError",
+    "FailoverReason",
     # Token
     "estimate_tokens",
     "count_messages_tokens",

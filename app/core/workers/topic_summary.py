@@ -10,7 +10,7 @@ from loguru import logger
 from PyQt5.QtCore import QRunnable, pyqtSlot
 from openai import OpenAI
 
-from app.core.retry_helper import create_api_call_with_retry
+from app.core.workers.error_handler import create_api_call_with_retry
 
 _JSON_PATTERN = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
