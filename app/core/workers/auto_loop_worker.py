@@ -283,17 +283,18 @@ class AutoLoopWorker(QThread):
             summary = self._extract_summary(response, iteration)
             self.iteration_completed.emit(iteration, summary)
 
-            # 写入本轮完整日志到独立文件
+            # 写入本轮完整日志到独立文件（含全部对话）
             timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            messages_section = self._format_messages_for_log(self._all_messages) if self._all_messages else response
             log_content = f"""# AutoLoop 轮次 {iteration} 日志
 
 - 时间: {timestamp_str}
 - 阶段: {'PLANNING' if self._engine.is_planning_phase() else 'EXECUTING'}
 - 当前步骤: {self._engine.current_step} / {self._engine.total_steps}
 
-## 完整响应
+## 完整对话
 
-{response}
+{messages_section}
 """
             self._engine.write_round_log(iteration, log_content)
 
@@ -492,6 +493,43 @@ class AutoLoopWorker(QThread):
                 return list(session.messages)
         # fallback
         return self._all_messages.copy()
+
+    @staticmethod
+    def _format_messages_for_log(messages: List[Dict]) -> str:
+        """将消息列表格式化为可读的日志文本"""
+        lines = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            tool_calls = msg.get("tool_calls", None)
+            tool_call_id = msg.get("tool_call_id", None)
+            name = msg.get("name", None)
+
+            prefix = {
+                "system": "【系统】",
+                "user": "【用户】",
+                "assistant": "【助手】",
+                "tool": f"【工具 {name or tool_call_id or ''}】",
+            }.get(role, f"【{role}】")
+
+            lines.append(f"\n{'='*60}")
+            lines.append(f"{prefix}  #{i}")
+            lines.append(f"{'='*60}")
+
+            if content:
+                lines.append(content)
+
+            if tool_calls:
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    args = func.get("arguments", "")
+                    lines.append(f"\n  ▶ 调用工具: {func.get('name', '?')}")
+                    lines.append(f"     参数: {args[:500]}")
+
+            if role == "tool" and content:
+                lines.append(f"  结果: {content[:300]}")
+
+        return "\n".join(lines)
 
     # ========== 公共接口（供 main_widget 等外部调用）==========
 

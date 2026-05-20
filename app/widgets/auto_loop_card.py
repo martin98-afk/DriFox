@@ -539,6 +539,17 @@ class AutoLoopRunningCard(QFrame):
         phase_layout.addWidget(self._phase_label)
         row2.addWidget(phase_w)
 
+        # 当前步骤
+        step_w = QWidget()
+        step_layout = QHBoxLayout(step_w)
+        step_layout.setContentsMargins(0, 0, 0, 0)
+        step_layout.setSpacing(6)
+        step_layout.addWidget(QLabel("🔹"))
+        self._step_label = QLabel("步骤 - / -")
+        self._step_label.setStyleSheet(f"color: #A7F3D0; {font_size_css(13)} {FONT_CSS}")
+        step_layout.addWidget(self._step_label)
+        row2.addWidget(step_w)
+
         row2.addStretch()
         status_layout.addLayout(row2)
 
@@ -673,9 +684,21 @@ class AutoLoopRunningCard(QFrame):
         max_iter = progress.get("max_iterations", 0)
         elapsed = progress.get("elapsed_str", "0秒")
         state = progress.get("state", "")
+        current_step = progress.get("current_step", 0)
+        total_steps = progress.get("total_steps", 0)
+        phase = progress.get("phase", "")
 
         self._iter_label.setText(f"{iteration} / {max_iter}")
         self._time_label.setText(elapsed)
+        if total_steps > 0:
+            self._step_label.setText(f"步骤 {current_step}/{total_steps}")
+        phase_text = {
+            "planning": "📋 规划中",
+            "executing": "⚡ 执行中",
+            "completed": "✅ 已完成",
+        }
+        if phase in phase_text:
+            self._phase_label.setText(phase_text[phase])
 
         if state == "running":
             self._status_label.setText(f"▶ 第 {iteration} 轮进行中...")

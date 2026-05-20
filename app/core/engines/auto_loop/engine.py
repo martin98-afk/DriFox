@@ -92,6 +92,7 @@ class AutoLoopEngine(BaseEngine):
     def set_step_progress(self, current: int, total: int):
         """设置步骤进度（仅用于 UI 显示，不影响结束）"""
         self._current_step = current
+        self._total_steps = total
 
     def add_tokens(self, tokens: int):
         """累加 token 使用量"""
@@ -307,12 +308,6 @@ class AutoLoopEngine(BaseEngine):
         """检测规划是否完成"""
         if "PLANNING_COMPLETE" not in response_text.upper():
             return False
-        current, total = self.parse_steps_from_notes(notes)
-        if total == 0:
-            logger.info("[AutoLoop] PLANNING_COMPLETE found but no steps in notes")
-            return False
-        self._total_steps = total
-        self._current_step = 1
         return True
 
     # ========== 预算检查 ==========
