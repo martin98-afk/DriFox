@@ -487,6 +487,9 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
         reasoning = normalized_message.get("reasoning_content")
         if reasoning:
             api_msg["reasoning_content"] = reasoning
+        # 确保 content 或 tool_calls 存在，避免 API 报 "content or tool_calls must be set"
+        if "content" not in api_msg and "tool_calls" not in api_msg:
+            api_msg["content"] = ""
         return api_msg
     elif role == "tool":
         return {
