@@ -7,6 +7,7 @@ from app.core.workers.chat_worker import OpenAIChatWorker
 from app.core.workers.subagent_worker import SubAgentExecutor, SubAgentManager
 from app.core.workers.topic_summary import TopicSummaryTask
 from app.core.workers.shell_task import ShellExecutionTask
+from app.core.workers import error_handler
 
 # AutoLoopWorker 延迟导入（避免 conversation.executor → workers → auto_loop → conversation 循环依赖）
 
@@ -27,4 +28,6 @@ __all__ = [
     # Tasks
     "TopicSummaryTask",
     "ShellExecutionTask",
+    # Error Handler
+    "error_handler",
 ]

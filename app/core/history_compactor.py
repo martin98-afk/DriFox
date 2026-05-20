@@ -31,7 +31,7 @@ from app.core.message_content import (
     consolidate_messages,
     content_to_text,
 )
-from app.core.retry_helper import create_api_call_with_retry
+from app.core.workers.error_handler import create_api_call_with_retry
 from app.core.token_estimator import count_messages_tokens, estimate_tokens
 from app.core.provider_profile import get_provider_profile
 

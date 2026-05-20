@@ -381,7 +381,7 @@ class SubAgentExecutor(QThread):
             timeout=120.0,
         )
 
-        from app.core.retry_helper import create_api_call_with_retry
+        from app.core.workers.error_handler import create_api_call_with_retry
 
         def create_completion():
             return client.chat.completions.create(**req_kwargs, tools=tools)

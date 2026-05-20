@@ -20,7 +20,7 @@ from loguru import logger
 
 # 尝试导入新的错误分类器
 try:
-    from app.core.error_classifier import (
+    from app.core.workers.error_handler.error_classifier import (
         ErrorClassifier,
         ClassifiedError,
         FailoverReason,
