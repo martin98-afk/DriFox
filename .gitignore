@@ -26,3 +26,13 @@ Thumbs.db
 /.drifox/
 /.drifox/app.config
 /docs/
+
+# Build artifacts
+dist/
+*.spec
+check_format.py
+debug_*.py
+test_*.py
+*.json
+fixed_extractor.py
+various_test.py

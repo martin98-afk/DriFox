@@ -67,7 +67,15 @@ class BuiltinTools(QObject):
         self._memory_manager = None
         self._get_llm_config = None
         self._get_session_messages = None
-        self._current_project = "默认项目"  # 当前项目
+        self._current_project = self._load_project_from_config() or "默认项目"  # 当前项目
+
+    def _load_project_from_config(self) -> str:
+        """从配置文件读取当前项目名"""
+        try:
+            from app.utils.config import Settings
+            return Settings.get_instance().current_project.value
+        except Exception:
+            return None
 
         logger.info(f"[BuiltinTools] Workdir: {self.workdir}, loaded {len(self._tools)} tool modules")
 
@@ -266,7 +274,7 @@ class BuiltinTools(QObject):
         if not self._memory_manager:
             return ToolResult(False, error="Memory manager not available")
         
-        project = getattr(self, '_current_project', '默认项目') or '默认项目'
+        project = getattr(self, '_current_project', None) or self._load_project_from_config() or '默认项目'
         
         # 获取现有内容
         existing = self._memory_manager.get_project_note(project)
@@ -314,7 +322,7 @@ class BuiltinTools(QObject):
         if not self._memory_manager:
             return ToolResult(False, error="Memory manager not available")
         
-        project = getattr(self, '_current_project', '默认项目') or '默认项目'
+        project = getattr(self, '_current_project', None) or self._load_project_from_config() or '默认项目'
         note = self._memory_manager.get_project_note(project)
         full_content = note.get("content", "") if note else ""
         

@@ -192,6 +192,9 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir=str(Path(__file__).parent.parent.parent),
         )
         self.backend._current_project = self._current_project
+        # 同步项目到 tool_executor，确保 BuiltinTools.edit_project_note 等工具使用正确项目名
+        if self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(self._current_project)
         # 从后端获取组件（前端只负责 UI 逻辑）
         self.history_manager = self.backend.history_manager
         self.session_store = self.backend.session_store

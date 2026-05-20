@@ -27,7 +27,16 @@ class TaskTools:
         self._sub_agent_manager = None
         self._set_stage_callback = None
         self._key_documents_repo = None  # 关键文档仓储
-        self._current_project = "默认项目"  # 当前项目
+        # 当前项目：优先从配置文件读取
+        self._current_project = self._load_current_project_from_config() or "默认项目"
+
+    def _load_current_project_from_config(self) -> str:
+        """从配置文件读取当前项目名"""
+        try:
+            from app.utils.config import Settings
+            return Settings.get_instance().current_project.value
+        except Exception:
+            return None
 
     @property
     def workdir(self) -> Path:
