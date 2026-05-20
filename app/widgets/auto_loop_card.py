@@ -22,7 +22,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.card_widget import CardSeparator
 from qfluentwidgets.components.widgets.flyout import IconWidget
 
-from app.core.auto_loop_config import AutoLoopConfig
+from app.core.engines.auto_loop import AutoLoopConfig
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import font_size_css, scale_font_size
 

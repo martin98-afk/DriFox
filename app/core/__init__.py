@@ -5,7 +5,7 @@ LLM Chatter 核心模块
 """
 
 from app.core.backend import ChatBackend
-from app.core.chat_engine import ChatEngine
+from app.core.engines.ui import ChatEngine
 from app.core.tool_executor import ToolExecutor
 from app.core.memory_manager import MemoryManagerCore
 from app.core.agent import Agent, AgentManager, create_agent_manager

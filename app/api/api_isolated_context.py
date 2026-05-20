@@ -191,9 +191,7 @@ class IsolatedChatContext:
         Returns:
             配置好的 ChatEngine，已绑定到隔离的组件
         """
-        from app.core.chat_engine import (
-            ChatEngine,
-        )
+        from app.core.engines.ui import ChatEngine
         
         engine = ChatEngine(
             session_manager=self._session_manager,

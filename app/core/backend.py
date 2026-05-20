@@ -15,9 +15,9 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool
 from loguru import logger
 
 from app.core.store import SessionStore
-from app.core.gateway_engine import GatewayEngine
+from app.core.engines.gateway import GatewayEngine
 from app.core.agent import AgentManager
-from app.core.chat_engine import ChatEngine
+from app.core.engines.ui import ChatEngine
 from app.core.chat_session import SessionManager, ChatSession
 from app.core.memory_manager import MemoryManagerCore
 from app.core.hook_manager import HookManager

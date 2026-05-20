@@ -47,7 +47,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.auto_loop_config import AutoLoopConfig
+from app.core.engines.auto_loop import AutoLoopConfig
 from app.core.workers.auto_loop_worker import AutoLoopWorker
 from app.tool_popup import ToolWindow
 from app.tools import get_builtin_tools_schema

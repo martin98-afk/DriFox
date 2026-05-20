@@ -20,9 +20,12 @@ from typing import Dict, List, Optional, Any, Callable
 from PyQt5.QtCore import QThread, pyqtSignal
 from loguru import logger
 
-from app.core.auto_loop_config import AutoLoopConfig
-from app.core.auto_loop_engine import AutoLoopEngine, LoopState
-from app.core.auto_loop_prompt_composer import AutoLoopPromptComposer
+from app.core.engines.auto_loop import (
+    AutoLoopConfig,
+    AutoLoopEngine,
+    LoopState,
+    AutoLoopPromptComposer,
+)
 from app.core.conversation import ConversationExecutor
 from app.core.conversation.core import ConversationCore
 from app.core.conversation.config import ConversationConfig, PermissionStrategy, filter_interactive_tools
