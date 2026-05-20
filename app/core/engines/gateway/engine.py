@@ -52,11 +52,12 @@ class GatewayEngine(QObject, BaseEngine):
         session_store: Any = None,
         parent: QObject = None,
     ):
-        QObject.__init__(self, parent)
-
         # 防止重复构造单例
         if self._global_instance is not None and self is not self._global_instance:
             raise RuntimeError("GatewayEngine is singleton, use GatewayEngine.get_instance()")
+
+        # 先调用 QObject.__init__（会通过 MRO 触发 BaseEngine.__init__()，使用默认值）
+        super().__init__(parent)
 
         # ===== ConversationCore =====
         self._conversation_core = ConversationCore.create(
@@ -95,8 +96,8 @@ class GatewayEngine(QObject, BaseEngine):
         # ===== Gateway 会话级配置 =====
         self._current_agent: Optional[str] = "plan"
 
-        # 调用 BaseEngine 构造
-        BaseEngine.__init__(self, self._conversation_core, self._conversation_executor)
+        # BaseEngine 属性已在上面赋值（_conversation_core, _conversation_executor）
+        # 无需再调用 BaseEngine.__init__，因为 super() 链已触发过（使用默认值）
 
         # 注册为全局单例
         GatewayEngine._global_instance = self

@@ -18,7 +18,7 @@ class BaseEngine:
     各引擎只需实现自身差异化的业务逻辑。
     """
 
-    def __init__(self, conversation_core: Any, conversation_executor: Any):
+    def __init__(self, conversation_core: Any = None, conversation_executor: Any = None):
         self._conversation_core = conversation_core
         self._conversation_executor = conversation_executor
 
