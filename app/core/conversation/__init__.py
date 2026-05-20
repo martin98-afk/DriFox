@@ -1,5 +1,5 @@
 # app/core/conversation/__init__.py
-from app.core.conversation.config import PermissionStrategy, ConversationConfig
+from app.core.conversation.config import PermissionStrategy, ConversationConfig, filter_interactive_tools, INTERACTIVE_ONLY_TOOLS
 from app.core.conversation.core import ConversationCore
 from app.core.conversation.executor import ConversationExecutor
 from app.core.conversation.adapters import (
@@ -12,6 +12,8 @@ from app.core.conversation.adapters import (
 __all__ = [
     "PermissionStrategy",
     "ConversationConfig",
+    "filter_interactive_tools",
+    "INTERACTIVE_ONLY_TOOLS",
     "ConversationCore",
     "ConversationExecutor",
     "BaseConversationAdapter",

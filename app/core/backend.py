@@ -666,8 +666,7 @@ class ChatBackend(QObject):
                 """发送中间更新到平台"""
                 if not _ev_loop or not content.strip():
                     return
-                # [DEBUG-gw7f] 排查钉钉两遍回复问题
-                logger.info(f"[Gateway] _push_to_platform: content_len={len(content)}, preview={content[:60]}")
+                logger.debug(f"[Gateway] _push_to_platform: content_len={len(content)}")
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self._gateway_send_message(gw_platform, chat_id, content),
@@ -707,8 +706,7 @@ class ChatBackend(QObject):
                 content = response or "".join(gateway_chunks)
                 final = content or "抱歉，我没有生成有效回复，请重试。"
 
-                # [DEBUG-gw7f] 排查钉钉两遍回复问题
-                logger.info(f"[Gateway] on_stream_finished called, response_len={len(response)}, gateway_chunks_count={len(gateway_chunks)}, final_len={len(final)}")
+                logger.info(f"[Gateway] AI completed, response_len={len(response)}, final_len={len(final)}")
 
                 # 发送最终回复（替换之前的流式预览，不重复）
                 _push_to_platform(f"💬 **DriFox 助手**\n\n{final}")

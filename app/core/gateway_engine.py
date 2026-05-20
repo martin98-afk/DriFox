@@ -28,10 +28,6 @@ from app.tools import get_builtin_tools_schema
 from app.utils.config import Settings
 
 
-# Gateway 模式下禁用的工具（交互式/不适用于网关场景）
-GATEWAY_DISABLED_TOOLS = {"question", "task_batch", "task_status"}
-
-
 def _noop(*args, **kwargs):
     """空操作回调"""
     pass
@@ -619,17 +615,9 @@ class GatewayEngine(QObject):
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
             )
 
-        # 过滤掉 Gateway 不适用的交互式工具
-        before = len(tools)
-        filtered = [t for t in tools if t.get("function", {}).get("name") not in GATEWAY_DISABLED_TOOLS
-                    and t.get("name") not in GATEWAY_DISABLED_TOOLS]
-        removed = before - len(filtered)
-        if removed > 0:
-            removed_names = [t.get("function", {}).get("name") or t.get("name", "?") for t in tools
-                             if t.get("function", {}).get("name") in GATEWAY_DISABLED_TOOLS
-                             or t.get("name") in GATEWAY_DISABLED_TOOLS]
-            logger.info(f"[GatewayEngine] Filtered {removed} tool(s): {removed_names}")
-        return filtered
+        # Gateway 使用 AGENT_CONFIG 策略，过滤交互类工具
+        from app.core.conversation.config import filter_interactive_tools, PermissionStrategy
+        return filter_interactive_tools(tools, PermissionStrategy.AGENT_CONFIG)
 
     # ==================== 持久化 ====================
 

@@ -23,19 +23,10 @@ from loguru import logger
 from app.core.auto_loop_config import AutoLoopConfig
 from app.core.auto_loop_engine import AutoLoopEngine, LoopState
 from app.core.auto_loop_prompt_composer import AutoLoopPromptComposer
+from app.core.conversation import ConversationExecutor
 from app.core.conversation.core import ConversationCore
-from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.conversation.config import ConversationConfig, PermissionStrategy, filter_interactive_tools
 from app.core.conversation.adapters import AutoLoopConversationAdapter
-from app.core.workers import OpenAIChatWorker
-
-
-# ========== 规划阶段受限工具集 ==========
-# PLANNING_TOOLS = {
-#     # 扫描工具
-#     "scan_repo", "glob", "grep", "list", "read", "websearch", "webfetch", ""
-#     # 笔记写入工具
-#     "write",
-# }
 
 
 class AutoLoopWorker(QThread):
@@ -86,8 +77,12 @@ class AutoLoopWorker(QThread):
         # Worker 同步事件（由 AutoLoopConversationAdapter 管理）
 
     def _configure_tools_for_phase(self, tools_schema: List[Dict]) -> List[Dict]:
-        """根据当前阶段配置工具集"""
-        return self._all_tools_schema or tools_schema
+        """根据当前阶段和权限策略配置工具集
+
+        AutoLoop 使用 AUTO_ALLOW 策略，交互类工具必须被过滤。
+        """
+        raw = self._all_tools_schema or tools_schema
+        return filter_interactive_tools(raw, PermissionStrategy.AUTO_ALLOW)
 
     def configure(
             self,
@@ -113,7 +108,6 @@ class AutoLoopWorker(QThread):
         self._compactor = compactor
 
         # ===== ConversationCore + AutoLoopConversationAdapter（统一执行基础设施）=====
-        from app.core.conversation.executor import ConversationExecutor
         self._conversation_core = ConversationCore.create(
             get_model_config=model_config_getter,
             agent_manager=agent_manager,

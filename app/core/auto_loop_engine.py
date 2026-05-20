@@ -329,9 +329,6 @@ class AutoLoopEngine:
 
         return None
 
-    def add_tokens(self, tokens: int):
-        self._total_tokens += tokens
-
     # ========== 共享笔记 ==========
 
     def get_notes_path(self) -> Optional[Path]:

@@ -1,7 +1,7 @@
 # app/core/conversation/config.py
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class PermissionStrategy(Enum):
@@ -10,6 +10,48 @@ class PermissionStrategy(Enum):
     AUTO_ALLOW = "auto_allow"      # 全部放行（AutoLoop）
     AGENT_CONFIG = "agent_config"  # 按 Agent 配置，ask 视为 deny（Gateway）
     AUTO_DENY = "auto_deny"        # 全部拒绝，只读模式（Cron 保守模式）
+
+
+# 非交互策略下必须过滤的工具——这些工具需要人工参与或实时交互，
+# 只在 INTERACTIVE 策略下可用
+INTERACTIVE_ONLY_TOOLS = frozenset({
+    "question",       # 交互式提问，需要用户选择
+    "task_batch",     # 发布子智能体任务，需要后续交互查询
+    "task_status",    # 查询子智能体任务状态，配合 task_batch 使用
+    "todowrite",      # 待办事项管理，纯交互式工具
+    "edit_project_note",
+    "read_project_note"
+})
+
+
+def filter_interactive_tools(
+    tools: List[Dict],
+    strategy: PermissionStrategy,
+) -> List[Dict]:
+    """根据权限策略过滤交互类工具
+
+    只有 INTERACTIVE 策略保留交互类工具，其余策略全部过滤。
+    """
+    if strategy == PermissionStrategy.INTERACTIVE:
+        return tools
+
+    before = len(tools)
+    filtered = [
+        t for t in tools
+        if t.get("function", {}).get("name") not in INTERACTIVE_ONLY_TOOLS
+        and t.get("name") not in INTERACTIVE_ONLY_TOOLS
+    ]
+    removed = before - len(filtered)
+    if removed > 0:
+        removed_names = [
+            t.get("function", {}).get("name") or t.get("name", "?")
+            for t in tools
+            if t.get("function", {}).get("name") in INTERACTIVE_ONLY_TOOLS
+            or t.get("name") in INTERACTIVE_ONLY_TOOLS
+        ]
+        from loguru import logger
+        logger.info(f"[ToolFilter] {strategy.value}: filtered {removed} interactive tool(s): {removed_names}")
+    return filtered
 
 
 @dataclass
