@@ -650,8 +650,11 @@ class ChatBackend(QObject):
             if not chat_session:
                 user_name = gw_session.user_name or user_id[:8]
                 chat_session = ChatSession(
-                    name=f"[{platform}] {user_name}"
+                    name=f"{platform}对话"  # UI 显示用（后续会被 topic_summary 覆盖）
                 )
+                # 单独设置 topic_summary，确保 DB 标题字段为有意义的内容
+                # 注意：__init__ 中 topic_summary = name，所以需要覆盖
+                chat_session.set_topic_summary(f"[{platform}] {user_name}")
                 self._gateway_engine.add_session(chat_session)
                 gw_session.metadata["chat_session_id"] = chat_session.session_id
                 logger.debug(f"[Gateway] Created ChatSession: {chat_session.session_id} for {platform}:{user_id}")

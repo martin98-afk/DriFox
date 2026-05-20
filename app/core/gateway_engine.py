@@ -498,7 +498,11 @@ class GatewayEngine(QObject):
             """AI 完成 — 保存会话并处理队列"""
             final_response = response or "".join(chunks)
             if final_response.strip():
-                session.add_assistant_message(content=final_response)
+                # 避免重复添加：检查当前会话最后一条消息是否已经是同内容的 assistant
+                current_msgs = session.get_context_messages()
+                if not (current_msgs and current_msgs[-1].get("role") == "assistant"
+                        and current_msgs[-1].get("content") == final_response):
+                    session.add_assistant_message(content=final_response)
             self._save_to_store(session)
             cb_finished(final_response)
             self.worker_finished.emit(final_response)

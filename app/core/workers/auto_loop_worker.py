@@ -422,6 +422,10 @@ class AutoLoopWorker(QThread):
 
         # Token 追踪 + 预算检查（在 messages_updated 回调中）
         def on_messages_updated(messages: list):
+            # 注意：messages_updated 每轮都发送完整会话消息（含历史），
+            # 直接 append 会导致 user 消息重复累积（多轮工具调用时）。
+            # 所以这里只做 token 追踪，不追加到 _all_messages。
+            # 保存时直接从 ConversationCore 的 SessionManager 读取当前会话消息。
             if self._engine and messages:
                 token_count = count_messages_tokens(messages)
                 self._engine.add_tokens(token_count)
