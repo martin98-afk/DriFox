@@ -56,6 +56,7 @@ class ChatEngine:
             get_model_config=get_model_config,
             agent_manager=agent_manager,
             backend=backend,
+            session_manager=self._session_manager,  # 传入共享的 SessionManager，确保会话数据一致
         )
 
         # ===== ConversationExecutor（统一 Worker 执行）=====

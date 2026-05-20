@@ -26,9 +26,19 @@ class ConversationCore:
         get_model_config: Callable[[], Dict[str, Any]],
         agent_manager: Any,
         backend: Any,
+        session_manager: Optional[SessionManager] = None,
     ) -> "ConversationCore":
-        """便捷工厂方法"""
-        session_manager = SessionManager()
+        """便捷工厂方法
+
+        Args:
+            get_model_config: 获取模型配置的回调
+            agent_manager: AgentManager 实例
+            backend: 后端实例
+            session_manager: 外部传入的 SessionManager（如 ChatEngine 的共享管理器），
+                            None 时内部创建新实例
+        """
+        if session_manager is None:
+            session_manager = SessionManager()
         compactor = HistoryCompactor(get_model_config, agent_manager)
         permission_cache = PermissionCache()
         context_builder = ContextBudgetAllocator(
