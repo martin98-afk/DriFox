@@ -71,9 +71,11 @@ class AutoLoopPromptComposer:
         if self._engine.is_planning_phase():
             return PLANNING_CONSTRAINT.format(current_time=current_time)
         else:
+            # 使用 display_step（笔记推导值），不直接用 _current_step（内部追踪值）
+            step = self._engine.display_step if self._engine.display_step > 0 else self._engine.current_step
             return EXECUTING_CONSTRAINT.format(
                 current_time=current_time,
-                current=self._engine.current_step,
+                current=step,
                 total=self._engine.total_steps,
             )
 
@@ -123,7 +125,8 @@ class AutoLoopPromptComposer:
 
     def build_forced_update_prompt(self, iteration: int) -> str:
         """生成强制更新接力文档的提示"""
-        current_step = self._engine.current_step
+        # 使用 display_step（笔记推导值）
+        current_step = self._engine.display_step if self._engine.display_step > 0 else self._engine.current_step
         total_steps = self._engine.total_steps
         notes_preview = self._engine.read_shared_notes()[:500] if self._engine else ""
 
@@ -245,7 +248,8 @@ class AutoLoopPromptComposer:
 
     def _executing_context(self) -> list:
         """执行阶段上下文模板"""
-        current_step = self._engine.current_step
+        # 使用 display_step（笔记推导值），不直接用 _current_step（内部追踪值）
+        current_step = self._engine.display_step if self._engine.display_step > 0 else self._engine.current_step
         total_steps = self._engine.total_steps
         notes = self._engine.read_shared_notes()
 
@@ -285,10 +289,20 @@ class AutoLoopPromptComposer:
         ]
 
         if notes:
-            pattern = rf'- \[步骤\s*{current_step}\].*?'
-            match = re.search(pattern, notes)
-            if match:
-                step_text = match.group(0)
+            # 匹配两种实际格式：
+            # 1. - [ ] [步骤 N] <描述> | <文件> | <验证>  （有复选框 + 嵌套方括号）
+            # 2. - [x] [步骤 N] <描述> | <文件> | <验证>  （已勾选 + 嵌套方括号）
+            step_text = None
+            patterns = [
+                rf'- .*?\[步骤\s*{current_step}\].*$',
+                rf'- \[.*?\]\s*步骤\s*{current_step}.*$',
+            ]
+            for p in patterns:
+                m = re.search(p, notes, re.MULTILINE)
+                if m:
+                    step_text = m.group(0).strip()
+                    break
+            if step_text:
                 lines.append("```")
                 lines.append(step_text)
                 lines.append("```")

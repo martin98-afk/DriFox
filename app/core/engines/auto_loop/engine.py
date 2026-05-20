@@ -50,7 +50,10 @@ class AutoLoopEngine(BaseEngine):
         # 规划状态
         self._is_planning_phase = True
         self._planning_count = 0
+        # _current_step: 内部步骤追踪，只由 advance_to_step / enter_execution_phase 修改
         self._current_step = 0
+        # _display_step: UI 显示的步骤值，由 set_step_progress 修改（与 _current_step 分离）
+        self._display_step = 0
         self._total_steps = 0
         self._verified_steps: set[int] = set()
         self._step_verified = False
@@ -69,7 +72,13 @@ class AutoLoopEngine(BaseEngine):
 
     @property
     def current_step(self) -> int:
+        """内部追踪的当前步骤（由 advance_to_step 控制）"""
         return self._current_step
+
+    @property
+    def display_step(self) -> int:
+        """UI 显示的当前步骤（由 set_step_progress 控制）"""
+        return self._display_step
 
     @property
     def total_steps(self) -> int:
@@ -90,8 +99,12 @@ class AutoLoopEngine(BaseEngine):
     # ========== 状态写入方法 ==========
 
     def set_step_progress(self, current: int, total: int):
-        """设置步骤进度（仅用于 UI 显示，不影响结束）"""
-        self._current_step = current
+        """设置步骤进度（仅用于 UI 显示，不影响步骤推进）
+        
+        ⚡ 只修改 _display_step 和 _total_steps
+        ⚡ 不修改 _current_step（它只由 advance_to_step / enter_execution_phase 控制）
+        """
+        self._display_step = current
         self._total_steps = total
 
     def add_tokens(self, tokens: int):
@@ -118,6 +131,7 @@ class AutoLoopEngine(BaseEngine):
         self._is_planning_phase = True
         self._planning_count = 0
         self._current_step = 0
+        self._display_step = 0
         self._total_steps = 0
         self._verified_steps = set()
         self._step_verified = False
@@ -203,14 +217,20 @@ class AutoLoopEngine(BaseEngine):
         return current_step, max_verified, total_steps
 
     def parse_checked_steps_from_notes(self, notes: str) -> set[int]:
-        """从笔记中解析已勾选完成的步骤 [x]"""
+        """从笔记中解析已勾选完成的步骤 [x]
+        
+        只匹配 [x]（已勾选），不匹配 [ ]（未勾选）。
+        支持 [x] 和 [X] 两种写法。
+        """
         patterns = [
-            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
-            r'- \[.*?\]\s*步骤\s*(\d+)',
+            r'- \[x\]\s*\[步骤\s*(\d+)\]',
+            r'- \[X\]\s*\[步骤\s*(\d+)\]',
+            r'- \[x\]\s*步骤\s*(\d+)',
+            r'- \[X\]\s*步骤\s*(\d+)',
         ]
         checked = set()
         for pattern in patterns:
-            for match in re.finditer(pattern, notes, re.IGNORECASE):
+            for match in re.finditer(pattern, notes):
                 checked.add(int(match.group(1)))
         return checked
 
@@ -234,17 +254,18 @@ class AutoLoopEngine(BaseEngine):
 
         verified = sorted(self._verified_steps)
         total = self._total_steps
-        current = self._current_step
+        # 展示给模型看的步骤用 display_step（反映笔记中的实际进度）
+        display = self._display_step if self._display_step > 0 else self._current_step
         remaining = [s for s in range(1, total + 1) if s not in self._verified_steps]
 
         summary = [
             "\n\n📊 **增量执行进度总结**",
             f"- ✅ 已验证完成：{verified if verified else '无'}",
-            f"- 🔄 当前需要处理：步骤 {current}",
+            f"- 🔄 当前需要处理：步骤 {display}",
             f"- ⏭️ 未开始：{remaining if remaining else '无'}",
             "",
             "⚠️ 强制要求：",
-            f"- 你只需要处理**当前步骤 {current}**",
+            f"- 你只需要处理**当前步骤 {display}**",
             "- 已完成步骤不需要重复验证或修改",
             "- **每轮结束必须追加**本轮操作记录到 SHARED_TASK_NOTES.md",
             "- 禁止覆盖原始执行计划，只能在文档末尾追加结果记录",
@@ -382,7 +403,8 @@ class AutoLoopEngine(BaseEngine):
             "max_tokens": self.config.max_tokens,
             "state": self.state,
             "phase": "planning" if self._is_planning_phase else "executing",
-            "current_step": self._current_step,
+            # UI 显示用 _display_step，内部追踪用 _current_step
+            "current_step": self._display_step if not self._is_planning_phase else self._current_step,
             "total_steps": self._total_steps,
         }
 
@@ -407,15 +429,21 @@ class AutoLoopEngine(BaseEngine):
         patterns = [
             rf'步骤\s*{step_num}\s*(完成|已验证|验证成功)',
             rf'step\s*{step_num}\s*(complete|verified|done)',
-            rf'验证.*?成功|verify.*?success',
+            # 注意：必须绑定 step_num，防止"步骤 3 验证成功"被步骤2的检查误匹配
+            rf'步骤\s*{step_num}.*?验证.*?成功',
+            rf'step\s*{step_num}.*?verify.*?success',
         ]
         for p in patterns:
             if re.search(p, response, re.IGNORECASE):
                 return True
 
         if notes:
-            pattern = rf'- \[.*?\]\s*步骤\s*{step_num}'
+            # 只匹配 [x]（已勾选），不匹配 [ ]
+            pattern = rf'- \[x\]\s*步骤\s*{step_num}'
             if re.search(pattern, notes, re.IGNORECASE):
+                return True
+            pattern = rf'- \[X\]\s*步骤\s*{step_num}'
+            if re.search(pattern, notes):
                 return True
             if re.search(rf'步骤\s*{step_num}\s+结果', notes):
                 return True

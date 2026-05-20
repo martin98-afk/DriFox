@@ -6111,12 +6111,30 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_loop_worker.start()
 
     def _on_auto_loop_stop(self):
-        """停止 AutoLoop（用户主动停止）"""
+        """停止 AutoLoop（用户主动停止）
+        
+        不再阻塞 UI 线程！通过 loop_stopped 信号异步处理清理。
+        只在 looper 线程退出后(通过信号)才执行 _finish_auto_loop，
+        避免 UI 卡死和二次清理导致的闪退。
+        """
         if self._auto_loop_worker and self._auto_loop_worker.isRunning():
+            # 1. 立即发送取消信号给 worker 线程
             self._auto_loop_worker.cancel()
-            self._auto_loop_worker.wait(5000)
+            # 2. UI 立即反馈，不阻塞
+            if self._auto_loop_running_card:
+                self._auto_loop_running_card.set_status("⏹ 正在停止...")
+            # 3. 安全兜底：5 秒后如果还没停，强制清理（避免永久卡住）
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(5000, self._force_cleanup_autoloop)
 
-        self._finish_auto_loop("⏹ 用户手动停止")
+    def _force_cleanup_autoloop(self):
+        """兜底清理：如果 worker 线程未正常结束，强制清理"""
+        if not self._is_auto_loop_running:
+            return  # 已经通过信号正常清理了
+        logger.warning("[AutoLoop] Force cleanup after timeout")
+        if self._auto_loop_worker and self._auto_loop_worker.isRunning():
+            self._auto_loop_worker.wait(2000)
+        self._finish_auto_loop("⏹ 强制停止（超时）")
 
     def _on_auto_loop_phase_changed(self, phase: str):
         """AutoLoop 阶段变更"""
@@ -6191,18 +6209,24 @@ class OpenAIChatToolWindow(ToolWindow):
         self._finish_auto_loop("⏹ 已停止")
 
     def _finish_auto_loop(self, message: str):
-        """清理 AutoLoop 状态"""
+        """清理 AutoLoop 状态
+        
+        注意：可能被多个路径调用（loop_completed/loop_error/loop_stopped 信号 + 兜底定时器），
+        必须在顶部做防重入保护。
+        """
+        if not self._is_auto_loop_running:
+            # 防止二次清理导致 worker.deleteLater 冲突和闪退
+            return
         self._is_auto_loop_running = False
 
         # 恢复为当前项目配置的工作目录
         self._sync_working_directory()
 
-        # 停止动画
+        # 停止动画（只调用一次，移除重复调用）
         if self._auto_loop_running_card:
             self._auto_loop_running_card.stop_animation()
 
         # 隐藏运行卡
-        self._auto_loop_running_card.stop_animation()
         self._auto_loop_running_card.hide()
         self._restore_after_system_close()
 

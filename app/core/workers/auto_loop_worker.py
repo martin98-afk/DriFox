@@ -71,11 +71,17 @@ class AutoLoopWorker(QThread):
         # 执行阶段的步骤追踪
         self._last_step = 0  # 上次完成的步骤
         
-        # 汇总的完整消息列表（从每个 ChatWorker 获取）
+        # 汇总的完整消息列表（从每个 ChatWorker 获取，跨轮累积）
         self._all_messages: List[Dict] = []
+        
+        # 每轮独立的消息列表（每轮开始时清空，仅记录本轮产生的消息）
+        self._round_messages: List[Dict] = []
         
         # 上一次 on_messages_updated 的消息 token 数（用于增量累加）
         self._last_message_token_count = 0
+        
+        # 本轮开始前的消息基数（用于截取本轮新增消息）
+        self._prev_message_count = 0
         
         # Worker 同步事件（由 AutoLoopConversationAdapter 管理）
 
@@ -151,6 +157,8 @@ class AutoLoopWorker(QThread):
         self._last_step = 0
         # 清空消息列表
         self._all_messages = []
+        self._round_messages = []
+        self._prev_message_count = 0
         self._last_message_token_count = 0
 
         # 确保 ConversationCore 的 SessionManager 有当前会话
@@ -176,6 +184,10 @@ class AutoLoopWorker(QThread):
             self._engine.iteration = iteration
             self.iteration_started.emit(iteration, self._config.max_iterations)
             self._emit_progress()
+            
+            # 本轮独立消息追踪：记录当前消息基数，清空本轮消息列表
+            self._prev_message_count = len(self._all_messages)
+            self._round_messages = []
             
             # 给主线程时间处理信号并创建 assistant card
             time.sleep(0.2)
@@ -223,6 +235,9 @@ class AutoLoopWorker(QThread):
                 if worker:
                     loop = QEventLoop()
                     worker.finished.connect(loop.quit)
+                    # 防止竞态：如果 worker 在 connect 之前已完成，立即退出 loop
+                    if not worker.isRunning():
+                        loop.quit()
                     loop.exec_()  # 阻塞直到 worker 线程结束
                 else:
                     # fallback: 等待 adapter 的事件
@@ -230,6 +245,10 @@ class AutoLoopWorker(QThread):
 
                 response = self._adapter.get_response() or ""
                 self._emit_progress()
+                
+                # ⚡ 关键：每次 LLM 对话结束后立即检查取消信号，避免走后续流程
+                if self._is_cancelled:
+                    continue
                     
                 # 【新增】强制检查接力文档更新
                 if not self._check_relay_doc_updated(iteration):
@@ -253,6 +272,9 @@ class AutoLoopWorker(QThread):
                         if worker:
                             loop = QEventLoop()
                             worker.finished.connect(loop.quit)
+                            # 防止竞态：如果 worker 在 connect 之前已完成，立即退出 loop
+                            if not worker.isRunning():
+                                loop.quit()
                             loop.exec_()
                     except Exception as e:
                         self.log_signal.emit(f"⚠️ 强制更新失败: {e}")
@@ -283,14 +305,14 @@ class AutoLoopWorker(QThread):
             summary = self._extract_summary(response, iteration)
             self.iteration_completed.emit(iteration, summary)
 
-            # 写入本轮完整日志到独立文件（含全部对话）
+            # 写入本轮完整日志到独立文件（仅含本轮对话，不包含历史轮次）
             timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            messages_section = self._format_messages_for_log(self._all_messages) if self._all_messages else response
+            messages_section = self._format_messages_for_log(self._round_messages) if self._round_messages else response
             log_content = f"""# AutoLoop 轮次 {iteration} 日志
 
 - 时间: {timestamp_str}
 - 阶段: {'PLANNING' if self._engine.is_planning_phase() else 'EXECUTING'}
-- 当前步骤: {self._engine.current_step} / {self._engine.total_steps}
+- 当前步骤: {self._engine.display_step if not self._engine.is_planning_phase() else self._engine.current_step} / {self._engine.total_steps}
 
 ## 完整对话
 
@@ -376,8 +398,12 @@ class AutoLoopWorker(QThread):
 
             self._emit_progress()
 
-        # 达到最大迭代次数
-        if not self._is_cancelled:
+        # 循环终止处理：区分取消 vs 正常完成
+        if self._is_cancelled:
+            self._engine.state = LoopState.STOPPED
+            self.loop_stopped.emit()
+        elif self._engine.state != LoopState.COMPLETED:
+            # 未手动取消也未收到完成信号 → 达到最大迭代次数自然结束
             self._engine.state = LoopState.COMPLETED
             self.loop_completed.emit(f"达到最大迭代次数 ({self._config.max_iterations})，已停止")
 
@@ -436,6 +462,8 @@ class AutoLoopWorker(QThread):
             # 每轮覆盖而非追加，因为 messages_updated 发送的是累积的会话消息
             if messages:
                 self._all_messages = list(messages)
+                # 提取本轮新增的消息（从 prev_message_count 开始截取）
+                self._round_messages = list(messages[self._prev_message_count:])
                 # 同步到 ConversationCore 的 session，确保后续迭代时
                 # session_messages 有内容（含历史 user + assistant + tool）
                 session = self._conversation_core.session_manager.get_current_session()
