@@ -301,9 +301,12 @@ class WeComAdapter(BasePlatformAdapter):
         if not isinstance(body, dict):
             return
         
-        msg_id = body.get("msgid") or uuid.uuid4().hex
+        msg_id = body.get("msgid") or ""
         sender = body.get("from", {}) if isinstance(body.get("from"), dict) else {}
         sender_id = str(sender.get("userid", "")).strip()
+        if not msg_id:
+            text = body.get("text", "") or ""
+            msg_id = f"{sender_id}:{text[:50]}"
         chat_id = str(body.get("chatid", sender_id)).strip()
         
         if not chat_id:

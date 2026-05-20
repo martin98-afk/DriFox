@@ -156,6 +156,16 @@ class AutoLoopWorker(QThread):
         
         # 清空消息列表
         self._all_messages = []
+
+        # 确保 ConversationCore 的 SessionManager 有当前会话
+        # 这样 ConversationExecutor.execute() 才能正确获取 session → session_messages 不为空
+        sm = self._conversation_core.session_manager
+        if not sm.get_current_session():
+            from app.core.chat_session import ChatSession
+            auto_loop_session = ChatSession(name="AutoLoop")
+            sm.sessions.append(auto_loop_session)
+            sm.current_index = 0
+            sm._touch_session(auto_loop_session.session_id)
         
         # 发送阶段信号：规划中
         self.phase_changed.emit("planning")
@@ -176,7 +186,18 @@ class AutoLoopWorker(QThread):
 
             # 构建本轮消息
             messages = self._build_messages(task_prompt, iteration)
-            
+
+            # 同步到 AutoLoop 的 session，确保 ConversationExecutor.execute()
+            # 能通过 session.get_context_messages() 获取 session_messages，
+            # 从而 Worker 的 finished_with_messages 信号携带完整消息（含 user）
+            auto_loop_session = self._conversation_core.session_manager.get_current_session()
+            if auto_loop_session:
+                # 只在首次迭代时同步 user 消息（后续由 on_messages_updated 维护）
+                if iteration == 1 and not auto_loop_session.messages:
+                    for msg in messages:
+                        if msg.get("role") == "user":
+                            auto_loop_session.add_user_message(content=msg.get("content", ""))
+
             # 根据阶段获取对应的工具集
             current_tools = self._configure_tools_for_phase(self._all_tools_schema or self._tools_schema)
 
@@ -420,12 +441,18 @@ class AutoLoopWorker(QThread):
         callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"调用工具: {n}")
         callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(f"工具完成: {n}")
 
-        # Token 追踪 + 预算检查（在 messages_updated 回调中）
+        # Token 追踪 + 预算检查 + 消息收集（在 messages_updated 回调中）
         def on_messages_updated(messages: list):
-            # 注意：messages_updated 每轮都发送完整会话消息（含历史），
-            # 直接 append 会导致 user 消息重复累积（多轮工具调用时）。
-            # 所以这里只做 token 追踪，不追加到 _all_messages。
-            # 保存时直接从 ConversationCore 的 SessionManager 读取当前会话消息。
+            # 收集每轮 Worker 的完整消息（含 assistant + tool_calls）
+            # 每轮覆盖而非追加，因为 messages_updated 发送的是累积的会话消息
+            if messages:
+                self._all_messages = list(messages)
+                # 同步到 ConversationCore 的 session，确保后续迭代时
+                # session_messages 有内容（含历史 user + assistant + tool）
+                session = self._conversation_core.session_manager.get_current_session()
+                if session:
+                    session.set_messages(messages, preserve_compaction=True)
+            # Token 追踪 + 预算检查
             if self._engine and messages:
                 token_count = count_messages_tokens(messages)
                 self._engine.add_tokens(token_count)
@@ -461,7 +488,17 @@ class AutoLoopWorker(QThread):
             self.progress_updated.emit(self._engine.get_progress())
 
     def get_all_messages(self) -> List[Dict]:
-        """获取所有消息（用于保存到会话）"""
+        """获取所有消息（用于保存到会话）
+
+        优先从 ConversationCore 的 SessionManager 读取（由 on_messages_updated 维护），
+        其次使用 _all_messages（每轮 on_messages_updated 覆盖更新）。
+        """
+        # 优先从 ConversationCore 的 SessionManager 读取
+        if self._conversation_core:
+            session = self._conversation_core.session_manager.get_current_session()
+            if session and session.messages:
+                return list(session.messages)
+        # fallback
         return self._all_messages.copy()
 
     # ========== 公共接口（供 main_widget 等外部调用）==========

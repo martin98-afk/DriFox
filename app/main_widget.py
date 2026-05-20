@@ -6258,18 +6258,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        # 直接从 ConversationCore 的 SessionManager 读取当前会话的完整消息
-        # 不依赖 _all_messages（可能为空或重复）
-        conv_core = getattr(self.backend.chat_engine, '_conversation_core', None) if self.backend.chat_engine else None
-        if conv_core:
-            current = conv_core.session_manager.get_current_session()
-            if current and current.messages:
-                # 直接使用会话中的完整消息列表
-                auto_loop_messages = list(current.messages)
-            else:
-                auto_loop_messages = list(messages or [])
-        else:
-            auto_loop_messages = list(messages or [])
+        # messages 来自 AutoLoopWorker.get_all_messages()，
+        # 包含 on_messages_updated 收集的完整消息（含 user + assistant + tool_calls）
+        auto_loop_messages = list(messages or [])
 
         # 确保 user 消息存在（第一条 user 消息）
         has_user = any(msg.get("role") == "user" for msg in auto_loop_messages)

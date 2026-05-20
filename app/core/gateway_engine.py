@@ -122,9 +122,14 @@ class GatewayEngine(QObject):
     # ==================== 会话管理 ====================
 
     def add_session(self, session: ChatSession) -> None:
-        """添加 Gateway 会话，不改变 current_index"""
+        """添加 Gateway 会话并切换为当前会话
+
+        必须设置 current_index，否则 ConversationExecutor.execute() 中
+        get_current_session() 返回 None → session_messages=[] → 保存无 user 消息。
+        """
         sm = self._conversation_core.session_manager
         sm.sessions.append(session)
+        sm.current_index = len(sm.sessions) - 1
         sm._touch_session(session.session_id)
         self._save_to_store(session)
 
@@ -495,14 +500,24 @@ class GatewayEngine(QObject):
             cb_content(chunk)
 
         def on_finished(response: str):
-            """AI 完成 — 保存会话并处理队列"""
+            """AI 完成 — 保存会话并处理队列
+
+            注意：on_messages_updated 已在 finished_with_messages 信号中设置了完整消息
+            （含 user + assistant + tool_calls），不需要再 add_assistant_message。
+            on_finished 只负责：1. 确保会话已保存  2. 通知外部回调  3. 处理队列
+            """
             final_response = response or "".join(chunks)
-            if final_response.strip():
-                # 避免重复添加：检查当前会话最后一条消息是否已经是同内容的 assistant
-                current_msgs = session.get_context_messages()
-                if not (current_msgs and current_msgs[-1].get("role") == "assistant"
-                        and current_msgs[-1].get("content") == final_response):
-                    session.add_assistant_message(content=final_response)
+            # 如果 on_messages_updated 没有触发（非工具调用场景下不应出现），
+            # 兜底添加 assistant 消息
+            current_msgs = session.get_context_messages()
+            has_new_assistant = (
+                current_msgs
+                and current_msgs[-1].get("role") == "assistant"
+                # 检查时间戳是否足够新（3 秒内）
+                and self._is_recent_message(current_msgs[-1])
+            )
+            if not has_new_assistant and final_response.strip():
+                session.add_assistant_message(content=final_response)
             self._save_to_store(session)
             cb_finished(final_response)
             self.worker_finished.emit(final_response)
@@ -617,6 +632,19 @@ class GatewayEngine(QObject):
         return filtered
 
     # ==================== 持久化 ====================
+
+    @staticmethod
+    def _is_recent_message(msg: Dict, threshold_seconds: int = 3) -> bool:
+        """检查消息是否是最近几秒内创建的（用于去重判断）"""
+        from datetime import datetime
+        ts = msg.get("timestamp", "")
+        if not ts:
+            return False
+        try:
+            msg_time = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            return (datetime.now() - msg_time).total_seconds() < threshold_seconds
+        except (ValueError, TypeError):
+            return False
 
     def _save_to_store(self, session: ChatSession) -> None:
         """保存 Gateway 会话到 SQLite（供 UI 历史查看）"""
