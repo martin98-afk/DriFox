@@ -485,3 +485,10 @@ class UIEngine(BaseEngine):
         worker = getattr(self._conversation_executor, '_current_worker', None)
         if worker and hasattr(worker, "provide_answer"):
             worker.provide_answer(answer)
+
+    def cleanup_worker(self):
+        """清理当前 Worker 资源（用于切换会话前清理）
+
+        由 Backend.cleanup_worker() 调用，委托 ConversationExecutor.cleanup() 实现。
+        """
+        self.cleanup()
