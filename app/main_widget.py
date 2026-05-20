@@ -918,7 +918,7 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._settings_popup)
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(0)
+        self.chat_scroll_area.setMinimumHeight(1)
         self.chat_scroll_area.setMinimumWidth(400)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)

@@ -184,7 +184,7 @@ class AutoLoopWorker(QThread):
             try:
                 self._adapter.reset()
 
-                # 构建包装回调（保留 AutoLoop 的日志转发和预算检查）
+                # 构建包装回调
                 wrapped_callbacks = self._make_autoloop_callbacks()
 
                 # 获取模型配置
@@ -200,10 +200,16 @@ class AutoLoopWorker(QThread):
                     self.log_signal.emit("⚠️ Worker 启动失败，重试...")
                     continue
 
-                # 等待 Worker 完成
-                if not self._adapter.wait_for_completion(timeout=300):
-                    logger.warning(f"[AutoLoop] Iteration {iteration}: timeout waiting for worker")
-                    self.log_signal.emit("⏱ Worker 超时，继续...")
+                # 使用 QEventLoop 等待 Worker 完成（Qt 信号需要事件循环才能跨线程投递）
+                from PyQt5.QtCore import QEventLoop
+                worker = self._conversation_executor.get_current_worker()
+                if worker:
+                    loop = QEventLoop()
+                    worker.finished.connect(loop.quit)
+                    loop.exec_()  # 阻塞直到 worker 线程结束
+                else:
+                    # fallback: 等待 adapter 的事件
+                    self._adapter.wait_for_completion(timeout=300)
 
                 response = self._adapter.get_response() or ""
                 # 估算 token 用量
@@ -227,7 +233,12 @@ class AutoLoopWorker(QThread):
                         tools=current_tools,
                         callbacks=self._make_autoloop_callbacks(),
                     )
-                    self._adapter.wait_for_completion(timeout=300)
+                    from PyQt5.QtCore import QEventLoop
+                    worker = self._conversation_executor.get_current_worker()
+                    if worker:
+                        loop = QEventLoop()
+                        worker.finished.connect(loop.quit)
+                        loop.exec_()
                     
                     # 再次检查接力文档
                     if self._check_relay_doc_updated(iteration):
@@ -396,33 +407,42 @@ class AutoLoopWorker(QThread):
         return messages
 
     def _make_autoloop_callbacks(self) -> Dict[str, Callable]:
-        """构建 AutoLoop 的回调包装（日志转发 + 预算检查）"""
-        def on_content(piece: str):
-            self.log_signal.emit(f"生成内容...")
+        """构建 AutoLoop 的回调包装（日志转发 + 预算检查 + token 追踪）"""
+        from app.core.token_estimator import count_messages_tokens
 
-        def on_reasoning(piece: str):
-            self.log_signal.emit(f"思考中...")
+        # 以 Adapter 的回调为基础（包含 finished → 设置 _worker_done_event，作为 QEventLoop 的 fallback）
+        callbacks = dict(self._adapter.get_callbacks())
 
-        def on_thinking():
-            self.log_signal.emit(f"开始推理")
+        # 日志转发（覆盖 adapter 的 content_received no-op）
+        callbacks["content_received"] = lambda p: self.log_signal.emit(f"生成内容...")
+        callbacks["reasoning_content_received"] = lambda p: self.log_signal.emit(f"思考中...")
+        callbacks["thinking_started"] = lambda: self.log_signal.emit(f"开始推理")
+        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"调用工具: {n}")
+        callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(f"工具完成: {n}")
 
-        def on_tool_call(tool_call_id: str, tool_name: str, args: dict, round_id: str):
-            self.log_signal.emit(f"调用工具: {tool_name}")
+        # Token 追踪 + 预算检查（在 messages_updated 回调中）
+        def on_messages_updated(messages: list):
+            if self._engine and messages:
+                token_count = count_messages_tokens(messages)
+                self._engine.add_tokens(token_count)
+                self.tokens_updated.emit(self._engine.total_tokens)
+                reason = self._engine.check_budget()
+                if reason:
+                    self.log_signal.emit(f"⚠️ {reason}，正在停止...")
+                    self._is_cancelled = True
+                    self._conversation_executor.stop()
 
-        def on_tool_result(tool_call_id: str, tool_name: str, args: dict, result):
-            self.log_signal.emit(f"工具完成: {tool_name}")
+        callbacks["messages_updated"] = on_messages_updated
 
-        def on_error(error: str):
-            self.log_signal.emit(f"错误: {error}")
+        # 错误日志
+        orig_error = callbacks.get("error")
+        if orig_error:
+            def on_error_wrapper(e):
+                self.log_signal.emit(f"错误: {e}")
+                orig_error(e)
+            callbacks["error"] = on_error_wrapper
 
-        return {
-            "content_received": on_content,
-            "reasoning_content_received": on_reasoning,
-            "thinking_started": on_thinking,
-            "tool_call_started": on_tool_call,
-            "tool_result_received": on_tool_result,
-            "error": on_error,
-        }
+        return callbacks
 
     def _extract_summary(self, response: str, iteration: int) -> str:
         """从响应中提取摘要"""

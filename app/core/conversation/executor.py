@@ -37,6 +37,10 @@ class ConversationExecutor:
     def is_streaming(self) -> bool:
         return self._is_streaming
 
+    def get_current_worker(self):
+        """获取当前 Worker 实例（供外部直接连接信号）"""
+        return self._current_worker
+
     def execute(
         self,
         messages: List[Dict],
@@ -105,6 +109,9 @@ class ConversationExecutor:
         # 连接回调
         self._connect_callbacks(callbacks)
 
+        # Worker 完成后重置流式状态（start 前连接，避免竞态）
+        self._current_worker.finished.connect(self._on_worker_finished)
+
         # 启动
         self._is_streaming = True
         self._current_worker.start()
@@ -115,6 +122,11 @@ class ConversationExecutor:
             cb()
 
         return True
+
+    def _on_worker_finished(self):
+        """Worker 线程结束，重置流式状态"""
+        self._is_streaming = False
+        self._current_worker = None
 
     def _make_permission_checker(self) -> Optional[Callable[[str, dict], str]]:
         """根据权限策略生成权限检查器"""

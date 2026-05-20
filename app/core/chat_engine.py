@@ -96,6 +96,22 @@ class ChatEngine:
     def compactor(self):
         """暴露压缩器供外部使用（如工具迭代中压缩）"""
         return self._conversation_core.compactor
+
+    # 向后兼容属性（外部代码通过 chat_engine._permission_cache / _compactor / _current_worker 访问）
+    @property
+    def _permission_cache(self):
+        """向后兼容：权限缓存已移至 ConversationCore"""
+        return self._conversation_core.permission_cache
+
+    @property
+    def _compactor(self):
+        """向后兼容：压缩器已移至 ConversationCore"""
+        return self._conversation_core.compactor
+
+    @property
+    def _current_worker(self):
+        """向后兼容：Worker 已由 ConversationExecutor 管理"""
+        return getattr(self._conversation_executor, '_current_worker', None)
     
     # ========== 属性访问（正式接口，避免直接访问私有属性）==========
     
