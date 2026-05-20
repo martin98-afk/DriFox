@@ -16,6 +16,8 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QFileDialog,
     QSizePolicy,
+    QMenu,
+    QAction,
 )
 from qfluentwidgets import (
     BodyLabel,
@@ -28,8 +30,10 @@ from qfluentwidgets import (
     TextEdit,
 )
 
-from app.utils.design_tokens import scale_font_size, font_size_css
+from app.utils.design_tokens import scale_font_size, font_size_css, Colors
 from app.utils.utils import get_font_family_css, get_icon
+from app.utils.git_worktree import GitWorktreeDetector
+from app.widgets.worktree_section import WorktreeSectionWidget
 
 # Tab 标识
 TAB_ENTRY_MEMORIES = "entries"
@@ -120,6 +124,7 @@ class EntryMemoryItemWidget(QWidget):
         # 允许收缩，最小宽度小一点，适应小窗口
         self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         self.content_label.setMinimumWidth(100)
+        self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
         self.content_label.setStyleSheet(
             f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
         )
@@ -235,6 +240,7 @@ class KeyDocumentItemWidget(QWidget):
     open_file = pyqtSignal(str)  # file_path
     open_folder = pyqtSignal(str)  # folder_path
     setAsWorkingDir = pyqtSignal(str)  # file_path
+    worktreeChanged = pyqtSignal(str, str)  # (original_folder, worktree_path)
 
     def __init__(
         self,
@@ -353,14 +359,16 @@ class KeyDocumentItemWidget(QWidget):
         path_label.setStyleSheet(
             f"color: #8c99ad; {get_font_family_css()} {font_size_css(10)}"
         )
-        path_label.setMaximumWidth(200)
-        main_layout.addWidget(path_label)
+        path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
+        path_label.setWordWrap(False)
+        path_label.setMinimumWidth(60)
+        path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        main_layout.addWidget(path_label, 1)
 
         # 操作按钮
         # 工作目录按钮（仅文件夹显示）
         self.wd_btn = None
         if self._is_folder:
-            from qfluentwidgets import PrimaryToolButton
             self.wd_btn = TransparentToolButton(get_icon("根目录"), self)
             self.wd_btn.setToolTip("设置为工作目录（工具将在此目录下使用相对路径）")
             self.wd_btn.setFixedSize(24, 24)
@@ -375,8 +383,12 @@ class KeyDocumentItemWidget(QWidget):
             self.wd_btn.clicked.connect(lambda: self.setAsWorkingDir.emit(self.file_path))
             main_layout.addWidget(self.wd_btn)
 
+        # 检测 git worktree（只要是文件夹就检测，树在 _load_key_documents 中插入）
+        self._repo_info = None
+        if self._is_folder:
+            self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
+
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
-        self.open_btn.setToolTip("打开所在文件夹")
         self.open_btn.setToolTip("打开所在文件夹")
         self.open_btn.clicked.connect(lambda: self.open_folder.emit(self.file_path))
 
@@ -933,44 +945,96 @@ class MemoryCardContent(QWidget):
     # ==================== 关键文档操作 ====================
 
     def _load_key_documents(self):
-        """加载关键文档（支持搜索过滤和工作目录置顶）"""
+        """加载关键文档（过滤掉 git_worktree 条目，但保留根目录视觉效果）"""
         self.docs_list.clear()
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
 
-        docs = memory_mgr.get_key_documents(self._current_project)
+        all_docs = memory_mgr.get_key_documents(self._current_project)
 
-        # 搜索过滤（按文件名/路径匹配，忽略大小写）
+        # 获取实际工作目录
+        actual_wd = memory_mgr.get_working_directory(self._current_project)
+
+        # 判断当前工作目录是否指向 worktree
+        is_worktree_active = False
+        original_repo_path = None
+        if actual_wd:
+            for d in all_docs:
+                if d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree":
+                    is_worktree_active = True
+                elif d.get("added_by") != "git_worktree":
+                    # 记录原始 git 仓库路径
+                    try:
+                        if GitWorktreeDetector.detect_git(d.get("file_path", "")):
+                            original_repo_path = d["file_path"]
+                    except Exception:
+                        pass
+
+        # 过滤掉 git_worktree（不显示在 UI 中）
+        docs = [d for d in all_docs if d.get("added_by") != "git_worktree"]
+
+        # 搜索过滤
         if self._search_filter:
             keyword = self._search_filter.lower()
-            docs = [
-                d for d in docs
-                if keyword in d.get("file_name", "").lower()
-                or keyword in d.get("file_path", "").lower()
-            ]
+            docs = [d for d in docs if keyword in d.get("file_name", "").lower() or keyword in d.get("file_path", "").lower()]
 
-        # 工作目录置顶排序
-        docs.sort(key=lambda d: (0 if d.get("is_working_dir") else 1, d.get("added_at", "")))
+        # 工作目录置顶（如果 worktree 激活则原始仓库置顶，否则按 DB 标记）
+        if is_worktree_active and original_repo_path:
+            docs.sort(key=lambda d: (0 if d.get("file_path") == original_repo_path else 1, d.get("added_at", "")))
+        else:
+            docs.sort(key=lambda d: (0 if d.get("is_working_dir") else 1, d.get("added_at", "")))
 
+        inserted_worktree = False
+        self._original_folder_for_worktree = None
         for doc in docs:
             doc_id = doc.get("id", "")
             file_name = doc.get("file_name", "")
             file_path = doc.get("file_path", "")
             added_by = doc.get("added_by", "manual")
-            is_working_dir = doc.get("is_working_dir", False)
+            # 根目录标记：如果 worktree 激活且是原始仓库，显示为根目录
+            db_is_wd = doc.get("is_working_dir", False)
+            show_as_wd = db_is_wd or (is_worktree_active and file_path == original_repo_path)
 
             item = QListWidgetItem()
             item.setSizeHint(self._get_doc_item_size())
             widget = KeyDocumentItemWidget(
                 doc_id, file_name, file_path, added_by,
-                is_working_dir=is_working_dir,
+                is_working_dir=show_as_wd,
             )
             widget.removed.connect(self._remove_key_document)
             widget.open_folder.connect(self._open_folder)
             widget.setAsWorkingDir.connect(self._set_as_working_directory)
+            widget.worktreeChanged.connect(self._on_worktree_changed)
             self.docs_list.addItem(item)
             self.docs_list.setItemWidget(item, widget)
+
+            # 在第一个 git 仓库文件夹后插入 worktree 树（仅当有活跃的工作目录）
+            has_active_wd = actual_wd is not None and actual_wd != "clear"
+            if has_active_wd and not inserted_worktree and widget._repo_info:
+                inserted_worktree = True
+                self._original_folder_for_worktree = file_path
+                wt_item = QListWidgetItem()
+                wt_item.setSizeHint(self._get_worktree_section_size(widget._repo_info))
+                wt_widget = WorktreeSectionWidget(
+                    widget._repo_info, file_path, self,
+                    current_workdir=actual_wd,
+                )
+                wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
+                wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
+                self.docs_list.addItem(wt_item)
+                self.docs_list.setItemWidget(wt_item, wt_widget)
+
+    def _get_worktree_section_size(self, repo_info):
+        """计算 worktree 树状组件的高度"""
+        from PyQt5.QtCore import QSize
+        width = self.docs_list.size().width()
+        if width <= 0:
+            width = 400
+        # 每个 worktree 行 28px + 新建行 24px + 上下边距 6px
+        wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
+        height = wt_count * 28 + 24 + 6
+        return QSize(width, height)
 
     def _get_doc_item_size(self):
         from PyQt5.QtCore import QSize
@@ -1011,6 +1075,51 @@ class MemoryCardContent(QWidget):
         else:
             memory_mgr.set_working_directory(self._current_project, file_path)
             self.workingDirChanged.emit(file_path)
+        self._load_key_documents()
+
+    def _on_worktree_changed(self, original_folder: str, worktree_path: str):
+        """Worktree 切换：写入 DB + 切换 workdir（UI 层过滤不显示 git_worktree 条目）"""
+        memory_mgr = self._get_memory_manager()
+        if not memory_mgr:
+            return
+        
+        # 必须写入 DB，否则 set_working_directory 找不到路径
+        # added_by="git_worktree" 标记，UI 显示时过滤掉
+        memory_mgr.add_key_document(self._current_project, worktree_path, "git_worktree")
+        
+        # 设为工作目录
+        memory_mgr.set_working_directory(self._current_project, worktree_path)
+        self.workingDirChanged.emit(worktree_path)
+        self._load_key_documents()
+
+    def _on_worktree_deleted(self, worktree_path: str):
+        """Worktree 被删除后：移除 DB 记录 + 恢复到主仓库"""
+        memory_mgr = self._get_memory_manager()
+        if not memory_mgr:
+            return
+
+        current_wd = memory_mgr.get_working_directory(self._current_project)
+
+        # 从关键文档中移除 worktree 路径
+        if memory_mgr._key_documents_repo:
+            memory_mgr._key_documents_repo.remove_by_path(self._current_project, worktree_path)
+
+        if current_wd == worktree_path:
+            # 自动恢复到主仓库文件夹
+            main_path = None
+            for d in memory_mgr.get_key_documents(self._current_project):
+                if d.get("added_by") != "git_worktree" and os.path.isdir(d.get("file_path", "")):
+                    main_path = d["file_path"]
+                    break
+            if main_path and GitWorktreeDetector.detect_git(main_path):
+                memory_mgr.set_working_directory(self._current_project, main_path)
+                self.workingDirChanged.emit(main_path)
+            else:
+                memory_mgr.set_working_directory(self._current_project, "clear")
+                self.workingDirChanged.emit("")
+
+        self._load_key_documents()
+        
         self._load_key_documents()
 
     def _open_folder(self, path: str):
