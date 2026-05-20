@@ -9,8 +9,6 @@ import warnings
 
 from qfluentwidgets import setFontFamilies
 
-from app.tool_popup import ToolPopupDialog
-
 warnings.filterwarnings("ignore")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -148,7 +146,9 @@ def main():
     from app.tray_manager import TrayManager
     TrayManager.get_instance()
 
-    # 使用 ToolPopupDialog 包装
+    # 使用 ToolPopupDialog 包装（延迟导入，确保 QApp 和 theme 已就绪）
+    from app.tool_popup import ToolPopupDialog
+
     popup = ToolPopupDialog(chat_window, None)
     popup.setWindowTitle("Drifox")
 
