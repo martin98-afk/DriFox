@@ -393,6 +393,12 @@ class AutoLoopEngine(BaseEngine):
 
     def check_step_completed(self, response: str, notes: str, step_num: int) -> bool:
         """检测当前步骤是否完成"""
+        # 新增：STEP_X/N_COMPLETE 信号检测
+        total = self._total_steps
+        step_signal = f"STEP_{step_num}/{total}_COMPLETE" if total > 0 else None
+        if step_signal and step_signal in response:
+            return True
+
         patterns = [
             rf'步骤\s*{step_num}\s*(完成|已验证|验证成功)',
             rf'step\s*{step_num}\s*(complete|verified|done)',
@@ -410,6 +416,9 @@ class AutoLoopEngine(BaseEngine):
                 return True
             if re.search(rf'步骤\s*{step_num}.*完成', notes, re.DOTALL):
                 return True
+
+        if response.strip().endswith(self.config.completion_signal):
+            return True
 
         return False
 

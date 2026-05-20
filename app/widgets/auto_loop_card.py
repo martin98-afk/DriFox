@@ -74,6 +74,7 @@ class AutoLoopConfigCard(QFrame):
         self._iteration_spin.setStyleSheet(self._spin_style())
         self._token_spin.setStyleSheet(self._spin_style())
         self._duration_spin.setStyleSheet(self._spin_style())
+        self._threshold_spin.setStyleSheet(self._spin_style())
         self._path_edit.setStyleSheet(self._line_style())
         self._prompt_edit.setStyleSheet(f"""
             QTextEdit {{
@@ -192,6 +193,13 @@ class AutoLoopConfigCard(QFrame):
         self._duration_spin.setStyleSheet(self._spin_style())
         field_layout.addLayout(_make_field("最大时长(分钟)", self._duration_spin))
 
+        self._threshold_spin = SpinBox()
+        self._threshold_spin.setRange(1, 10)
+        self._threshold_spin.setValue(_default_config.completion_threshold)
+        self._threshold_spin.setFixedHeight(28)
+        self._threshold_spin.setStyleSheet(self._spin_style())
+        field_layout.addLayout(_make_field("完成确认次数", self._threshold_spin))
+
         # 项目路径（带浏览按钮）
         path_container = QWidget()
         path_row = QHBoxLayout(path_container)
@@ -236,6 +244,7 @@ class AutoLoopConfigCard(QFrame):
             max_iterations=self._iteration_spin.value(),
             max_tokens=self._token_spin.value(),
             max_duration_minutes=self._duration_spin.value(),
+            completion_threshold=self._threshold_spin.value(),
             project_path=self._path_edit.text().strip(),
             task_prompt=self._prompt_edit.toPlainText().strip(),
         )
