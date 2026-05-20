@@ -1,47 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-AutoLoop 配置数据类
+[兼容重导出] AutoLoop 配置 — 已迁移至 app/core/engines/auto_loop/config.py
+
+保持向后兼容，所有原有 import 语句继续可用。
 """
-from dataclasses import dataclass, field
-from typing import Optional
+from app.core.engines.auto_loop.config import AutoLoopConfig  # noqa: F401
 
-
-@dataclass
-class AutoLoopConfig:
-    """AutoLoop 循环配置"""
-    max_iterations: int = 50
-    max_tokens: int = 500000
-    max_duration_minutes: int = 120  # 2 hours
-    completion_signal: str = "DONE"
-    completion_threshold: int = 3
-    project_path: str = ""
-    notes_file: str = "SHARED_TASK_NOTES.md"
-    logs_dir: str = ".autoloop/logs"  # 每轮日志单独存放目录（按轮次命名）
-    task_prompt: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "max_iterations": self.max_iterations,
-            "max_tokens": self.max_tokens,
-            "max_duration_minutes": self.max_duration_minutes,
-            "completion_signal": self.completion_signal,
-            "completion_threshold": self.completion_threshold,
-            "project_path": self.project_path,
-            "notes_file": self.notes_file,
-            "logs_dir": self.logs_dir,
-            "task_prompt": self.task_prompt,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "AutoLoopConfig":
-        return cls(
-            max_iterations=d.get("max_iterations", 50),
-            max_tokens=d.get("max_tokens", 500000),
-            max_duration_minutes=d.get("max_duration_minutes", 120),
-            completion_signal=d.get("completion_signal", "DONE"),
-            completion_threshold=d.get("completion_threshold", 3),
-            project_path=d.get("project_path", ""),
-            notes_file=d.get("notes_file", "SHARED_TASK_NOTES.md"),
-            logs_dir=d.get("logs_dir", ".autoloop/logs"),
-            task_prompt=d.get("task_prompt", ""),
-        )
+__all__ = ["AutoLoopConfig"]
