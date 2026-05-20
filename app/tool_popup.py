@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+
 import platform
+import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtWidgets import (
@@ -7,6 +9,8 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QDialog,
     QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
     QApplication,
 )
 from loguru import logger
@@ -14,12 +18,228 @@ from qfluentwidgets import (
     isDarkTheme,
     FluentIcon as FIF,
     TransparentToolButton,
-    FluentIcon,
+    IconWidget,
 )
 
 from app.tray_manager import TrayManager
 from app.utils.config import Settings
+from app.utils.design_tokens import get_font_family_css
+from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_icon
+
+
+class ToolWindowTitleBar(QWidget):
+    popupRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._custom_buttons = []
+        self._popup_mode_buttons = []
+        self._is_compact = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setFixedHeight(32)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 4, 0)
+        layout.setSpacing(6)
+
+        self._icon_widget = IconWidget(self)
+        self._icon_widget.setFixedSize(16, 16)
+
+        self._title_label = QLabel(self)
+        self._title_label.setObjectName("titleLabel")
+
+        layout.addWidget(self._icon_widget)
+        layout.addWidget(self._title_label)
+        layout.addStretch()
+
+        self._action_container = QWidget(self)
+        self._action_container.setObjectName("actionContainer")
+        self._action_layout = QHBoxLayout(self._action_container)
+        self._action_layout.setContentsMargins(0, 0, 0, 0)
+        self._action_layout.setSpacing(4)
+        layout.addWidget(self._action_container)
+
+        # 内存显示标签
+        self._memory_label = QLabel(self)
+        self._memory_label.setObjectName("memoryLabel")
+        self._memory_label.setFixedHeight(22)
+        self._memory_label.setStyleSheet(
+            f"color: #ffffff; {get_font_family_css()} font-size: {scale_font_size(12)}px; "
+            f"padding: 2px 6px; background-color: transparent; border: none; border-radius: 4px;"
+        )
+        self._memory_label.hide()  # 默认隐藏，子类可以控制显示
+        layout.insertWidget(layout.indexOf(self._action_container) - 1, self._memory_label)
+
+        # 内存刷新定时器
+        self._memory_timer = QTimer(self)
+        self._memory_timer.setInterval(5000)  # 5秒刷新
+        self._memory_timer.timeout.connect(self._update_memory_label)
+        self._memory_refreshing = False
+
+        # 设置按钮已移除（移到主窗口内）
+
+        self._min_btn = TransparentToolButton(get_icon("最小化"), self)
+        self._min_btn.setFixedSize(24, 24)
+        self._min_btn.setToolTip("最小化")
+
+        self._popup_btn = TransparentToolButton(FIF.CLOSE, self)
+        self._popup_btn.setFixedSize(24, 24)
+        self._popup_btn.setToolTip("关闭")
+        self._popup_btn.clicked.connect(self._on_popup_clicked)
+
+        layout.addWidget(self._min_btn)
+        layout.addWidget(self._popup_btn)
+
+        try:
+            font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            try:
+                font_name = Settings.get_instance().canvas_font_selected.value
+            except Exception:
+                font_name = "Microsoft YaHei"
+
+        if isDarkTheme():
+            bg = "#2d2d2d"
+            title_color = "#e0e0e0"
+            btn_hover = "rgba(255, 255, 255, 15)"
+            border_color = "#3a3a3a"
+        else:
+            bg = "#f5f5f5"
+            title_color = "#333333"
+            btn_hover = "rgba(0, 0, 0, 10)"
+            border_color = "#e0e0e0"
+
+        self.setStyleSheet(f"""
+            ToolWindowTitleBar {{
+                background-color: {bg};
+                border-bottom: 1px solid {border_color};
+            }}
+            #titleLabel {{
+                color: {title_color};
+                font-size: {scale_font_size(15)}px;
+                font-weight: bold;
+                font-family: "{font_name}";
+                padding: 0 4px;
+            }}
+            #actionContainer {{
+                background-color: transparent;
+            }}
+            ToolButton {{
+                background-color: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            ToolButton:hover {{
+                background-color: {btn_hover};
+            }}
+            ToolButton:pressed {{
+                background-color: {btn_hover};
+            }}
+        """)
+
+    def set_icon(self, icon):
+        self._icon_widget.setIcon(icon)
+
+    def set_title(self, title):
+        self._title_label.setText(title)
+
+    def add_button(self, widget, stretch=0):
+        self._action_layout.insertWidget(
+            self._action_layout.count() - 2, widget, stretch=stretch
+        )
+        self._custom_buttons.append(widget)
+
+    def insert_button(self, index, widget, stretch=0):
+        self._action_layout.insertWidget(index, widget, stretch=stretch)
+        self._custom_buttons.append(widget)
+
+    def remove_button(self, widget):
+        self._action_layout.removeWidget(widget)
+        if widget in self._custom_buttons:
+            self._custom_buttons.remove(widget)
+        widget.setParent(None)
+
+    def _on_popup_clicked(self):
+        self.popupRequested.emit()
+
+    def show_memory_label(self):
+        """显示内存标签并开始刷新"""
+        self._memory_label.show()
+        # 每次显示都重新启动定时器，确保新窗口独立刷新
+        self._memory_timer.stop()
+        self._memory_refreshing = True
+        self._update_memory_label()
+        self._memory_timer.start()
+
+    def _update_memory_label(self):
+        """更新内存显示"""
+        try:
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            mem_mb = mem_info.rss / (1024 * 1024)
+            self._memory_label.setText(f" {mem_mb:.0f} MB ")
+        except Exception:
+            self._memory_label.setText(" N/A ")
+
+
+class ToolWindow(QWidget):
+    name: str = "Unnamed"
+    icon = None
+
+    def __init__(self, page):
+        super().__init__()
+        self.homepage = page
+        self._title_bar = None
+        self._content_widget = None
+
+        self._init_unified_font()
+        self._init_title_bar()
+
+    def _init_title_bar(self):
+        if self._title_bar:
+            return
+
+        self._title_bar = ToolWindowTitleBar(self)
+        self._title_bar.set_icon(self.icon)
+        self._title_bar.set_title(self.name)
+        self._title_bar.hide()
+        self._setup_title_bar()
+
+    def _setup_title_bar(self):
+        pass
+
+    def register_action_button(self, widget):
+        if self._title_bar:
+            self._title_bar.add_button(widget)
+
+    def get_title_bar(self):
+        return self._title_bar
+
+    def _init_unified_font(self):
+        try:
+            font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            try:
+                font_name = Settings.get_instance().canvas_font_selected.value
+            except Exception:
+                font_name = "Microsoft YaHei"
+
+        font = self.font()
+        font.setFamily(font_name)
+        self.setFont(font)
+
+        self.setStyleSheet(f"""
+            ToolWindow, QWidget {{
+                font-family: "{font_name}";
+            }}
+            QLabel, QPushButton, QLineEdit, QComboBox, QTreeWidget, QTableWidget {{
+                font-family: "{font_name}";
+            }}
+        """)
 
 
 class OpacitySlider(QWidget):
@@ -294,7 +514,10 @@ class ToolPopupDialog(QDialog):
         main_layout.setSpacing(0)
 
         title_bar = tool_instance.get_title_bar()
-        title_bar.popupRequested.disconnect()
+        try:
+            title_bar.popupRequested.disconnect()
+        except TypeError:
+            pass
         title_bar.popupRequested.connect(self.close)
         title_bar.show()
 
@@ -303,10 +526,6 @@ class ToolPopupDialog(QDialog):
             title_bar._min_btn.clicked.connect(self.hide)
         else:
             title_bar._min_btn.clicked.connect(self.showMinimized)
-
-        # 隐藏标题栏的锁定按钮，改用独立的 LockButtonWidget
-        lock_btn = title_bar._lock_btn
-        lock_btn.hide()
 
         main_layout.addWidget(title_bar)
         main_layout.addWidget(tool_instance, 1)
@@ -331,17 +550,10 @@ class ToolPopupDialog(QDialog):
         self._lock_btn_widget = LockButtonWidget()
         self._lock_btn_widget.lockClicked.connect(self._on_lock_changed)
 
-        # 连接标题栏锁定信号（用于同步状态）
-        title_bar.lockRequested.connect(self._on_title_bar_lock_changed)
-
         # macOS: 始终安装事件过滤器监听应用激活（Dock 点击）
         if platform.system() == "Darwin":
             QApplication.instance().installEventFilter(self)
             logger.info("[DockRestore] EventFilter installed for macOS Dock restore")
-
-    def _on_title_bar_lock_changed(self, locked: bool):
-        """响应标题栏锁定信号，同步到独立锁定按钮"""
-        self._lock_btn_widget.setLocked(locked)
 
     def _on_lock_changed(self, locked: bool):
         """处理窗口锁定状态变化"""
@@ -422,7 +634,7 @@ class ToolPopupDialog(QDialog):
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style & ~WS_EX_TRANSPARENT)
 
     def _show_settings(self):
-        """ "显示设置弹窗 - 已被移除，按钮已移到主窗口"""
+        """显示设置弹窗 - 已被移除，按钮已移到主窗口"""
         pass
 
     def setRestoreInfo(self, tool_name, was_in_top, btn):
@@ -447,7 +659,7 @@ class ToolPopupDialog(QDialog):
     def _restore_geometry(self):
         from PyQt5.QtCore import QSettings
 
-        settings = QSettings("WorkFlowGUI", "ToolPopup")
+        settings = QSettings("DriFox", "ToolPopup")
         key = f"popup_geometry_{self.tool_instance.name}"
         geometry = settings.value(key)
         if geometry:
@@ -461,7 +673,7 @@ class ToolPopupDialog(QDialog):
 
         if self._is_maximized:
             return
-        settings = QSettings("WorkFlowGUI", "ToolPopup")
+        settings = QSettings("DriFox", "ToolPopup")
         key = f"popup_geometry_{self.tool_instance.name}"
         settings.setValue(key, self.saveGeometry())
 
@@ -504,7 +716,7 @@ class ToolPopupDialog(QDialog):
                         self.tool_instance._popup_refs = refs
         except Exception:
             pass
-        
+
         self.deleteLater()
         super().closeEvent(event)
 
@@ -524,16 +736,6 @@ class ToolPopupDialog(QDialog):
                     if self._lock_btn_widget:
                         self._sync_lock_btn_position()
                         self._lock_btn_widget.show()
-
-    def _restore_geometry(self):
-        """恢复窗口几何信息"""
-        from PyQt5.QtCore import QSettings
-
-        settings = QSettings("WorkFlowGUI", "ToolPopup")
-        key = f"popup_geometry_{self.tool_instance.name}"
-        geometry = settings.value(key)
-        if geometry:
-            self.restoreGeometry(geometry)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -775,7 +977,7 @@ class ToolPopupDialog(QDialog):
             )
         elif obj == self._popup_btn and event.type() == QEvent.Leave:
             self._popup_btn.setStyleSheet("")
-        
+
         # macOS: 监听应用激活事件，当 Dock 图标被点击时恢复窗口
         if platform.system() == "Darwin":
             if event.type() == QEvent.ApplicationActivate:
@@ -792,7 +994,7 @@ class ToolPopupDialog(QDialog):
                         self._sync_lock_btn_position()
                         self._lock_btn_widget.show()
                     logger.info("[DockRestore] Restored via ApplicationActivate")
-        
+
         return super().eventFilter(obj, event)
 
     def enterEvent(self, e):

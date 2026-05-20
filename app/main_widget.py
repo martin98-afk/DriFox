@@ -49,7 +49,7 @@ from app.core import (
 )
 from app.core.auto_loop_config import AutoLoopConfig
 from app.core.workers.auto_loop_worker import AutoLoopWorker
-from app.tool_window import ToolWindow
+from app.tool_popup import ToolWindow
 from app.tools import get_builtin_tools_schema
 from app.update_checker import UpdateChecker
 from app.utils.config import Settings
@@ -176,7 +176,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def __init__(self, homepage, button):
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
-        super().__init__(homepage, button)
+        super().__init__(homepage)
         # 需要在 super().__init__() 之前初始化所有依赖项
         self.homepage = homepage  # 必须在 super() 之前设置，供 backend.initialize 使用
         self.cfg = Settings.get_instance()
@@ -511,7 +511,7 @@ class OpenAIChatToolWindow(ToolWindow):
             new_instance._skip_restore_history = True  # 跳过历史会话恢复
 
             # 以弹窗方式显示
-            from app.side_dock_area import ToolPopupDialog
+            from app.tool_popup import ToolPopupDialog
 
             popup = ToolPopupDialog(new_instance, None)
             if branch:
@@ -915,7 +915,7 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._settings_popup)
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(10)
+        self.chat_scroll_area.setMinimumHeight(0)
         self.chat_scroll_area.setMinimumWidth(400)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)

@@ -9,7 +9,7 @@ import warnings
 
 from qfluentwidgets import setFontFamilies
 
-from app.side_dock_area import ToolPopupDialog
+from app.tool_popup import ToolPopupDialog
 
 warnings.filterwarnings("ignore")
 os.environ["PYTHONIOENCODING"] = "utf-8"
