@@ -21,10 +21,9 @@ from PyQt5.QtCore import QObject, pyqtSignal
 from loguru import logger
 
 from app.core.chat_session import ChatSession, SessionManager
-from app.core.context_builder import ContextBudgetAllocator
-from app.core.history_compactor import HistoryCompactor
-from app.core.permission_cache import PermissionCache
-from app.core.workers import OpenAIChatWorker
+from app.core.conversation.core import ConversationCore
+from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.conversation.adapters import GatewayConversationAdapter
 from app.tools import get_builtin_tools_schema
 from app.utils.config import Settings
 
@@ -63,23 +62,36 @@ class GatewayEngine(QObject):
         if self._global_instance is not None and self is not self._global_instance:
             raise RuntimeError("GatewayEngine is singleton, use GatewayEngine.get_instance()")
 
-        # ===== 独立的组件 =====
-        self._session_manager = SessionManager()  # 不碰 UI 的 SessionManager
-        self._compactor = HistoryCompactor(
+        # ===== ConversationCore（聚合 SessionManager + Compactor + PermissionCache）=====
+        self._conversation_core = ConversationCore.create(
             get_model_config=get_model_config,
             agent_manager=agent_manager,
+            backend=None,  # Gateway 不需要记忆上下文
         )
-        self._permission_cache = PermissionCache()
+
+        # ===== ConversationExecutor（统一 Worker 执行）=====
+        from app.core.conversation.executor import ConversationExecutor
+        config = ConversationConfig(
+            permission_strategy=PermissionStrategy.AGENT_CONFIG,
+        )
+        self._conversation_executor = ConversationExecutor(
+            core=self._conversation_core,
+            config=config,
+            tool_executor=tool_executor,
+            agent_manager=agent_manager,
+        )
+
+        # ===== GatewayConversationAdapter（直接回调适配器）=====
+        self._adapter = GatewayConversationAdapter(
+            core=self._conversation_core,
+            executor=self._conversation_executor,
+        )
 
         # ===== 共享的无状态组件 =====
         self._get_model_config = get_model_config
         self._tool_executor = tool_executor
         self._agent_manager = agent_manager
         self._session_store = session_store
-
-        # ===== 自己的流式状态 =====
-        self._current_worker: Optional[OpenAIChatWorker] = None
-        self._is_streaming = False
 
         # ===== 消息队列（流式中到达的新消息排队依次处理）=====
         self._pending_queue: List[tuple] = []  # [(session, text, callbacks), ...]
@@ -111,33 +123,36 @@ class GatewayEngine(QObject):
 
     def add_session(self, session: ChatSession) -> None:
         """添加 Gateway 会话，不改变 current_index"""
-        self._session_manager.sessions.append(session)
-        self._session_manager._touch_session(session.session_id)
+        sm = self._conversation_core.session_manager
+        sm.sessions.append(session)
+        sm._touch_session(session.session_id)
         self._save_to_store(session)
 
     def find_session(self, session_id: str) -> Optional[ChatSession]:
         """查找 Gateway 会话"""
-        for s in self._session_manager.sessions:
+        sm = self._conversation_core.session_manager
+        for s in sm.sessions:
             if s.session_id == session_id:
-                self._session_manager._touch_session(s.session_id)
+                sm._touch_session(s.session_id)
                 return s
         return None
 
     def switch_to_session(self, session_id: str) -> Optional[ChatSession]:
         """切换当前 Gateway 会话（不影响 UI）"""
-        for idx, s in enumerate(self._session_manager.sessions):
+        sm = self._conversation_core.session_manager
+        for idx, s in enumerate(sm.sessions):
             if s.session_id == session_id:
-                self._session_manager.switch_to_session(idx)
+                sm.switch_to_session(idx)
                 return s
         return None
 
     def get_current_session(self) -> Optional[ChatSession]:
         """获取当前 Gateway 会话"""
-        return self._session_manager.get_current_session()
+        return self._conversation_core.session_manager.get_current_session()
 
     def get_all_sessions(self) -> List[ChatSession]:
         """获取所有 Gateway 会话"""
-        return self._session_manager.get_all_sessions()
+        return self._conversation_core.session_manager.get_all_sessions()
 
     # ==================== 入口 ====================
 
@@ -354,13 +369,14 @@ class GatewayEngine(QObject):
 
     def _cmd_session(self, args: str) -> str:
         """处理 /session 命令"""
+        sm = self._conversation_core.session_manager
         if not args:
             # 列出所有 Gateway 会话
-            sessions = self._session_manager.get_all_sessions()
+            sessions = sm.get_all_sessions()
             if not sessions:
                 return "📋 没有历史会话。"
 
-            current = self._session_manager.get_current_session()
+            current = sm.get_current_session()
             current_id = current.session_id if current else None
 
             lines = [f"📋 **Gateway 会话** ({len(sessions)} 个):\n"]
@@ -373,7 +389,7 @@ class GatewayEngine(QObject):
 
         # /session <id> — 切换到指定会话
         # 支持部分匹配
-        candidates = [s for s in self._session_manager.get_all_sessions()
+        candidates = [s for s in sm.get_all_sessions()
                      if args in s.session_id or args in s.name]
         if len(candidates) == 1:
             self.switch_to_session(candidates[0].session_id)
@@ -394,8 +410,8 @@ class GatewayEngine(QObject):
         text: str,
         callbacks: Dict[str, Callable],
     ) -> bool:
-        """发送消息到 AI（使用独立 worker）"""
-        if self._is_streaming:
+        """发送消息到 AI（使用 ConversationExecutor）"""
+        if self._conversation_executor.is_streaming:
             # 排队，不丢弃消息
             self._pending_queue.append((session, text, callbacks))
             logger.info(f"[GatewayEngine] Message queued ({len(self._pending_queue)} pending)")
@@ -411,7 +427,6 @@ class GatewayEngine(QObject):
             cb = callbacks.get("error")
             if cb:
                 cb("模型配置无效，请检查设置。")
-            self._is_streaming = False
             return False
 
         # 会话级模型覆盖
@@ -445,38 +460,78 @@ class GatewayEngine(QObject):
         # 获取工具
         tools = self._get_tools(session=session)
 
-        # 创建 worker
-        try:
-            worker = OpenAIChatWorker(
-                messages=messages,
-                session_messages=session.get_context_messages(),
-                llm_config=llm_config,
-                tools=tools,
-                tool_executor=self._tool_executor,
-                tool_start_callback=None,           # Gateway 不需要交互式权限
-                permission_check_callback=None,     # Gateway 自动放行
-                compaction_prompt="",
-                compaction_config={},
-                permission_cache=self._permission_cache,
-                compactor=self._compactor,          # Gateway 使用自己的 compactor
-                initial_compaction_cache=getattr(session, "compaction_cache", None),
-            )
-        except Exception as e:
-            logger.error(f"[GatewayEngine] Failed to create worker: {e}")
-            cb = callbacks.get("error")
-            if cb:
-                cb(f"创建 AI 工作线程失败: {e}")
-            return False
+        # 将 Gateway 特有逻辑（session保存、队列处理）包装在回调中
+        wrapped_callbacks = self._make_gateway_callbacks(session, callbacks)
 
-        # 连接信号 → 回调
-        self._connect_worker_signals(worker, session, callbacks)
+        # 使用统一 Executor 执行
+        self._adapter.set_callbacks(callbacks)
+        success = self._conversation_executor.execute(
+            messages=messages,
+            llm_config=llm_config,
+            tools=tools,
+            callbacks=wrapped_callbacks,
+        )
 
-        # 启动
-        self._current_worker = worker
-        self._is_streaming = True
-        worker.start()
-        self.worker_started.emit()
-        return True
+        if success:
+            self.worker_started.emit()
+        return success
+
+    def _make_gateway_callbacks(
+        self,
+        session: ChatSession,
+        callbacks: Dict[str, Callable],
+    ) -> Dict[str, Callable]:
+        """包装 Gateway 特有逻辑的回调"""
+        from app.core.message_content import consolidate_messages
+
+        cb_content = callbacks.get("content_received", _noop)
+        cb_finished = callbacks.get("stream_finished", _noop)
+        cb_error = callbacks.get("error", _noop)
+
+        chunks = []
+
+        def on_content(chunk: str):
+            chunks.append(chunk)
+            cb_content(chunk)
+
+        def on_finished(response: str):
+            """AI 完成 — 保存会话并处理队列"""
+            final_response = response or "".join(chunks)
+            if final_response.strip():
+                session.add_assistant_message(content=final_response)
+            self._save_to_store(session)
+            cb_finished(final_response)
+            self.worker_finished.emit(final_response)
+            self._process_next()
+
+        def on_error(error: str):
+            """错误 — 处理队列"""
+            cb_error(error)
+            self.worker_error.emit(error)
+            self._process_next()
+
+        result = {
+            "content_received": on_content,
+            "finished": on_finished,
+            "error": on_error,
+        }
+
+        # 工具调用跟踪回调
+        cb_tool_call = callbacks.get("tool_call_started")
+        cb_tool_result = callbacks.get("tool_result_received")
+        if cb_tool_call:
+            result["tool_call_started"] = lambda i, n, a, r: cb_tool_call({"tool_name": n, "arguments": a})
+        if cb_tool_result:
+            result["tool_result_received"] = lambda i, n, a, r: cb_tool_result({"tool_name": n, "result": r})
+
+        # 消息更新 → 保存到会话
+        def on_messages_updated(messages):
+            if messages:
+                session.set_messages(messages, preserve_compaction=True)
+                self._save_to_store(session)
+        result["messages_updated"] = on_messages_updated
+
+        return result
 
     def _process_next(self) -> None:
         """从队列中取出下一条消息处理"""
@@ -557,80 +612,6 @@ class GatewayEngine(QObject):
             logger.info(f"[GatewayEngine] Filtered {removed} tool(s): {removed_names}")
         return filtered
 
-    def _connect_worker_signals(
-        self,
-        worker: OpenAIChatWorker,
-        session: ChatSession,
-        callbacks: Dict[str, Callable],
-    ) -> None:
-        """连接 worker 信号到回调"""
-        cb_content = callbacks.get("content_received", _noop)
-        cb_finished = callbacks.get("stream_finished", _noop)
-        cb_error = callbacks.get("error", _noop)
-
-        # 收集流式内容
-        chunks = []
-
-        def on_content(chunk: str):
-            chunks.append(chunk)
-            cb_content(chunk)
-
-        def on_finished(response: str):
-            """AI 完成"""
-            self._is_streaming = False
-            self._current_worker = None
-
-            # 尝试获取完整的响应
-            final_response = response or "".join(chunks)
-
-            # 添加到会话
-            if final_response.strip():
-                session.add_assistant_message(content=final_response)
-
-            # 保存到 SQLite（供 UI 历史查看）
-            self._save_to_store(session)
-
-            cb_finished(final_response)
-            self.worker_finished.emit(final_response)
-
-            # 处理队列中的下一条消息
-            self._process_next()
-
-        def on_error(error: str):
-            self._is_streaming = False
-            self._current_worker = None
-            cb_error(error)
-            self.worker_error.emit(error)
-
-            # 处理队列中的下一条消息
-            self._process_next()
-
-        worker.content_received.connect(on_content)
-        worker.finished_with_content.connect(on_finished)
-        worker.error_occurred.connect(on_error)
-
-        # Gateway 需要工具调用跟踪（推送进度到平台）
-        cb_tool_call = callbacks.get("tool_call_started")
-        cb_tool_result = callbacks.get("tool_result_received")
-
-        if cb_tool_call:
-            def on_tool_call(tool_call_id: str, tool_name: str, args: dict, round_id: str):
-                cb_tool_call({"tool_name": tool_name, "arguments": args})
-            worker.tool_call_started.connect(on_tool_call)
-
-        if cb_tool_result:
-            def on_tool_result(tool_call_id: str, tool_name: str, args: dict, result: object):
-                cb_tool_result({"tool_name": tool_name, "result": result})
-            worker.tool_result_received.connect(on_tool_result)
-
-        def on_messages_updated(messages: List[Dict]):
-            """工具调用后消息更新"""
-            if messages:
-                session.set_messages(messages, preserve_compaction=True)
-                self._save_to_store(session)
-
-        worker.finished_with_messages.connect(on_messages_updated)
-
     # ==================== 持久化 ====================
 
     def _save_to_store(self, session: ChatSession) -> None:
@@ -645,16 +626,5 @@ class GatewayEngine(QObject):
     # ==================== 清理 ====================
 
     def cleanup(self):
-        """清理当前 worker"""
-        worker = self._current_worker
-        self._current_worker = None
-        self._is_streaming = False
-
-        if worker:
-            try:
-                worker.cancel()
-                if worker.isRunning():
-                    worker.quit()
-                worker.cleanup()
-            except Exception as e:
-                logger.warning(f"[GatewayEngine] Worker cleanup error: {e}")
+        """清理当前 worker（委托 ConversationExecutor）"""
+        self._conversation_executor.cleanup()

@@ -11,14 +11,14 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
-from app.core.context_builder import ContextBudgetAllocator
-from app.core.history_compactor import HistoryCompactor
+from app.core.conversation.core import ConversationCore
+from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.conversation.adapters import UIConversationAdapter
+from app.core.conversation.adapters import UIConversationAdapter
 from app.core.message_content import (
     consolidate_messages,
 )
-from app.core.permission_cache import PermissionCache
 from app.core.token_estimator import count_messages_tokens
-from app.core.workers import OpenAIChatWorker
 from app.tools import get_builtin_tools_schema
 
 
@@ -44,36 +44,58 @@ class ChatEngine:
         self._get_chat_cards = get_chat_cards
         self._get_memory_context = get_memory_context
         self._backend = backend
-        self._current_worker: Optional[OpenAIChatWorker] = None
-        self._is_streaming = False
         self._callbacks: Dict[str, Callable] = {}
-        # 权限缓存：整个会话生命周期保存，不受 worker 新建影响
-        self._permission_cache = PermissionCache()
         self._current_agent: Optional[str] = "plan"
-        
+
         # API 模式专用：直接回调（绕过 Qt 信号-槽，避免跨线程事件循环问题）
         self._worker_callbacks = worker_callbacks or {}
         self._api_mode = api_mode
-        
-        # Token 计算缓存（已移除版本追踪机制）
-        # 如需缓存优化，可在此处实现基于内容hash的失效判断
-        
-        self._compactor = HistoryCompactor(
+
+        # ===== ConversationCore（聚合 Compactor + PermissionCache + ContextBudgetAllocator）=====
+        self._conversation_core = ConversationCore.create(
             get_model_config=get_model_config,
             agent_manager=agent_manager,
-        )
-        
-        # 初始化 ContextBudgetAllocator
-        self._context_builder = ContextBudgetAllocator(
-            agent_manager=agent_manager,
-            compactor=self._compactor,
-            backend=backend
+            backend=backend,
         )
 
+        # ===== ConversationExecutor（统一 Worker 执行）=====
+        from app.core.conversation.executor import ConversationExecutor
+        config = ConversationConfig(
+            permission_strategy=PermissionStrategy.INTERACTIVE,
+            interactive_check_callback=self._check_tool_permission,
+        )
+        self._conversation_executor = ConversationExecutor(
+            core=self._conversation_core,
+            config=config,
+            tool_executor=tool_executor,
+            agent_manager=agent_manager,
+        )
+
+        # ===== UIConversationAdapter（Qt 信号转发）=====
+        self._adapter = UIConversationAdapter(
+            core=self._conversation_core,
+            executor=self._conversation_executor,
+        )
+
+        # ===== Adapter 信号 → ChatEngine 回调 =====
+        self._adapter.content_received.connect(lambda p: self._emit("content_received", p))
+        self._adapter.reasoning_content_received.connect(lambda p: self._emit("reasoning_content_received", p))
+        self._adapter.thinking_started.connect(lambda: self._emit("thinking_started"))
+        self._adapter.tool_call_started.connect(lambda i, n, a, r: self._emit("tool_call_started", i, n, a, r))
+        self._adapter.tool_args_updated.connect(lambda i, n, p: self._emit("tool_args_updated", i, n, p))
+        self._adapter.tool_result_received.connect(lambda i, n, a, r: self._emit("tool_result_received", i, n, a, r))
+        self._adapter.question_asked.connect(lambda i, q, o, m: self._emit("question_asked", i, q, o, m))
+        self._adapter.permission_approval_requested.connect(lambda i, n, a: self._emit("permission_approval_requested", i, n, a))
+        self._adapter.stream_finished.connect(lambda r: self._on_worker_finished(r))
+        self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))
+        self._adapter.error_occurred.connect(lambda e: self._on_error(e))
+        self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
+        self._adapter.stream_started.connect(lambda: self._emit("stream_started"))
+
     @property
-    def compactor(self) -> 'HistoryCompactor':
+    def compactor(self):
         """暴露压缩器供外部使用（如工具迭代中压缩）"""
-        return self._compactor
+        return self._conversation_core.compactor
     
     # ========== 属性访问（正式接口，避免直接访问私有属性）==========
     
@@ -88,12 +110,12 @@ class ChatEngine:
     
     @property
     def is_streaming(self) -> bool:
-        """获取流式状态"""
-        return self._is_streaming
+        """获取流式状态（委托 ConversationExecutor）"""
+        return self._conversation_executor.is_streaming
     
     def set_streaming(self, value: bool):
         """设置流式状态"""
-        self._is_streaming = value
+        # 已由 ConversationExecutor 管理，忽略手动设置
     
     def get_context_usage(self) -> tuple:
         """获取上下文使用情况（用于兼容性）"""
@@ -156,21 +178,25 @@ class ChatEngine:
         self._emit("permission_approval_requested", tool_call_id, tool_name, arguments)
 
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
-        """批准工具权限请求"""
-        if self._current_worker:
-            # 转发给 Worker 处理
-            self._current_worker.approve_permission(tool_call_id, auto_allow, session_allow)
+        """批准工具权限请求（转发给 Worker）"""
+        from app.core.workers import OpenAIChatWorker as W
+        # 通过 executor 获取当前 worker（可通过 protected 属性访问）
+        worker = getattr(self._conversation_executor, '_current_worker', None)
+        if worker:
+            worker.approve_permission(tool_call_id, auto_allow, session_allow)
 
     def deny_tool_permission(self, tool_call_id: str):
-        if self._current_worker:
-            self._current_worker.deny_permission(tool_call_id)
+        worker = getattr(self._conversation_executor, '_current_worker', None)
+        if worker:
+            worker.deny_permission(tool_call_id)
 
     def clear_session_permission_cache(self, tool_name: str = None):
         """清除会话级权限缓存"""
+        cache = self._conversation_core.permission_cache
         if tool_name:
-            self._permission_cache.deny(tool_name)
+            cache.deny(tool_name)
         else:
-            self._permission_cache.clear_session()
+            cache.clear_session()
 
     def set_callback(self, event: str, callback: Callable):
         self._callbacks[event] = callback
@@ -215,7 +241,7 @@ class ChatEngine:
         *args,
         **kwargs
     ) -> bool:
-        if self._is_streaming:
+        if self._conversation_executor.is_streaming:
             logger.warning("[ChatEngine] Already streaming, ignoring new message")
             return False
 
@@ -245,7 +271,6 @@ class ChatEngine:
                     current_message=user_text
                 )
         session.add_user_message(content=user_text)
-        self._is_streaming = True
 
         self._emit("user_message_added", user_text)
 
@@ -285,7 +310,7 @@ class ChatEngine:
                     current_message=current_message_text
                 )
 
-        messages = self._build_messages(self._session_manager.get_current_session(), llm_config)
+        messages = self._adapter.build_messages(self._session_manager.get_current_session(), llm_config)
         if self._current_agent:
             available_tools = self._get_agent_manager().get_agent_tools_schema(
                 self._current_agent
@@ -296,8 +321,15 @@ class ChatEngine:
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
             )
 
-        self._start_worker(messages, llm_config, available_tools)
-        return True
+        # 使用 ConversationExecutor 执行
+        callbacks = self._adapter.get_callbacks()
+        success = self._conversation_executor.execute(
+            messages=messages,
+            llm_config=llm_config,
+            tools=available_tools,
+            callbacks=callbacks,
+        )
+        return success
 
     def _build_messages(
         self,
@@ -306,7 +338,7 @@ class ChatEngine:
         allow_llm_summary: bool = False,
     ) -> List[Dict]:
         """委托给 ContextBudgetAllocator 构建消息"""
-        messages = self._context_builder.build_messages(
+        messages = self._conversation_core.context_builder.build_messages(
             session=session,
             llm_config=llm_config,
             allow_llm_summary=allow_llm_summary,
@@ -325,7 +357,7 @@ class ChatEngine:
                 "used_tokens": 0,
                 "budget_tokens": 0,
                 "percent": 0,
-                "compaction": self._compactor._make_state(),
+                "compaction": self._conversation_core.compactor._make_state(),
                 "normal_tokens": 0,
                 "compacted_tokens": 0,
             }
@@ -333,7 +365,7 @@ class ChatEngine:
         # 直接构建消息
         messages = self._build_messages(session, llm_config)
         
-        budget_tokens = max(1, self._context_builder.get_context_budget(llm_config))
+        budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
         used_tokens = count_messages_tokens(messages)
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
         
@@ -373,107 +405,18 @@ class ChatEngine:
         llm_config: Dict,
         tools: List[Dict],
     ):
-        self.cleanup_worker()
-        
-        compaction_prompt = ""
-        compaction_config = {}
-        if self._agent_manager and self._agent_manager.get_agent("compaction"):
-            compaction_prompt = self._agent_manager.get_agent_system_prompt(
-                "compaction"
-            )
-            compaction_config = self._agent_manager.get_agent_config("compaction")
-        session = self._session_manager.get_current_session()
-
-        self._current_worker = OpenAIChatWorker(
+        """启动 Worker（委托 ConversationExecutor + UIConversationAdapter）"""
+        callbacks = self._adapter.get_callbacks()
+        success = self._conversation_executor.execute(
             messages=messages,
-            session_messages=session.get_context_messages() if session else [],
             llm_config=llm_config,
             tools=tools,
-            tool_executor=self._tool_executor,
-            tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
-            permission_check_callback=self._check_tool_permission,
-            compaction_prompt=compaction_prompt,
-            compaction_config=compaction_config,
-            permission_cache=self._permission_cache,
-            compactor=self._compactor,
-            initial_compaction_cache=getattr(session, "compaction_cache", None),
+            callbacks=callbacks,
         )
-        # 无需同步缓存，因为共享同一个 PermissionCache 实例
-
-        # API 模式：直接调用回调（不使用 Qt 信号-槽，避免跨线程事件循环问题）
-        # API 模式下 worker 运行在没有 Qt 事件循环的线程中，Qt 信号无法传递
-        if self._api_mode and self._worker_callbacks:
-            self._current_worker.set_direct_callbacks(self._worker_callbacks)
-        else:
-            # UI 模式：使用 Qt 信号-槽机制
-            self._current_worker.content_received.connect(self._on_content_received)
-            self._current_worker.reasoning_content_received.connect(self._on_reasoning_content_received)
-            self._current_worker.thinking_started.connect(self._on_thinking_started)
-            self._current_worker.tool_call_started.connect(self._on_tool_call_started)
-            self._current_worker.tool_args_updated.connect(self._on_tool_args_updated)
-            self._current_worker.tool_result_received.connect(self._on_tool_result_received)
-            self._current_worker.error_occurred.connect(self._on_error)
-            self._current_worker.finished_with_content.connect(self._on_worker_finished)
-            self._current_worker.finished_with_messages.connect(
-                self._on_worker_messages_updated
-            )
-            self._current_worker.question_asked.connect(self._on_question_asked)
-            self._current_worker.permission_approval_requested.connect(
-                self._on_permission_approval_requested
-            )
-            self._current_worker.retry_status.connect(self._on_retry_status)
-
-        self._current_worker.start()
-        
-        # UI 模式：立即发射 stream_started 信号（用于记录开始时间）
-        if not self._api_mode:
+        if success and not self._api_mode:
             self._emit("stream_started")
-        # API 模式：engine 也需要在主线程发射事件（用于 stream_started）
-        if self._api_mode:
-            import threading
-            def emit_later():
-                import time
-                time.sleep(0.1)
-                self._emit("stream_started")
-            threading.Thread(target=emit_later, daemon=True).start()
-
-    def _on_content_received(self, content_piece: str):
-        self._emit("content_received", content_piece)
-
-    def _on_reasoning_content_received(self, reasoning_piece: str):
-        """DeepSeek 思考内容接收"""
-        self._emit("reasoning_content_received", reasoning_piece)
-
-    def _on_thinking_started(self):
-        """新一轮思考开始（多轮工具迭代时触发）"""
-        self._emit("thinking_started")
-
-    def _on_reasoning_finished(self):
-        """DeepSeek 思考内容结束"""
-        self._emit("reasoning_finished")
-
-    def _on_tool_args_updated(
-        self, tool_call_id: str, tool_name: str, partial_args: dict
-    ):
-        self._emit("tool_args_updated", tool_call_id, tool_name, partial_args)
-
-    def _on_tool_call_started(
-        self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str
-    ):
-        self._emit("tool_call_started", tool_call_id, tool_name, arguments, round_id)
-
-    def _on_question_asked(
-        self, tool_call_id: str, question: str, options: list, multiple: bool
-    ):
-        self._emit("question_asked", tool_call_id, question, options, multiple)
-
-    def _on_tool_result_received(
-        self, tool_call_id: str, tool_name: str, arguments: dict, result: Any
-    ):
-        self._emit("tool_result_received", tool_call_id, tool_name, arguments, result)
 
     def _on_worker_finished(self, response: str):
-        self._is_streaming = False
         self._emit("stream_finished", response)
         
         # Trigger PostAssistantMessage hook
@@ -502,11 +445,7 @@ class ChatEngine:
         # 对话结束后清理 worker，释放内存
         self.cleanup_worker()
 
-    def _on_worker_messages_updated(self, messages: List[Dict]):
-        self._emit("messages_updated", consolidate_messages(messages or []))
-
     def _on_error(self, error: str):
-        self._is_streaming = False
         self._emit("error", error)
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
@@ -514,55 +453,17 @@ class ChatEngine:
         self._emit("retry_status", error_type, attempt, max_retries, wait_time)
 
     def stop(self) -> List[Dict]:
-        
-        worker = self._current_worker
-        self._current_worker = None
-        self._is_streaming = False
-        interrupted_messages: List[Dict] = []
-
-        if worker:
-            try:
-                interrupted_messages = worker.get_interrupted_messages()
-            except Exception as exc:
-                logger.warning(
-                    f"[ChatEngine] Failed to snapshot interrupted messages: {exc}"
-                )
-            worker.cancel()
-            if worker.isRunning():
-                worker.quit()
-            # 彻底清理 worker 的所有缓存数据
-            try:
-                worker.cleanup()
-            except Exception as exc:
-                logger.warning(f"[ChatEngine] Failed to cleanup worker: {exc}")
-
-        # 发射 stream_finished 回调（更新持续时间显示）
+        """停止当前 Worker（委托 ConversationExecutor）"""
+        interrupted = self._conversation_executor.stop()
+        # 通知 UI
         self._emit("stream_finished", "")
-
-        return interrupted_messages
+        return interrupted
     
     def cleanup_worker(self):
-        """
-        清理当前 worker，释放所有缓存。
-        应该在对话结束后或切换会话时调用。
-        """
-        worker = self._current_worker
-        self._current_worker = None
-        self._is_streaming = False
-        
-        if worker:
-            try:
-                worker.cancel()
-                if worker.isRunning():
-                    worker.quit()
-                worker.cleanup()
-            except Exception as exc:
-                logger.warning(f"[ChatEngine] Failed to cleanup worker: {exc}")
-        
-        # 清理 HTTP 客户端缓存
-        self._compaction_http_client = None
-        self._compaction_cache_config = None
+        """清理当前 Worker（委托 ConversationExecutor）"""
+        self._conversation_executor.cleanup()
 
     def provide_question_answer(self, answer: str):
-        if self._current_worker and hasattr(self._current_worker, "provide_answer"):
-            self._current_worker.provide_answer(answer)
+        worker = getattr(self._conversation_executor, '_current_worker', None)
+        if worker and hasattr(worker, "provide_answer"):
+            worker.provide_answer(answer)
