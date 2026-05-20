@@ -7,7 +7,7 @@
 """
 import os
 
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor
 from PyQt5.QtWidgets import (
     QWidget,
@@ -1020,6 +1020,10 @@ class MemoryCardContent(QWidget):
                     widget._repo_info, file_path, self,
                     current_workdir=actual_wd,
                 )
+                wt_widget.sizeChanged.connect(lambda h, item=wt_item: (
+                    item.setSizeHint(QSize(self.docs_list.size().width() or 400, h)),
+                    self.docs_list.update(),
+                ))
                 wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
                 wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
                 self.docs_list.addItem(wt_item)
@@ -1031,9 +1035,9 @@ class MemoryCardContent(QWidget):
         width = self.docs_list.size().width()
         if width <= 0:
             width = 400
-        # 每个 worktree 行 28px + 新建行 24px + 上下边距 6px
+        # 每个 worktree 行 24px + 新建行 24px + 边距
         wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
-        height = wt_count * 28 + 24 + 6
+        height = wt_count * 24 + 24 + 4
         return QSize(width, height)
 
     def _get_doc_item_size(self):
@@ -1105,21 +1109,15 @@ class MemoryCardContent(QWidget):
             memory_mgr._key_documents_repo.remove_by_path(self._current_project, worktree_path)
 
         if current_wd == worktree_path:
-            # 自动恢复到主仓库文件夹
-            main_path = None
-            for d in memory_mgr.get_key_documents(self._current_project):
-                if d.get("added_by") != "git_worktree" and os.path.isdir(d.get("file_path", "")):
-                    main_path = d["file_path"]
-                    break
-            if main_path and GitWorktreeDetector.detect_git(main_path):
-                memory_mgr.set_working_directory(self._current_project, main_path)
-                self.workingDirChanged.emit(main_path)
+            # 恢复到原始 git 仓库文件夹（不是随便找一个文件夹）
+            repo_root = GitWorktreeDetector.detect_git(self._original_folder_for_worktree)
+            if repo_root:
+                memory_mgr.set_working_directory(self._current_project, repo_root)
+                self.workingDirChanged.emit(repo_root)
             else:
                 memory_mgr.set_working_directory(self._current_project, "clear")
                 self.workingDirChanged.emit("")
 
-        self._load_key_documents()
-        
         self._load_key_documents()
 
     def _open_folder(self, path: str):
