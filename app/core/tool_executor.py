@@ -260,7 +260,10 @@ class ToolExecutor:
         """设置当前项目（供 update_project_note 使用）"""
         if self._builtin_tools:
             self._builtin_tools.set_current_project(project)
-            logger.info("[ToolExecutor] AgentManager attached to BuiltinTools")
+            # 同步更新 TaskTools._current_project（stage_files 也用）
+            if self._builtin_tools._task_tools:
+                self._builtin_tools._task_tools._current_project = project
+            logger.info(f"[ToolExecutor] set_current_project({project})")
 
     def set_workdir(self, workdir: Optional[str]):
         """设置工作目录（None 或 "" 表示恢复默认）"""

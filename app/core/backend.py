@@ -247,7 +247,7 @@ class ChatBackend(QObject):
         if self._memory_manager and self._memory_manager.key_documents:
             self._tool_executor.set_key_documents_repo(
                 self._memory_manager.key_documents,
-                "默认项目"
+                "默认项目"  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
             )
         logger.info("[ChatBackend] ToolExecutor 创建完成")
         
