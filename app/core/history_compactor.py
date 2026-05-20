@@ -18,8 +18,8 @@
     # 获取当前使用情况
     usage = compactor.get_usage(messages, budget)
 """
-import re
 import hashlib
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Callable, Any
 
@@ -31,9 +31,9 @@ from app.core.message_content import (
     consolidate_messages,
     content_to_text,
 )
-from app.core.workers.error_handler import create_api_call_with_retry
-from app.core.token_estimator import count_messages_tokens, estimate_tokens
 from app.core.provider_profile import get_provider_profile
+from app.core.token_estimator import count_messages_tokens
+from app.core.workers.error_handler import create_api_call_with_retry
 
 # ========== 常量 ==========
 MAX_HISTORY_SNIPPET_CHARS = 1200

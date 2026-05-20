@@ -153,6 +153,8 @@ class AutoLoopEngine(BaseEngine):
         self._planning_count += 1
         if self._planning_count > 5:
             logger.warning("[AutoLoop] Too many planning attempts, forcing execution")
+            if self._total_steps == 0:
+                self._total_steps = 1
             self.enter_execution_phase()
 
     def parse_steps_from_notes(self, notes: str) -> tuple[int, int]:
@@ -275,9 +277,12 @@ class AutoLoopEngine(BaseEngine):
         signal = self.config.completion_signal
         if not signal:
             return False
+        # 规划阶段忽略完成信号，防止偶然匹配导致误判
+        if not self.is_executing_phase():
+            return False
         if signal in response_text:
-            if self.is_executing_phase() and not self.is_task_completed():
-                logger.info(f"[AutoLoop] Received DONE but not all steps verified, continuing")
+            if not self.is_task_completed():
+                logger.info(f"[AutoLoop] Received {signal} but not all steps verified, continuing")
                 return False
             self._completion_count += 1
             if self._completion_count >= self.config.completion_threshold:
@@ -405,9 +410,6 @@ class AutoLoopEngine(BaseEngine):
                 return True
             if re.search(rf'步骤\s*{step_num}.*完成', notes, re.DOTALL):
                 return True
-
-        if response.strip().endswith("DONE"):
-            return True
 
         return False
 

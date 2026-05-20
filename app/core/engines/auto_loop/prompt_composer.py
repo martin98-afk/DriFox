@@ -146,6 +146,7 @@ class AutoLoopPromptComposer:
 请立即使用 `write` 工具更新接力文档，然后输出 `PLANNING_COMPLETE`。
 """
         else:
+            completion_signal = self._engine.config.completion_signal
             return f"""
 ## ⚠️ 【强制】接力文档未更新！
 
@@ -154,7 +155,7 @@ class AutoLoopPromptComposer:
 根据规则，你必须：
 1. 更新 SHARED_TASK_NOTES.md 中的"步骤 {current_step} 结果"章节
 2. 记录本轮执行的改动、验证命令和结果
-3. 然后才能继续下一步或输出 DONE
+3. 然后才能继续下一步或输出 {completion_signal}
 
 当前接力文档状态：
 ```
@@ -269,7 +270,7 @@ class AutoLoopPromptComposer:
             "3. 执行当前步骤（**只做一件事**）",
             "4. **必须运行验证命令**（不能跳过）",
             "5. 更新 `SHARED_TASK_NOTES.md`: **只追加/更新当前步骤结果和当前状态，不得改动执行计划部分**",
-            "6. 判断：继续当前步骤 | 前进到下一步 | 输出 DONE",
+            f"6. 判断：继续当前步骤 | 前进到下一步 | 输出 {self._engine.config.completion_signal}",
             "",
             "### 验证失败处理",
             "- 验证失败 → 分析原因 → 修复 → 重试",
@@ -278,7 +279,7 @@ class AutoLoopPromptComposer:
             "",
             "### 完成条件",
             "- 所有计划步骤都验证通过",
-            "- 输出 `DONE`（独占一行）",
+            f"- 输出 `{self._engine.config.completion_signal}`（独占一行）",
             "",
             "### 当前步骤详情",
         ]

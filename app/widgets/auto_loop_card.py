@@ -74,8 +74,6 @@ class AutoLoopConfigCard(QFrame):
         self._iteration_spin.setStyleSheet(self._spin_style())
         self._token_spin.setStyleSheet(self._spin_style())
         self._duration_spin.setStyleSheet(self._spin_style())
-        self._signal_edit.setStyleSheet(self._line_style())
-        self._threshold_spin.setStyleSheet(self._spin_style())
         self._path_edit.setStyleSheet(self._line_style())
         self._prompt_edit.setStyleSheet(f"""
             QTextEdit {{
@@ -108,6 +106,9 @@ class AutoLoopConfigCard(QFrame):
         """)
 
     def _build_ui(self):
+        # 从配置读取默认值，避免硬编码不一致
+        _default_config = AutoLoopConfig()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 5, 6, 5)
         layout.setSpacing(3)
@@ -153,78 +154,61 @@ class AutoLoopConfigCard(QFrame):
 
         layout.addWidget(CardSeparator())
 
-        # ---- 基本配置（两列） ----
-        config_grid = QHBoxLayout()
-        config_grid.setSpacing(12)
+        # ---- 参数配置（竖排）----
+        field_layout = QVBoxLayout()
+        field_layout.setSpacing(6)
 
-        # 左列
-        left_col = QVBoxLayout()
-        left_col.setSpacing(4)
+        def _make_field(label_text, widget):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            lbl = BodyLabel(label_text)
+            lbl.setStyleSheet(f"color: #B4C2D9; {FONT_CSS} font-size: {scale_font_size(14)}px;")
+            lbl.setFixedWidth(120)
+            row.addWidget(lbl)
+            row.addWidget(widget, 1)
+            return row
 
-        left_col.addWidget(BodyLabel("最大迭代轮数"))
         self._iteration_spin = SpinBox()
         self._iteration_spin.setRange(1, 10000)
-        self._iteration_spin.setValue(50)
-        self._iteration_spin.setFixedHeight(26)
+        self._iteration_spin.setValue(_default_config.max_iterations)
+        self._iteration_spin.setFixedHeight(28)
         self._iteration_spin.setStyleSheet(self._spin_style())
-        left_col.addWidget(self._iteration_spin)
+        field_layout.addLayout(_make_field("最大迭代轮数", self._iteration_spin))
 
-        left_col.addWidget(BodyLabel("Token 上限"))
         self._token_spin = SpinBox()
         self._token_spin.setRange(1000, 100000000)
-        self._token_spin.setValue(500000)
+        self._token_spin.setValue(_default_config.max_tokens)
         self._token_spin.setSingleStep(100000)
-        self._token_spin.setFixedHeight(26)
+        self._token_spin.setFixedHeight(28)
         self._token_spin.setStyleSheet(self._spin_style())
-        left_col.addWidget(self._token_spin)
+        field_layout.addLayout(_make_field("Token 上限", self._token_spin))
 
-        left_col.addWidget(BodyLabel("最大时长(分钟)"))
         self._duration_spin = SpinBox()
         self._duration_spin.setRange(0, 14400)
-        self._duration_spin.setValue(120)
+        self._duration_spin.setValue(_default_config.max_duration_minutes)
         self._duration_spin.setSuffix(" 分钟")
         self._duration_spin.setSpecialValueText("不限")
-        self._duration_spin.setFixedHeight(26)
+        self._duration_spin.setFixedHeight(28)
         self._duration_spin.setStyleSheet(self._spin_style())
-        left_col.addWidget(self._duration_spin)
+        field_layout.addLayout(_make_field("最大时长(分钟)", self._duration_spin))
 
-        config_grid.addLayout(left_col, 2)
-
-        # 右列
-        right_col = QVBoxLayout()
-        right_col.setSpacing(4)
-
-        right_col.addWidget(BodyLabel("完成信号词"))
-        self._signal_edit = LineEdit()
-        self._signal_edit.setText("DONE")
-        self._signal_edit.setFixedHeight(26)
-        self._signal_edit.setStyleSheet(self._line_style())
-        right_col.addWidget(self._signal_edit)
-
-        right_col.addWidget(BodyLabel("连续确认次数"))
-        self._threshold_spin = SpinBox()
-        self._threshold_spin.setRange(1, 10)
-        self._threshold_spin.setValue(3)
-        self._threshold_spin.setFixedHeight(26)
-        self._threshold_spin.setStyleSheet(self._spin_style())
-        right_col.addWidget(self._threshold_spin)
-
-        right_col.addWidget(BodyLabel("项目路径（工作目录）"))
-        path_row = QHBoxLayout()
+        # 项目路径（带浏览按钮）
+        path_container = QWidget()
+        path_row = QHBoxLayout(path_container)
+        path_row.setContentsMargins(0, 0, 0, 0)
         path_row.setSpacing(4)
         self._path_edit = LineEdit()
         self._path_edit.setPlaceholderText("默认为当前工作目录")
-        self._path_edit.setFixedHeight(26)
+        self._path_edit.setFixedHeight(28)
         self._path_edit.setStyleSheet(self._line_style())
         path_row.addWidget(self._path_edit, 1)
         self._path_browse_btn = ToolButton(FluentIcon.FOLDER)
-        self._path_browse_btn.setFixedSize(26, 26)
+        self._path_browse_btn.setFixedSize(28, 28)
         self._path_browse_btn.clicked.connect(self._browse_folder)
         path_row.addWidget(self._path_browse_btn)
-        right_col.addLayout(path_row)
+        field_layout.addLayout(_make_field("项目路径", path_container))
 
-        config_grid.addLayout(right_col, 3)
-        layout.addLayout(config_grid)
+        layout.addLayout(field_layout)
 
         layout.addWidget(CardSeparator())
 
@@ -252,8 +236,6 @@ class AutoLoopConfigCard(QFrame):
             max_iterations=self._iteration_spin.value(),
             max_tokens=self._token_spin.value(),
             max_duration_minutes=self._duration_spin.value(),
-            completion_signal=self._signal_edit.text().strip() or "DONE",
-            completion_threshold=self._threshold_spin.value(),
             project_path=self._path_edit.text().strip(),
             task_prompt=self._prompt_edit.toPlainText().strip(),
         )

@@ -5329,7 +5329,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
-            self._current_assistant_card.set_error_state(True)
+            self._current_assistant_card.set_error_state(True, error_message=error)
             self._current_assistant_card.update_content(error)
 
         self._is_streaming = False

@@ -71,11 +71,11 @@ class AutoLoopWorker(QThread):
         # 执行阶段的步骤追踪
         self._last_step = 0  # 上次完成的步骤
         
-        # 规划阶段标志：记录首次规划后的状态，防止模型一次性完成
-        self._first_planning_done = False
-        
         # 汇总的完整消息列表（从每个 ChatWorker 获取）
         self._all_messages: List[Dict] = []
+        
+        # 上一次 on_messages_updated 的消息 token 数（用于增量累加）
+        self._last_message_token_count = 0
         
         # Worker 同步事件（由 AutoLoopConversationAdapter 管理）
 
@@ -149,10 +149,9 @@ class AutoLoopWorker(QThread):
         self._prompt_composer = AutoLoopPromptComposer(self._engine)
         self._engine.start()
         self._last_step = 0
-        self._first_planning_done = False
-        
         # 清空消息列表
         self._all_messages = []
+        self._last_message_token_count = 0
 
         # 确保 ConversationCore 的 SessionManager 有当前会话
         # 这样 ConversationExecutor.execute() 才能正确获取 session → session_messages 不为空
@@ -230,9 +229,6 @@ class AutoLoopWorker(QThread):
                     self._adapter.wait_for_completion(timeout=300)
 
                 response = self._adapter.get_response() or ""
-                # 估算 token 用量
-                token_usage = max(1, len(response) // 4)
-                self._engine.add_tokens(token_usage)
                 self._emit_progress()
                     
                 # 【新增】强制检查接力文档更新
@@ -243,20 +239,23 @@ class AutoLoopWorker(QThread):
                     # 重新构建消息，注入强制更新提示
                     force_messages = self._build_messages(task_prompt, iteration, force_update=True)
                     
-                    # 使用统一 Executor 执行强制更新
-                    self._adapter.reset()
-                    self._conversation_executor.execute(
-                        messages=force_messages,
-                        llm_config=llm_config,
-                        tools=current_tools,
-                        callbacks=self._make_autoloop_callbacks(),
-                    )
-                    from PyQt5.QtCore import QEventLoop
-                    worker = self._conversation_executor.get_current_worker()
-                    if worker:
-                        loop = QEventLoop()
-                        worker.finished.connect(loop.quit)
-                        loop.exec_()
+                    try:
+                        # 使用统一 Executor 执行强制更新
+                        self._adapter.reset()
+                        self._conversation_executor.execute(
+                            messages=force_messages,
+                            llm_config=llm_config,
+                            tools=current_tools,
+                            callbacks=self._make_autoloop_callbacks(),
+                        )
+                        from PyQt5.QtCore import QEventLoop
+                        worker = self._conversation_executor.get_current_worker()
+                        if worker:
+                            loop = QEventLoop()
+                            worker.finished.connect(loop.quit)
+                            loop.exec_()
+                    except Exception as e:
+                        self.log_signal.emit(f"⚠️ 强制更新失败: {e}")
                     
                     # 再次检查接力文档
                     if self._check_relay_doc_updated(iteration):
@@ -265,6 +264,9 @@ class AutoLoopWorker(QThread):
                         self.log_signal.emit("⚠️ 接力文档仍未更新，将继续强制要求")
                         # 允许继续（避免死循环），但会在下一轮继续检查
                     
+                    # 补充迭代完成信号，确保 UI 进度更新
+                    summary = self._extract_summary(response, iteration)
+                    self.iteration_completed.emit(iteration, summary)
                     self._emit_progress()
                     continue
             except Exception as e:
@@ -305,7 +307,6 @@ class AutoLoopWorker(QThread):
                 planning_done = self._engine.check_planning_complete(response, notes)
                 
                 if planning_done:
-                    self._first_planning_done = True
                     self._engine.enter_execution_phase()
                     current, max_verified, total = self._engine.parse_current_and_next_step(notes)
                     # 从笔记同步已勾选完成的步骤到缓存
@@ -355,7 +356,8 @@ class AutoLoopWorker(QThread):
                         self.log_signal.emit(f"✓ 步骤 {self._engine.current_step}/{total_steps} 完成")
                         
                         if self._engine.current_step >= total_steps:
-                            # 所有步骤完成，输出 DONE
+                            # 所有步骤完成，输出完成信号
+                            self._engine.state = LoopState.COMPLETED
                             self.log_signal.emit("🎉 所有步骤完成！任务结束")
                             self.phase_changed.emit("completed")
                             self.loop_completed.emit("所有计划步骤已完成！🎉")
@@ -370,7 +372,7 @@ class AutoLoopWorker(QThread):
                         if "验证失败" in response or "failed" in response.lower():
                             self.log_signal.emit("⚠️ 检测到验证失败，模型应修复后重试")
                 
-                # 检查完成信号（可能在响应中直接输出 DONE）
+                # 检查完成信号（可能在响应中直接输出 MISSION_COMPLETE）
                 if self._engine.check_completion(response):
                     self.phase_changed.emit("completed")
                     self.loop_completed.emit("任务完成 — 检测到完成信号！🎉")
@@ -449,16 +451,20 @@ class AutoLoopWorker(QThread):
                 session = self._conversation_core.session_manager.get_current_session()
                 if session:
                     session.set_messages(messages, preserve_compaction=True)
-            # Token 追踪 + 预算检查
+            # Token 增量追踪（只加新增部分，避免重复累加）
             if self._engine and messages:
-                token_count = count_messages_tokens(messages)
-                self._engine.add_tokens(token_count)
-                self.tokens_updated.emit(self._engine.total_tokens)
-                reason = self._engine.check_budget()
-                if reason:
-                    self.log_signal.emit(f"⚠️ {reason}，正在停止...")
-                    self._is_cancelled = True
-                    self._conversation_executor.stop()
+                current_count = count_messages_tokens(messages)
+                delta = max(0, current_count - self._last_message_token_count)
+                if delta > 0:
+                    self._engine.add_tokens(delta)
+                    self.tokens_updated.emit(self._engine.total_tokens)
+                    self._last_message_token_count = current_count
+                    # 预算检查
+                    reason = self._engine.check_budget()
+                    if reason:
+                        self.log_signal.emit(f"⚠️ {reason}，正在停止...")
+                        self._is_cancelled = True
+                        self._conversation_executor.stop()
 
         callbacks["messages_updated"] = on_messages_updated
 

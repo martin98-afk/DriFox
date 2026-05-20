@@ -12,7 +12,7 @@ class AutoLoopConfig:
     max_iterations: int = 50
     max_tokens: int = 5000000
     max_duration_minutes: int = 120
-    completion_signal: str = "DONE"
+    completion_signal: str = "MISSION_COMPLETE"
     completion_threshold: int = 3
     project_path: str = ""
     notes_file: str = "SHARED_TASK_NOTES.md"
@@ -36,9 +36,9 @@ class AutoLoopConfig:
     def from_dict(cls, d: dict) -> "AutoLoopConfig":
         return cls(
             max_iterations=d.get("max_iterations", 50),
-            max_tokens=d.get("max_tokens", 500000),
+            max_tokens=d.get("max_tokens", 5000000),
             max_duration_minutes=d.get("max_duration_minutes", 120),
-            completion_signal=d.get("completion_signal", "DONE"),
+            completion_signal=d.get("completion_signal", "MISSION_COMPLETE"),
             completion_threshold=d.get("completion_threshold", 3),
             project_path=d.get("project_path", ""),
             notes_file=d.get("notes_file", "SHARED_TASK_NOTES.md"),

@@ -2991,6 +2991,7 @@ class MessageCard(SimpleCardWidget):
     def stop_streaming_anim(self):
         self._streaming = False
         self._retrying = False
+        self.error = False  # 重试成功后清除错误状态
         try:
             self._anim_timer.stop()
         except RuntimeError:
@@ -3040,15 +3041,50 @@ class MessageCard(SimpleCardWidget):
 
     def _update_retry_status_bar(self):
         """更新重试状态栏的文本内容"""
+        # 重试时恢复标准重试样式
+        self._retry_status_widget.setStyleSheet(
+            """
+            QWidget {
+                background: rgba(255, 40, 40, 0.08);
+                border-top: 1px solid rgba(255, 60, 60, 0.2);
+                border-radius: 0px;
+            }
+            """
+        )
         # 旋转图标动画
         spin_chars = ["◜", "◝", "◞", "◟"]
         idx = int(self._pulse_phase * 2) % 4
         self._retry_spinner.setText(spin_chars[idx])
         # 错误类型
+        self._retry_type_label.setStyleSheet(
+            f"""
+            QLabel {{
+                color: #ff6b6b;
+                font-size: {scale_font_size(12)}px;
+                font-weight: 600;
+            }}
+            """
+        )
         self._retry_type_label.setText(self._retry_error_type)
         # 重试次数
+        self._retry_attempt_label.setStyleSheet(
+            f"""
+            QLabel {{
+                color: #ffaa44;
+                font-size: {scale_font_size(12)}px;
+            }}
+            """
+        )
         self._retry_attempt_label.setText(f"第 {self._retry_attempt}/{self._retry_max} 次重试")
         # 等待时间
+        self._retry_wait_label.setStyleSheet(
+            f"""
+            QLabel {{
+                color: #888;
+                font-size: {scale_font_size(11)}px;
+            }}
+            """
+        )
         self._retry_wait_label.setText(f"等待 {self._retry_wait_time:.0f}s")
 
     def _on_webengine_context_lost(self):
@@ -3292,7 +3328,7 @@ class MessageCard(SimpleCardWidget):
         top_clip.addRoundedRect(0, 0, w, h, radius, radius)
         painter.setClipPath(top_clip)
         if self.role == "assistant":
-            if self._retrying:
+            if self._retrying or self.error:
                 top_color = QColor("#ff2222")
             else:
                 top_color = QColor("#60D4FF")
@@ -3302,15 +3338,59 @@ class MessageCard(SimpleCardWidget):
             top_color.setAlpha(int(30 * breathe))
         painter.fillRect(0, 0, w, 5, top_color)
 
-    def set_error_state(self, is_error: bool):
+    def set_error_state(self, is_error: bool, error_message: str = ""):
+        """设置错误状态
+        
+        Args:
+            is_error: 是否为错误状态
+            error_message: 错误信息（错误状态时显示在状态栏）
+        """
         self.error = is_error
         if is_error:
             self._retrying = False
-            self._retry_status_widget.setVisible(False)
+            # 显示错误状态栏（而不是隐藏）
+            self._show_error_status(error_message)
             bd, bg = "#ff4d4d", "#2a1f1f"
         else:
+            self._retry_status_widget.setVisible(False)
             bd, bg = self._base_border, self._base_bg
         self._apply_card_style(border=bd, bg=bg)
+
+    def _show_error_status(self, error_message: str):
+        """显示错误状态信息（复用重试状态栏UI，但显示错误信息）"""
+        self._retry_error_type = "错误"
+        self._retry_type_label.setText("❌")
+        self._retry_attempt_label.setText(error_message if error_message else "请求失败")
+        self._retry_wait_label.setText("")
+        self._retry_spinner.setText("⚠")
+        # 改变状态栏样式为错误风格
+        self._retry_status_widget.setStyleSheet(
+            """
+            QWidget {
+                background: rgba(255, 40, 40, 0.08);
+                border-top: 1px solid rgba(255, 60, 60, 0.2);
+                border-radius: 0px;
+            }
+            """
+        )
+        self._retry_type_label.setStyleSheet(
+            f"""
+            QLabel {{
+                color: #ff6b6b;
+                font-size: {scale_font_size(14)}px;
+                font-weight: bold;
+            }}
+            """
+        )
+        self._retry_attempt_label.setStyleSheet(
+            f"""
+            QLabel {{
+                color: #ff9999;
+                font-size: {scale_font_size(12)}px;
+            }}
+            """
+        )
+        self._retry_status_widget.setVisible(True)
 
     def _emit_card_diff_requested(self):
         """发射卡片差异请求信号"""
