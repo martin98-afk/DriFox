@@ -1,5 +1,5 @@
 # app/core/conversation/executor.py
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Type
 
 from loguru import logger
 
@@ -14,7 +14,7 @@ class ConversationExecutor:
 
     职责：
     1. 根据 ConversationConfig 的权限策略生成权限检查闭包
-    2. 创建 OpenAIChatWorker 并连接回调
+    2. 根据可注入的 worker_factory 创建 Worker 并连接回调
     3. 管理 Worker 生命周期（启动/停止/清理）
     """
 
@@ -24,13 +24,15 @@ class ConversationExecutor:
         config: ConversationConfig,
         tool_executor: Any,
         agent_manager: Any,
+        worker_factory: Optional[Callable[..., Any]] = None,
     ):
         self._core = core
         self._config = config
         self._tool_executor = tool_executor
         self._agent_manager = agent_manager
+        self._worker_factory = worker_factory or OpenAIChatWorker  # 默认用 OpenAIChatWorker
 
-        self._current_worker: Optional[OpenAIChatWorker] = None
+        self._current_worker: Optional[Any] = None  # 不再硬编码 OpenAIChatWorker
         self._is_streaming = False
 
     @property
@@ -90,21 +92,22 @@ class ConversationExecutor:
         # 清理旧 Worker
         self.cleanup()
 
-        # 创建 Worker
-        self._current_worker = OpenAIChatWorker(
-            messages=messages,
-            session_messages=session.get_context_messages() if session else [],
-            llm_config=llm_config,
-            tools=tools,
-            tool_executor=self._tool_executor,
-            tool_start_callback=callbacks.get("tool_call_sync_requested"),
-            permission_check_callback=self._make_permission_checker(),
-            compaction_prompt=compaction_prompt,
-            compaction_config=compaction_config,
-            permission_cache=self._core.permission_cache,
-            compactor=self._core.compactor,
-            initial_compaction_cache=getattr(session, "compaction_cache", None),
-        )
+        # 创建 Worker（通过 factory 注入，支持替换为 MockWorker 等）
+        worker_kwargs = {
+            "messages": messages,
+            "session_messages": session.get_context_messages() if session else [],
+            "llm_config": llm_config,
+            "tools": tools,
+            "tool_executor": self._tool_executor,
+            "tool_start_callback": callbacks.get("tool_call_sync_requested"),
+            "permission_check_callback": self._make_permission_checker(),
+            "compaction_prompt": compaction_prompt,
+            "compaction_config": compaction_config,
+            "permission_cache": self._core.permission_cache,
+            "compactor": self._core.compactor,
+            "initial_compaction_cache": getattr(session, "compaction_cache", None),
+        }
+        self._current_worker = self._worker_factory(**worker_kwargs)
 
         # 连接回调
         self._connect_callbacks(callbacks)

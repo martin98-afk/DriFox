@@ -1,4 +1,6 @@
 # app/core/conversation/config.py
+from typing import Dict as DictType
+from loguru import logger
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
@@ -61,3 +63,63 @@ class ConversationConfig:
     agent_permission_config: Dict[str, Any] = field(default_factory=dict)
     # INTERACTIVE 策略下需要外部提供权限检查回调
     interactive_check_callback: Optional[Callable[[str, dict], str]] = None
+
+
+# ============================================================
+# PermissionCache（从 app/core/permission_cache.py 迁移）
+# ============================================================
+class PermissionCache:
+    """工具权限缓存管理器
+
+    设计原则：
+    - Round-level: 单轮对话内自动允许，工具执行完自动清理
+    - Session-level: 整个会话有效，跨 Worker 持久化
+    - 每个 ChatEngine 实例有独立的 PermissionCache，多窗口隔离
+    """
+
+    def __init__(self):
+        self._round_cache: DictType[str, bool] = {}
+        self._session_cache: DictType[str, bool] = {}
+
+    def is_allowed(self, tool_name: str) -> bool:
+        if tool_name in self._round_cache:
+            return True
+        if tool_name in self._session_cache:
+            return True
+        return False
+
+    def allow_round(self, tool_name: str) -> None:
+        self._round_cache[tool_name] = True
+
+    def allow_session(self, tool_name: str) -> None:
+        self._session_cache[tool_name] = True
+        logger.info(f"[PermissionCache] 设置 session 缓存: tool={tool_name}")
+
+    def deny(self, tool_name: str) -> None:
+        if tool_name in self._round_cache:
+            del self._round_cache[tool_name]
+        if tool_name in self._session_cache:
+            del self._session_cache[tool_name]
+
+    def clear_round(self) -> None:
+        self._round_cache.clear()
+
+    def clear_session(self) -> None:
+        self._session_cache.clear()
+
+    def clear_all(self) -> None:
+        self._round_cache.clear()
+        self._session_cache.clear()
+
+    def get_session_cache(self) -> DictType[str, bool]:
+        return self._session_cache.copy()
+
+    def sync_session_cache(self, cache: DictType[str, bool]) -> None:
+        self._session_cache = cache.copy()
+        logger.info(f"[PermissionCache] 同步 session 缓存: {len(cache)} 项")
+
+    def get_cache_stats(self) -> DictType[str, int]:
+        return {
+            "round_count": len(self._round_cache),
+            "session_count": len(self._session_cache),
+        }

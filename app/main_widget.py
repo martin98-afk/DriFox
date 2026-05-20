@@ -760,6 +760,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.backend.create_session()
         session.messages = messages
         session.name = name
+        session.topic_summary = name  # 同步 topic_summary，避免 _display_current_session 覆盖 title_edit
         self._current_session_id = session.session_id
 
         # 清空聊天区域

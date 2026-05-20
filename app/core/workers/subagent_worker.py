@@ -59,10 +59,30 @@ class SubAgentExecutor(QThread):
         self._pending_answer = None
         self._last_result = None
         self._execution_error = None
-        self._start_time = None
+        self._start_time: Optional[float] = None  # Unix timestamp, 访问用 @property
         # 日志存储: [{"type": "progress"|"thinking"|"ai_response"|"tool_call"|"tool_result"|"finish", "content": str, "timestamp": float}]
         self._logs: List[Dict] = []
         self._tool_call_count = 0
+
+    @property
+    def start_time(self) -> Optional[float]:
+        """获取任务开始时间戳（供 SubAgentManager 超时检测使用）"""
+        return self._start_time
+
+    @property
+    def tool_call_count(self) -> int:
+        """获取工具调用次数（供 SubAgentManager 使用）"""
+        return self._tool_call_count
+
+    @property
+    def last_result(self) -> Optional[str]:
+        """获取最终结果（供 SubAgentManager 使用）"""
+        return self._last_result
+
+    @property
+    def execution_error(self) -> Optional[str]:
+        """获取执行错误（供 SubAgentManager 使用）"""
+        return self._execution_error
         self._log_store_callback = None  # 日志存储回调
         self._get_history_messages = None  # 获取主智能体历史消息的回调
 
@@ -389,17 +409,53 @@ class SubAgentExecutor(QThread):
         return response_content, tool_calls_found, reasoning_content
 
     def _cap_max_output_tokens(self, model: str, requested: int) -> int:
+        """
+        计算 max_tokens 的合理上限。
+
+        核心原则：
+        - 用户明确设置的 max_tokens 应被尊重，provider 默认值不再作为硬上限
+        - 仅对已知的模型特定限制做软提示（不强制截断）
+        - 对于 write/edit 等工具调用场景，需要足够的输出 token
+          来生成完整的 arguments JSON（含长 content）
+
+        Args:
+            model: 模型名称
+            requested: 用户配置中请求的 max_tokens
+
+        Returns:
+            合理的 max_tokens 值
+        """
         try:
             requested_int = int(requested)
         except Exception:
             return requested
+
         profile = get_provider_profile(self.llm_config)
-        cap = int(profile.get("max_output_tokens", requested_int))
-        if profile.get("family") == "openai":
-            model_name = (model or "").lower()
-            if "o1" in model_name or "o3" in model_name:
-                cap = max(cap, min(requested_int, 32768))
-        return min(requested_int, cap)
+
+        # 1. 如果用户没有设置或设置值 <= 0，使用 provider 默认值
+        if requested_int <= 0:
+            return int(profile.get("max_output_tokens", 8192))
+
+        # 2. 获取绝对上限（防止用户设置极端值）
+        absolute_limit = int(profile.get("absolute_limit", 65536))
+
+        # 3. 针对特定模型系列的软限制（仅当用户设置值超出时才生效）
+        family = profile.get("family", "")
+        model_name = (model or "").lower()
+
+        if family == "openai":
+            if "gpt-4-turbo" in model_name:
+                # GPT-4-Turbo 实际限制 4096，超出会报错
+                if requested_int > 4096:
+                    return 4096
+        elif family == "anthropic":
+            # Claude 系列上限一般为 8192
+            pass
+        elif family == "minimax":
+            pass  # MiniMax 支持高输出
+
+        # 4. 只做绝对上限保护（避免明显错误的极值）
+        return min(requested_int, absolute_limit)
 
     def _execute_tools(self, tool_calls: List[Dict]) -> Optional[List[Dict]]:
         """执行工具调用"""
@@ -654,15 +710,14 @@ class SubAgentManager(QObject):
         for task_id in list(self._running_tasks.keys()):
             executor = self._running_tasks[task_id]
             if executor.isFinished():
-                # 收集结果和日志
-                result = getattr(executor, "_last_result", "") or ""
-                error = getattr(executor, "_execution_error", "") or ""
-                agent_name = getattr(executor, "agent_name", "")
-                task_description = getattr(executor, "task_description", "")
-                logs = executor.get_logs() if hasattr(executor, "get_logs") else []
-                tool_call_count = getattr(executor, "_tool_call_count", 0) or 0
-                start_time = getattr(executor, "_start_time", None)
-                elapsed = int(time.time() - start_time) if start_time else 0
+                # 通过公共属性获取结果
+                result = executor.last_result or ""
+                error = executor.execution_error or ""
+                agent_name = executor.agent_name
+                task_description = executor.task_description
+                logs = executor.get_logs()
+                tool_call_count = executor.tool_call_count
+                elapsed = int(time.time() - executor.start_time) if executor.start_time else 0
 
                 self._finished_tasks[task_id] = {
                     "result": result,
@@ -693,14 +748,14 @@ class SubAgentManager(QObject):
 
         for task_id in list(self._running_tasks.keys()):
             executor = self._running_tasks[task_id]
-            start_time = getattr(executor, "_start_time", None)
+            start_time = executor.start_time
 
             if start_time and (now - start_time) > timeout_seconds:
                 logger.warning(f"[SubAgentManager] Task {task_id} dead for {now - start_time}s, cancelling")
                 executor.cancel()
-                agent_name = getattr(executor, "agent_name", "")
-                task_description = getattr(executor, "task_description", "")
-                logs = executor.get_logs() if hasattr(executor, "get_logs") else []
+                agent_name = executor.agent_name
+                task_description = executor.task_description
+                logs = executor.get_logs()
                 error_msg = f"Task cancelled due to timeout ({timeout_seconds}s)"
                 self._finished_tasks[task_id] = {
                     "result": "",
@@ -834,7 +889,7 @@ class SubAgentManager(QObject):
                 tasks_info.append({
                     "task_id": tid,
                     "status": "running" if executor.isRunning() else "finishing",
-                    "agent": getattr(executor, "agent_name", ""),
+                    "agent": executor.agent_name,
                 })
             elif tid in self._finished_tasks:
                 tasks_info.append({
@@ -946,6 +1001,6 @@ class SubAgentManager(QObject):
             tasks_info.append({
                 "task_id": task_id,
                 "status": "running" if executor.isRunning() else "finishing",
-                "agent": getattr(executor, "agent_name", ""),
+                "agent": executor.agent_name,
             })
         return ToolResult(True, content={"tasks": tasks_info})

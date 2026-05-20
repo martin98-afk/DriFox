@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
