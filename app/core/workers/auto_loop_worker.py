@@ -343,32 +343,21 @@ class AutoLoopWorker(QThread):
                 current_step, max_verified, total_steps = self._engine.parse_current_and_next_step(notes)
                 
                 if total_steps > 0:
-                    self._engine.set_step_progress(
-                        current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step,
-                        total_steps,
-                    )
+                    # 更新步骤进度（仅用于 UI 显示，不影响结束）
+                    display_step = current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step
+                    self._engine.set_step_progress(display_step, total_steps)
                     
-                    # 检测当前步骤是否已完成
+                    # 检测当前步骤是否已完成（仅用于前进到下一步显示，不决定结束）
                     step_completed = self._check_step_completed(response, notes, self._engine.current_step)
                     
                     if step_completed:
                         self._last_step = self._engine.current_step
                         self.log_signal.emit(f"✓ 步骤 {self._engine.current_step}/{total_steps} 完成")
-                        
-                        if self._engine.current_step >= total_steps:
-                            # 所有步骤完成，输出完成信号
-                            self._engine.state = LoopState.COMPLETED
-                            self.log_signal.emit("🎉 所有步骤完成！任务结束")
-                            self.phase_changed.emit("completed")
-                            self.loop_completed.emit("所有计划步骤已完成！🎉")
-                            return
-                        else:
-                            # 前进到下一步
-                            self._engine.advance_to_step(self._engine.current_step + 1)
-                            self.log_signal.emit(f"📋 执行步骤 {self._engine.current_step}/{total_steps}: {self._get_next_step_preview(notes, self._engine.current_step)}")
+                        # 前进到下一步（仅用于 UI 进度显示）
+                        self._engine.advance_to_step(self._engine.current_step + 1)
+                        self.log_signal.emit(f"📋 执行步骤 {self._engine.current_step}/{total_steps}: {self._get_next_step_preview(notes, self._engine.current_step)}")
                     else:
                         # 步骤未完成，可能需要继续执行或验证
-                        # 检查是否有验证失败的情况
                         if "验证失败" in response or "failed" in response.lower():
                             self.log_signal.emit("⚠️ 检测到验证失败，模型应修复后重试")
                 

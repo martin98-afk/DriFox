@@ -90,9 +90,8 @@ class AutoLoopEngine(BaseEngine):
     # ========== 状态写入方法 ==========
 
     def set_step_progress(self, current: int, total: int):
-        """设置步骤进度（由 Worker 调用）"""
+        """设置步骤进度（仅用于 UI 显示，不影响结束）"""
         self._current_step = current
-        self._total_steps = total
 
     def add_tokens(self, tokens: int):
         """累加 token 使用量"""
@@ -160,10 +159,8 @@ class AutoLoopEngine(BaseEngine):
     def parse_steps_from_notes(self, notes: str) -> tuple[int, int]:
         """从笔记中解析当前步骤和总步骤数"""
         patterns = [
-            r'- \[.?\]?\s*\[步骤\s*(\d+)\]',
-            r'- \[.?\]?\s*步骤\s*(\d+)',
-            r'- \[x\]\s*\[步骤\s*(\d+)\]',
-            r'\\[步骤\s*(\d+)\\]',
+            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'- \[.*?\]\s*步骤\s*(\d+)',
         ]
         steps = []
         for pattern in patterns:
@@ -177,10 +174,23 @@ class AutoLoopEngine(BaseEngine):
 
     def parse_current_and_next_step(self, notes: str) -> tuple[int, int, int]:
         """从笔记中解析当前步骤、已勾选完成的最大步骤、总步骤数"""
-        all_step_pattern = r'- \[.?\]?\s*\[步骤\s*(\d+)\]'
-        all_steps = re.findall(all_step_pattern, notes, re.IGNORECASE)
-        if not all_steps:
-            all_steps = re.findall(r'- \[.?\]?\s*步骤\s*(\d+)', notes, re.IGNORECASE)
+        # 同时匹配两种常见格式：
+        # 1. - [ ] [步骤 1] <描述>  (嵌套方括号)
+        # 2. - [ ] 步骤 1 <描述>      (直接)
+        # 匹配三种格式：
+        # 1. - [x] [步骤 1] (嵌套方括号)
+        # 2. - [x] 步骤 1   (直接)
+        # 3. - [步骤 1]     (无复选框)
+        patterns = [
+            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'- \[.*?\]\s*步骤\s*(\d+)',
+        ]
+        all_steps = []
+        for pattern in patterns:
+            matches = re.findall(pattern, notes, re.IGNORECASE)
+            if matches:
+                all_steps = matches
+                break
 
         total_steps = len(all_steps)
         max_step_num = max([int(s) for s in all_steps]) if all_steps else 0
@@ -194,9 +204,8 @@ class AutoLoopEngine(BaseEngine):
     def parse_checked_steps_from_notes(self, notes: str) -> set[int]:
         """从笔记中解析已勾选完成的步骤 [x]"""
         patterns = [
-            r'- \[x\]\s*\[步骤\s*(\d+)\]',
-            r'- \[x\]\s*步骤\s*(\d+)',
-            r'- \[x\]\s*\[Step\s*(\d+)\]',
+            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'- \[.*?\]\s*步骤\s*(\d+)',
         ]
         checked = set()
         for pattern in patterns:
@@ -273,7 +282,11 @@ class AutoLoopEngine(BaseEngine):
     # ========== 完成检测 ==========
 
     def check_completion(self, response_text: str) -> bool:
-        """检测响应中是否包含完成信号"""
+        """检测响应中是否包含完成信号
+        
+        结束只由 completion_signal 连续出现次数决定，与步骤数无关。
+        步骤数可动态变化，不参与结束判断。
+        """
         signal = self.config.completion_signal
         if not signal:
             return False
@@ -281,9 +294,6 @@ class AutoLoopEngine(BaseEngine):
         if not self.is_executing_phase():
             return False
         if signal in response_text:
-            if not self.is_task_completed():
-                logger.info(f"[AutoLoop] Received {signal} but not all steps verified, continuing")
-                return False
             self._completion_count += 1
             if self._completion_count >= self.config.completion_threshold:
                 self.state = LoopState.COMPLETED
@@ -409,16 +419,13 @@ class AutoLoopEngine(BaseEngine):
                 return True
 
         if notes:
-            pattern = rf'- \[(x|✓)\]\s*步骤\s*{step_num}'
+            pattern = rf'- \[.*?\]\s*步骤\s*{step_num}'
             if re.search(pattern, notes, re.IGNORECASE):
                 return True
             if re.search(rf'步骤\s*{step_num}\s+结果', notes):
                 return True
             if re.search(rf'步骤\s*{step_num}.*完成', notes, re.DOTALL):
                 return True
-
-        if response.strip().endswith(self.config.completion_signal):
-            return True
 
         return False
 
