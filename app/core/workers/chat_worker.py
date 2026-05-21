@@ -594,6 +594,7 @@ class OpenAIChatWorker(QThread):
 
     def _build_response_message_sequence(self, tool_results=None) -> List[Dict]:
         now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        model_name = str(self.llm_config.get("模型名称", "") or "")
 
         # 性能优化：缓存 reasoning_content，避免重复 join
         reasoning_content = self._get_reasoning_content()
@@ -711,6 +712,8 @@ class OpenAIChatWorker(QThread):
                     assistant_msg["tool_calls"] = [tool_call]
                 if reasoning_content:
                     assistant_msg["reasoning_content"] = reasoning_content
+                if model_name:
+                    assistant_msg["model_name"] = model_name
                 if assistant_msg.get("content") or assistant_msg.get("tool_calls"):
                     sequence.append(assistant_msg)
 
@@ -736,6 +739,8 @@ class OpenAIChatWorker(QThread):
                     assistant_msg["tool_calls"] = [tool_call]
                 if reasoning_content:
                     assistant_msg["reasoning_content"] = reasoning_content
+                if model_name:
+                    assistant_msg["model_name"] = model_name
                 if assistant_msg.get("tool_calls"):
                     sequence.append(assistant_msg)
                 sequence.append(tool_result)
@@ -748,6 +753,8 @@ class OpenAIChatWorker(QThread):
             }
             if reasoning_content:
                 assistant_msg["reasoning_content"] = reasoning_content
+            if model_name:
+                assistant_msg["model_name"] = model_name
             sequence.append(assistant_msg)
         elif not sequence and self.full_response:
             assistant_msg = {
@@ -757,9 +764,14 @@ class OpenAIChatWorker(QThread):
             }
             if reasoning_content:
                 assistant_msg["reasoning_content"] = reasoning_content
+            if model_name:
+                assistant_msg["model_name"] = model_name
             sequence.append(assistant_msg)
         elif not sequence and not response_blocks:
-            sequence.append({"role": "assistant", "content": [], "timestamp": now_ts})
+            empty_msg = {"role": "assistant", "content": [], "timestamp": now_ts}
+            if model_name:
+                empty_msg["model_name"] = model_name
+            sequence.append(empty_msg)
 
         return sequence
 
