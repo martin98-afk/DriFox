@@ -234,6 +234,19 @@ class ToolExecutor:
             # 记录失败不阻塞主流程
             logger.warning(f"[ToolExecutor] 编辑后备份失败: {e}")
 
+    def _cleanup_backup_on_failure(self):
+        """编辑失败时清理备份文件"""
+        if not self._file_recorder:
+            return
+        if not self._session_id or not self._call_id:
+            return
+
+        try:
+            self._file_recorder.cleanup_on_failure(self._session_id, self._call_id)
+            logger.info(f"[ToolExecutor] 已清理失败操作的备份: session={self._session_id}, call={self._call_id}")
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 清理备份失败: {e}")
+
     def set_memory_manager(self, memory_manager):
         if self._builtin_tools:
             self._builtin_tools.set_memory_manager(memory_manager)
@@ -582,6 +595,9 @@ class ToolExecutor:
                 
                 return result
             except Exception as e:
+                # 文件编辑操作失败时清理备份
+                if tool_name in self._FILE_OPS_TO_TRACK:
+                    self._cleanup_backup_on_failure()
                 return ToolResult(False, error=f"Execution error: {str(e)}")
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")

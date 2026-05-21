@@ -198,6 +198,21 @@ class FileOperationRecorder:
         """根据备份路径获取编辑后备份路径"""
         return str(Path(backup_path).with_suffix(self.AFTER_BACKUP_SUFFIX))
 
+    def cleanup_on_failure(self, session_id: str, call_id: str):
+        """
+        编辑失败时清理备份文件
+
+        Args:
+            session_id: 会话 ID
+            call_id: 工具调用 ID
+        """
+        backup_path = self._get_backup_path(session_id, call_id)
+        if backup_path:
+            self._cleanup_backup_files(backup_path)
+            # 同时清理数据库中的记录
+            self._session_store.remove_file_operation(session_id, call_id)
+            logger.info(f"[FileRecorder] 已清理失败操作的备份: {backup_path}")
+
     def _cleanup_backup_files(self, backup_path: str):
         """清理备份文件及其对应的编辑后备份"""
         try:
