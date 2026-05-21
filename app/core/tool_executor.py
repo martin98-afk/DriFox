@@ -278,6 +278,10 @@ class ToolExecutor:
                 self._builtin_tools._task_tools._current_project = project
             logger.info(f"[ToolExecutor] set_current_project({project})")
 
+    def get_workdir(self) -> Optional[str]:
+        """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）"""
+        return self._workdir
+
     def set_workdir(self, workdir: Optional[str]):
         """设置工作目录（None 或 "" 表示恢复默认）"""
         self._workdir = workdir

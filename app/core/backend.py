@@ -441,16 +441,19 @@ class ChatBackend(QObject):
     def get_memory_context_string(self, limit: int = 8) -> str:
         """获取记忆上下文字符串
         
-        Args:
-            query: 搜索关键词
-            limit: 条目记忆最大数量
-            project: 当前项目名称
+        多窗口隔离：优先使用 tool_executor 中的实例级 workdir，
+        避免 DB 中其他窗口写入的工作目录值。
         """
         if self._memory_manager:
+            # 多窗口隔离：从 tool_executor 获取实例级 workdir（而非 DB）
+            workdir = None
+            if self._tool_executor:
+                workdir = self._tool_executor.get_workdir()
             return self._memory_manager.format_memories_for_prompt(
                 project=self._current_project,
                 entry_limit=limit,
-                doc_limit=20
+                doc_limit=20,
+                workdir_override=workdir,
             )
         return ""
     
@@ -586,13 +589,20 @@ class ChatBackend(QObject):
     # ========== 上下文构建方法 ==========
     
     def _build_memory_context(self, query: str = "", project: str = "默认项目") -> str:
-        """构建长期记忆上下文（供 ChatEngine 调用）"""
+        """构建长期记忆上下文（供 ChatEngine 调用）
+        
+        多窗口隔离：优先使用 tool_executor 中的实例级 workdir。
+        """
         if not self._memory_manager:
             return ""
+        workdir = None
+        if self._tool_executor:
+            workdir = self._tool_executor.get_workdir()
         return self._memory_manager.format_memories_for_prompt(
             project=project,
             entry_limit=8,
-            doc_limit=20
+            doc_limit=20,
+            workdir_override=workdir,
         )
     
     def _build_chat_cards_context(self) -> str:
