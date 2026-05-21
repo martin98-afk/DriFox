@@ -2528,10 +2528,12 @@ class MessageCard(SimpleCardWidget):
             parent=None,
             error: bool = False,
             reasoning_content: str = "",
+            model_name: str = None,
     ):
         super().__init__(parent)
         self.parent = parent
         self.role = role
+        self.model_name = model_name
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -2540,7 +2542,7 @@ class MessageCard(SimpleCardWidget):
                 self.timestamp = dt.strftime("%m-%d %H:%M")
             except ValueError:
                 self.timestamp = self.timestamp[:14]
-        # 助手卡片初始不显示时间，流完成后再设持续时长
+        # 助手卡片初始不显示时间，流完成后再设模型名称或时间
         if role == "assistant" and not timestamp:
             self.timestamp = ""
         self.error = error
@@ -2675,23 +2677,15 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, 'viewer') and self.viewer and hasattr(self.viewer, '_refresh_viewer_font'):
             self.viewer._refresh_viewer_font()
 
-    def set_duration(self, duration_seconds: int):
-        """设置执行持续时间显示（用于 assistant 卡片）"""
+    def set_model_name(self, model_name: str):
+        """设置模型名称显示（用于助手卡片）"""
         if self.role != "assistant":
             return
-        if duration_seconds <= 0:
+        if not model_name:
             return
-        # 格式化为 mm:ss 或 h:mm:ss
-        h, rem = divmod(duration_seconds, 3600)
-        m, s = divmod(rem, 60)
-        if h > 0:
-            duration_text = f"{h}:{m:02d}:{s:02d}"
-        else:
-            duration_text = f"{m:02d}:{s:02d}"
-        # 更新时间戳显示为持续时间
+        self.model_name = model_name
         if hasattr(self, '_ts_label'):
-            self._ts_label.setText(duration_text)
-            self._ts_label.setToolTip(f"执行持续时间: {duration_text}")
+            self._ts_label.setText(model_name)
             self._ts_label.setVisible(True)
             self._ts_label.setStyleSheet(
                 f"""
@@ -2767,10 +2761,14 @@ class MessageCard(SimpleCardWidget):
 
         top.addWidget(av)
         top.addWidget(title_wrap)
-        # 所有卡片都显示时间（用户卡片显示时间戳，助手卡片显示持续时间）
-        ts = QLabel(self.timestamp, self)
+        # 用户卡片显示时间戳，助手卡片显示模型名称
+        if self.role == "assistant" and self.model_name:
+            label_text = self.model_name
+        else:
+            label_text = self.timestamp
+        ts = QLabel(label_text, self)
         self._ts_label = ts
-        ts.setVisible(bool(self.timestamp))
+        ts.setVisible(bool(label_text))
         ts.setStyleSheet(
             f"""
             QLabel {{
