@@ -327,7 +327,7 @@ class ToolExecutor:
         "git_diff": [],
         "get_diagnostics": ["file_path"],
         "summarize_changes": ["text"],
-        "edit_project_note": ["old_string", "new_string"],
+        "edit_project_note": ["operations"],
         "read_project_note": [],
         "todowrite": ["todos"],
         "todoread": [],
@@ -517,8 +517,7 @@ class ToolExecutor:
             ),
             "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
             "edit_project_note": lambda: self._builtin_tools.edit_project_note(
-                args.get("old_string", ""),
-                args.get("new_string", "")),
+                args.get("operations", [])),
             "read_project_note": lambda: self._builtin_tools.read_project_note(
                 args.get("offset", 1),
                 args.get("limit", 500)),

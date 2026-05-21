@@ -79,6 +79,8 @@ class Settings(QConfig):
             app_data_dir = get_app_data_dir()
             cls._instance.file = app_data_dir / "app.config"
             try:
+                # 在加载配置前先扩展主题选项验证器，防止保存的主题被拒绝
+                update_theme_options()
                 cls._instance.load()
             except:
                 logger.exception("无法加载配置文件")
