@@ -974,8 +974,7 @@ class MemoryCardContent(QWidget):
                 if d.get("added_by") == "git_worktree":
                     continue
                 # 仅检测：根目录 或 worktree 激活时
-                should_check = d.get("is_working_dir", False) or is_worktree_active
-                if should_check and original_repo_path is None:
+                if original_repo_path is None and (d.get("is_working_dir", False) or is_worktree_active):
                     try:
                         if GitWorktreeDetector.detect_git(d.get("file_path", "")):
                             original_repo_path = d["file_path"]
