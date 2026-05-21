@@ -361,7 +361,22 @@ class ChatBackend(QObject):
     def cleanup_worker(self):
         """清理 worker"""
         if self._chat_engine:
-            self._chat_engine.cleanup_worker()
+            return self._chat_engine.cleanup_worker()
+
+    def get_current_worker(self):
+        """获取当前 Worker 实例"""
+        if self._chat_engine:
+            return self._chat_engine.get_current_worker()
+        return None
+
+    def get_last_cache_stats(self) -> Optional[Dict]:
+        """获取最后一次的缓存统计（Worker 被清理后仍可访问）"""
+        return getattr(self, '_last_cache_stats', None)
+
+    def set_last_cache_stats(self, stats: Dict):
+        """保存最后一次的缓存统计"""
+        self._last_cache_stats = stats
+
     
     def get_context_usage_snapshot(self, session, llm_config) -> Dict:
         """获取上下文使用快照"""

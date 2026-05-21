@@ -276,7 +276,6 @@ class MemoryManagerCore:
             except Exception:
                 pass
 
-        lines.append("请优先遵循高置信度的记忆。")
         return "\n".join(lines)
 
     # ==================== 兼容旧接口 ====================

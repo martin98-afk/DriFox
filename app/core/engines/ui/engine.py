@@ -340,7 +340,11 @@ class UIEngine(BaseEngine):
                     current_message=current_message_text
                 )
 
-        messages = self._adapter.build_messages(self._session_manager.get_current_session(), llm_config)
+        messages = self._adapter.build_messages(
+            self._session_manager.get_current_session(),
+            llm_config,
+            current_agent=self._current_agent,
+        )
         if self._current_agent:
             available_tools = self._get_agent_manager().get_agent_tools_schema(
                 self._current_agent
@@ -471,8 +475,30 @@ class UIEngine(BaseEngine):
                     current_message=current_message_text
                 )
 
+        # 保存缓存统计（在 worker 被清理前）
+        self._save_cache_stats()
         # 对话结束后清理 worker，释放内存
         self.cleanup()
+
+    def _save_cache_stats(self):
+        """保存 Worker 的缓存统计到 Backend（Worker 被清理后仍可访问）"""
+        from loguru import logger
+        worker = getattr(self._conversation_executor, '_current_worker', None)
+        if not worker:
+            logger.debug("[_save_cache_stats] No worker found")
+            return
+        try:
+            if hasattr(worker, 'get_cache_stats'):
+                stats = worker.get_cache_stats()
+                if stats:
+                    logger.debug(f"[_save_cache_stats] hit_rate={stats.hit_rate}, read={stats.cache_read_tokens}")
+                    self._backend.set_last_cache_stats(stats.to_dict())
+                else:
+                    logger.debug("[_save_cache_stats] stats is None")
+            else:
+                logger.debug("[_save_cache_stats] worker has no get_cache_stats")
+        except Exception as e:
+            logger.debug(f"[_save_cache_stats] Error: {e}")
 
     def _on_error(self, error: str):
         self._emit("error", error)
@@ -492,3 +518,7 @@ class UIEngine(BaseEngine):
         由 Backend.cleanup_worker() 调用，委托 ConversationExecutor.cleanup() 实现。
         """
         self.cleanup()
+
+    def get_current_worker(self):
+        """获取当前 Worker 实例（供外部获取缓存统计等）"""
+        return getattr(self._conversation_executor, '_current_worker', None)

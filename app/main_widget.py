@@ -782,16 +782,54 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 重置输入框高度
         if hasattr(self, 'input_area'):
-            self.input_area._initializing = True
             self.input_area.setFixedHeight(72)
             self.input_area._initializing = False
 
         # 复用现有的会话显示逻辑
         self._display_current_session()
 
-        # 滚动到底部
-        QTimer.singleShot(50, self._scroll_to_bottom)
-        QTimer.singleShot(150, self._scroll_to_bottom)
+    def _refresh_cache_stats(self):
+        """刷新缓存统计显示（对话完成后调用）"""
+        ring = getattr(self, "context_usage_ring", None)
+        if not ring:
+            return
+
+        # 优先从 Backend 获取保存的缓存统计（Worker 可能已被清理）
+        stats_dict = self.backend.get_last_cache_stats()
+
+        # 如果 Backend 没有缓存统计，尝试从 worker 获取
+        if not stats_dict:
+            worker = self.backend.get_current_worker()
+            if worker:
+                try:
+                    stats = worker.get_cache_stats()
+                    if stats:
+                        stats_dict = stats.to_dict()
+                except Exception:
+                    pass
+
+        if not stats_dict:
+            return
+
+        try:
+            # 计算节省的成本
+            cost_savings = 0.0
+            cost_with = stats_dict.get('cost_usd', 0.0)
+            cost_without = stats_dict.get('cost_without_cache_usd', 0.0)
+            if cost_without > 0:
+                cost_savings = cost_without - cost_with
+            hit_rate = stats_dict.get('hit_rate', 0.0)
+            read_tokens = stats_dict.get('cache_read_tokens', 0)
+            write_tokens = stats_dict.get('cache_creation_5m_tokens', 0) + stats_dict.get('cache_creation_1h_tokens', 0)
+            logger.debug(f"[CacheStats] hit_rate={hit_rate}, read={read_tokens}, write={write_tokens}")
+            ring.set_cache_stats(
+                hit_rate=hit_rate,
+                read_tokens=read_tokens,
+                write_tokens=write_tokens,
+                cost_savings=cost_savings,
+            )
+        except Exception as e:
+            logger.debug(f"[CacheStats] Failed to refresh: {e}")
 
     def setup_ui(self):
         Colors.refresh()
@@ -5341,8 +5379,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     current_title = self.title_edit.text() if self.title_edit else "对话完成"
                     self._notify_if_inactive(current_title, preview)
 
+        # 对话完成后更新缓存统计显示
+        self._refresh_cache_stats()
+
         # 对话完成后刷新余额显示
         self._refresh_balance()
+
+
 
     def _refresh_balance(self):
         """刷新余额显示（对话完成后调用）"""

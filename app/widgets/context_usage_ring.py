@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from PyQt5.QtCore import Qt, QTimer, QPoint
+import math
 from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics
 from PyQt5.QtWidgets import QWidget, QApplication, QToolTip
 
@@ -15,6 +16,12 @@ class ContextUsageRing(QWidget):
         self._track_color = QColor(255, 255, 255, 40)
         self._normal_tokens = 0
         self._compacted_tokens = 0
+
+        # 缓存命中相关
+        self._cache_hit_rate = 0.0  # 缓存命中率 0.0-1.0
+        self._cache_read_tokens = 0
+        self._cache_write_tokens = 0
+        self._cache_cost_savings = 0.0  # 节省的成本（美元）
 
         self.setFixedSize(18, 18)
         self.setMouseTracking(True)
@@ -99,6 +106,47 @@ class ContextUsageRing(QWidget):
         self._last_tooltip_lines = tooltip_lines
         self.update()
 
+    def set_cache_stats(self, hit_rate: float = 0.0, read_tokens: int = 0, write_tokens: int = 0, cost_savings: float = 0.0):
+        """
+        设置缓存统计信息
+
+        Args:
+            hit_rate: 缓存命中率 (0.0 - 1.0)
+            read_tokens: 从缓存读取的 token 数
+            write_tokens: 写入缓存的 token 数
+            cost_savings: 节省的成本（美元）
+        """
+        self._cache_hit_rate = max(0.0, min(1.0, hit_rate))
+        self._cache_read_tokens = read_tokens
+        self._cache_write_tokens = write_tokens
+        self._cache_cost_savings = cost_savings
+
+        # 更新 tooltip 内容
+        if hit_rate > 0:
+            cache_rate_display = f"{hit_rate * 100:.1f}%"
+            self._last_tooltip_lines.extend([
+                "",
+                "━━━━━━━━━━",
+                "📊 缓存统计",
+                f"命中率: {cache_rate_display}",
+            ])
+            if read_tokens > 0:
+                self._last_tooltip_lines.append(f"缓存读取: {read_tokens:,} tokens")
+            if write_tokens > 0:
+                self._last_tooltip_lines.append(f"缓存写入: {write_tokens:,} tokens")
+            if cost_savings > 0:
+                self._last_tooltip_lines.append(f"节省成本: ${cost_savings:.4f}")
+        elif read_tokens > 0 or write_tokens > 0:
+            self._last_tooltip_lines.extend([
+                "",
+                "━━━━━━━━━━",
+                "📊 缓存统计",
+                f"缓存读取: {read_tokens:,} tokens",
+                f"缓存写入: {write_tokens:,} tokens",
+            ])
+
+        self.update()
+
     def _show_tooltip(self):
         """使用 QToolTip 显示提示，位置调整为向左延伸"""
         lines = self._last_tooltip_lines
@@ -149,16 +197,16 @@ class ContextUsageRing(QWidget):
             font.setFamily(font_family)
             font.setPointSize(font_size)
             fm = QFontMetrics(font)
-            
+
             # 计算最宽行的宽度
             max_width = 0
             for line in lines:
                 line_width = fm.width(line)
                 if line_width > max_width:
                     max_width = line_width
-            
+
             # 加上左右 padding 和边框
-            tooltip_width = max_width   # 24px padding + 2px border
+            tooltip_width = max_width + 24 + 2
             tooltip_height = len(lines) * fm.height() + 16
         except Exception:
             tooltip_width = 220
@@ -238,3 +286,28 @@ class ContextUsageRing(QWidget):
             ring_pen = QPen(self._ring_color, 2.2)
             painter.setPen(ring_pen)
             painter.drawArc(rect, start_angle, span_angle)
+
+        # 如果有缓存命中率，绘制缓存指示点
+        if self._cache_hit_rate > 0:
+            # 在圆环顶部（12点方向）绘制一个小指示点
+            # 颜色根据命中率变化：绿色(高) -> 黄色(中) -> 红色(低)
+            indicator_angle = -90  # 12点方向
+            indicator_radians = math.radians(indicator_angle)
+            center_x = self.width() / 2
+            center_y = self.height() / 2
+            radius = self.width() / 2 - 1
+            dot_x = center_x + radius * math.cos(indicator_radians)
+            dot_y = center_y - radius * math.sin(indicator_radians)  # 注意减号因为 y 轴向下
+
+            # 根据命中率选择颜色
+            if self._cache_hit_rate >= 0.8:
+                dot_color = QColor("#4ade80")  # 绿色
+            elif self._cache_hit_rate >= 0.5:
+                dot_color = QColor("#facc15")  # 黄色
+            else:
+                dot_color = QColor("#f87171")  # 红色
+
+            # 绘制指示点
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(dot_color)
+            painter.drawEllipse(int(dot_x) - 2, int(dot_y) - 2, 4, 4)

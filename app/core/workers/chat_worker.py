@@ -26,6 +26,7 @@ from app.core.conversation.config import PermissionCache
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.workers.worker_event_bus import WorkerEventBus, WorkerEvent
+from app.core.workers.cache_tracker import CacheHitRateTracker
 
 # 预编译正则表达式
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -115,6 +116,7 @@ class OpenAIChatWorker(QThread):
         }
         self._current_session_messages = list(self.session_messages)
         self._last_usage = None  # 保存最后一次 API 调用的 token usage
+        self._cache_tracker = CacheHitRateTracker()  # 缓存命中率追踪器
         self._accumulated_tokens = 0  # 累加本轮所有 API 调用（含多轮工具迭代）的总 token 使用量
 
         # ========== 工具迭代中压缩支持 ==========
@@ -313,7 +315,29 @@ class OpenAIChatWorker(QThread):
         self.tools = []
 
         #
-        self._legacy_direct_callbacks = {}
+
+    # ========== 缓存追踪方法 ==========
+
+    def get_cache_stats(self) -> 'AggregatedCacheStats':
+        """获取缓存追踪统计"""
+        return self._cache_tracker.get_session_stats()
+
+    def get_cache_hit_rate(self) -> float:
+        """获取当前缓存命中率"""
+        return self._cache_tracker.get_current_hit_rate()
+
+    def get_cache_hit_rate_display(self) -> str:
+        """获取格式化的命中率显示"""
+        return self._cache_tracker.get_hit_rate_display()
+
+    def reset_cache_stats(self):
+        """重置缓存统计"""
+        self._cache_tracker.start_session()
+
+    def get_cache_stats_summary(self) -> str:
+        """获取缓存统计摘要"""
+        return self._cache_tracker.summary()
+
 
         # 清理问题/回答状态
         self._pending_answer = None
@@ -1191,6 +1215,8 @@ class OpenAIChatWorker(QThread):
                         "completion_tokens": getattr(usage, "completion_tokens", 0),
                         "total_tokens": getattr(usage, "total_tokens", 0),
                     }
+                    # 同步更新缓存追踪器
+                    self._cache_tracker.record_usage(usage)
                 continue
 
             delta = chunk.choices[0].delta
@@ -1361,7 +1387,8 @@ class OpenAIChatWorker(QThread):
                     "completion_tokens": getattr(usage, "completion_tokens", 0),
                     "total_tokens": getattr(usage, "total_tokens", 0),
                 }
-            
+                # 同步更新缓存追踪器
+                self._cache_tracker.record_usage(usage)
             # 每处理 5 个 chunk 就让渡一次 CPU，确保主线程能及时处理排队的 Qt 信号
             # 避免 content_received 等信号堆积到工具执行完毕后一次性处理
             chunk_count += 1
@@ -1377,12 +1404,13 @@ class OpenAIChatWorker(QThread):
                     "completion_tokens": getattr(usage, "completion_tokens", 0),
                     "total_tokens": getattr(usage, "total_tokens", 0),
                 }
+                # 同步更新缓存追踪器
+                self._cache_tracker.record_usage(usage)
                 total = getattr(usage, "total_tokens", 0) or 0
                 self._accumulated_tokens += total
                 # 实时通知外部（如 AutoLoop）更新 token 计数
                 if self._token_update_callback and total > 0:
                     self._token_update_callback(total)
-
         # 冲刷剩余的 reasoning batch
         if _reasoning_batch:
             self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
