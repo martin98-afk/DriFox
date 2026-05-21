@@ -128,13 +128,19 @@ class EntryMemoryItemWidget(QFrame):
         self.setStyleSheet(ItemStyles.entry_card())
         self.setMouseTracking(True)
 
-        # 主布局：左侧指示器占位 + 内容区 + hover 操作按钮
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(38, 10, 10, 10)  # left=38 给指示器留空间
-        layout.setSpacing(8)
+        # 主布局：垂直堆叠，显示行/编辑行互斥切换
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ==== 显示行: 指示器占位 + 内容 + hover按钮 ====
+        self._display_row_widget = QWidget(self)
+        display_layout = QHBoxLayout(self._display_row_widget)
+        display_layout.setContentsMargins(38, 10, 10, 10)
+        display_layout.setSpacing(8)
 
         # 只读内容显示（QPlainTextEdit: 强制换行 + 不可交互）
-        self.content_label = QPlainTextEdit(self._content, self)
+        self.content_label = QPlainTextEdit(self._content, self._display_row_widget)
         self.content_label.setReadOnly(True)
         self.content_label.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.content_label.setTextInteractionFlags(Qt.NoTextInteraction)
@@ -147,10 +153,10 @@ class EntryMemoryItemWidget(QFrame):
         self.content_label.setToolTip(self._content)
         self._apply_content_style(self._enabled)
         self.content_label.document().documentSizeChanged.connect(self._sync_content_height)
-        layout.addWidget(self.content_label, 1)
+        display_layout.addWidget(self.content_label, 1)
 
         # Hover 操作按钮区（默认隐藏，hover 时显示）
-        self._hover_actions = QWidget(self)
+        self._hover_actions = QWidget(self._display_row_widget)
         hover_layout = QHBoxLayout(self._hover_actions)
         hover_layout.setContentsMargins(0, 0, 0, 0)
         hover_layout.setSpacing(2)
@@ -169,18 +175,20 @@ class EntryMemoryItemWidget(QFrame):
 
         hover_layout.addWidget(self.edit_btn)
         hover_layout.addWidget(self.delete_btn)
-        layout.addWidget(self._hover_actions)
+        display_layout.addWidget(self._hover_actions)
         self._hover_actions.setVisible(False)
 
-        # 编辑输入框（初始隐藏）
-        self.edit_widget = QWidget(self)
-        self.edit_widget.setVisible(False)
-        edit_outer = QHBoxLayout(self.edit_widget)
-        edit_outer.setContentsMargins(38, 10, 10, 10)
-        edit_outer.setSpacing(8)
+        main_layout.addWidget(self._display_row_widget)
+
+        # ==== 编辑行: 指示器占位 + TextEdit（初始隐藏） ====
+        self._edit_row_widget = QWidget(self)
+        self._edit_row_widget.setVisible(False)
+        edit_layout = QHBoxLayout(self._edit_row_widget)
+        edit_layout.setContentsMargins(38, 10, 10, 10)
+        edit_layout.setSpacing(8)
 
         from qfluentwidgets import TextEdit
-        self.edit_text = TextEdit(self.edit_widget)
+        self.edit_text = TextEdit(self._edit_row_widget)
         self.edit_text.setText(self._content)
         self.edit_text.setPlaceholderText("编辑条目记忆...")
         self.edit_text.setStyleSheet(f"""
@@ -197,7 +205,9 @@ class EntryMemoryItemWidget(QFrame):
         self.edit_text.setMaximumHeight(200)
         self.edit_text.document().documentSizeChanged.connect(self._adjust_edit_height)
         self.edit_text.focusOutEvent = lambda e: self._on_focus_out(e)
-        edit_outer.addWidget(self.edit_text, 1)
+        edit_layout.addWidget(self.edit_text, 1)
+
+        main_layout.addWidget(self._edit_row_widget)
 
     # ==================== 卡片样式 ====================
 
@@ -363,9 +373,8 @@ class EntryMemoryItemWidget(QFrame):
         if self._editing:
             return
         self._editing = True
-        self.content_label.setVisible(False)
-        self._hover_actions.setVisible(False)
-        self.edit_widget.setVisible(True)
+        self._display_row_widget.setVisible(False)
+        self._edit_row_widget.setVisible(True)
         self._adjust_edit_height()
         self.edit_text.setFocus()
         cursor = self.edit_text.textCursor()
@@ -385,8 +394,8 @@ class EntryMemoryItemWidget(QFrame):
     def _cancel_edit(self):
         """取消编辑"""
         self._editing = False
-        self.content_label.setVisible(True)
-        self.edit_widget.setVisible(False)
+        self._display_row_widget.setVisible(True)
+        self._edit_row_widget.setVisible(False)
         self.edit_text.setText(self._content)
 
     def _on_focus_out(self, event):
