@@ -5620,10 +5620,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._gen_thread_pool.start(task)
 
     def _on_topic_summary_generated(self, result, error: str = None):
-        # 🛡️ 如果已被取消（用户停止对话），不再更新标题
-        if self._topic_summary_cancelled:
-            logger.info("[Topic Summary] 已取消，跳过标题更新")
-            return
         if error:
             logger.error(f"[Topic Summary] Failed to generate: {error}")
             return
