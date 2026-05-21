@@ -446,6 +446,8 @@ class WorktreeSectionWidget(QWidget):
                 norm_new_path = os.path.normpath(worktree_dir)
                 for wt in self._repo_info.worktrees:
                     if os.path.normpath(wt.path) == norm_new_path:
+                        # 先刷新列表，再切换
+                        self._refresh()
                         self._on_switch(wt.path)
                         break
 
