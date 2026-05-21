@@ -1438,7 +1438,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text);
                     {self._viewer_font_css}
                     margin: 0; 
-                    padding: 6px 14px; 
+                    padding: 6px 14px 0 14px; 
                     max-height: {self.MAX_HEIGHT}px;
                     overflow-x: hidden;
                     overflow-y: auto;
@@ -1471,6 +1471,12 @@ class CodeWebViewer(QWebEngineView):
                 /* 优化：移除首尾元素的边距，彻底消除多余空白 */
                 #content-placeholder > :first-child {{ margin-top: 0 !important; }}
                 #content-placeholder > :last-child {{ margin-bottom: 0 !important; }}
+                /* 解决 Chromium 滚动容器 padding-bottom 不生效的 bug */
+                #content-placeholder::after {{
+                    content: '';
+                    display: block;
+                    height: 16px;
+                }}
 
                 /* 优化：紧凑的段落间距 */
                 p {{ margin: 8px 0; }}
@@ -2455,7 +2461,7 @@ class PlainTextViewer(QWidget):
         self.text_edit.ensurePolished()
 
         doc = self.text_edit.document()
-        h = int(doc.size().height()) + 16  # padding
+        h = int(math.ceil(doc.size().height())) + 16  # padding
 
         h = max(40, h)
 
