@@ -51,15 +51,40 @@ class NoWheelComboBox(ComboBox):
 
 class RefreshableThemeComboBox(ComboBox):
     """主题下拉框 - 每次打开时刷新主题列表"""
-    themeRefreshRequested = pyqtSignal()
 
     def wheelEvent(self, event):
         event.ignore()
 
-    def showPopup(self):
+    def _toggleComboMenu(self):
         """打开下拉前先刷新主题列表"""
-        self.themeRefreshRequested.emit()
-        super().showPopup()
+        try:
+            from app.utils.theme_manager import theme_manager
+            from app.utils.config import Settings, update_theme_options
+            theme_manager.reload()
+            update_theme_options()
+            themes = theme_manager.list_themes()
+            new_options = {tid: {"label": name} for tid, name in themes.items()}
+            card = self.parent()
+            if not card or not hasattr(card, 'config_item'):
+                p = self.parent()
+                while p and not hasattr(p, 'config_item'):
+                    p = p.parent()
+                card = p
+            if card and hasattr(card, 'config_item'):
+                current_key = card.config_item.value
+                card.options = new_options
+                card.value_by_label = {data["label"]: key for key, data in new_options.items()}
+                card.label_by_value = {key: data["label"] for key, data in new_options.items()}
+                if current_key not in card.label_by_value:
+                    current_key = list(new_options.keys())[0]
+                self.currentTextChanged.disconnect(card._on_changed)
+                self.clear()
+                self.addItems([data["label"] for data in new_options.values()])
+                self.setCurrentText(card.label_by_value.get(current_key, ""))
+                self.currentTextChanged.connect(card._on_changed)
+        except Exception as e:
+            logger.warning(f"[ThemeComboBox] refresh error: {e}")
+        super()._toggleComboMenu()
 
 
 class ManualUpdateCard(SettingCard):
@@ -343,7 +368,6 @@ class LLMSettingsCard(SystemCardFrame):
 
                 if is_theme_card:
                     self.comboBox = RefreshableThemeComboBox(self)
-                    self.comboBox.themeRefreshRequested.connect(self._refresh_theme_options)
                 else:
                     self.comboBox = NoWheelComboBox(self)
                 self.comboBox.setMaxVisibleItems(6)
