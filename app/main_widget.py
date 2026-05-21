@@ -2936,6 +2936,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for local_index, batch in enumerate(batches):
             role = batch[0].get("role")
             timestamp = batch[0].get("timestamp") or get_default_timestamp()
+            model_name = batch[0].get("model_name")
             global_batch_index = batch_offset + local_index
             round_index = self._get_user_round_index_for_batch_index(
                 global_batch_index, batch_offset
@@ -2983,6 +2984,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     scroll=False,
                     insert_index=insert_index,
                     round_index=round_index,
+                    model_name=model_name if role == "assistant" else None,
                 )
                 if assistant_card:
                     # 设置 message_index 用于卡片差异功能
@@ -3608,6 +3610,7 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll: bool = True,
             insert_index: Optional[int] = None,
             round_index: Optional[int] = None,
+            model_name: str = None,
     ) -> MessageCard:
         session = self.session_manager.get_current_session()
         if session:
@@ -3626,6 +3629,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if round_index is not None
                 else self._current_assistant_round_index
             ),
+            model_name=model_name,
             on_action=self._on_code_action,
             on_context_action=on_context_action,
             on_tool_diff=self._on_tool_diff_requested,
@@ -4822,7 +4826,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.clear()
         self._append_user_message(user_text)
 
-        assistant_card = self._append_assistant_message()
+        assistant_card = self._append_assistant_message(
+            model_name=self._current_model_name,
+        )
 
         # 先设置当前卡片（必须在 send_message 之前，否则回调触发时 _current_assistant_card 为 None）
         self._current_assistant_card = assistant_card
@@ -5231,11 +5237,19 @@ class OpenAIChatToolWindow(ToolWindow):
         self._cancelled_tool_call_id = None
         self._toggle_send_stop(False)
 
-        # 计算并显示执行持续时间
-        if self._current_assistant_card and self._response_start_time:
-            duration_seconds = int(time.time() - self._response_start_time)
-            self._current_assistant_card.set_duration(duration_seconds)
-            self._response_start_time = None
+        # 写入模型名称到卡片和 session 消息
+        if self._current_assistant_card:
+            current_model_name = getattr(self, '_current_model_name', '') or ''
+            if current_model_name:
+                self._current_assistant_card.set_model_name(current_model_name)
+                # 写入 session 的最后一条 assistant 消息
+                session = self.session_manager.get_current_session()
+                if session and session.messages:
+                    for msg in reversed(session.messages):
+                        if msg.get("role") == "assistant":
+                            msg["model_name"] = current_model_name
+                            break
+        self._response_start_time = None
 
         if self._current_assistant_card:
             self._current_assistant_card.finish_streaming()
@@ -5395,7 +5409,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         # 确保 round_index 正确
         self._current_assistant_round_index = self._get_current_user_round_index()
-        new_card = self._append_assistant_message()
+        new_card = self._append_assistant_message(
+            model_name=self._current_model_name,
+        )
         new_card.update_content(str(content))
         new_card.finish_streaming()
         self._scroll_to_bottom()
