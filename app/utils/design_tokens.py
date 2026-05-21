@@ -1006,6 +1006,42 @@ class ItemStyles:
             padding: 2px 8px;
         """
 
+    @staticmethod
+    def entry_card() -> str:
+        """条目记忆卡片 - 常规状态"""
+        Colors.refresh()
+        return f"""
+            QFrame {{
+                background-color: rgba(50, 50, 55, 150);
+                border: 1px solid rgba(80, 80, 85, 150);
+                border-radius: 8px;
+            }}
+        """
+
+    @staticmethod
+    def entry_card_hover() -> str:
+        """条目记忆卡片 - hover 状态"""
+        Colors.refresh()
+        return f"""
+            QFrame {{
+                background-color: rgba(55, 55, 60, 200);
+                border: 1px solid rgba(102, 198, 255, 150);
+                border-radius: 8px;
+            }}
+        """
+
+    @staticmethod
+    def entry_card_selected() -> str:
+        """条目记忆卡片 - 选中状态"""
+        Colors.refresh()
+        return f"""
+            QFrame {{
+                background-color: rgba(20, 60, 90, 100);
+                border: 1px solid rgba(102, 198, 255, 180);
+                border-radius: 8px;
+            }}
+        """
+
 
 class ButtonStyles:
     """按钮统一样式模板"""
