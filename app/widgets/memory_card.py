@@ -957,20 +957,27 @@ class MemoryCardContent(QWidget):
         # 获取实际工作目录
         actual_wd = memory_mgr.get_working_directory(self._current_project)
 
-        # 判断当前工作目录是否指向 worktree
+        # 预检：当前工作目录是否指向 worktree（需要在循环前确定，用于后续 git 检测判断）
         is_worktree_active = False
+        if actual_wd:
+            is_worktree_active = any(
+                d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree"
+                for d in all_docs
+            )
+
+        # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
         original_repo_path = None
         if actual_wd:
             for d in all_docs:
-                if d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree":
-                    is_worktree_active = True
-                elif d.get("added_by") != "git_worktree" and original_repo_path is None and d.get("is_working_dir", False):
-                    # 记录原始 git 仓库路径（仅检测被标记为根目录的文件夹）
-                    try:
-                        if GitWorktreeDetector.detect_git(d.get("file_path", "")):
-                            original_repo_path = d["file_path"]
-                    except Exception:
-                        pass
+                if d.get("added_by") != "git_worktree" and original_repo_path is None:
+                    # 仅检测：根目录 或 worktree 激活时的原始仓库
+                    should_check = d.get("is_working_dir", False) or is_worktree_active
+                    if should_check:
+                        try:
+                            if GitWorktreeDetector.detect_git(d.get("file_path", "")):
+                                original_repo_path = d["file_path"]
+                        except Exception:
+                            pass
 
         # 过滤掉 git_worktree（不显示在 UI 中）
         docs = [d for d in all_docs if d.get("added_by") != "git_worktree"]
@@ -1003,6 +1010,9 @@ class MemoryCardContent(QWidget):
                 doc_id, file_name, file_path, added_by,
                 is_working_dir=show_as_wd,
             )
+            # worktree 激活时：原仓库虽不是根目录，但需要 _repo_info 来显示 worktree 区域
+            if is_worktree_active and file_path == original_repo_path and not widget._repo_info:
+                widget._repo_info = GitWorktreeDetector.get_repo_info(file_path)
             widget.removed.connect(self._remove_key_document)
             widget.open_folder.connect(self._open_folder)
             widget.setAsWorkingDir.connect(self._set_as_working_directory)
