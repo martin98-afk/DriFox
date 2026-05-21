@@ -1,0 +1,700 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - img [ref=e7]
+        - img [ref=e10]
+        - generic [ref=e12]:
+          - generic [ref=e13]:
+            - generic [ref=e14]:
+              - generic [ref=e15]: 
+              - generic [ref=e16]: 我的首页
+              - text: 
+            - generic [ref=e85]:
+              - generic [ref=e86]: 设备孪生建模
+              - generic [ref=e87]: 
+            - generic [ref=e89] [cursor=pointer]:
+              - generic [ref=e90]: 数字孪生建模
+              - generic [ref=e91]: 
+            - generic [ref=e105]:
+              - generic [ref=e106]: 机理模式
+              - generic [ref=e107]: 
+            - generic [ref=e108]:
+              - generic [ref=e109]: 机理规则
+              - generic [ref=e110]: 
+          - text: 
+        - generic [ref=e17]:
+          - generic [ref=e20]:
+            - link "系统管理员" [ref=e21] [cursor=pointer]:
+              - /url: javascript:void(0);
+            - generic [ref=e22]: 
+          - img [ref=e24]
+      - generic [ref=e25]:
+        - generic [ref=e27]:
+          - generic [ref=e28]:
+            - generic [ref=e30]:
+              - text: 
+              - textbox "请输入关键字搜索..." [ref=e31]
+              - generic [ref=e33]: 
+            - menubar [ref=e36]:
+              - menuitem " 模型开发管理 " [ref=e37]:
+                - generic [ref=e38] [cursor=pointer]:
+                  - generic [ref=e39]: 
+                  - text: 模型开发管理
+                  - generic [ref=e40]: 
+                - text:                                                                                     
+              - menuitem " 模型资产管理 " [ref=e41]:
+                - generic [ref=e42] [cursor=pointer]:
+                  - generic [ref=e43]: 
+                  - text: 模型资产管理
+                  - generic [ref=e44]: 
+                - text:        
+              - menuitem " 模型服务管理 " [expanded] [ref=e45]:
+                - generic [ref=e46] [cursor=pointer]:
+                  - generic [ref=e47]: 
+                  - text: 模型服务管理
+                  - generic [ref=e48]: 
+                - menu [ref=e75]:
+                  - menuitem " 模型服务管理" [ref=e77] [cursor=pointer]:
+                    - generic [ref=e78]: 
+                    - text: 模型服务管理
+                  - menuitem " 模型服务授权" [ref=e80] [cursor=pointer]:
+                    - generic [ref=e81]: 
+                    - text: 模型服务授权
+                  - menuitem " 设备孪生建模" [ref=e83] [cursor=pointer]:
+                    - generic [ref=e84]: 
+                    - text: 设备孪生建模
+              - menuitem " 云边协同中心 " [ref=e49]:
+                - generic [ref=e50] [cursor=pointer]:
+                  - generic [ref=e51]: 
+                  - text: 云边协同中心
+                  - generic [ref=e52]: 
+                - text:   
+              - menuitem " 智能应用管理 " [ref=e53]:
+                - generic [ref=e54] [cursor=pointer]:
+                  - generic [ref=e55]: 
+                  - text: 智能应用管理
+                  - generic [ref=e56]: 
+                - text: 
+              - menuitem " 系统运维管理 " [ref=e57]:
+                - generic [ref=e58] [cursor=pointer]:
+                  - generic [ref=e59]: 
+                  - text: 系统运维管理
+                  - generic [ref=e60]: 
+                - text:                                                                                     
+          - text:       
+        - generic [ref=e62]:
+          - iframe [ref=e88]:
+            - generic [active] [ref=f10e1]:
+              - generic [ref=f10e232]:
+                - generic [ref=f10e233]:
+                  - generic [ref=f10e235]: 数字孪生建模
+                  - generic [ref=f10e236]:
+                    - button "保 存" [ref=f10e240]:
+                      - generic [ref=f10e242]: 保 存
+                    - button "更多 " [ref=f10e245] [cursor=pointer]:
+                      - generic [ref=f10e246]:
+                        - text: 更多
+                        - generic [ref=f10e247]: 
+                - generic [ref=f10e248]:
+                  - generic:
+                    - generic [ref=f10e250] [cursor=pointer]: 
+                    - list [ref=f10e251]:
+                      - listitem [ref=f10e252]:
+                        - generic "基础信息" [ref=f10e256] [cursor=pointer]
+                      - listitem [ref=f10e257]:
+                        - generic "参数配置" [ref=f10e260] [cursor=pointer]
+                  - generic [ref=f10e261]:
+                    - generic:
+                      - generic [ref=f10e264]:
+                        - generic [ref=f10e267] [cursor=pointer]: 
+                        - generic [ref=f10e268]:
+                          - generic [ref=f10e270]:
+                            - generic [ref=f10e272]:
+                              - generic [ref=f10e273] [cursor=pointer]: 
+                              - text: 
+                              - textbox "请输入关键字搜索..." [ref=f10e274]
+                            - listitem [ref=f10e277]:
+                              - generic "集团侧模型" [ref=f10e279] [cursor=pointer]: 集团侧模型
+                              - list [ref=f10e281]:
+                                - listitem [ref=f10e282]:
+                                  - generic "1#机组" [ref=f10e284] [cursor=pointer]: 1#机组
+                                  - list [ref=f10e286]:
+                                    - listitem [ref=f10e287]:
+                                      - generic "锅炉专业" [ref=f10e289] [cursor=pointer]: 锅炉专业
+                                      - list [ref=f10e291]:
+                                        - listitem [ref=f10e292]:
+                                          - generic "制粉系统" [ref=f10e294] [cursor=pointer]: 制粉系统
+                                          - list [ref=f10e991]:
+                                            - listitem [ref=f10e992]:
+                                              - generic "磨煤机" [ref=f10e994] [cursor=pointer]: 磨煤机
+                                            - listitem [ref=f10e996]:
+                                              - generic "给煤机" [ref=f10e998] [cursor=pointer]: 给煤机
+                                        - listitem [ref=f10e296]:
+                                          - generic "风烟系统" [ref=f10e298] [cursor=pointer]: 风烟系统
+                                        - listitem [ref=f10e300]:
+                                          - generic "吹灰系统" [ref=f10e302] [cursor=pointer]: 吹灰系统
+                                        - listitem [ref=f10e304]:
+                                          - generic "火检系统" [ref=f10e306] [cursor=pointer]: 火检系统
+                                        - listitem [ref=f10e308]:
+                                          - generic "汽水系统" [ref=f10e310] [cursor=pointer]: 汽水系统
+                                        - listitem [ref=f10e312]:
+                                          - generic "锅炉受热面系统" [ref=f10e314] [cursor=pointer]: 锅炉受热面系统
+                                        - listitem [ref=f10e316]:
+                                          - generic "等离子点火系统" [ref=f10e318] [cursor=pointer]: 等离子点火系统
+                                        - listitem [ref=f10e320]:
+                                          - generic "锅炉疏放水系统" [ref=f10e322] [cursor=pointer]: 锅炉疏放水系统
+                                        - listitem [ref=f10e324]:
+                                          - generic "燃油系统" [ref=f10e326] [cursor=pointer]: 燃油系统
+                                        - listitem [ref=f10e328]:
+                                          - generic "脱硝系统" [ref=f10e330] [cursor=pointer]: 脱硝系统
+                                        - listitem [ref=f10e332]:
+                                          - generic "供热系统" [ref=f10e334] [cursor=pointer]: 供热系统
+                                        - listitem [ref=f10e336]:
+                                          - generic "LDC系统" [ref=f10e338] [cursor=pointer]: LDC系统
+                                        - listitem [ref=f10e340]:
+                                          - generic "全厂液位监视" [ref=f10e342] [cursor=pointer]: 全厂液位监视
+                                    - listitem [ref=f10e344]:
+                                      - generic "汽机专业" [ref=f10e346] [cursor=pointer]: 汽机专业
+                                      - list [ref=f10e348]:
+                                        - listitem [ref=f10e349]:
+                                          - generic "密封油系统" [ref=f10e351] [cursor=pointer]: 密封油系统
+                                        - listitem [ref=f10e353]:
+                                          - generic "DEH系统" [ref=f10e355] [cursor=pointer]: DEH系统
+                                        - listitem [ref=f10e357]:
+                                          - generic "加热器系统" [ref=f10e359] [cursor=pointer]: 加热器系统
+                                        - listitem [ref=f10e361]:
+                                          - generic "定子冷却水系统" [ref=f10e363] [cursor=pointer]: 定子冷却水系统
+                                        - listitem [ref=f10e365]:
+                                          - generic "开式冷却水系统" [ref=f10e367] [cursor=pointer]: 开式冷却水系统
+                                        - listitem [ref=f10e369]:
+                                          - generic "汽机疏水系统" [ref=f10e371] [cursor=pointer]: 汽机疏水系统
+                                        - listitem [ref=f10e373]:
+                                          - generic "汽机本体系统" [ref=f10e375] [cursor=pointer]: 汽机本体系统
+                                        - listitem [ref=f10e377]:
+                                          - generic "主机润滑油系统" [ref=f10e379] [cursor=pointer]: 主机润滑油系统
+                                        - listitem [ref=f10e381]:
+                                          - generic "凝结水系统" [ref=f10e383] [cursor=pointer]: 凝结水系统
+                                        - listitem [ref=f10e385]:
+                                          - generic "空冷岛系统" [ref=f10e387] [cursor=pointer]: 空冷岛系统
+                                        - listitem [ref=f10e389]:
+                                          - generic "热网系统" [ref=f10e391] [cursor=pointer]: 热网系统
+                                        - listitem [ref=f10e393]:
+                                          - generic "真空系统" [ref=f10e395] [cursor=pointer]: 真空系统
+                                        - listitem [ref=f10e397]:
+                                          - generic "轴封供汽系统" [ref=f10e399] [cursor=pointer]: 轴封供汽系统
+                                        - listitem [ref=f10e401]:
+                                          - generic "辅助蒸汽系统" [ref=f10e403] [cursor=pointer]: 辅助蒸汽系统
+                                        - listitem [ref=f10e405]:
+                                          - generic "EH油系统" [ref=f10e407] [cursor=pointer]: EH油系统
+                                        - listitem [ref=f10e409]:
+                                          - generic "闭式冷却水系统" [ref=f10e411] [cursor=pointer]: 闭式冷却水系统
+                                        - listitem [ref=f10e413]:
+                                          - generic "主再热蒸汽及旁路系统" [ref=f10e415] [cursor=pointer]: 主再热蒸汽及旁路系统
+                                        - listitem [ref=f10e417]:
+                                          - generic "循环水系统" [ref=f10e419] [cursor=pointer]: 循环水系统
+                                        - listitem [ref=f10e421]:
+                                          - generic "氢气系统" [ref=f10e423] [cursor=pointer]: 氢气系统
+                                        - listitem [ref=f10e425]:
+                                          - generic "给水系统" [ref=f10e427] [cursor=pointer]: 给水系统
+                                    - listitem [ref=f10e429]:
+                                      - generic "电气专业" [ref=f10e431] [cursor=pointer]: 电气专业
+                                      - list [ref=f10e433]:
+                                        - listitem [ref=f10e434]:
+                                          - generic "发变组系统" [ref=f10e436] [cursor=pointer]: 发变组系统
+                                        - listitem [ref=f10e438]:
+                                          - generic "中压系统" [ref=f10e440] [cursor=pointer]: 中压系统
+                                        - listitem [ref=f10e442]:
+                                          - generic "厂用电系统" [ref=f10e444] [cursor=pointer]: 厂用电系统
+                                        - listitem [ref=f10e446]:
+                                          - generic "柴油发电机组系统" [ref=f10e448] [cursor=pointer]: 柴油发电机组系统
+                                        - listitem [ref=f10e450]:
+                                          - generic "电力市场辅助服务" [ref=f10e452] [cursor=pointer]: 电力市场辅助服务
+                                        - listitem [ref=f10e454]:
+                                          - generic "低压系统" [ref=f10e456] [cursor=pointer]: 低压系统
+                                        - listitem [ref=f10e458]:
+                                          - generic "直流电系统" [ref=f10e460] [cursor=pointer]: 直流电系统
+                                        - listitem [ref=f10e462]:
+                                          - generic "UPS系统" [ref=f10e464] [cursor=pointer]: UPS系统
+                                    - listitem [ref=f10e466]:
+                                      - generic "环保专业" [ref=f10e468] [cursor=pointer]: 环保专业
+                                      - list [ref=f10e470]:
+                                        - listitem [ref=f10e471]:
+                                          - generic "脱硫系统" [ref=f10e473] [cursor=pointer]: 脱硫系统
+                                        - listitem [ref=f10e475]:
+                                          - generic "除渣系统" [ref=f10e477] [cursor=pointer]: 除渣系统
+                                        - listitem [ref=f10e479]:
+                                          - generic "除尘系统" [ref=f10e481] [cursor=pointer]: 除尘系统
+                                - listitem [ref=f10e483]:
+                                  - generic "一期公用系统" [ref=f10e485] [cursor=pointer]: 一期公用系统
+                                  - list [ref=f10e487]:
+                                    - listitem [ref=f10e488]:
+                                      - generic "压缩空气系统" [ref=f10e490] [cursor=pointer]: 压缩空气系统
+                                    - listitem [ref=f10e492]:
+                                      - generic "脱硫系统" [ref=f10e494] [cursor=pointer]: 脱硫系统
+                                      - list [ref=f10e496]:
+                                        - listitem [ref=f10e497]:
+                                          - generic "脱硫球磨机" [ref=f10e499] [cursor=pointer]: 脱硫球磨机
+                                    - listitem [ref=f10e501]:
+                                      - generic "采暖加热站及厂前区换热站" [ref=f10e503] [cursor=pointer]: 采暖加热站及厂前区换热站
+                                    - listitem [ref=f10e505]:
+                                      - generic "化学水处理系统" [ref=f10e507] [cursor=pointer]: 化学水处理系统
+                                    - listitem [ref=f10e509]:
+                                      - generic "输煤系统" [ref=f10e511] [cursor=pointer]: 输煤系统
+                                      - list [ref=f10e513]:
+                                        - listitem [ref=f10e514]:
+                                          - generic "碎煤机" [ref=f10e516] [cursor=pointer]: 碎煤机
+                                    - listitem [ref=f10e518]:
+                                      - generic "热网系统" [ref=f10e520] [cursor=pointer]: 热网系统
+                                      - list [ref=f10e522]:
+                                        - listitem [ref=f10e523]:
+                                          - generic "热网疏水泵" [ref=f10e525] [cursor=pointer]: 热网疏水泵
+                                        - listitem [ref=f10e527]:
+                                          - generic "热网加热器" [ref=f10e529] [cursor=pointer]: 热网加热器
+                                        - listitem [ref=f10e531]:
+                                          - generic "热网循环泵" [ref=f10e533] [cursor=pointer]: 热网循环泵
+                                    - listitem [ref=f10e535]:
+                                      - generic "辅机冷却水系统" [ref=f10e537] [cursor=pointer]: 辅机冷却水系统
+                                    - listitem [ref=f10e539]:
+                                      - generic "凝结水精处理系统" [ref=f10e541] [cursor=pointer]: 凝结水精处理系统
+                                    - listitem [ref=f10e543]:
+                                      - generic "除灰系统" [ref=f10e545] [cursor=pointer]: 除灰系统
+                                    - listitem [ref=f10e547]:
+                                      - generic "烟气余热系统" [ref=f10e549] [cursor=pointer]: 烟气余热系统
+                                    - listitem [ref=f10e551]:
+                                      - generic "废水处理系统" [ref=f10e553] [cursor=pointer]: 废水处理系统
+                          - generic [ref=f10e557] [cursor=pointer]: 
+                      - generic [ref=f10e572]:
+                        - generic [ref=f10e574]:
+                          - generic [ref=f10e575]:
+                            - generic [ref=f10e578]: 基础信息
+                            - generic [ref=f10e581] [cursor=pointer]: 
+                          - generic [ref=f10e582]:
+                            - generic [ref=f10e584]:
+                              - generic [ref=f10e585]: 设备编码 *
+                              - generic [ref=f10e586]:
+                                - generic [ref=f10e587]:
+                                  - text: 
+                                  - textbox "自动生成" [disabled] [ref=f10e588]: AMLMMMJ
+                                - generic [ref=f10e597]:
+                                  - text: 
+                                  - textbox [ref=f10e598]: "0"
+                                - generic [ref=f10e599]:
+                                  - text: 
+                                  - textbox [ref=f10e600]: "0"
+                                - generic [ref=f10e1006]:
+                                  - text: 
+                                  - textbox [ref=f10e1007]: "1"
+                                - generic [ref=f10e602] [cursor=pointer]: 
+                            - generic [ref=f10e605]:
+                              - generic [ref=f10e606]: 设备名称 *
+                              - generic "磨煤机" [ref=f10e1008]:
+                                - generic [ref=f10e609]:
+                                  - text:  
+                                  - textbox "请输入..." [ref=f10e610]: 磨煤机
+                            - generic [ref=f10e612]:
+                              - generic [ref=f10e613]: 所属行业
+                              - generic "煤电行业" [ref=f10e615]:
+                                - generic [ref=f10e616]:
+                                  - text: 
+                                  - textbox "请输入..." [disabled] [ref=f10e617]: 煤电行业
+                            - generic [ref=f10e619]:
+                              - generic [ref=f10e620]: 节点类型 *
+                              - generic [ref=f10e624]:
+                                - textbox [disabled] [ref=f10e625]: 设备
+                                - generic [ref=f10e626]: 
+                            - text:    *   
+                            - generic [ref=f10e818]:
+                              - generic [ref=f10e819]: 设备资产编码
+                              - generic [ref=f10e821]:
+                                - generic [ref=f10e824] [cursor=pointer]:
+                                  - generic [ref=f10e825]: 请选择
+                                  - generic [ref=f10e826]: 
+                                - button "" [ref=f10e828] [cursor=pointer]:
+                                  - generic [ref=f10e830]: 
+                            - generic [ref=f10e832]:
+                              - generic [ref=f10e833]: 别名
+                              - generic [ref=f10e836]:
+                                - text: 
+                                - textbox "请输入..." [ref=f10e837]
+                            - generic [ref=f10e839]:
+                              - generic [ref=f10e840]: 展示工况图
+                              - generic [ref=f10e844] [cursor=pointer]:
+                                - textbox "请选择" [ref=f10e845]
+                                - generic [ref=f10e846]: 
+                            - text: 
+                            - generic [ref=f10e1010]:
+                              - generic [ref=f10e1011]: 设备类型 *
+                              - generic [ref=f10e1015]:
+                                - textbox [disabled] [ref=f10e1016]: 磨煤机
+                                - generic [ref=f10e1017]: 
+                            - generic [ref=f10e1019]:
+                              - generic [ref=f10e1020]: 规格型号
+                              - generic [ref=f10e1023]:
+                                - text: 
+                                - textbox "请输入规格型号" [ref=f10e1024]
+                            - generic [ref=f10e848]:
+                              - generic [ref=f10e849]: 专业类型
+                              - generic [ref=f10e853] [cursor=pointer]:
+                                - textbox "请选择专业类型" [ref=f10e854]
+                                - generic [ref=f10e855]: 
+                            - generic [ref=f10e1026]:
+                              - generic [ref=f10e1027]: 出厂日期
+                              - generic [ref=f10e1031]:
+                                - generic [ref=f10e1033]: 
+                                - text: 
+                                - textbox "请选择出厂日期" [ref=f10e1034]
+                            - generic [ref=f10e1036]:
+                              - generic [ref=f10e1037]: 安装日期
+                              - generic [ref=f10e1041]:
+                                - generic [ref=f10e1043]: 
+                                - text: 
+                                - textbox "请选择安装日期" [ref=f10e1044]
+                            - generic [ref=f10e1046]:
+                              - generic [ref=f10e1047]: 制造厂商
+                              - generic [ref=f10e1050]:
+                                - text: 
+                                - textbox "请输入制造厂商" [ref=f10e1051]
+                            - generic [ref=f10e1053]:
+                              - generic [ref=f10e1054]: 安装位置
+                              - generic [ref=f10e1057]:
+                                - text: 
+                                - textbox "请输入安装位置" [ref=f10e1058]
+                            - generic [ref=f10e1060]:
+                              - generic [ref=f10e1061]: 监视图地址
+                              - generic [ref=f10e1063]:
+                                - generic [ref=f10e1066] [cursor=pointer]:
+                                  - generic [ref=f10e1067]: 请选择
+                                  - generic [ref=f10e1068]: 
+                                - button "" [ref=f10e1070] [cursor=pointer]:
+                                  - generic [ref=f10e1072]: 
+                            - generic [ref=f10e1074]:
+                              - generic [ref=f10e1075]: 复用系统得分
+                              - generic [ref=f10e1079] [cursor=pointer]:
+                                - textbox "请选择" [ref=f10e1080]
+                                - generic [ref=f10e1081]: 
+                            - generic [ref=f10e1083]:
+                              - generic [ref=f10e1084]: 润滑周期 (天)
+                              - generic [ref=f10e1086]:
+                                - generic [ref=f10e1087]:
+                                  - generic [ref=f10e1089] [cursor=pointer]: 
+                                  - generic [ref=f10e1091]: 
+                                - textbox "请填写正整数" [ref=f10e1093]
+                            - generic [ref=f10e1095]:
+                              - generic [ref=f10e1096]: 总貌图地址
+                              - generic [ref=f10e1098]:
+                                - generic [ref=f10e1101] [cursor=pointer]:
+                                  - generic [ref=f10e1102]: 请选择
+                                  - generic [ref=f10e1103]: 
+                                - button "" [ref=f10e1105] [cursor=pointer]:
+                                  - generic [ref=f10e1107]: 
+                            - generic [ref=f10e635]:
+                              - generic [ref=f10e636]: 说明
+                              - generic [ref=f10e638]:
+                                - textbox "说明" [ref=f10e639]
+                                - generic [ref=f10e640]: 0/200
+                        - generic [ref=f10e643]:
+                          - generic [ref=f10e644]:
+                            - generic [ref=f10e647]: 参数配置
+                            - generic [ref=f10e650] [cursor=pointer]: 
+                          - generic [ref=f10e653]:
+                            - generic [ref=f10e656]:
+                              - text:  
+                              - generic [ref=f10e658]:
+                                - generic [ref=f10e659] [cursor=pointer]: 基础配置
+                                - generic [ref=f10e660] [cursor=pointer]: 诊断分析
+                                - generic [ref=f10e661] [cursor=pointer]: 专项分析
+                                - generic [ref=f10e662] [cursor=pointer]: 诊断报告
+                                - generic [ref=f10e663] [cursor=pointer]: 运行报告
+                                - generic [ref=f10e1108] [cursor=pointer]: 部件
+                            - generic [ref=f10e857]:
+                              - generic [ref=f10e860]:
+                                - text:  
+                                - generic [ref=f10e862]:
+                                  - generic [ref=f10e864] [cursor=pointer]: 故障机理模型
+                                  - generic [ref=f10e865] [cursor=pointer]: 状态评价模型
+                              - generic [ref=f10e868]:
+                                - generic [ref=f10e872] [cursor=pointer]:
+                                  - generic [ref=f10e873]: 有效
+                                  - generic [ref=f10e874]: 
+                                - generic [ref=f10e875]:
+                                  - generic [ref=f10e877]:
+                                    - button "复用其他模型" [ref=f10e878]:
+                                      - generic [ref=f10e880]: 复用其他模型
+                                    - button " 添 加" [ref=f10e881]:
+                                      - generic [ref=f10e882]:
+                                        - generic [ref=f10e884]: 
+                                        - generic [ref=f10e885]: 添 加
+                                    - generic [ref=f10e888]:
+                                      - generic [ref=f10e889] [cursor=pointer]: 
+                                      - text: 
+                                      - textbox "请输入关键字搜索..." [ref=f10e890]
+                                  - generic [ref=f10e892]:
+                                    - table [ref=f10e894]:
+                                      - rowgroup [ref=f10e904]:
+                                        - row "机理代码 机理模式 机理类别 是否有效 评价类型" [ref=f10e905]:
+                                          - columnheader "机理代码" [ref=f10e906]:
+                                            - generic [ref=f10e907]: 机理代码
+                                          - columnheader "机理模式" [ref=f10e909]:
+                                            - generic [ref=f10e910]: 机理模式
+                                          - columnheader "机理类别" [ref=f10e912]:
+                                            - generic [ref=f10e913]: 机理类别
+                                          - columnheader "是否有效" [ref=f10e915]:
+                                            - generic [ref=f10e916]: 是否有效
+                                          - columnheader "评价类型" [ref=f10e918]:
+                                            - generic [ref=f10e919]: 评价类型
+                                    - table [ref=f10e1110]:
+                                      - rowgroup [ref=f10e1120]:
+                                        - row "GZ3879 旋转分离器轴承温度异常预警 性能劣化 有效 健康状态" [ref=f10e1121]:
+                                          - cell "GZ3879" [ref=f10e1122]:
+                                            - generic "GZ3879" [ref=f10e1125]
+                                          - cell "旋转分离器轴承温度异常预警" [ref=f10e1126]:
+                                            - generic "旋转分离器轴承温度异常预警" [ref=f10e1129]
+                                          - cell "性能劣化" [ref=f10e1130]:
+                                            - generic "性能劣化" [ref=f10e1132]
+                                          - cell "有效" [ref=f10e1133]:
+                                            - generic [ref=f10e1135]: 有效
+                                          - cell "健康状态" [ref=f10e1137]:
+                                            - generic "健康状态" [ref=f10e1139]
+                                        - row "GZ3880 磨煤机入口风压测点堵，需吹扫 性能劣化 有效 健康状态" [ref=f10e1140]:
+                                          - cell "GZ3880" [ref=f10e1141]:
+                                            - generic "GZ3880" [ref=f10e1144]
+                                          - cell "磨煤机入口风压测点堵，需吹扫" [ref=f10e1145]:
+                                            - generic "磨煤机入口风压测点堵，需吹扫" [ref=f10e1148]
+                                          - cell "性能劣化" [ref=f10e1149]:
+                                            - generic "性能劣化" [ref=f10e1151]
+                                          - cell "有效" [ref=f10e1152]:
+                                            - generic [ref=f10e1154]: 有效
+                                          - cell "健康状态" [ref=f10e1156]:
+                                            - generic "健康状态" [ref=f10e1158]
+                                        - row "GZ3881 磨煤机风门裕度小风量低，有堵磨风险. 性能劣化 有效 健康状态" [ref=f10e1159]:
+                                          - cell "GZ3881" [ref=f10e1160]:
+                                            - generic "GZ3881" [ref=f10e1163]
+                                          - cell "磨煤机风门裕度小风量低，有堵磨风险." [ref=f10e1164]:
+                                            - generic "磨煤机风门裕度小风量低，有堵磨风险." [ref=f10e1167]
+                                          - cell "性能劣化" [ref=f10e1168]:
+                                            - generic "性能劣化" [ref=f10e1170]
+                                          - cell "有效" [ref=f10e1171]:
+                                            - generic [ref=f10e1173]: 有效
+                                          - cell "健康状态" [ref=f10e1175]:
+                                            - generic "健康状态" [ref=f10e1177]
+                                        - row "GZ3882 润滑系统故障预警 性能劣化 有效 健康状态" [ref=f10e1178]:
+                                          - cell "GZ3882" [ref=f10e1179]:
+                                            - generic "GZ3882" [ref=f10e1182]
+                                          - cell "润滑系统故障预警" [ref=f10e1183]:
+                                            - generic "润滑系统故障预警" [ref=f10e1186]
+                                          - cell "性能劣化" [ref=f10e1187]:
+                                            - generic "性能劣化" [ref=f10e1189]
+                                          - cell "有效" [ref=f10e1190]:
+                                            - generic [ref=f10e1192]: 有效
+                                          - cell "健康状态" [ref=f10e1194]:
+                                            - generic "健康状态" [ref=f10e1196]
+                                    - generic [ref=f10e929]:
+                                      - table [ref=f10e931]:
+                                        - rowgroup [ref=f10e941]:
+                                          - row "序号" [ref=f10e942]:
+                                            - columnheader [ref=f10e943]:
+                                              - checkbox [ref=f10e948] [cursor=pointer]
+                                            - columnheader "序号" [ref=f10e949]:
+                                              - generic [ref=f10e950]: 序号
+                                      - table [ref=f10e1198]:
+                                        - rowgroup [ref=f10e1208]:
+                                          - row "1" [ref=f10e1209]:
+                                            - cell [ref=f10e1210]:
+                                              - checkbox [ref=f10e1215] [cursor=pointer]
+                                            - cell "1" [ref=f10e1216]:
+                                              - generic [ref=f10e1217]: "1"
+                                          - row "2" [ref=f10e1218]:
+                                            - cell [ref=f10e1219]:
+                                              - checkbox [ref=f10e1224] [cursor=pointer]
+                                            - cell "2" [ref=f10e1225]:
+                                              - generic [ref=f10e1226]: "2"
+                                          - row "3" [ref=f10e1227]:
+                                            - cell [ref=f10e1228]:
+                                              - checkbox [ref=f10e1233] [cursor=pointer]
+                                            - cell "3" [ref=f10e1234]:
+                                              - generic [ref=f10e1235]: "3"
+                                          - row "4" [ref=f10e1236]:
+                                            - cell [ref=f10e1237]:
+                                              - checkbox [ref=f10e1242] [cursor=pointer]
+                                            - cell "4" [ref=f10e1243]:
+                                              - generic [ref=f10e1244]: "4"
+                                    - generic [ref=f10e951]:
+                                      - table [ref=f10e953]:
+                                        - rowgroup [ref=f10e963]:
+                                          - row "操作" [ref=f10e964]:
+                                            - columnheader "操作" [ref=f10e965]:
+                                              - generic [ref=f10e966]: 操作
+                                      - table [ref=f10e1246]:
+                                        - rowgroup [ref=f10e1256]:
+                                          - row "发布 编辑 删除" [ref=f10e1257]:
+                                            - cell "发布 编辑 删除" [ref=f10e1258]:
+                                              - generic [ref=f10e1261]:
+                                                - button "发布" [ref=f10e1262]:
+                                                  - generic [ref=f10e1264]: 发布
+                                                - button "编辑" [ref=f10e1265]:
+                                                  - generic [ref=f10e1267]: 编辑
+                                                - button "删除" [ref=f10e1268]:
+                                                  - generic [ref=f10e1270]: 删除
+                                          - row "发布 编辑 删除" [ref=f10e1271]:
+                                            - cell "发布 编辑 删除" [ref=f10e1272]:
+                                              - generic [ref=f10e1275]:
+                                                - button "发布" [ref=f10e1276]:
+                                                  - generic [ref=f10e1278]: 发布
+                                                - button "编辑" [ref=f10e1279]:
+                                                  - generic [ref=f10e1281]: 编辑
+                                                - button "删除" [ref=f10e1282]:
+                                                  - generic [ref=f10e1284]: 删除
+                                          - row "发布 编辑 删除" [ref=f10e1285]:
+                                            - cell "发布 编辑 删除" [ref=f10e1286]:
+                                              - generic [ref=f10e1289]:
+                                                - button "发布" [ref=f10e1290]:
+                                                  - generic [ref=f10e1292]: 发布
+                                                - button "编辑" [ref=f10e1293]:
+                                                  - generic [ref=f10e1295]: 编辑
+                                                - button "删除" [ref=f10e1296]:
+                                                  - generic [ref=f10e1298]: 删除
+                                          - row "发布 编辑 删除" [ref=f10e1299]:
+                                            - cell "发布 编辑 删除" [ref=f10e1300]:
+                                              - generic [ref=f10e1303]:
+                                                - button "发布" [ref=f10e1304]:
+                                                  - generic [ref=f10e1306]: 发布
+                                                - button "编辑" [ref=f10e1307]:
+                                                  - generic [ref=f10e1309]: 编辑
+                                                - button "删除" [ref=f10e1310]:
+                                                  - generic [ref=f10e1312]: 删除
+                                  - generic [ref=f10e967]:
+                                    - generic [ref=f10e968]:
+                                      - generic [ref=f10e969]: 已选0条
+                                      - button "删 除" [disabled] [ref=f10e971]
+                                    - list [ref=f10e973]:
+                                      - generic [ref=f10e974]: 共 4 条
+                                      - listitem "上一页" [ref=f10e975]:
+                                        - generic [ref=f10e977] [cursor=pointer]: 
+                                      - listitem "1" [ref=f10e978] [cursor=pointer]
+                                      - listitem "下一页" [ref=f10e979]:
+                                        - generic [ref=f10e981] [cursor=pointer]: 
+                                      - generic [ref=f10e982]:
+                                        - generic [ref=f10e983]:
+                                          - text: 跳至
+                                          - textbox [ref=f10e984]: "1"
+                                          - text: 页
+                                        - generic [ref=f10e988] [cursor=pointer]:
+                                          - generic [ref=f10e989]: 7 条/页
+                                          - generic [ref=f10e990]: 
+              - text:        
+          - iframe [ref=e98]:
+            - generic [ref=f18e364]:
+              - generic:
+                - generic [ref=f18e368]:
+                  - generic [ref=f18e370]:
+                    - generic [ref=f18e371] [cursor=pointer]: 
+                    - text: 
+                    - textbox "请输入关键字搜索..." [ref=f18e372]
+                  - listitem [ref=f18e375]:
+                    - generic "函数与规则" [ref=f18e377] [cursor=pointer]: 函数与规则
+                    - list [ref=f18e379]:
+                      - listitem [ref=f18e380]:
+                        - generic "数学函数" [ref=f18e382] [cursor=pointer]: 数学函数
+                      - listitem [ref=f18e384]:
+                        - generic "比较函数" [ref=f18e386] [cursor=pointer]: 比较函数
+                      - listitem [ref=f18e388]:
+                        - generic "评价函数" [ref=f18e390] [cursor=pointer]: 评价函数
+                      - listitem [ref=f18e392]:
+                        - generic "参数趋势函数" [ref=f18e394] [cursor=pointer]: 参数趋势函数
+                      - listitem [ref=f18e396]:
+                        - generic "启停统计函数" [ref=f18e398] [cursor=pointer]: 启停统计函数
+                      - listitem [ref=f18e400]:
+                        - generic "曲线拟合函数" [ref=f18e402] [cursor=pointer]: 曲线拟合函数
+                      - listitem [ref=f18e404]:
+                        - generic "残差模型" [ref=f18e406] [cursor=pointer]: 残差模型
+                      - listitem [ref=f18e408]:
+                        - generic "其他函数" [ref=f18e410] [cursor=pointer]: 其他函数
+                      - listitem [ref=f18e412]:
+                        - generic "对数函数" [ref=f18e414] [cursor=pointer]: 对数函数
+                      - listitem [ref=f18e416]:
+                        - generic "水蒸气函数" [ref=f18e418] [cursor=pointer]: 水蒸气函数
+                      - listitem [ref=f18e420]:
+                        - generic "电流函数" [ref=f18e422] [cursor=pointer]: 电流函数
+                      - listitem [ref=f18e424]:
+                        - generic "三角函数" [ref=f18e426] [cursor=pointer]: 三角函数
+                      - listitem [ref=f18e428]:
+                        - generic "规则判断" [ref=f18e430] [cursor=pointer]: 规则判断
+                      - listitem [ref=f18e432]:
+                        - generic "逻辑运算" [ref=f18e434] [cursor=pointer]: 逻辑运算
+                      - listitem [ref=f18e436]:
+                        - generic "结束判断" [ref=f18e438] [cursor=pointer]: 结束判断
+                - generic [ref=f18e452]:
+                  - generic: 
+                  - generic [ref=f18e454]:
+                    - generic [ref=f18e456]:
+                      - generic [ref=f18e457]: 数字孪生建模 > 机理模式
+                      - generic [ref=f18e459]: 磨煤机--磨煤机风门裕度小风量低，有堵磨风险.
+                      - list [ref=f18e471]:
+                        - listitem [ref=f18e472] [cursor=pointer]: 较严重故障
+                    - generic [ref=f18e475] [cursor=pointer]:
+                      - img [ref=f18e476]
+                      - text: 快捷键
+                    - generic [ref=f18e482]:
+                      - img [ref=f18e487] [cursor=pointer]
+                      - img [ref=f18e492] [cursor=pointer]
+                      - img [ref=f18e497] [cursor=pointer]
+                      - img [ref=f18e502] [cursor=pointer]
+                      - img [ref=f18e507] [cursor=pointer]
+                      - img [ref=f18e512] [cursor=pointer]
+                      - img [ref=f18e517] [cursor=pointer]
+                      - img [ref=f18e522] [cursor=pointer]
+                      - img [ref=f18e527] [cursor=pointer]
+                      - img [ref=f18e532] [cursor=pointer]
+                      - img [ref=f18e537] [cursor=pointer]
+                    - generic [ref=f18e539]: This text is displayed if your browser does not support the Canvas HTML element.
+    - generic [ref=e65]:
+      - text: 系统消息
+      - generic [ref=e66]: 
+  - generic [ref=e68]:
+    - generic [ref=e71]:
+      - generic "全屏" [ref=e72] [cursor=pointer]: 
+      - text: 
+      - generic "关闭" [ref=e73] [cursor=pointer]: 
+    - iframe [ref=e74]:
+      - generic [ref=f9e6]:
+        - generic [ref=f9e8]:
+          - generic [ref=f9e9]:
+            - generic [ref=f9e12]: 您好，我是苏畅瑶光大模型，有问题尽管问~
+            - generic [ref=f9e14]:
+              - generic [ref=f9e15]: 您还可以尝试选择以下具体场景后提问，帮助您更好的解决问题~
+              - generic [ref=f9e16]:
+                - generic [ref=f9e17] [cursor=pointer]:
+                  - generic [ref=f9e20]: 信息问答智能体
+                  - generic [ref=f9e21]: 信息问答智能体
+                - generic [ref=f9e22] [cursor=pointer]:
+                  - generic [ref=f9e25]: 矿山知识问答
+                  - generic [ref=f9e26]: 矿山知识问答
+                - generic [ref=f9e27] [cursor=pointer]:
+                  - generic [ref=f9e30]: 标准化作业岗位流程
+                  - generic [ref=f9e31]: 标准化作业岗位流程
+                - generic [ref=f9e32] [cursor=pointer]:
+                  - generic [ref=f9e35]: 报告总结智能体
+                  - generic [ref=f9e36]: 汇总系统数据生成智能报告
+                - generic [ref=f9e37] [cursor=pointer]:
+                  - generic [ref=f9e40]: 故障预警分析应用
+                  - generic [ref=f9e41]: 过参数质量检查、模型合理性分析、参数异常分析、故障原因排查，对预警信息进行综合分析，自动输出故障诊断报告，形成闭环处理
+                - generic [ref=f9e42] [cursor=pointer]:
+                  - generic [ref=f9e45]: 合同信息综合问答
+                  - generic [ref=f9e46]: 合同信息综合问答
+                - generic [ref=f9e47] [cursor=pointer]:
+                  - generic [ref=f9e50]: 故障问题消缺处理
+                  - generic [ref=f9e51]: 故障问题消缺处理
+              - generic [ref=f9e54] [cursor=pointer]: 更多场景
+          - generic [ref=f9e56] [cursor=pointer]:
+            - text: 你已切换至
+            - generic "信息问答智能体" [ref=f9e57]
+            - text: 场景
+        - generic [ref=f9e58]:
+          - generic [ref=f9e62] [cursor=pointer]: 
+          - generic [ref=f9e66] [cursor=pointer]: 
+          - generic [ref=f9e70] [cursor=pointer]: 
+          - generic [ref=f9e76] [cursor=pointer]: 
+        - generic [ref=f9e77]:
+          - generic "信息问答智能体" [ref=f9e79] [cursor=pointer]
+          - textbox "请输入" [ref=f9e81]

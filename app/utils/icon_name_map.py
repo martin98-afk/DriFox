@@ -11,6 +11,7 @@ ICON_NAME_TO_FILE = {
     "MCP": "MCP.svg",
     "MiniMax": "MiniMax.svg",
     "Ollama": "Ollama.svg",
+    "opencode": "opencode.svg",
     "qwen": "qwen.svg",
     "siliconflow": "siliconflow.png",
     "主题风格": "主题风格.svg",

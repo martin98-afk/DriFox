@@ -478,6 +478,18 @@ def _render_tool_block_content(content: str) -> str:
     # ========== 解析 result ==========
     # 关键：从 result: 之后开始搜索，而不是从 result_search_start
     result_start = content.find("result:")
+    
+    # ========== 解析 diff（可选字段，仅 edit/write 工具有）==========
+    diff_content = ""
+    diff_start = content.find("\ndiff:")
+    if diff_start != -1:
+        diff_after = content[diff_start + 6:]  # skip "\ndiff:"
+        # diff 内容持续到下一个字段（\nsuccess:）或末尾
+        diff_next = _NEXT_FIELD_PATTERN.search(diff_after)
+        if diff_next:
+            diff_content = diff_after[:diff_next.start()].strip()
+        else:
+            diff_content = diff_after.strip()
     if result_start >= 0:
         result_after = content[result_start + 7:]  # 跳过 "result:"
         # 找到 result 内容的结束位置（下一个字段之前）
@@ -526,7 +538,7 @@ def _render_tool_block_content(content: str) -> str:
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
     return render_tool_block(
         tool_name, args_dict, tool_result, tool_success, collapsed=True,
-        tool_call_id=tool_call_id
+        tool_call_id=tool_call_id, diff=diff_content
     )
 
 
@@ -1438,7 +1450,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text);
                     {self._viewer_font_css}
                     margin: 0; 
-                    padding: 6px 14px; 
+                    padding: 6px 14px 0 14px; 
                     max-height: {self.MAX_HEIGHT}px;
                     overflow-x: hidden;
                     overflow-y: auto;
@@ -1471,6 +1483,12 @@ class CodeWebViewer(QWebEngineView):
                 /* 优化：移除首尾元素的边距，彻底消除多余空白 */
                 #content-placeholder > :first-child {{ margin-top: 0 !important; }}
                 #content-placeholder > :last-child {{ margin-bottom: 0 !important; }}
+                /* 解决 Chromium 滚动容器 padding-bottom 不生效的 bug */
+                #content-placeholder::after {{
+                    content: '';
+                    display: block;
+                    height: 10px;
+                }}
 
                 /* 优化：紧凑的段落间距 */
                 p {{ margin: 8px 0; }}
@@ -1719,6 +1737,26 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-expanded-content {{
                     padding: 0;
+                }}
+                .tool-diff-inline .diff-line {{
+                    padding: 0 12px;
+                    white-space: pre-wrap;
+                    font-size: {tag_font_size}px;
+                }}
+                .tool-diff-inline .diff-add {{
+                    background-color: rgba(63, 185, 80, 0.15);
+                    color: #3fb950;
+                }}
+                .tool-diff-inline .diff-del {{
+                    background-color: rgba(248, 81, 73, 0.15);
+                    color: #f85149;
+                }}
+                .tool-diff-inline .diff-hunk {{
+                    color: #58a6ff;
+                    padding: 0 12px;
+                }}
+                .tool-diff-inline .diff-ctx {{
+                    color: #c9d1d9;
                 }}
                 .tool-params-section,
                 .tool-result-section {{
@@ -2455,7 +2493,7 @@ class PlainTextViewer(QWidget):
         self.text_edit.ensurePolished()
 
         doc = self.text_edit.document()
-        h = int(doc.size().height()) + 16  # padding
+        h = int(math.ceil(doc.size().height())) + 16  # padding
 
         h = max(40, h)
 
@@ -2528,10 +2566,12 @@ class MessageCard(SimpleCardWidget):
             parent=None,
             error: bool = False,
             reasoning_content: str = "",
+            model_name: str = None,
     ):
         super().__init__(parent)
         self.parent = parent
         self.role = role
+        self.model_name = model_name
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -2540,7 +2580,7 @@ class MessageCard(SimpleCardWidget):
                 self.timestamp = dt.strftime("%m-%d %H:%M")
             except ValueError:
                 self.timestamp = self.timestamp[:14]
-        # 助手卡片初始不显示时间，流完成后再设持续时长
+        # 助手卡片初始不显示时间，流完成后再设模型名称或时间
         if role == "assistant" and not timestamp:
             self.timestamp = ""
         self.error = error
@@ -2675,23 +2715,15 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, 'viewer') and self.viewer and hasattr(self.viewer, '_refresh_viewer_font'):
             self.viewer._refresh_viewer_font()
 
-    def set_duration(self, duration_seconds: int):
-        """设置执行持续时间显示（用于 assistant 卡片）"""
+    def set_model_name(self, model_name: str):
+        """设置模型名称显示（用于助手卡片）"""
         if self.role != "assistant":
             return
-        if duration_seconds <= 0:
+        if not model_name:
             return
-        # 格式化为 mm:ss 或 h:mm:ss
-        h, rem = divmod(duration_seconds, 3600)
-        m, s = divmod(rem, 60)
-        if h > 0:
-            duration_text = f"{h}:{m:02d}:{s:02d}"
-        else:
-            duration_text = f"{m:02d}:{s:02d}"
-        # 更新时间戳显示为持续时间
+        self.model_name = model_name
         if hasattr(self, '_ts_label'):
-            self._ts_label.setText(duration_text)
-            self._ts_label.setToolTip(f"执行持续时间: {duration_text}")
+            self._ts_label.setText(model_name)
             self._ts_label.setVisible(True)
             self._ts_label.setStyleSheet(
                 f"""
@@ -2767,10 +2799,14 @@ class MessageCard(SimpleCardWidget):
 
         top.addWidget(av)
         top.addWidget(title_wrap)
-        # 所有卡片都显示时间（用户卡片显示时间戳，助手卡片显示持续时间）
-        ts = QLabel(self.timestamp, self)
+        # 用户卡片显示时间戳，助手卡片显示模型名称
+        if self.role == "assistant" and self.model_name:
+            label_text = self.model_name
+        else:
+            label_text = self.timestamp
+        ts = QLabel(label_text, self)
         self._ts_label = ts
-        ts.setVisible(bool(self.timestamp))
+        ts.setVisible(bool(label_text))
         ts.setStyleSheet(
             f"""
             QLabel {{
@@ -3641,6 +3677,7 @@ class MessageCard(SimpleCardWidget):
             result: Any = None,
             success: bool = True,
             tool_call_id: str = None,
+            diff: str = None,
     ):
         self._content_data.append(
             make_tool_result_block(
@@ -3649,6 +3686,7 @@ class MessageCard(SimpleCardWidget):
                 result=result,
                 success=success,
                 tool_call_id=tool_call_id,
+                diff=diff,
             )
         )
         # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算

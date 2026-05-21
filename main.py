@@ -45,6 +45,11 @@ def main():
     from app.utils.utils import get_app_data_dir
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
+
+    # 迁移旧版本数据（打包版从安装目录迁到用户 home 目录）
+    from app.utils.utils import migrate_app_data_if_needed
+    migrate_app_data_if_needed()
+
     # 设置日志 (使用统一路径获取方法，DMG 只读时也需要可写)
     log_dir = get_app_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -142,22 +147,28 @@ def main():
     fake_page = FakePage()
     chat_window = OpenAIChatToolWindow(fake_page, None)
 
-    # 初始化全局 TrayManager（必须在创建任何 ToolPopupDialog 之前）
-    from app.tray_manager import TrayManager
-    TrayManager.get_instance()
+    # 延迟创建 ToolPopupDialog 和初始化 TrayManager
+    # 等 chat_window 的 __init__ 完成后再创建弹窗，避免窗口渲染阻塞主线程
+    from PyQt5.QtCore import QTimer
 
-    # 使用 ToolPopupDialog 包装（延迟导入，确保 QApp 和 theme 已就绪）
-    from app.tool_popup import ToolPopupDialog
+    def _show_popup():
+        # TrayManager 懒初始化（首次访问时才创建 QSystemTrayIcon）
+        from app.tray_manager import TrayManager
+        TrayManager.get_instance()
 
-    popup = ToolPopupDialog(chat_window, None)
-    popup.setWindowTitle("Drifox")
+        # ToolPopupDialog 构造（包含 QSettings 读取、布局构建）
+        from app.tool_popup import ToolPopupDialog
+        popup = ToolPopupDialog(chat_window, None)
+        popup.setWindowTitle("Drifox")
 
-    # 跳过历史会话恢复
-    chat_window._skip_restore_history = True
+        # 跳过历史会话恢复
+        chat_window._skip_restore_history = True
 
-    popup.show()
+        popup.show()
+        logger.info("LLM Chatter 启动成功")
 
-    logger.info("LLM Chatter 启动成功")
+    # 等 chat_window.__init__ 完成后再创建弹窗
+    QTimer.singleShot(0, _show_popup)
 
     sys.exit(app.exec_())
 

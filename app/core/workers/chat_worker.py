@@ -594,6 +594,7 @@ class OpenAIChatWorker(QThread):
 
     def _build_response_message_sequence(self, tool_results=None) -> List[Dict]:
         now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        model_name = str(self.llm_config.get("模型名称", "") or "")
 
         # 性能优化：缓存 reasoning_content，避免重复 join
         reasoning_content = self._get_reasoning_content()
@@ -711,6 +712,8 @@ class OpenAIChatWorker(QThread):
                     assistant_msg["tool_calls"] = [tool_call]
                 if reasoning_content:
                     assistant_msg["reasoning_content"] = reasoning_content
+                if model_name:
+                    assistant_msg["model_name"] = model_name
                 if assistant_msg.get("content") or assistant_msg.get("tool_calls"):
                     sequence.append(assistant_msg)
 
@@ -736,6 +739,8 @@ class OpenAIChatWorker(QThread):
                     assistant_msg["tool_calls"] = [tool_call]
                 if reasoning_content:
                     assistant_msg["reasoning_content"] = reasoning_content
+                if model_name:
+                    assistant_msg["model_name"] = model_name
                 if assistant_msg.get("tool_calls"):
                     sequence.append(assistant_msg)
                 sequence.append(tool_result)
@@ -748,6 +753,8 @@ class OpenAIChatWorker(QThread):
             }
             if reasoning_content:
                 assistant_msg["reasoning_content"] = reasoning_content
+            if model_name:
+                assistant_msg["model_name"] = model_name
             sequence.append(assistant_msg)
         elif not sequence and self.full_response:
             assistant_msg = {
@@ -757,9 +764,14 @@ class OpenAIChatWorker(QThread):
             }
             if reasoning_content:
                 assistant_msg["reasoning_content"] = reasoning_content
+            if model_name:
+                assistant_msg["model_name"] = model_name
             sequence.append(assistant_msg)
         elif not sequence and not response_blocks:
-            sequence.append({"role": "assistant", "content": [], "timestamp": now_ts})
+            empty_msg = {"role": "assistant", "content": [], "timestamp": now_ts}
+            if model_name:
+                empty_msg["model_name"] = model_name
+            sequence.append(empty_msg)
 
         return sequence
 
@@ -983,7 +995,7 @@ class OpenAIChatWorker(QThread):
             # 用户取消时立即退出重试循环
             if self._is_cancelled:
                 logger.info("[API] 重试被用户取消")
-                return None
+                return None, None
             try:
                 response = client.chat.completions.create(**req_kwargs)
                 break
@@ -1060,6 +1072,11 @@ class OpenAIChatWorker(QThread):
                 )
 
                 if should_retry and attempt < max_retries - 1:
+                    # 🛡️ 已取消则不再 emit 信号也不重试
+                    if self._is_cancelled:
+                        logger.info("[API] 检测到取消，放弃重试")
+                        return None, None
+
                     wait_time = retry_delay * (attempt + 1)
                     if is_rate_limit:
                         retry_reason = "RateLimit"
@@ -1083,7 +1100,7 @@ class OpenAIChatWorker(QThread):
                     while elapsed < wait_time:
                         if self._is_cancelled:
                             logger.info("[API] 重试等待被用户取消")
-                            return None
+                            return None, None
                         time.sleep(min(step, wait_time - elapsed))
                         elapsed += step
                     continue
@@ -1162,6 +1179,19 @@ class OpenAIChatWorker(QThread):
         for chunk in response:
             if self._is_cancelled:
                 return False, False  # 返回元组而不是单个布尔值
+
+            # 兼容新模型（如 GPT-5.5）：流式响应可能包含 choices 为空的 chunk
+            # （例如 usage 事件、ping 事件等），直接跳过即可
+            if not chunk.choices:
+                #但仍需检查 usage 信息（部分模型在空 choices 的 chunk 中携带 usage）
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    self._last_usage = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(usage, "completion_tokens", 0),
+                        "total_tokens": getattr(usage, "total_tokens", 0),
+                    }
+                continue
 
             delta = chunk.choices[0].delta
             content = getattr(delta, "content", None)
@@ -1521,7 +1551,7 @@ class OpenAIChatWorker(QThread):
                             )
                         else:
                             # 阶段2: 对于 write/edit 工具，尝试从原始字符串提取关键参数
-                            if tool_name in ("write", "edit", "patch", "multiedit"):
+                            if tool_name in ("write", "edit"):
                                 extracted = _extract_tool_args_from_raw(arguments, tool_name)
                                 if extracted:
                                     arguments = extracted
@@ -1815,6 +1845,8 @@ class OpenAIChatWorker(QThread):
                     "content": result_content,
                     "success": success,
                     "round_id": round_id,
+                    "diff": getattr(result, "diff", None) if result else None,
+                    "anchors": getattr(result, "anchors", None) if result else None,
                 }
             )
 
@@ -1976,72 +2008,11 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                     if content_end > content_begin:
                         result["content"] = raw_str[content_begin:content_end]
 
-    # 提取 oldString 和 newString（edit 工具）
+    # 提取 operations 数组（hashline edit 工具）
     if tool_name == "edit":
-        old_start = raw_str.find('"oldString"')
-        if old_start >= 0:
-            colon = raw_str.find(':', old_start)
-            first_quote = raw_str.find('"', colon) if colon >= 0 else -1
-            if first_quote >= 0:
-                begin = first_quote + 1
-                end = -1
-                i = begin
-                while i < len(raw_str):
-                    if raw_str[i] == '\\' and i + 1 < len(raw_str):
-                        i += 2
-                    elif raw_str[i] == '"':
-                        end = i
-                        break
-                    else:
-                        i += 1
-                if end > begin:
-                    result["oldString"] = raw_str[begin:end]
-
-        new_start = raw_str.find('"newString"')
-        if new_start >= 0:
-            colon = raw_str.find(':', new_start)
-            first_quote = raw_str.find('"', colon) if colon >= 0 else -1
-            if first_quote >= 0:
-                begin = first_quote + 1
-                end = -1
-                i = begin
-                while i < len(raw_str):
-                    if raw_str[i] == '\\' and i + 1 < len(raw_str):
-                        i += 2
-                    elif raw_str[i] == '"':
-                        end = i
-                        break
-                    else:
-                        i += 1
-                if end > begin:
-                    result["newString"] = raw_str[begin:end]
-
-    # 提取 patch_content（patch 工具）
-    if tool_name == "patch":
-        pc_start = raw_str.find('"patch_content"')
-        if pc_start >= 0:
-            colon = raw_str.find(':', pc_start)
-            first_quote = raw_str.find('"', colon) if colon >= 0 else -1
-            if first_quote >= 0:
-                begin = first_quote + 1
-                end = -1
-                i = begin
-                while i < len(raw_str):
-                    if raw_str[i] == '\\' and i + 1 < len(raw_str):
-                        i += 2
-                    elif raw_str[i] == '"':
-                        end = i
-                        break
-                    else:
-                        i += 1
-                if end > begin:
-                    result["patch_content"] = raw_str[begin:end]
-
-    # 提取 edits 数组（multiedit 工具）
-    if tool_name == "multiedit":
-        edits_start = raw_str.find('"edits"')
-        if edits_start >= 0:
-            colon = raw_str.find(':', edits_start)
+        ops_start = raw_str.find('"operations"')
+        if ops_start >= 0:
+            colon = raw_str.find(':', ops_start)
             if colon >= 0:
                 arr_start = raw_str.find('[', colon)
                 if arr_start >= 0:
@@ -2059,34 +2030,8 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                     if arr_end > arr_start:
                         try:
                             import json
-                            result["edits"] = json.loads(raw_str[arr_start:arr_end])
+                            result["operations"] = json.loads(raw_str[arr_start:arr_end])
                         except json.JSONDecodeError:
                             pass
-
-    # 也尝试从旧格式提取（content 直接作为第二个关键字段）
-    if "content" not in result and tool_name in ("write", "edit"):
-        # 如果 content 提取失败，尝试将整个字符串的剩余部分作为 content
-        # （如 truncated JSON 场景）
-        if "path" in result:
-            # 从 path 值之后的所有内容
-            path_val = result["path"]
-            path_pos = raw_str.find(path_val)
-            after_path = raw_str[path_pos + len(path_val) + 1:] if path_pos >= 0 else raw_str
-            # 尝试在 after_path 中找到 content
-            if '"content"' in after_path:
-                con_start = after_path.find('"content"')
-                colon = after_path.find(':', con_start)
-                first_quote = after_path.find('"', colon) if colon >= 0 else -1
-                if first_quote >= 0:
-                    content_begin = first_quote + 1
-                    # 找最后一个 " 或 }
-                    last_quote = after_path.rfind('"')
-                    last_brace = after_path.rfind('}')
-                    end_pos = max(last_quote, last_brace) if last_brace > last_quote else last_brace
-                    if end_pos > content_begin:
-                        candidate = after_path[content_begin:end_pos]
-                        candidate = candidate.rstrip('"').rstrip(',').rstrip()
-                        if candidate:
-                            result["content"] = candidate
 
     return result

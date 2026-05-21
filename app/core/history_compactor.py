@@ -250,7 +250,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         offset = args.get("offset", 1)
         return f"[{tool_name}] read {path} from line {offset} ({content_len:,} chars)"
 
-    if tool_name in ("write", "write_file", "Write", "edit", "patch"):
+    if tool_name in ("write", "write_file", "Write", "edit"):
         path = args.get("path", "?")
         written_lines = args.get("content", "").count("\n") + 1 if args.get("content") else "?"
         return f"[{tool_name}] wrote to {path} ({written_lines} lines)"
@@ -1288,6 +1288,9 @@ class HistoryCompactor:
                 return client.chat.completions.create(**req_kwargs)
 
             resp = create_api_call_with_retry(client, create_task)
+            if not resp.choices:
+                logger.warning("[Compaction] API 返回空 choices，跳过摘要")
+                return ""
             content = (resp.choices[0].message.content or "").strip()
             
             # 更新迭代摘要缓存

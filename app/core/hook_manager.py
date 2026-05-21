@@ -411,6 +411,11 @@ class HookManager:
         
         # 注册的 Python 函数
         self._registered_functions: Dict[str, Callable] = {}
+        
+        # cwd 解析缓存：key=id(hook), value=(resolved_cwd_or_None, timestamp)
+        # 避免每次触发事件都重复扫描磁盘查找脚本文件
+        self._cwd_resolve_cache: Dict[int, tuple] = {}
+        self._CWD_CACHE_TTL = 30.0  # 30秒缓存
     
     def set_on_finished_callback(self, callback: Callable[[str, str, bool], None]):
         """设置 Hook 执行完成回调"""
@@ -841,15 +846,25 @@ class HookManager:
         1. 显式设置的 cwd（配置文件中指定）
         2. 从命令中解析脚本文件路径，使用该文件所在目录
         3. None（使用 subprocess 默认 CWD=项目根目录）
+        
+        结果会缓存 30 秒（因为 hook.command 和 hook.skill_root 是静态的），
+        避免每次事件触发都重复扫描磁盘。
         """
-        # 1. 显式设置优先
+        # 1. 显式设置优先（不缓存，因为值已经是最终结果）
         if hook.cwd:
             logger.debug(f"[HookManager] Using explicit cwd: {hook.cwd}")
             return hook.cwd
         
-        # 2. 从命令中解析脚本文件路径
+        # 2. 检查缓存（key 基于 hook.command + hook.skill_root，两者都是静态的）
+        import time
+        cache_key = id(hook)
+        cached = self._cwd_resolve_cache.get(cache_key)
+        if cached and time.monotonic() - cached[1] < self._CWD_CACHE_TTL:
+            return cached[0]
+        
         command = hook.command
         if not command:
+            self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
             logger.debug("[HookManager] No command, returning None for cwd")
             return None
         
@@ -884,11 +899,15 @@ class HookManager:
                     if os.path.isfile(full_path):
                         resolved_cwd = os.path.dirname(full_path)
                         logger.debug(f"[HookManager] Found script, resolved cwd: {resolved_cwd}")
+                        self._cwd_resolve_cache[cache_key] = (resolved_cwd, time.monotonic())
                         return resolved_cwd
                 
                 logger.debug(f"[HookManager] Script file not found in any search dir")
+                self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
+                return None
         
         logger.debug(f"[HookManager] No script in command, returning None for cwd")
+        self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
         return None
     
     def _interpolate_variables(self, text: str, context: Dict[str, Any]) -> str:

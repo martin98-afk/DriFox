@@ -244,6 +244,7 @@ def create_api_call_with_retry(
     max_retries: int = 15,
     retry_delay: float = 5.0,
     enable_smart_retry: bool = True,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Any:
     """
     执行带重试的API调用
@@ -254,6 +255,7 @@ def create_api_call_with_retry(
         max_retries: 最大重试次数
         retry_delay: 基础重试延迟（秒）
         enable_smart_retry: 是否使用智能重试
+        cancel_check: 取消检查回调（返回 True 表示应取消重试）
 
     Returns:
         API响应对象
@@ -262,6 +264,11 @@ def create_api_call_with_retry(
     compression_needed = False
 
     for attempt in range(max_retries):
+        # 🛡️ 检查取消
+        if cancel_check and cancel_check():
+            logger.info("[RetryHelper] 检测到取消，放弃重试")
+            raise last_error or Exception("Cancelled by user")
+
         try:
             return create_func()
         except Exception as e:
@@ -295,7 +302,15 @@ def create_api_call_with_retry(
                     f"[API] {error_type} error, "
                     f"retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})"
                 )
-                time.sleep(wait_time)
+                # 🛡️ 可取消的 sleep
+                elapsed = 0.0
+                step = 0.5
+                while elapsed < wait_time:
+                    if cancel_check and cancel_check():
+                        logger.info("[RetryHelper] 等待期间检测到取消，放弃重试")
+                        raise last_error or Exception("Cancelled by user")
+                    time.sleep(min(step, wait_time - elapsed))
+                    elapsed += step
             else:
                 logger.error(
                     f"[API] {get_error_type_name(e)} error failed after {max_retries} attempts"

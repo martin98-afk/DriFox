@@ -464,7 +464,8 @@ class GatewayEngine(QObject, BaseEngine):
                 and self._is_recent_message(current_msgs[-1])
             )
             if not has_new_assistant and final_response.strip():
-                session.add_assistant_message(content=final_response)
+                model_name = str(llm_config.get("模型名称", "") or "")
+                session.add_assistant_message(content=final_response, model_name=model_name if model_name else None)
             self._save_to_store(session)
             cb_finished(final_response)
             self.worker_finished.emit(final_response)

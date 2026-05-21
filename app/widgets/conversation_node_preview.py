@@ -6,8 +6,35 @@ from PyQt5.QtWidgets import QWidget, QToolTip
 class ConversationNodePreview(QWidget):
     nodeClicked = pyqtSignal(int)
 
+
+    # 主题颜色缓存
+    _colors_initialized = False
+
+    @classmethod
+    def _ensure_colors(cls):
+        if not cls._colors_initialized:
+            cls._refresh_colors()
+            cls._colors_initialized = True
+
+    @classmethod
+    def _refresh_colors(cls):
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+        cls._COLOR_NODE_DEFAULT = QColor(Colors.TIMELINE_NODE)
+        cls._COLOR_NODE_HOVER = QColor(Colors.TIMELINE_NODE_HOVER)
+        cls._COLOR_NODE_VISIBLE = QColor(Colors.TIMELINE_NODE_VISIBLE)
+        cls._COLOR_NODE_SELECTED = QColor(Colors.TIMELINE_NODE_SELECTED)
+        cls._COLOR_LINE = QColor(Colors.TIMELINE_LINE)
+        cls._COLOR_LINE_PROGRESS = QColor(Colors.TIMELINE_LINE_PROGRESS)
+
+    def refresh_theme(self):
+        """主题切换时调用，刷新颜色缓存并重绘"""
+        self._refresh_colors()
+        self.update()
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._ensure_colors()
         self._nodes = []
         self._selected_index = -1
         self._hovered_index = -1
@@ -32,7 +59,7 @@ class ConversationNodePreview(QWidget):
         end_x = start_x + total_width
 
         if len(self._nodes) > 1:
-            base_pen = QPen(QColor("#3A3A3A"))
+            base_pen = QPen(self._COLOR_LINE)
             base_pen.setWidth(1)
             painter.setPen(base_pen)
             painter.drawLine(start_x, center_y, end_x, center_y)
@@ -43,12 +70,12 @@ class ConversationNodePreview(QWidget):
                 )
                 progress_x = start_x + clamped_progress * self._spacing
 
-                active_pen = QPen(QColor("#00FF7F"))
+                active_pen = QPen(self._COLOR_LINE_PROGRESS)
                 active_pen.setWidth(2)
                 painter.setPen(active_pen)
                 painter.drawLine(start_x, center_y, int(progress_x), center_y)
 
-                glow_pen = QPen(QColor("#63D8FF"))
+                glow_pen = QPen(self._COLOR_LINE_PROGRESS)
                 glow_pen.setWidth(3)
                 painter.setPen(glow_pen)
                 segment_start = max(start_x, int(progress_x) - 6)
@@ -59,13 +86,13 @@ class ConversationNodePreview(QWidget):
             x = start_x + i * self._spacing
 
             if i == self._selected_index:
-                color = QColor("#FFA500")
+                color = self._COLOR_NODE_SELECTED
             elif i == self._hovered_index:
-                color = QColor("#6BA3FF")
+                color = self._COLOR_NODE_HOVER
             elif i == self._visible_index:
-                color = QColor("#00FF7F")
+                color = self._COLOR_NODE_VISIBLE
             else:
-                color = QColor("#5A5A5A")
+                color = self._COLOR_NODE_DEFAULT
 
             painter.setPen(QPen(color))
             painter.setBrush(QBrush(color))

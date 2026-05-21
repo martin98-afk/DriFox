@@ -30,7 +30,7 @@ from app.utils.design_tokens import Colors, font_size_css
 _ITEM_HEIGHT = 34  # ModelItem 高度
 _HEADER_HEIGHT = 36  # ProviderHeader 高度
 _MIN_ITEMS = 3  # 最少显示 item 数
-_MAX_ITEMS = 7  # 最多显示 item 数
+_MAX_ITEMS = 10  # 最多显示 item 数
 
 # 滚动区域高度计算
 _MIN_SCROLL_HEIGHT = _MIN_ITEMS * _ITEM_HEIGHT  # 最小高度：约 102px
@@ -342,7 +342,7 @@ class ModelSelectorPopup(QWidget):
         # 如果弹窗已显示且有参考控件，重新计算位置确保下边缘对齐按钮向上扩展
         if self.isVisible() and self._reference_widget is not None:
             reference_widget = self._reference_widget
-            screen = QApplication.primaryScreen()
+            screen = reference_widget.screen() or QApplication.primaryScreen()
             screen_geom = screen.availableGeometry() if screen else None
 
             btn_rect = reference_widget.rect()
@@ -488,7 +488,7 @@ class ModelSelectorPopup(QWidget):
         scroll_area_height = content_size.height() + 20  # 搜索框+边距
 
         # 设置合理的最大尺寸
-        screen = QApplication.primaryScreen()
+        screen = reference_widget.screen() or QApplication.primaryScreen()
         if screen:
             screen_geom = screen.availableGeometry()
             max_width = max(min(450, screen_geom.width() - 40), content_width)

@@ -2,20 +2,27 @@ from typing import Any, Optional
 
 
 class ToolResult:
-    def __init__(self, success: bool, content: Any = None, error: Optional[str] = None):
+    def __init__(self, success: bool, content: Any = None, error: Optional[str] = None,
+                 diff: Optional[str] = None, anchors: Optional[str] = None):
         self.success = success
         self.content = content
-        # 存储错误信息
         self.error = error
+        self.diff = diff      # diff 字符串，供 UI inline diff 展示
+        self.anchors = anchors  # 新锚点块，供 LLM 链式编辑
 
     def to_dict(self) -> dict:
-        # 转换为字典
+        d = {"success": self.success}
         if self.success:
-            return {"success": True, "content": self.content}
-        return {"success": False, "error": self.error}  # failure case
+            d["content"] = self.content
+        else:
+            d["error"] = self.error
+        if self.diff:
+            d["diff"] = self.diff
+        if self.anchors:
+            d["anchors"] = self.anchors
+        return d
 
     def __str__(self):
-        # 转换为字符串
         if self.success:
             return str(self.content)
         return f"[Error] {self.error}"

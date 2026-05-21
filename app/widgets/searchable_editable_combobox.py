@@ -5,9 +5,12 @@ from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import font_size_css
 
 
+MAX_COMBO_VISIBLE_ITEMS = 15  # 下拉框最大同时显示数量
+
 class SearchableEditableComboBox(EditableComboBox):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, max_visible_items: int = MAX_COMBO_VISIBLE_ITEMS):
         super().__init__(parent)
+        self._max_visible_items = max_visible_items
 
         # 设置深色样式 + 全局字体
         self.setStyleSheet(f"""
@@ -44,6 +47,12 @@ class SearchableEditableComboBox(EditableComboBox):
         # 内部维护一个纯文本列表用于同步
         self._item_texts = []
 
+        # 限制下拉列表同时显示的最大项数
+        try:
+            self.view().setMaxVisibleItems(self._max_visible_items)
+        except Exception:
+            pass
+
     def addItem(self, text: str, icon = None, userData=None):
         """重写单条添加"""
         super().addItem(text, icon, userData)
@@ -51,6 +60,8 @@ class SearchableEditableComboBox(EditableComboBox):
         if text not in self._item_texts:
             self._item_texts.append(text)
             self._update_completer_model()
+        # 刷新最大显示项数
+        self._apply_max_visible()
 
     def addItems(self, texts):
         """重写批量添加"""
@@ -58,6 +69,14 @@ class SearchableEditableComboBox(EditableComboBox):
         # 这里的 texts 应该是从 Scanner 获取的所有类型列表
         self._item_texts = list(set(self._item_texts + list(texts)))
         self._update_completer_model()
+        self._apply_max_visible()
+
+    def _apply_max_visible(self):
+        """应用最大显示项数限制"""
+        try:
+            self.view().setMaxVisibleItems(self._max_visible_items)
+        except Exception:
+            pass
 
     def _update_completer_model(self):
         """更新补全器的数据源"""

@@ -320,15 +320,16 @@ class TerminalTools:
             output = stdout.strip() if stdout else ""
             error_out = stderr.strip() if stderr else ""
             combined = "\n".join(filter(None, [output, error_out]))
+            
+            # Shell 输出压缩（减少 token 消耗）
+            from app.tools.shell_compressor import compress
+            compressed = compress(command, combined if combined else "(command completed with no output)")
 
-            return ToolResult(
-                True,
-                content=combined if combined else "(command completed with no output)",
-            )
-
+            return ToolResult(True, content=compressed)
+        
         except Exception as e:
             return ToolResult(False, error=f"Execution error: {str(e)}")
-    
+
     def bg_start(self, command: str, cwd: str = None) -> ToolResult:
         """启动后台命令
         

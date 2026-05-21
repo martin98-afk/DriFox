@@ -1,0 +1,372 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - img [ref=e7]
+        - img [ref=e10]
+        - generic [ref=e12]:
+          - generic [ref=e13]:
+            - generic [ref=e14]:
+              - generic [ref=e15]: 
+              - generic [ref=e16]: 我的首页
+              - text: 
+            - generic [ref=e85]:
+              - generic [ref=e86]: 设备孪生建模
+              - generic [ref=e87]: 
+            - generic [ref=e89]:
+              - generic [ref=e90]: 数字孪生建模
+              - generic [ref=e91]: 
+            - generic [ref=e123]:
+              - generic [ref=e124]: 机理模式
+              - generic [ref=e125]: 
+            - generic [ref=e120]:
+              - generic [ref=e121]: 机理规则
+              - generic [ref=e122]: 
+          - text: 
+        - generic [ref=e17]:
+          - generic [ref=e20]:
+            - link "系统管理员" [ref=e21] [cursor=pointer]:
+              - /url: javascript:void(0);
+            - generic [ref=e22]: 
+          - img [ref=e24]
+      - generic [ref=e25]:
+        - generic [ref=e27]:
+          - generic [ref=e28]:
+            - generic [ref=e30]:
+              - text: 
+              - textbox "请输入关键字搜索..." [ref=e31]
+              - generic [ref=e33]: 
+            - menubar [ref=e36]:
+              - menuitem " 模型开发管理 " [ref=e37]:
+                - generic [ref=e38] [cursor=pointer]:
+                  - generic [ref=e39]: 
+                  - text: 模型开发管理
+                  - generic [ref=e40]: 
+                - text:                                                                                     
+              - menuitem " 模型资产管理 " [ref=e41]:
+                - generic [ref=e42] [cursor=pointer]:
+                  - generic [ref=e43]: 
+                  - text: 模型资产管理
+                  - generic [ref=e44]: 
+                - text:        
+              - menuitem " 模型服务管理 " [expanded] [ref=e45]:
+                - generic [ref=e46] [cursor=pointer]:
+                  - generic [ref=e47]: 
+                  - text: 模型服务管理
+                  - generic [ref=e48]: 
+                - menu [ref=e75]:
+                  - menuitem " 模型服务管理" [ref=e77] [cursor=pointer]:
+                    - generic [ref=e78]: 
+                    - text: 模型服务管理
+                  - menuitem " 模型服务授权" [ref=e80] [cursor=pointer]:
+                    - generic [ref=e81]: 
+                    - text: 模型服务授权
+                  - menuitem " 设备孪生建模" [ref=e83] [cursor=pointer]:
+                    - generic [ref=e84]: 
+                    - text: 设备孪生建模
+              - menuitem " 云边协同中心 " [ref=e49]:
+                - generic [ref=e50] [cursor=pointer]:
+                  - generic [ref=e51]: 
+                  - text: 云边协同中心
+                  - generic [ref=e52]: 
+                - text:   
+              - menuitem " 智能应用管理 " [ref=e53]:
+                - generic [ref=e54] [cursor=pointer]:
+                  - generic [ref=e55]: 
+                  - text: 智能应用管理
+                  - generic [ref=e56]: 
+                - text: 
+              - menuitem " 系统运维管理 " [ref=e57]:
+                - generic [ref=e58] [cursor=pointer]:
+                  - generic [ref=e59]: 
+                  - text: 系统运维管理
+                  - generic [ref=e60]: 
+                - text:                                                                                     
+          - text:       
+        - generic [ref=e62]:
+          - iframe [active] [ref=e88]:
+            - generic [active] [ref=f10e1]:
+              - generic [ref=f10e2922]:
+                - generic [ref=f10e2923]:
+                  - generic [ref=f10e2925]: 机理模式 待入库
+                  - generic [ref=f10e2926]:
+                    - button "保 存" [ref=f10e2927]:
+                      - generic [ref=f10e2929]: 保 存
+                    - button "提交入库" [ref=f10e2930]:
+                      - generic [ref=f10e2932]: 提交入库
+                - generic [ref=f10e2935]:
+                  - generic [ref=f10e2937]:
+                    - generic [ref=f10e2938]:
+                      - generic [ref=f10e2941]: 基础配置
+                      - generic [ref=f10e2944] [cursor=pointer]: 
+                    - generic [ref=f10e2945]:
+                      - generic [ref=f10e2947]:
+                        - generic [ref=f10e2948]: 机理代码
+                        - generic "GZ2962" [ref=f10e2950]:
+                          - generic [ref=f10e2951]:
+                            - text: 
+                            - textbox "自动生成" [disabled] [ref=f10e2952]: GZ2962
+                      - generic [ref=f10e2954]:
+                        - generic [ref=f10e2955]: 机理模式 *
+                        - generic "给煤机进口断煤V2.1" [ref=f10e2957]:
+                          - generic [ref=f10e2958]:
+                            - text:  
+                            - textbox "请输入..." [ref=f10e2959]: 给煤机进口断煤V2.1
+                      - generic [ref=f10e2961]:
+                        - generic [ref=f10e2962]: 机理类别 *
+                        - generic [ref=f10e2966] [cursor=pointer]:
+                          - textbox [ref=f10e2967]: 性能劣化
+                          - generic [ref=f10e2968]: 
+                      - generic [ref=f10e2970]:
+                        - generic [ref=f10e2971]: 诊断技术 *
+                        - generic [ref=f10e2975] [cursor=pointer]:
+                          - textbox [ref=f10e2976]: 工况分析
+                          - generic [ref=f10e2977]: 
+                      - generic [ref=f10e2979]:
+                        - generic [ref=f10e2980]: 评价类型 *
+                        - generic [ref=f10e2984]:
+                          - textbox [disabled] [ref=f10e2985]: 健康状态
+                          - generic [ref=f10e2986]: 
+                      - generic [ref=f10e2988]:
+                        - generic [ref=f10e2989]: 经济效益（万元） *
+                        - generic [ref=f10e2992]:
+                          - text: 
+                          - textbox "请输入..." [ref=f10e2993]
+                      - generic [ref=f10e2995]:
+                        - generic [ref=f10e2996]: 适用工况
+                        - button "选择" [ref=f10e3000] [cursor=pointer]:
+                          - generic [ref=f10e3001]: 选择
+                      - generic [ref=f10e3003]:
+                        - generic [ref=f10e3004]: 是否有效
+                        - generic [ref=f10e3008] [cursor=pointer]:
+                          - textbox [ref=f10e3009]: 有效
+                          - generic [ref=f10e3010]: 
+                      - generic [ref=f10e3012]:
+                        - generic [ref=f10e3013]: 故障码
+                        - generic [ref=f10e3015]:
+                          - generic [ref=f10e3018] [cursor=pointer]:
+                            - generic [ref=f10e3019]: 请选择
+                            - generic [ref=f10e3020]: 
+                          - button "" [ref=f10e3022] [cursor=pointer]:
+                            - generic [ref=f10e3024]: 
+                      - text:  
+                      - generic [ref=f10e3026]:
+                        - generic [ref=f10e3027]: 机理说明
+                        - generic [ref=f10e3029]:
+                          - textbox "请输入..." [ref=f10e3030]
+                          - generic [ref=f10e3031]: 0/200
+                  - generic [ref=f10e3033]:
+                    - generic [ref=f10e3034]:
+                      - generic [ref=f10e3037]: 机理等级定义
+                      - generic [ref=f10e3040] [cursor=pointer]: 
+                    - generic [ref=f10e3042]:
+                      - generic [ref=f10e3044]:
+                        - button " 添 加" [ref=f10e3045]:
+                          - generic [ref=f10e3046]:
+                            - generic [ref=f10e3048]: 
+                            - generic [ref=f10e3049]: 添 加
+                        - generic [ref=f10e3052]:
+                          - generic [ref=f10e3053] [cursor=pointer]: 
+                          - text: 
+                          - textbox "请输入关键字搜索..." [ref=f10e3054]
+                      - generic [ref=f10e3056]:
+                        - table [ref=f10e3058]:
+                          - rowgroup [ref=f10e3068]:
+                            - row "机理等级 机理指数 等级描述 机理现象 机理原因及机理措施" [ref=f10e3069]:
+                              - columnheader "机理等级" [ref=f10e3070]:
+                                - generic [ref=f10e3071]: 机理等级
+                              - columnheader "机理指数" [ref=f10e3073]:
+                                - generic [ref=f10e3074]: 机理指数
+                              - columnheader "等级描述" [ref=f10e3076]:
+                                - generic [ref=f10e3077]: 等级描述
+                              - columnheader "机理现象" [ref=f10e3079]:
+                                - generic [ref=f10e3080]: 机理现象
+                              - columnheader "机理原因及机理措施" [ref=f10e3082]:
+                                - generic [ref=f10e3083]: 机理原因及机理措施
+                        - table [ref=f10e3086]:
+                          - rowgroup [ref=f10e3096]:
+                            - row "较严重故障 3 给煤量反馈值小于指令，并且偏差越来越大。 1.给煤量反馈值小于指令，并且偏差越来越大。; 1.原因： 可能由于煤的水分高，或有异物 措施： 1.煤量放至最低； 2.全开冷风调门，控制好磨出口温度； 3.联系巡操就地敲煤； 4.无效则停运处理。" [ref=f10e3097]:
+                              - cell "较严重故障" [ref=f10e3098]:
+                                - generic [ref=f10e3101]: 较严重故障
+                              - cell "3" [ref=f10e3102]:
+                                - generic "3" [ref=f10e3105]
+                              - cell "给煤量反馈值小于指令，并且偏差越来越大。" [ref=f10e3106]:
+                                - generic "给煤量反馈值小于指令，并且偏差越来越大。" [ref=f10e3109]
+                              - cell "1.给煤量反馈值小于指令，并且偏差越来越大。;" [ref=f10e3110]:
+                                - generic "给煤量反馈值小于指令，并且偏差越来越大。" [ref=f10e3114]: 1.给煤量反馈值小于指令，并且偏差越来越大。;
+                              - cell "1.原因： 可能由于煤的水分高，或有异物 措施： 1.煤量放至最低； 2.全开冷风调门，控制好磨出口温度； 3.联系巡操就地敲煤； 4.无效则停运处理。" [ref=f10e3115]:
+                                - generic [ref=f10e3119]:
+                                  - generic [ref=f10e3120]: 1.原因：
+                                  - generic "可能由于煤的水分高，或有异物" [ref=f10e3121]
+                                  - generic [ref=f10e3122]: 措施：
+                                  - generic "1.煤量放至最低；" [ref=f10e3123]: 1.煤量放至最低； 2.全开冷风调门，控制好磨出口温度； 3.联系巡操就地敲煤； 4.无效则停运处理。
+                        - generic [ref=f10e3124]:
+                          - table [ref=f10e3126]:
+                            - rowgroup [ref=f10e3136]:
+                              - row "序号" [ref=f10e3137]:
+                                - columnheader [ref=f10e3138]:
+                                  - checkbox [ref=f10e3143] [cursor=pointer]
+                                - columnheader "序号" [ref=f10e3144]:
+                                  - generic [ref=f10e3145]: 序号
+                          - table [ref=f10e3147]:
+                            - rowgroup [ref=f10e3157]:
+                              - row "1" [ref=f10e3158]:
+                                - cell [ref=f10e3159]:
+                                  - checkbox [ref=f10e3164] [cursor=pointer]
+                                - cell "1" [ref=f10e3165]:
+                                  - generic [ref=f10e3166]: "1"
+                        - generic [ref=f10e3167]:
+                          - table [ref=f10e3169]:
+                            - rowgroup [ref=f10e3179]:
+                              - row "操作" [ref=f10e3180]:
+                                - columnheader "操作" [ref=f10e3181]:
+                                  - generic [ref=f10e3182]: 操作
+                          - table [ref=f10e3184]:
+                            - rowgroup [ref=f10e3194]:
+                              - row "复制 编辑 删除 机理规则" [ref=f10e3195]:
+                                - cell "复制 编辑 删除 机理规则" [ref=f10e3196]:
+                                  - generic [ref=f10e3199]:
+                                    - button "复制" [ref=f10e3200]:
+                                      - generic [ref=f10e3202]: 复制
+                                    - button "编辑" [ref=f10e3203]:
+                                      - generic [ref=f10e3205]: 编辑
+                                    - button "删除" [ref=f10e3206]:
+                                      - generic [ref=f10e3208]: 删除
+                                    - button "机理规则" [ref=f10e3209]:
+                                      - generic [ref=f10e3211]: 机理规则
+                      - generic [ref=f10e3212]:
+                        - generic [ref=f10e3213]:
+                          - generic [ref=f10e3214]: 已选0条
+                          - button "删 除" [disabled] [ref=f10e3216]:
+                            - generic [ref=f10e3218]: 删 除
+                        - list [ref=f10e3220]:
+                          - generic [ref=f10e3221]: 共 1 条
+                          - listitem "上一页" [ref=f10e3222]:
+                            - generic [ref=f10e3224] [cursor=pointer]: 
+                          - listitem "1" [ref=f10e3225] [cursor=pointer]
+                          - listitem "下一页" [ref=f10e3226]:
+                            - generic [ref=f10e3228] [cursor=pointer]: 
+                          - generic [ref=f10e3229]:
+                            - generic [ref=f10e3230]:
+                              - text: 跳至
+                              - textbox [ref=f10e3231]: "1"
+                              - text: 页
+                            - generic [ref=f10e3235] [cursor=pointer]:
+                              - generic [ref=f10e3236]: 7 条/页
+                              - generic [ref=f10e3237]: 
+              - text:        
+          - iframe [ref=e98]:
+            - generic [ref=f18e722]:
+              - generic:
+                - generic [ref=f18e726]:
+                  - generic [ref=f18e728]:
+                    - generic [ref=f18e729] [cursor=pointer]: 
+                    - text: 
+                    - textbox "请输入关键字搜索..." [ref=f18e730]
+                  - listitem [ref=f18e733]:
+                    - generic "函数与规则" [ref=f18e735] [cursor=pointer]: 函数与规则
+                    - list [ref=f18e737]:
+                      - listitem [ref=f18e738]:
+                        - generic "数学函数" [ref=f18e740] [cursor=pointer]: 数学函数
+                      - listitem [ref=f18e742]:
+                        - generic "比较函数" [ref=f18e744] [cursor=pointer]: 比较函数
+                      - listitem [ref=f18e746]:
+                        - generic "评价函数" [ref=f18e748] [cursor=pointer]: 评价函数
+                      - listitem [ref=f18e750]:
+                        - generic "参数趋势函数" [ref=f18e752] [cursor=pointer]: 参数趋势函数
+                      - listitem [ref=f18e754]:
+                        - generic "启停统计函数" [ref=f18e756] [cursor=pointer]: 启停统计函数
+                      - listitem [ref=f18e758]:
+                        - generic "曲线拟合函数" [ref=f18e760] [cursor=pointer]: 曲线拟合函数
+                      - listitem [ref=f18e762]:
+                        - generic "残差模型" [ref=f18e764] [cursor=pointer]: 残差模型
+                      - listitem [ref=f18e766]:
+                        - generic "其他函数" [ref=f18e768] [cursor=pointer]: 其他函数
+                      - listitem [ref=f18e770]:
+                        - generic "对数函数" [ref=f18e772] [cursor=pointer]: 对数函数
+                      - listitem [ref=f18e774]:
+                        - generic "水蒸气函数" [ref=f18e776] [cursor=pointer]: 水蒸气函数
+                      - listitem [ref=f18e778]:
+                        - generic "电流函数" [ref=f18e780] [cursor=pointer]: 电流函数
+                      - listitem [ref=f18e782]:
+                        - generic "三角函数" [ref=f18e784] [cursor=pointer]: 三角函数
+                      - listitem [ref=f18e786]:
+                        - generic "规则判断" [ref=f18e788] [cursor=pointer]: 规则判断
+                      - listitem [ref=f18e790]:
+                        - generic "逻辑运算" [ref=f18e792] [cursor=pointer]: 逻辑运算
+                      - listitem [ref=f18e794]:
+                        - generic "结束判断" [ref=f18e796] [cursor=pointer]: 结束判断
+                - generic [ref=f18e810]:
+                  - generic: 
+                  - generic [ref=f18e812]:
+                    - generic [ref=f18e814]:
+                      - generic [ref=f18e815]: 数字孪生建模 > 机理模式
+                      - generic [ref=f18e817]: 给煤机--给煤机皮带有异物造成煤量晃动V2.1
+                      - list [ref=f18e829]:
+                        - listitem [ref=f18e830] [cursor=pointer]: 较严重故障
+                    - generic [ref=f18e833] [cursor=pointer]:
+                      - img [ref=f18e834]
+                      - text: 快捷键
+                    - generic [ref=f18e840]:
+                      - img [ref=f18e845] [cursor=pointer]
+                      - img [ref=f18e850] [cursor=pointer]
+                      - img [ref=f18e855] [cursor=pointer]
+                      - img [ref=f18e860] [cursor=pointer]
+                      - img [ref=f18e865] [cursor=pointer]
+                      - img [ref=f18e870] [cursor=pointer]
+                      - img [ref=f18e875] [cursor=pointer]
+                      - img [ref=f18e880] [cursor=pointer]
+                      - img [ref=f18e885] [cursor=pointer]
+                      - img [ref=f18e890] [cursor=pointer]
+                      - img [ref=f18e895] [cursor=pointer]
+                    - generic [ref=f18e897]: This text is displayed if your browser does not support the Canvas HTML element.
+    - generic [ref=e65]:
+      - text: 系统消息
+      - generic [ref=e66]: 
+  - generic [ref=e68]:
+    - generic [ref=e71]:
+      - generic "全屏" [ref=e72] [cursor=pointer]: 
+      - text: 
+      - generic "关闭" [ref=e73] [cursor=pointer]: 
+    - iframe [ref=e74]:
+      - generic [ref=f9e6]:
+        - generic [ref=f9e8]:
+          - generic [ref=f9e9]:
+            - generic [ref=f9e12]: 您好，我是苏畅瑶光大模型，有问题尽管问~
+            - generic [ref=f9e14]:
+              - generic [ref=f9e15]: 您还可以尝试选择以下具体场景后提问，帮助您更好的解决问题~
+              - generic [ref=f9e16]:
+                - generic [ref=f9e17] [cursor=pointer]:
+                  - generic [ref=f9e20]: 信息问答智能体
+                  - generic [ref=f9e21]: 信息问答智能体
+                - generic [ref=f9e22] [cursor=pointer]:
+                  - generic [ref=f9e25]: 矿山知识问答
+                  - generic [ref=f9e26]: 矿山知识问答
+                - generic [ref=f9e27] [cursor=pointer]:
+                  - generic [ref=f9e30]: 标准化作业岗位流程
+                  - generic [ref=f9e31]: 标准化作业岗位流程
+                - generic [ref=f9e32] [cursor=pointer]:
+                  - generic [ref=f9e35]: 报告总结智能体
+                  - generic [ref=f9e36]: 汇总系统数据生成智能报告
+                - generic [ref=f9e37] [cursor=pointer]:
+                  - generic [ref=f9e40]: 故障预警分析应用
+                  - generic [ref=f9e41]: 过参数质量检查、模型合理性分析、参数异常分析、故障原因排查，对预警信息进行综合分析，自动输出故障诊断报告，形成闭环处理
+                - generic [ref=f9e42] [cursor=pointer]:
+                  - generic [ref=f9e45]: 合同信息综合问答
+                  - generic [ref=f9e46]: 合同信息综合问答
+                - generic [ref=f9e47] [cursor=pointer]:
+                  - generic [ref=f9e50]: 故障问题消缺处理
+                  - generic [ref=f9e51]: 故障问题消缺处理
+              - generic [ref=f9e54] [cursor=pointer]: 更多场景
+          - generic [ref=f9e56] [cursor=pointer]:
+            - text: 你已切换至
+            - generic "信息问答智能体" [ref=f9e57]
+            - text: 场景
+        - generic [ref=f9e58]:
+          - generic [ref=f9e62] [cursor=pointer]: 
+          - generic [ref=f9e66] [cursor=pointer]: 
+          - generic [ref=f9e70] [cursor=pointer]: 
+          - generic [ref=f9e76] [cursor=pointer]: 
+        - generic [ref=f9e77]:
+          - generic "信息问答智能体" [ref=f9e79] [cursor=pointer]
+          - textbox "请输入" [ref=f9e81]

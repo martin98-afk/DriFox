@@ -240,6 +240,7 @@ def render_tool_block(
     success: bool = None,
     collapsed: bool = False,
     tool_call_id: str = None,
+    diff: str = None,
 ) -> str:
     """渲染工具块，参数横向表格展示（左列参数名，右列结果值）"""
 
@@ -278,7 +279,7 @@ def render_tool_block(
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
     # 文件编辑工具判断
-    file_edit_tools = {"write", "edit", "multiedit", "patch"}
+    file_edit_tools = {"write", "edit"}
     is_file_edit = tool_name in file_edit_tools
 
     # 差异对比按钮
@@ -316,10 +317,43 @@ def render_tool_block(
     # 生成统一表格：参数行 + 结果行（最后一行）
     unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
     
-    # 完整的展开内容（合并的表格）
+    # ── inline diff 预览区 ──
+    diff_html = ""
+    if diff:
+        diff_lines = diff.split("\n")
+        # 限制显示行数，过长时截断
+        MAX_DIFF_LINES = 60
+        truncated = False
+        if len(diff_lines) > MAX_DIFF_LINES:
+            truncated = True
+            half = MAX_DIFF_LINES // 2
+            diff_lines = diff_lines[:half] + ["... 中间省略 %d 行 ..." % (len(diff_lines) - MAX_DIFF_LINES)] + diff_lines[-half:]
+        diff_rows = []
+        for line in diff_lines:
+            if line.startswith("+") and not line.startswith("+++"):
+                cls = "diff-add"
+            elif line.startswith("-") and not line.startswith("---"):
+                cls = "diff-del"
+            elif line.startswith("@@"):
+                cls = "diff-hunk"
+            else:
+                cls = "diff-ctx"
+            escaped = escape(line)
+            diff_rows.append(f'<div class="diff-line {cls}">{escaped}</div>')
+        diff_body = "".join(diff_rows)
+        diff_html = f"""
+        <div class="tool-diff-inline" style="margin-top: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; overflow: hidden;">
+            <div style="padding: 6px 12px; background: #161b22; border-bottom: 1px solid #30363d; color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
+            <div style="padding: 4px 0; font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px; line-height: 1.5; overflow-x: auto;">
+                {diff_body}
+            </div>
+        </div>"""
+    
+    # 完整的展开内容（合并的表格 + diff）
     expanded_content = f"""
     <div class="tool-expanded-content">
         {unified_table_html}
+        {diff_html}
     </div>"""
 
     # 生成哈希 key

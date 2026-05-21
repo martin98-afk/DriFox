@@ -122,17 +122,40 @@ class KeyDocumentsRepository:
             logger.error(f"[KeyDocumentsRepository] set_working_directory 异常: {e}")
             return False
 
+
+    def set_working_directory_only(self, project: str, file_path: str) -> bool:
+        """
+        仅设置指定路径为工作目录，不清除其他路径的标记。
+
+        用于 worktree 切换场景：set_working_directory 会先清除所有 is_working_dir
+        （包括原根目录的标记），导致 _load_key_documents 无法识别用户真正的根目录。
+        此方法仅追加设置，不干扰已有的标记。
+        """
+        if not self._ensure_table():
+            return False
+        self._migrate()
+
+        try:
+            file_path = str(file_path).replace('\\', '/')
+            success, _ = self._execute(
+                f'UPDATE {self.TABLE_NAME} SET is_working_dir = 1 WHERE project = ? AND file_path = ?',
+                (project, file_path)
+            )
+            return success
+        except Exception as e:
+            logger.error(f'[KeyDocumentsRepository] set_working_directory_only 异常: {e}')
+            return False
     def get_working_directory(self, project: str) -> Optional[str]:
         """
         获取项目当前工作目录
-        
+
         Returns:
             Optional[str]: 工作目录路径，未设置返回 None
         """
         if not self.is_initialized:
             return None
         self._migrate()
-        
+
         try:
             success, rows = self._execute(
                 f'SELECT file_path FROM {self.TABLE_NAME} WHERE project = ? AND is_working_dir = 1 LIMIT 1',
@@ -149,17 +172,17 @@ class KeyDocumentsRepository:
     def get_by_project(self, project: str, limit: int = 20) -> List[Dict]:
         """
         获取指定项目的所有关键文档
-        
+
         Args:
             project: 项目名称
             limit: 最大返回数量
-        
+
         Returns:
             List[Dict]: 关键文档列表
         """
         if not self.is_initialized:
             return []
-        
+
         try:
             success, rows = self._execute(
                 f'SELECT * FROM {self.TABLE_NAME} WHERE project = ? ORDER BY added_at DESC LIMIT ?',

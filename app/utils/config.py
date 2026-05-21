@@ -201,8 +201,7 @@ class Settings(QConfig):
         "UI",
         "ThemeStyle",
         "midnight",
-        OptionsValidator(["midnight", "obsidian", "forest", "graphite",
-                          "bordeaux", "amber", "ocean", "sakura", "slate", "jade"]),
+        OptionsValidator(["midnight"]),  # 运行时动态补充
     )
 
     # ========== 会话项目管理 ==========
@@ -240,5 +239,19 @@ class Settings(QConfig):
     gateway_dingtalk_client_secret = ConfigItem("Gateway", "DingTalk/ClientSecret", "")
 
 
+
+def update_theme_options():
+    """从 ThemeManager 动态更新主题选项验证器"""
+    try:
+        from app.utils.theme_manager import theme_manager
+        themes = list(theme_manager.list_themes().keys())
+        if themes:
+            settings = Settings.get_instance()
+            settings.ui_theme_style.validator.__init__(themes)
+            if settings.ui_theme_style.value not in themes:
+                settings.ui_theme_style.value = themes[0]
+    except Exception as e:
+        import logging
+        logging.warning(f"[update_theme_options] failed: {e}")
 # 注册解释器退出时关闭配置写入保护
 atexit.register(Settings._set_closing_down)

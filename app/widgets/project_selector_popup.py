@@ -323,7 +323,7 @@ class ProjectSelectorPopup(QWidget):
         self.main_frame.layout().activate()
         content_size = self.main_frame.sizeHint()
 
-        screen = QApplication.primaryScreen()
+        screen = reference_widget.screen() or QApplication.primaryScreen()
         if screen:
             screen_geom = screen.availableGeometry()
             max_width = min(350, screen_geom.width() - 40)

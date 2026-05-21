@@ -680,7 +680,7 @@ class ToolPopupDialog(QDialog):
     def _center_on_screen(self):
         from PyQt5.QtWidgets import QApplication
 
-        screen = QApplication.primaryScreen()
+        screen = self.screen() or QApplication.primaryScreen()
         if screen:
             rect = screen.availableGeometry()
             x = (rect.width() - self.width()) // 2 + rect.x()
@@ -971,13 +971,6 @@ class ToolPopupDialog(QDialog):
             self._hide_opacity_slider()
 
     def eventFilter(self, obj, event):
-        if obj == self._popup_btn and event.type() == QEvent.Enter:
-            self._popup_btn.setStyleSheet(
-                "background-color: #e81123; border-radius: 4px;"
-            )
-        elif obj == self._popup_btn and event.type() == QEvent.Leave:
-            self._popup_btn.setStyleSheet("")
-
         # macOS: 监听应用激活事件，当 Dock 图标被点击时恢复窗口
         if platform.system() == "Darwin":
             if event.type() == QEvent.ApplicationActivate:

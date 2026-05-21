@@ -11,8 +11,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from pathlib import Path
+from app.utils.utils import get_app_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -399,11 +400,10 @@ class BasePlatformAdapter(ABC):
 
 def get_cache_dir(name: str) -> Path:
     """获取缓存目录"""
-    cache_dir = Path(os.path.expanduser("~/.drifox/gateway/cache"))
+    cache_dir = get_app_data_dir() / "gateway" / "cache"
     cache_dir = cache_dir / name
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
-
 
 def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
     """缓存图片字节到本地文件"""
