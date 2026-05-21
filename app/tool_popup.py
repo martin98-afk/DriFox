@@ -971,13 +971,6 @@ class ToolPopupDialog(QDialog):
             self._hide_opacity_slider()
 
     def eventFilter(self, obj, event):
-        if obj == self._popup_btn and event.type() == QEvent.Enter:
-            self._popup_btn.setStyleSheet(
-                "background-color: #e81123; border-radius: 4px;"
-            )
-        elif obj == self._popup_btn and event.type() == QEvent.Leave:
-            self._popup_btn.setStyleSheet("")
-
         # macOS: 监听应用激活事件，当 Dock 图标被点击时恢复窗口
         if platform.system() == "Darwin":
             if event.type() == QEvent.ApplicationActivate:
