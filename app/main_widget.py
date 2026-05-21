@@ -5703,12 +5703,15 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         if branch:
-            self._branch_label.setText(f"{branch}")
+            # 分支名过长时截断显示，悬浮显示全名
+            display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
+            self._branch_label.setText(display)
+            self._branch_label.setToolTip(f"分支: {branch}\n点击打开关键文档")
             self._branch_label.setStyleSheet(f"""
                 QLabel {{
                     color: {Colors.TEXT_SECONDARY};
                     {get_font_family_css()}
-                    {font_size_css(10)}
+                    {font_size_css(10)};
                     padding: 0px 3px;
                     border-radius: 2px;
                     background: rgba(255,255,255,0.05);
@@ -5717,7 +5720,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     background: {Colors.HOVER_BG};
                 }}
             """)
-            self._branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._branch_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             self._branch_label.setMinimumWidth(0)
             self._branch_label.setMaximumWidth(160)
             self._branch_label.setVisible(True)
