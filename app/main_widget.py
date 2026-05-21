@@ -802,9 +802,7 @@ class OpenAIChatToolWindow(ToolWindow):
             worker = self.backend.get_current_worker()
             if worker:
                 try:
-                    stats = worker.get_cache_stats()
-                    if stats:
-                        stats_dict = stats.to_dict()
+                    stats_dict = worker.get_cache_stats()
                 except Exception:
                     pass
 
@@ -821,7 +819,8 @@ class OpenAIChatToolWindow(ToolWindow):
             hit_rate = stats_dict.get('hit_rate', 0.0)
             read_tokens = stats_dict.get('cache_read_tokens', 0)
             write_tokens = stats_dict.get('cache_creation_5m_tokens', 0) + stats_dict.get('cache_creation_1h_tokens', 0)
-            logger.debug(f"[CacheStats] hit_rate={hit_rate}, read={read_tokens}, write={write_tokens}")
+            is_estimated = stats_dict.get('is_estimated', False)
+            logger.info(f"[CacheStats] hit_rate={hit_rate}, read={read_tokens}, write={write_tokens}, estimated={is_estimated}")
             ring.set_cache_stats(
                 hit_rate=hit_rate,
                 read_tokens=read_tokens,

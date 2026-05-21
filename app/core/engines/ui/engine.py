@@ -491,8 +491,15 @@ class UIEngine(BaseEngine):
             if hasattr(worker, 'get_cache_stats'):
                 stats = worker.get_cache_stats()
                 if stats:
-                    logger.debug(f"[_save_cache_stats] hit_rate={stats.hit_rate}, read={stats.cache_read_tokens}")
-                    self._backend.set_last_cache_stats(stats.to_dict())
+                    # stats 可能是 dict 或带 to_dict() 的对象
+                    if isinstance(stats, dict):
+                        stats_dict = stats
+                    else:
+                        stats_dict = stats.to_dict()
+                    hit_rate = stats_dict.get('hit_rate', 0.0)
+                    cache_read = stats_dict.get('cache_read_tokens', 0)
+                    logger.debug(f"[_save_cache_stats] hit_rate={hit_rate}, read={cache_read}")
+                    self._backend.set_last_cache_stats(stats_dict)
                 else:
                     logger.debug("[_save_cache_stats] stats is None")
             else:

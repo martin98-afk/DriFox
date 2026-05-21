@@ -5,6 +5,7 @@ Workers 模块 - 包含各种执行器和任务类
 
 from app.core.workers.chat_worker import OpenAIChatWorker
 from app.core.workers.cache_tracker import CacheHitRateTracker, CacheStats, AggregatedCacheStats
+from app.core.workers.cache_estimator import CacheHitEstimator, HybridCacheTracker
 from app.core.workers.subagent_worker import SubAgentExecutor, SubAgentManager
 from app.core.workers.topic_summary import TopicSummaryTask
 from app.core.workers.shell_task import ShellExecutionTask
@@ -33,6 +34,8 @@ __all__ = [
     "CacheHitRateTracker",
     "CacheStats",
     "AggregatedCacheStats",
+    "CacheHitEstimator",
+    "HybridCacheTracker",
     # Error Handler
     "error_handler",
 ]
