@@ -176,6 +176,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg = Settings.get_instance()
         # 初始化当前项目（在 backend.initialize 之前）
         self._current_project = self.cfg.current_project.value or "默认项目"  # 当前项目
+        # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
+        # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
+        self._current_workdir: Dict[str, str] = {}
         # 标记窗口是否已销毁，防止异步回调访问已销毁的 widget
         self._is_destroyed = False
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
@@ -5868,7 +5871,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card_popup.switch_tab(tab_id)
 
     def _on_working_dir_changed(self, file_path: str):
-        """工作目录变更 → 同步到工具执行器 + 刷新分支标签"""
+        """工作目录变更 → 更新实例缓存 + 同步到工具执行器 + 刷新分支标签
+
+        多窗口隔离：更新实例缓存（关键！），DB 写入在 memory_card 层已完成。
+        """
+        # 更新实例缓存（多窗口隔离：每个窗口独立持有自己的 workdir）
+        if file_path:
+            self._current_workdir[self._current_project] = file_path
+        else:
+            self._current_workdir.pop(self._current_project, None)
+        # 同步到工具执行器
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(file_path or None)
             from loguru import logger
@@ -5877,16 +5889,24 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_branch()
 
     def _sync_working_directory(self):
-        """切换项目时自动加载并同步工作目录"""
+        """切换项目时自动加载并同步工作目录
+
+        多窗口隔离：实例缓存优先；首次启动时从 DB 读取（新窗口默认值回退）。
+        """
         if getattr(self, '_is_destroyed', False):
             return
         if not self.backend or not self.backend.tool_executor:
             return
         project = self._current_project
-        workdir = None
-        if self.backend.memory_manager:
-            workdir = self.backend.memory_manager.get_working_directory(project)
-        self.backend.tool_executor.set_workdir(workdir)
+        # 实例缓存优先（多窗口隔离的关键：保持自身选择，不受其他窗口 DB 写入影响）
+        workdir = self._current_workdir.get(project)
+        if workdir is None:
+            # 首次启动或项目首次切换，从 DB 读取默认值（新窗口恢复用）
+            if self.backend.memory_manager:
+                workdir = self.backend.memory_manager.get_working_directory(project)
+            if workdir:
+                self._current_workdir[project] = workdir
+        self.backend.tool_executor.set_workdir(workdir or None)
         from loguru import logger
         logger.info(f"[MainWidget] Synced working directory for project '{project}': {workdir or 'default'}")
 
