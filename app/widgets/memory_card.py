@@ -204,7 +204,7 @@ class EntryMemoryItemWidget(QFrame):
         """)
         self.edit_text.setMinimumHeight(36)
         self.edit_text.setMaximumHeight(200)
-        self.edit_text.document().documentSizeChanged.connect(self._adjust_edit_height)
+        self.edit_text.document().contentsChanged.connect(self._adjust_edit_height)
         self.edit_text.focusOutEvent = lambda e: self._on_focus_out(e)
         edit_layout.addWidget(self.edit_text, 1)
 
@@ -372,6 +372,10 @@ class EntryMemoryItemWidget(QFrame):
 
     def _adjust_edit_height(self):
         """根据内容调整编辑框高度，不超过最大高度"""
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, self._do_adjust_edit_height)
+
+    def _do_adjust_edit_height(self):
         doc = self.edit_text.document()
         doc_height = int(doc.size().height() + 10)
         height = max(36, min(doc_height, 200))
