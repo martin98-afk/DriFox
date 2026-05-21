@@ -361,6 +361,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["reasoning_content"] = str(reasoning)
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
+        if message.get("model_name"):
+            normalized["model_name"] = str(message.get("model_name"))
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -383,6 +385,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if role == "user":
         params = message.get("params")
         normalized["params"] = dict(params) if isinstance(params, dict) else {}
+    if message.get("model_name"):
+        normalized["model_name"] = str(message.get("model_name"))
     return normalized
 
 
