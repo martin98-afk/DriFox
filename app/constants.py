@@ -205,6 +205,15 @@ FREE_PROVIDERS = {
         "认证方式": "bearer",
         "获取地址": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
     },
+    "OpenCode Zen": {
+        "API_URL": "https://opencode.ai/zen/v1",
+        "API_KEY": "",
+        "模型名称": "deepseek-v4-flash-free",
+        "温度": 0.7,
+        "最大Token": 128000,
+        "认证方式": "bearer",
+        "获取地址": "https://opencode.ai/auth",
+    },
     "火山方舟": {
         "API_URL": "https://ark.cn-beijing.volces.com/api/coding/v3",
         "API_KEY": "",
@@ -307,15 +316,6 @@ FREE_PROVIDERS = {
         "最大Token": 40960,
         "认证方式": "bearer",
         "获取地址": "https://aistudio.google.com/app/apikey",
-    },
-    "OpenCode Zen": {
-        "API_URL": "https://opencode.ai/zen/v1",
-        "API_KEY": "",
-        "模型名称": "deepseek-v4-flash-free",
-        "温度": 0.7,
-        "最大Token": 128000,
-        "认证方式": "bearer",
-        "获取地址": "https://opencode.ai/auth",
     },
 }
 

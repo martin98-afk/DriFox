@@ -1288,6 +1288,9 @@ class HistoryCompactor:
                 return client.chat.completions.create(**req_kwargs)
 
             resp = create_api_call_with_retry(client, create_task)
+            if not resp.choices:
+                logger.warning("[Compaction] API 返回空 choices，跳过摘要")
+                return ""
             content = (resp.choices[0].message.content or "").strip()
             
             # 更新迭代摘要缓存

@@ -124,7 +124,11 @@ class TopicSummaryTask(QRunnable):
                 )
 
             resp = create_api_call_with_retry(client, create_task)
-            raw_response = resp.choices[0].message.content.strip()
+            if not resp.choices:
+                logger.warning("[TopicSummary] API 返回空 choices，跳过摘要")
+                raw_response = ""
+            else:
+                raw_response = resp.choices[0].message.content.strip()
             result = _extract_json(raw_response)
             
             if result:

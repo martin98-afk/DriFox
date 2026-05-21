@@ -181,6 +181,7 @@ class ProviderEditCard(QWidget):
             name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             name_row.addWidget(name_label)
             self.nameCombo = SearchableEditableComboBox()
+            self.nameCombo.setMaxVisibleItems(10)
             for provider_name in FREE_PROVIDERS.keys():
                 icon_name = PROVIDER_ICONS.get(provider_name, "大模型")
                 icon = get_icon(icon_name)
@@ -257,6 +258,7 @@ class ProviderEditCard(QWidget):
         model_row = QHBoxLayout()
         model_row.addWidget(BodyLabel("默认模型:"))
         self.modelCombo = SearchableEditableComboBox()
+        self.modelCombo.setMaxVisibleItems(10)
         self.modelCombo.setDisabled(False)
         current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
         saved_models = self.provider_info.get("模型列表", [])

@@ -388,6 +388,11 @@ class SubAgentExecutor(QThread):
 
         response = create_api_call_with_retry(client, create_completion)
 
+        # 防御性检查：某些模型可能返回空 choices
+        if not response.choices:
+            logger.warning("[SubAgentWorker] API 返回空 choices，跳过工具执行")
+            return "", [], ""
+
         # 非流式：直接读取响应
         message = response.choices[0].message
         response_content = self._filter_thinking_content(message.content or "")

@@ -1083,7 +1083,7 @@ class OpenAIChatWorker(QThread):
                     while elapsed < wait_time:
                         if self._is_cancelled:
                             logger.info("[API] 重试等待被用户取消")
-                            return None
+                            return None, None
                         time.sleep(min(step, wait_time - elapsed))
                         elapsed += step
                     continue
@@ -1162,6 +1162,19 @@ class OpenAIChatWorker(QThread):
         for chunk in response:
             if self._is_cancelled:
                 return False, False  # 返回元组而不是单个布尔值
+
+            # 兼容新模型（如 GPT-5.5）：流式响应可能包含 choices 为空的 chunk
+            # （例如 usage 事件、ping 事件等），直接跳过即可
+            if not chunk.choices:
+                #但仍需检查 usage 信息（部分模型在空 choices 的 chunk 中携带 usage）
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    self._last_usage = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(usage, "completion_tokens", 0),
+                        "total_tokens": getattr(usage, "total_tokens", 0),
+                    }
+                continue
 
             delta = chunk.choices[0].delta
             content = getattr(delta, "content", None)
