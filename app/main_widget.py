@@ -257,6 +257,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._handle_tool_start_ui_sync, type=Qt.BlockingQueuedConnection
         )
         self._is_streaming = False
+        self._topic_summary_cancelled = False  # 🛡️ 标题生成取消标记
         self._response_start_time = None
         # 使用 try-except 保护 homepage 操作，防止 C++ 对象已删除错误
         try:
@@ -753,6 +754,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
             self._is_streaming = False
+            self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
             self._toggle_send_stop(False)
         elif self.backend.chat_engine:
             # 即使不在流式输出，也要清理 worker
@@ -2328,6 +2330,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.stop_streaming()
 
         self._is_streaming = False
+        self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._tool_cancelled_by_user = False
         self._toggle_send_stop(False)
 
@@ -4745,6 +4748,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
             self._is_streaming = False
+            self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         elif self.backend.chat_engine:
             self.backend.cleanup_worker()
 
@@ -5566,6 +5570,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._latest_compaction_result = None
     
     def _maybe_generate_topic_summary(self):
+        # 🛡️ 每次启动新的标题生成任务时重置取消标记
+        self._topic_summary_cancelled = False
         selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
         llm_config = self._valid_configs.get(selected_name)
         if not llm_config:
@@ -5593,10 +5599,15 @@ class OpenAIChatToolWindow(ToolWindow):
             llm_config=llm_config,
             callback=self._on_topic_summary_generated,
             previous_summary=previous_summary if previous_summary else None,
+            cancel_check=lambda: self._topic_summary_cancelled,
         )
         self._gen_thread_pool.start(task)
 
     def _on_topic_summary_generated(self, result, error: str = None):
+        # 🛡️ 如果已被取消（用户停止对话），不再更新标题
+        if self._topic_summary_cancelled:
+            logger.info("[Topic Summary] 已取消，跳过标题更新")
+            return
         if error:
             logger.error(f"[Topic Summary] Failed to generate: {error}")
             return
@@ -6026,6 +6037,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     self.backend.chat_engine.clear_callbacks()
                 # 停止所有正在进行的流式输出
                 self.backend.stop_streaming()
+                self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
                 # 清理 worker
                 self.backend.cleanup_worker()
             except Exception:
@@ -6061,6 +6073,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, '_is_destroyed', False):
             return
         self._tool_cancelled_by_user = False
+        # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
+        self._topic_summary_cancelled = True
         interrupted_messages: List[Dict[str, Any]] = []
 
         if self.backend.chat_engine:
