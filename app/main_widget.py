@@ -1655,6 +1655,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 image = chat_list.get("image", ":/icons/fox_bg.png")
                 opacity = chat_list.get("opacity", 0.1)
                 viewport = self.chat_scroll_area.viewport()
+                # 先清除旧背景
+                if hasattr(self, '_bg_label') and self._bg_label is not None:
+                    self._bg_label.deleteLater()
+                    self._bg_label = None
                 self._bg_label = QLabel(viewport)
                 self._bg_label.setPixmap(QPixmap(image))
                 self._bg_label.setScaledContents(True)
@@ -1666,6 +1670,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._bg_label.resize(viewport.size())
                 self._bg_label.show()
                 viewport.installEventFilter(self)
+            else:
+                # 主题禁用背景图，清除旧背景
+                if hasattr(self, '_bg_label') and self._bg_label is not None:
+                    self._bg_label.deleteLater()
+                    self._bg_label = None
         except Exception:
             pass
     def _restore_after_system_close(self):

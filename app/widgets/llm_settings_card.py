@@ -49,6 +49,19 @@ class NoWheelComboBox(ComboBox):
         event.ignore()
 
 
+class RefreshableThemeComboBox(ComboBox):
+    """主题下拉框 - 每次打开时刷新主题列表"""
+    themeRefreshRequested = pyqtSignal()
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+    def showPopup(self):
+        """打开下拉前先刷新主题列表"""
+        self.themeRefreshRequested.emit()
+        super().showPopup()
+
+
 class ManualUpdateCard(SettingCard):
     def __init__(self, title, content, parent_widget, parent=None):
         super().__init__(FluentIcon.SYNC, title, content, parent)
@@ -320,15 +333,19 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _setup_appearance_cards(self):
         class AppearanceComboCard(SettingCard):
-            def __init__(self, icon, title, content, cfg, config_item, options, parent=None):
+            def __init__(self, icon, title, content, cfg, config_item, options, parent=None, is_theme_card=False):
                 super().__init__(icon, title, content, parent)
                 self.cfg = cfg
                 self.config_item = config_item
                 self.options = options
-                self.value_by_label = {data["label"]: key for key, data in options.items()}
-                self.label_by_value = {key: data["label"] for key, data in options.items()}
+                self.is_theme_card = is_theme_card
+                self._build_lookup_tables()
 
-                self.comboBox = NoWheelComboBox(self)
+                if is_theme_card:
+                    self.comboBox = RefreshableThemeComboBox(self)
+                    self.comboBox.themeRefreshRequested.connect(self._refresh_theme_options)
+                else:
+                    self.comboBox = NoWheelComboBox(self)
                 self.comboBox.setMaxVisibleItems(6)
                 self.comboBox.addItems([data["label"] for data in options.values()])
                 self.comboBox.setCurrentText(self.label_by_value.get(config_item.value, next(iter(self.value_by_label))))
@@ -339,6 +356,10 @@ class LLMSettingsCard(SystemCardFrame):
                 self.hBoxLayout.addWidget(self.comboBox)
                 self.hBoxLayout.addSpacing(16)
 
+            def _build_lookup_tables(self):
+                self.value_by_label = {data["label"]: key for key, data in self.options.items()}
+                self.label_by_value = {key: data["label"] for key, data in self.options.items()}
+
             def _on_changed(self, label):
                 value = self.value_by_label.get(label)
                 if value:
@@ -347,6 +368,24 @@ class LLMSettingsCard(SystemCardFrame):
                     if parent and hasattr(parent, "_on_config_changed"):
                         parent._on_config_changed()
 
+            def _refresh_theme_options(self):
+                """点击时刷新主题列表"""
+                from app.utils.config import update_theme_options
+                from app.utils.theme_manager import theme_manager
+                theme_manager.reload()
+                update_theme_options()
+                themes = theme_manager.list_themes()
+                new_options = {tid: {"label": name} for tid, name in themes.items()}
+                current_key = self.config_item.value
+                self.options = new_options
+                self._build_lookup_tables()
+                if current_key not in self.label_by_value:
+                    current_key = list(new_options.keys())[0]
+                self.comboBox.currentTextChanged.disconnect(self._on_changed)
+                self.comboBox.clear()
+                self.comboBox.addItems([data["label"] for data in new_options.values()])
+                self.comboBox.setCurrentText(self.label_by_value.get(current_key, ""))
+                self.comboBox.currentTextChanged.connect(self._on_changed)
         self.uiFontSizeCard = AppearanceComboCard(
             get_icon("字体大小"),
             "界面字号",
@@ -364,6 +403,7 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg.ui_theme_style,
             self._build_theme_options(),
             self,
+            True,  # is_theme_card
         )
 
     def _build_theme_options(self) -> dict:
