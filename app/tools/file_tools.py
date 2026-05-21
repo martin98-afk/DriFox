@@ -692,7 +692,7 @@ class FileTools:
                 fromfile=path, tofile=path,
                 lineterm=''
             ))
-            diff_str = "".join(diff_lines) if diff_lines else ""
+            diff_str = "\n".join(diff_lines) if diff_lines else ""
 
             # 从 diff header 中提取首末变更行
             first_changed = None

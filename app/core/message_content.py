@@ -224,20 +224,35 @@ def content_to_markdown(content: Any) -> str:
 
             # 生成安全的参数字符串表示
             if isinstance(args, dict) and args:
+                # 按 value 类型排序：字符串优先显示（如 path），复杂类型（list/dict）放后面
+                # 这样即使 JSON 被截断，关键短字段如 path 也不会丢失
+                sorted_items = sorted(args.items(), key=lambda x: (0 if isinstance(x[1], str) else 1, len(str(x[1]))))
                 args_parts = []
-                for k, v in args.items():
-                    if isinstance(v, str) and len(v) > 100:
-                        # 截断长字符串但先转义（顺序重要：先转义反斜杠）
-                        truncated = v[:100].replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                        truncated = _sanitize_result(truncated)
-                        args_parts.append(f'"{k}": "{truncated}"')
-                    elif isinstance(v, str):
-                        # 转义字符串中的反斜杠、引号和换行（顺序重要：先转义反斜杠）
-                        safe_v = v.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                        safe_v = _sanitize_result(safe_v)
-                        args_parts.append(f'"{k}": "{safe_v}"')
+                for k, v in sorted_items:
+                    if isinstance(v, str):
+                        if len(v) > 200:
+                            # 截断长字符串但保留 JSON 合法性
+                            truncated = v[:200].replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            truncated = _sanitize_result(truncated)
+                            args_parts.append(f'"{k}": "{truncated}..."')
+                        else:
+                            # 短字符串完整保留（如 path）
+                            safe_v = v.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            safe_v = _sanitize_result(safe_v)
+                            args_parts.append(f'"{k}": "{safe_v}"')
                     else:
-                        args_parts.append(f'"{k}": {_sanitize_result(json.dumps(v).decode("utf-8")[:50])}')
+                        # 非字符串类型（list/dict）：序列化后智能截断
+                        try:
+                            serialized = json.dumps(v).decode('utf-8')
+                        except (AttributeError, TypeError):
+                            serialized = str(v)
+                        if len(serialized) > 300:
+                            # 过长的 list/dict 只保留前100字符作为预览 + 省略标记
+                            preview = serialized[:100].replace('\\', '\\\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            preview = _sanitize_result(preview)
+                            args_parts.append(f'"{k}": "{preview}..."')
+                        else:
+                            args_parts.append(f'"{k}": {_sanitize_result(serialized)}')
                 args_json = "{" + ", ".join(args_parts) + "}"
             else:
                 args_json = "{}"
