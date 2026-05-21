@@ -383,9 +383,9 @@ class KeyDocumentItemWidget(QWidget):
             self.wd_btn.clicked.connect(lambda: self.setAsWorkingDir.emit(self.file_path))
             main_layout.addWidget(self.wd_btn)
 
-        # 检测 git worktree（只要是文件夹就检测，树在 _load_key_documents 中插入）
+        # 检测 git worktree（仅当是文件夹且被标记为根目录时才检测）
         self._repo_info = None
-        if self._is_folder:
+        if self._is_folder and self._is_working_dir:
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
@@ -963,8 +963,8 @@ class MemoryCardContent(QWidget):
             for d in all_docs:
                 if d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree":
                     is_worktree_active = True
-                elif d.get("added_by") != "git_worktree":
-                    # 记录原始 git 仓库路径
+                elif d.get("added_by") != "git_worktree" and original_repo_path is None and d.get("is_working_dir", False):
+                    # 记录原始 git 仓库路径（仅检测被标记为根目录的文件夹）
                     try:
                         if GitWorktreeDetector.detect_git(d.get("file_path", "")):
                             original_repo_path = d["file_path"]

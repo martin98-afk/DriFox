@@ -68,7 +68,7 @@ class GitWorktreeDetector:
     _git_available: Optional[bool] = None  # 是否安装了 git
     _detect_cache: dict = {}               # {path: (result, timestamp)}
     _info_cache: dict = {}                 # {path: (GitRepoInfo, timestamp)}
-    _CACHE_TTL = 2.0                       # 缓存有效期（秒）
+    _CACHE_TTL = 30.0                      # 缓存有效期（秒），避免频繁 git 子进程调用拖慢 UI
 
     @staticmethod
     def _is_git_available() -> bool:
@@ -104,8 +104,11 @@ class GitWorktreeDetector:
 
     @staticmethod
     def detect_git(path: str) -> Optional[str]:
-        """检测路径是否在 git 仓库中（带缓存）"""
-        if not path or not os.path.exists(path):
+        """检测路径是否在 git 仓库中（带缓存）
+        
+        注意：只接受目录路径，文件路径直接跳过（避免以文件为 cwd 执行 git 命令报错）
+        """
+        if not path or not os.path.isdir(path):
             return None
         if not GitWorktreeDetector._is_git_available():
             return None
