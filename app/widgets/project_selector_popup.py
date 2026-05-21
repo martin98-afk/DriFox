@@ -3,7 +3,7 @@
 项目选择弹窗 - 点击标题栏项目名时弹出
 支持选择已有项目或新建项目
 """
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QTimer
 from PyQt5.QtWidgets import (
     QWidget,
     QFrame,
@@ -116,13 +116,15 @@ class ProjectSelectorPopup(QWidget):
         self._projects = list(projects)
         self._current_project = current_project
 
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_InputMethodEnabled)
 
-        # 安装事件过滤器，检测外部点击
-        QApplication.instance().installEventFilter(self)
+        # 注意：不在 __init__ 安装事件过滤器！
+        # 因为当前 mousePressEvent 还在传播中，
+        # 如果在此时安装，同一个鼠标按下事件会被过滤器捕获
+        # 导致弹窗被立即关闭
+        # 事件过滤器在 show_at() 中安装
 
         self._setup_ui()
 
@@ -358,6 +360,9 @@ class ProjectSelectorPopup(QWidget):
 
         self.move(x, y)
         self.raise_()
+
+        # 安装事件过滤器，检测外部点击关闭弹窗
+        QApplication.instance().installEventFilter(self)
 
     def eventFilter(self, obj, event):
         """检测外部点击，关闭弹窗"""
