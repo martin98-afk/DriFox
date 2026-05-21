@@ -4,6 +4,8 @@ from __future__ import annotations
 import ctypes
 import gc
 import os
+import subprocess
+import sys
 import time
 import sip
 import orjson as json
@@ -26,7 +28,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsOpacityEffect,
     QLabel,
     QPushButton,
-    QButtonGroup, QFrame, QScrollArea,
+    QButtonGroup, QFrame, QScrollArea, QSizePolicy,
 )
 from loguru import logger
 from qfluentwidgets import (
@@ -794,7 +796,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session_bar_layout.setContentsMargins(0, 0, 0, 0)
         session_bar_layout.setSpacing(4)
 
-        # 项目选择标签
+        # 项目选择标签（跟随主题色）
         self._project_label = QLabel(self._current_project, self)
         self._project_label.setStyleSheet(f"""
             QLabel {{
@@ -812,10 +814,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
         self._project_label.setCursor(Qt.PointingHandCursor)
         self._project_label.mousePressEvent = self._on_project_label_clicked
-        self._project_label.setToolTip("点击切换项目")
+        self._project_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._project_label.customContextMenuRequested.connect(self._show_context_menu)
+        self._project_label.setToolTip("点击切换项目 · 右键更多操作")
 
-        # 分隔符
-        self._title_sep = StrongBodyLabel(" / ", self)
+        # Git 分支标签（从工作目录检测，左键点击打开关键文档卡片）
+        self._branch_label = QLabel("", self)
+        self._branch_label.setCursor(Qt.PointingHandCursor)
+        self._branch_label.setToolTip("当前 Git 分支 — 点击打开关键文档")
+        self._branch_label.mousePressEvent = self._on_branch_label_clicked
+        self._branch_label.setVisible(False)
+        self._update_branch()
 
         # 标题
         self.title_edit = QLabel("新对话", self)
@@ -827,14 +836,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.title_edit.mouseDoubleClickEvent = self._on_title_double_click
 
         session_bar_layout.addWidget(self._project_label)
-        session_bar_layout.addWidget(self._title_sep)
+        session_bar_layout.addWidget(self._branch_label)
         session_bar_layout.addWidget(self.title_edit)
-
-        self.menu_btn = TransparentToolButton(FluentIcon.MORE, self)
-        self.menu_btn.setFixedSize(26, 26)
-        self.menu_btn.setToolTip("更多操作")
-        self._create_context_menu()
-        session_bar_layout.addWidget(self.menu_btn)
 
         # right_layout 保持简化，显示余额和 context_usage_ring
         right_layout = QHBoxLayout()
@@ -2076,20 +2079,7 @@ class OpenAIChatToolWindow(ToolWindow):
         Colors.refresh()
         self.setStyleSheet(get_window_style())
         if hasattr(self, "_project_label"):
-            self._project_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_ACCENT};
-                    {get_font_family_css()}
-                    {font_size_css(13)}
-                    font-weight: bold;
-                    padding: 2px 6px;
-                    border-radius: 4px;
-                    background: {Colors.HOVER_BG};
-                }}
-                QLabel:hover {{
-                    background: {Colors.SELECTED_BG};
-                }}
-            """)
+            self._update_project_label_style()
         if hasattr(self, "title_edit"):
             title_style = TITLE_STYLE.replace("    QLabel {", f"    QLabel {{\n        {get_font_family_css()}")
             title_style = title_style.replace("font-size: 15px;", font_size_css(15))
@@ -3556,6 +3546,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = session_project
         self.backend._current_project = session_project
         self._project_label.setText(session_project)
+        self._update_project_label_style()
+        self._update_branch()
 
         self._display_current_session()
 
@@ -4778,6 +4770,8 @@ class OpenAIChatToolWindow(ToolWindow):
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
             self._project_label.setText(session_project)
+            self._update_project_label_style()
+            self._update_branch()
             self._display_current_session()
             self._hide_welcome_cards()
         else:
@@ -5655,11 +5649,93 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
+        self._update_project_label_style()
 
     def _on_project_label_clicked(self, event):
         """项目标签点击 - 显示项目选择 popup"""
         event.accept()
         self._show_project_selector_popup()
+
+    def _update_project_label_style(self):
+        """更新项目标签样式（跟随主题色）"""
+        self._project_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_ACCENT};
+                {get_font_family_css()}
+                {font_size_css(13)}
+                font-weight: bold;
+                padding: 2px 6px;
+                border-radius: 4px;
+                background: {Colors.HOVER_BG};
+            }}
+            QLabel:hover {{
+                background: {Colors.SELECTED_BG};
+            }}
+        """)
+
+    def _update_branch(self):
+        """从工作目录检测 git 分支并更新分支标签"""
+        branch = None
+        try:
+            # 优先从 memory_manager 获取工作目录（与关键文档一致）
+            workdir = None
+            if self.backend and self.backend.memory_manager:
+                workdir = self.backend.memory_manager.get_working_directory(self._current_project)
+            # 其次从 tool_executor 获取
+            if not workdir and self.backend and self.backend.tool_executor:
+                workdir = getattr(self.backend.tool_executor, '_workdir', None)
+            if not workdir:
+                workdir = os.getcwd()
+            if workdir and os.path.isdir(str(workdir)):
+                workdir = str(workdir)
+                from app.utils.git_worktree import GitWorktreeDetector
+                git_root = GitWorktreeDetector.detect_git(workdir)
+                if git_root:
+                    r = subprocess.run(
+                        ["git", "branch", "--show-current"],
+                        capture_output=True, text=True, cwd=workdir,
+                        timeout=3, encoding="utf-8", errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if r.returncode == 0:
+                        branch = r.stdout.strip()
+        except Exception:
+            pass
+
+        if branch:
+            self._branch_label.setText(f"{branch}")
+            self._branch_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_SECONDARY};
+                    {get_font_family_css()}
+                    {font_size_css(10)}
+                    padding: 0px 3px;
+                    border-radius: 2px;
+                    background: rgba(255,255,255,0.05);
+                }}
+                QLabel:hover {{
+                    background: {Colors.HOVER_BG};
+                }}
+            """)
+            self._branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._branch_label.setMinimumWidth(0)
+            self._branch_label.setMaximumWidth(160)
+            self._branch_label.setVisible(True)
+        else:
+            self._branch_label.setText("")
+            self._branch_label.setVisible(False)
+
+    def _on_branch_label_clicked(self, event):
+        """分支标签点击 — 打开关键文档卡片"""
+        event.accept()
+        self._toggle_memory_card()
+        # 确保切换到关键文档 Tab
+        if hasattr(self, '_memory_card_popup') and self._memory_card_popup:
+            from app.widgets.memory_card import TAB_KEY_DOCUMENTS
+            self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
+            # 同步卡片 Tab 按钮
+            if hasattr(self, '_memory_card') and self._memory_card:
+                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
 
     def _show_project_selector_popup(self):
         """显示项目选择弹窗"""
@@ -5683,6 +5759,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
+        self._update_project_label_style()
+        self._update_branch()
         self.cfg.current_project.value = project
         self.cfg.save()
         # 更新 tool_executor 的当前项目
@@ -5707,6 +5785,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
+        self._update_project_label_style()
+        self._update_branch()
         # 保存到配置
         self.cfg.current_project.value = project
         self.cfg.save()
@@ -5740,6 +5820,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_project = default_project
                 self.backend._current_project = default_project
                 self._project_label.setText(default_project)
+                self._update_project_label_style()
+                self._update_branch()
                 # 保存到配置
                 self.cfg.current_project.value = default_project
                 self.cfg.save()
@@ -5783,11 +5865,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card_popup.switch_tab(tab_id)
 
     def _on_working_dir_changed(self, file_path: str):
-        """工作目录变更 → 同步到工具执行器"""
+        """工作目录变更 → 同步到工具执行器 + 刷新分支标签"""
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(file_path or None)
             from loguru import logger
             logger.info(f"[MainWidget] Working directory synced to tool executor: {file_path or 'default'}")
+        # 工作目录变更后刷新分支标签
+        self._update_branch()
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录"""
@@ -5988,9 +6072,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _create_context_menu(self):
         self._context_menu_actions = {}
-        self.menu_btn.clicked.connect(self._show_context_menu)
 
-    def _show_context_menu(self):
+    def _show_context_menu(self, pos=None):
         from PyQt5.QtWidgets import QMenu
 
         menu = QMenu(self)
@@ -5998,7 +6081,11 @@ class OpenAIChatToolWindow(ToolWindow):
         export_action.triggered.connect(self._export_conversation)
         clear_action = menu.addAction("清空当前对话")
         clear_action.triggered.connect(self._clear_current_conversation)
-        menu.exec_(self.menu_btn.mapToGlobal(self.menu_btn.rect().bottomRight()))
+        # 从项目标签位置弹出
+        if hasattr(self, '_project_label') and self._project_label.isVisible():
+            menu.exec_(self._project_label.mapToGlobal(self._project_label.rect().bottomLeft()))
+        else:
+            menu.exec_(pos)
 
     def _export_conversation(self):
         session = self.session_manager.get_current_session()

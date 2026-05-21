@@ -51,7 +51,7 @@ class _WorktreeRow(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setContentsMargins(0, 0, 16, 0)
         layout.setSpacing(4)
 
         # 左侧竖线（加粗到 3px，配合更大圆点）
@@ -248,7 +248,7 @@ class _AddWorktreeRow(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setContentsMargins(0, 0, 16, 0)
         layout.setSpacing(4)
 
         # 竖线（加粗到 3px，配合圆点尺寸）

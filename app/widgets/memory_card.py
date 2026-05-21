@@ -7,7 +7,7 @@
 """
 import os
 
-from PyQt5.QtCore import pyqtSignal, Qt, QSize
+from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
 from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor
 from PyQt5.QtWidgets import (
     QWidget,
@@ -110,18 +110,19 @@ class EntryMemoryItemWidget(QWidget):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
-        # 内容区域
+        # 内容区域（stretch=1 让文本区优先吃满剩余空间，按钮区固定宽度在尾部）
         self.text_widget = QWidget(self)
         # 允许收缩，适应小窗口
         self.text_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        self.text_widget.setMinimumWidth(0)
         text_layout = QVBoxLayout(self.text_widget)
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
 
         self.content_label = BodyLabel(self._content, self.text_widget)
         self.content_label.setWordWrap(True)
-        # 允许收缩，最小宽度小一点，适应小窗口
         self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        self.content_label.setMinimumWidth(0)
         self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
         self.content_label.setStyleSheet(
             f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
@@ -214,6 +215,18 @@ class EntryMemoryItemWidget(QWidget):
             self._content = new_content
             self.content_label.setText(new_content)
         self._cancel_edit()
+        # 编辑完成后刷新列表中所有条目的 sizeHint
+        lst = self._get_listwidget()
+        if lst and hasattr(lst.parent(), '_refresh_entries_size'):
+            lst.parent()._refresh_entries_size()
+
+    def _get_listwidget(self):
+        """反向查找当前 widget 所在的 ListWidget"""
+        from qfluentwidgets import ListWidget
+        lst = self.parent()
+        while lst and not isinstance(lst, ListWidget):
+            lst = lst.parent()
+        return lst
 
     def _on_focus_out(self, event):
         """失去焦点时自动保存完成编辑"""
@@ -751,8 +764,7 @@ class MemoryCardContent(QWidget):
         
         self.add_doc_btn = PrimaryPushButton("📄 添加文件", self)
         self.add_doc_btn.setFixedHeight(28)
-        self.add_doc_btn.setMinimumWidth(0)
-        self.add_doc_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.add_doc_btn.setFixedWidth(110)
         self.add_doc_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: #0e639c;
@@ -771,8 +783,7 @@ class MemoryCardContent(QWidget):
         
         self.add_folder_btn = PrimaryPushButton("📁 添加文件夹", self)
         self.add_folder_btn.setFixedHeight(28)
-        self.add_folder_btn.setMinimumWidth(0)
-        self.add_folder_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.add_folder_btn.setFixedWidth(120)
         self.add_folder_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: #2d882d;
@@ -855,27 +866,45 @@ class MemoryCardContent(QWidget):
             source = entry.get("source", "manual")
 
             item = QListWidgetItem()
-            item.setSizeHint(self._get_entry_item_size(content))
             widget = EntryMemoryItemWidget(memory_id, content, enabled, source)
             widget.deleted.connect(self._delete_entry)
             widget.toggled.connect(self._toggle_entry)
             widget.edited.connect(self._edit_entry)
             self.entries_list.addItem(item)
             self.entries_list.setItemWidget(item, widget)
+            # sizeHint 宽度为 0，让列表用 viewport 宽度；高度稍后由 _refresh_entries_size 重算
+            item.setSizeHint(QSize(0, 44))
+
+        # 初始布局后刷新所有条目的高度
+        QTimer.singleShot(0, self._refresh_entries_size)
 
     def _get_entry_item_size(self, content: str):
+        """仅作为 fallback 使用，实际高度由 _refresh_entries_size 决定"""
         from PyQt5.QtCore import QSize
-        # 宽度随列表自适应，不设定固定宽度避免溢出
-        # 使用 0 表示宽度随 viewport 自适应
-        lines = content.count('\n') + 1
-        # 估算自动换行额外行数（按每行约20字符保守估算）
-        chars_per_line = 20
-        if chars_per_line > 0:
-            lines += (len(content) + chars_per_line - 1) // chars_per_line - 1
-        
-        # 行高约 20px，上下边距 + 按钮空间，多留一些余量避免遮挡
-        height = max(48, int(20 * lines) + 20)
-        return QSize(0, height)
+        return QSize(0, 44)
+
+    def _refresh_entries_size(self):
+        """刷新所有条目记忆 item 的 sizeHint，让高度随内容自适应"""
+        vw = self.entries_list.viewport().width() if self.entries_list.viewport() else 0
+        if vw <= 0:
+            return
+        for i in range(self.entries_list.count()):
+            item = self.entries_list.item(i)
+            widget = self.entries_list.itemWidget(item)
+            if widget is None:
+                continue
+            # 约束 widget 最大宽度为 viewport 宽度，确保文本换行
+            widget.setMaximumWidth(vw)
+            widget.adjustSize()
+            sh = widget.sizeHint()
+            # 最小高度 44px
+            item.setSizeHint(QSize(0, max(44, sh.height())))
+
+    def resizeEvent(self, event):
+        """窗口缩放时刷新条目记忆列表高度"""
+        super().resizeEvent(event)
+        if hasattr(self, 'entries_list'):
+            self._refresh_entries_size()
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本"""
