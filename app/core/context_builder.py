@@ -112,27 +112,20 @@ class ContextBudgetAllocator:
 
         prompt_parts = [full_system_prompt]
 
-        # 添加时间
-        time_part = f"# 当前系统时间\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        # 添加自定义提示（固定内容）
+        custom_prompt = llm_config.get("系统提示", "").strip()
+        if custom_prompt:
+            prompt_parts.append(custom_prompt)
 
-        # 添加启用的技能内容
+        # 添加启用的技能内容（放在 system prompt 最后，可能变化但相对稳定）
         enabled_skills = Settings.get_instance().llm_enabled_skills.value
         if enabled_skills and self._agent_manager:
             skills_content = self._agent_manager.get_enabled_skills_content(enabled_skills)
             if skills_content:
                 prompt_parts.append(skills_content)
 
-        # 添加自定义提示
-        custom_prompt = llm_config.get("系统提示", "").strip()
-        if custom_prompt:
-            prompt_parts.append(custom_prompt)
-
-        prompt_parts.append(time_part)
-
-        # 添加记忆上下文
-        memory_context = self.backend.get_memory_context_string()
-        prompt_parts.append(memory_context)
-
+        # 【不】将记忆上下文放入 system prompt，避免动态内容破坏缓存
+        # 记忆上下文将在 user message 中注入（见下方）
         # 使用单一 join 操作
         full_system_content = "\n\n".join(prompt_parts)
 
@@ -179,6 +172,18 @@ class ContextBudgetAllocator:
         if latest_user_timestamp:
             user_msg["timestamp"] = latest_user_timestamp
         messages.append(user_msg)
+
+        # 在最后一个用户消息前插入动态上下文（时间 + 记忆）
+        # 不在 system prompt 中，避免动态内容破坏 API 缓存命中率
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        memory_context = self.backend.get_memory_context_string()
+
+        dynamic_parts = [f"## 当前系统时间\n{current_time}"]
+        if memory_context:
+            dynamic_parts.append(memory_context)
+
+        dynamic_context = "\n\n".join(dynamic_parts)
+        messages[-1]["content"] = f"{dynamic_context}\n\n用户提问：{messages[-1]['content']}"
 
         return messages
 
