@@ -376,6 +376,11 @@ class ProviderEditCard(QWidget):
                 preset_urls = [
                     "https://ark.cn-beijing.volces.com/api/v3",
                 ]
+            elif provider_name == "OpenCode Zen":
+                preset_urls = [
+                    "https://opencode.ai/zen/v1",
+                    "https://opencode.ai/zen/go/v1",
+                ]
             elif provider_name in FREE_PROVIDERS:
                 url = FREE_PROVIDERS[provider_name].get("API_URL", "")
                 if url:
