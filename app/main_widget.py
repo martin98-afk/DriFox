@@ -1646,7 +1646,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
         try:
-            from app.theme import theme_manager
+            from app.utils.theme_manager import theme_manager
             from app.utils.design_tokens import Colors
             Colors.refresh()
             bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
@@ -5755,11 +5755,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """从工作目录检测 git 分支并更新分支标签"""
         branch = None
         try:
-            # 优先从 memory_manager 获取工作目录（与关键文档一致）
+            # 多窗口隔离：优先使用实例缓存（与 _sync_working_directory 一致）
             workdir = None
-            if self.backend and self.backend.memory_manager:
+            project_workdir = self._current_workdir.get(self._current_project)
+            if project_workdir:
+                workdir = project_workdir
+            # 其次从 memory_manager 获取（DB 默认值）
+            if not workdir and self.backend and self.backend.memory_manager:
                 workdir = self.backend.memory_manager.get_working_directory(self._current_project)
-            # 其次从 tool_executor 获取
+            # 最后从 tool_executor 获取
             if not workdir and self.backend and self.backend.tool_executor:
                 workdir = getattr(self.backend.tool_executor, '_workdir', None)
             if not workdir:

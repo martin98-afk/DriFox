@@ -137,24 +137,28 @@ def get_theme_style_key() -> str:
 
 
 def current_theme() -> dict:
-    global THEME_STYLE_OPTIONS
+    """获取当前主题的扁平 colors 字典，始终从 ThemeManager 实时读取"""
+    from app.utils.theme_manager import theme_manager
+    colors = theme_manager.get_current_colors()
+    if colors:
+        return colors
+    # fallback：使用 THEME_STYLE_OPTIONS
     key = get_theme_style_key()
     if key in THEME_STYLE_OPTIONS:
         return THEME_STYLE_OPTIONS[key]
-    # fallback：重新构建
-    THEME_STYLE_OPTIONS = _build_theme_options()
-    return THEME_STYLE_OPTIONS.get(key, THEME_STYLE_OPTIONS.get("midnight", {}))
+    return THEME_STYLE_OPTIONS.get("midnight", {})
 
 
 def get_window_style() -> str:
-    theme = current_theme()
+    from app.utils.theme_manager import theme_manager
+    window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
     return f"""
     OpenAIChatToolWindow {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-            stop:0 {theme["window_start"]},
-            stop:1 {theme["window_end"]});
+            stop:0 {window.get('gradient_start', 'rgba(10, 14, 22, 255)')},
+            stop:1 {window.get('gradient_end', 'rgba(15, 20, 30, 255)')});
     }}
-"""
+    """
 
 
 def get_capsule_style() -> str:

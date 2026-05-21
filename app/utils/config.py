@@ -243,14 +243,15 @@ class Settings(QConfig):
 def update_theme_options():
     """从 ThemeManager 动态更新主题选项验证器"""
     try:
-        from app.theme import theme_manager
+        from app.utils.theme_manager import theme_manager
         themes = list(theme_manager.list_themes().keys())
         if themes:
             settings = Settings.get_instance()
             settings.ui_theme_style.validator.__init__(themes)
             if settings.ui_theme_style.value not in themes:
-                settings.set(settings.ui_theme_style, themes[0])
-    except Exception:
-        pass
+                settings.ui_theme_style.value = themes[0]
+    except Exception as e:
+        import logging
+        logging.warning(f"[update_theme_options] failed: {e}")
 # 注册解释器退出时关闭配置写入保护
 atexit.register(Settings._set_closing_down)
