@@ -1845,6 +1845,8 @@ class OpenAIChatWorker(QThread):
                     "content": result_content,
                     "success": success,
                     "round_id": round_id,
+                    "diff": getattr(result, "diff", None) if result else None,
+                    "anchors": getattr(result, "anchors", None) if result else None,
                 }
             )
 

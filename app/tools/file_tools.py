@@ -19,6 +19,7 @@ from functools import lru_cache
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
 from loguru import logger
+import difflib
 from app.tools.result import ToolResult
 
 MAX_GREP_CONTENT_LENGTH = 15000
@@ -679,9 +680,55 @@ class FileTools:
             full_path.write_text("".join(new_lines), encoding="utf-8")
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
+
+            # ── 计算 diff + 锚点块 ──
+            old_text = "".join(all_lines)
+            new_text = "".join(new_lines)
+
+            # 生成 unified diff
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(),
+                new_text.splitlines(),
+                fromfile=path, tofile=path,
+                lineterm=''
+            ))
+            diff_str = "".join(diff_lines) if diff_lines else ""
+
+            # 从 diff header 中提取首末变更行
+            first_changed = None
+            last_changed = None
+            _HUNK_RE = re.compile(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
+            for line in diff_lines:
+                m = _HUNK_RE.match(line)
+                if m:
+                    start = int(m.group(1))
+                    count = int(m.group(2)) if m.group(2) else 1
+                    end_line = start + count - 1
+                    if first_changed is None or start < first_changed:
+                        first_changed = start
+                    if last_changed is None or end_line > last_changed:
+                        last_changed = end_line
+
+            # 构建锚点块（±2 行上下文）
+            anchors = None
+            if first_changed is not None and last_changed is not None:
+                anchor_start = max(1, first_changed - 2)
+                anchor_end = min(len(new_lines), last_changed + 2)
+                anchor_lines = new_lines[anchor_start - 1:anchor_end]
+                anchors = _format_hashline(anchor_lines, anchor_start)
+
+            # 构建结果文本
+            result_parts = [f"Applied {applied_count} hashline edit(s) to {path}."]
+            if anchors:
+                result_parts.append("")
+                result_parts.append(f"--- Anchors {anchor_start}-{anchor_end} ---")
+                result_parts.append(anchors)
+
             return ToolResult(
                 True,
-                content=f"Applied {applied_count} hashline edit(s) to {path}."
+                content="\n".join(result_parts),
+                diff=diff_str,
+                anchors=anchors,
             )
         except Exception as e:
             import traceback

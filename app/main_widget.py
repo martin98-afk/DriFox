@@ -180,6 +180,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._current_workdir: Dict[str, str] = {}
         # 标记窗口是否已销毁，防止异步回调访问已销毁的 widget
+        # 多窗口隔离：实例级模型配置缓存（必须覆盖类变量，防止多窗口共享）
+        self._valid_configs: Dict[str, Dict[str, Any]] = {}
         self._is_destroyed = False
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
@@ -5150,6 +5152,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._tool_floating_widget.show_if_needed(elapsed)
                 self._tool_floating_widget.show_when_ready()
 
+        # 提取 diff 字段（ToolResult 对象或 dict 格式）
+        diff_val = None
+        if isinstance(result, dict):
+            diff_val = result.get("diff", None)
+        else:
+            diff_val = getattr(result, "diff", None) if result else None
+
         if self._current_assistant_card:
             self._current_assistant_card.append_tool_result(
                 tool_name=tool_name,
@@ -5157,6 +5166,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 result=content,
                 success=success,
                 tool_call_id=tool_call_id,
+                diff=diff_val,
             )
 
         self._scroll_to_bottom()

@@ -478,6 +478,18 @@ def _render_tool_block_content(content: str) -> str:
     # ========== 解析 result ==========
     # 关键：从 result: 之后开始搜索，而不是从 result_search_start
     result_start = content.find("result:")
+    
+    # ========== 解析 diff（可选字段，仅 edit/write 工具有）==========
+    diff_content = ""
+    diff_start = content.find("\ndiff:")
+    if diff_start != -1:
+        diff_after = content[diff_start + 6:]  # skip "\ndiff:"
+        # diff 内容持续到下一个字段（\nsuccess:）或末尾
+        diff_next = _NEXT_FIELD_PATTERN.search(diff_after)
+        if diff_next:
+            diff_content = diff_after[:diff_next.start()].strip()
+        else:
+            diff_content = diff_after.strip()
     if result_start >= 0:
         result_after = content[result_start + 7:]  # 跳过 "result:"
         # 找到 result 内容的结束位置（下一个字段之前）
@@ -526,7 +538,7 @@ def _render_tool_block_content(content: str) -> str:
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
     return render_tool_block(
         tool_name, args_dict, tool_result, tool_success, collapsed=True,
-        tool_call_id=tool_call_id
+        tool_call_id=tool_call_id, diff=diff_content
     )
 
 
@@ -1725,6 +1737,26 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-expanded-content {{
                     padding: 0;
+                }}
+                .tool-diff-inline .diff-line {{
+                    padding: 0 12px;
+                    white-space: pre-wrap;
+                    font-size: {tag_font_size}px;
+                }}
+                .tool-diff-inline .diff-add {{
+                    background-color: rgba(63, 185, 80, 0.15);
+                    color: #3fb950;
+                }}
+                .tool-diff-inline .diff-del {{
+                    background-color: rgba(248, 81, 73, 0.15);
+                    color: #f85149;
+                }}
+                .tool-diff-inline .diff-hunk {{
+                    color: #58a6ff;
+                    padding: 0 12px;
+                }}
+                .tool-diff-inline .diff-ctx {{
+                    color: #c9d1d9;
                 }}
                 .tool-params-section,
                 .tool-result-section {{
@@ -3645,6 +3677,7 @@ class MessageCard(SimpleCardWidget):
             result: Any = None,
             success: bool = True,
             tool_call_id: str = None,
+            diff: str = None,
     ):
         self._content_data.append(
             make_tool_result_block(
@@ -3653,6 +3686,7 @@ class MessageCard(SimpleCardWidget):
                 result=result,
                 success=success,
                 tool_call_id=tool_call_id,
+                diff=diff,
             )
         )
         # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算

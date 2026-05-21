@@ -77,6 +77,7 @@ def make_tool_result_block(
         result: Any = None,
         success: bool = True,
         tool_call_id: Optional[str] = None,
+        diff: Optional[str] = None,
 ) -> Dict[str, Any]:
     # 检测是否为子智能体任务（task tool）
     is_subagent = str(tool_name).lower() == "task"
@@ -91,6 +92,8 @@ def make_tool_result_block(
     }
     if tool_call_id:
         block["tool_call_id"] = str(tool_call_id)
+    if diff:
+        block["diff"] = diff
     return block
 
 
@@ -123,6 +126,7 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
                             result=item.get("result", ""),
                             success=item.get("success", True),
                             tool_call_id=item.get("tool_call_id"),
+                            diff=item.get("diff"),
                         )
                     )
                 else:
@@ -159,6 +163,7 @@ def build_assistant_content(
                 result=item.get("result", item.get("content", "")),
                 success=item.get("success", True),
                 tool_call_id=item.get("tool_call_id"),
+                diff=item.get("diff"),
             )
         )
 
@@ -244,13 +249,22 @@ def content_to_markdown(content: Any) -> str:
             success = bool(block.get("success", True))
             tool_call_id = block.get("tool_call_id", "")
 
+            # 读取 diff 字段（用于 inline diff 展示）
+            diff_raw = block.get("diff", "") or ""
+            if diff_raw:
+                # diff 多行内容，直接嵌入
+                diff_escaped = _sanitize_result(str(diff_raw))
+
             tool_lines = [
                 "<tool>",
                 f"name: {block.get('name', 'tool')}",
                 f"args: {args_json}",
                 f"result: {result_escaped}",
-                f"success: {success}",
             ]
+            if diff_raw:
+                tool_lines.append(f"diff:")
+                tool_lines.append(diff_escaped)
+            tool_lines.append(f"success: {success}")
             # 保留 tool_call_id 用于差异对比功能
             if tool_call_id:
                 tool_lines.append(f"tool_call_id: {tool_call_id}")
