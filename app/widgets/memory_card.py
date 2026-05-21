@@ -162,7 +162,7 @@ class EntryMemoryItemWidget(QWidget):
 
         main_layout.addWidget(self.edit_widget, 1)
 
-        # 操作按钮
+        # 操作按钮 — 直接加入 main_layout，固定宽度不放 stretch，始终靠右
         self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
         self.edit_btn.setToolTip("编辑")
         self.edit_btn.clicked.connect(self._start_edit)
@@ -179,13 +179,11 @@ class EntryMemoryItemWidget(QWidget):
             lambda checked: self.toggled.emit(self.memory_id, checked)
         )
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(2)
-        btn_layout.addWidget(self.edit_btn)
-        btn_layout.addWidget(self.delete_btn)
-        btn_layout.addWidget(self.switch)
-
-        main_layout.addLayout(btn_layout)
+        # 在按钮前加一个弹性空白，把按钮推到最右边
+        main_layout.addStretch()
+        main_layout.addWidget(self.edit_btn)
+        main_layout.addWidget(self.delete_btn)
+        main_layout.addWidget(self.switch)
 
     def _adjust_edit_height(self):
         """根据内容调整编辑框高度，不超过最大高度，超出可滚动"""
@@ -215,18 +213,23 @@ class EntryMemoryItemWidget(QWidget):
             self._content = new_content
             self.content_label.setText(new_content)
         self._cancel_edit()
-        # 编辑完成后刷新列表中所有条目的 sizeHint
-        lst = self._get_listwidget()
-        if lst and hasattr(lst.parent(), '_refresh_entries_size'):
-            lst.parent()._refresh_entries_size()
+        # 编辑后更新自身的 sizeHint，让列表行高自适应
+        self.updateGeometry()
+        item = self._get_item()
+        if item:
+            item.setSizeHint(self.sizeHint())
 
-    def _get_listwidget(self):
-        """反向查找当前 widget 所在的 ListWidget"""
+    def _get_item(self):
+        """反向查找当前 widget 所在的 QListWidgetItem"""
         from qfluentwidgets import ListWidget
         lst = self.parent()
         while lst and not isinstance(lst, ListWidget):
             lst = lst.parent()
-        return lst
+        if lst:
+            for i in range(lst.count()):
+                if lst.itemWidget(lst.item(i)) is self:
+                    return lst.item(i)
+        return None
 
     def _on_focus_out(self, event):
         """失去焦点时自动保存完成编辑"""
@@ -872,39 +875,12 @@ class MemoryCardContent(QWidget):
             widget.edited.connect(self._edit_entry)
             self.entries_list.addItem(item)
             self.entries_list.setItemWidget(item, widget)
-            # sizeHint 宽度为 0，让列表用 viewport 宽度；高度稍后由 _refresh_entries_size 重算
-            item.setSizeHint(QSize(0, 44))
-
-        # 初始布局后刷新所有条目的高度
-        QTimer.singleShot(0, self._refresh_entries_size)
+            item.setSizeHint(widget.sizeHint())
 
     def _get_entry_item_size(self, content: str):
-        """仅作为 fallback 使用，实际高度由 _refresh_entries_size 决定"""
+        """仅作为 fallback 使用"""
         from PyQt5.QtCore import QSize
         return QSize(0, 44)
-
-    def _refresh_entries_size(self):
-        """刷新所有条目记忆 item 的 sizeHint，让高度随内容自适应"""
-        vw = self.entries_list.viewport().width() if self.entries_list.viewport() else 0
-        if vw <= 0:
-            return
-        for i in range(self.entries_list.count()):
-            item = self.entries_list.item(i)
-            widget = self.entries_list.itemWidget(item)
-            if widget is None:
-                continue
-            # 约束 widget 最大宽度为 viewport 宽度，确保文本换行
-            widget.setMaximumWidth(vw)
-            widget.adjustSize()
-            sh = widget.sizeHint()
-            # 最小高度 44px
-            item.setSizeHint(QSize(0, max(44, sh.height())))
-
-    def resizeEvent(self, event):
-        """窗口缩放时刷新条目记忆列表高度"""
-        super().resizeEvent(event)
-        if hasattr(self, 'entries_list'):
-            self._refresh_entries_size()
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本"""
@@ -1122,7 +1098,11 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _set_as_working_directory(self, file_path: str):
-        """设置为工作目录（再次点击取消）"""
+        """设置为工作目录（再次点击取消）
+
+        多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
+        当前窗口通过 workingDirChanged 信号通知 main_widget 更新实例缓存。
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
@@ -1138,7 +1118,11 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _on_worktree_changed(self, original_folder: str, worktree_path: str):
-        """Worktree 切换：写入 DB + 切换 workdir（UI 层过滤不显示 git_worktree 条目）"""
+        """Worktree 切换：写入 DB（新窗口默认值）+ 切换 workdir（UI 层过滤不显示 git_worktree 条目）
+
+        多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
+        当前窗口通过 workingDirChanged 信号通知 main_widget 更新实例缓存。
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
@@ -1153,7 +1137,10 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _on_worktree_deleted(self, worktree_path: str):
-        """Worktree 被删除后：移除 DB 记录 + 恢复到主仓库"""
+        """Worktree 被删除后：移除 DB 记录 + 恢复到主仓库 + 清除实例缓存
+
+        多窗口隔离：通过 workingDirChanged 信号通知 main_widget 清除对应实例缓存。
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
