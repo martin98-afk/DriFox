@@ -13,6 +13,8 @@ extra_modules = [
 # 需要删除的冗余库列表
 to_remove = [
     "scipy",
+    "numpy",
+    "pandas",
     "cv2",
     "pyarrow",
     "jieba",
