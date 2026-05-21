@@ -1049,10 +1049,11 @@ class MemoryCardContent(QWidget):
 
         # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
         # 注意：worktree 本身不能作为 original_repo_path，必须是实际的 git 仓库文件夹
-        # 优先级：DB 中 is_working_dir=1 的非 worktree 目录 > 第一个 git 仓库目录
+        # 优先级 1：DB 中 is_working_dir=1 的非 worktree 目录（用户手动设定的根目录）
+        # 优先级 2：is_worktree_active 时，第一个非 worktree 的 git 仓库目录（兼容无根目录场景）
         original_repo_path = None
         if actual_wd:
-            # 第一优先级：DB 中标记为 is_working_dir 的非 worktree 目录（即用户手动设定的根目录）
+            # 第一优先级：DB 中标记为 is_working_dir 的非 worktree 目录(即用户手动设定的根目录)
             for d in all_docs:
                 if d.get("added_by") == "git_worktree":
                     continue

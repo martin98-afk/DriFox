@@ -149,26 +149,14 @@ class KeyDocumentsRepository:
         """
         获取项目当前工作目录
 
-        当多个条目标记为 is_working_dir 时，优先返回 git_worktree 类型的路径，
-        因为 worktree 切换场景下，worktree 路径是用户实际工作的目录，
-        而原始根目录的标记仅用于 UI 显示“根目录”图标。
+        Returns:
+            Optional[str]: 工作目录路径，未设置返回 None
         """
         if not self.is_initialized:
             return None
         self._migrate()
 
         try:
-            # 优先返回 git_worktree 类型的工作目录（worktree 切换场景）
-            success, rows = self._execute(
-                f'SELECT file_path FROM {self.TABLE_NAME} WHERE project = ? AND is_working_dir = 1 AND added_by = "git_worktree" LIMIT 1',
-                (project,)
-            )
-            if success and rows:
-                row = rows[0]
-                val = row[0] if isinstance(row, tuple) else row.get("file_path", "")
-                if val:
-                    return val
-            # 其次返回任意标记为工作目录的路径（普通根目录场景）
             success, rows = self._execute(
                 f'SELECT file_path FROM {self.TABLE_NAME} WHERE project = ? AND is_working_dir = 1 LIMIT 1',
                 (project,)
@@ -178,7 +166,7 @@ class KeyDocumentsRepository:
                 return row[0] if isinstance(row, tuple) else row.get("file_path", "")
             return None
         except Exception as e:
-            logger.error(f'[KeyDocumentsRepository] get_working_directory 异常: {e}')
+            logger.error(f"[KeyDocumentsRepository] get_working_directory 异常: {e}")
             return None
 
     def get_by_project(self, project: str, limit: int = 20) -> List[Dict]:

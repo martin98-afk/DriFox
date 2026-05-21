@@ -6,6 +6,8 @@
 
 from PyQt5.QtCore import QSize
 
+from app.utils.theme_manager import theme_manager
+
 
 def _get_global_font() -> str:
     """获取全局字体名称，用于样式表"""
@@ -108,7 +110,6 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
 def _build_theme_options() -> dict:
     """从 ThemeManager 构建 THEME_STYLE_OPTIONS 兼容格式"""
-    from app.theme import theme_manager
     result = {}
     for tid, name in theme_manager.list_themes().items():
         theme = theme_manager.get_theme(tid)

@@ -23,6 +23,7 @@ from loguru import logger
 
 from app.utils.db_manager import DatabaseManager
 from app.core.message_content import consolidate_messages
+from app.utils.utils import get_app_data_dir
 
 # 导入子模块
 from app.core.store.session_repository import SessionRepository
@@ -39,7 +40,7 @@ class SessionStore:
 
     _instance: Optional["SessionStore"] = None
 
-    def __new__(cls, db_dir: str = ".drifox"):
+    def __new__(cls, db_dir: str = None):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -47,15 +48,13 @@ class SessionStore:
     @classmethod
     def get_instance(cls, db_dir: str = None) -> "SessionStore":
         """获取单例实例"""
+        if db_dir is None:
+            db_dir = str(get_app_data_dir())
         if cls._instance is None:
-            # 使用默认数据目录
-            if db_dir is None:
-                from app.utils.utils import get_app_data_dir
-                db_dir = str(get_app_data_dir())
             cls._instance = cls(db_dir)
         return cls._instance
 
-    def __init__(self, db_dir: str = ".drifox"):
+    def __init__(self, db_dir: str):
         # 防止重复初始化
         if hasattr(self, "_initialized") and self._initialized:
             return

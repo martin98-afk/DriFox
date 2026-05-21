@@ -790,7 +790,6 @@ class ChatBackend(QObject):
                     return await self._gateway_send_message(platform, chat_id, content, **kwargs)
                 
                 # 创建管理器（PlatformManager 是单例，连接逻辑在其后台事件循环）
-                config = get_gateway_config()
                 self._gateway_manager = create_platform_manager(process_message, send_message)
 
                 self._gateway_initialized = True
@@ -800,7 +799,7 @@ class ChatBackend(QObject):
                 self._gateway_manager.start_all_async()
                     
             except Exception as e:
-                logger.error(f"[ChatBackend] Gateway 初始化失败: {e}", exc_info=True)
+                logger.exception(f"[ChatBackend] Gateway 初始化失败: {e}", exc_info=True)
         
         # 在后台线程运行
         import threading
