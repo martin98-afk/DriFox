@@ -504,8 +504,6 @@ class ChatBackend(QObject):
         
         # Trigger SessionStart hook
         if trigger_hook and self._hook_manager:
-            import traceback
-            logger.debug(f"[ChatBackend] create_session called with trigger_hook=True, stack:\n{''.join(traceback.format_stack()[:-1])}")
             context = {
                 "project_root": os.getcwd(),
             }

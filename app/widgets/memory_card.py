@@ -966,18 +966,21 @@ class MemoryCardContent(QWidget):
             )
 
         # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
+        # 注意：worktree 本身不能作为 original_repo_path，必须是实际的 git 仓库文件夹
         original_repo_path = None
         if actual_wd:
             for d in all_docs:
-                if d.get("added_by") != "git_worktree" and original_repo_path is None:
-                    # 仅检测：根目录 或 worktree 激活时的原始仓库
-                    should_check = d.get("is_working_dir", False) or is_worktree_active
-                    if should_check:
-                        try:
-                            if GitWorktreeDetector.detect_git(d.get("file_path", "")):
-                                original_repo_path = d["file_path"]
-                        except Exception:
-                            pass
+                # 排除 worktree 条目本身
+                if d.get("added_by") == "git_worktree":
+                    continue
+                # 仅检测：根目录 或 worktree 激活时
+                should_check = d.get("is_working_dir", False) or is_worktree_active
+                if should_check and original_repo_path is None:
+                    try:
+                        if GitWorktreeDetector.detect_git(d.get("file_path", "")):
+                            original_repo_path = d["file_path"]
+                    except Exception:
+                        pass
 
         # 过滤掉 git_worktree（不显示在 UI 中）
         docs = [d for d in all_docs if d.get("added_by") != "git_worktree"]
