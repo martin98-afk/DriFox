@@ -177,6 +177,9 @@ PROVIDER_MODELS = {
         "gemini-1.5-flash-8b",
     ],
     "OpenCode Zen": [
+        "deepseek-v4-flash-free",
+        "nemotron-3-super-free",
+        "big-pickle",
         "glm-5.1",
         "glm-5",
         "kimi-k2.6",
@@ -306,11 +309,11 @@ FREE_PROVIDERS = {
         "获取地址": "https://aistudio.google.com/app/apikey",
     },
     "OpenCode Zen": {
-        "API_URL": "https://opencode.ai/zen/go/v1",
+        "API_URL": "https://opencode.ai/zen/v1",
         "API_KEY": "",
-        "模型名称": "kimi-k2.6",
+        "模型名称": "deepseek-v4-flash-free",
         "温度": 0.7,
-        "最大Token": 200000,
+        "最大Token": 128000,
         "认证方式": "bearer",
         "获取地址": "https://opencode.ai/auth",
     },
@@ -329,5 +332,5 @@ PROVIDER_ICONS = {
     "OpenAI": "大模型",
     "Anthropic (Claude)": "Anthropic",
     "Google Gemini": "gemini-ai",
-    "OpenCode Zen": "大模型",
+    "OpenCode Zen": "opencode",
 }
