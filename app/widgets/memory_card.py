@@ -7,10 +7,14 @@
 """
 import os
 
-from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
-from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor
+from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer, QRect, QPoint
+from PyQt5.QtGui import (
+    QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextOption,
+    QPainter, QPen, QBrush,
+)
 from PyQt5.QtWidgets import (
     QWidget,
+    QFrame,
     QVBoxLayout,
     QHBoxLayout,
     QListWidgetItem,
@@ -18,12 +22,12 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QMenu,
     QAction,
+    QPlainTextEdit,
 )
 from qfluentwidgets import (
     BodyLabel,
     LineEdit,
     PrimaryPushButton,
-    SwitchButton,
     FluentIcon,
     TransparentToolButton,
     ListWidget,
@@ -80,12 +84,22 @@ class DocDropListWidget(ListWidget):
             self.files_dropped.emit(file_paths)
 
 
-class EntryMemoryItemWidget(QWidget):
-    """条目记忆项组件"""
+class EntryMemoryItemWidget(QFrame):
+    """条目记忆卡片组件 — 悬浮操作卡片样式
+
+    布局: 圆角卡片边框，左侧圆形开关指示器(paintEvent绘制)，
+    内容全宽，hover 时右上角浮现编辑/删除按钮。
+    双击内容进入行内编辑，单击指示器切换启用/禁用。
+    """
 
     deleted = pyqtSignal(str)  # memory_id
     toggled = pyqtSignal(str, bool)
     edited = pyqtSignal(str, str)  # memory_id, new_content
+
+    # 指示器常量
+    _INDICATOR_SIZE = 18
+    _INDICATOR_LEFT = 12
+    _INDICATOR_PADDING_TOP = 10  # 与 padding-top 对齐
 
     def __init__(
         self,
@@ -98,46 +112,72 @@ class EntryMemoryItemWidget(QWidget):
         super().__init__(parent)
         self.memory_id = memory_id
         self._content = content
+        self._enabled = enabled
         self._editing = False
-        self._init_ui(enabled, source)
+        self._selected = False
+        self._hovered = False
+        self._syncing_height = False
+        self._init_ui()
 
-    def _init_ui(self, enabled, source):
-        # 高度自适应内容，不固定高度
+    def _init_ui(self):
+        """构建卡片式布局"""
+        # QFrame 卡片容器
+        self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.setMinimumHeight(44)
+        self.setStyleSheet(ItemStyles.entry_card())
+        self.setMouseTracking(True)
 
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(6)
+        # 主布局：左侧指示器占位 + 内容区 + hover 操作按钮
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(38, 10, 10, 10)  # left=38 给指示器留空间
+        layout.setSpacing(8)
 
-        # 内容区域（stretch=1 让文本区优先吃满剩余空间，按钮区固定宽度在尾部）
-        self.text_widget = QWidget(self)
-        # 允许收缩，适应小窗口
-        self.text_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.text_widget.setMinimumWidth(0)
-        text_layout = QVBoxLayout(self.text_widget)
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(0)
-
-        self.content_label = BodyLabel(self._content, self.text_widget)
-        self.content_label.setWordWrap(True)
-        self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        # 只读内容显示（QPlainTextEdit: 强制换行 + 不可交互）
+        self.content_label = QPlainTextEdit(self._content, self)
+        self.content_label.setReadOnly(True)
+        self.content_label.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.content_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.content_label.setCursorWidth(0)
+        self.content_label.setFrameShape(QPlainTextEdit.NoFrame)
+        self.content_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.content_label.setMinimumWidth(0)
-        self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
-        self.content_label.setStyleSheet(
-            f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
-        )
-        text_layout.addWidget(self.content_label)
+        self.content_label.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content_label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content_label.setToolTip(self._content)
+        self._apply_content_style(self._enabled)
+        self.content_label.document().documentSizeChanged.connect(self._sync_content_height)
+        layout.addWidget(self.content_label, 1)
 
-        main_layout.addWidget(self.text_widget, 1)
+        # Hover 操作按钮区（默认隐藏，hover 时显示）
+        self._hover_actions = QWidget(self)
+        hover_layout = QHBoxLayout(self._hover_actions)
+        hover_layout.setContentsMargins(0, 0, 0, 0)
+        hover_layout.setSpacing(2)
 
-        # 编辑输入框（初始隐藏，使用 TextEdit 支持多行）
+        self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
+        self.edit_btn.setToolTip("编辑")
+        self.edit_btn.setFixedSize(26, 26)
+        self.edit_btn.clicked.connect(self._start_edit)
+        self.edit_btn.setStyleSheet("background: transparent; border: none;")
+
+        self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self)
+        self.delete_btn.setToolTip("删除")
+        self.delete_btn.setFixedSize(26, 26)
+        self.delete_btn.clicked.connect(lambda: self.deleted.emit(self.memory_id))
+        self.delete_btn.setStyleSheet("background: transparent; border: none;")
+
+        hover_layout.addWidget(self.edit_btn)
+        hover_layout.addWidget(self.delete_btn)
+        layout.addWidget(self._hover_actions)
+        self._hover_actions.setVisible(False)
+
+        # 编辑输入框（初始隐藏）
         self.edit_widget = QWidget(self)
-        self.edit_widget.setSizePolicy(1, QSizePolicy.MinimumExpanding)
         self.edit_widget.setVisible(False)
-        edit_layout = QVBoxLayout(self.edit_widget)
-        edit_layout.setContentsMargins(0, 0, 0, 0)
-        edit_layout.setSpacing(0)
+        edit_outer = QHBoxLayout(self.edit_widget)
+        edit_outer.setContentsMargins(38, 10, 10, 10)
+        edit_outer.setSpacing(8)
 
         from qfluentwidgets import TextEdit
         self.edit_text = TextEdit(self.edit_widget)
@@ -149,58 +189,185 @@ class EntryMemoryItemWidget(QWidget):
                 border: 1px solid rgba(14, 99, 156, 200);
                 color: #e0e0e0;
                 padding: 4px 6px;
-                border-radius: 3px;
-                {get_font_family_css()} {font_size_css(12)}
+                border-radius: 4px;
+                {get_font_family_css()} {font_size_css(13)}
             }}
         """)
         self.edit_text.setMinimumHeight(36)
-        self.edit_text.setMaximumHeight(200)  # 限制最大高度，超出可滚动
-        self.edit_text.document().documentLayout().documentSizeChanged.connect(self._adjust_edit_height)
-        # 失去焦点自动保存
+        self.edit_text.setMaximumHeight(200)
+        self.edit_text.document().documentSizeChanged.connect(self._adjust_edit_height)
         self.edit_text.focusOutEvent = lambda e: self._on_focus_out(e)
-        edit_layout.addWidget(self.edit_text)
+        edit_outer.addWidget(self.edit_text, 1)
 
-        main_layout.addWidget(self.edit_widget, 1)
+    # ==================== 卡片样式 ====================
 
-        # 操作按钮 — 直接加入 main_layout，固定宽度不放 stretch，始终靠右
-        self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
-        self.edit_btn.setToolTip("编辑")
-        self.edit_btn.clicked.connect(self._start_edit)
+    def _apply_content_style(self, enabled):
+        """根据启用/禁用状态设置内容文本样式"""
+        if enabled:
+            self.content_label.setStyleSheet(
+                f"QPlainTextEdit {{"
+                f"  background: transparent;"
+                f"  color: {Colors.TEXT_PRIMARY};"
+                f"  padding: 0;"
+                f"  {get_font_family_css()} {font_size_css(13)}"
+                f"}}"
+            )
+        else:
+            self.content_label.setStyleSheet(
+                f"QPlainTextEdit {{"
+                f"  background: transparent;"
+                f"  color: rgba(255, 255, 255, 80);"
+                f"  padding: 0;"
+                f"  text-decoration: line-through;"
+                f"  {get_font_family_css()} {font_size_css(13)}"
+                f"}}"
+            )
 
-        self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self)
-        self.delete_btn.setToolTip("删除")
-        self.delete_btn.clicked.connect(lambda: self.deleted.emit(self.memory_id))
+    def _update_card_style(self):
+        """根据 hover/selected 状态更新卡片边框样式"""
+        if self._selected:
+            self.setStyleSheet(ItemStyles.entry_card_selected())
+        elif self._hovered:
+            self.setStyleSheet(ItemStyles.entry_card_hover())
+        else:
+            self.setStyleSheet(ItemStyles.entry_card())
 
-        self.switch = SwitchButton(self)
-        self.switch.setChecked(enabled)
-        from app.utils.design_tokens import SwitchStyles
-        SwitchStyles.configure(self.switch)
-        self.switch.checkedChanged.connect(
-            lambda checked: self.toggled.emit(self.memory_id, checked)
-        )
+    # ==================== 事件处理 ====================
 
-        # 在按钮前加一个弹性空白，把按钮推到最右边
-        main_layout.addStretch()
-        main_layout.addWidget(self.edit_btn)
-        main_layout.addWidget(self.delete_btn)
-        main_layout.addWidget(self.switch)
+    def enterEvent(self, event):
+        """鼠标进入卡片 — 显示操作按钮，高亮边框"""
+        self._hovered = True
+        self._update_card_style()
+        self._hover_actions.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标离开卡片 — 隐藏操作按钮，恢复边框"""
+        self._hovered = False
+        self._update_card_style()
+        self._hover_actions.setVisible(False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        """单击处理: 指示器区域切换启用/禁用, 其余区域选中条目"""
+        if event.button() == Qt.LeftButton:
+            # 指示器点击判定: x=[12,30], y 根据内容高度居中
+            content_h = max(36, int(self.content_label.document().size().height()) + 4)
+            ind_y = self._INDICATOR_PADDING_TOP + max(0, (content_h - self._INDICATOR_SIZE) // 2)
+            indicator_rect = QRect(
+                self._INDICATOR_LEFT, ind_y,
+                self._INDICATOR_SIZE, self._INDICATOR_SIZE
+            )
+            if indicator_rect.contains(event.pos()):
+                self._on_toggle_clicked()
+                return
+            self._selected = True
+            self._update_card_style()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """双击内容区进入编辑"""
+        if event.button() == Qt.LeftButton and not self._editing:
+            self._start_edit()
+        super().mouseDoubleClickEvent(event)
+
+    def paintEvent(self, event):
+        """绘制圆形开关指示器"""
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 计算指示器位置 (与 mousePressEvent 保持一致)
+        content_h = max(36, int(self.content_label.document().size().height()) + 4)
+        ind_y = self._INDICATOR_PADDING_TOP + max(0, (content_h - self._INDICATOR_SIZE) // 2)
+        radius = self._INDICATOR_SIZE // 2
+
+        if self._enabled:
+            # 启用态: 蓝色填充圆 + 白色勾号
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#0e639c")))
+            painter.drawEllipse(
+                self._INDICATOR_LEFT, ind_y,
+                self._INDICATOR_SIZE, self._INDICATOR_SIZE
+            )
+            # 勾号
+            pen = QPen(QColor("white"), 2)
+            painter.setPen(pen)
+            cx = self._INDICATOR_LEFT + radius
+            cy = ind_y + radius
+            # 简化的勾号路径: 左短笔画 + 右长笔画
+            painter.drawLine(cx - 4, cy, cx - 1, cy + 3)
+            painter.drawLine(cx - 1, cy + 3, cx + 4, cy - 3)
+        else:
+            # 禁用态: 空心圆
+            pen = QPen(QColor("#555555"), 1.5)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(
+                self._INDICATOR_LEFT, ind_y,
+                self._INDICATOR_SIZE, self._INDICATOR_SIZE
+            )
+
+        painter.end()
+
+    # ==================== 高度自适应 ====================
+
+    def _sync_content_height(self):
+        """根据内容换行自适应只读文本区高度，同步更新列表行高"""
+        if self._syncing_height:
+            return
+        self._syncing_height = True
+        try:
+            doc = self.content_label.document()
+            doc_height = int(doc.size().height()) + 4
+            height = max(36, doc_height)
+            self.content_label.setFixedHeight(height)
+            self.updateGeometry()
+            item = self._get_item()
+            if item:
+                item.setSizeHint(self.sizeHint())
+            self.update()  # 重绘指示器（高度变化可能影响指示器位置）
+        finally:
+            self._syncing_height = False
+
+    def resizeEvent(self, event):
+        """宽度变化超过阈值时重新同步高度（换行可能发生变化）"""
+        super().resizeEvent(event)
+        old_width = getattr(self, '_last_width', None)
+        new_width = self.width()
+        if old_width is None or abs(new_width - old_width) > 10:
+            self._last_width = new_width
+            self._sync_content_height()
+
+    # ==================== 开关指示器 ====================
+
+    def _on_toggle_clicked(self):
+        """点击指示器切换启用/禁用"""
+        self._enabled = not self._enabled
+        self._apply_content_style(self._enabled)
+        self.toggled.emit(self.memory_id, self._enabled)
+        self.update()  # 重绘指示器
+
+    # ==================== 编辑模式 ====================
 
     def _adjust_edit_height(self):
-        """根据内容调整编辑框高度，不超过最大高度，超出可滚动"""
+        """根据内容调整编辑框高度，不超过最大高度"""
         doc = self.edit_text.document()
         doc_height = int(doc.size().height() + 10)
         height = max(36, min(doc_height, 200))
         self.edit_text.setFixedHeight(height)
-        # 如果内容超过最大高度，QTextEdit 会自动出现滚动条，可以滚动查看
-    
+
     def _start_edit(self):
-        """开始编辑"""
+        """双击或点编辑按钮进入行内编辑"""
+        if self._editing:
+            return
         self._editing = True
-        self.text_widget.setVisible(False)
+        self.content_label.setVisible(False)
+        self._hover_actions.setVisible(False)
         self.edit_widget.setVisible(True)
         self._adjust_edit_height()
         self.edit_text.setFocus()
-        # 选中文本
         cursor = self.edit_text.textCursor()
         cursor.select(cursor.Document)
         self.edit_text.setTextCursor(cursor)
@@ -211,13 +378,25 @@ class EntryMemoryItemWidget(QWidget):
         if new_content and new_content != self._content:
             self.edited.emit(self.memory_id, new_content)
             self._content = new_content
-            self.content_label.setText(new_content)
+            self.content_label.setPlainText(new_content)
         self._cancel_edit()
-        # 编辑后更新自身的 sizeHint，让列表行高自适应
-        self.updateGeometry()
-        item = self._get_item()
-        if item:
-            item.setSizeHint(self.sizeHint())
+        self._sync_content_height()
+
+    def _cancel_edit(self):
+        """取消编辑"""
+        self._editing = False
+        self.content_label.setVisible(True)
+        self.edit_widget.setVisible(False)
+        self.edit_text.setText(self._content)
+
+    def _on_focus_out(self, event):
+        """失去焦点时自动保存完成编辑"""
+        if self._editing:
+            self._finish_edit()
+        if event:
+            event.ignore()
+
+    # ==================== 辅助 ====================
 
     def _get_item(self):
         """反向查找当前 widget 所在的 QListWidgetItem"""
@@ -230,21 +409,6 @@ class EntryMemoryItemWidget(QWidget):
                 if lst.itemWidget(lst.item(i)) is self:
                     return lst.item(i)
         return None
-
-    def _on_focus_out(self, event):
-        """失去焦点时自动保存完成编辑"""
-        if self._editing:
-            self._finish_edit()
-        # 继续传递事件
-        if event:
-            event.ignore()
-    
-    def _cancel_edit(self):
-        """取消编辑"""
-        self._editing = False
-        self.text_widget.setVisible(True)
-        self.edit_widget.setVisible(False)
-        self.edit_text.setText(self._content)
 
 
 class KeyDocumentItemWidget(QWidget):
@@ -640,6 +804,7 @@ class MemoryCardContent(QWidget):
         self.entries_list = ListWidget(self)
         self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.entries_list.setResizeMode(ListWidget.Adjust)
+        self.entries_list.setSpacing(6)  # 卡片间距
         self.entries_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);
@@ -650,7 +815,7 @@ class MemoryCardContent(QWidget):
             }}
             QListWidget::item {{
                 padding: 0;
-                border-bottom: 1px solid rgba(62, 62, 66, 80);
+                border-bottom: none;
             }}
         """)
         layout.addWidget(self.entries_list, 1)
