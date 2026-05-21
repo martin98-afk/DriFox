@@ -1060,6 +1060,11 @@ class OpenAIChatWorker(QThread):
                 )
 
                 if should_retry and attempt < max_retries - 1:
+                    # 🛡️ 已取消则不再 emit 信号也不重试
+                    if self._is_cancelled:
+                        logger.info("[API] 检测到取消，放弃重试")
+                        return None, None
+
                     wait_time = retry_delay * (attempt + 1)
                     if is_rate_limit:
                         retry_reason = "RateLimit"

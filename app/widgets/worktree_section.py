@@ -4,13 +4,14 @@ Worktree 树状展示组件
 
 紧贴文件夹条目下方，左侧竖线 + 圆点标识分支
 主分支也有切换按钮，当前分支高亮
+支持折叠/展开、内联确认删除、分支名自动省略
 """
 
 import os
 import subprocess
 import sys
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QSizePolicy, QDialog,
@@ -33,15 +34,25 @@ class _WorktreeRow(QWidget):
 
     switched = pyqtSignal(str)   # worktree_path
     deleted = pyqtSignal(str)    # worktree_path
+    collapseToggled = pyqtSignal()  # 折叠/展开切换
 
     def __init__(self, branch: str, wt_path: str, is_main: bool,
-                 is_current: bool, is_prunable: bool, parent=None):
+                 is_current: bool, is_prunable: bool,
+                 show_collapse_toggle: bool = False,
+                 is_collapsed: bool = False,
+                 parent=None):
         super().__init__(parent)
         self._branch = branch
         self._wt_path = wt_path
         self._is_main = is_main
         self._is_current = is_current
         self._is_prunable = is_prunable
+        self._show_collapse_toggle = show_collapse_toggle
+        self._is_collapsed = is_collapsed
+        self._confirming_delete = False
+        self._delete_timer: QTimer = None
+        self._del_btn: QLabel = None
+        self._toggle_btn: QLabel = None
         self.setFixedHeight(24)
         self._setup_ui()
 
@@ -69,15 +80,18 @@ class _WorktreeRow(QWidget):
             )
         layout.addWidget(dot)
 
-        # 分支名
+        # 分支名（自动省略超长名称）
         if self._is_current:
             branch_ss = f"color: #e6edf3; font-weight: 600; {get_font_family_css()} {font_size_css(12)}"
         else:
             branch_ss = f"color: #8b949e; {get_font_family_css()} {font_size_css(12)}"
 
-        branch_label = QLabel(self._branch, self)
-        branch_label.setStyleSheet(branch_ss)
-        layout.addWidget(branch_label)
+        self._branch_label = QLabel(self._branch, self)
+        self._branch_label.setStyleSheet(branch_ss)
+        # 允许压缩：窗口缩小时分支名自动省略右侧
+        self._branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._branch_label.setMinimumWidth(30)
+        layout.addWidget(self._branch_label, 1)
 
         # 标签（小圆角 badge，适配系统字体大小）
         if self._is_main:
@@ -89,7 +103,17 @@ class _WorktreeRow(QWidget):
             )
             layout.addWidget(tag)
 
-        layout.addStretch()
+        # 折叠/展开切换按钮（仅当前分支 + 多分支时显示）
+        if self._show_collapse_toggle:
+            toggle_text = "▶" if self._is_collapsed else "▼"
+            self._toggle_btn = QLabel(toggle_text, self)
+            self._toggle_btn.setCursor(Qt.PointingHandCursor)
+            self._toggle_btn.setStyleSheet(
+                f"color: #8b949e; font-size: 10px; padding: 0 2px;"
+            )
+            self._toggle_btn.setToolTip("展开分支列表" if self._is_collapsed else "收起分支列表")
+            self._toggle_btn.mousePressEvent = lambda e: self.collapseToggled.emit()
+            layout.addWidget(self._toggle_btn)
 
         # 切换按钮（纯白色加粗，适配系统字体）
         if not self._is_current:
@@ -102,71 +126,73 @@ class _WorktreeRow(QWidget):
             btn.mousePressEvent = lambda e: self.switched.emit(self._wt_path)
             layout.addWidget(btn)
 
-        # 删除按钮（纯白色加粗，适配系统字体）
+        # 删除按钮（纯白色加粗，适配系统字体，支持内联确认）
         if not self._is_main:
-            del_btn = QLabel("✕", self)
-            del_btn.setFixedWidth(14)
-            del_btn.setCursor(Qt.PointingHandCursor)
-            del_btn.setToolTip("删除 worktree")
-            del_btn.setStyleSheet(
+            self._del_btn = QLabel("✕", self)
+            self._del_btn.setMinimumWidth(14)
+            self._del_btn.setAlignment(Qt.AlignCenter)
+            self._del_btn.setCursor(Qt.PointingHandCursor)
+            self._del_btn.setToolTip("删除 worktree")
+            self._del_btn.setStyleSheet(
                 f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
-            del_btn.mousePressEvent = lambda e: self._confirm_delete()
-            layout.addWidget(del_btn)
+            self._del_btn.mousePressEvent = lambda e: self._on_delete_clicked()
+            layout.addWidget(self._del_btn)
 
-    def _confirm_delete(self):
-        """确认删除 worktree + 自动删除分支"""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("删除 Worktree")
-        dlg.setFixedSize(380, 170)
-        dlg.setStyleSheet(f"""
-            QDialog {{
-                background-color: {Colors.CONTENT_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-            }}
-            QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QPushButton {{
-                border: none; border-radius: 4px; padding: 6px 20px;
-                {get_font_family_css()} {font_size_css(12)} min-width: 60px;
-            }}
-            QPushButton#okBtn {{
-                background-color: {Colors.ERROR};
-                color: white;
-            }}
-            QPushButton#okBtn:hover {{ opacity: 0.8; }}
-            QPushButton#cancelBtn {{
-                background: transparent; color: {Colors.TEXT_SECONDARY};
-                border: 1px solid {Colors.BORDER};
-            }}
-            QPushButton#cancelBtn:hover {{ background-color: {Colors.HOVER_BG}; }}
-        """)
-        vl = QVBoxLayout(dlg)
-        vl.setContentsMargins(16, 16, 16, 16)
-        vl.setSpacing(8)
+    def resizeEvent(self, event):
+        """窗口缩小时自动省略分支名右侧"""
+        super().resizeEvent(event)
+        self._update_branch_elision()
 
-        vl.addWidget(QLabel(f"删除 worktree「{self._branch}」？"))
-        vl.addWidget(QLabel(f"路径: {self._wt_path}"))
-        vl.addWidget(QLabel(f"将同时删除分支「{self._branch}」"))
-
-        bl = QHBoxLayout()
-        bl.addStretch()
-        cancel = QPushButton("取消", dlg)
-        cancel.setObjectName("cancelBtn")
-        cancel.clicked.connect(dlg.reject)
-        bl.addWidget(cancel)
-        ok = QPushButton("删除", dlg)
-        ok.setObjectName("okBtn")
-        ok.clicked.connect(dlg.accept)
-        bl.addWidget(ok)
-        vl.addLayout(bl)
-
-        if dlg.exec_() != QDialog.Accepted:
+    def _update_branch_elision(self):
+        """根据可用宽度自动省略分支名（右侧截断）"""
+        if not hasattr(self, '_branch_label') or self._branch_label is None:
             return
+        available = self._branch_label.width()
+        if available <= 0:
+            return
+        fm = self._branch_label.fontMetrics()
+        elided = fm.elidedText(self._branch, Qt.ElideRight, available)
+        self._branch_label.setText(elided)
 
+    def _on_delete_clicked(self):
+        """删除按钮点击：内联确认，第二次点击才真正删除"""
+        if not self._confirming_delete:
+            # 第一次点击：进入确认状态
+            self._confirming_delete = True
+            self._del_btn.setText("确认删除")
+            self._del_btn.setStyleSheet(
+                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                f"padding: 0 4px;"
+            )
+            self._del_btn.setToolTip("再次点击确认删除，3秒后自动取消")
+            # 3秒后自动恢复
+            self._delete_timer = QTimer(self)
+            self._delete_timer.setSingleShot(True)
+            self._delete_timer.setInterval(3000)
+            self._delete_timer.timeout.connect(self._cancel_delete_confirm)
+            self._delete_timer.start()
+        else:
+            # 第二次点击：确认删除
+            if self._delete_timer:
+                self._delete_timer.stop()
+                self._delete_timer = None
+            self._confirming_delete = False
+            self._do_delete()
+
+    def _cancel_delete_confirm(self):
+        """取消确认状态，恢复删除按钮样式"""
+        self._confirming_delete = False
+        if self._del_btn:
+            self._del_btn.setText("✕")
+            self._del_btn.setMinimumWidth(14)
+            self._del_btn.setStyleSheet(
+                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+            )
+            self._del_btn.setToolTip("删除 worktree")
+
+    def _do_delete(self):
+        """执行删除 worktree + 自动删除分支"""
         cwd = self._find_git_root()
         # 1. 删除 worktree 目录
         try:
@@ -329,9 +355,9 @@ class _AddWorktreeRow(QWidget):
 class WorktreeSectionWidget(QWidget):
     """
     紧贴文件夹条目下方的 worktree 分支列表
-    
-    │ ● dev         主·当前
-    │ ○ feature     [切换] [✕]
+
+    │ ● dev         主·当前  ▼
+    │ ○ feature     [切换] [确认删除?]
     │ ＋ 新建
     """
 
@@ -349,13 +375,15 @@ class WorktreeSectionWidget(QWidget):
         self._repo_info = repo_info
         self._original_folder = original_folder
         self._current_workdir = current_workdir  # 当前实际工作目录（用于判断哪个分支激活）
+        self._is_collapsed = False  # 默认展开
         self._setup_ui()
 
     def _setup_ui(self):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(84, 2, 0, 4)  # 左边距约 1/4 宽度（400px 的 1/4 = 100px，减去竖线宽度约 16px）
+        # 左边距改为固定 24px，不再硬编码 84px，窗口缩小时不会溢出
+        layout.setContentsMargins(24, 2, 0, 4)
         layout.setSpacing(0)
 
         self._rows = QWidget(self)
@@ -375,6 +403,7 @@ class WorktreeSectionWidget(QWidget):
         # 用 _current_workdir 来判断哪个分支是当前激活的
         current_wd = self._current_workdir or self._original_folder
         normalized_wd = os.path.normpath(current_wd)
+        has_multiple = len(self._repo_info.worktrees) > 1 if self._repo_info.worktrees else False
 
         for wt in self._repo_info.worktrees:
             # 比较 worktree 路径与当前工作目录
@@ -385,10 +414,16 @@ class WorktreeSectionWidget(QWidget):
                 is_main=wt.is_main,
                 is_current=is_current,
                 is_prunable=wt.is_bare,
+                show_collapse_toggle=has_multiple and is_current,
+                is_collapsed=self._is_collapsed,
                 parent=self,
             )
             row.switched.connect(self._on_switch)
             row.deleted.connect(self._on_deleted)
+            row.collapseToggled.connect(self._toggle_collapse)
+            # 折叠时隐藏非当前分支
+            if self._is_collapsed and not is_current:
+                row.setVisible(False)
             self._rows_layout.addWidget(row)
 
         add = _AddWorktreeRow(
@@ -398,12 +433,28 @@ class WorktreeSectionWidget(QWidget):
             parent=self,
         )
         add.createRequested.connect(self._on_create)
+        # 折叠时隐藏新建行
+        if self._is_collapsed:
+            add.setVisible(False)
         self._rows_layout.addWidget(add)
 
         # 通知父级高度变化
-        wt_count = len(self._repo_info.worktrees) or 1
-        height = wt_count * 24 + 24 + 4
+        self._update_size_hint()
+
+    def _update_size_hint(self):
+        """根据折叠状态计算并通知高度变化"""
+        if self._is_collapsed:
+            # 折叠时只显示当前分支行 + 边距
+            height = 24 + 4
+        else:
+            wt_count = len(self._repo_info.worktrees) or 1
+            height = wt_count * 24 + 24 + 4
         self.sizeChanged.emit(height)
+
+    def _toggle_collapse(self):
+        """切换折叠/展开状态"""
+        self._is_collapsed = not self._is_collapsed
+        self._populate_rows()
 
     def _on_switch(self, worktree_path: str):
         """切换 worktree"""

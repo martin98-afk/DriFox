@@ -114,7 +114,6 @@ class EntryMemoryItemWidget(QWidget):
         self.text_widget = QWidget(self)
         # 允许收缩，适应小窗口
         self.text_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.text_widget.setMinimumWidth(100)
         text_layout = QVBoxLayout(self.text_widget)
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
@@ -123,7 +122,6 @@ class EntryMemoryItemWidget(QWidget):
         self.content_label.setWordWrap(True)
         # 允许收缩，最小宽度小一点，适应小窗口
         self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.content_label.setMinimumWidth(100)
         self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
         self.content_label.setStyleSheet(
             f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
@@ -321,7 +319,7 @@ class KeyDocumentItemWidget(QWidget):
 
     def _init_ui(self, file_name, file_path, added_by):
         self.setFixedHeight(44)
-        self.setSizePolicy(1, 0)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         # 工作目录高亮背景（用 Palette 方式避免 QListWidget 样式表冲突）
         if self._is_working_dir:
@@ -345,25 +343,26 @@ class KeyDocumentItemWidget(QWidget):
         icon_label.setStyleSheet(f"{font_size_css(16)} padding: 0 4px;")
 
         name_label = BodyLabel(file_name, self)
-        name_label.setWordWrap(True)
-        name_label.setSizePolicy(1, 0)
+        name_label.setWordWrap(False)
+        name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        name_label.setMinimumWidth(0)
         name_label.setStyleSheet(
             f"{get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
         )
 
         main_layout.addWidget(icon_label)
-        main_layout.addWidget(name_label, 1)
+        main_layout.addWidget(name_label)
 
-        # 显示绝对路径
-        path_label = BodyLabel(self.file_path, self)
-        path_label.setStyleSheet(
+        # 显示绝对路径（自动中间省略，窗口缩小时优先压缩）
+        self._path_label = BodyLabel("", self)
+        self._path_label.setStyleSheet(
             f"color: #8c99ad; {get_font_family_css()} {font_size_css(10)}"
         )
-        path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
-        path_label.setWordWrap(False)
-        path_label.setMinimumWidth(60)
-        path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        main_layout.addWidget(path_label, 1)
+        self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
+        self._path_label.setWordWrap(False)
+        self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._path_label.setMinimumWidth(0)
+        main_layout.addWidget(self._path_label, 1)
 
         # 操作按钮
         # 工作目录按钮（仅文件夹显示）
@@ -399,6 +398,23 @@ class KeyDocumentItemWidget(QWidget):
 
         main_layout.addWidget(self.open_btn)
         main_layout.addWidget(self.remove_btn)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_path_elision()
+
+    def _update_path_elision(self):
+        """根据可用宽度自动省略路径（中间截断），窗口缩小时优先压缩路径"""
+        if not hasattr(self, '_path_label') or self._path_label is None:
+            return
+        full_path = self.file_path
+        available_width = self._path_label.width()
+        if available_width <= 0:
+            self._path_label.setText(full_path)
+            return
+        fm = self._path_label.fontMetrics()
+        elided = fm.elidedText(full_path, Qt.ElideMiddle, available_width)
+        self._path_label.setText(elided)
 
 
 class DropZoneWidget(QWidget):
@@ -583,6 +599,7 @@ class MemoryCardContent(QWidget):
 
         # 记忆列表
         self.entries_list = ListWidget(self)
+        self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.entries_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);
@@ -708,6 +725,7 @@ class MemoryCardContent(QWidget):
 
         # 文档列表（支持拖拽）
         self.docs_list = DocDropListWidget(self)  # 使用支持拖拽的列表
+        self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.docs_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);

@@ -386,7 +386,10 @@ class SubAgentExecutor(QThread):
         def create_completion():
             return client.chat.completions.create(**req_kwargs, tools=tools)
 
-        response = create_api_call_with_retry(client, create_completion)
+        response = create_api_call_with_retry(
+            client, create_completion,
+            cancel_check=lambda: self._is_cancelled,
+        )
 
         # 防御性检查：某些模型可能返回空 choices
         if not response.choices:

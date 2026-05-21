@@ -574,13 +574,21 @@ class OpenAIChatToolWindow(ToolWindow):
         return cards
 
     def _get_current_model_config(self) -> Dict[str, Any]:
-        """获取当前选中的模型配置，实时从系统配置读取"""
+        """获取当前选中的模型配置，实时从系统配置读取
+        
+        多窗口隔离：使用 _current_model_name 覆盖全局配置中的模型名称，
+        确保每个窗口使用自己选中的模型，而非其他窗口最后选择的模型。
+        """
         selected_name = self._current_provider_name if self._current_provider_name else (
             list(self._valid_configs.keys())[0] if self._valid_configs else "")
 
         # 优先从 _valid_configs 获取（已合并默认配置）
         if selected_name in self._valid_configs:
-            return self._valid_configs[selected_name].copy()
+            config = self._valid_configs[selected_name].copy()
+            # 确保使用当前窗口选中的模型名称，而非全局配置中的模型名称（多窗口隔离）
+            if self._current_model_name:
+                config["模型名称"] = self._current_model_name
+            return config
 
         return {}
 
@@ -1237,9 +1245,14 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
     def _on_model_selected_from_popup(self, provider_name: str, model_name: str):
-        """从弹窗选中模型后切换"""
+        """从弹窗选中模型后切换
+        
+        多窗口隔离：全局配置保存最后使用的服务高（作为新窗口默认值），
+        但窗口实例的 _current_provider_name/_current_model_name 不受其他窗口影响。
+        """
         self._current_provider_name = provider_name
         self._current_model_name = model_name
+        # 保存到全局配置（作为新窗口的默认值，不影响当前窗口实例）
         self.cfg.set(self.cfg.llm_selected_model, provider_name, save=True)
 
         # 更新 saved_providers 中的模型名称
@@ -1252,7 +1265,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs[provider_name] = saved_providers.get(provider_name, {}).copy()
         self._valid_configs[provider_name]["模型名称"] = model_name
 
-        # 重新加载模型配置确保所有组件同步
+        # 重新加载模型配置（_load_model_configs 已修复：保持窗口自身选择优先）
         self._load_model_configs()
 
         self._update_model_selector_btn()
@@ -2150,8 +2163,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, '_is_destroyed', False):
             return
         
-        saved_model = self.cfg.llm_selected_model.value
+        # 保存当前窗口的实例级选择状态（多窗口隔离的关键：优先保持自身选择）
         old_provider = self._current_provider_name
+        old_model = self._current_model_name
 
         self._valid_configs.clear()
 
@@ -2168,18 +2182,26 @@ class OpenAIChatToolWindow(ToolWindow):
             self._valid_configs[provider_name] = config
 
         # 恢复或设置当前选中的服务商和模型
-        if saved_model and saved_model in self._valid_configs:
-            self._current_provider_name = saved_model
-        elif old_provider and old_provider in self._valid_configs:
+        # 优先级：窗口自身选择 > 全局默认 > 列表第一个
+        # 关键修复：多窗口场景下，不应让全局配置覆盖窗口自己的选择
+        if old_provider and old_provider in self._valid_configs:
+            # 优先保持当前窗口已有的选择（多窗口独立）
             self._current_provider_name = old_provider
+            self._current_model_name = old_model
         else:
-            self._current_provider_name = list(self._valid_configs.keys())[0] if self._valid_configs else ""
-
-        if self._current_provider_name:
-            provider_config = self._valid_configs.get(self._current_provider_name, {})
-            self._current_model_name = provider_config.get("模型名称", "")
-        else:
-            self._current_model_name = ""
+            # 当前选择无效（可能被删除），回退到全局默认或列表第一个
+            saved_model = self.cfg.llm_selected_model.value
+            if saved_model and saved_model in self._valid_configs:
+                self._current_provider_name = saved_model
+            else:
+                self._current_provider_name = list(self._valid_configs.keys())[0] if self._valid_configs else ""
+            
+            # 回退时从配置中获取默认模型名称
+            if self._current_provider_name:
+                provider_config = self._valid_configs.get(self._current_provider_name, {})
+                self._current_model_name = provider_config.get("模型名称", "")
+            else:
+                self._current_model_name = ""
 
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
@@ -5347,6 +5369,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """API 重试状态通知 - 更新卡片边框和状态栏"""
         if getattr(self, '_is_destroyed', False):
+            return
+        # 🛡️ 不在流式状态时忽略重试信号（说明已停止或不在对话中）
+        if not self._is_streaming:
             return
         if self._current_assistant_card:
             if not self._current_assistant_card._retrying:

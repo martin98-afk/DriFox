@@ -208,6 +208,20 @@ class ConversationExecutor:
                 interrupted = worker.get_interrupted_messages()
             except Exception as e:
                 logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
+            
+            # 🛡️ 断开信号连接，防止已取消的 worker 继续向 UI 发送事件
+            for signal_name in ("retry_status", "error_occurred", "finished_with_content",
+                                "finished_with_messages", "content_received", "reasoning_content_received",
+                                "tool_call_started", "tool_args_updated", "tool_result_received",
+                                "question_asked", "permission_approval_requested", "thinking_started",
+                                "compaction_status_changed"):
+                try:
+                    signal = getattr(worker, signal_name, None)
+                    if signal is not None:
+                        signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass  # 信号可能未连接或对象已销毁
+            
             worker.cancel()
             if worker.isRunning():
                 worker.quit()
