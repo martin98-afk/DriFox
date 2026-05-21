@@ -1,8 +1,8 @@
 # 多窗口分支选择隔离修复
 
 **日期**: 2026-05-21  
-**状态**: 设计完成，待实施  
-**影响范围**: `app/main_widget.py`, `app/widgets/memory_card.py`
+**状态**: 已实施  
+**影响范围**: `app/main_widget.py`, `app/widgets/memory_card.py`, `app/core/memory_manager.py`, `app/core/backend.py`, `app/core/tool_executor.py`
 
 ## 1. 问题
 
@@ -192,7 +192,9 @@ def _on_worktree_deleted(self, worktree_path: str):
 | 隔离项 | 实例缓存 | DB/配置写入 | 优先级 | 状态 |
 |--------|----------|-------------|--------|------|
 | 模型选择 | `_current_provider_name/_current_model_name` | `cfg.llm_selected_model` | 实例 > DB | ✅ 已修复 |
-| 工作目录 | `_current_workdir[project]` | SQLite `is_working_dir` | 实例 > DB | 🔧 本次修复 |
+| 工作目录 | `_current_workdir[project]` | SQLite `is_working_dir` | 实例 > DB | ✅ 已修复 |
+| 工作目录(memory_card) | `_instance_workdir[project]` | SQLite `is_working_dir` | 实例 > DB | ✅ 已修复 |
+| 长期记忆注入 | `tool_executor.get_workdir()` | SQLite `is_working_dir` | 实例 > DB | ✅ 已修复 |
 | 项目选择 | `_current_project` | `cfg.current_project` | 实例 > cfg | ✅ 天然隔离 |
 
 ## 7. 测试要点
@@ -202,3 +204,32 @@ def _on_worktree_deleted(self, worktree_path: str):
 3. **新窗口恢复**：关闭所有窗口后重开 → 恢复到最后操作的 workdir
 4. **Worktree 删除**：删除当前 worktree → 回退到仓库根目录 → 实例缓存同步清除
 5. **新建窗口继承**：窗口A选择 branch-A 后新建窗口 → 新窗口默认继承 branch-A
+
+## 8. 长期记忆注入提示词隔离（补充修复）
+
+### 8.1 问题
+
+`format_memories_for_prompt` 内部通过 `self.get_working_directory(project)` 直接读 DB 获取工作目录，
+用于标注关键文档中的"项目根目录"标记和 Worktree 上下文信息。
+
+多窗口场景下，这个 DB 读取也会受到其他窗口写入的影响。
+
+### 8.2 修改
+
+| 文件 | 修改点 | 说明 |
+|------|--------|------|
+| `app/core/memory_manager.py` | `format_memories_for_prompt` 新增 `workdir_override` 参数 | 如果提供则替代 DB 读取 |
+| `app/core/backend.py` | `get_memory_context_string` 传入 `tool_executor.get_workdir()` | 使用实例级 workdir |
+| `app/core/backend.py` | `_build_memory_context` 传入 `tool_executor.get_workdir()` | 使用实例级 workdir |
+| `app/core/tool_executor.py` | 新增 `get_workdir()` 方法 | 公开获取实例级 workdir |
+
+### 8.3 数据流
+
+```
+ChatEngine 构建 system prompt:
+  → context_builder.get_memory_context_string()
+  → backend.get_memory_context_string()
+  → tool_executor.get_workdir()  ← 实例级值（已被 _on_working_dir_changed 同步）
+  → memory_manager.format_memories_for_prompt(workdir_override=workdir)
+  → 如果 workdir_override 不为 None，使用它而非 DB 值
+```
