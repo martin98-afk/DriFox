@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import ctypes
 import gc
 import os
@@ -47,17 +49,8 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.engines.auto_loop import AutoLoopConfig
-from app.core.workers.auto_loop_worker import AutoLoopWorker
 from app.tool_popup import ToolWindow
-from app.tools import get_builtin_tools_schema
-from app.update_checker import UpdateChecker
 from app.utils.config import Settings
-from app.utils.diff_viewer import (
-    DiffHtmlGenerator,
-    DiffViewerWindow,
-)
-from app.utils.file_operation_recorder import FileOperationRecorder
 from app.utils.utils import get_icon, get_font_family_css
 from app.utils.design_tokens import (
     Colors,
@@ -67,7 +60,6 @@ from app.utils.design_tokens import (
     scale_font_size,
     apply_font_size_to_widget,
 )
-from app.widgets.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.base_settings_card import (
     BaseSettingsCard,
@@ -310,6 +302,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _init_auto_update_check(self):
         """启动时静默检查更新"""
+        from app.update_checker import UpdateChecker
         # 检查是否启用自动更新
         if not self.cfg.auto_check_update.value:
             return
@@ -1028,6 +1021,7 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._memory_card)
 
         # AutoLoop 配置卡片 - 和历史会话/记忆卡片同位置
+        from app.widgets.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
         self._auto_loop_config_card.setVisible(False)
@@ -2551,6 +2545,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning("提示", "工具执行器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
                 return
 
+            from app.utils.file_operation_recorder import FileOperationRecorder
             file_recorder = FileOperationRecorder(self.session_store)
 
             # 获取当前会话的所有文件操作
@@ -2569,12 +2564,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 生成 git diff
             try:
+                from app.utils.diff_viewer import DiffHtmlGenerator
                 diff_output = DiffHtmlGenerator.get_diff_for_files(file_paths, session_id)
             except Exception as e:
                 logger.warning(f"[DiffViewer] 获取 git diff 失败: {e}")
                 diff_output = ""
 
             # 生成 HTML 报告
+            from app.utils.diff_viewer import DiffViewerWindow
             html = DiffHtmlGenerator.generate_html_report(diff_output or "", session_id)
 
             # 创建并显示差异查看窗口
@@ -6015,8 +6012,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._hide_main_popups()
             self._auto_loop_config_card.show()
 
-    def _on_auto_loop_start(self, config: AutoLoopConfig):
+    def _on_auto_loop_start(self, config: 'AutoLoopConfig'):
         """开始 AutoLoop"""
+        from app.core.engines.auto_loop import AutoLoopConfig
+        from app.core.engines.auto_loop import AutoLoopConfig
         if self._is_auto_loop_running:
             return
 
@@ -6058,6 +6057,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if val in ("deny", False)
         }
 
+        from app.tools import get_builtin_tools_schema
         all_tools = get_builtin_tools_schema(
             agent_manager=agent_manager,
             builtin_tools=self.backend.tool_executor._builtin_tools if hasattr(self.backend, 'tool_executor') else None,
@@ -6073,6 +6073,7 @@ class OpenAIChatToolWindow(ToolWindow):
             compactor = self.backend.chat_engine._compactor
 
         # 创建并启动 worker
+        from app.core.workers.auto_loop_worker import AutoLoopWorker
         self._auto_loop_worker = AutoLoopWorker()
         self._auto_loop_worker.configure(
             config=config,

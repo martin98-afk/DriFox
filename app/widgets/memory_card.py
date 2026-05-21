@@ -386,6 +386,7 @@ class KeyDocumentItemWidget(QWidget):
         # 检测 git worktree（仅当是文件夹且被标记为根目录时才检测）
         self._repo_info = None
         if self._is_folder and self._is_working_dir:
+            from app.utils.git_worktree import GitWorktreeDetector
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
