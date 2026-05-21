@@ -128,7 +128,7 @@ class BuiltinTools(QObject):
                 method = getattr(tool, name)
                 
                 # Wrap the method to handle fileModified emission after write operations
-                if name in ['write_file', 'edit_file', 'multi_edit', 'apply_patch']:
+                if name in ['write_file', 'edit_file']:
                     def wrapped_method(*args, **kwargs):
                         result = method(*args, **kwargs)
                         if isinstance(result, ToolResult) and result.success:
@@ -358,7 +358,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": "读取文件内容，返回指定范围的代码片段。",
+            "description": "读取文件内容，返回 hashline 格式（每行标注 LINE:HASH|content）。每行带有 2-字符内容哈希锚点，编辑时通过 LINE:HASH 定位，无需精确匹配旧文本。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -372,11 +372,6 @@ TOOL_SCHEMAS = [
                         "type": "integer",
                         "description": "读取的行数",
                         "default": 500,
-                    },
-                    "show_line_numbers": {
-                        "type": "boolean",
-                        "description": "是否显示行号（不建议在编辑时使用，可能导致 oldString 匹配失败）",
-                        "default": False,
                     },
                 },
                 "required": ["path"],
@@ -402,26 +397,41 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit",
-            "description": "通过精确字符串替换编辑文件。为防止误改，oldString 必须在文件中唯一。",
+            "description": "通过 hashline LINE:HASH 锚点编辑文件。使用 read 工具返回的 LINE:HASH 标记作为锚点定位编辑位置，无需精确匹配旧文本。支持多种操作类型。批量操作从文件底部向上执行以避免行号偏移。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "文件路径"},
-                    "oldString": {
-                        "type": "string",
-                        "description": "要被替换的原始精确文本块",
-                    },
-                    "newString": {
-                        "type": "string",
-                        "description": "替换后的新文本块",
-                    },
-                    "replaceAll": {
-                        "type": "boolean",
-                        "description": "如果存在多个匹配项，是否全部替换",
-                        "default": False,
-                    },
+                    "operations": {
+                        "type": "array",
+                        "description": "编辑操作列表。支持的操作类型：\n- replace: 替换单行或范围 (anchor + 可选 anchor_end + lines)\n- insert_after: 在锚点后插入 (anchor + lines)\n- insert_before: 在锚点前插入 (anchor + lines)\n- delete: 删除单行或范围 (anchor + 可选 anchor_end)\n\n每条操作的 anchor 格式为 read 返回的 LINE:HASH，如 '12:a3'。",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "description": "操作类型: replace, insert_after, insert_before, delete",
+                                    "enum": ["replace", "insert_after", "insert_before", "delete"]
+                                },
+                                "anchor": {
+                                    "type": "string",
+                                    "description": "LINE:HASH 锚点，如 '12:a3'"
+                                },
+                                "anchor_end": {
+                                    "type": "string",
+                                    "description": "范围操作的结束锚点，如 '15:b7'（可选）"
+                                },
+                                "lines": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "新内容行列表（delete 操作不需要）"
+                                }
+                            },
+                            "required": ["op", "anchor"]
+                        }
+                    }
                 },
-                "required": ["path", "oldString", "newString"],
+                "required": ["path", "operations"],
             },
         },
     },
@@ -487,55 +497,8 @@ TOOL_SCHEMAS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "multiedit",
-            "description": "在同一个文件中执行多处替换操作。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "文件路径"},
-                    "edits": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "oldString": {
-                                    "type": "string",
-                                    "description": "旧文本",
-                                },
-                                "newString": {
-                                    "type": "string",
-                                    "description": "新文本",
-                                },
-                            },
-                            "required": ["oldString", "newString"],
-                        },
-                    },
-                },
-                "required": ["path", "edits"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "patch",
-            "description": "通过 unified diff 格式对文件进行精确修改。支持追加行、删除行、替换行、在指定位置插入行等多处修改。适用于需要同时修改文件多个位置的场景。输入标准的 unified diff 格式（包含 @@ -start +start @@ 行号标记）。**推荐优先使用 patch**，比 write/edit 更安全可靠。\n\n使用规范：\n1. 修改前先用 read 确认文件当前行号和内容\n2. @@ 行号必须是文件中实际的行号（1-based），注意 context/delete 行数之和是旧文件行数\n3. context 行（以空格开头）是匹配锚点，必须与文件完全一致（缩进、空行、空格/制表符）\n4. 只保留必要的 context 行（上下各 1-2 行）减少出错\n\n常见失败原因：\n- @@ 行号不对：检查 hunk 第一行 context 在文件中的实际行号\n- 空行数量不匹配：文件有几个空行，patch 里也要有几个\n- 缩进/空格不一致：空格和制表符不能混用",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "文件路径"},
-                    "patch_content": {
-                        "type": "string",
-                        "description": "Unified diff 格式补丁内容。格式：\n--- filename\n+++ filename\n@@ -起始行,行数 +起始行,行数 @@\n[空格]上下文行（不变）\n[-]要删除的行\n[+]要添加的新行",
-                    },
-                },
-                "required": ["path", "patch_content"],
-            },
-        },
-    },
+
+
     {
         "type": "function",
         "function": {

@@ -12,7 +12,6 @@ permission:
   bash: allow
   write: deny
   edit: deny
-  patch: deny
   todowrite: deny
   todoread: deny
   task: deny

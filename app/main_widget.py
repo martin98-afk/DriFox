@@ -235,6 +235,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
         self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
+        self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
+        self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         # resize 防抖定时器 - 性能优化：增加防抖时间减少卡顿
         self._resize_debounce_timer = QTimer(self)
@@ -2435,6 +2437,7 @@ class OpenAIChatToolWindow(ToolWindow):
                           ]
         self._suspend_auto_scroll = not initial
         self._loading_session = True  # 标记加载状态，懒渲染期间保持滚动
+        self._initial_scroll_to_bottom = False  # 重置滚底标记，让首次懒渲染强制滚底
         try:
             self._render_message_to_card(
                 visible_batches,
@@ -3037,9 +3040,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 每次渲染完一个卡片后立即同步滚动到底部，无论加载多慢都生效
         # 直接设置滚动条值，不依赖定时器
+        # 关键修复：首次强制滚底后，只在用户未主动滚上去时才继续滚底
         if self._loading_session:
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
-            scroll_bar.setValue(scroll_bar.maximum())
+            if not self._initial_scroll_to_bottom or scroll_bar.value() >= scroll_bar.maximum() - 50:
+                scroll_bar.setValue(scroll_bar.maximum())
+                self._initial_scroll_to_bottom = True
 
         # 继续处理下一个，使用 QTimer 异步调度释放事件循环
         if self._pending_lazy_cards:
@@ -4052,11 +4058,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_scroll_changed(self, value):
         self._sync_node_preview_to_scroll()
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
         if self._bottom_anchor_deadline > 0:
-            scroll_bar = self.chat_scroll_area.verticalScrollBar()
             if value < scroll_bar.maximum():
                 self._bottom_anchor_deadline = 0.0
                 self._bottom_anchor_timer.stop()
+        # 检测用户是否主动滚离底部（距离底部超过 30px）
+        if value < scroll_bar.maximum() - 30:
+            self._user_intentionally_away_from_bottom = True
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
@@ -4652,6 +4661,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 再次设置确保卡片高度变化后仍在底部
         scroll_bar.setValue(max_val)
         self._pending_scroll_to_bottom = False
+        self._user_intentionally_away_from_bottom = False
         if self._bottom_anchor_deadline > time.monotonic():
             self._bottom_anchor_timer.start()
         else:
@@ -4666,6 +4676,9 @@ class OpenAIChatToolWindow(ToolWindow):
         Args:
             retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
         """
+        # 如果用户已经主动滚离底部，不再强制拉回
+        if self._user_intentionally_away_from_bottom:
+            return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         if scroll_bar.value() < scroll_bar.maximum() - 20:
             scroll_bar.setValue(scroll_bar.maximum())
@@ -4728,8 +4741,8 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             max_val = scroll_bar.maximum()
             current_val = scroll_bar.value()
-            # 如果滚动条已经在底部附近 → 滚底
-            if max_val - current_val < 50:
+            # 如果滚动条已经在底部附近 → 滚底（严格阈值，避免误触发）
+            if max_val - current_val < 20:
                 self._scroll_to_bottom()
         
         sender._content_just_loaded = False

@@ -250,7 +250,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         offset = args.get("offset", 1)
         return f"[{tool_name}] read {path} from line {offset} ({content_len:,} chars)"
 
-    if tool_name in ("write", "write_file", "Write", "edit", "patch"):
+    if tool_name in ("write", "write_file", "Write", "edit"):
         path = args.get("path", "?")
         written_lines = args.get("content", "").count("\n") + 1 if args.get("content") else "?"
         return f"[{tool_name}] wrote to {path} ({written_lines} lines)"

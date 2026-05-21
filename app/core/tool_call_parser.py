@@ -356,38 +356,42 @@ def _rebuild_write_json(raw: str) -> Optional[Dict]:
 def _rebuild_edit_json(raw: str) -> Optional[Dict]:
     """
     针对 edit 工具，从可能不完整的 JSON 中重建参数。
+    尝试提取 path 和 operations 数组。
     """
     path = _extract_field(raw, "path")
     if not path:
         return None
 
-    old_string = _extract_field(raw, "oldString")
-    new_string = _extract_field(raw, "newString")
-
-    if old_string is None and new_string is None:
-        return None
-
     result = {"path": path}
-    if old_string is not None:
-        result["oldString"] = old_string
-    if new_string is not None:
-        result["newString"] = new_string
 
-    return result
+    # 尝试提取 operations 数组
+    ops_start = raw.find('"operations"')
+    if ops_start >= 0:
+        colon = raw.find(':', ops_start)
+        if colon >= 0:
+            arr_start = raw.find('[', colon)
+            if arr_start >= 0:
+                depth = 0
+                arr_end = -1
+                for i in range(arr_start, len(raw)):
+                    if raw[i] == '[':
+                        depth += 1
+                    elif raw[i] == ']':
+                        depth -= 1
+                        if depth == 0:
+                            arr_end = i + 1
+                            break
+                if arr_end > arr_start:
+                    try:
+                        import json
+                        ops = json.loads(raw[arr_start:arr_end])
+                        if ops:
+                            result["operations"] = ops
+                            return result
+                    except json.JSONDecodeError:
+                        pass
 
-
-def _rebuild_patch_json(raw: str) -> Optional[Dict]:
-    """针对 patch 工具重建参数"""
-    path = _extract_field(raw, "path")
-    if not path:
-        return None
-
-    patch_content = _extract_field(raw, "patch_content")
-    if patch_content is None:
-        return None
-
-    return {"path": path, "patch_content": patch_content}
-
+    return None
 
 def _rebuild_bash_json(raw: str) -> Optional[Dict]:
     """针对 bash 工具重建参数"""
@@ -441,8 +445,6 @@ def try_fix_malformed_json_arguments(raw_args: str, tool_name: str) -> Tuple[Opt
     rebuilders = {
         "write": _rebuild_write_json,
         "edit": _rebuild_edit_json,
-        "multiedit": _rebuild_edit_json,
-        "patch": _rebuild_patch_json,
         "bash": _rebuild_bash_json,
     }
 
@@ -455,7 +457,7 @@ def try_fix_malformed_json_arguments(raw_args: str, tool_name: str) -> Tuple[Opt
     # 策略 4: 尝试提取常见参数（通用方案）
     common_args = {}
     for field in ("path", "filePath", "command", "url", "query", "pattern",
-                  "name", "question", "oldString", "newString", "patch_content"):
+                  "name", "question"):
         val = _extract_field(raw_args, field)
         if val is not None:
             key = "path" if field == "filePath" else field

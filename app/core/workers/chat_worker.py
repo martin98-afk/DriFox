@@ -1551,7 +1551,7 @@ class OpenAIChatWorker(QThread):
                             )
                         else:
                             # 阶段2: 对于 write/edit 工具，尝试从原始字符串提取关键参数
-                            if tool_name in ("write", "edit", "patch", "multiedit"):
+                            if tool_name in ("write", "edit"):
                                 extracted = _extract_tool_args_from_raw(arguments, tool_name)
                                 if extracted:
                                     arguments = extracted
@@ -2006,72 +2006,11 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                     if content_end > content_begin:
                         result["content"] = raw_str[content_begin:content_end]
 
-    # 提取 oldString 和 newString（edit 工具）
+    # 提取 operations 数组（hashline edit 工具）
     if tool_name == "edit":
-        old_start = raw_str.find('"oldString"')
-        if old_start >= 0:
-            colon = raw_str.find(':', old_start)
-            first_quote = raw_str.find('"', colon) if colon >= 0 else -1
-            if first_quote >= 0:
-                begin = first_quote + 1
-                end = -1
-                i = begin
-                while i < len(raw_str):
-                    if raw_str[i] == '\\' and i + 1 < len(raw_str):
-                        i += 2
-                    elif raw_str[i] == '"':
-                        end = i
-                        break
-                    else:
-                        i += 1
-                if end > begin:
-                    result["oldString"] = raw_str[begin:end]
-
-        new_start = raw_str.find('"newString"')
-        if new_start >= 0:
-            colon = raw_str.find(':', new_start)
-            first_quote = raw_str.find('"', colon) if colon >= 0 else -1
-            if first_quote >= 0:
-                begin = first_quote + 1
-                end = -1
-                i = begin
-                while i < len(raw_str):
-                    if raw_str[i] == '\\' and i + 1 < len(raw_str):
-                        i += 2
-                    elif raw_str[i] == '"':
-                        end = i
-                        break
-                    else:
-                        i += 1
-                if end > begin:
-                    result["newString"] = raw_str[begin:end]
-
-    # 提取 patch_content（patch 工具）
-    if tool_name == "patch":
-        pc_start = raw_str.find('"patch_content"')
-        if pc_start >= 0:
-            colon = raw_str.find(':', pc_start)
-            first_quote = raw_str.find('"', colon) if colon >= 0 else -1
-            if first_quote >= 0:
-                begin = first_quote + 1
-                end = -1
-                i = begin
-                while i < len(raw_str):
-                    if raw_str[i] == '\\' and i + 1 < len(raw_str):
-                        i += 2
-                    elif raw_str[i] == '"':
-                        end = i
-                        break
-                    else:
-                        i += 1
-                if end > begin:
-                    result["patch_content"] = raw_str[begin:end]
-
-    # 提取 edits 数组（multiedit 工具）
-    if tool_name == "multiedit":
-        edits_start = raw_str.find('"edits"')
-        if edits_start >= 0:
-            colon = raw_str.find(':', edits_start)
+        ops_start = raw_str.find('"operations"')
+        if ops_start >= 0:
+            colon = raw_str.find(':', ops_start)
             if colon >= 0:
                 arr_start = raw_str.find('[', colon)
                 if arr_start >= 0:
@@ -2089,34 +2028,8 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                     if arr_end > arr_start:
                         try:
                             import json
-                            result["edits"] = json.loads(raw_str[arr_start:arr_end])
+                            result["operations"] = json.loads(raw_str[arr_start:arr_end])
                         except json.JSONDecodeError:
                             pass
-
-    # 也尝试从旧格式提取（content 直接作为第二个关键字段）
-    if "content" not in result and tool_name in ("write", "edit"):
-        # 如果 content 提取失败，尝试将整个字符串的剩余部分作为 content
-        # （如 truncated JSON 场景）
-        if "path" in result:
-            # 从 path 值之后的所有内容
-            path_val = result["path"]
-            path_pos = raw_str.find(path_val)
-            after_path = raw_str[path_pos + len(path_val) + 1:] if path_pos >= 0 else raw_str
-            # 尝试在 after_path 中找到 content
-            if '"content"' in after_path:
-                con_start = after_path.find('"content"')
-                colon = after_path.find(':', con_start)
-                first_quote = after_path.find('"', colon) if colon >= 0 else -1
-                if first_quote >= 0:
-                    content_begin = first_quote + 1
-                    # 找最后一个 " 或 }
-                    last_quote = after_path.rfind('"')
-                    last_brace = after_path.rfind('}')
-                    end_pos = max(last_quote, last_brace) if last_brace > last_quote else last_brace
-                    if end_pos > content_begin:
-                        candidate = after_path[content_begin:end_pos]
-                        candidate = candidate.rstrip('"').rstrip(',').rstrip()
-                        if candidate:
-                            result["content"] = candidate
 
     return result
