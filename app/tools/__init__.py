@@ -9,6 +9,9 @@ for manual method forwarding in a shallow facade.
 
 from pathlib import Path
 from typing import Dict, List, Any
+import re
+import difflib
+import hashlib
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from loguru import logger
@@ -22,6 +25,12 @@ from app.tools.task_tools import TaskTools
 from app.tools.terminal_tools import TerminalTools
 from app.tools.web_tools import WebTools
 
+
+# 导入 hashline 核心函数
+from app.tools.file_tools import (
+    _line_hash, _parse_anchor, _format_hashline,
+    _find_anchor_in_proximity, _find_anchor_remaps, _build_hash_error_message,
+)
 
 class BuiltinTools(QObject):
     """
@@ -245,13 +254,16 @@ class BuiltinTools(QObject):
 
     def edit_project_note(
         self,
-        old_string: str,
-        new_string: str,
+        operations: List[Dict],
     ) -> ToolResult:
-        """编辑项目笔记，通过精确字符串替换更新
+        """
+        通过 hashline LINE:HASH 锚点编辑项目笔记。
+        
+        与 edit 工具操作方式完全一致：使用 read_project_note 返回的
+        LINE:HASH 标记作为锚点定位编辑位置，无需精确匹配旧文本。
         
         **使用时机**：
-        1. 项目探索完成后，记录项目的关键信息（目录结构、技术栈、核心文件、约束条件等）
+        1. 项目探索完成后，记录项目的关键信息
         2. 关键内容构建时（设计决策、重要实现、配置变更等）
         3. 发现对项目有长期价值的洞察时
         
@@ -259,48 +271,192 @@ class BuiltinTools(QObject):
         - 只有当有明确有价值的信息时才更新
         - 避免记录无意义的闲聊、简单问答或一次性信息
         - 笔记内容应简洁、具体、可操作
-        - 通过精确字符串替换编辑，不允许直接覆盖重写整个笔记
         
         Args:
-            old_string: 要被替换的原始精确文本块
-            new_string: 替换后的新文本块
+            operations: 编辑操作列表，与 edit 工具完全一致：
+                - replace: 替换单行或范围 (anchor + 可选 anchor_end + lines)
+                - insert_after: 在锚点后插入 (anchor + lines)
+                - insert_before: 在锚点前插入 (anchor + lines)
+                - delete: 删除单行或范围 (anchor + 可选 anchor_end)
         """
         if not self._memory_manager:
             return ToolResult(False, error="Memory manager not available")
         
         project = getattr(self, '_current_project', '默认项目') or '默认项目'
+        note = self._memory_manager.get_project_note(project)
+        old_text = note.get("content", "") if note else ""
         
-        # 获取现有内容
-        existing = self._memory_manager.get_project_note(project)
-        existing_content = existing.get("content", "") if existing else ""
+        if not old_text:
+            return ToolResult(False, error="项目笔记为空，无法编辑")
         
-        if old_string not in existing_content:
-            return ToolResult(False, error=f"未找到匹配的文本片段，替换失败")
+        all_lines = [l + '\n' for l in old_text.splitlines()]
+        if not all_lines:
+            all_lines = ['\n']
+        if all_lines and not all_lines[-1].endswith('\n'):
+            all_lines[-1] = all_lines[-1] + '\n'
         
-        # 执行精确替换
-        new_content = existing_content.replace(old_string, new_string)
+        # ── 第一遍：校验锚点（含邻近搜索自动修正） ──
+        resolved_ops = []
+        raw_errors = []
+        validation_failed = False
         
-        if new_content == existing_content:
-            return ToolResult(False, error="替换后内容未发生变化")
+        for op in operations:
+            op_type = op.get("op", "replace")
+            anchor_str = op.get("anchor", "")
+            try:
+                orig_line, expected_hash = _parse_anchor(anchor_str)
+            except (ValueError, IndexError):
+                return ToolResult(False, error=f"无效的锚点格式: {anchor_str}")
+            
+            actual_line = orig_line
+            if 1 <= actual_line <= len(all_lines):
+                actual_content = all_lines[actual_line - 1].rstrip('\n')
+                actual_hash = _line_hash(actual_content, actual_line)
+                if actual_hash == expected_hash:
+                    pass
+                else:
+                    nearby = _find_anchor_in_proximity(expected_hash, orig_line, all_lines)
+                    if nearby is not None and nearby != orig_line:
+                        actual_line = nearby
+                    else:
+                        raw_errors.append({"line": orig_line, "hash": expected_hash, "anchor": anchor_str})
+                        validation_failed = True
+                        continue
+            else:
+                raw_errors.append({"line": orig_line, "hash": expected_hash, "anchor": anchor_str, "out_of_range": True})
+                validation_failed = True
+                continue
+            
+            anchor_end_str = op.get("anchor_end")
+            actual_end_line = actual_line
+            if anchor_end_str:
+                try:
+                    orig_end_line, end_hash = _parse_anchor(anchor_end_str)
+                except (ValueError, IndexError):
+                    return ToolResult(False, error=f"无效的 anchor_end 格式: {anchor_end_str}")
+                actual_end_line = orig_end_line
+                if 1 <= actual_end_line <= len(all_lines):
+                    end_content = all_lines[actual_end_line - 1].rstrip('\n')
+                    end_actual_hash = _line_hash(end_content, actual_end_line)
+                    if end_actual_hash == end_hash:
+                        pass
+                    else:
+                        nearby_end = _find_anchor_in_proximity(end_hash, orig_end_line, all_lines)
+                        if nearby_end is not None and nearby_end != orig_end_line:
+                            actual_end_line = nearby_end
+                        else:
+                            raw_errors.append({"line": orig_end_line, "hash": end_hash, "anchor": anchor_end_str})
+                            validation_failed = True
+                            continue
+                if actual_end_line < actual_line:
+                    return ToolResult(False, error=f"结束行 {actual_end_line} 在起始行 {actual_line} 之前")
+            resolved_ops.append((actual_line, actual_end_line, op))
         
-        success = self._memory_manager.save_project_note(project, new_content)
+        if validation_failed:
+            remaps = _find_anchor_remaps(
+                [(e["line"], e["hash"]) for e in raw_errors], all_lines
+            )
+            msg_parts = []
+            if remaps:
+                msg_parts.append("Hashline 编辑失败 —— 自上次读取后锚点已变更。\n使用以下映射更新你的锚点:\n")
+                for stale, current in remaps.items():
+                    msg_parts.append(f"  {stale} → {current}")
+                msg_parts.append("")
+            msg_parts.append(_build_hash_error_message(raw_errors, all_lines))
+            return ToolResult(False, error="\n".join(msg_parts))
         
-        if success:
-            return ToolResult(True, content={
-                "saved": True,
-                "project": project,
-                "content_length": len(new_content),
-                "replaced": True,
-            })
-        else:
+        # ── 第二遍：应用操作（从底部向上） ──
+        sorted_ops = sorted(resolved_ops, key=lambda x: (-x[1], -x[0]))
+        new_lines = list(all_lines)
+        applied_count = 0
+        
+        for actual_line, actual_end_line, op in sorted_ops:
+            op_type = op.get("op", "replace")
+            anchor_end = op.get("anchor_end")
+            if op_type == "replace":
+                if anchor_end:
+                    insert_lines = [l + ("\n" if not l.endswith("\n") else "") for l in op.get("lines", [])]
+                    new_lines[actual_line - 1:actual_end_line] = insert_lines
+                else:
+                    insert_lines = op.get("lines", [])
+                    if insert_lines:
+                        first = insert_lines[0]
+                        new_lines[actual_line - 1] = first + ("\n" if not first.endswith("\n") else "")
+                        if len(insert_lines) > 1:
+                            extra = [l + ("\n" if not l.endswith("\n") else "") for l in insert_lines[1:]]
+                            new_lines[actual_line:actual_line] = extra
+                    else:
+                        del new_lines[actual_line - 1]
+            elif op_type == "delete":
+                if anchor_end:
+                    del new_lines[actual_line - 1:actual_end_line]
+                else:
+                    del new_lines[actual_line - 1]
+            elif op_type == "insert_after":
+                insert_lines = [l + ("\n" if not l.endswith("\n") else "") for l in op.get("lines", [])]
+                new_lines[actual_line:actual_line] = insert_lines
+            elif op_type == "insert_before":
+                insert_lines = [l + ("\n" if not l.endswith("\n") else "") for l in op.get("lines", [])]
+                new_lines[actual_line - 1:actual_line - 1] = insert_lines
+            else:
+                return ToolResult(False, error=f"未知的操作类型: {op_type}")
+            applied_count += 1
+        
+        # 保存
+        new_text = "".join(new_lines).rstrip('\n')
+        success = self._memory_manager.save_project_note(project, new_text)
+        if not success:
             return ToolResult(False, error="保存项目笔记失败")
+        
+        # ── 计算 diff ──
+        diff_lines = list(difflib.unified_diff(
+            old_text.splitlines(), new_text.splitlines(),
+            fromfile="project_note", tofile="project_note", lineterm=''
+        ))
+        diff_str = "\n".join(diff_lines) if diff_lines else ""
+        
+        # 锚点块
+        first_changed = None
+        last_changed = None
+        _HUNK_RE = re.compile(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
+        for line in diff_lines:
+            m = _HUNK_RE.match(line)
+            if m:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) else 1
+                end_line = start + count - 1
+                if first_changed is None or start < first_changed:
+                    first_changed = start
+                if last_changed is None or end_line > last_changed:
+                    last_changed = end_line
+        
+        result_parts = [f"Applied {applied_count} hashline edit(s) to project note."]
+        if first_changed is not None and last_changed is not None:
+            anchor_start = max(1, first_changed - 2)
+            anchor_end_num = min(len(new_text.splitlines()), last_changed + 2)
+            new_lines_list = [l + '\n' for l in new_text.splitlines()]
+            if new_lines_list:
+                anchor_slice = new_lines_list[anchor_start - 1:anchor_end_num]
+                anchors = _format_hashline(anchor_slice, anchor_start)
+                result_parts.append("")
+                result_parts.append(f"--- Anchors {anchor_start}-{anchor_end_num} ---")
+                result_parts.append(anchors)
+        
+        return ToolResult(
+            True,
+            content="\n".join(result_parts),
+            diff=diff_str,
+        )
 
     def read_project_note(
         self,
         offset: int = 1,
         limit: int = 500,
     ) -> ToolResult:
-        """读取当前项目笔记内容，支持读取部分内容
+        """
+        读取当前项目笔记内容，返回 hashline 格式（每行标注 LINE:HASH|content）。
+        与普通 read 工具用法一致，每行带有 2-字符内容哈希锚点，
+        编辑时通过 edit_project_note 的 LINE:HASH 定位，无需精确匹配旧文本。
         
         **使用时机**：
         需要查看或引用当前项目笔记内容时使用。
@@ -309,9 +465,6 @@ class BuiltinTools(QObject):
         Args:
             offset: 起始行号（从 1 开始），默认 1
             limit: 读取行数，默认 500
-        
-        Returns:
-            项目笔记的内容
         """
         if not self._memory_manager:
             return ToolResult(False, error="Memory manager not available")
@@ -323,21 +476,19 @@ class BuiltinTools(QObject):
         if not full_content:
             full_content = "(项目笔记为空)"
         
-        # 按行分割，支持分页读取
         lines = full_content.splitlines()
         total_lines = len(lines)
-        
         if offset < 1:
             offset = 1
         
         start = offset - 1
-        end = start + limit if limit > 0 else None
+        end = min(total_lines, start + limit) if limit > 0 else total_lines
         selected_lines = lines[start:end]
-        content = '\n'.join(selected_lines)
+        hashline_content = _format_hashline(selected_lines, start + 1)
         
         return ToolResult(True, content={
             "project": project,
-            "content": content,
+            "content": hashline_content,
             "total_lines": total_lines,
             "offset": offset,
             "limit": limit if limit > 0 else total_lines,
@@ -657,14 +808,40 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_project_note",
-            "description": "编辑项目笔记，通过精确字符串替换更新。**使用时机**：1. 项目探索完成后，记录项目的关键信息（目录结构、技术栈、核心文件、约束条件等）；2. 关键内容构建时（设计决策、重要实现、配置变更等）；3. 发现对项目有长期价值的洞察时。**使用原则**：只有当有明确有价值的信息时才更新，避免记录无意义的闲聊、简单问答或一次性信息。笔记内容应简洁、具体、可操作。通过精确字符串替换编辑，不允许直接覆盖重写整个笔记。",
+            "description": "通过 hashline LINE:HASH 锚点编辑项目笔记。使用 read_project_note 返回的 LINE:HASH 标记作为锚点定位编辑位置，无需精确匹配旧文本。支持多种操作类型。批量操作从文件底部向上执行以避免行号偏移。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "old_string": {"type": "string", "description": "要被替换的原始精确文本块"},
-                    "new_string": {"type": "string", "description": "替换后的新文本块"},
+                    "operations": {
+                        "type": "array",
+                        "description": "编辑操作列表。支持的操作类型：\n- replace: 替换单行或范围 (anchor + 可选 anchor_end + lines)\n- insert_after: 在锚点后插入 (anchor + lines)\n- insert_before: 在锚点前插入 (anchor + lines)\n- delete: 删除单行或范围 (anchor + 可选 anchor_end)\n\n每条操作的 anchor 格式为 read_project_note 返回的 LINE:HASH，如 '12:a3'。",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "description": "操作类型: replace, insert_after, insert_before, delete",
+                                    "enum": ["replace", "insert_after", "insert_before", "delete"]
+                                },
+                                "anchor": {
+                                    "type": "string",
+                                    "description": "LINE:HASH 锚点，如 '12:a3'"
+                                },
+                                "anchor_end": {
+                                    "type": "string",
+                                    "description": "范围操作的结束锚点，如 '15:b7'（可选）"
+                                },
+                                "lines": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "新内容行列表（delete 操作不需要）"
+                                }
+                            },
+                            "required": ["op", "anchor"]
+                        }
+                    }
                 },
-                "required": ["old_string", "new_string"],
+                "required": ["operations"],
             },
         },
     },
@@ -672,7 +849,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_project_note",
-            "description": "读取当前项目笔记内容，支持读取部分内容。需要查看或引用当前项目笔记内容时使用。内容很长时可以通过 offset/limit 分页读取，和普通 read 工具用法一致。",
+            "description": "读取当前项目笔记内容，返回 hashline 格式（每行标注 LINE:HASH|content）。需要查看或引用当前项目笔记内容时使用。内容很长时可以通过 offset/limit 分页读取，和普通 read 工具用法一致。",
             "parameters": {
                 "type": "object",
                 "properties": {
