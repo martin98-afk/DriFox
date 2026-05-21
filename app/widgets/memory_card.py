@@ -525,6 +525,9 @@ class MemoryCardContent(QWidget):
         super().__init__(parent)
         self._memory_manager = memory_manager
         self._current_project = "默认项目"
+        # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
+        # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
+        self._instance_workdir: Dict[str, str] = {}
         self._current_tab = TAB_ENTRY_MEMORIES
         self._search_filter = ""  # 搜索过滤文本
         self._init_ui()
@@ -547,6 +550,26 @@ class MemoryCardContent(QWidget):
         # 强制刷新项目笔记和关键文档
         self._load_project_note()
         self._load_key_documents()
+
+    def _get_effective_workdir(self, project: str):
+        """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）
+
+        实例缓存 _instance_workdir 记录了当前窗口用户的选择，
+        优先于 DB 中其他窗口可能写入的值。
+        DB 值仅作为首次启动时的回退默认值。
+        """
+        # 实例缓存优先（多窗口隔离：保持自身选择）
+        workdir = self._instance_workdir.get(project)
+        if workdir is not None:
+            return workdir if workdir else None
+        # 首次启动，从 DB 读取默认值（新窗口恢复用）
+        memory_mgr = self._get_memory_manager()
+        if memory_mgr:
+            db_workdir = memory_mgr.get_working_directory(project)
+            if db_workdir:
+                self._instance_workdir[project] = db_workdir
+            return db_workdir
+        return None
 
     def _init_ui(self):
         self.setStyleSheet(f"""
@@ -978,8 +1001,8 @@ class MemoryCardContent(QWidget):
 
         all_docs = memory_mgr.get_key_documents(self._current_project)
 
-        # 获取实际工作目录
-        actual_wd = memory_mgr.get_working_directory(self._current_project)
+        # 获取实际工作目录（多窗口隔离：实例缓存优先）
+        actual_wd = self._get_effective_workdir(self._current_project)
 
         # 预检：当前工作目录是否指向 worktree（需要在循环前确定，用于后续 git 检测判断）
         is_worktree_active = False
@@ -1101,18 +1124,21 @@ class MemoryCardContent(QWidget):
         """设置为工作目录（再次点击取消）
 
         多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
-        当前窗口通过 workingDirChanged 信号通知 main_widget 更新实例缓存。
+        当前窗口通过 _instance_workdir 实例缓存保持自身选择独立。
         """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
-        # 检查当前是否已经是工作目录（如果再次点击则取消）
-        current_wd = memory_mgr.get_working_directory(self._current_project)
+        # 检查当前是否已经是工作目录（用实例缓存判断，不受其他窗口 DB 写入影响）
+        current_wd = self._get_effective_workdir(self._current_project)
         if current_wd == file_path:
-            # 取消设置
+            # 取消设置：更新实例缓存 + 写入 DB（新窗口默认值）
+            self._instance_workdir[self._current_project] = ""
             memory_mgr.set_working_directory(self._current_project, "clear")
             self.workingDirChanged.emit("")
         else:
+            # 设置工作目录：更新实例缓存 + 写入 DB（新窗口默认值）
+            self._instance_workdir[self._current_project] = file_path
             memory_mgr.set_working_directory(self._current_project, file_path)
             self.workingDirChanged.emit(file_path)
         self._load_key_documents()
@@ -1131,8 +1157,9 @@ class MemoryCardContent(QWidget):
         # added_by="git_worktree" 标记，UI 显示时过滤掉
         memory_mgr.add_key_document(self._current_project, worktree_path, "git_worktree")
         
-        # 设为工作目录
+        # 设为工作目录（DB 写入：新窗口默认值 + 实例缓存更新）
         memory_mgr.set_working_directory(self._current_project, worktree_path)
+        self._instance_workdir[self._current_project] = worktree_path
         self.workingDirChanged.emit(worktree_path)
         self._load_key_documents()
 
@@ -1145,7 +1172,7 @@ class MemoryCardContent(QWidget):
         if not memory_mgr:
             return
 
-        current_wd = memory_mgr.get_working_directory(self._current_project)
+        current_wd = self._get_effective_workdir(self._current_project)
 
         # 从关键文档中移除 worktree 路径（防止下次加载又显示）
         if memory_mgr._key_documents_repo:
@@ -1156,9 +1183,11 @@ class MemoryCardContent(QWidget):
             repo_root = GitWorktreeDetector.detect_git(self._original_folder_for_worktree)
             if repo_root:
                 memory_mgr.set_working_directory(self._current_project, repo_root)
+                self._instance_workdir[self._current_project] = repo_root
                 self.workingDirChanged.emit(repo_root)
             else:
                 memory_mgr.set_working_directory(self._current_project, "clear")
+                self._instance_workdir.pop(self._current_project, None)
                 self.workingDirChanged.emit("")
 
         self._load_key_documents()
