@@ -112,8 +112,6 @@ class ContextBudgetAllocator:
 
         prompt_parts = [full_system_prompt]
 
-        # 添加时间
-        time_part = f"# 当前系统时间\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         # 添加启用的技能内容
         enabled_skills = Settings.get_instance().llm_enabled_skills.value
@@ -127,7 +125,6 @@ class ContextBudgetAllocator:
         if custom_prompt:
             prompt_parts.append(custom_prompt)
 
-        prompt_parts.append(time_part)
 
         # 添加记忆上下文
         memory_context = self.backend.get_memory_context_string()
@@ -179,6 +176,11 @@ class ContextBudgetAllocator:
         if latest_user_timestamp:
             user_msg["timestamp"] = latest_user_timestamp
         messages.append(user_msg)
+
+        # 在最后一个用户消息前插入当前系统时间
+        # 不在 system prompt 中，避免动态时间破坏 API 缓存命中率
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        messages[-1]["content"] = f"## 当前系统时间\n{current_time}\n\n{messages[-1]['content']}"
 
         return messages
 
