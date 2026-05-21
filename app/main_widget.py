@@ -2135,6 +2135,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 viewer._schedule_render(immediate=True)
         # 递归刷新所有 qfluentwidgets 组件字体大小
         apply_font_size_to_widget(self, 14)
+        # 刷新 WorktreeSectionWidget 主题（用于系统字体大小切换）
+        from app.widgets.worktree_section import WorktreeSectionWidget
+        for wt_widget in self.findChildren(WorktreeSectionWidget):
+            wt_widget.refresh_style()
         # 刷新模型选择弹窗和项目弹窗主题
         if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
             self._model_selector_popup.refresh_style()

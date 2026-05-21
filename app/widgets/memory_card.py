@@ -1117,12 +1117,12 @@ class MemoryCardContent(QWidget):
 
         current_wd = memory_mgr.get_working_directory(self._current_project)
 
-        # 从关键文档中移除 worktree 路径
+        # 从关键文档中移除 worktree 路径（防止下次加载又显示）
         if memory_mgr._key_documents_repo:
             memory_mgr._key_documents_repo.remove_by_path(self._current_project, worktree_path)
 
         if current_wd == worktree_path:
-            # 恢复到原始 git 仓库文件夹（不是随便找一个文件夹）
+            # 恢复到原始 git 仓库文件夹
             repo_root = GitWorktreeDetector.detect_git(self._original_folder_for_worktree)
             if repo_root:
                 memory_mgr.set_working_directory(self._current_project, repo_root)

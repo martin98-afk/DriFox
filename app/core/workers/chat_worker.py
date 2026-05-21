@@ -983,7 +983,7 @@ class OpenAIChatWorker(QThread):
             # 用户取消时立即退出重试循环
             if self._is_cancelled:
                 logger.info("[API] 重试被用户取消")
-                return None
+                return None, None
             try:
                 response = client.chat.completions.create(**req_kwargs)
                 break

@@ -50,22 +50,22 @@ class _WorktreeRow(QWidget):
         layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(4)
 
-        # 左侧竖线
+        # 左侧竖线（加粗到 3px，配合更大圆点）
         bar = QFrame(self)
-        bar.setFixedWidth(1)
-        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.06);")
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.15);")
         layout.addWidget(bar)
 
-        # 圆点
+        # 圆点（加大到 8x8，配合加粗的线）
         dot = QLabel("", self)
-        dot.setFixedSize(6, 6)
+        dot.setFixedSize(8, 8)
         if self._is_current:
             dot.setStyleSheet(
-                "background-color: #58a6ff; border-radius: 3px;"
+                "background-color: #58a6ff; border-radius: 4px;"
             )
         else:
             dot.setStyleSheet(
-                "background: transparent; border: 1.5px solid #484f58; border-radius: 3px;"
+                "background: transparent; border: 1.5px solid #484f58; border-radius: 4px;"
             )
         layout.addWidget(dot)
 
@@ -79,11 +79,11 @@ class _WorktreeRow(QWidget):
         branch_label.setStyleSheet(branch_ss)
         layout.addWidget(branch_label)
 
-        # 标签（小圆角 badge）
+        # 标签（小圆角 badge，适配系统字体大小）
         if self._is_main:
             tag = QLabel("main", self)
             tag.setStyleSheet(
-                f"color: rgba(255,255,255,0.35); {font_size_css(8)};"
+                f"color: rgba(255,255,255,0.35); {font_size_css(10)}"
                 f"background: rgba(255,255,255,0.06);"
                 f"padding: 0 4px; border-radius: 2px;"
             )
@@ -91,26 +91,25 @@ class _WorktreeRow(QWidget):
 
         layout.addStretch()
 
-        # 切换（非当前分支显示）
+        # 切换按钮（纯白色加粗，适配系统字体）
         if not self._is_current:
             btn = QLabel("切换", self)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(
-                f"color: #8b949e; {get_font_family_css()} {font_size_css(10)};"
+                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
                 f"padding: 0 4px;"
             )
-            # 用 QLabel 模拟 hover 需要重写 enterEvent
             btn.mousePressEvent = lambda e: self.switched.emit(self._wt_path)
             layout.addWidget(btn)
 
-        # 删除（仅非主仓库可删）
+        # 删除按钮（纯白色加粗，适配系统字体）
         if not self._is_main:
             del_btn = QLabel("✕", self)
             del_btn.setFixedWidth(14)
             del_btn.setCursor(Qt.PointingHandCursor)
             del_btn.setToolTip("删除 worktree")
             del_btn.setStyleSheet(
-                f"color: #8b949e; {get_font_family_css()} {font_size_css(10)};"
+                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
             del_btn.mousePressEvent = lambda e: self._confirm_delete()
             layout.addWidget(del_btn)
@@ -243,15 +242,15 @@ class _AddWorktreeRow(QWidget):
         layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(4)
 
-        # 竖线
+        # 竖线（加粗到 3px，配合圆点尺寸）
         bar = QFrame(self)
-        bar.setFixedWidth(1)
-        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.06);")
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.15);")
         layout.addWidget(bar)
 
         add_label = QLabel("＋ 新建 worktree", self)
         add_label.setStyleSheet(
-            f"color: #8b949e; {get_font_family_css()} {font_size_css(10)};"
+            f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
         )
         add_label.setCursor(Qt.PointingHandCursor)
         add_label.mousePressEvent = lambda e: self._on_add()
@@ -340,6 +339,11 @@ class WorktreeSectionWidget(QWidget):
     worktreeDeleted = pyqtSignal(str)         # 被删除的 worktree 路径
     sizeChanged = pyqtSignal(int)             # 高度变化通知
 
+    def refresh_style(self):
+        """刷新样式（用于系统字体大小切换时重绘）"""
+        # 重建所有行以应用新的 font_size_css()
+        self._populate_rows()
+
     def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None):
         super().__init__(parent)
         self._repo_info = repo_info
@@ -351,7 +355,7 @@ class WorktreeSectionWidget(QWidget):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 2, 0, 4)
+        layout.setContentsMargins(84, 2, 0, 4)  # 左边距约 1/4 宽度（400px 的 1/4 = 100px，减去竖线宽度约 16px）
         layout.setSpacing(0)
 
         self._rows = QWidget(self)
@@ -408,10 +412,15 @@ class WorktreeSectionWidget(QWidget):
 
     def _on_deleted(self, worktree_path: str):
         """删除 worktree"""
+        # 1. 先刷新本地列表（移除已删除的分支）
+        self._refresh()
+        # 2. 再通知父级（worktree_path 只作为标识，worktree 已不存在）
         self.worktreeDeleted.emit(worktree_path)
 
     def _refresh(self):
         """刷新 worktree 列表"""
+        # 清除缓存，确保获取最新的 worktree 列表
+        GitWorktreeDetector._info_cache.pop(self._original_folder, None)
         self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)
         if self._repo_info:
             self._populate_rows()
@@ -439,7 +448,8 @@ class WorktreeSectionWidget(QWidget):
                 )
                 return
 
-            # 获取最新 repo_info 后直接切换
+            # 清除缓存，确保获取最新的 worktree 列表
+            GitWorktreeDetector._info_cache.pop(self._original_folder, None)
             self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)
             if self._repo_info:
                 # 归一化路径再比较（Windows 下 git 用 /，os.path.join 用 \）
