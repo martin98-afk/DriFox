@@ -600,6 +600,7 @@ class MemoryCardContent(QWidget):
         # 记忆列表
         self.entries_list = ListWidget(self)
         self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.entries_list.setResizeMode(ListWidget.Adjust)
         self.entries_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);
@@ -726,6 +727,7 @@ class MemoryCardContent(QWidget):
         # 文档列表（支持拖拽）
         self.docs_list = DocDropListWidget(self)  # 使用支持拖拽的列表
         self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.docs_list.setResizeMode(ListWidget.Adjust)
         self.docs_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);
@@ -749,7 +751,8 @@ class MemoryCardContent(QWidget):
         
         self.add_doc_btn = PrimaryPushButton("📄 添加文件", self)
         self.add_doc_btn.setFixedHeight(28)
-        self.add_doc_btn.setFixedWidth(110)
+        self.add_doc_btn.setMinimumWidth(0)
+        self.add_doc_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.add_doc_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: #0e639c;
@@ -768,7 +771,8 @@ class MemoryCardContent(QWidget):
         
         self.add_folder_btn = PrimaryPushButton("📁 添加文件夹", self)
         self.add_folder_btn.setFixedHeight(28)
-        self.add_folder_btn.setFixedWidth(120)
+        self.add_folder_btn.setMinimumWidth(0)
+        self.add_folder_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.add_folder_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: #2d882d;
@@ -861,20 +865,17 @@ class MemoryCardContent(QWidget):
 
     def _get_entry_item_size(self, content: str):
         from PyQt5.QtCore import QSize
-        width = self.entries_list.size().width()
-        if width <= 0:
-            width = 400
-        
-        # 根据内容估算行数，12px字体，每行约30个中文，加上边距
+        # 宽度随列表自适应，不设定固定宽度避免溢出
+        # 使用 0 表示宽度随 viewport 自适应
         lines = content.count('\n') + 1
-        # 自动换行，按宽度估算额外行数
-        chars_per_line = int(width / 7)  # 每个中文字符约7-8px
+        # 估算自动换行额外行数（按每行约20字符保守估算）
+        chars_per_line = 20
         if chars_per_line > 0:
             lines += (len(content) + chars_per_line - 1) // chars_per_line - 1
         
         # 行高约 20px，上下边距 + 按钮空间，多留一些余量避免遮挡
         height = max(48, int(20 * lines) + 20)
-        return QSize(width, height)
+        return QSize(0, height)
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本"""
@@ -1052,7 +1053,7 @@ class MemoryCardContent(QWidget):
                     current_workdir=actual_wd,
                 )
                 wt_widget.sizeChanged.connect(lambda h, item=wt_item: (
-                    item.setSizeHint(QSize(self.docs_list.size().width() or 400, h)),
+                    item.setSizeHint(QSize(0, h)),
                     self.docs_list.update(),
                 ))
                 wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
@@ -1063,20 +1064,15 @@ class MemoryCardContent(QWidget):
     def _get_worktree_section_size(self, repo_info):
         """计算 worktree 树状组件的高度"""
         from PyQt5.QtCore import QSize
-        width = self.docs_list.size().width()
-        if width <= 0:
-            width = 400
-        # 每个 worktree 行 24px + 新建行 24px + 边距
+        # 宽度随列表自适应，不设定固定宽度避免溢出
         wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
         height = wt_count * 24 + 24 + 4
-        return QSize(width, height)
+        return QSize(0, height)
 
     def _get_doc_item_size(self):
         from PyQt5.QtCore import QSize
-        width = self.docs_list.size().width()
-        if width <= 0:
-            width = 400
-        return QSize(width, 44)
+        # 宽度随列表自适应，不设定固定宽度避免溢出
+        return QSize(0, 44)
 
     def _on_files_dropped(self, file_paths: list):
         """处理文件拖拽/选择"""

@@ -4,7 +4,7 @@ Worktree 树状展示组件
 
 紧贴文件夹条目下方，左侧竖线 + 圆点标识分支
 主分支也有切换按钮，当前分支高亮
-支持折叠/展开、内联确认删除、分支名自动省略
+分支名自动省略、内联确认删除
 """
 
 import os
@@ -34,25 +34,18 @@ class _WorktreeRow(QWidget):
 
     switched = pyqtSignal(str)   # worktree_path
     deleted = pyqtSignal(str)    # worktree_path
-    collapseToggled = pyqtSignal()  # 折叠/展开切换
 
     def __init__(self, branch: str, wt_path: str, is_main: bool,
-                 is_current: bool, is_prunable: bool,
-                 show_collapse_toggle: bool = False,
-                 is_collapsed: bool = False,
-                 parent=None):
+                 is_current: bool, is_prunable: bool, parent=None):
         super().__init__(parent)
         self._branch = branch
         self._wt_path = wt_path
         self._is_main = is_main
         self._is_current = is_current
         self._is_prunable = is_prunable
-        self._show_collapse_toggle = show_collapse_toggle
-        self._is_collapsed = is_collapsed
         self._confirming_delete = False
         self._delete_timer: QTimer = None
         self._del_btn: QLabel = None
-        self._toggle_btn: QLabel = None
         self.setFixedHeight(24)
         self._setup_ui()
 
@@ -103,17 +96,7 @@ class _WorktreeRow(QWidget):
             )
             layout.addWidget(tag)
 
-        # 折叠/展开切换按钮（仅当前分支 + 多分支时显示）
-        if self._show_collapse_toggle:
-            toggle_text = "▶" if self._is_collapsed else "▼"
-            self._toggle_btn = QLabel(toggle_text, self)
-            self._toggle_btn.setCursor(Qt.PointingHandCursor)
-            self._toggle_btn.setStyleSheet(
-                f"color: #8b949e; font-size: 10px; padding: 0 2px;"
-            )
-            self._toggle_btn.setToolTip("展开分支列表" if self._is_collapsed else "收起分支列表")
-            self._toggle_btn.mousePressEvent = lambda e: self.collapseToggled.emit()
-            layout.addWidget(self._toggle_btn)
+        layout.addStretch()
 
         # 切换按钮（纯白色加粗，适配系统字体）
         if not self._is_current:
@@ -356,7 +339,7 @@ class WorktreeSectionWidget(QWidget):
     """
     紧贴文件夹条目下方的 worktree 分支列表
 
-    │ ● dev         主·当前  ▼
+    │ ● dev         主·当前
     │ ○ feature     [切换] [确认删除?]
     │ ＋ 新建
     """
@@ -375,14 +358,13 @@ class WorktreeSectionWidget(QWidget):
         self._repo_info = repo_info
         self._original_folder = original_folder
         self._current_workdir = current_workdir  # 当前实际工作目录（用于判断哪个分支激活）
-        self._is_collapsed = False  # 默认展开
         self._setup_ui()
 
     def _setup_ui(self):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
 
         layout = QVBoxLayout(self)
-        # 左边距改为固定 24px，不再硬编码 84px，窗口缩小时不会溢出
+        # 左边距从硬编码 84px 改为 24px，窗口缩小时不会溢出
         layout.setContentsMargins(24, 2, 0, 4)
         layout.setSpacing(0)
 
@@ -403,7 +385,6 @@ class WorktreeSectionWidget(QWidget):
         # 用 _current_workdir 来判断哪个分支是当前激活的
         current_wd = self._current_workdir or self._original_folder
         normalized_wd = os.path.normpath(current_wd)
-        has_multiple = len(self._repo_info.worktrees) > 1 if self._repo_info.worktrees else False
 
         for wt in self._repo_info.worktrees:
             # 比较 worktree 路径与当前工作目录
@@ -414,16 +395,10 @@ class WorktreeSectionWidget(QWidget):
                 is_main=wt.is_main,
                 is_current=is_current,
                 is_prunable=wt.is_bare,
-                show_collapse_toggle=has_multiple and is_current,
-                is_collapsed=self._is_collapsed,
                 parent=self,
             )
             row.switched.connect(self._on_switch)
             row.deleted.connect(self._on_deleted)
-            row.collapseToggled.connect(self._toggle_collapse)
-            # 折叠时隐藏非当前分支
-            if self._is_collapsed and not is_current:
-                row.setVisible(False)
             self._rows_layout.addWidget(row)
 
         add = _AddWorktreeRow(
@@ -433,28 +408,12 @@ class WorktreeSectionWidget(QWidget):
             parent=self,
         )
         add.createRequested.connect(self._on_create)
-        # 折叠时隐藏新建行
-        if self._is_collapsed:
-            add.setVisible(False)
         self._rows_layout.addWidget(add)
 
         # 通知父级高度变化
-        self._update_size_hint()
-
-    def _update_size_hint(self):
-        """根据折叠状态计算并通知高度变化"""
-        if self._is_collapsed:
-            # 折叠时只显示当前分支行 + 边距
-            height = 24 + 4
-        else:
-            wt_count = len(self._repo_info.worktrees) or 1
-            height = wt_count * 24 + 24 + 4
+        wt_count = len(self._repo_info.worktrees) or 1
+        height = wt_count * 24 + 24 + 4
         self.sizeChanged.emit(height)
-
-    def _toggle_collapse(self):
-        """切换折叠/展开状态"""
-        self._is_collapsed = not self._is_collapsed
-        self._populate_rows()
 
     def _on_switch(self, worktree_path: str):
         """切换 worktree"""
