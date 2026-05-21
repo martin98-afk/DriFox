@@ -6,6 +6,7 @@
 3. 关键文档 - 列表 + 拖拽添加
 """
 import os
+from typing import Dict
 
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer, QRect, QPoint
 from PyQt5.QtGui import (
@@ -34,7 +35,7 @@ from qfluentwidgets import (
     TextEdit,
 )
 
-from app.utils.design_tokens import scale_font_size, font_size_css, Colors
+from app.utils.design_tokens import scale_font_size, font_size_css, Colors, ItemStyles
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.git_worktree import GitWorktreeDetector
 from app.widgets.worktree_section import WorktreeSectionWidget
@@ -152,7 +153,7 @@ class EntryMemoryItemWidget(QFrame):
         self.content_label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.content_label.setToolTip(self._content)
         self._apply_content_style(self._enabled)
-        self.content_label.document().documentSizeChanged.connect(self._sync_content_height)
+        self.content_label.document().contentsChanged.connect(self._sync_content_height)
         display_layout.addWidget(self.content_label, 1)
 
         # Hover 操作按钮区（默认隐藏，hover 时显示）
@@ -330,16 +331,24 @@ class EntryMemoryItemWidget(QFrame):
         self._syncing_height = True
         try:
             doc = self.content_label.document()
-            doc_height = int(doc.size().height()) + 4
-            height = max(36, doc_height)
-            self.content_label.setFixedHeight(height)
-            self.updateGeometry()
-            item = self._get_item()
-            if item:
-                item.setSizeHint(self.sizeHint())
-            self.update()  # 重绘指示器（高度变化可能影响指示器位置）
+            # contentsChanged 在文档内容变化时触发，Qt 会延迟布局更新
+            # 使用 QTimer.singleShot(0) 将高度计算推迟到当前事件处理完成后
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, self._do_sync_height)
         finally:
             self._syncing_height = False
+
+    def _do_sync_height(self):
+        """实际执行高度同步（在 contentsChanged 后调用）"""
+        doc = self.content_label.document()
+        doc_height = int(doc.size().height()) + 4
+        height = max(36, doc_height)
+        self.content_label.setFixedHeight(height)
+        self.updateGeometry()
+        item = self._get_item()
+        if item:
+            item.setSizeHint(self.sizeHint())
+        self.update()  # 重绘指示器（高度变化可能影响指示器位置）
 
     def resizeEvent(self, event):
         """宽度变化超过阈值时重新同步高度（换行可能发生变化）"""
