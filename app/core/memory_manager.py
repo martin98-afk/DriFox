@@ -187,6 +187,7 @@ class MemoryManagerCore:
         project: str = "默认项目",
         entry_limit: int = 30,
         doc_limit: int = 20,
+        workdir_override: Optional[str] = None,
     ) -> str:
         """
         格式化记忆注入到 prompt
@@ -195,6 +196,7 @@ class MemoryManagerCore:
             project: 当前项目名称
             entry_limit: 条目记忆最大数量
             doc_limit: 关键文档最大数量
+            workdir_override: 工作目录覆盖（多窗口隔离：实例缓存优先于 DB）
         
         Returns:
             str: 格式化后的记忆字符串
@@ -225,8 +227,8 @@ class MemoryManagerCore:
         # 3. 关键文档
         lines.append("### 关键文档")
         docs = self.get_key_documents(project)[:doc_limit]
-        # 获取当前项目的工作目录
-        wd_path = self.get_working_directory(project)
+        # 获取当前项目的工作目录（多窗口隔离：优先使用实例缓存值）
+        wd_path = workdir_override if workdir_override is not None else self.get_working_directory(project)
         if docs:
             for doc in docs:
                 file_name = doc.get("file_name", "")

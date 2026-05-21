@@ -212,6 +212,29 @@ class FileOperationRepository:
             return result[0] if isinstance(result[0], tuple) else result
         return 0
 
+    def delete_by_call_id(self, session_id: str, call_id: str) -> int:
+        """
+        根据 session_id 和 call_id 删除文件操作记录
+
+        Args:
+            session_id: 会话 ID
+            call_id: 工具调用 ID
+
+        Returns:
+            int: 删除的记录数量
+        """
+        if not self.is_initialized:
+            return 0
+
+        success, result = self._execute('''
+            DELETE FROM file_operations
+            WHERE session_id = ? AND call_id = ?
+        ''', (session_id, call_id))
+
+        if success and result:
+            return result[0] if isinstance(result[0], tuple) else result
+        return 0
+
     def clear_session(self, session_id: str) -> Tuple[int, List[str]]:
         """
         清空会话的所有文件操作记录，返回被删除的备份文件路径列表

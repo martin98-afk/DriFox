@@ -7,8 +7,8 @@
 """
 import os
 
-from PyQt5.QtCore import pyqtSignal, Qt, QSize
-from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor
+from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
+from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextDocument
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -110,20 +110,19 @@ class EntryMemoryItemWidget(QWidget):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
-        # 内容区域
+        # 内容区域（stretch=1 让文本区优先吃满剩余空间，按钮区固定宽度在尾部）
         self.text_widget = QWidget(self)
         # 允许收缩，适应小窗口
         self.text_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.text_widget.setMinimumWidth(100)
+        self.text_widget.setMinimumWidth(0)
         text_layout = QVBoxLayout(self.text_widget)
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
 
         self.content_label = BodyLabel(self._content, self.text_widget)
         self.content_label.setWordWrap(True)
-        # 允许收缩，最小宽度小一点，适应小窗口
         self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.content_label.setMinimumWidth(100)
+        self.content_label.setMinimumWidth(0)
         self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
         self.content_label.setStyleSheet(
             f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
@@ -163,7 +162,7 @@ class EntryMemoryItemWidget(QWidget):
 
         main_layout.addWidget(self.edit_widget, 1)
 
-        # 操作按钮
+        # 操作按钮 — 直接加入 main_layout，固定宽度不放 stretch，始终靠右
         self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
         self.edit_btn.setToolTip("编辑")
         self.edit_btn.clicked.connect(self._start_edit)
@@ -180,13 +179,46 @@ class EntryMemoryItemWidget(QWidget):
             lambda checked: self.toggled.emit(self.memory_id, checked)
         )
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(2)
-        btn_layout.addWidget(self.edit_btn)
-        btn_layout.addWidget(self.delete_btn)
-        btn_layout.addWidget(self.switch)
+        # 按钮直接加入（text_widget stretch=1 自然将按钮推到右侧）
+        main_layout.addWidget(self.edit_btn)
+        main_layout.addWidget(self.delete_btn)
+        main_layout.addWidget(self.switch)
 
-        main_layout.addLayout(btn_layout)
+    def sizeHint(self):
+        """根据实际宽度计算自适应高度，支持文本自动换行"""
+        width = self.width()
+        if width <= 0:
+            return QSize(0, 44)
+
+        buttons_width = 100
+        content_width = width - 16 - 6 - buttons_width
+        if content_width < 20:
+            content_width = 20
+
+        if self._editing and self.edit_widget.isVisible():
+            edit_height = self.edit_text.height()
+            return QSize(0, max(44, edit_height + 16))
+
+        doc = QTextDocument()
+        doc.setPlainText(self._content)
+        doc.setDefaultFont(self.content_label.font())
+        doc.setTextWidth(content_width)
+        text_height = int(doc.size().height()) + 16
+        return QSize(0, max(44, text_height))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_item_size()
+
+    def _update_item_size(self):
+        item = self._get_item()
+        if item:
+            item.setSizeHint(self.sizeHint())
+            lst = self.parent()
+            while lst and not isinstance(lst, ListWidget):
+                lst = lst.parent()
+            if lst:
+                lst.doItemsLayout()
 
     def _adjust_edit_height(self):
         """根据内容调整编辑框高度，不超过最大高度，超出可滚动"""
@@ -194,7 +226,7 @@ class EntryMemoryItemWidget(QWidget):
         doc_height = int(doc.size().height() + 10)
         height = max(36, min(doc_height, 200))
         self.edit_text.setFixedHeight(height)
-        # 如果内容超过最大高度，QTextEdit 会自动出现滚动条，可以滚动查看
+        self._update_item_size()
     
     def _start_edit(self):
         """开始编辑"""
@@ -216,6 +248,23 @@ class EntryMemoryItemWidget(QWidget):
             self._content = new_content
             self.content_label.setText(new_content)
         self._cancel_edit()
+        # 编辑后更新自身的 sizeHint，让列表行高自适应
+        self.updateGeometry()
+        item = self._get_item()
+        if item:
+            item.setSizeHint(self.sizeHint())
+
+    def _get_item(self):
+        """反向查找当前 widget 所在的 QListWidgetItem"""
+        from qfluentwidgets import ListWidget
+        lst = self.parent()
+        while lst and not isinstance(lst, ListWidget):
+            lst = lst.parent()
+        if lst:
+            for i in range(lst.count()):
+                if lst.itemWidget(lst.item(i)) is self:
+                    return lst.item(i)
+        return None
 
     def _on_focus_out(self, event):
         """失去焦点时自动保存完成编辑"""
@@ -321,7 +370,7 @@ class KeyDocumentItemWidget(QWidget):
 
     def _init_ui(self, file_name, file_path, added_by):
         self.setFixedHeight(44)
-        self.setSizePolicy(1, 0)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         # 工作目录高亮背景（用 Palette 方式避免 QListWidget 样式表冲突）
         if self._is_working_dir:
@@ -345,25 +394,26 @@ class KeyDocumentItemWidget(QWidget):
         icon_label.setStyleSheet(f"{font_size_css(16)} padding: 0 4px;")
 
         name_label = BodyLabel(file_name, self)
-        name_label.setWordWrap(True)
-        name_label.setSizePolicy(1, 0)
+        name_label.setWordWrap(False)
+        name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        name_label.setMinimumWidth(0)
         name_label.setStyleSheet(
             f"{get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
         )
 
         main_layout.addWidget(icon_label)
-        main_layout.addWidget(name_label, 1)
+        main_layout.addWidget(name_label)
 
-        # 显示绝对路径
-        path_label = BodyLabel(self.file_path, self)
-        path_label.setStyleSheet(
+        # 显示绝对路径（自动中间省略，窗口缩小时优先压缩）
+        self._path_label = BodyLabel("", self)
+        self._path_label.setStyleSheet(
             f"color: #8c99ad; {get_font_family_css()} {font_size_css(10)}"
         )
-        path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
-        path_label.setWordWrap(False)
-        path_label.setMinimumWidth(60)
-        path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        main_layout.addWidget(path_label, 1)
+        self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
+        self._path_label.setWordWrap(False)
+        self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._path_label.setMinimumWidth(0)
+        main_layout.addWidget(self._path_label, 1)
 
         # 操作按钮
         # 工作目录按钮（仅文件夹显示）
@@ -383,9 +433,10 @@ class KeyDocumentItemWidget(QWidget):
             self.wd_btn.clicked.connect(lambda: self.setAsWorkingDir.emit(self.file_path))
             main_layout.addWidget(self.wd_btn)
 
-        # 检测 git worktree（只要是文件夹就检测，树在 _load_key_documents 中插入）
+        # 检测 git worktree（仅当是文件夹且被标记为根目录时才检测）
         self._repo_info = None
-        if self._is_folder:
+        if self._is_folder and self._is_working_dir:
+            from app.utils.git_worktree import GitWorktreeDetector
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
@@ -398,6 +449,23 @@ class KeyDocumentItemWidget(QWidget):
 
         main_layout.addWidget(self.open_btn)
         main_layout.addWidget(self.remove_btn)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_path_elision()
+
+    def _update_path_elision(self):
+        """根据可用宽度自动省略路径（中间截断），窗口缩小时优先压缩路径"""
+        if not hasattr(self, '_path_label') or self._path_label is None:
+            return
+        full_path = self.file_path
+        available_width = self._path_label.width()
+        if available_width <= 0:
+            self._path_label.setText(full_path)
+            return
+        fm = self._path_label.fontMetrics()
+        elided = fm.elidedText(full_path, Qt.ElideMiddle, available_width)
+        self._path_label.setText(elided)
 
 
 class DropZoneWidget(QWidget):
@@ -492,6 +560,9 @@ class MemoryCardContent(QWidget):
         super().__init__(parent)
         self._memory_manager = memory_manager
         self._current_project = "默认项目"
+        # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
+        # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
+        self._instance_workdir: Dict[str, str] = {}
         self._current_tab = TAB_ENTRY_MEMORIES
         self._search_filter = ""  # 搜索过滤文本
         self._init_ui()
@@ -514,6 +585,26 @@ class MemoryCardContent(QWidget):
         # 强制刷新项目笔记和关键文档
         self._load_project_note()
         self._load_key_documents()
+
+    def _get_effective_workdir(self, project: str):
+        """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）
+
+        实例缓存 _instance_workdir 记录了当前窗口用户的选择，
+        优先于 DB 中其他窗口可能写入的值。
+        DB 值仅作为首次启动时的回退默认值。
+        """
+        # 实例缓存优先（多窗口隔离：保持自身选择）
+        workdir = self._instance_workdir.get(project)
+        if workdir is not None:
+            return workdir if workdir else None
+        # 首次启动，从 DB 读取默认值（新窗口恢复用）
+        memory_mgr = self._get_memory_manager()
+        if memory_mgr:
+            db_workdir = memory_mgr.get_working_directory(project)
+            if db_workdir:
+                self._instance_workdir[project] = db_workdir
+            return db_workdir
+        return None
 
     def _init_ui(self):
         self.setStyleSheet(f"""
@@ -582,6 +673,8 @@ class MemoryCardContent(QWidget):
 
         # 记忆列表
         self.entries_list = ListWidget(self)
+        self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.entries_list.setResizeMode(ListWidget.Adjust)
         self.entries_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);
@@ -707,6 +800,8 @@ class MemoryCardContent(QWidget):
 
         # 文档列表（支持拖拽）
         self.docs_list = DocDropListWidget(self)  # 使用支持拖拽的列表
+        self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.docs_list.setResizeMode(ListWidget.Adjust)
         self.docs_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: rgba(37, 37, 38, 180);
@@ -832,30 +927,18 @@ class MemoryCardContent(QWidget):
             source = entry.get("source", "manual")
 
             item = QListWidgetItem()
-            item.setSizeHint(self._get_entry_item_size(content))
             widget = EntryMemoryItemWidget(memory_id, content, enabled, source)
             widget.deleted.connect(self._delete_entry)
             widget.toggled.connect(self._toggle_entry)
             widget.edited.connect(self._edit_entry)
             self.entries_list.addItem(item)
             self.entries_list.setItemWidget(item, widget)
+            item.setSizeHint(widget.sizeHint())
 
     def _get_entry_item_size(self, content: str):
+        """仅作为 fallback 使用"""
         from PyQt5.QtCore import QSize
-        width = self.entries_list.size().width()
-        if width <= 0:
-            width = 400
-        
-        # 根据内容估算行数，12px字体，每行约30个中文，加上边距
-        lines = content.count('\n') + 1
-        # 自动换行，按宽度估算额外行数
-        chars_per_line = int(width / 7)  # 每个中文字符约7-8px
-        if chars_per_line > 0:
-            lines += (len(content) + chars_per_line - 1) // chars_per_line - 1
-        
-        # 行高约 20px，上下边距 + 按钮空间，多留一些余量避免遮挡
-        height = max(48, int(20 * lines) + 20)
-        return QSize(width, height)
+        return QSize(0, 44)
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本"""
@@ -953,18 +1036,27 @@ class MemoryCardContent(QWidget):
 
         all_docs = memory_mgr.get_key_documents(self._current_project)
 
-        # 获取实际工作目录
-        actual_wd = memory_mgr.get_working_directory(self._current_project)
+        # 获取实际工作目录（多窗口隔离：实例缓存优先）
+        actual_wd = self._get_effective_workdir(self._current_project)
 
-        # 判断当前工作目录是否指向 worktree
+        # 预检：当前工作目录是否指向 worktree（需要在循环前确定，用于后续 git 检测判断）
         is_worktree_active = False
+        if actual_wd:
+            is_worktree_active = any(
+                d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree"
+                for d in all_docs
+            )
+
+        # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
+        # 注意：worktree 本身不能作为 original_repo_path，必须是实际的 git 仓库文件夹
         original_repo_path = None
         if actual_wd:
             for d in all_docs:
-                if d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree":
-                    is_worktree_active = True
-                elif d.get("added_by") != "git_worktree":
-                    # 记录原始 git 仓库路径
+                # 排除 worktree 条目本身
+                if d.get("added_by") == "git_worktree":
+                    continue
+                # 仅检测：根目录 或 worktree 激活时
+                if original_repo_path is None and (d.get("is_working_dir", False) or is_worktree_active):
                     try:
                         if GitWorktreeDetector.detect_git(d.get("file_path", "")):
                             original_repo_path = d["file_path"]
@@ -1002,6 +1094,9 @@ class MemoryCardContent(QWidget):
                 doc_id, file_name, file_path, added_by,
                 is_working_dir=show_as_wd,
             )
+            # worktree 激活时：原仓库虽不是根目录，但需要 _repo_info 来显示 worktree 区域
+            if is_worktree_active and file_path == original_repo_path and not widget._repo_info:
+                widget._repo_info = GitWorktreeDetector.get_repo_info(file_path)
             widget.removed.connect(self._remove_key_document)
             widget.open_folder.connect(self._open_folder)
             widget.setAsWorkingDir.connect(self._set_as_working_directory)
@@ -1021,7 +1116,7 @@ class MemoryCardContent(QWidget):
                     current_workdir=actual_wd,
                 )
                 wt_widget.sizeChanged.connect(lambda h, item=wt_item: (
-                    item.setSizeHint(QSize(self.docs_list.size().width() or 400, h)),
+                    item.setSizeHint(QSize(0, h)),
                     self.docs_list.update(),
                 ))
                 wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
@@ -1032,20 +1127,15 @@ class MemoryCardContent(QWidget):
     def _get_worktree_section_size(self, repo_info):
         """计算 worktree 树状组件的高度"""
         from PyQt5.QtCore import QSize
-        width = self.docs_list.size().width()
-        if width <= 0:
-            width = 400
-        # 每个 worktree 行 24px + 新建行 24px + 边距
+        # 宽度随列表自适应，不设定固定宽度避免溢出
         wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
         height = wt_count * 24 + 24 + 4
-        return QSize(width, height)
+        return QSize(0, height)
 
     def _get_doc_item_size(self):
         from PyQt5.QtCore import QSize
-        width = self.docs_list.size().width()
-        if width <= 0:
-            width = 400
-        return QSize(width, 44)
+        # 宽度随列表自适应，不设定固定宽度避免溢出
+        return QSize(0, 44)
 
     def _on_files_dropped(self, file_paths: list):
         """处理文件拖拽/选择"""
@@ -1066,23 +1156,34 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _set_as_working_directory(self, file_path: str):
-        """设置为工作目录（再次点击取消）"""
+        """设置为工作目录（再次点击取消）
+
+        多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
+        当前窗口通过 _instance_workdir 实例缓存保持自身选择独立。
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
-        # 检查当前是否已经是工作目录（如果再次点击则取消）
-        current_wd = memory_mgr.get_working_directory(self._current_project)
+        # 检查当前是否已经是工作目录（用实例缓存判断，不受其他窗口 DB 写入影响）
+        current_wd = self._get_effective_workdir(self._current_project)
         if current_wd == file_path:
-            # 取消设置
+            # 取消设置：更新实例缓存 + 写入 DB（新窗口默认值）
+            self._instance_workdir[self._current_project] = ""
             memory_mgr.set_working_directory(self._current_project, "clear")
             self.workingDirChanged.emit("")
         else:
+            # 设置工作目录：更新实例缓存 + 写入 DB（新窗口默认值）
+            self._instance_workdir[self._current_project] = file_path
             memory_mgr.set_working_directory(self._current_project, file_path)
             self.workingDirChanged.emit(file_path)
         self._load_key_documents()
 
     def _on_worktree_changed(self, original_folder: str, worktree_path: str):
-        """Worktree 切换：写入 DB + 切换 workdir（UI 层过滤不显示 git_worktree 条目）"""
+        """Worktree 切换：写入 DB（新窗口默认值）+ 切换 workdir（UI 层过滤不显示 git_worktree 条目）
+
+        多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
+        当前窗口通过 workingDirChanged 信号通知 main_widget 更新实例缓存。
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
@@ -1091,31 +1192,37 @@ class MemoryCardContent(QWidget):
         # added_by="git_worktree" 标记，UI 显示时过滤掉
         memory_mgr.add_key_document(self._current_project, worktree_path, "git_worktree")
         
-        # 设为工作目录
+        # 设为工作目录（DB 写入：新窗口默认值 + 实例缓存更新）
         memory_mgr.set_working_directory(self._current_project, worktree_path)
+        self._instance_workdir[self._current_project] = worktree_path
         self.workingDirChanged.emit(worktree_path)
         self._load_key_documents()
 
     def _on_worktree_deleted(self, worktree_path: str):
-        """Worktree 被删除后：移除 DB 记录 + 恢复到主仓库"""
+        """Worktree 被删除后：移除 DB 记录 + 恢复到主仓库 + 清除实例缓存
+
+        多窗口隔离：通过 workingDirChanged 信号通知 main_widget 清除对应实例缓存。
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
 
-        current_wd = memory_mgr.get_working_directory(self._current_project)
+        current_wd = self._get_effective_workdir(self._current_project)
 
-        # 从关键文档中移除 worktree 路径
+        # 从关键文档中移除 worktree 路径（防止下次加载又显示）
         if memory_mgr._key_documents_repo:
             memory_mgr._key_documents_repo.remove_by_path(self._current_project, worktree_path)
 
         if current_wd == worktree_path:
-            # 恢复到原始 git 仓库文件夹（不是随便找一个文件夹）
+            # 恢复到原始 git 仓库文件夹
             repo_root = GitWorktreeDetector.detect_git(self._original_folder_for_worktree)
             if repo_root:
                 memory_mgr.set_working_directory(self._current_project, repo_root)
+                self._instance_workdir[self._current_project] = repo_root
                 self.workingDirChanged.emit(repo_root)
             else:
                 memory_mgr.set_working_directory(self._current_project, "clear")
+                self._instance_workdir.pop(self._current_project, None)
                 self.workingDirChanged.emit("")
 
         self._load_key_documents()

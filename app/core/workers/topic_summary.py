@@ -6,6 +6,8 @@
 import orjson as json
 import re
 
+from typing import Callable
+
 from loguru import logger
 from PyQt5.QtCore import QRunnable, pyqtSlot
 from openai import OpenAI
@@ -41,12 +43,14 @@ class TopicSummaryTask(QRunnable):
         llm_config: dict,
         callback,
         previous_summary: str = None,
+        cancel_check: Callable[[], bool] = None,
     ):
         super().__init__()
         self.messages = messages
         self.llm_config = llm_config
         self.callback = callback
         self.previous_summary = previous_summary
+        self.cancel_check = cancel_check or (lambda: False)
         self.setAutoDelete(True)
 
     def _build_conversation_context(self) -> str:
@@ -65,6 +69,11 @@ class TopicSummaryTask(QRunnable):
     @pyqtSlot()
     def run(self):
         try:
+            # 开头即检查取消状态，避免无谓的 API 调用
+            if self.cancel_check():
+                logger.info("[TopicSummary] 任务已取消，跳过生成")
+                return
+
             if not self.messages:
                 self.callback({"topic_summary": ""})
                 return
@@ -123,8 +132,12 @@ class TopicSummaryTask(QRunnable):
                     max_tokens=1500,
                 )
 
-            resp = create_api_call_with_retry(client, create_task)
-            raw_response = resp.choices[0].message.content.strip()
+            resp = create_api_call_with_retry(client, create_task, cancel_check=self.cancel_check)
+            if not resp.choices:
+                logger.warning("[TopicSummary] API 返回空 choices，跳过摘要")
+                raw_response = ""
+            else:
+                raw_response = resp.choices[0].message.content.strip()
             result = _extract_json(raw_response)
             
             if result:

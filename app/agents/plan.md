@@ -6,8 +6,6 @@ permission:
   edit: ask
   bash: ask
   write: ask
-  patch: ask
-  multiedit: ask
   read: allow
   glob: allow
   grep: allow

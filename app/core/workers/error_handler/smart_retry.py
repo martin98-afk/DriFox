@@ -42,6 +42,9 @@ class RetryConfig:
     enable_context_compression: bool = True
     enable_credential_rotation: bool = False
     enable_model_fallback: bool = False
+    
+    # 取消检查回调（返回 True 表示应取消重试）
+    cancel_check: Optional[Callable[[], bool]] = None
 
 
 @dataclass
@@ -142,6 +145,19 @@ class SmartRetryHelper:
         for attempt in range(self._config.max_retries + 1):
             self._stats["total_attempts"] += 1
             
+            # 🛡️ 检查取消
+            if self._config.cancel_check and self._config.cancel_check():
+                logger.info("[SmartRetry] 检测到取消，放弃重试")
+                return RetryResult(
+                    success=False,
+                    error=last_error or Exception("Cancelled by user"),
+                    classified_error=classified if 'classified' in locals() else None,
+                    attempts=attempt + 1,
+                    used_compression=compression_applied,
+                    used_rotation=rotation_attempted,
+                    used_fallback=fallback_attempted,
+                )
+            
             try:
                 result = make_request()
                 if attempt > 0:
@@ -226,7 +242,17 @@ class SmartRetryHelper:
                         f"[SmartRetry] {classified.reason.value} 错误，"
                         f"等待 {delay:.1f}s 后重试 (attempt {attempt + 1}/{self._config.max_retries})"
                     )
-                    time.sleep(delay)
+                    if not self._cancelable_sleep(delay):
+                        logger.info("[SmartRetry] 等待期间检测到取消，放弃重试")
+                        return RetryResult(
+                            success=False,
+                            error=last_error,
+                            classified_error=classified if 'classified' in locals() else None,
+                            attempts=attempt + 1,
+                            used_compression=compression_applied,
+                            used_rotation=rotation_attempted,
+                            used_fallback=fallback_attempted,
+                        )
                 else:
                     logger.error(
                         f"[SmartRetry] 重试次数耗尽，最后错误: {classified.reason.value}"
@@ -276,6 +302,16 @@ class SmartRetryHelper:
             delay = delay * (0.5 + random.random())
         
         return delay
+    
+    def _cancelable_sleep(self, seconds: float, step: float = 0.5) -> bool:
+        """可取消的 sleep，返回 True 表示正常完成，False 表示被取消"""
+        elapsed = 0.0
+        while elapsed < seconds:
+            if self._config.cancel_check and self._config.cancel_check():
+                return False
+            time.sleep(min(step, seconds - elapsed))
+            elapsed += step
+        return True
     
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
@@ -327,6 +363,7 @@ def create_smart_api_call_with_retry(
     provider: str = "",
     model: str = "",
     classifier: Optional[ErrorClassifier] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
     **kwargs,
 ) -> Any:
     """
@@ -342,6 +379,7 @@ def create_smart_api_call_with_retry(
         provider: Provider 名称
         model: 模型名称
         classifier: 错误分类器
+        cancel_check: 取消检查回调（返回 True 表示应取消重试）
         **kwargs: 其他参数
     
     Returns:
@@ -355,6 +393,7 @@ def create_smart_api_call_with_retry(
         enable_context_compression=True,
         enable_credential_rotation=False,
         enable_model_fallback=False,
+        cancel_check=cancel_check,
     )
     
     helper = SmartRetryHelper(

@@ -1,3 +1,8 @@
+---
+name: minimax-image-understanding
+description: "跨平台截图分析工具，基于 MiniMax 多模态 API。支持 macOS (screencapture) 和 Windows (PowerShell) 截图，自动完成截图→Base64编码→API调用全流程。适用于：错误信息分析、代码解读、UI设计分析、文字提取、图表数据解读等场景。"
+---
+
 # MiniMax 图像理解技能
 
 支持 macOS 和 Windows 的跨平台截图分析工具。

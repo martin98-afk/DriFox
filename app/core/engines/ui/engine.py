@@ -177,7 +177,7 @@ class UIEngine(BaseEngine):
             if tool_name == "bash":
                 command = arguments.get("command", "")
                 return perm_resolver.resolve(tool_name, command)
-            elif tool_name in ("read", "edit", "write", "patch", "multiedit"):
+            elif tool_name in ("read", "edit", "write"):
                 file_path = arguments.get("filePath", "")
                 return perm_resolver.resolve(tool_name, file_path)
             elif tool_name == "webfetch":

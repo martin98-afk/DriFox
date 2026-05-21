@@ -24,7 +24,7 @@ class ToolExecutor:
 
     # 需要记录的文件操作
     _FILE_OPS_TO_TRACK = {
-        "write", "edit", "multiedit", "patch"
+        "write", "edit"
     }
 
     def __init__(self, homepage=None, workdir: str = None, backend=None):
@@ -234,6 +234,19 @@ class ToolExecutor:
             # 记录失败不阻塞主流程
             logger.warning(f"[ToolExecutor] 编辑后备份失败: {e}")
 
+    def _cleanup_backup_on_failure(self):
+        """编辑失败时清理备份文件"""
+        if not self._file_recorder:
+            return
+        if not self._session_id or not self._call_id:
+            return
+
+        try:
+            self._file_recorder.cleanup_on_failure(self._session_id, self._call_id)
+            logger.info(f"[ToolExecutor] 已清理失败操作的备份: session={self._session_id}, call={self._call_id}")
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 清理备份失败: {e}")
+
     def set_memory_manager(self, memory_manager):
         if self._builtin_tools:
             self._builtin_tools.set_memory_manager(memory_manager)
@@ -265,6 +278,10 @@ class ToolExecutor:
                 self._builtin_tools._task_tools._current_project = project
             logger.info(f"[ToolExecutor] set_current_project({project})")
 
+    def get_workdir(self) -> Optional[str]:
+        """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）"""
+        return self._workdir
+
     def set_workdir(self, workdir: Optional[str]):
         """设置工作目录（None 或 "" 表示恢复默认）"""
         self._workdir = workdir
@@ -292,11 +309,9 @@ class ToolExecutor:
     REQUIRED_ARGS = {
         "read": ["path"],
         "write": ["path", "content"],
-        "edit": ["path", "oldString", "newString"],
-        "multiedit": ["path", "edits"],
+        "edit": ["path", "operations"],
         "grep": ["pattern"],
         "glob": ["pattern"],
-        "patch": ["path", "patch_content"],
         "bash": ["command"],
         # 后台任务工具
         "bg_start": ["command"],
@@ -438,21 +453,14 @@ class ToolExecutor:
             "read": lambda: self._builtin_tools.read_file(
                 path=args.get("path"),  # 统一使用 path
                 offset=int(args.get("offset")) if args.get("offset") is not None else 1,
-                limit=int(args.get("limit")) if args.get("limit") is not None else 500,
-                show_line_numbers=args.get("show_line_numbers", False),
+                limit=int(args.get("limit")) if args.get("limit") is not None else 500
             ),
             "write": lambda: self._builtin_tools.write_file(
                 path=args.get("path"), content=args.get("content", "")
             ),
             "edit": lambda: self._builtin_tools.edit_file(
                 path=args.get("path"),
-                oldString=args.get("oldString", ""),
-                newString=args.get("newString", ""),
-                replaceAll=args.get("replaceAll", False),
-            ),
-            "multiedit": lambda: self._builtin_tools.multi_edit(
-                path=args.get("path"),
-                edits=args.get("edits", []),
+                operations=args.get("operations", []),
             ),
             "grep": lambda: self._builtin_tools.grep_files(
                 pattern=args.get("pattern"),
@@ -465,9 +473,6 @@ class ToolExecutor:
             ),
             "list": lambda: self._builtin_tools.list_directory(
                 path=args.get("path", "")  # 默认当前路径
-            ),
-            "patch": lambda: self._builtin_tools.apply_patch(
-                args.get("path"), args.get("patch_content", "")
             ),
             "git_status": lambda: self._builtin_tools.git_status(args.get("path")),
             "git_log": lambda: self._builtin_tools.git_log(
@@ -582,6 +587,9 @@ class ToolExecutor:
                 
                 return result
             except Exception as e:
+                # 文件编辑操作失败时清理备份
+                if tool_name in self._FILE_OPS_TO_TRACK:
+                    self._cleanup_backup_on_failure()
                 return ToolResult(False, error=f"Execution error: {str(e)}")
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")

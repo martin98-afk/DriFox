@@ -420,6 +420,12 @@ class SessionStore:
             return self._file_op_repo.clear_session(session_id)
         return 0, []
 
+    def remove_file_operation(self, session_id: str, call_id: str) -> int:
+        """删除指定 call_id 的文件操作记录"""
+        if self._file_op_repo:
+            return self._file_op_repo.delete_by_call_id(session_id, call_id)
+        return 0
+
     # ==================== 生命周期 ====================
 
     def close(self):

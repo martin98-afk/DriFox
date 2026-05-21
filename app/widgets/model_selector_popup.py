@@ -30,7 +30,7 @@ from app.utils.design_tokens import Colors, font_size_css
 _ITEM_HEIGHT = 34  # ModelItem 高度
 _HEADER_HEIGHT = 36  # ProviderHeader 高度
 _MIN_ITEMS = 3  # 最少显示 item 数
-_MAX_ITEMS = 7  # 最多显示 item 数
+_MAX_ITEMS = 10  # 最多显示 item 数
 
 # 滚动区域高度计算
 _MIN_SCROLL_HEIGHT = _MIN_ITEMS * _ITEM_HEIGHT  # 最小高度：约 102px

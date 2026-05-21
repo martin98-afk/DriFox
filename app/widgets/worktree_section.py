@@ -4,13 +4,14 @@ Worktree 树状展示组件
 
 紧贴文件夹条目下方，左侧竖线 + 圆点标识分支
 主分支也有切换按钮，当前分支高亮
+分支名自动省略、内联确认删除
 """
 
 import os
 import subprocess
 import sys
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QSizePolicy, QDialog,
@@ -42,48 +43,54 @@ class _WorktreeRow(QWidget):
         self._is_main = is_main
         self._is_current = is_current
         self._is_prunable = is_prunable
+        self._confirming_delete = False
+        self._delete_timer: QTimer = None
+        self._del_btn: QLabel = None
         self.setFixedHeight(24)
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setContentsMargins(0, 0, 16, 0)
         layout.setSpacing(4)
 
-        # 左侧竖线
+        # 左侧竖线（加粗到 3px，配合更大圆点）
         bar = QFrame(self)
-        bar.setFixedWidth(1)
-        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.06);")
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.15);")
         layout.addWidget(bar)
 
-        # 圆点
+        # 圆点（加大到 8x8，配合加粗的线）
         dot = QLabel("", self)
-        dot.setFixedSize(6, 6)
+        dot.setFixedSize(8, 8)
         if self._is_current:
             dot.setStyleSheet(
-                "background-color: #58a6ff; border-radius: 3px;"
+                "background-color: #58a6ff; border-radius: 4px;"
             )
         else:
             dot.setStyleSheet(
-                "background: transparent; border: 1.5px solid #484f58; border-radius: 3px;"
+                "background: transparent; border: 1.5px solid #484f58; border-radius: 4px;"
             )
         layout.addWidget(dot)
 
-        # 分支名
+        # 分支名（自动省略超长名称）
         if self._is_current:
             branch_ss = f"color: #e6edf3; font-weight: 600; {get_font_family_css()} {font_size_css(12)}"
         else:
             branch_ss = f"color: #8b949e; {get_font_family_css()} {font_size_css(12)}"
 
-        branch_label = QLabel(self._branch, self)
-        branch_label.setStyleSheet(branch_ss)
-        layout.addWidget(branch_label)
+        self._branch_label = QLabel(self._branch, self)
+        self._branch_label.setStyleSheet(branch_ss)
+        # 允许压缩：窗口缩小时分支名自动省略右侧
+        self._branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._branch_label.setMinimumWidth(30)
+        layout.addWidget(self._branch_label, 1)
 
-        # 标签（小圆角 badge）
+        # 标签（小圆角 badge，适配系统字体大小）
         if self._is_main:
             tag = QLabel("main", self)
             tag.setStyleSheet(
-                f"color: rgba(255,255,255,0.35); {font_size_css(8)};"
+                f"color: rgba(255,255,255,0.35); {font_size_css(10)}"
                 f"background: rgba(255,255,255,0.06);"
                 f"padding: 0 4px; border-radius: 2px;"
             )
@@ -91,83 +98,84 @@ class _WorktreeRow(QWidget):
 
         layout.addStretch()
 
-        # 切换（非当前分支显示）
+        # 切换按钮（纯白色加粗，适配系统字体）
         if not self._is_current:
             btn = QLabel("切换", self)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(
-                f"color: #8b949e; {get_font_family_css()} {font_size_css(10)};"
+                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
                 f"padding: 0 4px;"
             )
-            # 用 QLabel 模拟 hover 需要重写 enterEvent
             btn.mousePressEvent = lambda e: self.switched.emit(self._wt_path)
             layout.addWidget(btn)
 
-        # 删除（仅非主仓库可删）
+        # 删除按钮（纯白色加粗，适配系统字体，支持内联确认）
         if not self._is_main:
-            del_btn = QLabel("✕", self)
-            del_btn.setFixedWidth(14)
-            del_btn.setCursor(Qt.PointingHandCursor)
-            del_btn.setToolTip("删除 worktree")
-            del_btn.setStyleSheet(
-                f"color: #8b949e; {get_font_family_css()} {font_size_css(10)};"
+            self._del_btn = QLabel("✕", self)
+            self._del_btn.setMinimumWidth(14)
+            self._del_btn.setAlignment(Qt.AlignCenter)
+            self._del_btn.setCursor(Qt.PointingHandCursor)
+            self._del_btn.setToolTip("删除 worktree")
+            self._del_btn.setStyleSheet(
+                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
-            del_btn.mousePressEvent = lambda e: self._confirm_delete()
-            layout.addWidget(del_btn)
+            self._del_btn.mousePressEvent = lambda e: self._on_delete_clicked()
+            layout.addWidget(self._del_btn)
 
-    def _confirm_delete(self):
-        """确认删除 worktree + 自动删除分支"""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("删除 Worktree")
-        dlg.setFixedSize(380, 170)
-        dlg.setStyleSheet(f"""
-            QDialog {{
-                background-color: {Colors.CONTENT_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-            }}
-            QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QPushButton {{
-                border: none; border-radius: 4px; padding: 6px 20px;
-                {get_font_family_css()} {font_size_css(12)} min-width: 60px;
-            }}
-            QPushButton#okBtn {{
-                background-color: {Colors.ERROR};
-                color: white;
-            }}
-            QPushButton#okBtn:hover {{ opacity: 0.8; }}
-            QPushButton#cancelBtn {{
-                background: transparent; color: {Colors.TEXT_SECONDARY};
-                border: 1px solid {Colors.BORDER};
-            }}
-            QPushButton#cancelBtn:hover {{ background-color: {Colors.HOVER_BG}; }}
-        """)
-        vl = QVBoxLayout(dlg)
-        vl.setContentsMargins(16, 16, 16, 16)
-        vl.setSpacing(8)
+    def resizeEvent(self, event):
+        """窗口缩小时自动省略分支名右侧"""
+        super().resizeEvent(event)
+        self._update_branch_elision()
 
-        vl.addWidget(QLabel(f"删除 worktree「{self._branch}」？"))
-        vl.addWidget(QLabel(f"路径: {self._wt_path}"))
-        vl.addWidget(QLabel(f"将同时删除分支「{self._branch}」"))
-
-        bl = QHBoxLayout()
-        bl.addStretch()
-        cancel = QPushButton("取消", dlg)
-        cancel.setObjectName("cancelBtn")
-        cancel.clicked.connect(dlg.reject)
-        bl.addWidget(cancel)
-        ok = QPushButton("删除", dlg)
-        ok.setObjectName("okBtn")
-        ok.clicked.connect(dlg.accept)
-        bl.addWidget(ok)
-        vl.addLayout(bl)
-
-        if dlg.exec_() != QDialog.Accepted:
+    def _update_branch_elision(self):
+        """根据可用宽度自动省略分支名（右侧截断）"""
+        if not hasattr(self, '_branch_label') or self._branch_label is None:
             return
+        available = self._branch_label.width()
+        if available <= 0:
+            return
+        fm = self._branch_label.fontMetrics()
+        elided = fm.elidedText(self._branch, Qt.ElideRight, available)
+        self._branch_label.setText(elided)
 
+    def _on_delete_clicked(self):
+        """删除按钮点击：内联确认，第二次点击才真正删除"""
+        if not self._confirming_delete:
+            # 第一次点击：进入确认状态
+            self._confirming_delete = True
+            self._del_btn.setText("确认删除")
+            self._del_btn.setStyleSheet(
+                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                f"padding: 0 4px;"
+            )
+            self._del_btn.setToolTip("再次点击确认删除，3秒后自动取消")
+            # 3秒后自动恢复
+            self._delete_timer = QTimer(self)
+            self._delete_timer.setSingleShot(True)
+            self._delete_timer.setInterval(3000)
+            self._delete_timer.timeout.connect(self._cancel_delete_confirm)
+            self._delete_timer.start()
+        else:
+            # 第二次点击：确认删除
+            if self._delete_timer:
+                self._delete_timer.stop()
+                self._delete_timer = None
+            self._confirming_delete = False
+            self._do_delete()
+
+    def _cancel_delete_confirm(self):
+        """取消确认状态，恢复删除按钮样式"""
+        self._confirming_delete = False
+        if self._del_btn:
+            self._del_btn.setText("✕")
+            self._del_btn.setMinimumWidth(14)
+            self._del_btn.setStyleSheet(
+                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+            )
+            self._del_btn.setToolTip("删除 worktree")
+
+    def _do_delete(self):
+        """执行删除 worktree + 自动删除分支"""
         cwd = self._find_git_root()
         # 1. 删除 worktree 目录
         try:
@@ -175,7 +183,6 @@ class _WorktreeRow(QWidget):
                 ["git", "worktree", "remove", self._wt_path],
                 capture_output=True, text=True, cwd=cwd,
                 timeout=10, encoding="utf-8", errors="replace",
-                creationflags=_CREATION_FLAGS,
             )
             if r.returncode != 0:
                 subprocess.run(
@@ -241,18 +248,18 @@ class _AddWorktreeRow(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setContentsMargins(0, 0, 16, 0)
         layout.setSpacing(4)
 
-        # 竖线
+        # 竖线（加粗到 3px，配合圆点尺寸）
         bar = QFrame(self)
-        bar.setFixedWidth(1)
-        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.06);")
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.15);")
         layout.addWidget(bar)
 
         add_label = QLabel("＋ 新建 worktree", self)
         add_label.setStyleSheet(
-            f"color: #8b949e; {get_font_family_css()} {font_size_css(10)};"
+            f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
         )
         add_label.setCursor(Qt.PointingHandCursor)
         add_label.mousePressEvent = lambda e: self._on_add()
@@ -331,15 +338,20 @@ class _AddWorktreeRow(QWidget):
 class WorktreeSectionWidget(QWidget):
     """
     紧贴文件夹条目下方的 worktree 分支列表
-    
+
     │ ● dev         主·当前
-    │ ○ feature     [切换] [✕]
+    │ ○ feature     [切换] [确认删除?]
     │ ＋ 新建
     """
 
     worktreeSwitched = pyqtSignal(str, str)  # (original_folder, worktree_path)
     worktreeDeleted = pyqtSignal(str)         # 被删除的 worktree 路径
     sizeChanged = pyqtSignal(int)             # 高度变化通知
+
+    def refresh_style(self):
+        """刷新样式（用于系统字体大小切换时重绘）"""
+        # 重建所有行以应用新的 font_size_css()
+        self._populate_rows()
 
     def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None):
         super().__init__(parent)
@@ -352,7 +364,8 @@ class WorktreeSectionWidget(QWidget):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 2, 0, 4)
+        # 左边距从硬编码 84px 改为 24px，窗口缩小时不会溢出
+        layout.setContentsMargins(24, 2, 0, 4)
         layout.setSpacing(0)
 
         self._rows = QWidget(self)
@@ -409,10 +422,15 @@ class WorktreeSectionWidget(QWidget):
 
     def _on_deleted(self, worktree_path: str):
         """删除 worktree"""
+        # 1. 先刷新本地列表（移除已删除的分支）
+        self._refresh()
+        # 2. 再通知父级（worktree_path 只作为标识，worktree 已不存在）
         self.worktreeDeleted.emit(worktree_path)
 
     def _refresh(self):
         """刷新 worktree 列表"""
+        # 清除缓存，确保获取最新的 worktree 列表
+        GitWorktreeDetector._info_cache.pop(self._original_folder, None)
         self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)
         if self._repo_info:
             self._populate_rows()
@@ -440,13 +458,16 @@ class WorktreeSectionWidget(QWidget):
                 )
                 return
 
-            # 获取最新 repo_info 后直接切换
+            # 清除缓存，确保获取最新的 worktree 列表
+            GitWorktreeDetector._info_cache.pop(self._original_folder, None)
             self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)
             if self._repo_info:
                 # 归一化路径再比较（Windows 下 git 用 /，os.path.join 用 \）
                 norm_new_path = os.path.normpath(worktree_dir)
                 for wt in self._repo_info.worktrees:
                     if os.path.normpath(wt.path) == norm_new_path:
+                        # 先刷新列表，再切换
+                        self._refresh()
                         self._on_switch(wt.path)
                         break
 

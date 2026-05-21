@@ -176,6 +176,23 @@ PROVIDER_MODELS = {
         "gemini-1.5-flash",
         "gemini-1.5-flash-8b",
     ],
+    "OpenCode Zen": [
+        "deepseek-v4-flash-free",
+        "nemotron-3-super-free",
+        "big-pickle",
+        "glm-5.1",
+        "glm-5",
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "mimo-v2.5-pro",
+        "mimo-v2.5",
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "qwen3.6-plus",
+        "qwen3.5-plus",
+    ],
 }
 
 FREE_PROVIDERS = {
@@ -187,6 +204,15 @@ FREE_PROVIDERS = {
         "最大Token": 200000,
         "认证方式": "bearer",
         "获取地址": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+    },
+    "OpenCode Zen": {
+        "API_URL": "https://opencode.ai/zen/v1",
+        "API_KEY": "",
+        "模型名称": "deepseek-v4-flash-free",
+        "温度": 0.7,
+        "最大Token": 128000,
+        "认证方式": "bearer",
+        "获取地址": "https://opencode.ai/auth",
     },
     "火山方舟": {
         "API_URL": "https://ark.cn-beijing.volces.com/api/coding/v3",
@@ -306,4 +332,5 @@ PROVIDER_ICONS = {
     "OpenAI": "大模型",
     "Anthropic (Claude)": "Anthropic",
     "Google Gemini": "gemini-ai",
+    "OpenCode Zen": "opencode",
 }

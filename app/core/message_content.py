@@ -77,6 +77,7 @@ def make_tool_result_block(
         result: Any = None,
         success: bool = True,
         tool_call_id: Optional[str] = None,
+        diff: Optional[str] = None,
 ) -> Dict[str, Any]:
     # 检测是否为子智能体任务（task tool）
     is_subagent = str(tool_name).lower() == "task"
@@ -91,6 +92,8 @@ def make_tool_result_block(
     }
     if tool_call_id:
         block["tool_call_id"] = str(tool_call_id)
+    if diff:
+        block["diff"] = diff
     return block
 
 
@@ -123,6 +126,7 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
                             result=item.get("result", ""),
                             success=item.get("success", True),
                             tool_call_id=item.get("tool_call_id"),
+                            diff=item.get("diff"),
                         )
                     )
                 else:
@@ -159,6 +163,7 @@ def build_assistant_content(
                 result=item.get("result", item.get("content", "")),
                 success=item.get("success", True),
                 tool_call_id=item.get("tool_call_id"),
+                diff=item.get("diff"),
             )
         )
 
@@ -219,20 +224,35 @@ def content_to_markdown(content: Any) -> str:
 
             # 生成安全的参数字符串表示
             if isinstance(args, dict) and args:
+                # 按 value 类型排序：字符串优先显示（如 path），复杂类型（list/dict）放后面
+                # 这样即使 JSON 被截断，关键短字段如 path 也不会丢失
+                sorted_items = sorted(args.items(), key=lambda x: (0 if isinstance(x[1], str) else 1, len(str(x[1]))))
                 args_parts = []
-                for k, v in args.items():
-                    if isinstance(v, str) and len(v) > 100:
-                        # 截断长字符串但先转义（顺序重要：先转义反斜杠）
-                        truncated = v[:100].replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                        truncated = _sanitize_result(truncated)
-                        args_parts.append(f'"{k}": "{truncated}"')
-                    elif isinstance(v, str):
-                        # 转义字符串中的反斜杠、引号和换行（顺序重要：先转义反斜杠）
-                        safe_v = v.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                        safe_v = _sanitize_result(safe_v)
-                        args_parts.append(f'"{k}": "{safe_v}"')
+                for k, v in sorted_items:
+                    if isinstance(v, str):
+                        if len(v) > 200:
+                            # 截断长字符串但保留 JSON 合法性
+                            truncated = v[:200].replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            truncated = _sanitize_result(truncated)
+                            args_parts.append(f'"{k}": "{truncated}..."')
+                        else:
+                            # 短字符串完整保留（如 path）
+                            safe_v = v.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            safe_v = _sanitize_result(safe_v)
+                            args_parts.append(f'"{k}": "{safe_v}"')
                     else:
-                        args_parts.append(f'"{k}": {_sanitize_result(json.dumps(v).decode("utf-8")[:50])}')
+                        # 非字符串类型（list/dict）：序列化后智能截断
+                        try:
+                            serialized = json.dumps(v).decode('utf-8')
+                        except (AttributeError, TypeError):
+                            serialized = str(v)
+                        if len(serialized) > 300:
+                            # 过长的 list/dict 只保留前100字符作为预览 + 省略标记
+                            preview = serialized[:100].replace('\\', '\\\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            preview = _sanitize_result(preview)
+                            args_parts.append(f'"{k}": "{preview}..."')
+                        else:
+                            args_parts.append(f'"{k}": {_sanitize_result(serialized)}')
                 args_json = "{" + ", ".join(args_parts) + "}"
             else:
                 args_json = "{}"
@@ -244,13 +264,22 @@ def content_to_markdown(content: Any) -> str:
             success = bool(block.get("success", True))
             tool_call_id = block.get("tool_call_id", "")
 
+            # 读取 diff 字段（用于 inline diff 展示）
+            diff_raw = block.get("diff", "") or ""
+            if diff_raw:
+                # diff 多行内容，直接嵌入
+                diff_escaped = _sanitize_result(str(diff_raw))
+
             tool_lines = [
                 "<tool>",
                 f"name: {block.get('name', 'tool')}",
                 f"args: {args_json}",
                 f"result: {result_escaped}",
-                f"success: {success}",
             ]
+            if diff_raw:
+                tool_lines.append(f"diff:")
+                tool_lines.append(diff_escaped)
+            tool_lines.append(f"success: {success}")
             # 保留 tool_call_id 用于差异对比功能
             if tool_call_id:
                 tool_lines.append(f"tool_call_id: {tool_call_id}")
@@ -361,6 +390,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["reasoning_content"] = str(reasoning)
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
+        if message.get("model_name"):
+            normalized["model_name"] = str(message.get("model_name"))
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -383,6 +414,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if role == "user":
         params = message.get("params")
         normalized["params"] = dict(params) if isinstance(params, dict) else {}
+    if message.get("model_name"):
+        normalized["model_name"] = str(message.get("model_name"))
     return normalized
 
 
