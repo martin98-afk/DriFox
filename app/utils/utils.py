@@ -59,15 +59,15 @@ _ICON_CACHE = {}  # 缓存图标名 → QIcon 实例
 
 def get_app_data_dir() -> Path:
     """获取应用数据目录（跨平台兼容）
-    
+
     开发环境: 当前目录/.drifox
-    PyInstaller打包: 应用支持目录/.drifox（可写）
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
     """
     # 开发环境
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
         return Path('.drifox')
-    
+
     # macOS .app: 使用 Application Support（用户可写）
     if sys.platform == 'darwin':
         from AppKit import NSApplicationSupportDirectory, NSUserDomainMask, NSFileManager
@@ -75,19 +75,75 @@ def get_app_data_dir() -> Path:
             NSApplicationSupportDirectory, NSUserDomainMask
         )
         if paths:
-            # paths[0].path 是 ObjC native-selector，用 fileSystemRepresentation() 转 bytes 再解码
             app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
             app_support = Path(app_support_path) / 'Drifox'
             app_support.mkdir(parents=True, exist_ok=True)
             return app_support / '.drifox'
-    
-    # Windows/Linux 或其他平台
-    if hasattr(sys, '_MEIPASS'):
-        # 使用 MEIPASS 的同级的可写目录
-        return Path(sys._MEIPASS).parent / '.drifox'
-    
-    # Fallback
+
+    # Windows/Linux 打包: 使用 ~/.drifox（用户 home，不受安装位置限制）
     return Path.home() / '.drifox'
+
+
+_MIGRATED_FLAG = False  # 防止重复迁移
+
+
+def _checkpoint_sqlite_db(db_path: Path):
+    """对 SQLite 数据库执行 WAL 检查点，确保数据全部刷回主文件"""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=1)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except Exception:
+        pass
+
+
+def migrate_app_data_if_needed():
+    """将旧版本数据迁移到用户可写目录（仅打包版需要）
+
+    旧路径: <安装目录>/.drifox (Program Files 等，可能权限受限)
+    新路径: ~/.drifox 或 macOS: Application Support
+    """
+    global _MIGRATED_FLAG
+    if _MIGRATED_FLAG:
+        return
+    _MIGRATED_FLAG = True
+
+    # 开发环境不需要迁移
+    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
+        return
+
+    from loguru import logger
+    import shutil
+
+    # 旧路径（安装目录旁）
+    old_dir = Path(sys._MEIPASS).parent / '.drifox' if hasattr(sys, '_MEIPASS') else None
+    if not old_dir or not old_dir.exists():
+        return
+
+    new_dir = get_app_data_dir()
+    if new_dir.exists():
+        return
+
+    # 关键：先 checkpoint SQLite 数据库，把 WAL 数据刷回主文件
+    # 否则 shutil.copytree 可能只复制到不完整的 .db 文件
+    for db_file in old_dir.glob("*.db"):
+        logger.info(f"[迁移] 检查点: {db_file.name}")
+        _checkpoint_sqlite_db(db_file)
+
+    logger.info(f"[迁移] 复制数据: {old_dir} → {new_dir}")
+    new_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(str(old_dir), str(new_dir), dirs_exist_ok=True)
+
+    # 验证迁移结果
+    old_db = old_dir / "sessions.db"
+    new_db = new_dir / "sessions.db"
+    if old_db.exists() and new_db.exists():
+        logger.info(f"[迁移] sessions.db: {old_db.stat().st_size} → {new_db.stat().st_size} bytes")
+    elif new_db.exists():
+        logger.info(f"[迁移] sessions.db 复制完成")
+    else:
+        logger.warning(f"[迁移] sessions.db 未找到，数据可能是空的")
 
 def get_pinyin_search_keys(text):
     """生成拼音全拼和首字母缩写"""

@@ -680,7 +680,7 @@ class ToolPopupDialog(QDialog):
     def _center_on_screen(self):
         from PyQt5.QtWidgets import QApplication
 
-        screen = QApplication.primaryScreen()
+        screen = self.screen() or QApplication.primaryScreen()
         if screen:
             rect = screen.availableGeometry()
             x = (rect.width() - self.width()) // 2 + rect.x()

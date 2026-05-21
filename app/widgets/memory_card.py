@@ -1049,17 +1049,29 @@ class MemoryCardContent(QWidget):
 
         # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
         # 注意：worktree 本身不能作为 original_repo_path，必须是实际的 git 仓库文件夹
+        # 优先级：DB 中 is_working_dir=1 的非 worktree 目录 > 第一个 git 仓库目录
         original_repo_path = None
         if actual_wd:
+            # 第一优先级：DB 中标记为 is_working_dir 的非 worktree 目录（即用户手动设定的根目录）
             for d in all_docs:
-                # 排除 worktree 条目本身
                 if d.get("added_by") == "git_worktree":
                     continue
-                # 仅检测：根目录 或 worktree 激活时
-                if original_repo_path is None and (d.get("is_working_dir", False) or is_worktree_active):
+                if d.get("is_working_dir", False):
                     try:
                         if GitWorktreeDetector.detect_git(d.get("file_path", "")):
                             original_repo_path = d["file_path"]
+                            break
+                    except Exception:
+                        pass
+            # 第二优先级：worktree 激活时，取第一个非 worktree 的 git 仓库目录
+            if original_repo_path is None and is_worktree_active:
+                for d in all_docs:
+                    if d.get("added_by") == "git_worktree":
+                        continue
+                    try:
+                        if GitWorktreeDetector.detect_git(d.get("file_path", "")):
+                            original_repo_path = d["file_path"]
+                            break
                     except Exception:
                         pass
 
@@ -1183,17 +1195,31 @@ class MemoryCardContent(QWidget):
 
         多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
         当前窗口通过 workingDirChanged 信号通知 main_widget 更新实例缓存。
+
+        重要：在设置 worktree 为工作目录时，必须保留原有根目录的 is_working_dir 标记，
+        否则 _load_key_documents 会因遍历顺序将根目录标记错误地分配给其他目录。
         """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
-        
+
+        # 先记住 DB 中当前的工作目录（即用户手动设定的根目录）
+        db_wd = memory_mgr.get_working_directory(self._current_project)
+
         # 必须写入 DB，否则 set_working_directory 找不到路径
         # added_by="git_worktree" 标记，UI 显示时过滤掉
         memory_mgr.add_key_document(self._current_project, worktree_path, "git_worktree")
-        
+
         # 设为工作目录（DB 写入：新窗口默认值 + 实例缓存更新）
         memory_mgr.set_working_directory(self._current_project, worktree_path)
+
+        # 恢复原有根目录的 is_working_dir 标记（set_working_directory 会先清除所有标记）
+        # 这样 _load_key_documents 才能正确识别哪个是用户真正设定的根目录
+        if db_wd and db_wd != worktree_path and db_wd != "clear":
+            memory_mgr.restore_working_directory_mark(
+                self._current_project, db_wd
+            )
+
         self._instance_workdir[self._current_project] = worktree_path
         self.workingDirChanged.emit(worktree_path)
         self._load_key_documents()

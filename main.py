@@ -45,6 +45,11 @@ def main():
     from app.utils.utils import get_app_data_dir
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
+
+    # 迁移旧版本数据（打包版从安装目录迁到用户 home 目录）
+    from app.utils.utils import migrate_app_data_if_needed
+    migrate_app_data_if_needed()
+
     # 设置日志 (使用统一路径获取方法，DMG 只读时也需要可写)
     log_dir = get_app_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

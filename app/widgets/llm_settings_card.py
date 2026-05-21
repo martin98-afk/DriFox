@@ -361,9 +361,18 @@ class LLMSettingsCard(SystemCardFrame):
             "选择一套深色界面卡片配色",
             self.cfg,
             self.cfg.ui_theme_style,
-            THEME_STYLE_OPTIONS,
+            self._build_theme_options(),
             self,
         )
+
+    def _build_theme_options(self) -> dict:
+        """从 ThemeManager 动态构建主题选项"""
+        from app.theme import theme_manager
+        from app.utils.config import update_theme_options
+        update_theme_options()
+        themes = theme_manager.list_themes()
+        return {tid: {"label": name} for tid, name in themes.items()}
+
 
     def _setup_font_card(self):
         """创建字体设置卡片"""

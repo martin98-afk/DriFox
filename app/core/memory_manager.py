@@ -174,6 +174,16 @@ class MemoryManagerCore:
             return False
         return self._key_documents_repo.set_working_directory(project, file_path)
 
+
+    def restore_working_directory_mark(self, project: str, file_path: str) -> bool:
+        """恢复指定路径的工作目录标记（不清除其他标记）。
+
+        用于 worktree 切换场景：set_working_directory 会先清除所有 is_working_dir，
+        导致原根目录的标记丢失。此方法仅追加设置，不干扰已有的标记。
+        """
+        if not self._key_documents_repo:
+            return False
+        return self._key_documents_repo.set_working_directory_only(project, file_path)
     def get_working_directory(self, project: str) -> Optional[str]:
         """获取项目的工作目录"""
         if not self._key_documents_repo:

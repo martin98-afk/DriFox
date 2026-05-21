@@ -231,7 +231,7 @@ class SkillCompleterPopup(QWidget):
             cursor_top_global: 光标顶部在全局坐标系中的位置
             prefer_below: 是否优先显示在下方
         """
-        screen = QApplication.primaryScreen()
+        screen = QApplication.screenAt(cursor_top_global) or QApplication.primaryScreen()
         if screen:
             screen_geo = screen.geometry()
         else:
@@ -305,6 +305,9 @@ class SendableTextEdit(TextEdit):
         super().__init__(parent)
         self._initializing = True  # 初始化标志，防止早期高度调整
         self._glow_effect = None
+
+        self._setup_glow_effect()
+        self._apply_input_style()
         self.setPlaceholderText("给 DriFox 发送消息，Enter 发送，Shift+Enter 换行")
         self.setAcceptRichText(False)
         self.setLineWrapMode(TextEdit.WidgetWidth)
@@ -312,10 +315,6 @@ class SendableTextEdit(TextEdit):
         self.setMinimumHeight(72)
         self.setMaximumHeight(200)
         self.setFixedHeight(72)  # 初始化时设为最小高度
-        
-        # 设置发光效果
-        self._setup_glow_effect()
-        self._apply_input_style()
 
         self._agent_combo = ComboBox(self)
         self._agent_combo.setFixedSize(75, 28)
@@ -327,23 +326,7 @@ class SendableTextEdit(TextEdit):
         self.send_btn.setToolTip("发送（Enter）")
         self.send_btn.clicked.connect(self._on_send_click)
         self.send_btn.setDisabled(True)
-        self.send_btn.setStyleSheet("""
-            TransparentToolButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #C9A85C, stop:1 #B8956A);
-                border: none;
-                border-radius: 17px;
-                color: white;
-            }
-            TransparentToolButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #D4B878, stop:1 #C9A060);
-            }
-            TransparentToolButton:disabled {
-                background: rgba(255, 255, 255, 0.10);
-                color: rgba(255, 255, 255, 0.45);
-            }
-        """)
+        self._apply_send_btn_style()
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_at_trigger_check)
 
@@ -360,12 +343,32 @@ class SendableTextEdit(TextEdit):
         self._at_trigger_pos = -1  # @ 触发位置
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
-        # 这样可以避免在构造函数期间触发高度调整，同时确保初始化完成后正常工作
         QTimer.singleShot(0, self._finish_initialization)
+
+    def _apply_send_btn_style(self):
+        """从 Colors 应用发送按钮样式"""
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+        self.send_btn.setStyleSheet(f"""
+            TransparentToolButton {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
+                border: none;
+                border-radius: 17px;
+                color: white;
+            }}
+            TransparentToolButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
+            }}
+            TransparentToolButton:disabled {{
+                background: rgba(255, 255, 255, 0.10);
+                color: rgba(255, 255, 255, 0.45);
+            }}
+        """)
 
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
-        self._initializing = False
 
     def _on_at_trigger_check(self):
         """检测 @ 触发——统一逻辑：始终检查光标前是否有 @，不再依赖弹窗可见性"""

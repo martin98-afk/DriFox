@@ -795,6 +795,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def setup_ui(self):
         Colors.refresh()
+        # 动态更新主题选项
+        from app.utils.config import update_theme_options
+        update_theme_options()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 4, 1)
         layout.setSpacing(1)
@@ -939,19 +942,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
         self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # 背景图片层 - 半透明、随窗口缩放
-        viewport = self.chat_scroll_area.viewport()
-        self._bg_label = QLabel(viewport)
-        self._bg_label.setPixmap(QPixmap(":/icons/fox_bg.png"))
-        self._bg_label.setScaledContents(True)  # 允许缩放
-        self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
-        self._bg_opacity.setOpacity(0.1)  # 25% 透明度
-        self._bg_label.setGraphicsEffect(self._bg_opacity)
-        self._bg_label.lower()  # 放到底层
-        self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # 鼠标事件穿透
-        self._bg_label.resize(viewport.size())
-        self._bg_label.show()
-        viewport.installEventFilter(self)
+        # 背景图片层 - 从主题配置加载
+        self._apply_bg_from_theme()
 
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background: transparent;")
@@ -1651,6 +1643,31 @@ class OpenAIChatToolWindow(ToolWindow):
                 return True
         return False
 
+    def _apply_bg_from_theme(self):
+        """从当前主题配置加载背景图片"""
+        try:
+            from app.theme import theme_manager
+            from app.utils.design_tokens import Colors
+            Colors.refresh()
+            bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
+            chat_list = bg_config.get("chat_list", {})
+            if chat_list.get("enabled", True):
+                image = chat_list.get("image", ":/icons/fox_bg.png")
+                opacity = chat_list.get("opacity", 0.1)
+                viewport = self.chat_scroll_area.viewport()
+                self._bg_label = QLabel(viewport)
+                self._bg_label.setPixmap(QPixmap(image))
+                self._bg_label.setScaledContents(True)
+                self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
+                self._bg_opacity.setOpacity(opacity)
+                self._bg_label.setGraphicsEffect(self._bg_opacity)
+                self._bg_label.lower()
+                self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                self._bg_label.resize(viewport.size())
+                self._bg_label.show()
+                viewport.installEventFilter(self)
+        except Exception:
+            pass
     def _restore_after_system_close(self):
         """系统卡片关闭后，恢复 todo/tool/sub_agent 实时卡片"""
         if not self._is_any_system_card_visible():
@@ -2107,6 +2124,18 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self.input_area, "refresh_style"):
                 self.input_area.refresh_style()
         # 刷新设置弹出层 — 递归刷新 qfluentwidgets 组件字体大小
+        # 刷新发送按钮
+        if hasattr(self, "input_area") and hasattr(self.input_area, "_apply_send_btn_style"):
+            self.input_area._apply_send_btn_style()
+        # 刷新背景图片
+        self._apply_bg_from_theme()
+        # 刷新分支标签
+        if hasattr(self, "_update_branch"):
+            self._update_branch()
+        # 刷新时间线节点
+        if hasattr(self, "node_preview") and hasattr(self.node_preview, "refresh_theme"):
+            self.node_preview.refresh_theme()
+
         if self._settings_popup:
             apply_font_size_to_widget(self._settings_popup, 14)
             # 同时刷新所有子设置卡片的主题样式
@@ -5763,7 +5792,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     {font_size_css(10)};
                     padding: 0px 3px;
                     border-radius: 2px;
-                    background: rgba(255,255,255,0.05);
+                    background: {Colors.BRANCH_LABEL_BG};
+                    border: 1px solid {Colors.BRANCH_LABEL_BORDER};
                 }}
                 QLabel:hover {{
                     background: {Colors.HOVER_BG};

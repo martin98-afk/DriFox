@@ -1487,7 +1487,7 @@ class CodeWebViewer(QWebEngineView):
                 #content-placeholder::after {{
                     content: '';
                     display: block;
-                    height: 16px;
+                    height: 10px;
                 }}
 
                 /* 优化：紧凑的段落间距 */

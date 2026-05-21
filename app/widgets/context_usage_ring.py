@@ -39,16 +39,26 @@ class ContextUsageRing(QWidget):
         normal_tokens: int = 0,
         compacted_tokens: int = 0,
     ):
+
         self._percent = max(0, min(100, int(percent)))
         self._normal_tokens = normal_tokens
         self._compacted_tokens = compacted_tokens
 
+        # 从 Colors 获取主题色
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+        ring_normal = QColor(Colors.RING_NORMAL)
+        ring_warning = QColor(Colors.RING_WARNING)
+        ring_danger = QColor(Colors.RING_DANGER)
+        ring_compacted = QColor(Colors.RING_COMPACTED)
+
         if self._percent >= 90:
-            self._ring_color = QColor("#ff6b6b")
+            self._ring_color = ring_danger
         elif self._percent >= 70:
-            self._ring_color = QColor("#f6c453")
+            self._ring_color = ring_warning
         else:
-            self._ring_color = QColor("#5aa9ff")
+            self._ring_color = ring_normal
+        self._compacted_color = ring_compacted
 
         tooltip_lines = [
             "当前上下文占用",
