@@ -803,7 +803,11 @@ class OpenAIChatToolWindow(ToolWindow):
             worker = self.backend.get_current_worker()
             if worker:
                 try:
-                    stats_dict = worker.get_cache_stats()
+                    raw = worker.get_cache_stats()
+                    if hasattr(raw, 'to_dict'):
+                        stats_dict = raw.to_dict()
+                    elif isinstance(raw, dict):
+                        stats_dict = raw
                 except Exception:
                     pass
 
@@ -1009,7 +1013,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 连接滚动事件，触发虚拟滚动回收
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        scroll_bar.valueChanged.connect(lambda: self._virtual_scroll_timer.start())
+        scroll_bar.valueChanged.connect(self._on_chat_scrolled)
 
         layout.addWidget(self.chat_scroll_area, 1)
 
@@ -4148,6 +4152,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return False
         card_index = getattr(card, '_message_index', None)
         return card_index == expected_batch_index
+
+    def _on_chat_scrolled(self, value):
+        """聊天区域滚动时，触发虚拟滚动回收并通知所有 MessageCard 更新浮动头"""
+        self._virtual_scroll_timer.start()
+        for card in self.findChildren(MessageCard):
+            card._scroll_position_changed(value)
 
     def _on_scroll_changed(self, value):
         self._sync_node_preview_to_scroll()

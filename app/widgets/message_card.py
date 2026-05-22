@@ -3737,6 +3737,56 @@ class MessageCard(SimpleCardWidget):
             if layout:
                 layout.invalidate()
 
+
+    def _scroll_position_changed(self, scroll_y: int):
+        """由 QScrollArea 滚动事件触发，计算并注入视口偏移到 WebView JS
+
+        Args:
+            scroll_y: QScrollArea verticalScrollBar().value()
+        """
+        # 流式动画期间跳过，避免频繁注入
+        if self._is_height_animating:
+            return
+        if self.viewer is None:
+            return
+        # PlainTextViewer 没有 JS 环境，跳过
+        if not hasattr(self.viewer, 'page') or not callable(getattr(self.viewer, 'page', None)):
+            return
+        page = self.viewer.page()
+        if page is None:
+            return
+
+        # 计算该卡片顶部到视口顶部的偏移
+        parent = self.parentWidget()  # chat_container
+        if not parent:
+            return
+
+        # 获取该卡片在聊天容器中的位置
+        card_top = self.pos().y()
+        viewport_top = scroll_y - card_top
+
+        # 获取外部 QScrollArea 的视口高度
+        # 向上查找 chat_scroll_area
+        scroll_area = None
+        widget = self
+        for _ in range(5):
+            if hasattr(widget, 'chat_scroll_area'):
+                scroll_area = getattr(widget, 'chat_scroll_area')
+                break
+            parent_widget = widget.parent()
+            if parent_widget is None:
+                break
+            widget = parent_widget
+
+        if scroll_area and hasattr(scroll_area, 'viewport'):
+            viewport_height = scroll_area.viewport().height()
+        else:
+            viewport_height = 800  # fallback
+
+        # 注入 WebView JS
+        js = f"_setViewport({viewport_top}, {viewport_height})"
+        page.runJavaScript(js)
+
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
         if height == self._last_applied_viewer_height:
