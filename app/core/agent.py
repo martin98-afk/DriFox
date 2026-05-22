@@ -108,6 +108,8 @@ class PermissionResolver:
         "*": "allow",
         "read": "allow",
         "edit": "allow",
+        "write": "allow",
+        "multi_edit": "allow",
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
@@ -213,7 +215,6 @@ class PermissionResolver:
 
 class AgentManager:
     """Agent/Skill 管理器"""
-    DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Bash", "write", "edit"]
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):
         self.agents_dir = (

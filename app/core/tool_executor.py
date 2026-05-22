@@ -309,7 +309,8 @@ class ToolExecutor:
     REQUIRED_ARGS = {
         "read": ["path"],
         "write": ["path", "content"],
-        "edit": ["path", "operations"],
+        "edit": ["path", "oldString", "newString"],
+        "multi_edit": ["path", "edits"],
         "grep": ["pattern"],
         "glob": ["pattern"],
         "bash": ["command"],
@@ -327,7 +328,7 @@ class ToolExecutor:
         "git_diff": [],
         "get_diagnostics": ["path"],
         "summarize_changes": ["text"],
-        "edit_project_note": ["operations"],
+        "edit_project_note": ["oldString", "newString"],
         "read_project_note": [],
         "todowrite": ["todos"],
         "todoread": [],
@@ -460,7 +461,13 @@ class ToolExecutor:
             ),
             "edit": lambda: self._builtin_tools.edit_file(
                 path=args.get("path"),
-                operations=args.get("operations", []),
+                oldString=args.get("oldString", ""),
+                newString=args.get("newString", ""),
+                replaceAll=args.get("replaceAll", False),
+            ),
+            "multi_edit": lambda: self._builtin_tools.multi_edit(
+                path=args.get("path"),
+                edits=args.get("edits", []),
             ),
             "grep": lambda: self._builtin_tools.grep_files(
                 pattern=args.get("pattern"),
@@ -517,7 +524,8 @@ class ToolExecutor:
             ),
             "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
             "edit_project_note": lambda: self._builtin_tools.edit_project_note(
-                args.get("operations", [])),
+                oldString=args.get("oldString", ""),
+                newString=args.get("newString", "")),
             "read_project_note": lambda: self._builtin_tools.read_project_note(
                 args.get("offset", 1),
                 args.get("limit", 500)),

@@ -6,6 +6,7 @@ mode: subagent
 steps: 100
 permission:
   edit: deny
+  multi_edit: deny
   bash: ask
   write: deny
   get_diagnostics: allow
