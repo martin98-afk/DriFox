@@ -35,7 +35,7 @@ from qfluentwidgets import (
     setFont,
     FluentIcon,
     SingleDirectionScrollArea,
-    TransparentToolButton, StrongBodyLabel, InfoBar, InfoBarPosition, )
+    TransparentToolButton, InfoBar, InfoBarPosition, )
 
 from app.constants import (
     FREE_PROVIDERS,
@@ -53,7 +53,6 @@ from app.core import (
 )
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings
-from app.utils.utils import get_icon, get_font_family_css
 from app.utils.design_tokens import (
     Colors,
     font_size_css,
@@ -62,6 +61,7 @@ from app.utils.design_tokens import (
     scale_font_size,
     apply_font_size_to_widget,
 )
+from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.base_settings_card import (
     BaseSettingsCard,
@@ -1482,7 +1482,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """Hook 保存回调"""
         self._hook_edit_card.hide()
         if hasattr(self._settings_popup, 'hookListCard'):
-            from app.widgets.hook_setting_card import HookListSettingCard
             original = self._hook_edit_popup.get_original_data()
             if original:
                 # 编辑已有 hook
@@ -6288,8 +6287,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_auto_loop_start(self, config: 'AutoLoopConfig'):
         """开始 AutoLoop"""
-        from app.core.engines.auto_loop import AutoLoopConfig
-        from app.core.engines.auto_loop import AutoLoopConfig
         if self._is_auto_loop_running:
             return
 
