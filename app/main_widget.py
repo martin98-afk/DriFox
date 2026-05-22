@@ -1129,118 +1129,162 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
         layout.addWidget(self._question_floating_widget)
 
-        hlayout = QHBoxLayout()
-        hlayout.setContentsMargins(0, 0, 0, 0)
-        hlayout.setSpacing(4)
+        # ===== 底部输入区域（一体化圆弧卡片设计）=====
+        self._bottom_input_container = QWidget(self)
+        self._bottom_input_container.setStyleSheet("QWidget#bottomContainer { background: transparent; }")
+        self._bottom_input_container.setObjectName("bottomContainer")
+        bottom_layout = QVBoxLayout(self._bottom_input_container)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(0)
 
-        # 模型选择 + 配置按钮组 - 紧凑式设计
-        self._model_btn_container = QWidget(self)
-        self._model_btn_container.setFixedHeight(30)
-        self._model_btn_container.setStyleSheet(get_capsule_style())
-        model_layout = QHBoxLayout(self._model_btn_container)
-        model_layout.setContentsMargins(0, 0, 0, 0)
-        model_layout.setSpacing(0)
+        # ===== 一体化输入卡片（圆角大弧线包裹输入框+工具栏）=====
+        self._input_card = QWidget(self._bottom_input_container)
+        Colors.refresh()
+        self._input_card.setStyleSheet(f"""
+            QWidget {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {Colors.INPUT_BG_START},
+                    stop:1 {Colors.INPUT_BG_END});
+                border: 1px solid {Colors.INPUT_BORDER};
+                border-radius: 16px;
+            }}
+        """)
+        card_layout = QVBoxLayout(self._input_card)
+        card_layout.setContentsMargins(2, 2, 2, 2)
+        card_layout.setSpacing(0)
 
-        # 模型选择按钮（可点击弹出模型选择）
-        self.current_model_btn = QWidget(self._model_btn_container)
-        self.current_model_btn.setCursor(Qt.PointingHandCursor)
-        self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
-        self.current_model_btn.setMouseTracking(True)
-        self.current_model_btn.mousePressEvent = lambda e: self._show_model_selector_popup()
-        btn_layout = QHBoxLayout(self.current_model_btn)
-        btn_layout.setContentsMargins(8, 4, 0, 4)
-        btn_layout.setSpacing(4)
-        self._model_btn_icon = QLabel(self.current_model_btn)
-        self._model_btn_icon.setStyleSheet("""background: transparent; border: none;""")
-        self._model_btn_icon.setFixedSize(18, 18)
-        btn_layout.addWidget(self._model_btn_icon)
-        self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
-        self._model_btn_text.setStyleSheet(MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(13)))
-        btn_layout.addWidget(self._model_btn_text)
-        model_layout.addWidget(self.current_model_btn, 1)
-        # 配置按钮（点击弹出配置卡片）
-        self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
-        self.settings_btn.setFixedSize(26, 26)
-        self.settings_btn.setToolTip("模型参数配置")
-        self.settings_btn.clicked.connect(self._toggle_model_config_card)
-        model_layout.addWidget(self.settings_btn)
-
-        hlayout.addWidget(self._model_btn_container)
-
-        # 记下当前选中的服务商和模型，供弹窗使用
-        self._current_provider_name = ""
-        self._current_model_name = ""
-
-        # 智能体切换按钮组 - 金属质感+简约科技风
-        self._agent_switch_widget = self._create_agent_switch_buttons()
-        hlayout.addWidget(self._agent_switch_widget)
-
-        hlayout.addStretch(1)
-
-        # 工具栏右侧按钮组 - 胶囊包裹，无分隔线
-        self._toolbar_capsule = QWidget(self)
-        self._toolbar_capsule.setFixedHeight(30)
-        self._toolbar_capsule.setStyleSheet(get_capsule_style())
-        capsule_layout = QHBoxLayout(self._toolbar_capsule)
-        capsule_layout.setContentsMargins(4, 2, 4, 2)
-        capsule_layout.setSpacing(0)
-
-        # AutoLoop 按钮
-        self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
-        self.auto_loop_btn.setFixedSize(26, 26)
-        self.auto_loop_btn.setToolTip("AutoLoop 自动循环")
-        self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
-        capsule_layout.addWidget(self.auto_loop_btn)
-
-        # 分隔竖线
-        sep = QFrame(self._toolbar_capsule)
-        sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color: rgba(255,255,255,0.12); margin: 2px 0;")
-        sep.setFixedWidth(1)
-        capsule_layout.addWidget(sep)
-
-        # Diff 按钮 - 查看文件差异
-        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
-        self.diff_btn.setFixedSize(26, 26)
-        self.diff_btn.setToolTip("查看文件差异")
-        self.diff_btn.clicked.connect(self._open_diff_viewer)
-        capsule_layout.addWidget(self.diff_btn)
-
-        # 记忆按钮
-        self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
-        self.memory_btn.setFixedSize(26, 26)
-        self.memory_btn.setToolTip("长期记忆管理")
-        self.memory_btn.clicked.connect(self._show_soul_memory)
-        capsule_layout.addWidget(self.memory_btn)
-
-        # 历史按钮
-        self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
-        self.history_btn.setFixedSize(26, 26)
-        self.history_btn.setToolTip("历史会话")
-        self.history_btn.clicked.connect(self._toggle_history_card)
-        capsule_layout.addWidget(self.history_btn)
-
-        # 新建按钮
-        self.new_session_btn = TransparentToolButton(FluentIcon.ADD, self._toolbar_capsule)
-        self.new_session_btn.setFixedSize(26, 26)
-        self.new_session_btn.setToolTip("新建对话")
-        self.new_session_btn.clicked.connect(self._create_new_session)
-        capsule_layout.addWidget(self.new_session_btn)
-
-        hlayout.addWidget(self._toolbar_capsule)
-
-        layout.addLayout(hlayout)
-        # 输入框 - 在工具栏下方
-        self.input_area = SendableTextEdit(self)
-        self.input_area._agent_combo.hide()  # 隐藏输入框内部的下拉框，用工具栏的按钮组代替
-        self.input_area._initializing = False  # 初始化完成后启用高度调整
+        # 输入框（融入卡片，无边框）
+        self.input_area = SendableTextEdit(self._input_card)
+        self.input_area._agent_combo.hide()
+        self.input_area._initializing = False
+        self.input_area.setFixedHeight(52)
+        self.input_area.setPlaceholderText("给 DriFox 发送消息...")
         setFont(self.input_area, scale_font_size(15))
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
         self.input_area.clearRequested.connect(self._on_clear_shortcut)
         self.input_area.newSessionRequested.connect(self._create_new_session)
         self.input_area.agentChanged.connect(self._on_agent_changed)
-        layout.addWidget(self.input_area)
+        self.input_area.textChanged.connect(self._on_input_area_height_changed)
+        card_layout.addWidget(self.input_area)
+
+        # 分隔线
+        separator = QFrame(self._input_card)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background: rgba(255,255,255,0.06); border: none;")
+        card_layout.addWidget(separator)
+
+        # ===== 工具栏（卡片内部，分隔线下方）=====
+        toolbar_widget = QWidget(self._input_card)
+        toolbar_widget.setFixedHeight(34)
+        toolbar_widget.setStyleSheet("background: transparent; border: none;")
+        toolbar_layout = QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(8, 2, 8, 2)
+        toolbar_layout.setSpacing(8)
+
+        # 模型选择（无边框，只保留背景）
+        self._model_btn_container = QWidget(toolbar_widget)
+        self._model_btn_container.setFixedHeight(26)
+        self._model_btn_container.setStyleSheet(f"""
+            background: rgba(255,255,255,0.05);
+            border: none;
+            border-radius: 8px;
+        """)
+        model_layout = QHBoxLayout(self._model_btn_container)
+        model_layout.setContentsMargins(8, 0, 4, 0)
+        model_layout.setSpacing(0)
+        self.current_model_btn = QWidget(self._model_btn_container)
+        self.current_model_btn.setCursor(Qt.PointingHandCursor)
+        self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
+        self.current_model_btn.mousePressEvent = lambda e: self._show_model_selector_popup()
+        btn_layout = QHBoxLayout(self.current_model_btn)
+        btn_layout.setContentsMargins(2, 2, 0, 2)
+        btn_layout.setSpacing(4)
+        self._model_btn_icon = QLabel(self.current_model_btn)
+        self._model_btn_icon.setStyleSheet("background: transparent; border: none;")
+        self._model_btn_icon.setFixedSize(15, 15)
+        btn_layout.addWidget(self._model_btn_icon)
+        self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
+        self._model_btn_text.setStyleSheet(MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(11)))
+        btn_layout.addWidget(self._model_btn_text)
+        model_layout.addWidget(self.current_model_btn, 1)
+        self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
+        self.settings_btn.setFixedSize(22, 22)
+        self.settings_btn.setToolTip("模型参数配置")
+        self.settings_btn.clicked.connect(self._toggle_model_config_card)
+        model_layout.addWidget(self.settings_btn)
+        toolbar_layout.addWidget(self._model_btn_container)
+
+        self._current_provider_name = ""
+        self._current_model_name = ""
+
+        # 智能体切换（无边框）
+        self._agent_switch_widget = self._create_agent_switch_buttons()
+        self._agent_switch_widget.setFixedHeight(26)
+        toolbar_layout.addWidget(self._agent_switch_widget)
+
+        toolbar_layout.addStretch(1)
+
+        # 右侧功能按钮组（无边框，间距加宽）
+        self._toolbar_capsule = QWidget(toolbar_widget)
+        self._toolbar_capsule.setFixedHeight(26)
+        self._toolbar_capsule.setStyleSheet(f"""
+            background: rgba(255,255,255,0.05);
+            border: none;
+            border-radius: 8px;
+        """)
+        capsule_layout = QHBoxLayout(self._toolbar_capsule)
+        capsule_layout.setContentsMargins(6, 2, 6, 2)
+        capsule_layout.setSpacing(6)
+
+        btn_capsule_style = """
+            TransparentToolButton { background: transparent; border: none; }
+            TransparentToolButton:hover { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        """
+
+        self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
+        self.auto_loop_btn.setFixedSize(22, 22)
+        self.auto_loop_btn.setToolTip("AutoLoop")
+        self.auto_loop_btn.setStyleSheet(btn_capsule_style)
+        self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
+        capsule_layout.addWidget(self.auto_loop_btn)
+
+        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
+        self.diff_btn.setFixedSize(22, 22)
+        self.diff_btn.setStyleSheet(btn_capsule_style)
+        self.diff_btn.setToolTip("差异对比")
+        self.diff_btn.clicked.connect(self._open_diff_viewer)
+        capsule_layout.addWidget(self.diff_btn)
+
+        self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
+        self.memory_btn.setFixedSize(22, 22)
+        self.memory_btn.setStyleSheet(btn_capsule_style)
+        self.memory_btn.setToolTip("长期记忆")
+        self.memory_btn.clicked.connect(self._show_soul_memory)
+        capsule_layout.addWidget(self.memory_btn)
+
+        self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
+        self.history_btn.setFixedSize(22, 22)
+        self.history_btn.setStyleSheet(btn_capsule_style)
+        self.history_btn.setToolTip("历史会话")
+        self.history_btn.clicked.connect(self._toggle_history_card)
+        capsule_layout.addWidget(self.history_btn)
+
+        self.new_session_btn = TransparentToolButton(FluentIcon.ADD, self._toolbar_capsule)
+        self.new_session_btn.setFixedSize(22, 22)
+        self.new_session_btn.setStyleSheet(btn_capsule_style)
+        self.new_session_btn.setToolTip("新建对话")
+        self.new_session_btn.clicked.connect(self._create_new_session)
+        capsule_layout.addWidget(self.new_session_btn)
+
+        toolbar_layout.addWidget(self._toolbar_capsule)
+
+        card_layout.addWidget(toolbar_widget)
+
+        bottom_layout.addWidget(self._input_card)
+
+        layout.addWidget(self._bottom_input_container)
 
     def _show_model_selector_popup(self):
         """显示扁平式模型选择上拉框"""
@@ -1795,11 +1839,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """创建智能体切换按钮 - 单胶囊设计，中间用分隔线"""
         Colors.refresh()
         container = QWidget()
-        container.setFixedHeight(30)
+        container.setFixedHeight(26)
         container.setStyleSheet(f"""
-            background: {Colors.CAPSULE_BG};
-            border: 1px solid {Colors.CAPSULE_BORDER};
-            border-radius: 12px;
+            background: rgba(255,255,255,0.05);
+            border: none;
+            border-radius: 8px;
         """)
         layout = QHBoxLayout(container)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -2387,6 +2431,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_agent = agent_name
         self.backend.switch_agent(agent_name)
         self._update_agent_status(agent_name)
+
+    def _on_input_area_height_changed(self):
+        """根据输入框内容自动调整卡片高度"""
+        if not hasattr(self, '_input_card'):
+            return
+        if getattr(self, '_is_destroyed', False):
+            return
+        try:
+            input_height = self.input_area.height()
+            toolbar_height = 34
+            separator_height = 1
+            card_padding = 4  # 上下各2px
+            card_height = input_height + separator_height + toolbar_height + card_padding
+            if self._input_card.height() != card_height:
+                self._input_card.setFixedHeight(card_height)
+        except Exception:
+            pass
 
     def _show_agent_intro(self, agent_name: str):
         """显示智能体介绍卡片"""

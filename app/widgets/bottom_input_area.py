@@ -303,7 +303,7 @@ class SendableTextEdit(TextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._initializing = True  # 初始化标志，防止早期高度调整
+        self._initializing = True
         self._glow_effect = None
 
         self._setup_glow_effect()
@@ -312,9 +312,9 @@ class SendableTextEdit(TextEdit):
         self.setAcceptRichText(False)
         self.setLineWrapMode(TextEdit.WidgetWidth)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(72)
-        self.setMaximumHeight(200)
-        self.setFixedHeight(72)  # 初始化时设为最小高度
+        self.setMinimumHeight(52)
+        self.setMaximumHeight(180)
+        self.setFixedHeight(52)
 
         self._agent_combo = ComboBox(self)
         self._agent_combo.setFixedSize(75, 28)
@@ -484,19 +484,15 @@ class SendableTextEdit(TextEdit):
 
     def _adjust_height_to_content(self):
         """根据内容自动调整高度"""
-        # 初始化期间不调整高度
         if getattr(self, '_initializing', False):
             return
         
         doc = self.document()
-        # 计算文档高度 + padding
-        content_height = int(doc.size().height()) + 28  # 上下 padding
-        # 限制在最小和最大高度之间
-        new_height = max(72, min(200, content_height))
+        content_height = int(doc.size().height()) + 24
+        new_height = max(44, min(160, content_height))
 
         if self.height() != new_height:
             self.setFixedHeight(new_height)
-            # 触发父布局重新计算
             if self.parent():
                 self.parent().updateGeometry()
                 self.updateGeometry()
@@ -525,6 +521,13 @@ class SendableTextEdit(TextEdit):
             self.send_btn.setDisabled(False)  # 停止模式下按钮应该始终可用
             self._rebind_send_btn(self._on_stop_click)
 
+        # 同步到外部工具栏按钮（如果有的话）
+        self._sync_external_send_btn()
+
+    def _sync_external_send_btn(self):
+        """不再需要外部同步，发送按钮在输入框内部"""
+        pass
+
     def _on_send_click(self):
         """发送按钮点击事件"""
         if not self.toPlainText().strip():
@@ -539,15 +542,14 @@ class SendableTextEdit(TextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 定位发送按钮（智能体下拉已移到外部）
         self._position_send_button()
 
     def _position_send_button(self):
-        """只定位发送按钮"""
+        """定位发送按钮到输入框右下角"""
         if self.send_btn:
             btn_size = self.send_btn.size()
-            send_btn_x = self.width() - btn_size.width() - 12
-            send_btn_y = self.height() - btn_size.height() - 10
+            send_btn_x = self.width() - btn_size.width() - 10
+            send_btn_y = self.height() - btn_size.height() - 8
             self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -679,45 +681,35 @@ class SendableTextEdit(TextEdit):
                 pass
 
     def _setup_glow_effect(self):
-        """设置发光效果"""
-        try:
-            self._glow_effect = QGraphicsDropShadowEffect(self)
-            self._glow_effect.setBlurRadius(0)
-            self._glow_effect.setColor(QColor(201, 168, 92, 0))
-            self._glow_effect.setOffset(0, 0)
-            self.setGraphicsEffect(self._glow_effect)
-        except Exception:
-            self._glow_effect = None
+        """设置输入卡片发光效果 — 挂载到父卡片而非输入框自身"""
+        self._glow_effect = QGraphicsDropShadowEffect(self)
+        self._glow_effect.setBlurRadius(0)
+        self._glow_effect.setColor(QColor(201, 168, 92, 0))
+        self._glow_effect.setOffset(0, 0)
+        # 延迟挂载：等 input_area 加入 _input_card 后再设置
+        self._glow_target = None
 
     def _apply_input_style(self):
-        """应用输入框样式（动态从 Colors 读取）"""
+        """应用输入框样式 - 融入卡片，无边框"""
         Colors.refresh()
         self.setStyleSheet(f"""
             QTextEdit {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {Colors.INPUT_BG_START},
-                    stop:1 {Colors.INPUT_BG_END});
+                background: transparent;
                 color: {Colors.INPUT_TEXT};
-                border: 1px solid {Colors.INPUT_BORDER};
-                border-radius: 18px;
-                padding: 14px 50px 18px 16px;
+                border: none;
+                border-radius: 16px 16px 0 0;
+                padding: 12px 52px 12px 20px;
                 selection-background-color: rgba(201, 168, 92, 0.28);
-                {get_font_family_css()} {font_size_css(14)};
+                {get_font_family_css()} {font_size_css(15)};
             }}
             QTextEdit:focus {{
-                border: 2px solid {Colors.INPUT_FOCUS_BORDER};
-                border-radius: 18px;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {Colors.INPUT_FOCUS_BG_START},
-                    stop:1 {Colors.INPUT_FOCUS_BG_END});
+                border: none;
                 color: {Colors.INPUT_FOCUS_TEXT};
-                {font_size_css(14)};
             }}
             QTextEdit QScrollBar:vertical {{
-                background: rgba(255, 255, 255, 0.05);
-                width: 6px;
-                margin: 2px 0 2px 0;
-                border-radius: 3px;
+                background: transparent;
+                width: 0px;
+                margin: 0;
             }}
             QTextEdit QScrollBar::handle:vertical {{
                 background: rgba(255, 255, 255, 0.15);
@@ -780,36 +772,59 @@ class SendableTextEdit(TextEdit):
             self._agent_combo.setStyleSheet(self._build_combo_style())
         
     def _animate_glow(self, target_blur, target_alpha, duration=300):
-        """动画发光效果"""
+        """动画发光效果 - 作用到父级 _input_card 的边框"""
         if not self._glow_effect:
             return
-        
         try:
-            # 直接设置最终状态，避免复杂动画可能导致的问题
-            self._glow_effect.setBlurRadius(target_blur)
-            color = QColor(201, 168, 92, target_alpha)
-            self._glow_effect.setColor(color)
+            # 延迟挂载发光效果到父卡片
+            if self._glow_target is None:
+                card = self.parent()
+                while card and not hasattr(card, '_input_card'):
+                    card = card.parent()
+                if card and hasattr(card, '_input_card'):
+                    self._glow_target = card._input_card
+                    self._glow_target.setGraphicsEffect(self._glow_effect)
+            if self._glow_target:
+                self._glow_effect.setBlurRadius(target_blur)
+                color = QColor(201, 168, 92, target_alpha)
+                self._glow_effect.setColor(color)
+                # 焦点时高亮边框颜色
+                if target_alpha > 0:
+                    self._glow_target.setStyleSheet(f"""
+                        QWidget {{
+                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 {Colors.INPUT_FOCUS_BG_START},
+                                stop:1 {Colors.INPUT_FOCUS_BG_END});
+                            border: 2px solid {Colors.INPUT_FOCUS_BORDER};
+                            border-radius: 14px;
+                        }}
+                    """)
+                else:
+                    self._glow_target.setStyleSheet(f"""
+                        QWidget {{
+                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 {Colors.INPUT_BG_START},
+                                stop:1 {Colors.INPUT_BG_END});
+                            border: 1px solid {Colors.INPUT_BORDER};
+                            border-radius: 14px;
+                        }}
+                    """)
         except Exception:
-            # 发光效果失败时安全忽略
             pass
 
     def focusInEvent(self, event):
         try:
             super().focusInEvent(event)
-            # 激活发光效果
             self._animate_glow(25, 180, 250)
             QTimer.singleShot(0, self._ensure_cursor_visible)
         except Exception:
-            # 确保即使出错也不会崩溃
             pass
         
     def focusOutEvent(self, event):
         try:
             super().focusOutEvent(event)
-            # 取消发光效果
             self._animate_glow(0, 0, 200)
         except Exception:
-            # 确保即使出错也不会崩溃
             pass
 
     def _ensure_cursor_visible(self):
