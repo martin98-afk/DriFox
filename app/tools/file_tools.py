@@ -385,16 +385,16 @@ class FileTools:
             old_content = full_path.read_text(encoding="utf-8", errors="replace")
             content = old_content
             applied = 0
-            skipped = 0
+            skipped_indices = []
 
-            for edit in edits:
+            for idx, edit in enumerate(edits):
                 old = edit.get("oldString")
                 new = edit.get("newString")
                 if old in content:
                     content = content.replace(old, new, 1)
                     applied += 1
                 else:
-                    skipped += 1
+                    skipped_indices.append(idx + 1)  # 1-based
 
             if applied == 0:
                 return ToolResult(False, error="No edits were applied: none of the oldStrings were found.")
@@ -412,8 +412,9 @@ class FileTools:
             diff_str = "\n".join(diff_lines) if diff_lines else ""
 
             result = f"Applied {applied}/{len(edits)} edits to {path}."
-            if skipped:
-                result += f" ({skipped} skipped - oldString not found)"
+            if skipped_indices:
+                skipped_str = ", ".join(f"#{i}" for i in skipped_indices)
+                result += f" (skipped: {skipped_str} - no match, 1-based index)"
 
             return ToolResult(
                 True,
