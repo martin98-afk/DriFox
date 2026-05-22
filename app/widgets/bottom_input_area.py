@@ -796,7 +796,7 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_FOCUS_BG_START},
                                 stop:1 {Colors.INPUT_FOCUS_BG_END});
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
-                            border-radius: 14px;
+                            border-radius: 16px;
                         }}
                     """)
                 else:
@@ -806,7 +806,7 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_BG_START},
                                 stop:1 {Colors.INPUT_BG_END});
                             border: 1px solid {Colors.INPUT_BORDER};
-                            border-radius: 14px;
+                            border-radius: 16px;
                         }}
                     """)
         except Exception:

@@ -862,8 +862,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.setStyleSheet(get_window_style())
 
         session_bar_layout = QHBoxLayout()
-        session_bar_layout.setContentsMargins(0, 0, 0, 0)
-        session_bar_layout.setSpacing(4)
 
         # 项目选择标签（跟随主题色）
         self._project_label = QLabel(self._current_project, self)
@@ -2233,14 +2231,33 @@ class OpenAIChatToolWindow(ToolWindow):
             title_style = title_style.replace("font-size: 15px;", font_size_css(15))
             title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
             self.title_edit.setStyleSheet(title_style)
+        # 刷新输入卡片背景
+        if hasattr(self, '_input_card'):
+            self._input_card.setStyleSheet(f"""
+                QWidget {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {Colors.INPUT_BG_START},
+                        stop:1 {Colors.INPUT_BG_END});
+                    border: 1px solid {Colors.INPUT_BORDER};
+                    border-radius: 16px;
+                }}
+            """)
         if hasattr(self, "_model_btn_container"):
-            self._model_btn_container.setStyleSheet(get_capsule_style())
+            self._model_btn_container.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
+            """)
         if hasattr(self, "_model_btn_text"):
             btn_text_style = MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(13))
             btn_text_style = btn_text_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
             self._model_btn_text.setStyleSheet(btn_text_style)
         if hasattr(self, "_toolbar_capsule"):
-            self._toolbar_capsule.setStyleSheet(get_capsule_style())
+            self._toolbar_capsule.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
+            """)
         if hasattr(self, "input_area"):
             setFont(self.input_area, scale_font_size(15))
             if hasattr(self.input_area, "refresh_style"):
@@ -2268,9 +2285,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_agent_switch_widget"):
             Colors.refresh()
             self._agent_switch_widget.setStyleSheet(f"""
-                background: {Colors.CAPSULE_BG};
-                border: 1px solid {Colors.CAPSULE_BORDER};
-                border-radius: 12px;
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
             """)
         self._refresh_agent_button_styles()
         # 刷新设置卡片
