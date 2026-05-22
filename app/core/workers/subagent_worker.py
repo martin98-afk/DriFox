@@ -123,8 +123,8 @@ class SubAgentExecutor(QThread):
         log_callback = getattr(self, '_log_store_callback', None)
         if log_callback:
             try:
-                self._log_store_callback(self.task_id, self.agent_name, self.task_description, "running", None, None,
-                                         self._logs, self.get_summary())
+                log_callback(self.task_id, self.agent_name, self.task_description, "running", None, None,
+                             self._logs, self.get_summary())
             except Exception as e:
                 logger.warning(f"[SubAgentExecutor] 实时保存日志失败: {e}")
 

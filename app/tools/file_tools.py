@@ -120,7 +120,7 @@ def _format_hashline(lines: List[str], start_line: int = 1) -> str:
 
 
 # hashline 前缀正则：LINE+HASH|content 中的前缀部分
-_HL_PREFIX_RE = re.compile(r'^\s*(?:>>>|>>)?\s*(?:[*+]\s*)?\d+[a-z]{2}[:|]')
+_HL_PREFIX_RE = re.compile(r'^\s*(?:>>>|>>)?\s*(?:[*+]\s*)?\d*[a-z]{2}[:|]')
 _HL_TRUNCATION_NOTICE_RE = re.compile(
     r'^\[(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in '
     r'(?:file|\S+))\b.*\bUse :L?\d+'
