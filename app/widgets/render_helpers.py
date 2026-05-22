@@ -527,8 +527,8 @@ def render_tool_block(
     if diff:
         diff_body = _render_diff_preview(diff)
         diff_html = f"""
-        <div class="tool-diff-inline" style="margin-top: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; overflow: hidden;">
-            <div style="padding: 6px 12px; background: #161b22; border-bottom: 1px solid #30363d; color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
+        <div class="tool-diff-inline" style="margin-top: 8px; background: rgba(13,17,23,0.35); border: 1px solid rgba(48,54,61,0.5); border-radius: 6px; overflow: hidden;">
+            <div style="padding: 6px 12px; background: rgba(22,27,34,0.4); border-bottom: 1px solid rgba(48,54,61,0.4); color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
             <div style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px; line-height: 1.5; overflow-x: auto;">
                 {diff_body}
             </div>

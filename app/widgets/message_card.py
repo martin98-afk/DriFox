@@ -1770,8 +1770,14 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.5;
                     border-bottom: 1px solid transparent;
                 }}
-                .tool-diff-inline .diff-line:hover {{
-                    background: rgba(255,255,255,0.03);
+                .tool-diff-inline .diff-ctx:hover {{
+                    background: rgba(255,255,255,0.04);
+                }}
+                .tool-diff-inline .diff-add:hover {{
+                    background-color: rgba(63, 185, 80, 0.22);
+                }}
+                .tool-diff-inline .diff-del:hover {{
+                    background-color: rgba(248, 81, 73, 0.22);
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
@@ -1806,7 +1812,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow-x: auto;
                 }}
                 .tool-diff-inline .diff-add {{
-                    background-color: rgba(63, 185, 80, 0.06);
+                    background-color: rgba(63, 185, 80, 0.12);
                 }}
                 .tool-diff-inline .diff-add .line-sign {{
                     color: #3fb950;
@@ -1815,7 +1821,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #3fb950;
                 }}
                 .tool-diff-inline .diff-del {{
-                    background-color: rgba(248, 81, 73, 0.06);
+                    background-color: rgba(248, 81, 73, 0.12);
                 }}
                 .tool-diff-inline .diff-del .line-sign {{
                     color: #f85149;
