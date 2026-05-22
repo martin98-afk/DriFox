@@ -3773,7 +3773,7 @@ class MessageCard(SimpleCardWidget):
             if hasattr(widget, 'chat_scroll_area'):
                 scroll_area = getattr(widget, 'chat_scroll_area')
                 break
-            parent_widget = widget.parent()
+            parent_widget = widget.parent
             if parent_widget is None:
                 break
             widget = parent_widget
