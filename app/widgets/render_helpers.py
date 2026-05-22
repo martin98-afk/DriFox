@@ -534,14 +534,14 @@ def render_tool_block(
 
     # 生成参数预览（折叠时显示）
     args_preview = _format_args_preview(tool_args)
-    
-    # 生成统一表格：参数行 + 结果行（最后一行）
-    unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
-    
+
     # ── inline diff 预览区 ──
     diff_html = ""
+    diff_line_count = 0
     if diff:
         diff_body = _render_diff_preview(diff)
+        # 统计 diff 的行数（用于判断折叠阈值）
+        diff_line_count = sum(1 for l in diff.split('\n') if l.startswith('+') or l.startswith('-'))
         diff_html = f"""
         <div class="tool-diff-inline" style="margin-top: 8px; background: rgba(13,17,23,0.35); border: 1px solid rgba(48,54,61,0.5); border-radius: 6px; overflow: hidden;">
             <div style="padding: 6px 12px; background: rgba(22,27,34,0.4); border-bottom: 1px solid rgba(48,54,61,0.4); color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
@@ -550,12 +550,22 @@ def render_tool_block(
             </div>
         </div>"""
     
-    # 完整的展开内容（合并的表格 + diff）
-    expanded_content = f"""
-    <div class="tool-expanded-content">
-        {unified_table_html}
-        {diff_html}
-    </div>"""
+    # 有 diff 时：跳过参数表格，直接显示 diff；并根据 diff 大小决定折叠
+    DIFF_AUTO_COLLAPSE_LINES = 20
+    if diff and diff_line_count > 0:
+        collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES  # 小diff默认打开，大diff自动关闭
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {diff_html}
+        </div>"""
+    else:
+        # 无 diff 时：显示参数表格
+        unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {unified_table_html}
+            {diff_html}
+        </div>"""
 
     # 生成哈希 key
     block_seed = "|".join([
