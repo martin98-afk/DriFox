@@ -2266,6 +2266,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_popup.refresh_style()
         if hasattr(self, '_project_selector_popup') and self._project_selector_popup:
             self._project_selector_popup.refresh_style()
+        # 刷新记忆卡片主题
+        if hasattr(self, '_memory_card_popup') and hasattr(self._memory_card_popup, 'refresh_style'):
+            self._memory_card_popup.refresh_style()
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行

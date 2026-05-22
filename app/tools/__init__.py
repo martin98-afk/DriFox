@@ -670,8 +670,6 @@ TOOL_SCHEMAS = [
             },
         },
     },
-
-
     {
         "type": "function",
         "function": {
@@ -751,13 +749,13 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "文件路径"},
+                    "path": {"type": "string", "description": "文件路径"},
                     "language": {
                         "type": "string",
                         "description": "语言类型，可选: python, javascript, typescript, shellscript",
                     },
                 },
-                "required": ["file_path"],
+                "required": ["path"],
             },
         },
     },

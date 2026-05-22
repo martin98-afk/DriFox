@@ -325,7 +325,7 @@ class ToolExecutor:
         "git_status": [],
         "git_log": [],
         "git_diff": [],
-        "get_diagnostics": ["file_path"],
+        "get_diagnostics": ["path"],
         "summarize_changes": ["text"],
         "edit_project_note": ["operations"],
         "read_project_note": [],
@@ -510,7 +510,7 @@ class ToolExecutor:
                 args.get("files", [])
             ),
             "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(
-                args.get("file_path", ""), args.get("language")
+                args.get("path", ""), args.get("language")
             ),
             "summarize_changes": lambda: self._builtin_tools.summarize_changes(
                 args.get("text", ""), args.get("limit", 1200)

@@ -143,11 +143,12 @@ class EntryMemoryItemWidget(QWidget):
         self.edit_text = TextEdit(self.edit_widget)
         self.edit_text.setText(self._content)
         self.edit_text.setPlaceholderText("编辑条目记忆...")
+        Colors.refresh()
         self.edit_text.setStyleSheet(f"""
             QTextEdit {{
-                background-color: rgba(50, 50, 50, 200);
-                border: 1px solid rgba(14, 99, 156, 200);
-                color: #e0e0e0;
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER_ACCENT};
+                color: {Colors.TEXT_PRIMARY};
                 padding: 4px 6px;
                 border-radius: 3px;
                 {get_font_family_css()} {font_size_css(12)}
@@ -406,8 +407,9 @@ class KeyDocumentItemWidget(QWidget):
 
         # 显示绝对路径（自动中间省略，窗口缩小时优先压缩）
         self._path_label = BodyLabel("", self)
+        Colors.refresh()
         self._path_label.setStyleSheet(
-            f"color: #8c99ad; {get_font_family_css()} {font_size_css(10)}"
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
         )
         self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
         self._path_label.setWordWrap(False)
@@ -481,16 +483,17 @@ class DropZoneWidget(QWidget):
         self.setMinimumHeight(60)
         self.setMaximumHeight(80)
         self.setAcceptDrops(True)
+        Colors.refresh()
         self.setStyleSheet(f"""
             QWidget {{
-                background-color: rgba(37, 37, 38, 150);
-                border: 2px dashed rgba(62, 62, 66, 200);
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 2px dashed {Colors.BORDER};
                 border-radius: 6px;
                 {get_font_family_css()}
             }}
             QWidget:hover {{
-                border-color: rgba(14, 99, 156, 200);
-                background-color: rgba(50, 50, 55, 150);
+                border-color: {Colors.BORDER_ACCENT};
+                background-color: {Colors.CARD_BG.format(alpha=180)};
             }}
         """)
 
@@ -506,7 +509,7 @@ class DropZoneWidget(QWidget):
         label = BodyLabel("拖拽文件到此处 或 点击选择文件", self)
         label.setAlignment(Qt.AlignCenter)
         label.setStyleSheet(
-            f"color: #8c99ad; {get_font_family_css()} {font_size_css(11)}"
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
         )
         layout.addWidget(label)
 
@@ -607,31 +610,33 @@ class MemoryCardContent(QWidget):
         return None
 
     def _init_ui(self):
+        Colors.refresh()
         self.setStyleSheet(f"""
             QWidget {{
                 background: transparent;
             }}
             QListWidget {{
-                background-color: rgba(37, 37, 38, 180);
-                border: 1px solid rgba(62, 62, 66, 150);
-                color: #e0e0e0;
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
                 border-radius: 6px;
             }}
             QListWidget::item {{
                 padding: 0;
-                border-bottom: 1px solid rgba(62, 62, 66, 80);
+                border-bottom: 1px solid {Colors.BORDER};
             }}
             QListWidget::item:selected {{
-                background-color: rgba(9, 71, 113, 150);
+                background-color: {Colors.SELECTED_BG};
             }}
             BodyLabel {{
-                color: #e0e0e0;
+                color: {Colors.TEXT_PRIMARY};
                 {get_font_family_css()}
             }}
             QTextEdit, QPlainTextEdit {{
-                background-color: rgba(37, 37, 38, 180);
-                border: 1px solid rgba(62, 62, 66, 150);
-                color: #e0e0e0;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
+                border: 1px solid {Colors.INPUT_BORDER};
+                color: {Colors.INPUT_TEXT};
                 border-radius: 6px;
                 padding: 8px;
                 {get_font_family_css()} {font_size_css(13)}
@@ -677,15 +682,15 @@ class MemoryCardContent(QWidget):
         self.entries_list.setResizeMode(ListWidget.Adjust)
         self.entries_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: rgba(37, 37, 38, 180);
-                border: 1px solid rgba(62, 62, 66, 150);
-                color: #e0e0e0;
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
                 border-radius: 6px;
                 {get_font_family_css()}
             }}
             QListWidget::item {{
                 padding: 0;
-                border-bottom: 1px solid rgba(62, 62, 66, 80);
+                border-bottom: 1px solid {Colors.BORDER};
             }}
         """)
         layout.addWidget(self.entries_list, 1)
@@ -698,9 +703,9 @@ class MemoryCardContent(QWidget):
         self.entry_input.setPlaceholderText("添加新的条目记忆...")
         self.entry_input.setStyleSheet(f"""
             QLineEdit {{
-                background-color: rgba(37, 37, 38, 180);
-                border: 1px solid rgba(62, 62, 66, 150);
-                color: #e0e0e0;
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
                 padding: 4px 8px;
                 border-radius: 4px;
                 {get_font_family_css()} {font_size_css(12)}
@@ -710,14 +715,14 @@ class MemoryCardContent(QWidget):
         self.entry_add_btn.setFixedSize(50, 28)
         self.entry_add_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: #0e639c;
+                background-color: {Colors.INFO};
                 color: white;
                 border: none;
                 border-radius: 4px;
                 {font_size_css(12)}
             }}
             QPushButton:hover {{
-                background-color: #1177bb;
+                background-color: {Colors.BORDER_ACCENT};
             }}
         """)
         self.entry_add_btn.clicked.connect(self._add_entry)
@@ -741,8 +746,9 @@ class MemoryCardContent(QWidget):
 
         # 项目名标签
         self.project_name_label = BodyLabel(f"项目: {self._current_project}", self)
+        Colors.refresh()
         self.project_name_label.setStyleSheet(
-            f"color: #8c99ad; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
         )
         top_layout.addWidget(self.project_name_label)
 
@@ -752,7 +758,7 @@ class MemoryCardContent(QWidget):
         # 字数/token统计标签
         self.notes_stats_label = BodyLabel("0 字 / 0 token", self)
         self.notes_stats_label.setStyleSheet(
-            f"color: #8c99ad; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
         )
         top_layout.addWidget(self.notes_stats_label)
 
@@ -802,17 +808,18 @@ class MemoryCardContent(QWidget):
         self.docs_list = DocDropListWidget(self)  # 使用支持拖拽的列表
         self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.docs_list.setResizeMode(ListWidget.Adjust)
+        Colors.refresh()
         self.docs_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: rgba(37, 37, 38, 180);
-                border: 2px dashed rgba(62, 62, 66, 200);
-                color: #e0e0e0;
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 2px dashed {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
                 border-radius: 6px;
                 {get_font_family_css()}
             }}
             QListWidget::item {{
                 padding: 0;
-                border-bottom: 1px solid rgba(62, 62, 66, 80);
+                border-bottom: 1px solid {Colors.BORDER};
             }}
         """)
         self.docs_list.files_dropped.connect(self._on_files_dropped)
@@ -828,7 +835,7 @@ class MemoryCardContent(QWidget):
         self.add_doc_btn.setFixedWidth(110)
         self.add_doc_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: #0e639c;
+                background-color: {Colors.INFO};
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -837,7 +844,7 @@ class MemoryCardContent(QWidget):
                 padding: 0 8px;
             }}
             QPushButton:hover {{
-                background-color: #1177bb;
+                background-color: {Colors.BORDER_ACCENT};
             }}
         """)
         self.add_doc_btn.clicked.connect(self._on_add_file_clicked)
@@ -847,7 +854,7 @@ class MemoryCardContent(QWidget):
         self.add_folder_btn.setFixedWidth(120)
         self.add_folder_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: #2d882d;
+                background-color: {Colors.SUCCESS};
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -856,7 +863,7 @@ class MemoryCardContent(QWidget):
                 padding: 0 8px;
             }}
             QPushButton:hover {{
-                background-color: #3a9e3a;
+                background-color: {Colors.BORDER_ACCENT};
             }}
         """)
         self.add_folder_btn.clicked.connect(self._on_add_folder_clicked)
@@ -911,6 +918,143 @@ class MemoryCardContent(QWidget):
             self._load_key_documents()
 
     # ==================== 条目记忆操作 ====================
+
+    def refresh_style(self):
+        """响应主题切换：刷新所有样式"""
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: transparent;
+            }}
+            QListWidget {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
+                border-radius: 6px;
+            }}
+            QListWidget::item {{
+                padding: 0;
+                border-bottom: 1px solid {Colors.BORDER};
+            }}
+            QListWidget::item:selected {{
+                background-color: {Colors.SELECTED_BG};
+            }}
+            BodyLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()}
+            }}
+            QTextEdit, QPlainTextEdit {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
+                border-radius: 6px;
+                padding: 8px;
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+        """)
+        # 刷新子组件的独立样式
+        self._refresh_child_styles()
+
+    def _refresh_child_styles(self):
+        """刷新各个子组件独立样式（不继承自父级的）"""
+        Colors.refresh()
+        # 条目列表
+        if hasattr(self, 'entries_list'):
+            self.entries_list.setStyleSheet(f"""
+                QListWidget {{
+                    background-color: {Colors.CARD_BG.format(alpha=180)};
+                    border: 1px solid {Colors.BORDER};
+                    color: {Colors.TEXT_PRIMARY};
+                    border-radius: 6px;
+                    {get_font_family_css()}
+                }}
+                QListWidget::item {{
+                    padding: 0;
+                    border-bottom: 1px solid {Colors.BORDER};
+                }}
+            """)
+        # 条目输入框
+        if hasattr(self, 'entry_input'):
+            self.entry_input.setStyleSheet(f"""
+                QLineEdit {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
+                    border: 1px solid {Colors.INPUT_BORDER};
+                    color: {Colors.INPUT_TEXT};
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    {get_font_family_css()} {font_size_css(12)}
+                }}
+            """)
+        if hasattr(self, 'entry_add_btn'):
+            self.entry_add_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.INFO};
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    {font_size_css(12)}
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.BORDER_ACCENT};
+                }}
+            """)
+        # 项目笔记标签
+        if hasattr(self, 'project_name_label'):
+            self.project_name_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
+            )
+        if hasattr(self, 'notes_stats_label'):
+            self.notes_stats_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
+            )
+        # 文档列表
+        if hasattr(self, 'docs_list'):
+            self.docs_list.setStyleSheet(f"""
+                QListWidget {{
+                    background-color: {Colors.CARD_BG.format(alpha=180)};
+                    border: 2px dashed {Colors.BORDER};
+                    color: {Colors.TEXT_PRIMARY};
+                    border-radius: 6px;
+                    {get_font_family_css()}
+                }}
+                QListWidget::item {{
+                    padding: 0;
+                    border-bottom: 1px solid {Colors.BORDER};
+                }}
+            """)
+        # 添加文件按钮
+        if hasattr(self, 'add_doc_btn'):
+            self.add_doc_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.INFO};
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    {get_font_family_css()}
+                    font-size: {scale_font_size(12)}px;
+                    padding: 0 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.BORDER_ACCENT};
+                }}
+            """)
+        # 添加文件夹按钮
+        if hasattr(self, 'add_folder_btn'):
+            self.add_folder_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.SUCCESS};
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    {get_font_family_css()}
+                    font-size: {scale_font_size(12)}px;
+                    padding: 0 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.BORDER_ACCENT};
+                }}
+            """)
 
     def _load_entries(self):
         """加载条目记忆（使用 self._search_filter 过滤）"""
