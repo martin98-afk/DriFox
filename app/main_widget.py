@@ -797,10 +797,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
-        # 优先从 Backend 获取保存的缓存统计（Worker 可能已被清理）
         stats_dict = self.backend.get_last_cache_stats()
 
-        # 如果 Backend 没有缓存统计，尝试从 worker 获取
         if not stats_dict:
             worker = self.backend.get_current_worker()
             if worker:
@@ -813,22 +811,38 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         try:
-            # 计算节省的成本
             cost_savings = 0.0
             cost_with = stats_dict.get('cost_usd', 0.0)
             cost_without = stats_dict.get('cost_without_cache_usd', 0.0)
             if cost_without > 0:
                 cost_savings = cost_without - cost_with
+
             hit_rate = stats_dict.get('hit_rate', 0.0)
+            per_request_hit_rate = stats_dict.get('per_request_hit_rate', 0.0)
+            total_input_hit_rate = stats_dict.get('total_input_hit_rate', 0.0)
             read_tokens = stats_dict.get('cache_read_tokens', 0)
             write_tokens = stats_dict.get('cache_creation_5m_tokens', 0) + stats_dict.get('cache_creation_1h_tokens', 0)
-            is_estimated = stats_dict.get('is_estimated', False)
-            logger.info(f"[CacheStats] hit_rate={hit_rate}, read={read_tokens}, write={write_tokens}, estimated={is_estimated}")
+            cache_hits = stats_dict.get('cache_hits', 0)
+            cache_misses = stats_dict.get('cache_misses', 0)
+
+            logger.info(
+                f"[CacheStats] hit_rate={hit_rate:.1%}"
+                f" per_req={per_request_hit_rate:.1%}"
+                f" total_input={total_input_hit_rate:.1%}"
+                f" read={read_tokens} write={write_tokens}"
+                f" hits={cache_hits} misses={cache_misses}"
+                f" saved=${cost_savings:.4f}"
+            )
+
             ring.set_cache_stats(
                 hit_rate=hit_rate,
                 read_tokens=read_tokens,
                 write_tokens=write_tokens,
                 cost_savings=cost_savings,
+                per_request_hit_rate=per_request_hit_rate,
+                total_input_hit_rate=total_input_hit_rate,
+                cache_hits=cache_hits,
+                cache_misses=cache_misses,
             )
         except Exception as e:
             logger.debug(f"[CacheStats] Failed to refresh: {e}")

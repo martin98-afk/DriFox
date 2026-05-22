@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from PyQt5.QtCore import Qt, QTimer, QPoint
 import math
-from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics
+from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics, QFont
 from PyQt5.QtWidgets import QWidget, QApplication, QToolTip
 
 from app.utils.design_tokens import _get_global_font, scale_font_size, Colors
@@ -18,12 +18,16 @@ class ContextUsageRing(QWidget):
         self._compacted_tokens = 0
 
         # 缓存命中相关
-        self._cache_hit_rate = 0.0  # 缓存命中率 0.0-1.0
+        self._cache_hit_rate = 0.0  # token 命中率
+        self._cache_per_request_hit_rate = 0.0  # 按请求计数的命中率
+        self._cache_total_input_hit_rate = 0.0  # 总输入命中率
         self._cache_read_tokens = 0
         self._cache_write_tokens = 0
-        self._cache_cost_savings = 0.0  # 节省的成本（美元）
+        self._cache_cost_savings = 0.0
+        self._cache_hits = 0
+        self._cache_misses = 0
 
-        self.setFixedSize(18, 18)
+        self.setFixedSize(22, 22)
         self.setMouseTracking(True)
         self.setStyleSheet("""
             QToolTip {
@@ -51,7 +55,6 @@ class ContextUsageRing(QWidget):
         self._normal_tokens = normal_tokens
         self._compacted_tokens = compacted_tokens
 
-        # 从 Colors 获取主题色
         from app.utils.design_tokens import Colors
         Colors.refresh()
         ring_normal = QColor(Colors.RING_NORMAL)
@@ -68,10 +71,10 @@ class ContextUsageRing(QWidget):
         self._compacted_color = ring_compacted
 
         tooltip_lines = [
-            "当前上下文占用",
-            f"已用: {used_tokens} tokens",
-            f"预算: {budget_tokens} tokens",
-            f"占比: {self._percent}%",
+            "Context Usage",
+            f"Used: {used_tokens:,} tokens",
+            f"Budget: {budget_tokens:,} tokens",
+            f"Ratio: {self._percent}%",
         ]
 
         compaction = compaction or {}
@@ -83,86 +86,92 @@ class ContextUsageRing(QWidget):
                 tooltip_lines.extend(
                     [
                         "",
-                        f"普通上下文: {normal_tokens} tokens ({actual_ratio}%)",
-                        f"压缩上下文: {compacted_tokens} tokens ({compact_ratio}%)",
-                        f"压缩条数: {compaction.get('summarized_count', 0)}",
-                        f"保留条数: {compaction.get('kept_count', 0)}",
+                        f"Normal: {normal_tokens:,} ({actual_ratio}%)",
+                        f"Compacted: {compacted_tokens:,} ({compact_ratio}%)",
+                        f"Summarized: {compaction.get('summarized_count', 0)}",
+                        f"Kept: {compaction.get('kept_count', 0)}",
                     ]
                 )
             else:
                 tooltip_lines.extend(
                     [
                         "",
-                        f"压缩条数: {compaction.get('summarized_count', 0)}",
-                        f"保留条数: {compaction.get('kept_count', 0)}",
+                        f"Summarized: {compaction.get('summarized_count', 0)}",
+                        f"Kept: {compaction.get('kept_count', 0)}",
                     ]
                 )
             note = str(compaction.get("note", "") or "").strip()
             if note:
                 tooltip_lines.append(note)
         elif total_tokens > 0:
-            tooltip_lines.append(f"实际消息: {normal_tokens} tokens")
+            tooltip_lines.append(f"Messages: {normal_tokens:,} tokens")
+
+        # Append cache stats section (stored from last set_cache_stats call)
+        self._append_cache_tooltip(tooltip_lines)
 
         self._last_tooltip_lines = tooltip_lines
         self.update()
 
-    def set_cache_stats(self, hit_rate: float = 0.0, read_tokens: int = 0, write_tokens: int = 0, cost_savings: float = 0.0):
-        """
-        设置缓存统计信息
-
-        Args:
-            hit_rate: 缓存命中率 (0.0 - 1.0)
-            read_tokens: 从缓存读取的 token 数
-            write_tokens: 写入缓存的 token 数
-            cost_savings: 节省的成本（美元）
-        """
+    def set_cache_stats(
+        self,
+        hit_rate: float = 0.0,
+        read_tokens: int = 0,
+        write_tokens: int = 0,
+        cost_savings: float = 0.0,
+        per_request_hit_rate: float = 0.0,
+        total_input_hit_rate: float = 0.0,
+        cache_hits: int = 0,
+        cache_misses: int = 0,
+    ):
         self._cache_hit_rate = max(0.0, min(1.0, hit_rate))
+        self._cache_per_request_hit_rate = max(0.0, min(1.0, per_request_hit_rate))
+        self._cache_total_input_hit_rate = max(0.0, min(1.0, total_input_hit_rate))
         self._cache_read_tokens = read_tokens
         self._cache_write_tokens = write_tokens
         self._cache_cost_savings = cost_savings
+        self._cache_hits = cache_hits
+        self._cache_misses = cache_misses
 
-        # 更新 tooltip 内容
-        if hit_rate > 0:
-            cache_rate_display = f"{hit_rate * 100:.1f}%"
-            self._last_tooltip_lines.extend([
-                "",
-                "━━━━━━━━━━",
-                "📊 缓存统计",
-                f"命中率: {cache_rate_display}",
-            ])
-            if read_tokens > 0:
-                self._last_tooltip_lines.append(f"缓存读取: {read_tokens:,} tokens")
-            if write_tokens > 0:
-                self._last_tooltip_lines.append(f"缓存写入: {write_tokens:,} tokens")
-            if cost_savings > 0:
-                self._last_tooltip_lines.append(f"节省成本: ${cost_savings:.4f}")
-        elif read_tokens > 0 or write_tokens > 0:
-            self._last_tooltip_lines.extend([
-                "",
-                "━━━━━━━━━━",
-                "📊 缓存统计",
-                f"缓存读取: {read_tokens:,} tokens",
-                f"缓存写入: {write_tokens:,} tokens",
-            ])
+        self._last_tooltip_lines = [l for l in self._last_tooltip_lines if not l.startswith(("Cache", "  ", "━━", "Save"))]
+        self._append_cache_tooltip(self._last_tooltip_lines)
 
         self.update()
 
+    def _append_cache_tooltip(self, lines: list):
+        has_cache_data = (
+            self._cache_hit_rate > 0
+            or self._cache_read_tokens > 0
+            or self._cache_write_tokens > 0
+            or self._cache_hits > 0
+        )
+        if not has_cache_data:
+            return
+
+        lines.extend(["", "━" * 20, "Cache Stats"])
+        lines.append(f"Token Hit:  {self._cache_hit_rate:.1%}")
+        if self._cache_per_request_hit_rate > 0 and abs(self._cache_per_request_hit_rate - self._cache_hit_rate) > 0.01:
+            lines.append(f"Req Hit:    {self._cache_per_request_hit_rate:.1%}")
+        if self._cache_total_input_hit_rate > 0:
+            lines.append(f"Input Hit:  {self._cache_total_input_hit_rate:.1%}")
+        if self._cache_read_tokens > 0:
+            lines.append(f"Read:       {self._cache_read_tokens:,}")
+        if self._cache_write_tokens > 0:
+            lines.append(f"Write:      {self._cache_write_tokens:,}")
+        if self._cache_cost_savings > 0:
+            lines.append(f"Saved:      ${self._cache_cost_savings:.4f}")
+
     def _show_tooltip(self):
-        """使用 QToolTip 显示提示，位置调整为向左延伸"""
         lines = self._last_tooltip_lines
         if not lines:
             return
 
-        # 构建带格式的 tooltip 文本
         tooltip_text = "\n".join(lines)
 
-        # 获取全局字体信息
         try:
             Colors.refresh()
             font_family = _get_global_font()
             font_size = scale_font_size(12)
             font_style = f"font-family: '{font_family}'; font-size: {font_size}px;"
-            # 使用 Colors.CARD_BG（应用当前主题色）
             card_bg = Colors.CARD_BG.format(alpha=240)
             tooltip_css = f"""
                 QToolTip {{
@@ -187,10 +196,8 @@ class ContextUsageRing(QWidget):
                 }}
             """
 
-        # 设置 QToolTip 样式
         self.setStyleSheet(tooltip_css)
 
-        # 计算 tooltip 实际尺寸（根据文本内容）
         try:
             app = QApplication.instance()
             font = app.font()
@@ -198,31 +205,24 @@ class ContextUsageRing(QWidget):
             font.setPointSize(font_size)
             fm = QFontMetrics(font)
 
-            # 计算最宽行的宽度
             max_width = 0
             for line in lines:
                 line_width = fm.width(line)
                 if line_width > max_width:
                     max_width = line_width
 
-            # 加上左右 padding 和边框
             tooltip_width = max_width + 24 + 2
             tooltip_height = len(lines) * fm.height() + 16
         except Exception:
             tooltip_width = 220
             tooltip_height = len(lines) * 20 + 16
 
-        # 计算位置：显示在圆环左侧，右上角对齐
-        # QToolTip.showText 的 x 是 tooltip 左边缘
-        # tooltip 右侧间隔 2px 贴着圆环左边缘
         top_right_global = self.mapToGlobal(self.rect().topRight())
-        # 圆环左边缘 x
         top_left_global = self.mapToGlobal(self.rect().topLeft())
         ring_left_x = top_left_global.x()
         x = ring_left_x - tooltip_width + 30
         y = top_right_global.y()
 
-        # 边界检查
         screen = QApplication.desktop().screenGeometry(self)
         if x < screen.left():
             x = screen.left() + 5
@@ -234,7 +234,6 @@ class ContextUsageRing(QWidget):
         QToolTip.showText(QPoint(x, y), tooltip_text, self)
 
     def _is_dark_theme(self, app) -> bool:
-        """判断是否为深色主题"""
         try:
             palette = app.palette()
             bg = palette.window().color()
@@ -261,11 +260,10 @@ class ContextUsageRing(QWidget):
         start_angle = 90 * 16
 
         # 绘制背景轨道
-        track_pen = QPen(self._track_color, 2.2)
+        track_pen = QPen(self._track_color, 2.5)
         painter.setPen(track_pen)
         painter.drawArc(rect, 0, 360 * 16)
 
-        # 计算分段绘制
         total_tokens = self._normal_tokens + self._compacted_tokens
 
         if total_tokens > 0 and self._compacted_tokens > 0:
@@ -273,41 +271,59 @@ class ContextUsageRing(QWidget):
             compacted_ratio = self._compacted_tokens / total_tokens
 
             compacted_span = int(-360 * 16 * (compacted_ratio * self._percent / 100))
-            compacted_pen = QPen(self._compacted_color, 2.2)
+            compacted_pen = QPen(self._compacted_color, 2.5)
             painter.setPen(compacted_pen)
             painter.drawArc(rect, start_angle, compacted_span)
 
             normal_span = int(-360 * 16 * (normal_ratio * self._percent / 100))
-            ring_pen = QPen(self._ring_color, 2.2)
+            ring_pen = QPen(self._ring_color, 2.5)
             painter.setPen(ring_pen)
             painter.drawArc(rect, start_angle + compacted_span, normal_span)
         else:
             span_angle = int(-360 * 16 * (self._percent / 100.0))
-            ring_pen = QPen(self._ring_color, 2.2)
+            ring_pen = QPen(self._ring_color, 2.5)
             painter.setPen(ring_pen)
             painter.drawArc(rect, start_angle, span_angle)
 
-        # 如果有缓存命中率（>= 0.05 即 5%），绘制缓存指示点
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        radius = self.width() / 2 - 1
+
+        # 主指示点：Token 命中率 (3点方向，偏右)
         if self._cache_hit_rate >= 0.05:
-            # 在圆环顶部（12点方向）绘制一个小指示点
-            # 颜色根据命中率变化：绿色(高) -> 黄色(中) -> 红色(低)
-            indicator_angle = -90  # 12点方向
-            indicator_radians = math.radians(indicator_angle)
-            center_x = self.width() / 2
-            center_y = self.height() / 2
-            radius = self.width() / 2 - 1
-            dot_x = center_x + radius * math.cos(indicator_radians)
-            dot_y = center_y - radius * math.sin(indicator_radians)  # 注意减号因为 y 轴向下
+            angle_main = 0  # 3点方向
+            rad = math.radians(angle_main)
+            dx = center_x + radius * math.cos(rad)
+            dy = center_y - radius * math.sin(rad)
 
-            # 根据命中率选择颜色
             if self._cache_hit_rate >= 0.8:
-                dot_color = QColor("#4ade80")  # 绿色
+                dot_color = QColor("#4ade80")
             elif self._cache_hit_rate >= 0.5:
-                dot_color = QColor("#facc15")  # 黄色
+                dot_color = QColor("#facc15")
             else:
-                dot_color = QColor("#f87171")  # 红色
+                dot_color = QColor("#f87171")
 
-            # 绘制指示点
             painter.setPen(Qt.NoPen)
             painter.setBrush(dot_color)
-            painter.drawEllipse(int(dot_x) - 2, int(dot_y) - 2, 4, 4)
+            painter.drawEllipse(int(dx) - 2, int(dy) - 2, 4, 4)
+
+        # 副指示点：Per-Request 命中率 (9点方向，偏左，仅当与token命中率差异较大时显示)
+        if (
+            self._cache_per_request_hit_rate >= 0.05
+            and abs(self._cache_per_request_hit_rate - self._cache_hit_rate) > 0.05
+        ):
+            angle_secondary = 180  # 9点方向
+            rad = math.radians(angle_secondary)
+            sx = center_x + radius * math.cos(rad)
+            sy = center_y - radius * math.sin(rad)
+
+            if self._cache_per_request_hit_rate >= 0.8:
+                s_color = QColor("#4ade80")
+            elif self._cache_per_request_hit_rate >= 0.5:
+                s_color = QColor("#facc15")
+            else:
+                s_color = QColor("#f87171")
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(s_color)
+            painter.drawEllipse(int(sx) - 2, int(sy) - 2, 4, 4)

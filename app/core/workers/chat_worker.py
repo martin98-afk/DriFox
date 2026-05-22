@@ -117,6 +117,10 @@ class OpenAIChatWorker(QThread):
         self._current_session_messages = list(self.session_messages)
         self._last_usage = None  # 保存最后一次 API 调用的 token usage
         self._cache_tracker = CacheHitRateTracker()  # 缓存命中率追踪器
+        # 同步设置模型名称，用于模型感知的成本计算
+        model_name = str(self.llm_config.get("模型名称", "") or "")
+        if model_name:
+            self._cache_tracker.set_model(model_name)
         self._accumulated_tokens = 0  # 累加本轮所有 API 调用（含多轮工具迭代）的总 token 使用量
 
         # ========== 工具迭代中压缩支持 ==========
