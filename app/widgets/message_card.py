@@ -2410,10 +2410,7 @@ class CodeWebViewer(QWebEngineView):
 
         if not self._is_js_ready:
             return
-        if self._streaming and len(text) > 3:
-            self._schedule_render(immediate=True)
-        else:
-            self._schedule_render()
+        self._schedule_render(immediate=False)
 
     def _append_text_incremental(self, text: str):
         """增量追加纯文本到 DOM（流式模式），让用户立即看到文字，不等全量渲染。

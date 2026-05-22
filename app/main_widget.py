@@ -5856,6 +5856,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 workdir = self.backend.memory_manager.get_working_directory(self._current_project)
             # 最后从 tool_executor 获取
             if not workdir and self.backend and self.backend.tool_executor:
+                workdir = getattr(self.backend.tool_executor, '_workdir', None)
             # workdir 为空时直接跳过 git 检测，分支标签隐藏
             if not workdir:
                 pass  # branch 保持 None，分支标签隐藏

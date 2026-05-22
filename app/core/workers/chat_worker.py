@@ -1191,6 +1191,8 @@ class OpenAIChatWorker(QThread):
         reasoning_started_this_call = False  # 本轮 API 调用是否已发射 thinking_started
         _reasoning_batch = ""  # 批量积累 reasoning，减少信号频率
         _reasoning_batch_time = time.time()  # 上次发射时间
+        _content_batch = ""  # 批量积累 content，减少信号频率
+        _content_batch_time = time.time()  # 上次发射 content 的时间
         chunk_count = 0  # chunk 计数器，用于定期 yield 主线程
         for chunk in response:
             if self._is_cancelled:
@@ -1369,7 +1371,13 @@ class OpenAIChatWorker(QThread):
                 self._response_content_blocks = append_text_block(
                     self._response_content_blocks, content
                 )
-                self._emit_with_callback("content_received", self.content_received, content)
+                # 批量发送：积累到 15 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
+                _content_batch += content
+                now = time.time()
+                if len(_content_batch) >= 15 or (now - _content_batch_time) > 0.05:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
+                    _content_batch_time = now
 
             # 保存 token usage（如果这个 chunk 包含 usage 信息，OpenAI/Groq 流式最后一个chunk会带）
             usage = getattr(chunk, "usage", None)
@@ -1403,9 +1411,11 @@ class OpenAIChatWorker(QThread):
                 # 实时通知外部（如 AutoLoop）更新 token 计数
                 if self._token_update_callback and total > 0:
                     self._token_update_callback(total)
-        # 冲刷剩余的 reasoning batch
+        # 冲刷剩余的 reasoning batch 和 content batch
         if _reasoning_batch:
             self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
+        if _content_batch:
+            self._emit_with_callback("content_received", self.content_received, _content_batch)
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
         # 在所有 chunk 接收完成后，再次尝试解析仍处于等待状态的 tool_calls

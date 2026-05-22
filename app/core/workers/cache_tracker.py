@@ -382,15 +382,19 @@ class CacheHitRateTracker:
         """
         对可疑的缓存数据应用启发式修正。
         
-        策略：
-        - 首次请求：所有 cached_tokens 视为缓存写入（cache miss）
-        - 后续请求：上次请求的 prompt 前缀视为缓存命中
+        对于 cached_tokens == prompt_tokens 的 provider（如 DeepSeek），
+        无法区分缓存读取和写入，因此用会话内的请求序列来估算：
+        
+        - 首次请求：取 cached_tokens 的 30% 视为缓存读取
+          （系统提示词等稳定前缀占比估计值）
+        - 后续请求：上次请求的 prompt_tokens 视为本次的缓存读取
+          （上次全部内容已成为稳定前缀）
         """
         reported_read = stats.cache_read_tokens
         if self._last_prompt_tokens > 0:
             estimated_read = min(reported_read, self._last_prompt_tokens)
         else:
-            estimated_read = 0
+            estimated_read = int(reported_read * 0.3)
 
         stats.cache_read_tokens = estimated_read
         stats.cache_creation_5m_tokens = reported_read - estimated_read
