@@ -1984,9 +1984,92 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 0 10px 10px 0;
                     color: var(--text-secondary) !important;
                 }}
+
+                .collapsible-float {{
+                    position: sticky;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    z-index: 9999;
+                    padding: 8px 12px;
+                    background: linear-gradient(180deg, rgba(24,26,31,0.97) 0%, rgba(24,26,31,0.92) 100%);
+                    backdrop-filter: blur(8px);
+                    border-bottom: 1px solid rgba(102, 198, 255, 0.3);
+                    display: none;
+                    animation: collapsible-float-in 0.18s ease;
+                }}
+                .collapsible-float.visible {{ display: block; }}
+                @keyframes collapsible-float-in {{
+                    from {{ opacity: 0; transform: translateY(-4px); }}
+                    to   {{ opacity: 1; transform: translateY(0); }}
+                }}
+                .collapsible-float__inner {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 8px 12px;
+                    background: rgba(102, 198, 255, 0.08);
+                    border: 1px solid rgba(102, 198, 255, 0.25);
+                    border-radius: 8px;
+                    cursor: pointer;
+                    transition: background 0.15s, border-color 0.15s;
+                }}
+                .collapsible-float__inner:hover {{
+                    background: rgba(102, 198, 255, 0.15);
+                    border-color: rgba(102, 198, 255, 0.5);
+                }}
+                .collapsible-float__chevron {{
+                    flex: 0 0 auto;
+                    width: 8px; height: 8px;
+                    border-right: 1.5px solid currentColor;
+                    border-bottom: 1.5px solid currentColor;
+                    transform: rotate(45deg);
+                    transition: transform 0.18s ease;
+                    opacity: 0.85;
+                    color: var(--text-secondary);
+                }}
+                .collapsible-float__chevron.expanded {{ transform: rotate(225deg); }}
+                .collapsible-float__prefix {{ flex: 0 0 auto; font-size: 13px; }}
+                .collapsible-float__title {{
+                    color: var(--text-primary, #e0e0e0);
+                    font-weight: 500;
+                    font-size: 13px;
+                    flex: 0 0 auto;
+                    min-width: 60px;
+                }}
+                .collapsible-float__preview {{
+                    color: var(--text-secondary, #888);
+                    font-size: 11px;
+                    flex: 1 1 auto;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    min-width: 0;
+                }}
+                .collapsible-float__toggle {{
+                    flex: 0 0 auto;
+                    padding: 3px 10px;
+                    background: rgba(102, 198, 255, 0.25);
+                    color: #66c6ff;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: 500;
+                    cursor: pointer;
+                    flex-shrink: 0;
+                }}
+                .collapsible-float__toggle:hover {{ background: rgba(102, 198, 255, 0.35); }}
             </style>
         </head>
         <body>
+            <div id="collapsible-float" class="collapsible-float" style="display:none;">
+                <div class="collapsible-float__inner" data-target-key="">
+                    <span class="collapsible-float__chevron"></span>
+                    <span class="collapsible-float__prefix"></span>
+                    <span class="collapsible-float__title"></span>
+                    <span class="collapsible-float__preview"></span>
+                    <span class="collapsible-float__toggle">展开</span>
+                </div>
+            </div>
             <div id="content-placeholder"></div>
             <script>
                 const collapsibleState = new Map();
