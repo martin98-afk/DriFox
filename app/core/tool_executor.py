@@ -523,10 +523,9 @@ class ToolExecutor:
                 args.get("limit", 500)),
             "todoread": lambda: self._builtin_tools.todo_read(),
             "task_batch": lambda: (
-                # 【修复】处理 tasks 可能是 JSON 字符串的情况
                 lambda tasks_val: self._builtin_tools.task_execute_batch(
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
-                    args.get("share_context", True),
+                    args.get("share_context", False),
                 )
             )(args.get("tasks", [])),
             "task_status": lambda: self._builtin_tools.task_status(

@@ -140,25 +140,11 @@ def _strip_hashline_prefixes(line: str) -> str:
 
 def _clean_hashline_from_lines(lines: List[str]) -> List[str]:
     """
-    批量清理 lines 中的 hashline 标签。
-    全有或全无启发式：仅当每行都有前缀时才清理。
+    逐行清理 hashline 前缀。
+    对每行独立判断：仅当行首匹配前缀模式时剥离，不匹配的行原样保留。
+    同时过滤截断提示行（defense-in-depth）。
     """
     if not lines:
-        return lines
-
-    non_empty = sum(1 for l in lines if l.strip())
-    if non_empty == 0:
-        return lines
-
-    truncation_count = sum(1 for l in lines if _HL_TRUNCATION_NOTICE_RE.search(l))
-    hash_prefix_count = 0
-    for l in lines:
-        if truncation_count > 0 and _HL_TRUNCATION_NOTICE_RE.search(l):
-            continue
-        if _HL_PREFIX_RE.match(l):
-            hash_prefix_count += 1
-
-    if hash_prefix_count != non_empty:
         return lines
 
     result = []

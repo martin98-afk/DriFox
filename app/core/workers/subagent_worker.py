@@ -21,6 +21,7 @@ from app.core.provider_profile import get_provider_profile
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
+_TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 
 
@@ -191,8 +192,10 @@ class SubAgentExecutor(QThread):
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 获取历史消息失败: {e}")
 
+            # 过滤父智能体上下文中的 <tool> 标签，避免污染子智能体的工具调用格式
+            sanitized_context = _THINKING_PATTERN.sub("", self.parent_context)
             messages = [
-                {"role": "system", "content": system_prompt + history_section + F"## 父智能体说明\n{self.parent_context}\n\n"},
+                {"role": "system", "content": system_prompt + history_section + F"## 父智能体说明\n{sanitized_context}\n\n"},
                 {"role": "user", "content": f"## 子任务\n{self.task_description}"}
             ]
 

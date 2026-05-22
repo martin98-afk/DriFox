@@ -342,6 +342,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "question_asked": self._on_question_asked,
             "agent_switched": self._on_agent_switched,
             "retry_status": self._on_retry_status,
+            "retry_resolved": self._on_retry_resolved,
             "permission_approval_requested": self._on_permission_approval_requested,
             "compaction_updated": self._on_compaction_updated,  # 子智能体压缩完成回调
         }
@@ -4169,9 +4170,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_chat_scrolled(self, value):
         """聊天区域滚动时，触发虚拟滚动回收并通知所有 MessageCard 更新浮动头"""
-        self._virtual_scroll_timer.start()
-        for card in self.findChildren(MessageCard):
-            card._scroll_position_changed(value)
+        pass
+        # self._virtual_scroll_timer.start()
+        # for card in self.findChildren(MessageCard):
+        #     card._scroll_position_changed(value)
 
     def _on_scroll_changed(self, value):
         self._sync_node_preview_to_scroll()
@@ -5536,6 +5538,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_assistant_card.start_retry_anim(error_type, attempt, max_retries, wait_time)
             else:
                 self._current_assistant_card.update_retry_status(error_type, attempt, max_retries, wait_time)
+
+    def _on_retry_resolved(self):
+        """API 重试成功 - 恢复卡片彩虹边框"""
+        if getattr(self, '_is_destroyed', False):
+            return
+        if self._current_assistant_card:
+            self._current_assistant_card.stop_retry_anim()
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
