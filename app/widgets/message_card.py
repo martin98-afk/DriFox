@@ -1739,24 +1739,93 @@ class CodeWebViewer(QWebEngineView):
                     padding: 0;
                 }}
                 .tool-diff-inline .diff-line {{
-                    padding: 0 12px;
-                    white-space: pre-wrap;
+                    display: flex;
+                    align-items: stretch;
+                    min-height: 22px;
                     font-size: {tag_font_size}px;
+                    line-height: 1.5;
+                    border-bottom: 1px solid transparent;
+                }}
+                .tool-diff-inline .diff-line:hover {{
+                    background: rgba(255,255,255,0.03);
+                }}
+                .tool-diff-inline .line-num {{
+                    flex: none;
+                    min-width: 44px;
+                    padding: 0 8px;
+                    text-align: right;
+                    color: #484f58;
+                    user-select: none;
+                    font-size: {tag_font_size - 1}px;
+                    box-sizing: border-box;
+                }}
+                .tool-diff-inline .line-num-old {{
+                    border-right: 1px solid rgba(48,54,61,0.6);
+                }}
+                .tool-diff-inline .line-num-new {{
+                    border-right: 1px solid rgba(48,54,61,0.6);
+                }}
+                .tool-diff-inline .line-num-empty {{
+                    border-right: 1px solid rgba(48,54,61,0.6);
+                }}
+                .tool-diff-inline .line-sign {{
+                    flex: none;
+                    width: 18px;
+                    text-align: center;
+                    color: #484f58;
+                    user-select: none;
+                }}
+                .tool-diff-inline .line-code {{
+                    flex: 1;
+                    padding: 0 8px;
+                    white-space: pre-wrap;
+                    overflow-x: auto;
                 }}
                 .tool-diff-inline .diff-add {{
-                    background-color: rgba(63, 185, 80, 0.15);
+                    background-color: rgba(63, 185, 80, 0.12);
+                }}
+                .tool-diff-inline .diff-add .line-sign {{
+                    color: #3fb950;
+                }}
+                .tool-diff-inline .diff-add .line-code {{
                     color: #3fb950;
                 }}
                 .tool-diff-inline .diff-del {{
-                    background-color: rgba(248, 81, 73, 0.15);
+                    background-color: rgba(248, 81, 73, 0.12);
+                }}
+                .tool-diff-inline .diff-del .line-sign {{
                     color: #f85149;
                 }}
-                .tool-diff-inline .diff-hunk {{
-                    color: #58a6ff;
-                    padding: 0 12px;
+                .tool-diff-inline .diff-del .line-code {{
+                    color: #f85149;
                 }}
                 .tool-diff-inline .diff-ctx {{
                     color: #c9d1d9;
+                }}
+                .tool-diff-inline .diff-hunk {{
+                    color: #58a6ff;
+                }}
+                .tool-diff-inline .diff-hunk .line-code {{
+                    color: #58a6ff;
+                }}
+                .tool-diff-inline .diff-file-header .line-code {{
+                    color: #8b949e;
+                    font-weight: 600;
+                }}
+                .tool-diff-inline .diff-truncated {{
+                    justify-content: center;
+                    color: #484f58;
+                    padding: 4px 0;
+                }}
+                .tool-diff-inline .word-add {{
+                    background: rgba(63, 185, 80, 0.25);
+                    border-radius: 2px;
+                    border-bottom: 1px solid rgba(63, 185, 80, 0.5);
+                }}
+                .tool-diff-inline .word-del {{
+                    background: rgba(248, 81, 73, 0.25);
+                    border-radius: 2px;
+                    border-bottom: 1px solid rgba(248, 81, 73, 0.5);
                 }}
                 .tool-params-section,
                 .tool-result-section {{

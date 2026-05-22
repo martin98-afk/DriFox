@@ -368,6 +368,13 @@ class BuiltinTools(QObject):
         # ── 第二遍：应用操作（从底部向上） ──
         sorted_ops = sorted(resolved_ops, key=lambda x: (-x[1], -x[0]))
         new_lines = list(all_lines)
+
+        # ── 清理 operations 中 lines 字段的 hashline 标签 ──
+        from app.tools.file_tools import _clean_hashline_from_lines
+        for op in resolved_ops:
+            if "lines" in op and op["lines"]:
+                op["lines"] = _clean_hashline_from_lines(op["lines"])
+
         applied_count = 0
         
         for actual_line, actual_end_line, op in sorted_ops:

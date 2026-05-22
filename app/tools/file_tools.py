@@ -81,6 +81,31 @@ def _parse_anchor(anchor: str) -> tuple:
     return int(parts[0]), parts[1]
 
 
+_HASHLINE_PATTERN = re.compile(r'^(\d+):([0-9a-f]{2})\|')
+
+
+def _strip_hashline_prefix(line: str) -> str:
+    """
+    清理行首的 hashline 标签（如 '12:a3|content' → 'content'）。
+    
+    有些 LLM 会在返回的 lines 中携带 hashline 标签，这里自动清理。
+    """
+    stripped = _HASHLINE_PATTERN.sub('', line)
+    if stripped != line:
+        logger.debug(f"[Hashline] Stripped hashline prefix from line: {line[:50]}...")
+    return stripped
+
+
+def _clean_hashline_from_lines(lines: List[str]) -> List[str]:
+    """
+    批量清理 lines 中的 hashline 标签。
+    """
+    cleaned = [_strip_hashline_prefix(l) for l in lines]
+    if any(c != l for c, l in zip(cleaned, lines)):
+        logger.info(f"[Hashline] Cleaned hashline tags from {sum(1 for c, l in zip(cleaned, lines) if c != l)} line(s)")
+    return cleaned
+
+
 def _format_hashline(lines: List[str], start_line: int = 1) -> str:
     """
     将行列表格式化为 hashline 格式。
@@ -621,6 +646,11 @@ class FileTools:
 
             new_lines = list(all_lines)
             applied_count = 0
+
+            # ── 清理 operations 中 lines 字段的 hashline 标签 ──
+            for op in resolved_ops:
+                if "lines" in op and op["lines"]:
+                    op["lines"] = _clean_hashline_from_lines(op["lines"])
 
             for actual_line, actual_end_line, op in sorted_ops:
                 op_type = op.get("op", "replace")
