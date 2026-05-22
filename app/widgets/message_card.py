@@ -2073,6 +2073,9 @@ class CodeWebViewer(QWebEngineView):
             <div id="content-placeholder"></div>
             <script>
                 const collapsibleState = new Map();
+                // --- Floating Sticky Header ---
+                let _floatTargetBlock = null;
+                let _floatTargetKey = null;
 
                 function syncExpandedAttrs(block, expanded) {{
                     block.dataset.expanded = expanded ? 'true' : 'false';
@@ -2175,6 +2178,74 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
+
+                function _setViewport(offsetTop, viewportHeight) {{
+                    const body = document.body;
+                    const hasInternalScroll = body.scrollHeight > body.clientHeight;
+                    let visibleTop;
+                    if (hasInternalScroll) {{
+                        visibleTop = 0;
+                    }} else {{
+                        visibleTop = Math.max(0, offsetTop);
+                    }}
+                    const visibleBottom = visibleTop + viewportHeight;
+                    let targetBlock = null;
+                    let targetSummary = null;
+                    document.querySelectorAll('.cm-collapsible').forEach(block => {{
+                        const summary = block.querySelector('.cm-collapsible__summary');
+                        if (!summary) return;
+                        const rect = summary.getBoundingClientRect();
+                        const blockBottom = block.getBoundingClientRect().bottom;
+                        const headerAbove = rect.bottom < visibleTop;
+                        const bodyVisible = blockBottom > visibleTop;
+                        if (headerAbove && bodyVisible) {{
+                            if (!targetBlock || rect.bottom > targetSummary.getBoundingClientRect().bottom) {{
+                                targetBlock = block;
+                                targetSummary = summary;
+                            }}
+                        }}
+                    }});
+                    if (targetBlock) {{
+                        _showFloat(targetBlock, targetSummary);
+                    }} else {{
+                        _hideFloat();
+                    }}
+                }}
+
+                function _showFloat(block, summary) {{
+                    _floatTargetBlock = block;
+                    _floatTargetKey = block.dataset.blockKey;
+                    const isExpanded = block.dataset.expanded === 'true';
+                    const floatEl = document.getElementById('collapsible-float');
+                    const inner = floatEl.querySelector('.collapsible-float__inner');
+                    const titleEl = summary.querySelector('[style*="white-space: nowrap"]')
+                        || summary.querySelector('.tool-name');
+                    const previewEl = summary.querySelector('[style*="text-align: right"]')
+                        || summary.querySelector('.tool-preview');
+                    const iconEl = summary.querySelector('.tool-icon')
+                        || summary.querySelector('[style*="flex: 0 0 auto"]');
+                    const title = titleEl ? titleEl.textContent.trim() : '折叠块';
+                    const preview = previewEl ? previewEl.textContent.trim() : '';
+                    const icon = iconEl ? iconEl.textContent.trim() : '📋';
+                    const titleColor = summary.style.color || '#66c6ff';
+                    inner.dataset.targetKey = _floatTargetKey;
+                    inner.querySelector('.collapsible-float__chevron')
+                        .classList.toggle('expanded', isExpanded);
+                    inner.querySelector('.collapsible-float__prefix').textContent = icon;
+                    inner.querySelector('.collapsible-float__title').textContent = title;
+                    inner.querySelector('.collapsible-float__title').style.color = titleColor;
+                    inner.querySelector('.collapsible-float__preview').textContent = preview;
+                    inner.querySelector('.collapsible-float__toggle').textContent =
+                        isExpanded ? '▲ 折叠' : '▼ 展开';
+                    floatEl.classList.add('visible');
+                }}
+
+                function _hideFloat() {{
+                    const floatEl = document.getElementById('collapsible-float');
+                    floatEl.classList.remove('visible');
+                    _floatTargetBlock = null;
+                    _floatTargetKey = null;
+                }}
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
@@ -2213,6 +2284,10 @@ class CodeWebViewer(QWebEngineView):
                         
                         // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
+
+                        // 浮动头在下次 _setViewport 调用时重新计算
+                        _floatTargetBlock = null;
+                        _floatTargetKey = null;
                     }}
                 }}
                 function reportHeight() {{
@@ -2281,6 +2356,24 @@ class CodeWebViewer(QWebEngineView):
                         resizeTimeout = setTimeout(() => requestAnimationFrame(reportHeight), 50);
                     }}).observe(document.body);
                 }});
+
+                // 浮动头点击折叠/展开
+                document.getElementById('collapsible-float')
+                    .querySelector('.collapsible-float__inner')
+                    .addEventListener('click', function(e) {{
+                        if (!_floatTargetBlock) return;
+                        if (e.target.closest('.collapsible-float__toggle')) {{
+                            e.stopPropagation();
+                        }}
+                        const isExpanded = _floatTargetBlock.dataset.expanded === 'true';
+                        startCollapsibleAnimation();
+                        animateCollapsible(_floatTargetBlock, !isExpanded);
+                        const newExpanded = !isExpanded;
+                        this.querySelector('.collapsible-float__toggle').textContent =
+                            newExpanded ? '▲ 折叠' : '▼ 展开';
+                        this.querySelector('.collapsible-float__chevron')
+                            .classList.toggle('expanded', newExpanded);
+                    }});
                 window.addEventListener('load', () => {{
                     reportHeight();
                 }});
