@@ -14,14 +14,11 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
-from app.core.conversation.core import ConversationCore
-from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.adapters import UIConversationAdapter
-from app.core.message_content import (
-    consolidate_messages,
-)
-from app.core.token_estimator import count_messages_tokens
+from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
+from app.core.token_estimator import count_messages_tokens
 from app.tools import get_builtin_tools_schema
 
 
@@ -94,6 +91,7 @@ class UIEngine(BaseEngine):
         self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))
         self._adapter.error_occurred.connect(lambda e: self._on_error(e))
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
+        self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))
         self._adapter.stream_started.connect(lambda: self._emit("stream_started"))
 
         # 调用父类构造

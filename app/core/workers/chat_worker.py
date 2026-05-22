@@ -46,6 +46,7 @@ class OpenAIChatWorker(QThread):
     question_asked = pyqtSignal(str, str, list, bool)
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
+    retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
 
     def __init__(
@@ -1014,6 +1015,8 @@ class OpenAIChatWorker(QThread):
                 return None, None
             try:
                 response = client.chat.completions.create(**req_kwargs)
+                if attempt > 0:
+                    self.retry_resolved.emit()
                 break
             except BadRequestError as e:
                 error_str = str(e)

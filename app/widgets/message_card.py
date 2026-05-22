@@ -1165,13 +1165,6 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        # 2.5 增量文本缓冲定时器（防抖 _append_text_incremental 的高频 runJavaScript）
-        self._incremental_buffer = ""
-        self._incremental_timer = QTimer(self)
-        self._incremental_timer.setSingleShot(True)
-        self._incremental_timer.setInterval(30)
-        self._incremental_timer.timeout.connect(self._flush_incremental)
-
         self._page = ConsoleMonitorPage(self)
         self.setPage(self._page)
         # 透明背景
@@ -1850,9 +1843,10 @@ class CodeWebViewer(QWebEngineView):
                     font-weight: 600;
                 }}
                 .tool-diff-inline .diff-truncated {{
-                    justify-content: center;
                     color: #484f58;
-                    padding: 4px 0;
+                }}
+                .tool-diff-inline .diff-truncated .line-code {{
+                    text-align: center;
                 }}
                 .tool-diff-inline .word-add {{
                     background: rgba(63, 185, 80, 0.18);
@@ -1991,98 +1985,12 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 0 10px 10px 0;
                     color: var(--text-secondary) !important;
                 }}
-
-                .collapsible-float {{
-                    position: sticky;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    z-index: 9999;
-                    padding: 8px 12px;
-                    background: linear-gradient(180deg, rgba(24,26,31,0.97) 0%, rgba(24,26,31,0.92) 100%);
-                    backdrop-filter: blur(8px);
-                    border-bottom: 1px solid rgba(102, 198, 255, 0.3);
-                    display: none;
-                    animation: collapsible-float-in 0.18s ease;
-                }}
-                .collapsible-float.visible {{ display: block; }}
-                @keyframes collapsible-float-in {{
-                    from {{ opacity: 0; transform: translateY(-4px); }}
-                    to   {{ opacity: 1; transform: translateY(0); }}
-                }}
-                .collapsible-float__inner {{
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    padding: 8px 12px;
-                    background: rgba(102, 198, 255, 0.08);
-                    border: 1px solid rgba(102, 198, 255, 0.25);
-                    border-radius: 8px;
-                    cursor: pointer;
-                    transition: background 0.15s, border-color 0.15s;
-                }}
-                .collapsible-float__inner:hover {{
-                    background: rgba(102, 198, 255, 0.15);
-                    border-color: rgba(102, 198, 255, 0.5);
-                }}
-                .collapsible-float__chevron {{
-                    flex: 0 0 auto;
-                    width: 8px; height: 8px;
-                    border-right: 1.5px solid currentColor;
-                    border-bottom: 1.5px solid currentColor;
-                    transform: rotate(45deg);
-                    transition: transform 0.18s ease;
-                    opacity: 0.85;
-                    color: var(--text-secondary);
-                }}
-                .collapsible-float__chevron.expanded {{ transform: rotate(225deg); }}
-                .collapsible-float__prefix {{ flex: 0 0 auto; font-size: 13px; }}
-                .collapsible-float__title {{
-                    color: var(--text-primary, #e0e0e0);
-                    font-weight: 500;
-                    font-size: 13px;
-                    flex: 0 0 auto;
-                    min-width: 60px;
-                }}
-                .collapsible-float__preview {{
-                    color: var(--text-secondary, #888);
-                    font-size: 11px;
-                    flex: 1 1 auto;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                    min-width: 0;
-                }}
-                .collapsible-float__toggle {{
-                    flex: 0 0 auto;
-                    padding: 3px 10px;
-                    background: rgba(102, 198, 255, 0.25);
-                    color: #66c6ff;
-                    border-radius: 4px;
-                    font-size: 11px;
-                    font-weight: 500;
-                    cursor: pointer;
-                    flex-shrink: 0;
-                }}
-                .collapsible-float__toggle:hover {{ background: rgba(102, 198, 255, 0.35); }}
             </style>
         </head>
         <body>
-            <div id="collapsible-float" class="collapsible-float" style="display:none;">
-                <div class="collapsible-float__inner" data-target-key="">
-                    <span class="collapsible-float__chevron"></span>
-                    <span class="collapsible-float__prefix"></span>
-                    <span class="collapsible-float__title"></span>
-                    <span class="collapsible-float__preview"></span>
-                    <span class="collapsible-float__toggle">展开</span>
-                </div>
-            </div>
             <div id="content-placeholder"></div>
             <script>
                 const collapsibleState = new Map();
-                // --- Floating Sticky Header ---
-                let _floatTargetBlock = null;
-                let _floatTargetKey = null;
 
                 function syncExpandedAttrs(block, expanded) {{
                     block.dataset.expanded = expanded ? 'true' : 'false';
@@ -2185,74 +2093,6 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
-
-                function _setViewport(offsetTop, viewportHeight) {{
-                    const body = document.body;
-                    const hasInternalScroll = body.scrollHeight > body.clientHeight;
-                    let visibleTop;
-                    if (hasInternalScroll) {{
-                        visibleTop = 0;
-                    }} else {{
-                        visibleTop = Math.max(0, offsetTop);
-                    }}
-                    const visibleBottom = visibleTop + viewportHeight;
-                    let targetBlock = null;
-                    let targetSummary = null;
-                    document.querySelectorAll('.cm-collapsible').forEach(block => {{
-                        const summary = block.querySelector('.cm-collapsible__summary');
-                        if (!summary) return;
-                        const rect = summary.getBoundingClientRect();
-                        const blockBottom = block.getBoundingClientRect().bottom;
-                        const headerAbove = rect.bottom < visibleTop;
-                        const bodyVisible = blockBottom > visibleTop;
-                        if (headerAbove && bodyVisible) {{
-                            if (!targetBlock || rect.bottom > targetSummary.getBoundingClientRect().bottom) {{
-                                targetBlock = block;
-                                targetSummary = summary;
-                            }}
-                        }}
-                    }});
-                    if (targetBlock) {{
-                        _showFloat(targetBlock, targetSummary);
-                    }} else {{
-                        _hideFloat();
-                    }}
-                }}
-
-                function _showFloat(block, summary) {{
-                    _floatTargetBlock = block;
-                    _floatTargetKey = block.dataset.blockKey;
-                    const isExpanded = block.dataset.expanded === 'true';
-                    const floatEl = document.getElementById('collapsible-float');
-                    const inner = floatEl.querySelector('.collapsible-float__inner');
-                    const titleEl = summary.querySelector('[style*="white-space: nowrap"]')
-                        || summary.querySelector('.tool-name');
-                    const previewEl = summary.querySelector('[style*="text-align: right"]')
-                        || summary.querySelector('.tool-preview');
-                    const iconEl = summary.querySelector('.tool-icon')
-                        || summary.querySelector('[style*="flex: 0 0 auto"]');
-                    const title = titleEl ? titleEl.textContent.trim() : '折叠块';
-                    const preview = previewEl ? previewEl.textContent.trim() : '';
-                    const icon = iconEl ? iconEl.textContent.trim() : '📋';
-                    const titleColor = summary.style.color || '#66c6ff';
-                    inner.dataset.targetKey = _floatTargetKey;
-                    inner.querySelector('.collapsible-float__chevron')
-                        .classList.toggle('expanded', isExpanded);
-                    inner.querySelector('.collapsible-float__prefix').textContent = icon;
-                    inner.querySelector('.collapsible-float__title').textContent = title;
-                    inner.querySelector('.collapsible-float__title').style.color = titleColor;
-                    inner.querySelector('.collapsible-float__preview').textContent = preview;
-                    inner.querySelector('.collapsible-float__toggle').textContent =
-                        isExpanded ? '▲ 折叠' : '▼ 展开';
-                    floatEl.classList.add('visible');
-                }}
-
-                function _hideFloat() {{
-                    const floatEl = document.getElementById('collapsible-float');
-                    floatEl.classList.remove('visible');
-                    _floatTargetBlock = null;
-                    _floatTargetKey = null;
-                }}
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
@@ -2291,10 +2131,6 @@ class CodeWebViewer(QWebEngineView):
                         
                         // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
-
-                        // 浮动头在下次 _setViewport 调用时重新计算
-                        _floatTargetBlock = null;
-                        _floatTargetKey = null;
                     }}
                 }}
                 function reportHeight() {{
@@ -2363,24 +2199,6 @@ class CodeWebViewer(QWebEngineView):
                         resizeTimeout = setTimeout(() => requestAnimationFrame(reportHeight), 50);
                     }}).observe(document.body);
                 }});
-
-                // 浮动头点击折叠/展开
-                document.getElementById('collapsible-float')
-                    .querySelector('.collapsible-float__inner')
-                    .addEventListener('click', function(e) {{
-                        if (!_floatTargetBlock) return;
-                        if (e.target.closest('.collapsible-float__toggle')) {{
-                            e.stopPropagation();
-                        }}
-                        const isExpanded = _floatTargetBlock.dataset.expanded === 'true';
-                        startCollapsibleAnimation();
-                        animateCollapsible(_floatTargetBlock, !isExpanded);
-                        const newExpanded = !isExpanded;
-                        this.querySelector('.collapsible-float__toggle').textContent =
-                            newExpanded ? '▲ 折叠' : '▼ 展开';
-                        this.querySelector('.collapsible-float__chevron')
-                            .classList.toggle('expanded', newExpanded);
-                    }});
                 window.addEventListener('load', () => {{
                     reportHeight();
                 }});
@@ -2417,30 +2235,22 @@ class CodeWebViewer(QWebEngineView):
 
         if not self._is_js_ready:
             return
-        self._schedule_render(immediate=False)
+        if self._streaming and len(text) > 3:
+            self._schedule_render(immediate=True)
+        else:
+            self._schedule_render()
 
     def _append_text_incremental(self, text: str):
         """增量追加纯文本到 DOM（流式模式），让用户立即看到文字，不等全量渲染。
 
         在全量渲染（updateContent）到达前先推送纯文本内容，
         避免渲染延迟导致的"卡高先涨、文字后显"问题。
-
-        使用缓冲区 + 定时器防抖，避免高频小 chunk 过度调用 runJavaScript。
         """
-        self._incremental_buffer += text
-        if len(self._incremental_buffer) >= 20:
-            self._incremental_timer.stop()
-            self._flush_incremental()
-        elif not self._incremental_timer.isActive():
-            self._incremental_timer.start()
-
-    def _flush_incremental(self):
-        """冲刷增量文本缓冲区到 DOM"""
-        text = self._incremental_buffer
-        self._incremental_buffer = ""
-        if not text or not self._is_js_ready or not self.page():
+        if not self._is_js_ready or not self.page():
             return
         try:
+            # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
+            # （防止增量显示标签，全量渲染会正确处理）
             text_clean = text.replace("<think>", "").replace("</think>", "")
             if not text_clean:
                 return
@@ -2453,6 +2263,7 @@ class CodeWebViewer(QWebEngineView):
                 if (last && last.tagName === 'P') {{
                     last.textContent += {json.dumps(escaped)};
                 }} else if (last && last.classList.contains('think-block')) {{
+                    // 最后是思考块：追加到思考块之后的新段落
                     var p = document.createElement('p');
                     p.textContent = {json.dumps(escaped)};
                     c.appendChild(p);
@@ -2461,6 +2272,7 @@ class CodeWebViewer(QWebEngineView):
                     p.textContent = {json.dumps(escaped)};
                     c.appendChild(p);
                 }}
+                // 流式增量追加时，让 body 内部滚动到最底部
                 document.body.scrollTop = document.body.scrollHeight;
             }})();
             """
@@ -2598,7 +2410,6 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
-        self._flush_incremental()
         self._schedule_render(immediate=True)
 
     def get_plain_text(self) -> str:
@@ -2637,15 +2448,12 @@ class CodeWebViewer(QWebEngineView):
         清理 CodeWebViewer 持有的资源，防止内存泄漏。
         应该在删除 viewer 前调用，或者在 deleteLater 中自动调用。
         """
-        # 冲刷增量文本缓冲区
-        self._flush_incremental()
         # 停止所有定时器
         timers_to_stop = [
             self._render_timer,
             self._resize_timer,
             self._resize_debounce_timer,
             self._resize_unlock_timer,
-            self._incremental_timer,
         ]
         for timer in timers_to_stop:
             try:
@@ -3753,56 +3561,6 @@ class MessageCard(SimpleCardWidget):
             layout = self.layout()
             if layout:
                 layout.invalidate()
-
-
-    def _scroll_position_changed(self, scroll_y: int):
-        """由 QScrollArea 滚动事件触发，计算并注入视口偏移到 WebView JS
-
-        Args:
-            scroll_y: QScrollArea verticalScrollBar().value()
-        """
-        # 流式动画期间跳过，避免频繁注入
-        if self._is_height_animating:
-            return
-        if self.viewer is None:
-            return
-        # PlainTextViewer 没有 JS 环境，跳过
-        if not hasattr(self.viewer, 'page') or not callable(getattr(self.viewer, 'page', None)):
-            return
-        page = self.viewer.page()
-        if page is None:
-            return
-
-        # 计算该卡片顶部到视口顶部的偏移
-        parent = self.parentWidget()  # chat_container
-        if not parent:
-            return
-
-        # 获取该卡片在聊天容器中的位置
-        card_top = self.pos().y()
-        viewport_top = scroll_y - card_top
-
-        # 获取外部 QScrollArea 的视口高度
-        # 向上查找 chat_scroll_area
-        scroll_area = None
-        widget = self
-        for _ in range(5):
-            if hasattr(widget, 'chat_scroll_area'):
-                scroll_area = getattr(widget, 'chat_scroll_area')
-                break
-            parent_widget = widget.parent
-            if parent_widget is None:
-                break
-            widget = parent_widget
-
-        if scroll_area and hasattr(scroll_area, 'viewport'):
-            viewport_height = scroll_area.viewport().height()
-        else:
-            viewport_height = 800  # fallback
-
-        # 注入 WebView JS
-        js = f"_setViewport({viewport_top}, {viewport_height})"
-        page.runJavaScript(js)
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))

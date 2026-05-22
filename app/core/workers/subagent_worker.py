@@ -63,6 +63,8 @@ class SubAgentExecutor(QThread):
         # 日志存储: [{"type": "progress"|"thinking"|"ai_response"|"tool_call"|"tool_result"|"finish", "content": str, "timestamp": float}]
         self._logs: List[Dict] = []
         self._tool_call_count = 0
+        self._log_store_callback = None  # 日志存储回调
+        self._get_history_messages = None  # 获取主智能体历史消息的回调
 
     @property
     def start_time(self) -> Optional[float]:
@@ -83,8 +85,6 @@ class SubAgentExecutor(QThread):
     def execution_error(self) -> Optional[str]:
         """获取执行错误（供 SubAgentManager 使用）"""
         return self._execution_error
-        self._log_store_callback = None  # 日志存储回调
-        self._get_history_messages = None  # 获取主智能体历史消息的回调
 
     def set_log_store_callback(self, callback):
         """设置日志存储回调"""
@@ -161,7 +161,7 @@ class SubAgentExecutor(QThread):
 
             # 【新增】如果 agent 配置了 inherit_history，获取主智能体历史消息
             history_section = ""
-            if agent.inherit_history and self._get_history_messages:
+            if agent.inherit_history and getattr(self, '_get_history_messages', None):
                 try:
                     history_messages = self._get_history_messages() or []
                     if history_messages:
