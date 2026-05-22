@@ -7,12 +7,12 @@ import os
 import subprocess
 import sys
 import time
-import sip
-import orjson as json
-
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+import orjson as json
+import sip
 from PyQt5.QtCore import (
     QTimer,
     pyqtSignal,
@@ -56,7 +56,6 @@ from app.utils.config import Settings
 from app.utils.design_tokens import (
     Colors,
     font_size_css,
-    get_capsule_style,
     get_window_style,
     scale_font_size,
     apply_font_size_to_widget,
@@ -860,7 +859,27 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.setContentsMargins(1, 1, 4, 1)
         layout.setSpacing(1)
 
-        self.setStyleSheet(get_window_style())
+        # 设置窗口背景渐变（需要 setAutoFillBackground + palette）
+        from app.utils.theme_manager import theme_manager
+        window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
+        gradient_start = window.get('gradient_start', 'rgba(10, 14, 22, 255)')
+        gradient_end = window.get('gradient_end', 'rgba(15, 20, 30, 255)')
+        self.setStyleSheet(f"""
+            OpenAIChatToolWindow {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {gradient_start},
+                    stop:1 {gradient_end});
+            }}
+        """)
+        self.setAutoFillBackground(True)
+        p = self.palette()
+        # 设置窗口背景色（用作 CSS 渐变的 fallback）
+        import re
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', gradient_start)
+        if m:
+            from PyQt5.QtGui import QColor
+            p.setColor(self.backgroundRole(), QColor(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        self.setPalette(p)
 
         session_bar_layout = QHBoxLayout()
 
@@ -937,6 +956,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session_bar_layout.addStretch()
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
+
+        # 时间线节点
+        self.node_preview = ConversationNodePreview(self)
+        self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
+        layout.addWidget(self.node_preview)
 
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
@@ -1114,19 +1138,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_loop_running_card.setVisible(False)
         layout.addWidget(self._auto_loop_running_card)
 
-        self.node_preview = ConversationNodePreview(self)
-        self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
-        layout.addWidget(self.node_preview)
-
-        self.chat_scroll_area.verticalScrollBar().valueChanged.connect(
-            self._on_scroll_changed
-        )
-
         self._question_floating_widget = QuestionFloatingWidget(self)
         self._question_floating_widget.setVisible(False)
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
         layout.addWidget(self._question_floating_widget)
+
+        self.chat_scroll_area.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_changed
+        )
 
         # ===== 底部输入区域（一体化圆弧卡片设计）=====
         self._bottom_input_container = QWidget(self)
@@ -2224,7 +2244,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
-        self.setStyleSheet(get_window_style())
+        from app.utils.theme_manager import theme_manager
+        window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
+        gradient_start = window.get('gradient_start', 'rgba(10, 14, 22, 255)')
+        gradient_end = window.get('gradient_end', 'rgba(15, 20, 30, 255)')
+        self.setStyleSheet(f"""
+            OpenAIChatToolWindow {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {gradient_start},
+                    stop:1 {gradient_end});
+            }}
+        """)
+        self.setAutoFillBackground(True)
+        import re
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', gradient_start)
+        if m:
+            from PyQt5.QtGui import QColor
+            p = self.palette()
+            p.setColor(self.backgroundRole(), QColor(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+            self.setPalette(p)
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):

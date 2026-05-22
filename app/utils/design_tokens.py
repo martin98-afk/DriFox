@@ -261,6 +261,9 @@ class Colors:
     BRANCH_LABEL_BG = "rgba(102, 198, 255, 0.15)"
     BRANCH_LABEL_BORDER = "rgba(102, 198, 255, 0.3)"
 
+    # 窗口淡背景色
+    WINDOW_BG = "rgba(102, 198, 255, 0.04)"
+
     # 语义色
     SUCCESS = "#22c55e"
     WARNING = "#f59e0b"
@@ -346,6 +349,7 @@ class Colors:
 
         cls.BRANCH_LABEL_BG = theme.get("branch_label_bg", cls.BRANCH_LABEL_BG)
         cls.BRANCH_LABEL_BORDER = theme.get("branch_label_border", cls.BRANCH_LABEL_BORDER)
+        cls.WINDOW_BG = theme.get("window_bg", cls.WINDOW_BG)
 
 
 

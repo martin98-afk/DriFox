@@ -93,6 +93,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(102, 198, 255, 0.15)",
             "branch_label_border": "rgba(102, 198, 255, 0.3)",
+            "window_bg": "rgba(102, 198, 255, 0.04)",
         },
     },
     "obsidian": {
@@ -172,6 +173,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(183, 146, 255, 0.15)",
             "branch_label_border": "rgba(183, 146, 255, 0.3)",
+            "window_bg": "rgba(183, 146, 255, 0.04)",
         },
     },
     "forest": {
@@ -251,6 +253,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(87, 210, 154, 0.15)",
             "branch_label_border": "rgba(87, 210, 154, 0.3)",
+            "window_bg": "rgba(87, 210, 154, 0.04)",
         },
     },
     "graphite": {
@@ -330,6 +333,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(214, 154, 91, 0.15)",
             "branch_label_border": "rgba(214, 154, 91, 0.3)",
+            "window_bg": "rgba(214, 154, 91, 0.04)",
         },
     },
     "bordeaux": {
@@ -409,6 +413,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(192, 57, 43, 0.15)",
             "branch_label_border": "rgba(192, 57, 43, 0.3)",
+            "window_bg": "rgba(192, 57, 43, 0.04)",
         },
     },
     "amber": {
@@ -488,6 +493,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(212, 137, 59, 0.15)",
             "branch_label_border": "rgba(212, 137, 59, 0.3)",
+            "window_bg": "rgba(212, 137, 59, 0.04)",
         },
     },
     "ocean": {
@@ -567,6 +573,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(52, 152, 219, 0.15)",
             "branch_label_border": "rgba(52, 152, 219, 0.3)",
+            "window_bg": "rgba(52, 152, 219, 0.04)",
         },
     },
     "sakura": {
@@ -646,6 +653,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(232, 90, 122, 0.15)",
             "branch_label_border": "rgba(232, 90, 122, 0.3)",
+            "window_bg": "rgba(232, 90, 122, 0.04)",
         },
     },
     "slate": {
@@ -725,6 +733,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(120, 130, 160, 0.15)",
             "branch_label_border": "rgba(120, 130, 160, 0.3)",
+            "window_bg": "rgba(120, 130, 160, 0.04)",
         },
     },
     "jade": {
@@ -804,6 +813,7 @@ _BUILTIN_THEMES = {
             "ring_compacted": "#9b59b6",
             "branch_label_bg": "rgba(58, 168, 154, 0.15)",
             "branch_label_border": "rgba(58, 168, 154, 0.3)",
+            "window_bg": "rgba(58, 168, 154, 0.04)",
         },
     },
 }
@@ -844,14 +854,20 @@ class ThemeManager:
         os.makedirs(self._themes_dir, exist_ok=True)
 
     def _ensure_builtin_themes(self):
-        """首次运行生成内置主题"""
-        existing = self._list_yaml_files()
-        if existing:
-            return  # 已有主题文件，不覆盖
+        """确保所有内置主题文件存在，缺少的补全"""
+        existing_ids = set()
+        for f in self._list_yaml_files():
+            # 从文件名提取 theme_id（不解析 yaml，避免性能损耗）
+            theme_id = os.path.splitext(os.path.basename(f))[0]
+            existing_ids.add(theme_id)
 
-        logger.info(f"[ThemeManager] 首次运行，生成内置主题到 {self._themes_dir}")
-        for theme_id, theme_data in _BUILTIN_THEMES.items():
-            self._write_theme_file(theme_id, theme_data)
+        missing = [tid for tid in _BUILTIN_THEMES if tid not in existing_ids]
+        if not missing:
+            return
+
+        logger.info(f"[ThemeManager] 补全 {len(missing)} 个内置主题: {missing}")
+        for theme_id in missing:
+            self._write_theme_file(theme_id, _BUILTIN_THEMES[theme_id])
 
     def _list_yaml_files(self) -> List[str]:
         """列出主题目录下所有 yaml 文件"""
@@ -896,6 +912,10 @@ class ThemeManager:
                     continue
                 theme_id = data["id"]
                 self._themes[theme_id] = data
+                # 补充内置主题中新增的字段
+                builtin = _BUILTIN_THEMES.get(theme_id)
+                if builtin:
+                    self._sync_theme_fields(theme_id, data, builtin)
                 logger.debug(f"[ThemeManager] 加载主题: {theme_id} from {filepath}")
             except Exception as e:
                 logger.warning(f"[ThemeManager] 加载主题失败 {filepath}: {e}")
@@ -903,6 +923,16 @@ class ThemeManager:
         if not self._themes:
             logger.warning("[ThemeManager] 没有加载到任何主题，使用内置默认")
             self._themes = _BUILTIN_THEMES
+
+    def _sync_theme_fields(self, theme_id: str, loaded_data: dict, builtin_data: dict):
+        """同步缺失的字段到已加载的主题（保留用户自定义值）"""
+        colors = loaded_data.get("colors", {})
+        builtin_colors = builtin_data.get("colors", {})
+        for key, default_val in builtin_colors.items():
+            if key not in colors:
+                colors[key] = default_val
+                logger.debug(f"[ThemeManager] 为主题 {theme_id} 补充字段: {key}")
+        loaded_data["colors"] = colors
 
     def list_themes(self) -> Dict[str, str]:
         """列出所有可用主题 {id: name}"""
