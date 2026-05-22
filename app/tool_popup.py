@@ -695,30 +695,57 @@ class ToolPopupDialog(QDialog):
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        if self._is_closing:
-            event.accept()
-            return
-        self._is_closing = True
-        # 关闭时同时隐藏锁定按钮
-        if self._lock_btn_widget:
-            self._lock_btn_widget.hide()
+        # 获取 TrayManager 实例
+        tray_manager = TrayManager.get_instance()
+        
+        # window_count 包含当前窗口，所以:
+        # = 1 表示当前窗口是唯一的
+        # > 1 表示还有其他窗口
+        remaining_count = tray_manager.window_count
+        
+        logger.info(f"[CloseLogic] 窗口关闭，当前窗口总数: {remaining_count}")
+        
+        if remaining_count <= 1:
+            # 当前窗口是唯一的（或马上就是唯一的），隐藏到托盘而非退出
+            self._is_closing = False
+            event.ignore()
+            self.hide()
+            
+            # 确保托盘图标存在
+            if not tray_manager._tray_icon.isVisible():
+                tray_manager._tray_icon.show()
+            
+            logger.info("[CloseLogic] 最后一个窗口隐藏到托盘")
+        else:
+            # 还有其他窗口，直接关闭当前窗口
+            if self._is_closing:
+                event.accept()
+                return
+            self._is_closing = True
+            
+            # 注销当前窗口
+            tray_manager.unregister_window(self)
+            
+            # 关闭时同时隐藏锁定按钮
+            if self._lock_btn_widget:
+                self._lock_btn_widget.hide()
 
-        # 通知 tool_instance 标记为已销毁，防止异步回调继续执行
-        try:
-            from PyQt5 import sip
-            if self.tool_instance and not sip.isdeleted(self.tool_instance):
-                self.tool_instance._is_destroyed = True
-                # 通知父窗口移除引用，防止内存泄漏
-                if hasattr(self.tool_instance, '_popup_refs'):
-                    refs = list(self.tool_instance._popup_refs)
-                    if self in refs:
-                        refs.remove(self)
-                        self.tool_instance._popup_refs = refs
-        except Exception:
-            pass
+            # 通知 tool_instance 标记为已销毁，防止异步回调继续执行
+            try:
+                from PyQt5 import sip
+                if self.tool_instance and not sip.isdeleted(self.tool_instance):
+                    self.tool_instance._is_destroyed = True
+                    # 通知父窗口移除引用，防止内存泄漏
+                    if hasattr(self.tool_instance, '_popup_refs'):
+                        refs = list(self.tool_instance._popup_refs)
+                        if self in refs:
+                            refs.remove(self)
+                            self.tool_instance._popup_refs = refs
+            except Exception:
+                pass
 
-        self.deleteLater()
-        super().closeEvent(event)
+            self.deleteLater()
+            super().closeEvent(event)
 
     def changeEvent(self, event):
         """监听窗口状态变化"""
