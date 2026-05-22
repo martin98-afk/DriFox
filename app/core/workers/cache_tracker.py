@@ -3,12 +3,13 @@
 缓存命中率追踪器 - CacheHitRateTracker
 
 用于追踪 LLM API 的缓存命中情况，包括：
-- cache_read_input_tokens: 从缓存读取的 token 数
-- cache_creation_input_tokens: 写入缓存的 token 数
-- input_tokens: 非缓存的输入 token 数
-- hit_rate: 缓存命中率
+- 基于 API 返回的真实缓存数据（Anthropic/OpenAI 等支持时）
+- 基于上下文稳定性的启发式估算（不支持 API 缓存数据时）
 
-支持 OpenAI 和 Anthropic 格式的 usage 数据。
+估算逻辑：
+- 如果 system prompt 内容稳定 + 连续请求 → 高概率命中缓存
+- 如果 system prompt 变化 → 缓存失效
+- 如果是首次请求 → 命中率 0%
 """
 
 from dataclasses import dataclass, field
@@ -27,19 +28,30 @@ class CacheStats:
     cache_creation_tokens: int = 0   # 写入缓存的 token (5min TTL)
     cache_creation_1h_tokens: int = 0  # 写入缓存的 token (1h TTL)
     
+    # 启发式估算字段
+    is_estimated: bool = False       # 是否为估算值
+    estimated_hit_rate: float = 0.0  # 估算的命中率
+    context_stable: bool = False      # 上下文是否稳定
+    consecutive_stable_count: int = 0 # 连续稳定的请求次数
+    
     @property
     def hit_rate(self) -> float:
-        """计算命中率（基于 token）"""
-        cacheable = self.cache_read_tokens + self.cache_creation_tokens + self.cache_creation_1h_tokens
-        if cacheable == 0:
-            return 0.0
-        return self.cache_read_tokens / cacheable
-    
+        """计算命中率：优先使用真实值，其次使用估算值"""
+        # 优先返回真实 API 数据
+        if self.cache_read_tokens > 0 or self.cache_creation_tokens > 0:
+            cacheable = self.cache_read_tokens + self.cache_creation_tokens + self.cache_creation_1h_tokens
+            if cacheable > 0:
+                return self.cache_read_tokens / cacheable
+        # 使用启发式估算
+        if self.is_estimated:
+            return self.estimated_hit_rate
+        return 0.0
+
     @property
     def total_input_tokens(self) -> int:
         """总输入 token = 缓存读取 + 非缓存 + 缓存写入"""
         return self.cache_read_tokens + self.prompt_tokens + self.cache_creation_tokens + self.cache_creation_1h_tokens
-    
+
     def to_dict(self) -> Dict:
         return {
             "request_time": self.request_time,

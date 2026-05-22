@@ -287,8 +287,8 @@ class ContextUsageRing(QWidget):
             painter.setPen(ring_pen)
             painter.drawArc(rect, start_angle, span_angle)
 
-        # 如果有缓存命中率，绘制缓存指示点
-        if self._cache_hit_rate > 0:
+        # 如果有缓存命中率（>= 0.05 即 5%），绘制缓存指示点
+        if self._cache_hit_rate >= 0.05:
             # 在圆环顶部（12点方向）绘制一个小指示点
             # 颜色根据命中率变化：绿色(高) -> 黄色(中) -> 红色(低)
             indicator_angle = -90  # 12点方向
