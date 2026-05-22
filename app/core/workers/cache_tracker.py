@@ -300,11 +300,19 @@ class CacheHitRateTracker:
         print(stats.summary())
     """
 
+    # 已知缓存数据可靠的 provider 前缀
+    RELIABLE_CACHE_PROVIDERS = ("openai", "azure", "claude", "anthropic")
+
     def __init__(self, enabled: bool = True):
         self._enabled = enabled
         self._session_stats = AggregatedCacheStats()
         self._last_stats: Optional[CacheStats] = None
         self._last_model: str = ""
+
+        # 启发式估算状态
+        self._heuristic_mode: bool = False          # 是否进入启发式模式
+        self._last_prompt_tokens: int = 0            # 上一次 API 调用的 prompt_tokens
+        self._has_anthropic_cache: bool = False       # 是否检测到 Anthropic 缓存字段
 
     def enable(self):
         self._enabled = True
@@ -329,6 +337,66 @@ class CacheHitRateTracker:
         logger.info(f"[CacheTracker] Session ended - {stats.summary()}")
         return stats
 
+    @staticmethod
+    def _has_anthropic_fields(usage: any) -> bool:
+        """检测 usage 是否包含 Anthropic 缓存字段"""
+        if isinstance(usage, dict):
+            return bool(
+                usage.get("cache_read_input_tokens") is not None
+                or usage.get("cache_creation_input_tokens") is not None
+                or isinstance(usage.get("cache_creation"), dict)
+            )
+        return bool(
+            getattr(usage, "cache_read_input_tokens", None) is not None
+            or getattr(usage, "cache_creation_input_tokens", None) is not None
+            or getattr(usage, "cache_creation", None) is not None
+        )
+
+    def _is_suspicious_openai_cache(self, stats: CacheStats, usage: any) -> bool:
+        """
+        检测 OpenAI 格式的缓存数据是否可疑。
+        
+        部分 provider（如 DeepSeek）对所有请求返回 cached_tokens == prompt_tokens
+        但不返回 cache_creation，导致命中率恒为 100%。
+        """
+        if self._has_anthropic_fields(usage):
+            self._has_anthropic_cache = True
+            return False
+
+        has_suspicious_read = (
+            stats.cache_read_tokens > 0
+            and stats.cache_creation_5m_tokens == 0
+            and stats.cache_creation_1h_tokens == 0
+            and stats.prompt_tokens > 0
+            and stats.cache_read_tokens >= stats.prompt_tokens * 0.9
+        )
+        if not has_suspicious_read:
+            return False
+
+        # 检查 provider 是否已知可靠
+        model_lower = self._last_model.lower()
+        is_reliable = any(model_lower.startswith(p) for p in self.RELIABLE_CACHE_PROVIDERS)
+        return not is_reliable
+
+    def _apply_cache_heuristic(self, stats: CacheStats):
+        """
+        对可疑的缓存数据应用启发式修正。
+        
+        策略：
+        - 首次请求：所有 cached_tokens 视为缓存写入（cache miss）
+        - 后续请求：上次请求的 prompt 前缀视为缓存命中
+        """
+        reported_read = stats.cache_read_tokens
+        if self._last_prompt_tokens > 0:
+            estimated_read = min(reported_read, self._last_prompt_tokens)
+        else:
+            estimated_read = 0
+
+        stats.cache_read_tokens = estimated_read
+        stats.cache_creation_5m_tokens = reported_read - estimated_read
+        stats.is_estimated = True
+        self._last_prompt_tokens = stats.prompt_tokens
+
     def record_usage(self, usage: any, model: str = "") -> Optional[CacheStats]:
         """
         记录一次 API 调用的 usage 数据
@@ -348,6 +416,11 @@ class CacheHitRateTracker:
         stats = self._parse_usage(usage)
         if stats:
             stats.model = self._last_model
+            if self._is_suspicious_openai_cache(stats, usage):
+                self._heuristic_mode = True
+                self._apply_cache_heuristic(stats)
+            elif self._heuristic_mode and stats.cache_read_tokens > 0:
+                self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
         return stats
@@ -362,6 +435,11 @@ class CacheHitRateTracker:
         stats = self._parse_usage_dict(usage_dict)
         if stats:
             stats.model = self._last_model
+            if self._is_suspicious_openai_cache(stats, usage_dict):
+                self._heuristic_mode = True
+                self._apply_cache_heuristic(stats)
+            elif self._heuristic_mode and stats.cache_read_tokens > 0:
+                self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
         return stats

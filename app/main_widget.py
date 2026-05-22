@@ -847,6 +847,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 total_input_hit_rate=total_input_hit_rate,
                 cache_hits=cache_hits,
                 cache_misses=cache_misses,
+                requests=stats_dict.get('requests', 0),
             )
         except Exception as e:
             logger.debug(f"[CacheStats] Failed to refresh: {e}")
@@ -889,13 +890,26 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label.setToolTip("点击切换项目 · 右键更多操作")
 
         # Git 分支标签（从工作目录检测，左键点击打开关键文档卡片）
-        self._branch_label = QLabel("", self)
-        self._branch_label.setCursor(Qt.PointingHandCursor)
-        self._branch_label.setToolTip("当前 Git 分支 — 点击打开关键文档")
-        self._branch_label.mousePressEvent = self._on_branch_label_clicked
-        self._branch_label.setVisible(False)
-        self._update_branch()
+        self._branch_widget = QWidget(self)
+        self._branch_widget.setCursor(Qt.PointingHandCursor)
+        self._branch_widget.setObjectName("_branchWidget")
+        self._branch_widget.setAttribute(Qt.WA_StyledBackground)
+        self._branch_widget.mousePressEvent = self._on_branch_label_clicked
+        self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
+        self._branch_widget.setVisible(False)
+        self._branch_layout = QHBoxLayout(self._branch_widget)
+        self._branch_layout.setContentsMargins(3, 0, 3, 0)
+        self._branch_layout.setSpacing(2)
 
+        self._branch_icon = QLabel(self._branch_widget)
+        _pix = QPixmap(":/icons/分支.svg")
+        self._branch_icon.setPixmap(_pix.scaled(12, 12, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._branch_layout.addWidget(self._branch_icon)
+
+        self._branch_label = QLabel("", self._branch_widget)
+        self._branch_layout.addWidget(self._branch_label)
+
+        self._update_branch()
         # 标题
         self.title_edit = QLabel("新对话", self)
         font_css = get_font_family_css()
@@ -906,7 +920,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.title_edit.mouseDoubleClickEvent = self._on_title_double_click
 
         session_bar_layout.addWidget(self._project_label)
-        session_bar_layout.addWidget(self._branch_label)
+        session_bar_layout.addWidget(self._branch_widget)
         session_bar_layout.addWidget(self.title_edit)
 
         # right_layout 保持简化，显示余额和 context_usage_ring
@@ -5865,29 +5879,36 @@ class OpenAIChatToolWindow(ToolWindow):
             # 分支名过长时截断显示，悬浮显示全名
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
             self._branch_label.setText(display)
-            self._branch_label.setToolTip(f"分支: {branch}\n点击打开关键文档")
-            self._branch_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_SECONDARY};
-                    {get_font_family_css()}
-                    {font_size_css(10)};
-                    padding: 0px 3px;
-                    border-radius: 2px;
+            self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
+
+            # 容器样式：背景色 + 边框 + 圆角
+            self._branch_widget.setStyleSheet(f"""
+                #_branchWidget {{
                     background: {Colors.BRANCH_LABEL_BG};
                     border: 1px solid {Colors.BRANCH_LABEL_BORDER};
+                    border-radius: 2px;
                 }}
-                QLabel:hover {{
+                #_branchWidget:hover {{
                     background: {Colors.HOVER_BG};
                 }}
             """)
-            self._branch_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self._branch_label.setMinimumWidth(0)
-            self._branch_label.setMaximumWidth(160)
-            self._branch_label.setVisible(True)
+            # 文字标签：纯文字颜色+字体，无背景/边框
+            self._branch_label.setStyleSheet(f"""
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()}
+                {font_size_css(10)};
+                background: transparent;
+                border: none;
+            """)
+            # 图标标签：透明
+            self._branch_icon.setStyleSheet("background: transparent; border: none;")
+
+            self._branch_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self._branch_widget.setMaximumWidth(160)
+            self._branch_widget.setVisible(True)
         else:
             self._branch_label.setText("")
-            self._branch_label.setVisible(False)
-
+            self._branch_widget.setVisible(False)
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开关键文档卡片"""
         event.accept()
