@@ -3169,11 +3169,14 @@ class MessageCard(SimpleCardWidget):
     def stop_retry_anim(self):
         """停止重试动画，恢复正常边框"""
         self._retrying = False
+        self.error = False
         self._retry_status_widget.setVisible(False)
+        self._apply_card_style()
         if not self._streaming:
             return
         # 继续正常的流式动画（彩虹边框）
         self.update()
+        self.repaint()
 
     def _update_retry_status_bar(self):
         """更新重试状态栏的文本内容"""

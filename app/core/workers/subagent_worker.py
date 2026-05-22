@@ -13,6 +13,8 @@ from loguru import logger
 from app.constants import PARAM_SCHEMA
 from app.tools.result import ToolResult
 from app.core.store import SubAgentLogStore
+from app.core.message_content import to_api_message
+from app.core.tool_call_parser import smart_parse_arguments
 
 from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
@@ -118,7 +120,8 @@ class SubAgentExecutor(QThread):
             log_entry.update(extra)
         self._logs.append(log_entry)
         # 实时保存到数据库
-        if self._log_store_callback:
+        log_callback = getattr(self, '_log_store_callback', None)
+        if log_callback:
             try:
                 self._log_store_callback(self.task_id, self.agent_name, self.task_description, "running", None, None,
                                          self._logs, self.get_summary())
@@ -192,8 +195,9 @@ class SubAgentExecutor(QThread):
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 获取历史消息失败: {e}")
 
-            # 过滤父智能体上下文中的 <tool> 标签，避免污染子智能体的工具调用格式
-            sanitized_context = _THINKING_PATTERN.sub("", self.parent_context)
+            # 过滤父智能体上下文中的 <tool> 和 <think> 标签，避免污染子智能体的工具调用格式
+            sanitized_context = _TOOL_TAG_PATTERN.sub("", self.parent_context)
+            sanitized_context = _THINKING_PATTERN.sub("", sanitized_context)
             messages = [
                 {"role": "system", "content": system_prompt + history_section + F"## 父智能体说明\n{sanitized_context}\n\n"},
                 {"role": "user", "content": f"## 子任务\n{self.task_description}"}
@@ -481,8 +485,14 @@ class SubAgentExecutor(QThread):
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
-                except:
-                    arguments = {}
+                except json.JSONDecodeError:
+                    parsed = smart_parse_arguments(arguments, tool_name)
+                    if parsed is not None:
+                        arguments = parsed
+                        logger.info(f"[SubAgent] ✓ JSON 智能修复成功: tool={tool_name}")
+                    else:
+                        logger.warning(f"[SubAgent] ⚠️ JSON 解析失败且无法修复, tool={tool_name}, preview='{arguments[:200]}'")
+                        arguments = {}
 
             tool_call_id = tc["id"]
 
@@ -511,19 +521,19 @@ class SubAgentExecutor(QThread):
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
             QCoreApplication.processEvents()
 
-            results.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": tool_name,  # 添加 name 字段与 ChatWorker 一致
-                    "arguments": arguments,  # 添加 arguments 字段与 ChatWorker 一致
-                    "content": result_content,
-                    "success": success,  # 添加 success 字段与 ChatWorker 一致
-                    "round_id": f"round_{id(tc)}",  # 添加 round_id 字段与 ChatWorker 一致
-                    "diff": getattr(result, "diff", None) if result else None,
-                    "anchors": getattr(result, "anchors", None) if result else None,
-                }
-            )
+            raw_result = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "arguments": arguments,
+                "success": success,
+                "round_id": f"round_{id(tc)}",
+                "diff": getattr(result, "diff", None) if result else None,
+                "anchors": getattr(result, "anchors", None) if result else None,
+            }
+            # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
+            results.append(to_api_message(raw_result) or raw_result)
 
         return results
 
