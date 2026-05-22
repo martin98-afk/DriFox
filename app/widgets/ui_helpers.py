@@ -14,6 +14,7 @@ UI 辅助模块 - 从 main_widget.py 提取的 UI 辅助方法
 - 循环导入通过延迟导入解决
 """
 import re
+import time
 from datetime import datetime
 from typing import Optional, List, Any, Tuple, Callable
 
@@ -1183,15 +1184,21 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
     assistant_card.finish_streaming()
 
 
+_scroll_last_time = [0.0]  # 使用 list 实现可变闭包
+
 def scroll_to_bottom_if_streaming(scroll_area, is_streaming: bool) -> None:
     """
-    如果正在流式输出则滚动到底部
+    如果正在流式输出则滚动到底部（带时间防抖，最高 20fps）
     
     Args:
         scroll_area: 滚动区域
         is_streaming: 是否正在流式输出
     """
     if is_streaming:
+        now = time.time()
+        if now - _scroll_last_time[0] < 0.05:
+            return
+        _scroll_last_time[0] = now
         scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().maximum())
 
 

@@ -1165,6 +1165,13 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
+        # 2.5 增量文本缓冲定时器（防抖 _append_text_incremental 的高频 runJavaScript）
+        self._incremental_buffer = ""
+        self._incremental_timer = QTimer(self)
+        self._incremental_timer.setSingleShot(True)
+        self._incremental_timer.setInterval(30)
+        self._incremental_timer.timeout.connect(self._flush_incremental)
+
         self._page = ConsoleMonitorPage(self)
         self.setPage(self._page)
         # 透明背景
@@ -2417,12 +2424,23 @@ class CodeWebViewer(QWebEngineView):
 
         在全量渲染（updateContent）到达前先推送纯文本内容，
         避免渲染延迟导致的"卡高先涨、文字后显"问题。
+
+        使用缓冲区 + 定时器防抖，避免高频小 chunk 过度调用 runJavaScript。
         """
-        if not self._is_js_ready or not self.page():
+        self._incremental_buffer += text
+        if len(self._incremental_buffer) >= 20:
+            self._incremental_timer.stop()
+            self._flush_incremental()
+        elif not self._incremental_timer.isActive():
+            self._incremental_timer.start()
+
+    def _flush_incremental(self):
+        """冲刷增量文本缓冲区到 DOM"""
+        text = self._incremental_buffer
+        self._incremental_buffer = ""
+        if not text or not self._is_js_ready or not self.page():
             return
         try:
-            # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
-            # （防止增量显示标签，全量渲染会正确处理）
             text_clean = text.replace("<think>", "").replace("</think>", "")
             if not text_clean:
                 return
@@ -2435,7 +2453,6 @@ class CodeWebViewer(QWebEngineView):
                 if (last && last.tagName === 'P') {{
                     last.textContent += {json.dumps(escaped)};
                 }} else if (last && last.classList.contains('think-block')) {{
-                    // 最后是思考块：追加到思考块之后的新段落
                     var p = document.createElement('p');
                     p.textContent = {json.dumps(escaped)};
                     c.appendChild(p);
@@ -2444,7 +2461,6 @@ class CodeWebViewer(QWebEngineView):
                     p.textContent = {json.dumps(escaped)};
                     c.appendChild(p);
                 }}
-                // 流式增量追加时，让 body 内部滚动到最底部
                 document.body.scrollTop = document.body.scrollHeight;
             }})();
             """
@@ -2582,6 +2598,7 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        self._flush_incremental()
         self._schedule_render(immediate=True)
 
     def get_plain_text(self) -> str:
@@ -2620,12 +2637,15 @@ class CodeWebViewer(QWebEngineView):
         清理 CodeWebViewer 持有的资源，防止内存泄漏。
         应该在删除 viewer 前调用，或者在 deleteLater 中自动调用。
         """
+        # 冲刷增量文本缓冲区
+        self._flush_incremental()
         # 停止所有定时器
         timers_to_stop = [
             self._render_timer,
             self._resize_timer,
             self._resize_debounce_timer,
             self._resize_unlock_timer,
+            self._incremental_timer,
         ]
         for timer in timers_to_stop:
             try:
