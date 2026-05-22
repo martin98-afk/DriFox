@@ -25,7 +25,6 @@ from app.core.message_content import consolidate_messages, append_text_block, me
 from app.core.conversation.config import PermissionCache
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
-from app.core.workers.cache_estimator import HybridCacheTracker
 from app.core.workers.worker_event_bus import WorkerEventBus, WorkerEvent
 from app.core.workers.cache_tracker import CacheHitRateTracker
 
@@ -117,9 +116,7 @@ class OpenAIChatWorker(QThread):
         }
         self._current_session_messages = list(self.session_messages)
         self._last_usage = None  # 保存最后一次 API 调用的 token usage
-        self._cache_tracker = HybridCacheTracker()  # 混合缓存追踪器（支持 API 数据 + 启发式估算）
-        # 保留旧的 API tracker 用于兼容性
-        self._api_tracker = CacheHitRateTracker()
+        self._cache_tracker = CacheHitRateTracker()  # 缓存命中率追踪器
         self._accumulated_tokens = 0  # 累加本轮所有 API 调用（含多轮工具迭代）的总 token 使用量
 
         # ========== 工具迭代中压缩支持 ==========
@@ -279,19 +276,6 @@ class OpenAIChatWorker(QThread):
         彻底清理 worker 的所有缓存数据，防止内存泄漏。
         应该在对话结束后调用。
         """
-        from loguru import logger
-
-        # 计算清理前的内存占用估算
-        msg_count = len(self.messages) + len(self.session_messages) + len(self._current_session_messages or [])
-        full_resp_len = len(self.full_response or "")
-        reasoning_len = len(self._reasoning_content or "")
-        blocks_count = len(self._response_content_blocks or [])
-
-        # 记录清理的概况
-        if full_resp_len > 100000 or reasoning_len > 100000:
-            logger.info(f"[Worker] 清理大量缓存: full_response={full_resp_len / 1024:.1f}KB, "
-                        f"reasoning={reasoning_len / 1024:.1f}KB, messages={msg_count}, blocks={blocks_count}")
-
         # 清理消息引用
         self.messages = []
         self.session_messages = []
@@ -319,52 +303,6 @@ class OpenAIChatWorker(QThread):
         # 清理工具列表引用
         self.tools = []
 
-        #
-
-    # ========== 缓存追踪方法 ==========
-
-    def get_cache_stats(self) -> Dict:
-        """获取缓存追踪统计（优先使用 API 数据，否则使用估算）"""
-        # 尝试从 API tracker 获取真实数据
-        api_stats = self._api_tracker.get_session_stats()
-        if api_stats.hit_rate > 0:
-            return api_stats.to_dict()
-        # 否则使用 HybridCacheTracker 的估算数据
-        return self._cache_tracker.get_session_stats()
-
-    def get_cache_hit_rate(self) -> float:
-        """获取当前缓存命中率"""
-        # 优先使用 API 数据
-        api_stats = self._api_tracker.get_session_stats()
-        if api_stats.hit_rate > 0:
-            return api_stats.hit_rate
-        # 否则使用估算
-        stats = self._cache_tracker.get_session_stats()
-        return stats.get('hit_rate', 0.0)
-
-    def get_cache_hit_rate_display(self) -> str:
-        """获取格式化的命中率显示"""
-        rate = self.get_cache_hit_rate()
-        if rate <= 0:
-            return "N/A"
-        return f"{rate:.1%}"
-
-    def reset_cache_stats(self):
-        """重置缓存统计"""
-        self._api_tracker.start_session()
-        self._cache_tracker.reset()
-
-    def get_cache_stats_summary(self) -> str:
-        """获取缓存统计摘要"""
-        stats = self.get_cache_stats()
-        hit_rate = stats.get('hit_rate', 0.0)
-        read = stats.get('cache_read_tokens', 0)
-        write = stats.get('cache_creation_5m_tokens', 0) + stats.get('cache_creation_1h_tokens', 0)
-        is_estimated = stats.get('is_estimated', False)
-        source = "(估算)" if is_estimated else ""
-        return f"""缓存统计 {source}\n命中率: {hit_rate:.1%}\n缓存读取: {read:,} tokens\n缓存写入: {write:,} tokens\n"""
-
-
         # 清理问题/回答状态
         self._pending_answer = None
         self._question_pending = None
@@ -375,6 +313,28 @@ class OpenAIChatWorker(QThread):
         # 清理 HTTP 客户端缓存
         self._http_client = None
         self._cached_api_config = None
+
+    # ========== 缓存追踪方法 ==========
+
+    def get_cache_stats(self) -> 'AggregatedCacheStats':
+        """获取缓存追踪统计"""
+        return self._cache_tracker.get_session_stats()
+
+    def get_cache_hit_rate(self) -> float:
+        """获取当前缓存命中率"""
+        return self._cache_tracker.get_current_hit_rate()
+
+    def get_cache_hit_rate_display(self) -> str:
+        """获取格式化的命中率显示"""
+        return self._cache_tracker.get_hit_rate_display()
+
+    def reset_cache_stats(self):
+        """重置缓存统计"""
+        self._cache_tracker.start_session()
+
+    def get_cache_stats_summary(self) -> str:
+        """获取缓存统计摘要"""
+        return self._cache_tracker.summary()
 
     def _get_http_client(self) -> Any:
         """
@@ -1009,9 +969,6 @@ class OpenAIChatWorker(QThread):
                 self._api_messages_cache = sanitized
                 self._api_messages_built = True
 
-        # 保存当前请求上下文（用于缓存估算，在获得到最终 sanitized 后执行）
-        self._current_api_messages = sanitized
-        self._current_system_prompt = sanitized[0].get('content', '') if sanitized and sanitized[0].get('role') == 'system' else ''
         # 性能优化：使用预构建的 API 参数
         cached_config = self._build_api_request_kwargs()
 
@@ -1244,15 +1201,8 @@ class OpenAIChatWorker(QThread):
                         "completion_tokens": getattr(usage, "completion_tokens", 0),
                         "total_tokens": getattr(usage, "total_tokens", 0),
                     }
-                    # 同步更新缓存追踪器（使用混合追踪器，支持 API 数据 + 估算）
-                    self._api_tracker.record_usage(usage)
-                    # 同时用估算器记录请求上下文
-                    self._cache_tracker.record_request(
-                        usage=usage,
-                        system_prompt=getattr(self, '_current_system_prompt', ''),
-                        messages=getattr(self, '_current_api_messages', []),
-                        tools=getattr(self, 'tools', None),
-                    )
+                    # 同步更新缓存追踪器
+                    self._cache_tracker.record_usage(usage)
                 continue
 
             delta = chunk.choices[0].delta
@@ -1423,14 +1373,8 @@ class OpenAIChatWorker(QThread):
                     "completion_tokens": getattr(usage, "completion_tokens", 0),
                     "total_tokens": getattr(usage, "total_tokens", 0),
                 }
-                # 同步更新缓存追踪器（使用混合追踪器，支持 API 数据 + 估算）
-                self._api_tracker.record_usage(usage)
-                self._cache_tracker.record_request(
-                    usage=usage,
-                    system_prompt=getattr(self, '_current_system_prompt', ''),
-                    messages=getattr(self, '_current_api_messages', []),
-                    tools=getattr(self, 'tools', None),
-                )
+                # 同步更新缓存追踪器
+                self._cache_tracker.record_usage(usage)
             # 每处理 5 个 chunk 就让渡一次 CPU，确保主线程能及时处理排队的 Qt 信号
             # 避免 content_received 等信号堆积到工具执行完毕后一次性处理
             chunk_count += 1
@@ -1446,14 +1390,8 @@ class OpenAIChatWorker(QThread):
                     "completion_tokens": getattr(usage, "completion_tokens", 0),
                     "total_tokens": getattr(usage, "total_tokens", 0),
                 }
-                # 同步更新缓存追踪器（使用混合追踪器，支持 API 数据 + 估算）
-                self._api_tracker.record_usage(usage)
-                self._cache_tracker.record_request(
-                    usage=usage,
-                    system_prompt=getattr(self, '_current_system_prompt', ''),
-                    messages=getattr(self, '_current_api_messages', []),
-                    tools=getattr(self, 'tools', None),
-                )
+                # 同步更新缓存追踪器
+                self._cache_tracker.record_usage(usage)
                 total = getattr(usage, "total_tokens", 0) or 0
                 self._accumulated_tokens += total
                 # 实时通知外部（如 AutoLoop）更新 token 计数
