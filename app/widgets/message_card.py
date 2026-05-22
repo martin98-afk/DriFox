@@ -2182,35 +2182,41 @@ class CodeWebViewer(QWebEngineView):
                 function _setViewport(offsetTop, viewportHeight) {{
                     const body = document.body;
                     const hasInternalScroll = body.scrollHeight > body.clientHeight;
+                    const bodyTop = document.documentElement.getBoundingClientRect().top;
                     let visibleTop;
                     if (hasInternalScroll) {{
                         visibleTop = 0;
                     }} else {{
-                        visibleTop = Math.max(0, offsetTop);
+                        // visibleTop: 折叠头在 body 坐标系中的位置 + body 在 WebView 中的偏移 = 折叠头在 QScrollArea 坐标系中的位置
+                        // 当卡片滚出视口上方时（offsetTop < 0），WebView.rect.top < 0，需要用 rect.top 来计算
+                        visibleTop = offsetTop < 0 ? offsetTop : 0;
                     }}
-                    const visibleBottom = visibleTop + viewportHeight;
+                    // 调试日志
+                    console.log('_setViewport offsetTop=' + offsetTop + ' hasInternalScroll=' + hasInternalScroll + ' visibleTop=' + visibleTop + ' bodyTop=' + bodyTop);
                     let targetBlock = null;
                     let targetSummary = null;
                     document.querySelectorAll('.cm-collapsible').forEach(block => {{
                         const summary = block.querySelector('.cm-collapsible__summary');
                         if (!summary) return;
                         const rect = summary.getBoundingClientRect();
-                        const blockBottom = block.getBoundingClientRect().bottom;
-                        const headerAbove = rect.bottom < visibleTop;
-                        const bodyVisible = blockBottom > visibleTop;
+                        const blockRect = block.getBoundingClientRect();
+                        const inQScrollArea = offsetTop + rect.bottom;
+                        const headerAbove = inQScrollArea < 0;
+                        const bodyVisible = offsetTop + blockRect.bottom > 0;
                         if (headerAbove && bodyVisible) {{
-                            if (!targetBlock || rect.bottom > targetSummary.getBoundingClientRect().bottom) {{
+                            if (!targetBlock || rect.bottom > (targetSummary ? targetSummary.getBoundingClientRect().bottom : -9999)) {{
                                 targetBlock = block;
                                 targetSummary = summary;
                             }}
                         }}
                     }});
                     if (targetBlock) {{
+                        console.log('SHOW FLOAT: key=' + targetBlock.dataset.blockKey);
                         _showFloat(targetBlock, targetSummary);
                     }} else {{
                         _hideFloat();
                     }}
-                }}
+
 
                 function _showFloat(block, summary) {{
                     _floatTargetBlock = block;
