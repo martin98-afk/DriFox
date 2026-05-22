@@ -319,13 +319,13 @@ def _render_diff_preview(diff_text: str) -> str:
             _pending_old_header = None
             i += 1
         elif _pending_old_header:
-            # 单独的 --- 行（没有 +++ 跟随），直接渲染
+            # 单独的 --- 行（没有 +++ 跟随），先渲染 header 再处理当前行
             rows.append(
                 f'<div class="diff-line diff-file-header">'
                 f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(_pending_old_header[4:]))}</span></div>'
             )
             _pending_old_header = None
-            i += 1
+            continue
         # hunk 头
         elif line.startswith("@@"):
             m = _HUNK_HEADER_RE.match(line)
@@ -489,15 +489,15 @@ def render_tool_block(
     diff_icon_html = ""
     if is_file_edit and tool_call_id:
         diff_icon_html = f'''
+        {diff_stats_html}
         <span class="tool-diff-icon-btn" data-tool-call-id="{escape(tool_call_id)}"
             role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 8px; border-radius: 4px;"
+            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 4px; border-radius: 4px;"
             onclick="event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId)"
             onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId); }}"
             title="查看文件差异">
             <img src="qrc:/icons/差异对比.svg" style="width: 16px; height: 16px;" />
-        </span>
-        {diff_stats_html}'''
+        </span>'''
 
     # 子智能体日志查看按钮
     subagent_log_btn_html = ""

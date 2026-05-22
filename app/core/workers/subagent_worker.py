@@ -517,6 +517,8 @@ class SubAgentExecutor(QThread):
                     "content": result_content,
                     "success": success,  # 添加 success 字段与 ChatWorker 一致
                     "round_id": f"round_{id(tc)}",  # 添加 round_id 字段与 ChatWorker 一致
+                    "diff": getattr(result, "diff", None) if result else None,
+                    "anchors": getattr(result, "anchors", None) if result else None,
                 }
             )
 

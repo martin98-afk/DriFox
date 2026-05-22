@@ -321,6 +321,7 @@ def dedupe_tool_result_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, An
                 result=block.get("result", ""),
                 success=block.get("success", True),
                 tool_call_id=block.get("tool_call_id"),
+                diff=block.get("diff"),
             )
         )
     return deduped
@@ -408,6 +409,10 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         normalized["success"] = bool(message.get("success", True))
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
+        if message.get("diff"):
+            normalized["diff"] = str(message.get("diff"))
+        if message.get("anchors"):
+            normalized["anchors"] = str(message.get("anchors"))
         return normalized
 
     normalized["content"] = content_to_text(message.get("content", ""))

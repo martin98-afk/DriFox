@@ -679,6 +679,8 @@ class OpenAIChatWorker(QThread):
                     "success": item.get("success", True),
                     "round_id": item.get("round_id"),
                     "timestamp": item.get("timestamp", now_ts),
+                    "diff": item.get("diff"),
+                    "anchors": item.get("anchors"),
                 }
 
         # 预防性修复：过滤掉没有对应 tool 结果的 tool_call

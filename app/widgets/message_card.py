@@ -16,6 +16,7 @@ MessageCard - 消息卡片组件
 - tool_call_id: str         # 工具结果关联 ID
 """
 import base64
+import difflib
 import hashlib
 import math
 import random
@@ -531,6 +532,41 @@ def _render_tool_block_content(content: str) -> str:
     else:
         # 没有 args，尝试从整个 content 中提取参数
         args_dict = _extract_args_by_regex(content)
+
+    # 历史工具无 diff 字段时从参数生成
+    if not diff_content:
+        if tool_name == "write":
+            file_path = args_dict.get("file_path", "file")
+            content = args_dict.get("content", "")
+            if content:
+                lines = content.splitlines()
+                pseudo = [f"--- {file_path}", f"+++ {file_path}"]
+                pseudo.append(f"@@ -0,0 +1,{len(lines)} @@")
+                for line in lines:
+                    pseudo.append(f"+{line}")
+                diff_content = "\n".join(pseudo)
+        elif tool_name == "edit":
+            file_path = args_dict.get("file_path", "file")
+            operations = args_dict.get("operations", [])
+            if operations and isinstance(operations, list):
+                pseudo = [f"--- {file_path}", f"+++ {file_path}"]
+                for op in operations:
+                    if not isinstance(op, dict):
+                        pseudo.append(f"@@ -1,1 +1,1 @@")
+                        pseudo.append(f"+  {op if isinstance(op, str) else str(op)}")
+                        continue
+                    op_type = op.get("op", "replace")
+                    anchor = op.get("anchor", "")
+                    lines = op.get("lines", [])
+                    pseudo.append(f"@@ -1,1 +1,1 @@ {op_type} at {anchor}")
+                    if op_type == "delete":
+                        pseudo.append("-  (deleted)")
+                    elif lines:
+                        for l in lines:
+                            pseudo.append(f"+  {l}")
+                    else:
+                        pseudo.append(f"-  ({op_type})")
+                diff_content = "\n".join(pseudo)
 
     # 转义参数中的换行符（参数预览和表格不支持多行显示）
     for key in args_dict:
@@ -1751,8 +1787,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
-                    min-width: 44px;
-                    padding: 0 8px;
+                    min-width: 32px;
+                    padding: 0 4px;
                     text-align: right;
                     color: #484f58;
                     user-select: none;
@@ -1782,7 +1818,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow-x: auto;
                 }}
                 .tool-diff-inline .diff-add {{
-                    background-color: rgba(63, 185, 80, 0.12);
+                    background-color: rgba(63, 185, 80, 0.06);
                 }}
                 .tool-diff-inline .diff-add .line-sign {{
                     color: #3fb950;
@@ -1791,7 +1827,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #3fb950;
                 }}
                 .tool-diff-inline .diff-del {{
-                    background-color: rgba(248, 81, 73, 0.12);
+                    background-color: rgba(248, 81, 73, 0.06);
                 }}
                 .tool-diff-inline .diff-del .line-sign {{
                     color: #f85149;
@@ -1818,14 +1854,14 @@ class CodeWebViewer(QWebEngineView):
                     padding: 4px 0;
                 }}
                 .tool-diff-inline .word-add {{
-                    background: rgba(63, 185, 80, 0.25);
+                    background: rgba(63, 185, 80, 0.18);
                     border-radius: 2px;
-                    border-bottom: 1px solid rgba(63, 185, 80, 0.5);
+                    border-bottom: 1px solid rgba(63, 185, 80, 0.4);
                 }}
                 .tool-diff-inline .word-del {{
-                    background: rgba(248, 81, 73, 0.25);
+                    background: rgba(248, 81, 73, 0.18);
                     border-radius: 2px;
-                    border-bottom: 1px solid rgba(248, 81, 73, 0.5);
+                    border-bottom: 1px solid rgba(248, 81, 73, 0.4);
                 }}
                 .tool-params-section,
                 .tool-result-section {{
