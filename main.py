@@ -65,6 +65,9 @@ def main():
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
+    
+    # 禁用默认退出行为（让最后一个窗口隐藏到托盘而不是退出）
+    app.setQuitOnLastWindowClosed(False)
 
     # 设置主题
     from qfluentwidgets import Theme, setTheme

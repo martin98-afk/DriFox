@@ -16,7 +16,8 @@ from app.core.workers import (
     TopicSummaryTask,
     ShellExecutionTask,
 )
-from app.core.store import SessionStore, SubAgentLogStore
+from app.core.store import SessionStore
+from app.core.store import SubAgentLogRepository
 from app.core.message_content import (
     consolidate_messages,
     content_to_text,
@@ -62,7 +63,7 @@ __all__ = [
     "ShellExecutionTask",
     # Store
     "SessionStore",
-    "SubAgentLogStore",
+    "SubAgentLogRepository",
     # 消息处理
     "consolidate_messages",
     "content_to_text",

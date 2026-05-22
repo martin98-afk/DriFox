@@ -12,7 +12,6 @@ from loguru import logger
 
 from app.constants import PARAM_SCHEMA
 from app.tools.result import ToolResult
-from app.core.store import SubAgentLogStore
 from app.core.message_content import to_api_message
 from app.core.tool_call_parser import smart_parse_arguments
 
@@ -552,7 +551,7 @@ class SubAgentManager(QObject):
         self._get_llm_config = get_llm_config
         self._running_tasks: Dict[str, SubAgentExecutor] = {}
         self._finished_tasks: Dict[str, Dict] = {}  # task_id -> {"result": str, "error": str}
-        self._log_store: Optional[SubAgentLogStore] = None
+        self._session_store = None  # 使用 SessionStore 替代 SubAgentLogStore
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
         self._batch_completed = 0
@@ -565,15 +564,15 @@ class SubAgentManager(QObject):
         """设置获取主智能体历史消息的回调"""
         self._get_history_messages = getter
 
-    def set_log_store(self, log_store: SubAgentLogStore):
-        """设置日志存储"""
-        self._log_store = log_store
+    def set_session_store(self, session_store):
+        """设置会话存储（使用 SessionStore 统一管理）"""
+        self._session_store = session_store
 
     def _save_task_to_store(self, task_id: str, agent_name: str, task_description: str,
                             status: str = "running", result: str = None, error: str = None,
                             logs: List[Dict] = None, summary: Dict = None):
-        """保存任务到数据库"""
-        if not self._log_store:
+        """保存任务到数据库（通过 SessionStore）"""
+        if not self._session_store:
             return
         try:
             if logs is None or summary is None:
@@ -582,7 +581,7 @@ class SubAgentManager(QObject):
                     logs = executor.get_logs()
                 if executor and hasattr(executor, "get_summary"):
                     summary = executor.get_summary()
-            self._log_store.save_task(task_id, agent_name, task_description, status, result, error, logs or [],
+            self._session_store.save_subagent_task(task_id, agent_name, task_description, status, result, error, logs or [],
                                       summary or {})
         except Exception as e:
             logger.error(f"[SubAgentManager] 保存任务到数据库失败: {e}")
@@ -676,7 +675,7 @@ class SubAgentManager(QObject):
             )
 
             # 设置日志存储回调
-            if self._log_store:
+            if self._session_store:
                 executor.set_log_store_callback(self._save_task_to_store)
 
             # 【新增】设置历史消息获取回调
@@ -810,8 +809,8 @@ class SubAgentManager(QObject):
             }
         """
         # 先从数据库获取
-        if self._log_store:
-            db_task = self._log_store.get_task(task_id)
+        if self._session_store:
+            db_task = self._session_store.get_subagent_task(task_id)
             if db_task:
                 summary = db_task.get("summary", {})
                 # 确保 task_description 在 summary 中

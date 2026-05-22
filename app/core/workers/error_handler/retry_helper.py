@@ -249,6 +249,10 @@ def create_api_call_with_retry(
     """
     执行带重试的API调用
 
+    优先使用 SmartRetryHelper 提供智能重试策略。
+    如果 enable_smart_retry=True 且 ErrorClassifier 可用，
+    则使用智能重试（支持上下文压缩、凭据轮换、模型切换）。
+
     Args:
         client: OpenAI客户端
         create_func: 调用chat.completions.create的函数
@@ -260,6 +264,36 @@ def create_api_call_with_retry(
     Returns:
         API响应对象
     """
+    # 使用 SmartRetryHelper（如果可用且启用）
+    if enable_smart_retry and _HAS_ERROR_CLASSIFIER:
+        try:
+            from app.core.workers.error_handler.smart_retry import (
+                SmartRetryHelper,
+                RetryConfig,
+            )
+            
+            config = RetryConfig(
+                max_retries=max_retries,
+                base_delay=retry_delay,
+                enable_context_compression=True,
+                enable_credential_rotation=False,
+                enable_model_fallback=False,
+                cancel_check=cancel_check,
+            )
+            
+            helper = SmartRetryHelper(config=config)
+            result = helper.execute_with_retry(create_func)
+            
+            if result.success:
+                return result.result
+            
+            # 重试失败，抛出原始错误
+            raise result.error
+            
+        except ImportError:
+            logger.warning("[RetryHelper] SmartRetryHelper 不可用，回退到基础重试逻辑")
+    
+    # 回退到基础重试逻辑
     last_error: Optional[Exception] = None
     compression_needed = False
 

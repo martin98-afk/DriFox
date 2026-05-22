@@ -27,6 +27,7 @@ from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.workers.worker_event_bus import WorkerEventBus, WorkerEvent
 from app.core.workers.cache_tracker import CacheHitRateTracker
+from app.core.workers.chat_worker_state import ChatWorkerState
 
 # 预编译正则表达式
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -80,69 +81,97 @@ class OpenAIChatWorker(QThread):
         self.permission_check_callback = permission_check_callback
         self.compaction_prompt = compaction_prompt
         self.compaction_config = compaction_config or {}
-        self.full_response = ""
-        self._response_chunks: deque = deque()  # 性能优化：deque 比 list 的 append 更快
-        self._is_cancelled = False
-        self._question_pending = None
-        self._pending_answer = None
-        self._answer_event = Event()
-        self._permission_pending = None
-        self._permission_approved = False
-        # 权限缓存：使用注入的 PermissionCache 实例
-        self._permission_cache = permission_cache or PermissionCache()
-        self._previewed_tool_call_ids = set()
-        self._current_tool_calls = {}  # 改成字典
-        self._tool_calls_buffer = {}
-        self._reasoning_content = ""
+        
+        # ========== 使用 ChatWorkerState 统一管理所有可变状态 ==========
+        self._state = ChatWorkerState.from_constructor_args(
+            messages=messages,
+            session_messages=session_messages or [],
+            llm_config=llm_config,
+            tools=tools,
+            compaction_prompt=compaction_prompt,
+            compaction_config=compaction_config,
+            permission_cache=permission_cache or PermissionCache(),
+            event_bus=WorkerEventBus(),
+            tool_executor=tool_executor,
+            compactor=compactor,
+            initial_compaction_cache=initial_compaction_cache,
+        )
+        self._sync_state_from_state()  # 同步到旧属性名（向后兼容）
+        # ============================================================
 
         # ========== 性能优化：HTTP 客户端和参数缓存 ==========
-        self._http_client: Optional[Any] = None  # 复用的 HTTP 客户端
         self._cached_api_config: Optional[Dict[str, Any]] = None  # 缓存的 API 配置
-        self._reasoning_chunks: deque = deque()  # 性能优化：deque 比 list 的 append 更快
-        self._response_content_blocks = []
-        self._tool_execution_cancelled = False
-        # 等待完整参数的 tool_calls（用于处理超长 arguments 流式传输场景）
-        self._waiting_tool_params: Dict[str, dict] = {}  # tool_call_id -> {buffer, attempt_count}
         self._max_param_retry_count = 10  # 最多重试10次（每收到一个 chunk 重试一次）
-        self._last_progress_len: Dict[str, int] = {}  # tc_id -> 上一次推送进度时的字符数
-        self._last_compaction_state = {
-            "active": False,
-            "source": "worker",
-            "kind": "",
-            "original_count": len(messages or []),
-            "summarized_count": 0,
-            "kept_count": len(messages or []),
-            "summary_count": 0,
-            "note": "",
-        }
-        self._current_session_messages = list(self.session_messages)
-        self._last_usage = None  # 保存最后一次 API 调用的 token usage
         self._cache_tracker = CacheHitRateTracker()  # 缓存命中率追踪器
         # 同步设置模型名称，用于模型感知的成本计算
         model_name = str(self.llm_config.get("模型名称", "") or "")
         if model_name:
             self._cache_tracker.set_model(model_name)
-        self._accumulated_tokens = 0  # 累加本轮所有 API 调用（含多轮工具迭代）的总 token 使用量
-
-        # ========== 工具迭代中压缩支持 ==========
-        self._compactor = compactor
-        self._compaction_cache = initial_compaction_cache
 
         # ========== 性能优化：API 消息缓存 ==========
-        # 缓存已转换的 API 消息，避免每次 API 调用都重新处理所有消息
-        # 只在首次构建，之后增量追加
-        self._api_messages_cache: Optional[List[Dict[str, Any]]] = None
-        self._api_messages_built = False  # 是否已完成初始构建
-
-        # 事件总线：统一的事件通知机制，替代 PyQt Signal + direct_callback 双重模式
-        self._event_bus = WorkerEventBus()
-
         # 向后兼容：保留 PyQt Signal，但通过 EventBus 统一发射
         # UI 层连接这些 signal，事件总线负责分发到所有订阅者
 
         # 直接回调模式（API 层使用，已迁移到事件总线）
         # 保留以兼容旧的直接回调接口
         self._legacy_direct_callbacks: Dict[str, Callable] = {}
+
+    def _sync_state_from_state(self):
+        """
+        将 self._state 的值同步到旧的实例属性名（向后兼容）。
+        确保写 self._is_cancelled = True 之类的旧代码仍然能读/写到正确值。
+        """
+        s = self._state
+        self.full_response = s.response.full_response
+        self._response_chunks = s.response.response_chunks
+        self._is_cancelled = s.is_cancelled
+        self._question_pending = s.permission.pending_question
+        self._pending_answer = s.permission.pending_answer
+        self._answer_event = s.permission.answer_event
+        self._permission_pending = s.permission.pending_permission
+        self._permission_approved = s.permission.permission_approved
+        self._permission_cache = s.permission_cache
+        self._previewed_tool_call_ids = s.tool_call.previewed_ids
+        self._current_tool_calls = s.tool_call.current_calls
+        self._tool_calls_buffer = s.tool_call.calls_buffer
+        self._reasoning_content = s.response.reasoning_content
+        self._http_client = s.http.client
+        self._reasoning_chunks = s.response.reasoning_chunks
+        self._response_content_blocks = s.response.content_blocks
+        self._tool_execution_cancelled = s.tool_call.execution_cancelled
+        self._waiting_tool_params = s.tool_call.waiting_params
+        self._last_progress_len = s.response.last_progress_len
+        self._last_compaction_state = s.compaction.last_state
+        self._current_session_messages = s.session.current_messages
+        self._last_usage = s.session.last_usage
+        self._accumulated_tokens = s.session.accumulated_tokens
+        self._compactor = s.compactor
+        self._compaction_cache = s.compaction.cache
+        self._api_messages_cache = s.api_cache.cache
+        self._api_messages_built = s.api_cache.built
+        self._event_bus = s.event_bus
+
+    def _sync_state(self):
+        """
+        将当前实例属性值同步回 self._state。
+        调用时机：cancel(), cleanup(), _clear_pending_response_state()
+        """
+        s = self._state
+        s.response.full_response = self.full_response
+        s.is_cancelled = self._is_cancelled
+        s.permission.pending_question = self._question_pending
+        s.permission.pending_answer = self._pending_answer
+        s.permission.pending_permission = self._permission_pending
+        s.permission.permission_approved = self._permission_approved
+        s.tool_call.current_calls = self._current_tool_calls
+        s.tool_call.calls_buffer = self._tool_calls_buffer
+        s.response.reasoning_content = self._reasoning_content
+        s.http.client = self._http_client
+        s.tool_call.execution_cancelled = self._tool_execution_cancelled
+        s.tool_call.waiting_params = self._waiting_tool_params
+        s.session.current_messages = self._current_session_messages
+        s.session.last_usage = self._last_usage
+        s.session.accumulated_tokens = self._accumulated_tokens
 
     def _build_api_messages_cache(self) -> List[Dict[str, Any]]:
         """
@@ -234,13 +263,17 @@ class OpenAIChatWorker(QThread):
         return mapping.get(signal_name)
 
     def cancel(self):
+        self._state.is_cancelled = True
+        self._state.tool_call.execution_cancelled = True
         self._is_cancelled = True
         self._tool_execution_cancelled = True
         self._answer_event.set()
         if self._question_pending:
             self._question_pending = None
+            self._state.permission.pending_question = None
         if self._permission_pending:
             self._permission_pending = None
+            self._state.permission.pending_permission = None
 
     def get_interrupted_messages(self) -> List[Dict]:
         # 性能优化：使用 extend 代替 + 操作
@@ -255,20 +288,9 @@ class OpenAIChatWorker(QThread):
         清理单轮对话结束后的中间状态。
         在每次 API 调用前和工具执行完成后调用，释放内存。
         """
-        # 清理工具调用相关的缓存
-        self._current_tool_calls = {}
-        self._tool_calls_buffer = {}
-        self._waiting_tool_params = {}
-        self._previewed_tool_call_ids = set()
-
-        # 清理本轮响应内容（但保留 full_response 用于最终输出）
-        self._response_content_blocks = []
-
-        # 清理本轮的 reasoning_content（下一轮会有新的）
-        self._reasoning_content = ""
-        self._reasoning_chunks = []  # 清理思考片段缓存
-
-        # 注意：_round_permission_cache 不在这里清理，改到工具执行完成后清理
+        # 使用 ChatWorkerState 清理
+        self._state.reset_pending_response_state()
+        self._sync_state_from_state()
 
     def _get_reasoning_content(self) -> str:
         """获取当前的 reasoning_content（从累积的 chunks 合成）"""
@@ -281,32 +303,15 @@ class OpenAIChatWorker(QThread):
         彻底清理 worker 的所有缓存数据，防止内存泄漏。
         应该在对话结束后调用。
         """
-        # 清理消息引用
+        # 清理消息引用（非 state 管理的）
         self.messages = []
         self.session_messages = []
-        self._current_session_messages = []
-
-        # 清理响应缓存
-        self.full_response = ""
-        self._reasoning_content = ""
-        self._reasoning_chunks = []  # 性能优化：清理思考片段缓存
-        self._response_content_blocks = []
-        self._response_chunks = []  # 性能优化：清理响应片段缓存
-
-        # 清理工具调用缓存
-        self._current_tool_calls = {}
-        self._tool_calls_buffer = {}
-        self._waiting_tool_params = {}
-        self._previewed_tool_call_ids = set()
-
-        # 清理 API 消息缓存
-        self._api_messages_cache = None
-        self._api_messages_built = False
         self._current_api_messages = []
         self._current_system_prompt = ''
 
-        # 清理工具列表引用
-        self.tools = []
+        # 使用 ChatWorkerState 清理所有状态
+        self._state.full_cleanup()
+        self._sync_state_from_state()
 
         # 清理问题/回答状态
         self._pending_answer = None
