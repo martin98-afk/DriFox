@@ -23,6 +23,7 @@ from qfluentwidgets import (
     isDarkTheme, PrimaryPushButton, ToolButton,
 )
 
+from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_icon, get_font_family_css
 
 

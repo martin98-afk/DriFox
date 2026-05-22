@@ -532,6 +532,30 @@ def _render_tool_block_content(content: str) -> str:
         # 没有 args，尝试从整个 content 中提取参数
         args_dict = _extract_args_by_regex(content)
 
+    # 历史工具 diff 缺失时的 fallback（从参数重建）
+    if not diff_content and tool_name == "edit":
+        fpath = args_dict.get("file_path") or args_dict.get("path") or ""
+        if fpath:
+            ops = args_dict.get("operations", [])
+            if ops and isinstance(ops, list):
+                pseudo = [f"--- {fpath}", f"+++ {fpath}"]
+                for op in ops:
+                    if isinstance(op, dict):
+                        t = op.get("op", "replace")
+                        a = op.get("anchor", "")
+                        ln = op.get("lines")
+                        if t == "delete":
+                            pseudo.append(f"@@ -1 +1 @@ delete at {a}")
+                            pseudo.append("- <deleted>")
+                        elif ln:
+                            pseudo.append(f"@@ -1 +1 @@ {t} at {a}")
+                            for l in ln:
+                                pseudo.append(f"+{l}")
+                    elif isinstance(op, str):
+                        pseudo.append("@@ -1 +1 @@")
+                        pseudo.append(f"+{op}")
+                diff_content = "\n".join(pseudo)
+
     # 转义参数中的换行符（参数预览和表格不支持多行显示）
     for key in args_dict:
         if isinstance(args_dict[key], str):
@@ -1694,7 +1718,7 @@ class CodeWebViewer(QWebEngineView):
                     padding: 10px 12px;
                     border-top: 1px solid var(--border);
                     background: transparent;
-                    color: var(--text-muted) !important;
+                    color: var(--text-secondary) !important;
                     font-style: italic;
                     font-size: {code_font_size}px;
                     font-family: '{font_family}', sans-serif;
@@ -1739,24 +1763,100 @@ class CodeWebViewer(QWebEngineView):
                     padding: 0;
                 }}
                 .tool-diff-inline .diff-line {{
-                    padding: 0 12px;
-                    white-space: pre-wrap;
+                    display: flex;
+                    align-items: stretch;
+                    min-height: 22px;
                     font-size: {tag_font_size}px;
+                    line-height: 1.5;
+                    border-bottom: 1px solid transparent;
+                }}
+                .tool-diff-inline .diff-ctx:hover {{
+                    background: rgba(255,255,255,0.04);
+                }}
+                .tool-diff-inline .diff-add:hover {{
+                    background-color: rgba(63, 185, 80, 0.22);
+                }}
+                .tool-diff-inline .diff-del:hover {{
+                    background-color: rgba(248, 81, 73, 0.22);
+                }}
+                .tool-diff-inline .line-num {{
+                    flex: none;
+                    min-width: 32px;
+                    padding: 0 4px;
+                    text-align: right;
+                    color: #484f58;
+                    user-select: none;
+                    font-size: {tag_font_size - 1}px;
+                    box-sizing: border-box;
+                }}
+                .tool-diff-inline .line-num-old {{
+                    border-right: 1px solid rgba(48,54,61,0.6);
+                }}
+                .tool-diff-inline .line-num-new {{
+                    border-right: 1px solid rgba(48,54,61,0.6);
+                }}
+                .tool-diff-inline .line-num-empty {{
+                    border-right: 1px solid rgba(48,54,61,0.6);
+                }}
+                .tool-diff-inline .line-sign {{
+                    flex: none;
+                    width: 18px;
+                    text-align: center;
+                    color: #484f58;
+                    user-select: none;
+                }}
+                .tool-diff-inline .line-code {{
+                    flex: 1;
+                    padding: 0 8px;
+                    white-space: pre-wrap;
+                    overflow-x: auto;
                 }}
                 .tool-diff-inline .diff-add {{
-                    background-color: rgba(63, 185, 80, 0.15);
+                    background-color: rgba(63, 185, 80, 0.12);
+                }}
+                .tool-diff-inline .diff-add .line-sign {{
+                    color: #3fb950;
+                }}
+                .tool-diff-inline .diff-add .line-code {{
                     color: #3fb950;
                 }}
                 .tool-diff-inline .diff-del {{
-                    background-color: rgba(248, 81, 73, 0.15);
+                    background-color: rgba(248, 81, 73, 0.12);
+                }}
+                .tool-diff-inline .diff-del .line-sign {{
                     color: #f85149;
                 }}
-                .tool-diff-inline .diff-hunk {{
-                    color: #58a6ff;
-                    padding: 0 12px;
+                .tool-diff-inline .diff-del .line-code {{
+                    color: #f85149;
                 }}
                 .tool-diff-inline .diff-ctx {{
                     color: #c9d1d9;
+                }}
+                .tool-diff-inline .diff-hunk {{
+                    color: #58a6ff;
+                }}
+                .tool-diff-inline .diff-hunk .line-code {{
+                    color: #58a6ff;
+                }}
+                .tool-diff-inline .diff-file-header .line-code {{
+                    color: #8b949e;
+                    font-weight: 600;
+                }}
+                .tool-diff-inline .diff-truncated {{
+                    color: #484f58;
+                }}
+                .tool-diff-inline .diff-truncated .line-code {{
+                    text-align: center;
+                }}
+                .tool-diff-inline .word-add {{
+                    background: rgba(63, 185, 80, 0.18);
+                    border-radius: 2px;
+                    border-bottom: 1px solid rgba(63, 185, 80, 0.4);
+                }}
+                .tool-diff-inline .word-del {{
+                    background: rgba(248, 81, 73, 0.18);
+                    border-radius: 2px;
+                    border-bottom: 1px solid rgba(248, 81, 73, 0.4);
                 }}
                 .tool-params-section,
                 .tool-result-section {{
@@ -3069,11 +3169,14 @@ class MessageCard(SimpleCardWidget):
     def stop_retry_anim(self):
         """停止重试动画，恢复正常边框"""
         self._retrying = False
+        self.error = False
         self._retry_status_widget.setVisible(False)
+        self._apply_card_style()
         if not self._streaming:
             return
         # 继续正常的流式动画（彩虹边框）
         self.update()
+        self.repaint()
 
     def _update_retry_status_bar(self):
         """更新重试状态栏的文本内容"""

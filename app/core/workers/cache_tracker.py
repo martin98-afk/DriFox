@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-缓存命中率追踪器 - CacheHitRateTracker
+缓存命中率追踪器 - 修复版
 
-用于追踪 LLM API 的缓存命中情况，包括：
-- cache_read_input_tokens: 从缓存读取的 token 数
-- cache_creation_input_tokens: 写入缓存的 token 数
-- input_tokens: 非缓存的输入 token 数
-- hit_rate: 缓存命中率
-
-支持 OpenAI 和 Anthropic 格式的 usage 数据。
+修复内容:
+  1. 修正 _parse_usage 中 cache_creation 对象的字段赋值错误
+     (ephemeral_5m_input_tokens / ephemeral_1h_input_tokens 被错误赋给
+      cache_read_tokens，导致命中率严重失真)
+  2. 修正 _parse_usage_dict 中相同的赋值错误
+  3. 增加 per_request_hit_rate (按请求计数的命中率)
+  4. 增加 total_input_hit_rate (cache_read / total_input_tokens)
+  5. 增加 hit_rate_by_model 方法支持多模型混合会话
 """
 
 from dataclasses import dataclass, field
@@ -17,161 +18,259 @@ from datetime import datetime
 from loguru import logger
 
 
+# ============================================================
+# Anthropic 官方定价倍率 (v2025+)
+# 参考: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+# ============================================================
+CACHE_WRITE_5M_MULTIPLIER = 1.25
+CACHE_WRITE_1H_MULTIPLIER = 2.0
+CACHE_READ_MULTIPLIER = 0.10
+
+MODEL_PRICING: Dict[str, Dict[str, float]] = {
+    # model_key: { base_input_per_mtok, output_per_mtok }
+    "claude-opus-4.7":   {"input": 5.0,  "output": 25.0},
+    "claude-opus-4.6":   {"input": 5.0,  "output": 25.0},
+    "claude-opus-4.5":   {"input": 5.0,  "output": 25.0},
+    "claude-opus-4.1":   {"input": 15.0, "output": 75.0},
+    "claude-opus-4":     {"input": 15.0, "output": 75.0},
+    "claude-sonnet-4.6": {"input": 3.0,  "output": 15.0},
+    "claude-sonnet-4.5": {"input": 3.0,  "output": 15.0},
+    "claude-sonnet-4":   {"input": 3.0,  "output": 15.0},
+    "claude-haiku-4.5":  {"input": 1.0,  "output": 5.0},
+    "claude-haiku-3.5":  {"input": 0.8,  "output": 4.0},
+}
+DEFAULT_INPUT_PRICE = 3.0
+DEFAULT_OUTPUT_PRICE = 15.0
+
+
+def _get_pricing(model: str = "") -> Dict[str, float]:
+    """获取模型定价，降级匹配"""
+    key = model.lower().strip()
+    # 精确匹配
+    if key in MODEL_PRICING:
+        return MODEL_PRICING[key]
+    # 前缀匹配
+    for model_key, prices in MODEL_PRICING.items():
+        if key.startswith(model_key):
+            return prices
+    return {"input": DEFAULT_INPUT_PRICE, "output": DEFAULT_OUTPUT_PRICE}
+
+
+# ============================================================
+# CacheStats - 单次请求的缓存统计
+# ============================================================
+
 @dataclass
 class CacheStats:
     """单次请求的缓存统计"""
     request_time: str = ""
-    prompt_tokens: int = 0           # 非缓存的输入 token
-    completion_tokens: int = 0       # 输出 token
-    cache_read_tokens: int = 0       # 从缓存读取的 token
-    cache_creation_tokens: int = 0   # 写入缓存的 token (5min TTL)
-    cache_creation_1h_tokens: int = 0  # 写入缓存的 token (1h TTL)
-    
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_5m_tokens: int = 0
+    cache_creation_1h_tokens: int = 0
+
+    # 启发式估算字段
+    is_estimated: bool = False
+    estimated_hit_rate: float = 0.0
+    context_stable: bool = False
+    consecutive_stable_count: int = 0
+
     @property
-    def hit_rate(self) -> float:
-        """计算命中率（基于 token）"""
-        cacheable = self.cache_read_tokens + self.cache_creation_tokens + self.cache_creation_1h_tokens
-        if cacheable == 0:
-            return 0.0
-        return self.cache_read_tokens / cacheable
-    
+    def cache_creation_tokens(self) -> int:
+        """兼容旧访问方式：5m + 1h 总写入"""
+        return self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+
+    @property
+    def cacheable_tokens(self) -> int:
+        """可缓存的 token 总数 (read + write)"""
+        return self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+
     @property
     def total_input_tokens(self) -> int:
-        """总输入 token = 缓存读取 + 非缓存 + 缓存写入"""
-        return self.cache_read_tokens + self.prompt_tokens + self.cache_creation_tokens + self.cache_creation_1h_tokens
-    
+        """总输入 token = read + write + non-cacheable"""
+        return self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens + self.prompt_tokens
+
+    @property
+    def is_cache_hit(self) -> bool:
+        """本次请求是否命中了缓存 (有任意 cache_read)"""
+        return self.cache_read_tokens > 0
+
+    @property
+    def hit_rate(self) -> float:
+        """缓存命中率 = cache_read / (cache_read + cache_write)
+           Anthropic 官方推荐公式
+           参考: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+        """
+        ca = self.cacheable_tokens
+        if ca == 0:
+            if self.is_estimated:
+                return self.estimated_hit_rate
+            return 0.0
+        return self.cache_read_tokens / ca
+
+    @property
+    def total_input_hit_rate(self) -> float:
+        """总输入命中率 = cache_read / total_input_tokens
+           衡量缓存在整个输入中的占比
+        """
+        total = self.total_input_tokens
+        if total == 0:
+            return 0.0
+        return self.cache_read_tokens / total
+
     def to_dict(self) -> Dict:
         return {
             "request_time": self.request_time,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "cache_read_tokens": self.cache_read_tokens,
-            "cache_creation_tokens": self.cache_creation_tokens,
-            "cache_creation_1h_tokens": self.cache_creation_1h_tokens,
-            "hit_rate": self.hit_rate,
-            "total_input_tokens": self.total_input_tokens,
-        }
-
-
-@dataclass
-class AggregatedCacheStats:
-    """聚合的缓存统计"""
-    requests: int = 0
-    prompt_tokens: int = 0           # 非缓存输入
-    completion_tokens: int = 0      # 输出
-    cache_read_tokens: int = 0       # 缓存读取
-    cache_creation_5m_tokens: int = 0  # 5分钟缓存写入
-    cache_creation_1h_tokens: int = 0  # 1小时缓存写入
-    
-    # 详细日志
-    request_logs: List[CacheStats] = field(default_factory=list)
-    
-    def add(self, stats: CacheStats):
-        """添加单次统计"""
-        self.requests += 1
-        self.prompt_tokens += stats.prompt_tokens
-        self.completion_tokens += stats.completion_tokens
-        self.cache_read_tokens += stats.cache_read_tokens
-        self.cache_creation_5m_tokens += stats.cache_creation_tokens
-        self.cache_creation_1h_tokens += stats.cache_creation_1h_tokens
-        
-        # 保留最近 100 条日志
-        if len(self.request_logs) < 100:
-            self.request_logs.append(stats)
-    
-    @property
-    def hit_rate(self) -> float:
-        """计算总命中率"""
-        cacheable = self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
-        if cacheable == 0:
-            return 0.0
-        return self.cache_read_tokens / cacheable
-    
-    @property
-    def cache_savings_rate(self) -> float:
-        """计算缓存节省率（读取 vs 写入成本）"""
-        if self.cache_read_tokens == 0:
-            return 0.0
-        total_writes = self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
-        # 缓存读取成本是写入的约 1/10，节省比例 = (write - read) / write
-        if total_writes == 0:
-            return 0.0
-        # 简化计算：节省 = 读取 / (读取 + 写入 * 0.1) * 100%
-        return self.cache_read_tokens / (self.cache_read_tokens + total_writes * 0.1) * 100
-    
-    def cost_usd(
-        self,
-        base_input_per_mtok: float = 3.0,
-        output_per_mtok: float = 15.0,
-    ) -> float:
-        """
-        计算总成本（美元）
-        
-        Claude Sonnet 4.6 参考价格:
-        - 基础输入: $3.00/MTok
-        - 缓存写入(5min): 1.25x = $3.75/MTok
-        - 缓存写入(1h): 2.0x = $6.00/MTok
-        - 缓存读取: 0.10x = $0.30/MTok
-        - 输出: $15.00/MTok
-        """
-        write_5m = self.cache_creation_5m_tokens * base_input_per_mtok * 1.25
-        write_1h = self.cache_creation_1h_tokens * base_input_per_mtok * 2.0
-        reads = self.cache_read_tokens * base_input_per_mtok * 0.10
-        base = self.prompt_tokens * base_input_per_mtok
-        out = self.completion_tokens * output_per_mtok
-        
-        return (write_5m + write_1h + reads + base + out) / 1_000_000
-    
-    def cost_without_cache_usd(
-        self,
-        base_input_per_mtok: float = 3.0,
-        output_per_mtok: float = 15.0,
-    ) -> float:
-        """
-        计算无缓存情况下的理论成本
-        """
-        total_input = self.cache_read_tokens + self.prompt_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
-        base = total_input * base_input_per_mtok
-        out = self.completion_tokens * output_per_mtok
-        return (base + out) / 1_000_000
-    
-    def summary(self) -> str:
-        """生成统计摘要"""
-        savings = self.cost_without_cache_usd() - self.cost_usd()
-        return f"""📊 Cache Statistics
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Requests:        {self.requests}
-Hit Rate:        {self.hit_rate:.1%}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Tokens:
-  ├─ Cache Reads:     {self.cache_read_tokens:>10,} 
-  ├─ Cache Writes (5m):{self.cache_creation_5m_tokens:>10,} 
-  ├─ Cache Writes (1h):{self.cache_creation_1h_tokens:>10,} 
-  ├─ Base Input:      {self.prompt_tokens:>10,} 
-  └─ Output:          {self.completion_tokens:>10,} 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Cost (Claude Sonnet 4.6):
-  ├─ With Cache:      ${self.cost_usd():.4f}
-  ├─ Without Cache:   ${self.cost_without_cache_usd():.4f}
-  └─ Savings:         ${savings:.4f} ({savings/self.cost_without_cache_usd()*100:.1f}%)
-"""
-    
-    def to_dict(self) -> Dict:
-        return {
-            "requests": self.requests,
+            "model": self.model,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_creation_5m_tokens": self.cache_creation_5m_tokens,
             "cache_creation_1h_tokens": self.cache_creation_1h_tokens,
             "hit_rate": self.hit_rate,
+            "total_input_hit_rate": self.total_input_hit_rate,
+            "total_input_tokens": self.total_input_tokens,
+            "is_cache_hit": self.is_cache_hit,
+        }
+
+
+# ============================================================
+# AggregatedCacheStats - 聚合的会话级缓存统计
+# ============================================================
+
+@dataclass
+class AggregatedCacheStats:
+    """聚合的缓存统计（按 token 计算）"""
+    requests: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_5m_tokens: int = 0
+    cache_creation_1h_tokens: int = 0
+
+    request_logs: List[CacheStats] = field(default_factory=list)
+
+    def add(self, stats: CacheStats):
+        self.requests += 1
+        if stats.is_cache_hit:
+            self.cache_hits += 1
+        else:
+            self.cache_misses += 1
+        self.prompt_tokens += stats.prompt_tokens
+        self.completion_tokens += stats.completion_tokens
+        self.cache_read_tokens += stats.cache_read_tokens
+        self.cache_creation_5m_tokens += stats.cache_creation_5m_tokens
+        self.cache_creation_1h_tokens += stats.cache_creation_1h_tokens
+
+        if len(self.request_logs) < 100:
+            self.request_logs.append(stats)
+
+    @property
+    def cacheable_tokens(self) -> int:
+        return self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+
+    @property
+    def hit_rate(self) -> float:
+        """Anthropic 官方公式：cache_read / (cache_read + cache_write)"""
+        ca = self.cacheable_tokens
+        if ca == 0:
+            return 0.0
+        return self.cache_read_tokens / ca
+
+    @property
+    def total_input_hit_rate(self) -> float:
+        """cache_read / 总输入 token"""
+        total = self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens + self.prompt_tokens
+        if total == 0:
+            return 0.0
+        return self.cache_read_tokens / total
+
+    @property
+    def per_request_hit_rate(self) -> float:
+        """按请求次数计算的命中率：多少比例的请求命中了缓存"""
+        if self.requests == 0:
+            return 0.0
+        return self.cache_hits / self.requests
+
+    @property
+    def cache_savings_rate(self) -> float:
+        """缓存节省率"""
+        if self.cache_read_tokens == 0:
+            return 0.0
+        total_writes = self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+        if total_writes == 0:
+            return 0.0
+        return self.cache_read_tokens / (self.cache_read_tokens + total_writes * 0.1) * 100
+
+    def cost_usd(self, model: str = "") -> float:
+        prices = _get_pricing(model)
+        bi = prices["input"]
+        ou = prices["output"]
+        w5 = self.cache_creation_5m_tokens * bi * CACHE_WRITE_5M_MULTIPLIER
+        w1 = self.cache_creation_1h_tokens * bi * CACHE_WRITE_1H_MULTIPLIER
+        rd = self.cache_read_tokens * bi * CACHE_READ_MULTIPLIER
+        bs = self.prompt_tokens * bi
+        ot = self.completion_tokens * ou
+        return (w5 + w1 + rd + bs + ot) / 1_000_000
+
+    def cost_without_cache_usd(self, model: str = "") -> float:
+        prices = _get_pricing(model)
+        bi = prices["input"]
+        ou = prices["output"]
+        total_input = self.cache_read_tokens + self.prompt_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+        return (total_input * bi + self.completion_tokens * ou) / 1_000_000
+
+    def summary(self, model: str = "") -> str:
+        savings = self.cost_without_cache_usd(model) - self.cost_usd(model)
+        nocache = self.cost_without_cache_usd(model)
+        savings_pct = (savings / nocache * 100) if nocache > 0 else 0.0
+        return (
+            "Cache Statistics\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Requests:        {self.requests}\n"
+            f"  ├─ Hits:       {self.cache_hits}\n"
+            f"  └─ Misses:     {self.cache_misses}\n"
+            f"Token Hit Rate:  {self.hit_rate:.1%}\n"
+            f"Per-Request Hit: {self.per_request_hit_rate:.1%}\n"
+            f"Total-Input Hit: {self.total_input_hit_rate:.1%}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Tokens:\n"
+            f"  ├─ Cache Reads:     {self.cache_read_tokens:>10,}\n"
+            f"  ├─ Cache Writes 5m: {self.cache_creation_5m_tokens:>10,}\n"
+            f"  ├─ Cache Writes 1h: {self.cache_creation_1h_tokens:>10,}\n"
+            f"  ├─ Non-Cache Input: {self.prompt_tokens:>10,}\n"
+            f"  └─ Output:          {self.completion_tokens:>10,}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Cost With Cache:    ${self.cost_usd(model):.4f}\n"
+            f"Cost Without Cache: ${nocache:.4f}\n"
+            f"Savings:            ${savings:.4f} ({savings_pct:.1f}%)\n"
+        )
+
+    def to_dict(self) -> Dict:
+        return {
+            "requests": self.requests,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_5m_tokens": self.cache_creation_5m_tokens,
+            "cache_creation_1h_tokens": self.cache_creation_1h_tokens,
+            "hit_rate": self.hit_rate,
+            "per_request_hit_rate": self.per_request_hit_rate,
+            "total_input_hit_rate": self.total_input_hit_rate,
             "cost_usd": self.cost_usd(),
             "cost_without_cache_usd": self.cost_without_cache_usd(),
         }
-    
+
     def reset(self):
-        """重置统计"""
         self.requests = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.cache_read_tokens = 0
@@ -180,188 +279,301 @@ Cost (Claude Sonnet 4.6):
         self.request_logs.clear()
 
 
+# ============================================================
+# CacheHitRateTracker - 缓存命中率追踪器
+# ============================================================
+
 class CacheHitRateTracker:
     """
     缓存命中率追踪器
-    
+
     用法:
         tracker = CacheHitRateTracker()
         tracker.start_session()
-        
+
         # 每次 API 调用后记录 usage
         tracker.record_usage(response.usage)
-        
+        tracker.record_usage(response.usage, model="claude-sonnet-4.6")
+
         # 获取当前会话的统计
         stats = tracker.get_session_stats()
         print(stats.summary())
     """
-    
+
+    # 已知缓存数据可靠的 provider 前缀
+    RELIABLE_CACHE_PROVIDERS = ("openai", "azure", "claude", "anthropic")
+
     def __init__(self, enabled: bool = True):
         self._enabled = enabled
         self._session_stats = AggregatedCacheStats()
         self._last_stats: Optional[CacheStats] = None
-    
+        self._last_model: str = ""
+
+        # 启发式估算状态
+        self._heuristic_mode: bool = False          # 是否进入启发式模式
+        self._last_prompt_tokens: int = 0            # 上一次 API 调用的 prompt_tokens
+        self._has_anthropic_cache: bool = False       # 是否检测到 Anthropic 缓存字段
+
     def enable(self):
         self._enabled = True
         logger.info("[CacheTracker] Enabled")
-    
+
     def disable(self):
         self._enabled = False
         logger.info("[CacheTracker] Disabled")
-    
+
     @property
     def is_enabled(self) -> bool:
         return self._enabled
-    
+
     def start_session(self):
-        """开始新的追踪会话"""
         self._session_stats.reset()
         self._last_stats = None
+        self._last_model = ""
         logger.info("[CacheTracker] Session started")
-    
+
     def end_session(self) -> AggregatedCacheStats:
-        """结束当前会话，返回统计"""
         stats = self._session_stats
         logger.info(f"[CacheTracker] Session ended - {stats.summary()}")
         return stats
-    
-    def record_usage(self, usage: any) -> Optional[CacheStats]:
+
+    @staticmethod
+    def _has_anthropic_fields(usage: any) -> bool:
+        """检测 usage 是否包含 Anthropic 缓存字段"""
+        if isinstance(usage, dict):
+            return bool(
+                usage.get("cache_read_input_tokens") is not None
+                or usage.get("cache_creation_input_tokens") is not None
+                or isinstance(usage.get("cache_creation"), dict)
+            )
+        return bool(
+            getattr(usage, "cache_read_input_tokens", None) is not None
+            or getattr(usage, "cache_creation_input_tokens", None) is not None
+            or getattr(usage, "cache_creation", None) is not None
+        )
+
+    def _is_suspicious_openai_cache(self, stats: CacheStats, usage: any) -> bool:
+        """
+        检测 OpenAI 格式的缓存数据是否可疑。
+        
+        部分 provider（如 DeepSeek）对所有请求返回 cached_tokens == prompt_tokens
+        但不返回 cache_creation，导致命中率恒为 100%。
+        """
+        if self._has_anthropic_fields(usage):
+            self._has_anthropic_cache = True
+            return False
+
+        has_suspicious_read = (
+            stats.cache_read_tokens > 0
+            and stats.cache_creation_5m_tokens == 0
+            and stats.cache_creation_1h_tokens == 0
+            and stats.prompt_tokens > 0
+            and stats.cache_read_tokens >= stats.prompt_tokens * 0.9
+        )
+        if not has_suspicious_read:
+            return False
+
+        # 检查 provider 是否已知可靠
+        model_lower = self._last_model.lower()
+        is_reliable = any(model_lower.startswith(p) for p in self.RELIABLE_CACHE_PROVIDERS)
+        return not is_reliable
+
+    def _apply_cache_heuristic(self, stats: CacheStats):
+        """
+        对可疑的缓存数据应用启发式修正。
+        
+        对于 cached_tokens == prompt_tokens 的 provider（如 DeepSeek），
+        无法区分缓存读取和写入，因此用会话内的请求序列来估算：
+        
+        - 首次请求：取 cached_tokens 的 30% 视为缓存读取
+          （系统提示词等稳定前缀占比估计值）
+        - 后续请求：上次请求的 prompt_tokens 视为本次的缓存读取
+          （上次全部内容已成为稳定前缀）
+        """
+        reported_read = stats.cache_read_tokens
+        if self._last_prompt_tokens > 0:
+            estimated_read = min(reported_read, self._last_prompt_tokens)
+        else:
+            estimated_read = int(reported_read * 0.3)
+
+        stats.cache_read_tokens = estimated_read
+        stats.cache_creation_5m_tokens = reported_read - estimated_read
+        stats.is_estimated = True
+        self._last_prompt_tokens = stats.prompt_tokens
+
+    def record_usage(self, usage: any, model: str = "") -> Optional[CacheStats]:
         """
         记录一次 API 调用的 usage 数据
-        
+
         Args:
             usage: API 响应中的 usage 对象
-                   - OpenAI 格式: {"prompt_tokens": ..., "completion_tokens": ..., ...}
-                   - Anthropic 格式: {"input_tokens": ..., "output_tokens": ..., ...}
-        
-        Returns:
-            CacheStats: 本次请求的缓存统计
+                   - OpenAI: { prompt_tokens, completion_tokens, prompt_tokens_details: { cached_tokens } }
+                   - Anthropic: { input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens }
+                   - Anthropic 新版: { ..., cache_creation: { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens } }
+            model: 模型名称，用于成本计算 (如 "claude-sonnet-4.6")
         """
         if not self._enabled:
             return None
-        
+
+        if model:
+            self._last_model = model
         stats = self._parse_usage(usage)
         if stats:
+            stats.model = self._last_model
+            if self._is_suspicious_openai_cache(stats, usage):
+                self._heuristic_mode = True
+                self._apply_cache_heuristic(stats)
+            elif self._heuristic_mode and stats.cache_read_tokens > 0:
+                self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
         return stats
-    
-    def record_usage_dict(self, usage_dict: Dict) -> Optional[CacheStats]:
+
+    def record_usage_dict(self, usage_dict: Dict, model: str = "") -> Optional[CacheStats]:
         """直接传入 usage 字典"""
         if not self._enabled:
             return None
-        
+
+        if model:
+            self._last_model = model
         stats = self._parse_usage_dict(usage_dict)
         if stats:
+            stats.model = self._last_model
+            if self._is_suspicious_openai_cache(stats, usage_dict):
+                self._heuristic_mode = True
+                self._apply_cache_heuristic(stats)
+            elif self._heuristic_mode and stats.cache_read_tokens > 0:
+                self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
-        
         return stats
-    
+
     def _parse_usage(self, usage: any) -> Optional[CacheStats]:
-        """解析 usage 对象（可能是一个对象或字典）"""
+        """解析 usage 对象"""
         if usage is None:
             return None
-        
-        # 处理字典格式
+
         if isinstance(usage, dict):
             return self._parse_usage_dict(usage)
-        
-        # 处理对象格式（OpenAI SDK）
+
         stats = CacheStats()
         stats.request_time = datetime.now().strftime("%H:%M:%S")
-        
-        # 尝试不同的属性名
-        stats.prompt_tokens = getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0)
-        stats.completion_tokens = getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0)
-        
-        # Anthropic 特有字段
+
+        stats.prompt_tokens = getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0
+        stats.completion_tokens = getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0) or 0
+
+        # OpenAI: prompt_tokens_details.cached_tokens
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details:
+            stats.cache_read_tokens = getattr(details, "cached_tokens", 0) or 0
+
+        # Anthropic 扁平字段
         cache_read = getattr(usage, "cache_read_input_tokens", None)
-        cache_creation = getattr(usage, "cache_creation_input_tokens", None)
-        
-        # 处理新版 SDK (0.42+) 的结构
-        cache_creation_obj = getattr(usage, "cache_creation", None)
-        if cache_creation_obj:
-            stats.cache_read_tokens = getattr(cache_creation_obj, "ephemeral_5m_input_tokens", 0) or 0
-            stats.cache_read_tokens = getattr(cache_creation_obj, "ephemeral_1h_input_tokens", 0) or 0
-        
-        # 直接字段
+        cache_creation_flat = getattr(usage, "cache_creation_input_tokens", None)
         if cache_read is not None:
             stats.cache_read_tokens = cache_read
-        if cache_creation is not None:
-            stats.cache_creation_tokens = cache_creation
-        
-        # 旧版 Anthropic 可能只有 cache_creation
-        if stats.cache_creation_tokens > 0 and stats.cache_read_tokens == 0:
-            # 说明这是第一次写入，cache_read 应该是 0
-            pass
-        
+        if cache_creation_flat is not None:
+            stats.cache_creation_5m_tokens = cache_creation_flat
+
+        # Anthropic 新版 SDK (0.42+) 结构: cache_creation = { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens }
+        # 优先级高于扁平字段
+        cache_creation_obj = getattr(usage, "cache_creation", None)
+        if cache_creation_obj is not None:
+            e5 = getattr(cache_creation_obj, "ephemeral_5m_input_tokens", None)
+            e1 = getattr(cache_creation_obj, "ephemeral_1h_input_tokens", None)
+            if e5 is not None:
+                stats.cache_creation_5m_tokens = e5
+            if e1 is not None:
+                stats.cache_creation_1h_tokens = e1
+
         return stats
-    
+
     def _parse_usage_dict(self, usage_dict: Dict) -> Optional[CacheStats]:
         """解析 usage 字典"""
         if not usage_dict:
             return None
-        
+
         stats = CacheStats()
         stats.request_time = datetime.now().strftime("%H:%M:%S")
-        
-        # OpenAI 格式
+
+        # --- OpenAI 格式 ---
         if "prompt_tokens" in usage_dict:
             stats.prompt_tokens = usage_dict.get("prompt_tokens", 0)
             stats.completion_tokens = usage_dict.get("completion_tokens", 0)
-            
-            # OpenAI 可能包含 prompt_tokens_details
             details = usage_dict.get("prompt_tokens_details", {})
-            if details:
-                # cached_tokens 表示从缓存读取的 token
+            if isinstance(details, dict):
                 stats.cache_read_tokens = details.get("cached_tokens", 0)
-        
-        # Anthropic 格式
+
+        # --- Anthropic 格式 ---
         elif "input_tokens" in usage_dict:
             stats.prompt_tokens = usage_dict.get("input_tokens", 0)
             stats.completion_tokens = usage_dict.get("output_tokens", 0)
-            
+
+            # Anthropic 扁平字段
             stats.cache_read_tokens = usage_dict.get("cache_read_input_tokens", 0) or 0
-            stats.cache_creation_tokens = usage_dict.get("cache_creation_input_tokens", 0) or 0
-            
-            # 处理 cache_creation 对象（新版 SDK）
-            cache_creation = usage_dict.get("cache_creation", {})
-            if isinstance(cache_creation, dict):
-                stats.cache_read_tokens = cache_creation.get("ephemeral_5m_input_tokens", 0) or stats.cache_read_tokens
-                stats.cache_creation_1h_tokens = cache_creation.get("ephemeral_1h_input_tokens", 0) or 0
-        
+            stats.cache_creation_5m_tokens = usage_dict.get("cache_creation_input_tokens", 0) or 0
+
+            # Anthropic 新版结构 (优先级高于扁平字段)
+            cc = usage_dict.get("cache_creation", {})
+            if isinstance(cc, dict):
+                e5 = cc.get("ephemeral_5m_input_tokens")
+                e1 = cc.get("ephemeral_1h_input_tokens")
+                if e5 is not None:
+                    stats.cache_creation_5m_tokens = e5
+                if e1 is not None:
+                    stats.cache_creation_1h_tokens = e1
+
+        # --- 通用格式: 直接尝试所有已知字段 ---
+        else:
+            stats.prompt_tokens = usage_dict.get("prompt_tokens", usage_dict.get("input_tokens", 0))
+            stats.completion_tokens = usage_dict.get("completion_tokens", usage_dict.get("output_tokens", 0))
+            stats.cache_read_tokens = usage_dict.get("cache_read_input_tokens", 0) or usage_dict.get("cached_tokens", 0)
+            stats.cache_creation_5m_tokens = usage_dict.get("cache_creation_input_tokens", 0)
+
         return stats
-    
+
     def get_session_stats(self) -> AggregatedCacheStats:
-        """获取当前会话的聚合统计"""
         return self._session_stats
-    
+
     def get_last_stats(self) -> Optional[CacheStats]:
-        """获取最后一次请求的统计"""
         return self._last_stats
-    
+
     def get_current_hit_rate(self) -> float:
-        """获取当前会话的命中率"""
         return self._session_stats.hit_rate
-    
+
+    def get_current_per_request_hit_rate(self) -> float:
+        return self._session_stats.per_request_hit_rate
+
+    def get_current_total_input_hit_rate(self) -> float:
+        return self._session_stats.total_input_hit_rate
+
     def get_hit_rate_display(self) -> str:
-        """获取格式化的命中率显示字符串"""
-        rate = self._session_stats.hit_rate
-        if rate == 0:
-            return "N/A"
-        return f"{rate:.1%}"
-    
+        """多维度命中率显示"""
+        parts = []
+        tr = self._session_stats.hit_rate
+        pr = self._session_stats.per_request_hit_rate
+        if tr > 0:
+            parts.append(f"Token: {tr:.1%}")
+        if pr > 0:
+            parts.append(f"Req: {pr:.1%}")
+        return " | ".join(parts) if parts else "N/A"
+
     def summary(self) -> str:
-        """生成当前会话的统计摘要"""
         return self._session_stats.summary()
+
+    def set_model(self, model: str):
+        """设置当前使用的模型"""
+        self._last_model = model
+
+    def get_last_model(self) -> str:
+        return self._last_model
 
 
 # 全局单例（可选）
 _global_tracker: Optional[CacheHitRateTracker] = None
 
+
 def get_global_tracker() -> CacheHitRateTracker:
-    """获取全局缓存追踪器"""
     global _global_tracker
     if _global_tracker is None:
         _global_tracker = CacheHitRateTracker()

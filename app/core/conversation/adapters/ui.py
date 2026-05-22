@@ -1,5 +1,5 @@
 # app/core/conversation/adapters/ui.py
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -29,6 +29,7 @@ class UIConversationAdapter(QObject):
     messages_updated = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
     retry_status = pyqtSignal(str, int, int, float)
+    retry_resolved = pyqtSignal()
 
     def __init__(self, core: ConversationCore, executor: ConversationExecutor):
         super().__init__()
@@ -82,6 +83,9 @@ class UIConversationAdapter(QObject):
     def on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         self.retry_status.emit(error_type, attempt, max_retries, wait_time)
 
+    def on_retry_resolved(self):
+        self.retry_resolved.emit()
+
     def on_stream_started(self):
         self.stream_started.emit()
 
@@ -99,5 +103,6 @@ class UIConversationAdapter(QObject):
             "messages_updated": self.on_messages_updated,
             "error": self.on_error,
             "retry_status": self.on_retry_status,
+            "retry_resolved": self.on_retry_resolved,
             "stream_started": self.on_stream_started,
         }

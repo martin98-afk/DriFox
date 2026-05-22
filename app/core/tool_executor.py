@@ -10,6 +10,8 @@ from pathlib import Path
 from loguru import logger
 from typing import Dict, Optional, Callable
 
+from app.core.hook_manager import HookDecision
+
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
 
@@ -24,7 +26,7 @@ class ToolExecutor:
 
     # 需要记录的文件操作
     _FILE_OPS_TO_TRACK = {
-        "write", "edit"
+        "write", "edit", "multi_edit"
     }
 
     def __init__(self, homepage=None, workdir: str = None, backend=None):
@@ -309,7 +311,8 @@ class ToolExecutor:
     REQUIRED_ARGS = {
         "read": ["path"],
         "write": ["path", "content"],
-        "edit": ["path", "operations"],
+        "edit": ["path", "oldString", "newString"],
+        "multi_edit": ["path", "edits"],
         "grep": ["pattern"],
         "glob": ["pattern"],
         "bash": ["command"],
@@ -325,9 +328,9 @@ class ToolExecutor:
         "git_status": [],
         "git_log": [],
         "git_diff": [],
-        "get_diagnostics": ["file_path"],
+        "get_diagnostics": ["path"],
         "summarize_changes": ["text"],
-        "edit_project_note": ["operations"],
+        "edit_project_note": ["oldString", "newString"],
         "read_project_note": [],
         "todowrite": ["todos"],
         "todoread": [],
@@ -361,7 +364,6 @@ class ToolExecutor:
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         if self._backend and self._backend.hook_manager:
             import os
-            from app.core.hook_manager import HookDecision
             context = {
                 "project_root": self._workdir or os.getcwd(),
                 "tool_name": tool_name,
@@ -458,7 +460,13 @@ class ToolExecutor:
             ),
             "edit": lambda: self._builtin_tools.edit_file(
                 path=args.get("path"),
-                operations=args.get("operations", []),
+                oldString=args.get("oldString", ""),
+                newString=args.get("newString", ""),
+                replaceAll=args.get("replaceAll", False),
+            ),
+            "multi_edit": lambda: self._builtin_tools.multi_edit(
+                path=args.get("path"),
+                edits=args.get("edits", []),
             ),
             "grep": lambda: self._builtin_tools.grep_files(
                 pattern=args.get("pattern"),
@@ -508,23 +516,23 @@ class ToolExecutor:
                 args.get("files", [])
             ),
             "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(
-                args.get("file_path", ""), args.get("language")
+                args.get("path", ""), args.get("language")
             ),
             "summarize_changes": lambda: self._builtin_tools.summarize_changes(
                 args.get("text", ""), args.get("limit", 1200)
             ),
             "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
             "edit_project_note": lambda: self._builtin_tools.edit_project_note(
-                args.get("operations", [])),
+                oldString=args.get("oldString", ""),
+                newString=args.get("newString", "")),
             "read_project_note": lambda: self._builtin_tools.read_project_note(
                 args.get("offset", 1),
                 args.get("limit", 500)),
             "todoread": lambda: self._builtin_tools.todo_read(),
             "task_batch": lambda: (
-                # 【修复】处理 tasks 可能是 JSON 字符串的情况
                 lambda tasks_val: self._builtin_tools.task_execute_batch(
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
-                    args.get("share_context", True),
+                    args.get("share_context", False),
                 )
             )(args.get("tasks", [])),
             "task_status": lambda: self._builtin_tools.task_status(

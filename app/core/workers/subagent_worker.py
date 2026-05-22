@@ -13,6 +13,8 @@ from loguru import logger
 from app.constants import PARAM_SCHEMA
 from app.tools.result import ToolResult
 from app.core.store import SubAgentLogStore
+from app.core.message_content import to_api_message
+from app.core.tool_call_parser import smart_parse_arguments
 
 from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
@@ -21,6 +23,7 @@ from app.core.provider_profile import get_provider_profile
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
+_TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 
 
@@ -63,6 +66,8 @@ class SubAgentExecutor(QThread):
         # 日志存储: [{"type": "progress"|"thinking"|"ai_response"|"tool_call"|"tool_result"|"finish", "content": str, "timestamp": float}]
         self._logs: List[Dict] = []
         self._tool_call_count = 0
+        self._log_store_callback = None  # 日志存储回调
+        self._get_history_messages = None  # 获取主智能体历史消息的回调
 
     @property
     def start_time(self) -> Optional[float]:
@@ -83,8 +88,6 @@ class SubAgentExecutor(QThread):
     def execution_error(self) -> Optional[str]:
         """获取执行错误（供 SubAgentManager 使用）"""
         return self._execution_error
-        self._log_store_callback = None  # 日志存储回调
-        self._get_history_messages = None  # 获取主智能体历史消息的回调
 
     def set_log_store_callback(self, callback):
         """设置日志存储回调"""
@@ -117,10 +120,11 @@ class SubAgentExecutor(QThread):
             log_entry.update(extra)
         self._logs.append(log_entry)
         # 实时保存到数据库
-        if self._log_store_callback:
+        log_callback = getattr(self, '_log_store_callback', None)
+        if log_callback:
             try:
-                self._log_store_callback(self.task_id, self.agent_name, self.task_description, "running", None, None,
-                                         self._logs, self.get_summary())
+                log_callback(self.task_id, self.agent_name, self.task_description, "running", None, None,
+                             self._logs, self.get_summary())
             except Exception as e:
                 logger.warning(f"[SubAgentExecutor] 实时保存日志失败: {e}")
 
@@ -161,7 +165,7 @@ class SubAgentExecutor(QThread):
 
             # 【新增】如果 agent 配置了 inherit_history，获取主智能体历史消息
             history_section = ""
-            if agent.inherit_history and self._get_history_messages:
+            if agent.inherit_history and getattr(self, '_get_history_messages', None):
                 try:
                     history_messages = self._get_history_messages() or []
                     if history_messages:
@@ -191,8 +195,11 @@ class SubAgentExecutor(QThread):
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 获取历史消息失败: {e}")
 
+            # 过滤父智能体上下文中的 <tool> 和 <think> 标签，避免污染子智能体的工具调用格式
+            sanitized_context = _TOOL_TAG_PATTERN.sub("", self.parent_context)
+            sanitized_context = _THINKING_PATTERN.sub("", sanitized_context)
             messages = [
-                {"role": "system", "content": system_prompt + history_section + F"## 父智能体说明\n{self.parent_context}\n\n"},
+                {"role": "system", "content": system_prompt + history_section + F"## 父智能体说明\n{sanitized_context}\n\n"},
                 {"role": "user", "content": f"## 子任务\n{self.task_description}"}
             ]
 
@@ -478,8 +485,14 @@ class SubAgentExecutor(QThread):
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
-                except:
-                    arguments = {}
+                except json.JSONDecodeError:
+                    parsed = smart_parse_arguments(arguments, tool_name)
+                    if parsed is not None:
+                        arguments = parsed
+                        logger.info(f"[SubAgent] ✓ JSON 智能修复成功: tool={tool_name}")
+                    else:
+                        logger.warning(f"[SubAgent] ⚠️ JSON 解析失败且无法修复, tool={tool_name}, preview='{arguments[:200]}'")
+                        arguments = {}
 
             tool_call_id = tc["id"]
 
@@ -508,17 +521,19 @@ class SubAgentExecutor(QThread):
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
             QCoreApplication.processEvents()
 
-            results.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": tool_name,  # 添加 name 字段与 ChatWorker 一致
-                    "arguments": arguments,  # 添加 arguments 字段与 ChatWorker 一致
-                    "content": result_content,
-                    "success": success,  # 添加 success 字段与 ChatWorker 一致
-                    "round_id": f"round_{id(tc)}",  # 添加 round_id 字段与 ChatWorker 一致
-                }
-            )
+            raw_result = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "arguments": arguments,
+                "success": success,
+                "round_id": f"round_{id(tc)}",
+                "diff": getattr(result, "diff", None) if result else None,
+                "anchors": getattr(result, "anchors", None) if result else None,
+            }
+            # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
+            results.append(to_api_message(raw_result) or raw_result)
 
         return results
 

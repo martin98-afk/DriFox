@@ -14,14 +14,11 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
-from app.core.conversation.core import ConversationCore
-from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.adapters import UIConversationAdapter
-from app.core.message_content import (
-    consolidate_messages,
-)
-from app.core.token_estimator import count_messages_tokens
+from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
+from app.core.token_estimator import count_messages_tokens
 from app.tools import get_builtin_tools_schema
 
 
@@ -94,6 +91,7 @@ class UIEngine(BaseEngine):
         self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))
         self._adapter.error_occurred.connect(lambda e: self._on_error(e))
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
+        self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))
         self._adapter.stream_started.connect(lambda: self._emit("stream_started"))
 
         # 调用父类构造
@@ -177,7 +175,7 @@ class UIEngine(BaseEngine):
             if tool_name == "bash":
                 command = arguments.get("command", "")
                 return perm_resolver.resolve(tool_name, command)
-            elif tool_name in ("read", "edit", "write"):
+            elif tool_name in ("read", "edit", "multi_edit", "write"):
                 file_path = arguments.get("filePath", "")
                 return perm_resolver.resolve(tool_name, file_path)
             elif tool_name == "webfetch":
@@ -491,8 +489,15 @@ class UIEngine(BaseEngine):
             if hasattr(worker, 'get_cache_stats'):
                 stats = worker.get_cache_stats()
                 if stats:
-                    logger.debug(f"[_save_cache_stats] hit_rate={stats.hit_rate}, read={stats.cache_read_tokens}")
-                    self._backend.set_last_cache_stats(stats.to_dict())
+                    # stats 可能是 dict 或带 to_dict() 的对象
+                    if isinstance(stats, dict):
+                        stats_dict = stats
+                    else:
+                        stats_dict = stats.to_dict()
+                    hit_rate = stats_dict.get('hit_rate', 0.0)
+                    cache_read = stats_dict.get('cache_read_tokens', 0)
+                    logger.debug(f"[_save_cache_stats] hit_rate={hit_rate}, read={cache_read}")
+                    self._backend.set_last_cache_stats(stats_dict)
                 else:
                     logger.debug("[_save_cache_stats] stats is None")
             else:

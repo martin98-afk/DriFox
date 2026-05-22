@@ -41,8 +41,7 @@ class FileOperationRecorder:
 
     # 支持记录的文件操作类型
     TRACKED_OPERATIONS = {
-        "write", "edit",  # tool_executor 中的名称
-        "write_file", "edit_file", "delete_file",  # 兼容别名
+        "write", "edit", "multi_edit" # tool_executor 中的名称
     }
 
     def __init__(self, session_store: Optional[SessionStore] = None):

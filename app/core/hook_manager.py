@@ -11,16 +11,16 @@ HookManager - Hooks 机制核心管理类 (增强版)
 - Skill 与 Hook 深度集成
 """
 
+import json
+import os
 import re
 import subprocess
-import os
-import json
 import time
-import threading
-from pathlib import Path
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any, Callable, Union
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Callable, Union
+
 from PyQt5.QtCore import QThreadPool, QRunnable, pyqtSignal, QObject
 from loguru import logger
 
@@ -1044,3 +1044,150 @@ class HookManager:
             logger.info(f"[HookManager] Reloaded global hooks from {config_file}")
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")
+
+    def load_hooks_from_directory(self, agents_dir: Path) -> int:
+        """从 agents_dir 子目录加载 hooks.json"""
+        count = 0
+        if not agents_dir.exists():
+            return count
+
+        for agent_dir in agents_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            hooks_file = agent_dir / "hooks" / "hooks.json"
+            if hooks_file.exists():
+                try:
+                    with open(hooks_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    n = self.register_hooks_from_json(
+                        agent_dir.name,
+                        str(agent_dir.absolute()),
+                        config,
+                        str(hooks_file)
+                    )
+                    count += n
+                    if n > 0:
+                        logger.info(f"[HookManager] Loaded {n} hooks from {agent_dir.name}")
+                except Exception as e:
+                    logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
+        return count
+
+    def load_hooks_from_skills(self, skills_dir: Path) -> int:
+        """从 skills_dir 加载 hooks.json 和 SKILL.md"""
+        count = 0
+        if not skills_dir.exists():
+            return count
+
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+            skill_name = skill_dir.name
+
+            # 加载 hooks.json
+            hooks_file = skill_dir / "hooks" / "hooks.json"
+            if hooks_file.exists():
+                try:
+                    with open(hooks_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    n = self.register_hooks_from_json(
+                        skill_name,
+                        str(skill_dir.absolute()),
+                        config,
+                        str(hooks_file)
+                    )
+                    count += n
+                    if n > 0:
+                        logger.info(f"[HookManager] Loaded {n} hooks from skill {skill_name}")
+                except Exception as e:
+                    logger.error(f"[HookManager] Failed to load hooks from skill {hooks_file}: {e}")
+
+            # 加载 SKILL.md 中的 frontmatter hooks
+            skill_md = skill_dir / "SKILL.md"
+            if skill_md.exists():
+                try:
+                    n = self._load_skill_hooks_from_markdown(skill_dir, skill_md)
+                    count += n
+                except Exception as e:
+                    logger.error(f"[HookManager] Failed to load hooks from SKILL.md {skill_md}: {e}")
+
+        return count
+
+    def _load_skill_hooks_from_markdown(self, skill_dir: Path, md_file: Path) -> int:
+        """从 SKILL.md frontmatter 加载 hooks 配置"""
+        import re
+
+        content = md_file.read_text(encoding='utf-8')
+
+        # 解析 frontmatter
+        if not content.startswith("---"):
+            return 0
+
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return 0
+
+        body = parts[2]
+        skill_name = skill_dir.name
+
+        # 查找 <hooks> 块
+        hooks_pattern = r'<hooks>(.*?)</hooks>'
+        hooks_match = re.search(hooks_pattern, body, re.DOTALL)
+
+        if not hooks_match:
+            return 0
+
+        hooks_text = hooks_match.group(1).strip()
+        config = self._parse_inline_hooks(hooks_text)
+
+        if config.get("hooks"):
+            n = self.register_hooks_from_json(
+                skill_name,
+                str(skill_dir.absolute()),
+                config,
+                str(md_file)
+            )
+            if n > 0:
+                logger.info(f"[HookManager] Loaded {n} hooks from SKILL.md of {skill_name}")
+            return n
+        return 0
+
+    def _parse_inline_hooks(self, hooks_text: str) -> dict:
+        """解析内联 hooks 文本格式"""
+
+        config = {"hooks": {}}
+        current_event = None
+        current_rules = []
+
+        for line in hooks_text.split('\n'):
+            line = line.rstrip()
+            if not line:
+                continue
+
+            # 检查是否是事件名行（不以空格开头）
+            if line and not line[0].isspace():
+                # 保存上一个事件的 hooks
+                if current_event:
+                    config["hooks"][current_event] = current_rules
+
+                current_event = line.strip()
+                current_rules = []
+            else:
+                # 是 hook 规则行
+                if current_event is None:
+                    continue
+
+                # 解析简化的 hook 格式
+                hook_data = {}
+                parts = line.strip().lstrip('- ')
+                if ':' in parts:
+                    key, value = parts.split(':', 1)
+                    hook_data[key.strip()] = value.strip()
+
+                if hook_data:
+                    current_rules.append(hook_data)
+
+        # 保存最后一个事件
+        if current_event:
+            config["hooks"][current_event] = current_rules
+
+        return config

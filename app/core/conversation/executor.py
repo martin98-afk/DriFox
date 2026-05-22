@@ -195,6 +195,7 @@ class ConversationExecutor:
         safe_connect("question_asked", "question_asked")
         safe_connect("permission_approval_requested", "permission_approval_requested")
         safe_connect("retry_status", "retry_status")
+        safe_connect("retry_resolved", "retry_resolved")
 
     def stop(self) -> List[Dict]:
         """停止当前 Worker，返回中断的消息"""
@@ -212,9 +213,9 @@ class ConversationExecutor:
             # 🛡️ 断开信号连接，防止已取消的 worker 继续向 UI 发送事件
             for signal_name in ("retry_status", "error_occurred", "finished_with_content",
                                 "finished_with_messages", "content_received", "reasoning_content_received",
-                                "tool_call_started", "tool_args_updated", "tool_result_received",
-                                "question_asked", "permission_approval_requested", "thinking_started",
-                                "compaction_status_changed"):
+                                 "tool_call_started", "tool_args_updated", "tool_result_received",
+                                 "question_asked", "permission_approval_requested", "thinking_started",
+                                 "retry_resolved", "compaction_status_changed"):
                 try:
                     signal = getattr(worker, signal_name, None)
                     if signal is not None:

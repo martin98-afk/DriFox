@@ -3,13 +3,13 @@
 文件工具集 - 提供文件读写和编辑功能
 
 支持：
-- 读取：read（hashline 格式，每行标注 LINE:HASH|content）
-- 写入：write, write_file
-- 编辑：edit（基于 hashline LINE:HASH 锚点定位，替代旧版 str_replace）
+- 读取：read（返回文件原文）
+- 写入：write, write_file（含 diff 审查）
+- 编辑：edit（基于 oldString/newString 字符串替换）
 - 目录：list, mkdir, delete_file
-- 搜索：grep (异步), scan_repo (异步)
+- 搜索：grep (异步), scan_repo (异步）
+- 批量编辑：multi_edit（支持多次替换）
 """
-import hashlib
 import fnmatch
 import re
 from typing import Dict, List, Optional, Callable
@@ -25,201 +25,15 @@ from app.tools.result import ToolResult
 MAX_GREP_CONTENT_LENGTH = 15000
 
 # ========== 性能优化：模块级别常量和缓存 ==========
-# Grep 排除目录（性能优化：预创建集合）
 _GREP_EXCLUDE_DIRS = frozenset({
     '.drifox', '.mypy_cache', '.git', 'node_modules', '__pycache__',
     'venv', '.venv', 'dist', 'build', '.idea', '.vscode'
 })
 
-# ========== Hashline 核心函数 ==========
-
-_HASHLINE_EMPTY_PLACEHOLDER = " "  # 占位符，空行哈希时使用
-_HASHLINE_EMPTY_NUM_LINES = frozenset()  # 哨兵
-
-
-def _line_hash(line: str, line_num: int = 0) -> str:
-    """
-    计算行的 hashline 2-字符哈希。
-    
-    哈希算法：
-    1. 去除尾部空白（保持前导缩进，Python 缩进敏感）
-    2. 如果是空行或纯空白行，混入行号以区分相同空行
-    3. MD5 取前 2 个 hex 字符
-    
-    Args:
-        line: 行内容
-        line_num: 行号（从1开始），用于空行区分
-    
-    Returns:
-        2 字符哈希值
-    """
-    normalized = line.rstrip('\n\r ')
-    if not normalized:
-        # 空行/纯空白行：混入行号确保不同位置的相同空行有不同哈希
-        seed = f"\0line:{line_num}"
-    else:
-        seed = normalized
-    return hashlib.md5(seed.encode("utf-8")).hexdigest()[:2]
-
-
-def _parse_anchor(anchor: str) -> tuple:
-    """
-    解析 'LINE:HASH' 锚点为 (line_num, hash_value)
-    
-    Args:
-        anchor: 格式如 "12:a3" 的锚点
-        
-    Returns:
-        (line_number, hash_value)
-        
-    Raises:
-        ValueError: 格式无效
-    """
-    parts = anchor.split(":")
-    if len(parts) != 2:
-        raise ValueError(f"Invalid anchor format: {anchor}, expected LINE:HASH")
-    return int(parts[0]), parts[1]
-
-
-def _format_hashline(lines: List[str], start_line: int = 1) -> str:
-    """
-    将行列表格式化为 hashline 格式。
-    
-    Args:
-        lines: 行列表（每行可能含 \n）
-        start_line: 起始行号
-        
-    Returns:
-        hashline 格式字符串：LINE:HASH|content
-    """
-    result = []
-    for i, line in enumerate(lines, start=start_line):
-        content = line.rstrip('\n')
-        h = _line_hash(content, i)
-        result.append(f"{i}:{h}|{content}")
-    return "\n".join(result)
-
-
-# ── Hashline: 邻近搜索 & remaps ─────────────────────────────────────
-
-_PROXIMITY_WINDOW = 5  # 邻近搜索窗口大小（±N 行）
-
-
-def _find_anchor_in_proximity(expected_hash: str, expected_line: int,
-                              file_lines: List[str]) -> Optional[int]:
-    """
-    在目标行附近搜索匹配哈希的行。
-    
-    处理场景：前面插/删行导致锚点偏移。先在精确位置检查，
-    如果匹配不上，在 ±_PROXIMITY_WINDOW 范围内搜索。
-    
-    Args:
-        expected_hash: 期望的哈希值
-        expected_line: 期望的行号（1-based）
-        file_lines: 文件当前行列表
-        
-    Returns:
-        匹配的行号（1-based），未找到返回 None
-    """
-    total = len(file_lines)
-    lo = max(1, expected_line - _PROXIMITY_WINDOW)
-    hi = min(total, expected_line + _PROXIMITY_WINDOW)
-    
-    for line_num in range(lo, hi + 1):
-        content = file_lines[line_num - 1].rstrip('\n')
-        h = _line_hash(content, line_num)
-        if h == expected_hash:
-            return line_num
-    return None
-
-
-def _find_anchor_remaps(stale_anchors: List[tuple],
-                        file_lines: List[str]) -> Dict[str, str]:
-    """
-    全文件扫描，为失效率找当前正确锚点。
-    
-    扫描文件的每一行，匹配内容哈希。返回 stale→current 的映射字典。
-    
-    Args:
-        stale_anchors: 失效锚点列表 [(line_num, hash), ...]
-        file_lines: 文件当前行列表
-        
-    Returns:
-        remaps 字典: {"12:a3": "14:a3"} 等
-    """
-    remaps: Dict[str, str] = {}
-    for line_num, expected_hash in stale_anchors:
-        # 扫描整个文件找匹配哈希
-        found = False
-        for i in range(len(file_lines)):
-            content = file_lines[i].rstrip('\n')
-            h = _line_hash(content, i + 1)
-            if h == expected_hash:
-                stale_key = f"{line_num}:{expected_hash}"
-                current_key = f"{i + 1}:{h}"
-                remaps[stale_key] = current_key
-                found = True
-                break
-        if not found:
-            stale_key = f"{line_num}:{expected_hash}"
-            remaps[stale_key] = f"?{expected_hash}"  # 内容已不复存在
-    return remaps
-
-
-def _build_hash_error_message(errors: List[Dict], file_lines: List[str]) -> str:
-    """
-    构建带 remaps 和 >>> 标记的增强错误信息。
-    
-    格式类似 aron/hashline，让 LLM 能直接根据 remaps 修正锚点，
-    无需重新读取文件。
-    """
-    n = len(errors)
-    lines = []
-    
-    if n == 1:
-        lines.append("1 anchor has changed since last read. Use remaps below.")
-    else:
-        lines.append(f"{n} anchors have changed since last read. Use remaps below.")
-    lines.append("")
-    
-    # 收集需要显示的上下文行号
-    show_lines = set()
-    mismatches = {}
-    for err in errors:
-        ln = err["line"]
-        show_lines.add(ln)
-        mismatches[ln] = err
-        for offset in range(1, 3):  # ±2 行上下文
-            if ln - offset >= 1:
-                show_lines.add(ln - offset)
-            if ln + offset <= len(file_lines):
-                show_lines.add(ln + offset)
-    
-    # 按行号排序输出
-    sorted_lines = sorted(show_lines)
-    prev = -1
-    for ln in sorted_lines:
-        if prev != -1 and ln > prev + 1:
-            lines.append("    ...")
-        prev = ln
-        content = file_lines[ln - 1].rstrip('\n')
-        h = _line_hash(content, ln)
-        tag = f"{ln}:{h}"
-        if ln in mismatches:
-            lines.append(f">>> {tag}|{content}")
-        else:
-            lines.append(f"    {tag}|{content}")
-    
-    return "\n".join(lines)
-
 
 @lru_cache(maxsize=128)
 def _compile_grep_pattern(pattern: str) -> re.Pattern:
-    """
-    编译 grep 正则表达式（带缓存）
-
-    性能优化：避免每次调用都重新编译相同的正则表达式
-    """
+    """编译 grep 正则表达式（带缓存）"""
     return re.compile(pattern, re.IGNORECASE)
 
 
@@ -252,10 +66,10 @@ def _resolve_path(workdir: Path, path: str) -> Path:
 
 class GrepTask(QRunnable):
     """异步 Grep 任务，在子线程中执行"""
-    
+
     class Signals(QObject):
         finished = pyqtSignal(object)  # ToolResult
-    
+
     def __init__(self, pattern: str, path: str, include: str, workdir: Path, cancelled_ref: list):
         super().__init__()
         self.signals = self.Signals()
@@ -264,7 +78,7 @@ class GrepTask(QRunnable):
         self.include = include
         self.workdir = workdir
         self.cancelled_ref = cancelled_ref  # [bool] 引用，可被外部修改
-    
+
     def run(self):
         """在子线程中执行 grep"""
         try:
@@ -272,7 +86,7 @@ class GrepTask(QRunnable):
             self.signals.finished.emit(result)
         except Exception as e:
             self.signals.finished.emit(ToolResult(False, error=f"Grep error: {str(e)}"))
-    
+
     def _do_grep(self) -> ToolResult:
         """实际的 grep 实现"""
         try:
@@ -348,32 +162,28 @@ class FileTools:
     def workdir(self, value: Path):
         """保留向后兼容：外部设置 workdir 时同步更新 owner"""
         self._owner.workdir = value
-    
+
     def _get_thread_pool(self) -> QThreadPool:
         """获取或创建线程池"""
         if self._thread_pool is None:
             self._thread_pool = QThreadPool.globalInstance()
         return self._thread_pool
-    
+
     def cancel(self):
         """取消当前正在执行的操作"""
         self._grep_cancelled[0] = True
-    
+
     def reset_cancelled(self):
         """重置取消标志"""
         self._grep_cancelled[0] = False
-    
+
     def _resolve_path(self, path: str) -> Path:
         """委托给模块级函数"""
         return _resolve_path(self.workdir, path)
 
     def _check_file_modified(self, full_path: Path) -> Optional[ToolResult]:
         """
-        检查文件是否被外部修改（仅用于 write_file 全量写入）。
-        
-        edit_file 不使用此方法——hashline 的逐行哈希校验已是更精确的
-        内容级修改检测，且能给出行级错误信息 + 正确锚点供自动修正。
-        
+        检查文件是否被外部修改。
         如果文件之前被读取过，且当前修改时间与记录不一致，返回警告
         """
         path_key = str(full_path)
@@ -398,17 +208,16 @@ class FileTools:
 
         return None
 
-    def read_file(self, path: str, offset: int = 1, limit: int = 500) -> ToolResult:
+    def read_file(self, path: str, offset: int = 1, limit: int = 500,
+                  show_line_numbers: bool = False) -> ToolResult:
         """
-        读取文件内容，返回 hashline 格式（每行标注 LINE:HASH|content）。
-        
-        Hashline 使用 2-字符内容哈希作为稳定锚点，编辑时通过 LINE:HASH 定位，
-        无需精确匹配旧文本，避免因空白/缩进差异导致的编辑失败。
-        
+        读取文件内容
+
         Args:
             path: 文件路径
             offset: 起始行号（从1开始）
             limit: 最大读取行数
+            show_line_numbers: 是否显示行号，默认 False（返回原文）
 
         读取时记录文件的修改时间，用于后续编辑时检测文件是否被外部修改
         """
@@ -431,10 +240,17 @@ class FileTools:
             end_idx = min(total_lines, start_idx + limit)
 
             content_slice = all_lines[start_idx:end_idx]
-            hashline_content = _format_hashline(content_slice, start_idx + 1)
 
-            res_info = f"File: {path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n"
-            return ToolResult(True, content=res_info + hashline_content)
+            if show_line_numbers:
+                # 带行号格式
+                formatted_content = "".join(
+                    f"{i + start_idx + 1:6d} | {line}" for i, line in enumerate(content_slice)
+                )
+                res_info = f"File: {path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n"
+                return ToolResult(True, content=res_info + formatted_content)
+            else:
+                # 返回原文
+                return ToolResult(True, content="".join(content_slice))
         except Exception as e:
             return ToolResult(False, error=f"Read error: {str(e)}")
 
@@ -445,315 +261,189 @@ class FileTools:
         """
         try:
             full_path = self._resolve_path(path)
-            
+
             # 检查文件是否被外部修改
             check_result = self._check_file_modified(full_path)
             if check_result:
                 return check_result
-            
+
             full_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # 写入前读取旧内容，用于 diff 计算
+            old_content = ""
+            try:
+                if full_path.exists():
+                    old_content = full_path.read_text(encoding="utf-8")
+            except Exception:
+                old_content = ""
 
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(content if content is not None else "")
 
+            # 计算 unified diff
+            diff_str = ""
+            if old_content or content:
+                diff_lines = list(difflib.unified_diff(
+                    old_content.splitlines(),
+                    (content or "").splitlines(),
+                    fromfile=path, tofile=path,
+                    lineterm=''
+                ))
+                diff_str = "\n".join(diff_lines)
+
             # 更新修改时间记录
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
-            return ToolResult(True, content=f"Successfully written to {path}")
+            return ToolResult(True, content=f"Successfully written to {path}", diff=diff_str or None)
         except Exception as e:
             return ToolResult(False, error=f"Write error: {str(e)}")
 
-    def edit_file(self, path: str, operations: List[Dict]) -> ToolResult:
+    def edit_file(self, path: str, oldString: str, newString: str,
+                  replaceAll: bool = False) -> ToolResult:
         """
-        通过 hashline LINE:HASH 锚点编辑文件。
-        
-        替代旧版 str_replace 编辑方式。每行通过 'LINE:HASH' 锚点定位，
-        支持批量操作，编辑从文件底部向上执行以避免行号偏移。
-        
-        邻近搜索：如果锚点所在行哈希不匹配，会在 ±5 行范围内搜索匹配的
-        内容哈希。这处理了"前面插行后锚点偏移"的常见场景。
-        
-        如果邻近搜索也找不到，会全文件扫描所有失效锚点的当前位置，
-        返回 remaps 映射 + >>> 标记的差异上下文，LLM 可直接用 remaps
-        修正锚点，无需重新读取文件。
-        
+        精确文本替换编辑。包含唯一性校验，防止误改多处代码。
+        编辑前检查文件是否被外部修改。
+        生成 unified diff 用于审查。
+
         Args:
             path: 文件路径
-            operations: 编辑操作列表，每个操作包含：
-                - op: 操作类型
-                    "replace"    替换单行或范围
-                    "insert_after"  在锚点后插入
-                    "insert_before" 在锚点前插入  
-                    "delete"     删除单行或范围
-                - anchor: "LINE:HASH" 锚点（起始行/定位行）
-                - anchor_end: "LINE:HASH"（可选，范围操作的结束行）
-                - lines: 新内容行列表（delete 操作不需要）
-        
-        示例：
-            [{"op": "replace", "anchor": "12:a3", "lines": ["new content"]}]
-            [{"op": "replace", "anchor": "12:a3", "anchor_end": "15:b7", "lines": ["a", "b"]}]
-            [{"op": "insert_after", "anchor": "11:c2", "lines": ["inserted"]}]
-            [{"op": "delete", "anchor": "12:a3"}]
+            oldString: 要替换的旧文本（精确匹配，包含空白字符）
+            newString: 替换后的新文本
+            replaceAll: 是否替换所有匹配项（默认 False，只替换第一个）
+                        当 oldString 出现多次时需设置为 True
+
+        Returns:
+            ToolResult: 包含 diff 和编辑结果
         """
         try:
             full_path = self._resolve_path(path)
             if not full_path.exists():
                 return ToolResult(False, error=f"File not found: {path}")
 
-            with open(full_path, "r", encoding="utf-8") as f:
-                all_lines = f.readlines()
+            # 检查文件是否被外部修改
+            check_result = self._check_file_modified(full_path)
+            if check_result:
+                return check_result
 
-            # ── 第一遍：校验所有锚点，含邻近搜索自动修正 ──
-            resolved_ops = []     # 修正后的操作 [(anchor_line, end_line, op), ...]
-            raw_errors = []       # {line, hash, anchor_str} 收集完全匹配失败的行
-            validation_failed = False
+            old_content = full_path.read_text(encoding="utf-8", errors="replace")
 
-            for op in operations:
-                op_type = op.get("op", "replace")
-                anchor_str = op.get("anchor", "")
-                
-                # 解析 anchor
-                try:
-                    orig_line, expected_hash = _parse_anchor(anchor_str)
-                except (ValueError, IndexError):
-                    return ToolResult(False, error=f"Invalid anchor format: {anchor_str}")
-
-                # 1) 精确匹配
-                actual_line = orig_line
-                if 1 <= actual_line <= len(all_lines):
-                    actual_content = all_lines[actual_line - 1].rstrip('\n')
-                    actual_hash = _line_hash(actual_content, actual_line)
-                    if actual_hash == expected_hash:
-                        pass  # 精确匹配成功
-                    else:
-                        # 2) 邻近搜索（处理插行偏移）
-                        nearby = _find_anchor_in_proximity(expected_hash, orig_line, all_lines)
-                        if nearby is not None and nearby != orig_line:
-                            actual_line = nearby
-                            logger.info(
-                                f"[Hashline] Proximity fix: anchor {anchor_str} "
-                                f"→ line {nearby}:{expected_hash}"
-                            )
-                        else:
-                            # 完全匹配失败
-                            raw_errors.append({
-                                "line": orig_line,
-                                "hash": expected_hash,
-                                "anchor": anchor_str,
-                            })
-                            validation_failed = True
-                            continue
-                else:
-                    raw_errors.append({
-                        "line": orig_line,
-                        "hash": expected_hash,
-                        "anchor": anchor_str,
-                        "out_of_range": True,
-                    })
-                    validation_failed = True
-                    continue
-
-                # 解析 anchor_end（如果有）
-                anchor_end_str = op.get("anchor_end")
-                actual_end_line = actual_line  # 默认为单行
-                if anchor_end_str:
-                    try:
-                        orig_end_line, end_hash = _parse_anchor(anchor_end_str)
-                    except (ValueError, IndexError):
-                        return ToolResult(False, error=f"Invalid anchor_end format: {anchor_end_str}")
-
-                    # 同样尝试精确匹配 + 邻近搜索
-                    actual_end_line = orig_end_line
-                    if 1 <= actual_end_line <= len(all_lines):
-                        end_content = all_lines[actual_end_line - 1].rstrip('\n')
-                        end_actual_hash = _line_hash(end_content, actual_end_line)
-                        if end_actual_hash == end_hash:
-                            pass
-                        else:
-                            nearby_end = _find_anchor_in_proximity(
-                                end_hash, orig_end_line, all_lines
-                            )
-                            if nearby_end is not None and nearby_end != orig_end_line:
-                                actual_end_line = nearby_end
-                            else:
-                                raw_errors.append({
-                                    "line": orig_end_line,
-                                    "hash": end_hash,
-                                    "anchor": anchor_end_str,
-                                })
-                                validation_failed = True
-                                continue
-
-                    if actual_end_line < actual_line:
-                        return ToolResult(
-                            False,
-                            error=f"End line {actual_end_line} is before start line {actual_line}"
-                        )
-
-                resolved_ops.append((actual_line, actual_end_line, op))
-
-            # ── 如果有校验失败，构建增强错误 ──
-            if validation_failed:
-                remaps = _find_anchor_remaps(
-                    [(e["line"], e["hash"]) for e in raw_errors],
-                    all_lines
+            count = old_content.count(oldString)
+            if count == 0:
+                return ToolResult(
+                    False,
+                    error="The specified 'oldString' was not found in the file. "
+                          "Ensure exact match including whitespace and indentation."
                 )
-                # 构建错误消息
-                msg_parts = []
-                if remaps:
-                    msg_parts.append(
-                        "Hashline edit failed — anchors changed since last read.\n"
-                        "Use the remaps below to update your anchors:\n"
-                    )
-                    for stale, current in remaps.items():
-                        msg_parts.append(f"  {stale} → {current}")
-                    msg_parts.append("")
-                
-                msg_parts.append(_build_hash_error_message(raw_errors, all_lines))
-                
-                return ToolResult(False, error="\n".join(msg_parts))
 
-            # ── 第二遍：应用操作（从底部向上） ──
-            sorted_ops = sorted(
-                resolved_ops,
-                key=lambda x: (-x[1], -x[0])  # 先按 end_line 降序，再按 start_line 降序
-            )
+            if count > 1 and not replaceAll:
+                return ToolResult(
+                    False,
+                    error=f"The 'oldString' appears {count} times in the file. "
+                          f"Please provide a more specific context to ensure uniqueness, "
+                          f"or set replaceAll=True."
+                )
 
-            new_lines = list(all_lines)
-            applied_count = 0
-
-            for actual_line, actual_end_line, op in sorted_ops:
-                op_type = op.get("op", "replace")
-                anchor_end = op.get("anchor_end")
-
-                if op_type == "replace":
-                    if anchor_end:
-                        # 替换范围
-                        insert_lines = [
-                            l + ("\n" if not l.endswith("\n") else "")
-                            for l in op.get("lines", [])
-                        ]
-                        new_lines[actual_line - 1:actual_end_line] = insert_lines
-                    else:
-                        # 替换单行（可扩展为多行）
-                        insert_lines = op.get("lines", [])
-                        if insert_lines:
-                            first = insert_lines[0]
-                            new_lines[actual_line - 1] = first + (
-                                "\n" if not first.endswith("\n") else ""
-                            )
-                            if len(insert_lines) > 1:
-                                extra = [
-                                    l + ("\n" if not l.endswith("\n") else "")
-                                    for l in insert_lines[1:]
-                                ]
-                                new_lines[actual_line:actual_line] = extra
-                        else:
-                            del new_lines[actual_line - 1]
-
-                elif op_type == "delete":
-                    if anchor_end:
-                        del new_lines[actual_line - 1:actual_end_line]
-                    else:
-                        del new_lines[actual_line - 1]
-
-                elif op_type == "insert_after":
-                    insert_lines = [
-                        l + ("\n" if not l.endswith("\n") else "")
-                        for l in op.get("lines", [])
-                    ]
-                    new_lines[actual_line:actual_line] = insert_lines
-
-                elif op_type == "insert_before":
-                    insert_lines = [
-                        l + ("\n" if not l.endswith("\n") else "")
-                        for l in op.get("lines", [])
-                    ]
-                    new_lines[actual_line - 1:actual_line - 1] = insert_lines
-
-                else:
-                    return ToolResult(False, error=f"Unknown operation type: {op_type}")
-
-                applied_count += 1
-
-            # 写出文件
-            full_path.write_text("".join(new_lines), encoding="utf-8")
+            new_content = old_content.replace(oldString, newString, -1 if replaceAll else 1)
+            full_path.write_text(new_content, encoding="utf-8")
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
-
-            # ── 计算 diff + 锚点块 ──
-            old_text = "".join(all_lines)
-            new_text = "".join(new_lines)
-
-            # 生成 unified diff
+            # ── 生成 unified diff ──
             diff_lines = list(difflib.unified_diff(
-                old_text.splitlines(),
-                new_text.splitlines(),
+                old_content.splitlines(),
+                new_content.splitlines(),
                 fromfile=path, tofile=path,
                 lineterm=''
             ))
             diff_str = "\n".join(diff_lines) if diff_lines else ""
 
-            # 从 diff header 中提取首末变更行
-            first_changed = None
-            last_changed = None
-            _HUNK_RE = re.compile(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
-            for line in diff_lines:
-                m = _HUNK_RE.match(line)
-                if m:
-                    start = int(m.group(1))
-                    count = int(m.group(2)) if m.group(2) else 1
-                    end_line = start + count - 1
-                    if first_changed is None or start < first_changed:
-                        first_changed = start
-                    if last_changed is None or end_line > last_changed:
-                        last_changed = end_line
+            return ToolResult(
+                True,
+                content=f"Successfully edited {path}.",
+                diff=diff_str,
+            )
+        except Exception as e:
+            return ToolResult(False, error=f"Edit error: {str(e)}")
 
-            # 构建锚点块（±2 行上下文）
-            anchors = None
-            if first_changed is not None and last_changed is not None:
-                anchor_start = max(1, first_changed - 2)
-                anchor_end = min(len(new_lines), last_changed + 2)
-                anchor_lines = new_lines[anchor_start - 1:anchor_end]
-                anchors = _format_hashline(anchor_lines, anchor_start)
+    def multi_edit(self, path: str, edits: List[dict]) -> ToolResult:
+        """
+        批量编辑同一文件，支持多次 oldString/newString 替换。
+        所有替换完成后生成 unified diff 用于审查。
 
-            # 构建结果文本
-            result_parts = [f"Applied {applied_count} hashline edit(s) to {path}."]
-            if anchors:
-                result_parts.append("")
-                result_parts.append(f"--- Anchors {anchor_start}-{anchor_end} ---")
-                result_parts.append(anchors)
+        Args:
+            path: 文件路径
+            edits: 编辑操作列表，每项为 {"oldString": "...", "newString": "..."}
+                   按顺序逐条执行替换（仅替换第一个匹配项）
+
+        Returns:
+            ToolResult: 包含 diff 和编辑结果
+        """
+        try:
+            full_path = self._resolve_path(path)
+            if not full_path.exists():
+                return ToolResult(False, error=f"File not found: {path}")
+
+            old_content = full_path.read_text(encoding="utf-8", errors="replace")
+            content = old_content
+            applied = 0
+            skipped_indices = []
+
+            for idx, edit in enumerate(edits):
+                old = edit.get("oldString")
+                new = edit.get("newString")
+                if old in content:
+                    content = content.replace(old, new, 1)
+                    applied += 1
+                else:
+                    skipped_indices.append(idx + 1)  # 1-based
+
+            if applied == 0:
+                return ToolResult(False, error="No edits were applied: none of the oldStrings were found.")
+
+            full_path.write_text(content, encoding="utf-8")
+            self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
+
+            # ── 生成 unified diff ──
+            diff_lines = list(difflib.unified_diff(
+                old_content.splitlines(),
+                content.splitlines(),
+                fromfile=path, tofile=path,
+                lineterm=''
+            ))
+            diff_str = "\n".join(diff_lines) if diff_lines else ""
+
+            result = f"Applied {applied}/{len(edits)} edits to {path}."
+            if skipped_indices:
+                skipped_str = ", ".join(f"#{i}" for i in skipped_indices)
+                result += f" (skipped: {skipped_str} - no match, 1-based index)"
 
             return ToolResult(
                 True,
-                content="\n".join(result_parts),
+                content=result,
                 diff=diff_str,
-                anchors=anchors,
             )
         except Exception as e:
-            import traceback
-            return ToolResult(False, error=f"Hashline edit error: {str(e)}\n{traceback.format_exc()}")
+            return ToolResult(False, error=f"Multi-edit error: {str(e)}")
 
-    def grep_files(self, pattern: str, path: str = ".", include: str = None, 
+    def grep_files(self, pattern: str, path: str = ".", include: str = None,
                    callback: Optional[Callable[[ToolResult], None]] = None) -> Optional[ToolResult]:
         """
         高效搜索，排除干扰目录，限制返回行数
-        
+
         如果提供 callback，则异步执行并返回 None
         否则同步执行并返回 ToolResult
-        
+
         Args:
             pattern: 正则表达式模式
             path: 搜索路径，默认当前目录
             include: 文件名过滤模式
             callback: 异步完成后的回调函数
-        
+
         Returns:
             同步执行时返回 ToolResult，异步执行时返回 None
         """
         # 每次调用前重置取消标志
         self._grep_cancelled[0] = False
-        
+
         if callback is not None:
             # 异步执行
             self._run_grep_async(pattern, path, include, callback)
@@ -761,7 +451,7 @@ class FileTools:
         else:
             # 同步执行（保持向后兼容）
             return self._run_grep_sync(pattern, path, include)
-    
+
     def _run_grep_sync(self, pattern: str, path: str, include: str) -> ToolResult:
         """同步执行 grep"""
         try:
@@ -805,17 +495,17 @@ class FileTools:
             return ToolResult(True, content=content)
         except Exception as e:
             return ToolResult(False, error=f"Grep error: {str(e)}")
-    
-    def _run_grep_async(self, pattern: str, path: str, include: str, 
+
+    def _run_grep_async(self, pattern: str, path: str, include: str,
                         callback: Callable[[ToolResult], None]):
         """异步执行 grep"""
         task = GrepTask(pattern, path, include, self.workdir, self._grep_cancelled)
         self._current_grep_task = task
-        
+
         def on_finished(result: ToolResult):
             self._current_grep_task = None
             callback(result)
-        
+
         task.signals.finished.connect(on_finished)
         self._get_thread_pool().start(task)
         logger.info(f"[FileTools] Started async grep task, pattern={pattern}")
@@ -838,8 +528,6 @@ class FileTools:
             return ToolResult(True, content=output)
         except Exception as e:
             return ToolResult(False, error=f"List error: {str(e)}")
-
-    # multi_edit 和 apply_patch 已移除，已被 hashline edit 替代
 
     def glob_files(self, pattern: str, path: str = ".") -> ToolResult:
         """

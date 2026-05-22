@@ -3,6 +3,7 @@
 UI 渲染辅助函数
 """
 
+import difflib
 import hashlib
 import orjson as json
 import re
@@ -233,6 +234,212 @@ def _parse_subagent_task_ids(result: str) -> str:
     return ""
 
 
+def _word_diff_html(old_text: str, new_text: str) -> tuple:
+    """字符级差异高亮，返回 (old_html, new_html)"""
+    if len(old_text) + len(new_text) > 2000:
+        return escape(old_text), escape(new_text)
+    matcher = difflib.SequenceMatcher(None, old_text, new_text, autojunk=False)
+    old_parts = []
+    new_parts = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            old_parts.append(escape(old_text[i1:i2]))
+            new_parts.append(escape(new_text[j1:j2]))
+        elif tag == 'delete':
+            old_parts.append(f'<span class="word-del">{escape(old_text[i1:i2])}</span>')
+        elif tag == 'insert':
+            new_parts.append(f'<span class="word-add">{escape(new_text[j1:j2])}</span>')
+        elif tag == 'replace':
+            old_parts.append(f'<span class="word-del">{escape(old_text[i1:i2])}</span>')
+            new_parts.append(f'<span class="word-add">{escape(new_text[j1:j2])}</span>')
+    return ''.join(old_parts), ''.join(new_parts)
+
+
+_HUNK_HEADER_RE = re.compile(r'^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)')
+
+
+def _render_diff_preview(diff_text: str) -> str:
+    """
+    将 unified diff 文本渲染为带行号、词级差异高亮的 HTML。
+
+    支持: 文件头(---/+++) → hunk 头(@@) → 逐行差异
+    连续 -/+ 行对会做字符级 word diff。
+    超过 500 行时截断并显示行数。
+    """
+    lines = diff_text.split("\n")
+    MAX_LINES = 500
+    truncated = False
+    if len(lines) > MAX_LINES:
+        truncated = True
+        half = MAX_LINES // 2
+        shown = len(lines) - MAX_LINES
+        lines = lines[:half] + [None] + lines[-half:]
+
+    rows = []
+    old_ln = 0
+    new_ln = 0
+    i = 0
+    _pending_old_header = None
+
+    def _clean_path(p: str) -> str:
+        p = p.strip()
+        if p.startswith('a/') or p.startswith('b/'):
+            p = p[2:]
+        return p
+
+    while i < len(lines):
+        line = lines[i]
+        if line is None:
+            rows.append(
+                f'<div class="diff-line diff-truncated">'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>'
+            )
+            i += 1
+            continue
+
+        # 文件头：将 ---/+++ 合并为单个文件路径行
+        if line.startswith("--- "):
+            _pending_old_header = line
+            i += 1
+        elif line.startswith("+++ "):
+            if _pending_old_header:
+                old_path = _clean_path(_pending_old_header[4:])
+                new_path = _clean_path(line[4:])
+                if old_path == new_path:
+                    display = old_path
+                elif old_path and new_path:
+                    display = f"{old_path} → {new_path}"
+                else:
+                    display = new_path or old_path
+                rows.append(
+                    f'<div class="diff-line diff-file-header">'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-sign"></span>'
+                    f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(display)}</span></div>'
+                )
+            else:
+                rows.append(
+                    f'<div class="diff-line diff-file-header">'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-sign"></span>'
+                    f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(line[4:]))}</span></div>'
+                )
+            _pending_old_header = None
+            i += 1
+        elif _pending_old_header:
+            # 单独的 --- 行（没有 +++ 跟随），先渲染 header 再处理当前行
+            rows.append(
+                f'<div class="diff-line diff-file-header">'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(_pending_old_header[4:]))}</span></div>'
+            )
+            _pending_old_header = None
+            continue
+        # hunk 头
+        elif line.startswith("@@"):
+            m = _HUNK_HEADER_RE.match(line)
+            if m:
+                old_ln = int(m.group(1))
+                new_ln = int(m.group(2))
+            rows.append(
+                f'<div class="diff-line diff-hunk">'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code">{escape(line)}</span></div>'
+            )
+            i += 1
+        # 删除行-新增行配对处理（做 word diff）
+        elif line.startswith("-") and not line.startswith("---"):
+            del_lines = []
+            while i < len(lines) and lines[i] is not None and lines[i].startswith("-") and not lines[i].startswith("---"):
+                del_lines.append(lines[i][1:])  # 去掉前缀 -
+                i += 1
+            add_lines = []
+            while i < len(lines) and lines[i] is not None and lines[i].startswith("+") and not lines[i].startswith("+++"):
+                add_lines.append(lines[i][1:])  # 去掉前缀 +
+                i += 1
+
+            # 配对 word diff
+            pair_count = min(len(del_lines), len(add_lines))
+            for k in range(pair_count):
+                old_html, new_html = _word_diff_html(del_lines[k], add_lines[k])
+                rows.append(
+                    f'<div class="diff-line diff-del">'
+                    f'<span class="line-num line-num-old">{old_ln}</span>'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-sign">-</span>'
+                    f'<span class="line-code">{old_html}</span></div>'
+                )
+                rows.append(
+                    f'<div class="diff-line diff-add">'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num line-num-new">{new_ln}</span>'
+                    f'<span class="line-sign">+</span>'
+                    f'<span class="line-code">{new_html}</span></div>'
+                )
+                old_ln += 1
+                new_ln += 1
+
+            # 未配对的删除行
+            for k in range(pair_count, len(del_lines)):
+                rows.append(
+                    f'<div class="diff-line diff-del">'
+                    f'<span class="line-num line-num-old">{old_ln}</span>'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-sign">-</span>'
+                    f'<span class="line-code">{escape(del_lines[k])}</span></div>'
+                )
+                old_ln += 1
+
+            # 未配对的增加行
+            for k in range(pair_count, len(add_lines)):
+                rows.append(
+                    f'<div class="diff-line diff-add">'
+                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num line-num-new">{new_ln}</span>'
+                    f'<span class="line-sign">+</span>'
+                    f'<span class="line-code">{escape(add_lines[k])}</span></div>'
+                )
+                new_ln += 1
+
+        elif line.startswith("+") and not line.startswith("+++"):
+            # 单独的增加行（前面没有匹配的删除行）
+            rows.append(
+                f'<div class="diff-line diff-add">'
+                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num line-num-new">{new_ln}</span>'
+                f'<span class="line-sign">+</span>'
+                f'<span class="line-code">{escape(line[1:])}</span></div>'
+            )
+            new_ln += 1
+            i += 1
+        else:
+            # 上下文行（unified diff 的上下文行带前导空格，去掉）
+            stripped = line[1:] if line.startswith(" ") else line
+            rows.append(
+                f'<div class="diff-line diff-ctx">'
+                f'<span class="line-num line-num-old">{old_ln if old_ln > 0 else ""}</span>'
+                f'<span class="line-num line-num-new">{new_ln if new_ln > 0 else ""}</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code">{escape(stripped)}</span></div>'
+            )
+            if old_ln > 0:
+                old_ln += 1
+            if new_ln > 0:
+                new_ln += 1
+            i += 1
+
+    return "".join(rows)
+
+
 def render_tool_block(
     tool_name: str,
     tool_args: dict,
@@ -279,16 +486,30 @@ def render_tool_block(
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
     # 文件编辑工具判断
-    file_edit_tools = {"write", "edit"}
+    file_edit_tools = {"write", "edit", "multi_edit"}
     is_file_edit = tool_name in file_edit_tools
+
+    # 差异统计（+N/-N）
+    diff_stats_html = ""
+    if diff:
+        added = sum(1 for l in diff.split('\n') if l.startswith('+') and not l.startswith('+++'))
+        deleted = sum(1 for l in diff.split('\n') if l.startswith('-') and not l.startswith('---'))
+        if added or deleted:
+            diff_stats_html = f'''
+            <span style="font-size: {scale_font_size(11)}px; margin-left: 4px; font-weight: 600; white-space: nowrap; {get_font_family_css()}">
+                <span style="color: #3fb950;">+{added}</span>
+                <span style="color: #8b949e; margin: 0 2px;">/</span>
+                <span style="color: #f85149;">-{deleted}</span>
+            </span>'''
 
     # 差异对比按钮
     diff_icon_html = ""
     if is_file_edit and tool_call_id:
         diff_icon_html = f'''
+        {diff_stats_html}
         <span class="tool-diff-icon-btn" data-tool-call-id="{escape(tool_call_id)}"
             role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 8px; border-radius: 4px;"
+            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 4px; border-radius: 4px;"
             onclick="event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId)"
             onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId); }}"
             title="查看文件差异">
@@ -320,31 +541,11 @@ def render_tool_block(
     # ── inline diff 预览区 ──
     diff_html = ""
     if diff:
-        diff_lines = diff.split("\n")
-        # 限制显示行数，过长时截断
-        MAX_DIFF_LINES = 60
-        truncated = False
-        if len(diff_lines) > MAX_DIFF_LINES:
-            truncated = True
-            half = MAX_DIFF_LINES // 2
-            diff_lines = diff_lines[:half] + ["... 中间省略 %d 行 ..." % (len(diff_lines) - MAX_DIFF_LINES)] + diff_lines[-half:]
-        diff_rows = []
-        for line in diff_lines:
-            if line.startswith("+") and not line.startswith("+++"):
-                cls = "diff-add"
-            elif line.startswith("-") and not line.startswith("---"):
-                cls = "diff-del"
-            elif line.startswith("@@"):
-                cls = "diff-hunk"
-            else:
-                cls = "diff-ctx"
-            escaped = escape(line)
-            diff_rows.append(f'<div class="diff-line {cls}">{escaped}</div>')
-        diff_body = "".join(diff_rows)
+        diff_body = _render_diff_preview(diff)
         diff_html = f"""
-        <div class="tool-diff-inline" style="margin-top: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; overflow: hidden;">
-            <div style="padding: 6px 12px; background: #161b22; border-bottom: 1px solid #30363d; color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
-            <div style="padding: 4px 0; font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px; line-height: 1.5; overflow-x: auto;">
+        <div class="tool-diff-inline" style="margin-top: 8px; background: rgba(13,17,23,0.35); border: 1px solid rgba(48,54,61,0.5); border-radius: 6px; overflow: hidden;">
+            <div style="padding: 6px 12px; background: rgba(22,27,34,0.4); border-bottom: 1px solid rgba(48,54,61,0.4); color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
+            <div style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px; line-height: 1.5; overflow-x: auto;">
                 {diff_body}
             </div>
         </div>"""

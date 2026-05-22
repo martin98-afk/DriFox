@@ -35,7 +35,7 @@ from qfluentwidgets import (
     setFont,
     FluentIcon,
     SingleDirectionScrollArea,
-    TransparentToolButton, StrongBodyLabel, InfoBar, InfoBarPosition, )
+    TransparentToolButton, InfoBar, InfoBarPosition, )
 
 from app.constants import (
     FREE_PROVIDERS,
@@ -53,7 +53,6 @@ from app.core import (
 )
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings
-from app.utils.utils import get_icon, get_font_family_css
 from app.utils.design_tokens import (
     Colors,
     font_size_css,
@@ -62,6 +61,7 @@ from app.utils.design_tokens import (
     scale_font_size,
     apply_font_size_to_widget,
 )
+from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.base_settings_card import (
     BaseSettingsCard,
@@ -280,6 +280,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
         self._pending_scroll_to_update: Optional[int] = None  # 待更新的节点索引（用于同步高亮和进度）
+        # 撤销删除功能：删除消息的缓存栈
+        self._undo_delete_stack: List[Dict[str, Any]] = []  # 每个元素包含 deleted_messages, round_index, widgets
+
 
         self._current_session_id = self.session_manager.get_current_session().session_id
 
@@ -339,6 +342,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "question_asked": self._on_question_asked,
             "agent_switched": self._on_agent_switched,
             "retry_status": self._on_retry_status,
+            "retry_resolved": self._on_retry_resolved,
             "permission_approval_requested": self._on_permission_approval_requested,
             "compaction_updated": self._on_compaction_updated,  # 子智能体压缩完成回调
         }
@@ -794,17 +798,17 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
-        # 优先从 Backend 获取保存的缓存统计（Worker 可能已被清理）
         stats_dict = self.backend.get_last_cache_stats()
 
-        # 如果 Backend 没有缓存统计，尝试从 worker 获取
         if not stats_dict:
             worker = self.backend.get_current_worker()
             if worker:
                 try:
-                    stats = worker.get_cache_stats()
-                    if stats:
-                        stats_dict = stats.to_dict()
+                    raw = worker.get_cache_stats()
+                    if hasattr(raw, 'to_dict'):
+                        stats_dict = raw.to_dict()
+                    elif isinstance(raw, dict):
+                        stats_dict = raw
                 except Exception:
                     pass
 
@@ -812,21 +816,39 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         try:
-            # 计算节省的成本
             cost_savings = 0.0
             cost_with = stats_dict.get('cost_usd', 0.0)
             cost_without = stats_dict.get('cost_without_cache_usd', 0.0)
             if cost_without > 0:
                 cost_savings = cost_without - cost_with
+
             hit_rate = stats_dict.get('hit_rate', 0.0)
+            per_request_hit_rate = stats_dict.get('per_request_hit_rate', 0.0)
+            total_input_hit_rate = stats_dict.get('total_input_hit_rate', 0.0)
             read_tokens = stats_dict.get('cache_read_tokens', 0)
             write_tokens = stats_dict.get('cache_creation_5m_tokens', 0) + stats_dict.get('cache_creation_1h_tokens', 0)
-            logger.debug(f"[CacheStats] hit_rate={hit_rate}, read={read_tokens}, write={write_tokens}")
+            cache_hits = stats_dict.get('cache_hits', 0)
+            cache_misses = stats_dict.get('cache_misses', 0)
+
+            logger.info(
+                f"[CacheStats] hit_rate={hit_rate:.1%}"
+                f" per_req={per_request_hit_rate:.1%}"
+                f" total_input={total_input_hit_rate:.1%}"
+                f" read={read_tokens} write={write_tokens}"
+                f" hits={cache_hits} misses={cache_misses}"
+                f" saved=${cost_savings:.4f}"
+            )
+
             ring.set_cache_stats(
                 hit_rate=hit_rate,
                 read_tokens=read_tokens,
                 write_tokens=write_tokens,
                 cost_savings=cost_savings,
+                per_request_hit_rate=per_request_hit_rate,
+                total_input_hit_rate=total_input_hit_rate,
+                cache_hits=cache_hits,
+                cache_misses=cache_misses,
+                requests=stats_dict.get('requests', 0),
             )
         except Exception as e:
             logger.debug(f"[CacheStats] Failed to refresh: {e}")
@@ -869,13 +891,26 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label.setToolTip("点击切换项目 · 右键更多操作")
 
         # Git 分支标签（从工作目录检测，左键点击打开关键文档卡片）
-        self._branch_label = QLabel("", self)
-        self._branch_label.setCursor(Qt.PointingHandCursor)
-        self._branch_label.setToolTip("当前 Git 分支 — 点击打开关键文档")
-        self._branch_label.mousePressEvent = self._on_branch_label_clicked
-        self._branch_label.setVisible(False)
-        self._update_branch()
+        self._branch_widget = QWidget(self)
+        self._branch_widget.setCursor(Qt.PointingHandCursor)
+        self._branch_widget.setObjectName("_branchWidget")
+        self._branch_widget.setAttribute(Qt.WA_StyledBackground)
+        self._branch_widget.mousePressEvent = self._on_branch_label_clicked
+        self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
+        self._branch_widget.setVisible(False)
+        self._branch_layout = QHBoxLayout(self._branch_widget)
+        self._branch_layout.setContentsMargins(3, 0, 3, 0)
+        self._branch_layout.setSpacing(2)
 
+        self._branch_icon = QLabel(self._branch_widget)
+        _pix = QPixmap(":/icons/分支.svg")
+        self._branch_icon.setPixmap(_pix.scaled(12, 12, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._branch_layout.addWidget(self._branch_icon)
+
+        self._branch_label = QLabel("", self._branch_widget)
+        self._branch_layout.addWidget(self._branch_label)
+
+        self._update_branch()
         # 标题
         self.title_edit = QLabel("新对话", self)
         font_css = get_font_family_css()
@@ -886,7 +921,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.title_edit.mouseDoubleClickEvent = self._on_title_double_click
 
         session_bar_layout.addWidget(self._project_label)
-        session_bar_layout.addWidget(self._branch_label)
+        session_bar_layout.addWidget(self._branch_widget)
         session_bar_layout.addWidget(self.title_edit)
 
         # right_layout 保持简化，显示余额和 context_usage_ring
@@ -993,7 +1028,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 连接滚动事件，触发虚拟滚动回收
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        scroll_bar.valueChanged.connect(lambda: self._virtual_scroll_timer.start())
+        scroll_bar.valueChanged.connect(self._on_chat_scrolled)
 
         layout.addWidget(self.chat_scroll_area, 1)
 
@@ -1482,7 +1517,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """Hook 保存回调"""
         self._hook_edit_card.hide()
         if hasattr(self._settings_popup, 'hookListCard'):
-            from app.widgets.hook_setting_card import HookListSettingCard
             original = self._hook_edit_popup.get_original_data()
             if original:
                 # 编辑已有 hook
@@ -2232,6 +2266,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_popup.refresh_style()
         if hasattr(self, '_project_selector_popup') and self._project_selector_popup:
             self._project_selector_popup.refresh_style()
+        # 刷新记忆卡片主题
+        if hasattr(self, '_memory_card_popup') and hasattr(self._memory_card_popup, 'refresh_style'):
+            self._memory_card_popup.refresh_style()
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -4134,6 +4171,13 @@ class OpenAIChatToolWindow(ToolWindow):
         card_index = getattr(card, '_message_index', None)
         return card_index == expected_batch_index
 
+    def _on_chat_scrolled(self, value):
+        """聊天区域滚动时，触发虚拟滚动回收并通知所有 MessageCard 更新浮动头"""
+        pass
+        # self._virtual_scroll_timer.start()
+        # for card in self.findChildren(MessageCard):
+        #     card._scroll_position_changed(value)
+
     def _on_scroll_changed(self, value):
         self._sync_node_preview_to_scroll()
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
@@ -5498,6 +5542,13 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 self._current_assistant_card.update_retry_status(error_type, attempt, max_retries, wait_time)
 
+    def _on_retry_resolved(self):
+        """API 重试成功 - 恢复卡片彩虹边框"""
+        if getattr(self, '_is_destroyed', False):
+            return
+        if self._current_assistant_card:
+            self._current_assistant_card.stop_retry_anim()
+
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
         pass
@@ -5818,8 +5869,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 最后从 tool_executor 获取
             if not workdir and self.backend and self.backend.tool_executor:
                 workdir = getattr(self.backend.tool_executor, '_workdir', None)
+            # workdir 为空时直接跳过 git 检测，分支标签隐藏
             if not workdir:
-                workdir = os.getcwd()
+                pass  # branch 保持 None，分支标签隐藏
             if workdir and os.path.isdir(str(workdir)):
                 workdir = str(workdir)
                 from app.utils.git_worktree import GitWorktreeDetector
@@ -5840,29 +5892,36 @@ class OpenAIChatToolWindow(ToolWindow):
             # 分支名过长时截断显示，悬浮显示全名
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
             self._branch_label.setText(display)
-            self._branch_label.setToolTip(f"分支: {branch}\n点击打开关键文档")
-            self._branch_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_SECONDARY};
-                    {get_font_family_css()}
-                    {font_size_css(10)};
-                    padding: 0px 3px;
-                    border-radius: 2px;
+            self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
+
+            # 容器样式：背景色 + 边框 + 圆角
+            self._branch_widget.setStyleSheet(f"""
+                #_branchWidget {{
                     background: {Colors.BRANCH_LABEL_BG};
                     border: 1px solid {Colors.BRANCH_LABEL_BORDER};
+                    border-radius: 2px;
                 }}
-                QLabel:hover {{
+                #_branchWidget:hover {{
                     background: {Colors.HOVER_BG};
                 }}
             """)
-            self._branch_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self._branch_label.setMinimumWidth(0)
-            self._branch_label.setMaximumWidth(160)
-            self._branch_label.setVisible(True)
+            # 文字标签：纯文字颜色+字体，无背景/边框
+            self._branch_label.setStyleSheet(f"""
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()}
+                {font_size_css(10)};
+                background: transparent;
+                border: none;
+            """)
+            # 图标标签：透明
+            self._branch_icon.setStyleSheet("background: transparent; border: none;")
+
+            self._branch_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self._branch_widget.setMaximumWidth(160)
+            self._branch_widget.setVisible(True)
         else:
             self._branch_label.setText("")
-            self._branch_label.setVisible(False)
-
+            self._branch_widget.setVisible(False)
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开关键文档卡片"""
         event.accept()
@@ -6218,7 +6277,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._save_current_session_to_history()
         InfoBar.warning(
             title="已中止",
-            content="问答请求已被手动中止。",
+            content="",
             orient=Qt.Horizontal,
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
@@ -6288,8 +6347,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_auto_loop_start(self, config: 'AutoLoopConfig'):
         """开始 AutoLoop"""
-        from app.core.engines.auto_loop import AutoLoopConfig
-        from app.core.engines.auto_loop import AutoLoopConfig
         if self._is_auto_loop_running:
             return
 

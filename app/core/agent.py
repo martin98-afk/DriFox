@@ -108,6 +108,8 @@ class PermissionResolver:
         "*": "allow",
         "read": "allow",
         "edit": "allow",
+        "write": "allow",
+        "multi_edit": "allow",
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
@@ -211,17 +213,8 @@ class PermissionResolver:
     def _glob_match(self, text: str, pattern: str) -> bool:
         return fnmatch.fnmatch(text, pattern)
 
-
 class AgentManager:
-    """
-    Agent/Skill 管理器
-    
-    支持从以下位置加载 hooks:
-    - agents/{name}/hooks/hooks.json
-    - skills/{name}/hooks/hooks.json  
-    - skills/{name}/SKILL.md (frontmatter hooks 配置)
-    """
-    DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Bash", "write", "edit"]
+    """Agent/Skill 管理器"""
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):
         self.agents_dir = (
@@ -267,100 +260,14 @@ class AgentManager:
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {yaml_file}: {e}")
 
-        # 检查所有子目录，查找 hooks/hooks.json 配置（不修改agent加载逻辑，只加载hooks）
+        # 加载 hooks（委托给 HookManager）
         if self._hook_manager is not None:
-            # Check current agents_dir for hooks (app/agents)
-            for agent_dir in self.agents_dir.iterdir():
-                if agent_dir.is_dir():
-                    hooks_file = agent_dir / "hooks" / "hooks.json"
-                    if hooks_file.exists():
-                        try:
-                            import json
-                            with open(hooks_file, 'r', encoding='utf-8') as f:
-                                config = json.load(f)
-                            skill_name = agent_dir.name
-                            skill_root = str(agent_dir.absolute())
-                            count = self._hook_manager.register_hooks_from_json(skill_name, skill_root, config, str(hooks_file))
-                            if count > 0:
-                                logger.info(f"[AgentManager] Loaded {count} hooks from {skill_name}")
-                        except Exception as e:
-                            logger.error(f"[AgentManager] Failed to load hooks from {hooks_file}: {e}")
-            # Also check skills directory (app/skills) for hooks from skills
+            # 从 agents 子目录加载 hooks
+            self._hook_manager.load_hooks_from_directory(self.agents_dir)
+            # 从 skills 目录加载 hooks
             skills_dir = self.agents_dir.parent / "skills"
             if skills_dir.exists():
-                for skill_dir in skills_dir.iterdir():
-                    if skill_dir.is_dir():
-                        hooks_file = skill_dir / "hooks" / "hooks.json"
-                        if hooks_file.exists():
-                            try:
-                                import json
-                                with open(hooks_file, 'r', encoding='utf-8') as f:
-                                    config = json.load(f)
-                                skill_name = skill_dir.name
-                                skill_root = str(skill_dir.absolute())
-                                count = self._hook_manager.register_hooks_from_json(skill_name, skill_root, config, str(hooks_file))
-                                if count > 0:
-                                    logger.info(f"[AgentManager] Loaded {count} hooks from skill {skill_name}")
-                            except Exception as e:
-                                logger.error(f"[AgentManager] Failed to load hooks from skill {hooks_file}: {e}")
-                        
-                        # 支持从 SKILL.md frontmatter 加载 hooks
-                        skill_md = skill_dir / "SKILL.md"
-                        if skill_md.exists():
-                            try:
-                                self._load_skill_hooks_from_markdown(skill_dir, skill_md)
-                            except Exception as e:
-                                logger.error(f"[AgentManager] Failed to load hooks from SKILL.md {skill_md}: {e}")
-
-    def _load_skill_hooks_from_markdown(self, skill_dir: Path, md_file: Path):
-        """
-        从 SKILL.md frontmatter 加载 hooks 配置
-        
-        支持格式:
-        ---
-        name: my-skill
-        ---
-        <hooks>
-        SessionStart:
-          - command: echo "Hello"
-        PreToolUse:
-          - matcher: "tool:bash"
-            command: echo "Running bash"
-        </hooks>
-        """
-        import re
-        
-        content = md_file.read_text(encoding='utf-8')
-        
-        # 解析 frontmatter
-        if not content.startswith("---"):
-            return None
-            
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return
-        
-        frontmatter = parts[1]
-        body = parts[2]
-        
-        # 查找 <hooks> 块
-        hooks_pattern = r'<hooks>(.*?)</hooks>'
-        hooks_match = re.search(hooks_pattern, body, re.DOTALL)
-        
-        if not hooks_match:
-            return
-        
-        hooks_text = hooks_match.group(1).strip()
-        skill_name = skill_dir.name
-        skill_root = str(skill_dir.absolute())
-        
-        # 解析简化的 hooks 格式
-        config = self._parse_inline_hooks(hooks_text)
-        
-        if config.get("hooks"):
-            count = self._hook_manager.register_hooks_from_json(skill_name, skill_root, config, str(md_file))
-            if count > 0:
-                logger.info(f"[AgentManager] Loaded {count} hooks from SKILL.md of {skill_name}")
+                self._hook_manager.load_hooks_from_skills(skills_dir)
     
     def _parse_inline_hooks(self, hooks_text: str) -> dict:
         """

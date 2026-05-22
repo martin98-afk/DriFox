@@ -46,6 +46,7 @@ class OpenAIChatWorker(QThread):
     question_asked = pyqtSignal(str, str, list, bool)
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
+    retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
 
     def __init__(
@@ -117,6 +118,10 @@ class OpenAIChatWorker(QThread):
         self._current_session_messages = list(self.session_messages)
         self._last_usage = None  # 保存最后一次 API 调用的 token usage
         self._cache_tracker = CacheHitRateTracker()  # 缓存命中率追踪器
+        # 同步设置模型名称，用于模型感知的成本计算
+        model_name = str(self.llm_config.get("模型名称", "") or "")
+        if model_name:
+            self._cache_tracker.set_model(model_name)
         self._accumulated_tokens = 0  # 累加本轮所有 API 调用（含多轮工具迭代）的总 token 使用量
 
         # ========== 工具迭代中压缩支持 ==========
@@ -276,19 +281,6 @@ class OpenAIChatWorker(QThread):
         彻底清理 worker 的所有缓存数据，防止内存泄漏。
         应该在对话结束后调用。
         """
-        from loguru import logger
-
-        # 计算清理前的内存占用估算
-        msg_count = len(self.messages) + len(self.session_messages) + len(self._current_session_messages or [])
-        full_resp_len = len(self.full_response or "")
-        reasoning_len = len(self._reasoning_content or "")
-        blocks_count = len(self._response_content_blocks or [])
-
-        # 记录清理的概况
-        if full_resp_len > 100000 or reasoning_len > 100000:
-            logger.info(f"[Worker] 清理大量缓存: full_response={full_resp_len / 1024:.1f}KB, "
-                        f"reasoning={reasoning_len / 1024:.1f}KB, messages={msg_count}, blocks={blocks_count}")
-
         # 清理消息引用
         self.messages = []
         self.session_messages = []
@@ -310,11 +302,22 @@ class OpenAIChatWorker(QThread):
         # 清理 API 消息缓存
         self._api_messages_cache = None
         self._api_messages_built = False
+        self._current_api_messages = []
+        self._current_system_prompt = ''
 
         # 清理工具列表引用
         self.tools = []
 
-        #
+        # 清理问题/回答状态
+        self._pending_answer = None
+        self._question_pending = None
+
+        # 清理会话缓存
+        self._current_session_messages = []
+
+        # 清理 HTTP 客户端缓存
+        self._http_client = None
+        self._cached_api_config = None
 
     # ========== 缓存追踪方法 ==========
 
@@ -337,18 +340,6 @@ class OpenAIChatWorker(QThread):
     def get_cache_stats_summary(self) -> str:
         """获取缓存统计摘要"""
         return self._cache_tracker.summary()
-
-
-        # 清理问题/回答状态
-        self._pending_answer = None
-        self._question_pending = None
-
-        # 清理会话缓存
-        self._current_session_messages = []
-
-        # 清理 HTTP 客户端缓存
-        self._http_client = None
-        self._cached_api_config = None
 
     def _get_http_client(self) -> Any:
         """
@@ -693,6 +684,8 @@ class OpenAIChatWorker(QThread):
                     "success": item.get("success", True),
                     "round_id": item.get("round_id"),
                     "timestamp": item.get("timestamp", now_ts),
+                    "diff": item.get("diff"),
+                    "anchors": item.get("anchors"),
                 }
 
         # 预防性修复：过滤掉没有对应 tool 结果的 tool_call
@@ -1022,6 +1015,8 @@ class OpenAIChatWorker(QThread):
                 return None, None
             try:
                 response = client.chat.completions.create(**req_kwargs)
+                if attempt > 0:
+                    self.retry_resolved.emit()
                 break
             except BadRequestError as e:
                 error_str = str(e)
@@ -1199,6 +1194,8 @@ class OpenAIChatWorker(QThread):
         reasoning_started_this_call = False  # 本轮 API 调用是否已发射 thinking_started
         _reasoning_batch = ""  # 批量积累 reasoning，减少信号频率
         _reasoning_batch_time = time.time()  # 上次发射时间
+        _content_batch = ""  # 批量积累 content，减少信号频率
+        _content_batch_time = time.time()  # 上次发射 content 的时间
         chunk_count = 0  # chunk 计数器，用于定期 yield 主线程
         for chunk in response:
             if self._is_cancelled:
@@ -1377,7 +1374,13 @@ class OpenAIChatWorker(QThread):
                 self._response_content_blocks = append_text_block(
                     self._response_content_blocks, content
                 )
-                self._emit_with_callback("content_received", self.content_received, content)
+                # 批量发送：积累到 15 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
+                _content_batch += content
+                now = time.time()
+                if len(_content_batch) >= 15 or (now - _content_batch_time) > 0.05:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
+                    _content_batch_time = now
 
             # 保存 token usage（如果这个 chunk 包含 usage 信息，OpenAI/Groq 流式最后一个chunk会带）
             usage = getattr(chunk, "usage", None)
@@ -1411,9 +1414,11 @@ class OpenAIChatWorker(QThread):
                 # 实时通知外部（如 AutoLoop）更新 token 计数
                 if self._token_update_callback and total > 0:
                     self._token_update_callback(total)
-        # 冲刷剩余的 reasoning batch
+        # 冲刷剩余的 reasoning batch 和 content batch
         if _reasoning_batch:
             self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
+        if _content_batch:
+            self._emit_with_callback("content_received", self.content_received, _content_batch)
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
         # 在所有 chunk 接收完成后，再次尝试解析仍处于等待状态的 tool_calls

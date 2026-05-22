@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Dict, List, Any
 import re
 import difflib
-import hashlib
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from loguru import logger
@@ -26,16 +25,10 @@ from app.tools.terminal_tools import TerminalTools
 from app.tools.web_tools import WebTools
 
 
-# 导入 hashline 核心函数
-from app.tools.file_tools import (
-    _line_hash, _parse_anchor, _format_hashline,
-    _find_anchor_in_proximity, _find_anchor_remaps, _build_hash_error_message,
-)
-
 class BuiltinTools(QObject):
     """
     Builtin tools registry - automatically aggregates methods from tool modules.
-    
+
     This is a deep module: it handles dynamic dispatch to registered tools,
     manages session state, and emits file change events without requiring
     manual method forwarding for every tool method.
@@ -52,6 +45,7 @@ class BuiltinTools(QObject):
         else:
             try:
                 from app.utils.utils import resource_path
+
                 self.workdir = Path(resource_path("/"))
             except Exception:
                 self.workdir = Path.cwd()
@@ -64,11 +58,11 @@ class BuiltinTools(QObject):
         self._todo_list = []
         self._loaded_skills = {}
         self._skill_workspaces = {}
-        
+
         # MCP 客户端管理器（全局单例，多窗口共享连接）
         self._mcp_manager = MCPClientManager.get_instance()
         self._mcp_manager.acquire()
-        
+
         # Dependencies injected later
         self._sub_agent_manager = None
         self._agent_manager = None
@@ -78,26 +72,26 @@ class BuiltinTools(QObject):
         self._get_session_messages = None
         self._current_project = "默认项目"  # 当前项目（由 set_current_project() 设置）
 
-
-
-        logger.info(f"[BuiltinTools] Workdir: {self.workdir}, loaded {len(self._tools)} tool modules")
+        logger.info(
+            f"[BuiltinTools] Workdir: {self.workdir}, loaded {len(self._tools)} tool modules"
+        )
 
     def _register_tools(self):
         """Register all tool modules - add new tools here"""
         # 传入 self（BuiltinTools 实例），各工具通过 workdir 属性动态获取最新 workdir
         file_tools = FileTools(self)
-        self._tools['file'] = file_tools
-        self._tools['web'] = WebTools(self)
-        self._tools['terminal'] = TerminalTools(self)
-        self._tools['task'] = TaskTools(self)
-        self._tools['diagnostics'] = DiagnosticsTools(self)
+        self._tools["file"] = file_tools
+        self._tools["web"] = WebTools(self)
+        self._tools["terminal"] = TerminalTools(self)
+        self._tools["task"] = TaskTools(self)
+        self._tools["diagnostics"] = DiagnosticsTools(self)
 
         # Expose properties for backward compatibility
         self._file_tools = file_tools
-        self._web_tools = self._tools['web']
-        self._terminal_tools = self._tools['terminal']
-        self._task_tools = self._tools['task']
-        self._diagnostics_tools = self._tools['diagnostics']
+        self._web_tools = self._tools["web"]
+        self._terminal_tools = self._tools["terminal"]
+        self._task_tools = self._tools["task"]
+        self._diagnostics_tools = self._tools["diagnostics"]
 
     @property
     def file_tools(self):
@@ -126,7 +120,7 @@ class BuiltinTools(QObject):
     def __getattr__(self, name: str):
         """
         Dynamic dispatch: look for method on tool modules.
-        
+
         This eliminates the need for manual method forwarding.
         If a method isn't found on this class, it searches all
         registered tool modules and dispatches to the first match.
@@ -135,14 +129,15 @@ class BuiltinTools(QObject):
         for tool in self._tools.values():
             if hasattr(tool, name):
                 method = getattr(tool, name)
-                
+
                 # Wrap the method to handle fileModified emission after write operations
-                if name in ['write_file', 'edit_file']:
+                if name in ["write_file", "edit_file", "multi_edit"]:
+
                     def wrapped_method(*args, **kwargs):
                         result = method(*args, **kwargs)
                         if isinstance(result, ToolResult) and result.success:
                             # Get path from first argument
-                            path = args[0] if args else kwargs.get('path')
+                            path = args[0] if args else kwargs.get("path")
                             if path:
                                 resolved_path = self._file_tools._resolve_path(path)
                                 logger.info(
@@ -150,12 +145,15 @@ class BuiltinTools(QObject):
                                 )
                                 self.fileModified.emit(str(resolved_path))
                         return result
+
                     return wrapped_method
-                
+
                 return method
-        
+
         # If not found, raise AttributeError (Python default)
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        raise AttributeError(
+            f"'{self.__class__.__name__}' object has no attribute '{name}'"
+        )
 
     # The following methods have special handling (additional logic)
     # so they are kept here instead of dynamic dispatch
@@ -185,7 +183,7 @@ class BuiltinTools(QObject):
         """
         # 清理待办事项
         self._todo_list = []
-        if hasattr(self._task_tools, 'cleanup'):
+        if hasattr(self._task_tools, "cleanup"):
             self._task_tools.cleanup()
 
         # 清理加载的技能
@@ -196,7 +194,7 @@ class BuiltinTools(QObject):
         self._sub_agent_manager = None
 
         # 清理文件工具的缓存
-        if hasattr(self._file_tools, 'cleanup'):
+        if hasattr(self._file_tools, "cleanup"):
             self._file_tools.cleanup()
 
         # 释放 MCP 引用（引用计数归零时才真正断开）
@@ -219,7 +217,7 @@ class BuiltinTools(QObject):
         summary = "\n".join(clean_lines)
         if len(summary) > limit:
             head = summary[: int(limit * 0.75)].rstrip()
-            tail = summary[-int(limit * 0.15):].lstrip()
+            tail = summary[-int(limit * 0.15) :].lstrip()
             summary = f"{head}\n\n[... 已省略 {len(summary) - len(head) - len(tail)} 个字符 ...]\n\n{tail}"
         return ToolResult(True, content=summary)
 
@@ -236,7 +234,7 @@ class BuiltinTools(QObject):
         """设置 AgentManager 实例，用于动态生成工具 schema"""
         self._agent_manager = agent_manager
         # 同时设置给 task_tools
-        if hasattr(self._task_tools, '_agent_manager'):
+        if hasattr(self._task_tools, "_agent_manager"):
             self._task_tools._agent_manager = agent_manager
 
     def set_current_project(self, project: str):
@@ -245,206 +243,54 @@ class BuiltinTools(QObject):
 
     def set_workdir(self, workdir: str):
         """动态更新工作目录（用于 AutoLoop 自定义项目路径）
-        
+
         各工具模块通过 workdir 属性动态获取最新值，无需逐个传播。
         """
         from pathlib import Path
+
         self.workdir = Path(workdir)
         logger.info(f"[BuiltinTools] Workdir updated to: {self.workdir}")
 
     def edit_project_note(
         self,
-        operations: List[Dict],
+        oldString: str,
+        newString: str,
     ) -> ToolResult:
-        """
-        通过 hashline LINE:HASH 锚点编辑项目笔记。
-        
-        与 edit 工具操作方式完全一致：使用 read_project_note 返回的
-        LINE:HASH 标记作为锚点定位编辑位置，无需精确匹配旧文本。
-        
-        **使用时机**：
-        1. 项目探索完成后，记录项目的关键信息
-        2. 关键内容构建时（设计决策、重要实现、配置变更等）
-        3. 发现对项目有长期价值的洞察时
-        
-        **使用原则**：
-        - 只有当有明确有价值的信息时才更新
-        - 避免记录无意义的闲聊、简单问答或一次性信息
-        - 笔记内容应简洁、具体、可操作
-        
-        Args:
-            operations: 编辑操作列表，与 edit 工具完全一致：
-                - replace: 替换单行或范围 (anchor + 可选 anchor_end + lines)
-                - insert_after: 在锚点后插入 (anchor + lines)
-                - insert_before: 在锚点前插入 (anchor + lines)
-                - delete: 删除单行或范围 (anchor + 可选 anchor_end)
-        """
         if not self._memory_manager:
             return ToolResult(False, error="Memory manager not available")
-        
-        project = getattr(self, '_current_project', '默认项目') or '默认项目'
+
+        project = getattr(self, "_current_project", "默认项目") or "默认项目"
         note = self._memory_manager.get_project_note(project)
         old_text = note.get("content", "") if note else ""
-        
+
         if not old_text:
             return ToolResult(False, error="项目笔记为空，无法编辑")
-        
-        all_lines = [l + '\n' for l in old_text.splitlines()]
-        if not all_lines:
-            all_lines = ['\n']
-        if all_lines and not all_lines[-1].endswith('\n'):
-            all_lines[-1] = all_lines[-1] + '\n'
-        
-        # ── 第一遍：校验锚点（含邻近搜索自动修正） ──
-        resolved_ops = []
-        raw_errors = []
-        validation_failed = False
-        
-        for op in operations:
-            op_type = op.get("op", "replace")
-            anchor_str = op.get("anchor", "")
-            try:
-                orig_line, expected_hash = _parse_anchor(anchor_str)
-            except (ValueError, IndexError):
-                return ToolResult(False, error=f"无效的锚点格式: {anchor_str}")
-            
-            actual_line = orig_line
-            if 1 <= actual_line <= len(all_lines):
-                actual_content = all_lines[actual_line - 1].rstrip('\n')
-                actual_hash = _line_hash(actual_content, actual_line)
-                if actual_hash == expected_hash:
-                    pass
-                else:
-                    nearby = _find_anchor_in_proximity(expected_hash, orig_line, all_lines)
-                    if nearby is not None and nearby != orig_line:
-                        actual_line = nearby
-                    else:
-                        raw_errors.append({"line": orig_line, "hash": expected_hash, "anchor": anchor_str})
-                        validation_failed = True
-                        continue
-            else:
-                raw_errors.append({"line": orig_line, "hash": expected_hash, "anchor": anchor_str, "out_of_range": True})
-                validation_failed = True
-                continue
-            
-            anchor_end_str = op.get("anchor_end")
-            actual_end_line = actual_line
-            if anchor_end_str:
-                try:
-                    orig_end_line, end_hash = _parse_anchor(anchor_end_str)
-                except (ValueError, IndexError):
-                    return ToolResult(False, error=f"无效的 anchor_end 格式: {anchor_end_str}")
-                actual_end_line = orig_end_line
-                if 1 <= actual_end_line <= len(all_lines):
-                    end_content = all_lines[actual_end_line - 1].rstrip('\n')
-                    end_actual_hash = _line_hash(end_content, actual_end_line)
-                    if end_actual_hash == end_hash:
-                        pass
-                    else:
-                        nearby_end = _find_anchor_in_proximity(end_hash, orig_end_line, all_lines)
-                        if nearby_end is not None and nearby_end != orig_end_line:
-                            actual_end_line = nearby_end
-                        else:
-                            raw_errors.append({"line": orig_end_line, "hash": end_hash, "anchor": anchor_end_str})
-                            validation_failed = True
-                            continue
-                if actual_end_line < actual_line:
-                    return ToolResult(False, error=f"结束行 {actual_end_line} 在起始行 {actual_line} 之前")
-            resolved_ops.append((actual_line, actual_end_line, op))
-        
-        if validation_failed:
-            remaps = _find_anchor_remaps(
-                [(e["line"], e["hash"]) for e in raw_errors], all_lines
+
+        if oldString not in old_text:
+            return ToolResult(
+                False,
+                error="The specified 'oldString' was not found in the project note. Ensure exact match.",
             )
-            msg_parts = []
-            if remaps:
-                msg_parts.append("Hashline 编辑失败 —— 自上次读取后锚点已变更。\n使用以下映射更新你的锚点:\n")
-                for stale, current in remaps.items():
-                    msg_parts.append(f"  {stale} → {current}")
-                msg_parts.append("")
-            msg_parts.append(_build_hash_error_message(raw_errors, all_lines))
-            return ToolResult(False, error="\n".join(msg_parts))
-        
-        # ── 第二遍：应用操作（从底部向上） ──
-        sorted_ops = sorted(resolved_ops, key=lambda x: (-x[1], -x[0]))
-        new_lines = list(all_lines)
-        applied_count = 0
-        
-        for actual_line, actual_end_line, op in sorted_ops:
-            op_type = op.get("op", "replace")
-            anchor_end = op.get("anchor_end")
-            if op_type == "replace":
-                if anchor_end:
-                    insert_lines = [l + ("\n" if not l.endswith("\n") else "") for l in op.get("lines", [])]
-                    new_lines[actual_line - 1:actual_end_line] = insert_lines
-                else:
-                    insert_lines = op.get("lines", [])
-                    if insert_lines:
-                        first = insert_lines[0]
-                        new_lines[actual_line - 1] = first + ("\n" if not first.endswith("\n") else "")
-                        if len(insert_lines) > 1:
-                            extra = [l + ("\n" if not l.endswith("\n") else "") for l in insert_lines[1:]]
-                            new_lines[actual_line:actual_line] = extra
-                    else:
-                        del new_lines[actual_line - 1]
-            elif op_type == "delete":
-                if anchor_end:
-                    del new_lines[actual_line - 1:actual_end_line]
-                else:
-                    del new_lines[actual_line - 1]
-            elif op_type == "insert_after":
-                insert_lines = [l + ("\n" if not l.endswith("\n") else "") for l in op.get("lines", [])]
-                new_lines[actual_line:actual_line] = insert_lines
-            elif op_type == "insert_before":
-                insert_lines = [l + ("\n" if not l.endswith("\n") else "") for l in op.get("lines", [])]
-                new_lines[actual_line - 1:actual_line - 1] = insert_lines
-            else:
-                return ToolResult(False, error=f"未知的操作类型: {op_type}")
-            applied_count += 1
-        
-        # 保存
-        new_text = "".join(new_lines).rstrip('\n')
+
+        new_text = old_text.replace(oldString, newString, 1)
         success = self._memory_manager.save_project_note(project, new_text)
         if not success:
             return ToolResult(False, error="保存项目笔记失败")
-        
-        # ── 计算 diff ──
-        diff_lines = list(difflib.unified_diff(
-            old_text.splitlines(), new_text.splitlines(),
-            fromfile="project_note", tofile="project_note", lineterm=''
-        ))
+
+        diff_lines = list(
+            difflib.unified_diff(
+                old_text.splitlines(),
+                new_text.splitlines(),
+                fromfile="project_note",
+                tofile="project_note",
+                lineterm="",
+            )
+        )
         diff_str = "\n".join(diff_lines) if diff_lines else ""
-        
-        # 锚点块
-        first_changed = None
-        last_changed = None
-        _HUNK_RE = re.compile(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
-        for line in diff_lines:
-            m = _HUNK_RE.match(line)
-            if m:
-                start = int(m.group(1))
-                count = int(m.group(2)) if m.group(2) else 1
-                end_line = start + count - 1
-                if first_changed is None or start < first_changed:
-                    first_changed = start
-                if last_changed is None or end_line > last_changed:
-                    last_changed = end_line
-        
-        result_parts = [f"Applied {applied_count} hashline edit(s) to project note."]
-        if first_changed is not None and last_changed is not None:
-            anchor_start = max(1, first_changed - 2)
-            anchor_end_num = min(len(new_text.splitlines()), last_changed + 2)
-            new_lines_list = [l + '\n' for l in new_text.splitlines()]
-            if new_lines_list:
-                anchor_slice = new_lines_list[anchor_start - 1:anchor_end_num]
-                anchors = _format_hashline(anchor_slice, anchor_start)
-                result_parts.append("")
-                result_parts.append(f"--- Anchors {anchor_start}-{anchor_end_num} ---")
-                result_parts.append(anchors)
-        
+
         return ToolResult(
             True,
-            content="\n".join(result_parts),
+            content="Successfully edited project note.",
             diff=diff_str,
         )
 
@@ -454,47 +300,43 @@ class BuiltinTools(QObject):
         limit: int = 500,
     ) -> ToolResult:
         """
-        读取当前项目笔记内容，返回 hashline 格式（每行标注 LINE:HASH|content）。
-        与普通 read 工具用法一致，每行带有 2-字符内容哈希锚点，
-        编辑时通过 edit_project_note 的 LINE:HASH 定位，无需精确匹配旧文本。
-        
-        **使用时机**：
-        需要查看或引用当前项目笔记内容时使用。
-        内容很长时可以通过 offset/limit 分页读取。
-        
+        读取当前项目笔记内容。
+
         Args:
             offset: 起始行号（从 1 开始），默认 1
             limit: 读取行数，默认 500
         """
         if not self._memory_manager:
             return ToolResult(False, error="Memory manager not available")
-        
-        project = getattr(self, '_current_project', '默认项目') or '默认项目'
+
+        project = getattr(self, "_current_project", "默认项目") or "默认项目"
         note = self._memory_manager.get_project_note(project)
         full_content = note.get("content", "") if note else ""
-        
+
         if not full_content:
             full_content = "(项目笔记为空)"
-        
-        lines = full_content.splitlines()
-        total_lines = len(lines)
+
+        line_list = full_content.splitlines()
+        total_lines = len(line_list)
         if offset < 1:
             offset = 1
-        
+
         start = offset - 1
         end = min(total_lines, start + limit) if limit > 0 else total_lines
-        selected_lines = lines[start:end]
-        hashline_content = _format_hashline(selected_lines, start + 1)
-        
-        return ToolResult(True, content={
-            "project": project,
-            "content": hashline_content,
-            "total_lines": total_lines,
-            "offset": offset,
-            "limit": limit if limit > 0 else total_lines,
-            "returned_lines": len(selected_lines),
-            "total_length": len(full_content),
-        })
+        selected_lines = line_list[start:end]
+
+        return ToolResult(
+            True,
+            content={
+                "project": project,
+                "content": "\n".join(selected_lines),
+                "total_lines": total_lines,
+                "offset": offset,
+                "limit": limit if limit > 0 else total_lines,
+                "returned_lines": len(selected_lines),
+                "total_length": len(full_content),
+            },
+        )
 
 
 def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
@@ -509,11 +351,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": "读取文件内容，返回 hashline 格式（每行标注 LINE:HASH|content）。每行带有 2-字符内容哈希锚点，编辑时通过 LINE:HASH 定位，无需精确匹配旧文本。",
+            "description": "读取文件内容。返回原文，可选带行号。读取时记录文件修改时间，用于后续编辑时检测外部修改。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "文件相对路径"},
+                    "path": {"type": "string", "description": "文件路径"},
                     "offset": {
                         "type": "integer",
                         "description": "起始行号 (从1开始)",
@@ -523,6 +365,11 @@ TOOL_SCHEMAS = [
                         "type": "integer",
                         "description": "读取的行数",
                         "default": 500,
+                    },
+                    "show_line_numbers": {
+                        "type": "boolean",
+                        "description": "是否显示行号，默认 False",
+                        "default": False,
                     },
                 },
                 "required": ["path"],
@@ -548,41 +395,55 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit",
-            "description": "通过 hashline LINE:HASH 锚点编辑文件。使用 read 工具返回的 LINE:HASH 标记作为锚点定位编辑位置，无需精确匹配旧文本。支持多种操作类型。批量操作从文件底部向上执行以避免行号偏移。",
+            "description": "精确文本替换编辑。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "文件路径"},
-                    "operations": {
+                    "oldString": {
+                        "type": "string",
+                        "description": "要替换的旧文本（精确匹配，包含空白字符）",
+                    },
+                    "newString": {"type": "string", "description": "替换后的新文本"},
+                    "replaceAll": {
+                        "type": "boolean",
+                        "description": "是否替换所有匹配项（默认 False，只替换第一个）。当 oldString 出现多次时需设置为 True",
+                        "default": False,
+                    },
+                },
+                "required": ["path", "oldString", "newString"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "multi_edit",
+            "description": "批量编辑同一文件，支持多次 oldString/newString 替换。所有替换完成后生成 unified diff 用于审查。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文件路径"},
+                    "edits": {
                         "type": "array",
-                        "description": "编辑操作列表。支持的操作类型：\n- replace: 替换单行或范围 (anchor + 可选 anchor_end + lines)\n- insert_after: 在锚点后插入 (anchor + lines)\n- insert_before: 在锚点前插入 (anchor + lines)\n- delete: 删除单行或范围 (anchor + 可选 anchor_end)\n\n每条操作的 anchor 格式为 read 返回的 LINE:HASH，如 '12:a3'。",
+                        "description": '编辑操作列表，每项为 {"oldString": "...", "newString": "..."}，按顺序逐条执行替换（仅替换第一个匹配项）',
                         "items": {
                             "type": "object",
                             "properties": {
-                                "op": {
+                                "oldString": {
                                     "type": "string",
-                                    "description": "操作类型: replace, insert_after, insert_before, delete",
-                                    "enum": ["replace", "insert_after", "insert_before", "delete"]
+                                    "description": "要替换的旧文本",
                                 },
-                                "anchor": {
+                                "newString": {
                                     "type": "string",
-                                    "description": "LINE:HASH 锚点，如 '12:a3'"
+                                    "description": "替换后的新文本",
                                 },
-                                "anchor_end": {
-                                    "type": "string",
-                                    "description": "范围操作的结束锚点，如 '15:b7'（可选）"
-                                },
-                                "lines": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "新内容行列表（delete 操作不需要）"
-                                }
                             },
-                            "required": ["op", "anchor"]
-                        }
-                    }
+                            "required": ["oldString", "newString"],
+                        },
+                    },
                 },
-                "required": ["path", "operations"],
+                "required": ["path", "edits"],
             },
         },
     },
@@ -636,7 +497,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "文件匹配模式 (如 '*.py', '**/*.json', 'src/**/*.ts')"
+                        "description": "文件匹配模式 (如 '*.py', '**/*.json', 'src/**/*.ts')",
                     },
                     "path": {
                         "type": "string",
@@ -648,8 +509,6 @@ TOOL_SCHEMAS = [
             },
         },
     },
-
-
     {
         "type": "function",
         "function": {
@@ -675,7 +534,10 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "要执行的 shell 命令"},
-                    "cwd": {"type": "string", "description": "工作目录（可选，默认为项目根目录）"},
+                    "cwd": {
+                        "type": "string",
+                        "description": "工作目录（可选，默认为项目根目录）",
+                    },
                 },
                 "required": ["command"],
             },
@@ -689,7 +551,10 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task_id": {"type": "string", "description": "任务 ID，格式为 bg_xxxxxxxx"},
+                    "task_id": {
+                        "type": "string",
+                        "description": "任务 ID，格式为 bg_xxxxxxxx",
+                    },
                 },
                 "required": ["task_id"],
             },
@@ -704,7 +569,10 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string", "description": "任务 ID"},
-                    "lines": {"type": "integer", "description": "返回最近 N 行（默认 100）"},
+                    "lines": {
+                        "type": "integer",
+                        "description": "返回最近 N 行（默认 100）",
+                    },
                 },
                 "required": ["task_id"],
             },
@@ -729,13 +597,13 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "文件路径"},
+                    "path": {"type": "string", "description": "文件路径"},
                     "language": {
                         "type": "string",
                         "description": "语言类型，可选: python, javascript, typescript, shellscript",
                     },
                 },
-                "required": ["file_path"],
+                "required": ["path"],
             },
         },
     },
@@ -808,40 +676,17 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_project_note",
-            "description": "通过 hashline LINE:HASH 锚点编辑项目笔记。使用 read_project_note 返回的 LINE:HASH 标记作为锚点定位编辑位置，无需精确匹配旧文本。支持多种操作类型。批量操作从文件底部向上执行以避免行号偏移。",
+            "description": "精确文本替换编辑项目笔记。编辑前检查文件是否被外部修改。生成 unified diff 用于审查。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "operations": {
-                        "type": "array",
-                        "description": "编辑操作列表。支持的操作类型：\n- replace: 替换单行或范围 (anchor + 可选 anchor_end + lines)\n- insert_after: 在锚点后插入 (anchor + lines)\n- insert_before: 在锚点前插入 (anchor + lines)\n- delete: 删除单行或范围 (anchor + 可选 anchor_end)\n\n每条操作的 anchor 格式为 read_project_note 返回的 LINE:HASH，如 '12:a3'。",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "op": {
-                                    "type": "string",
-                                    "description": "操作类型: replace, insert_after, insert_before, delete",
-                                    "enum": ["replace", "insert_after", "insert_before", "delete"]
-                                },
-                                "anchor": {
-                                    "type": "string",
-                                    "description": "LINE:HASH 锚点，如 '12:a3'"
-                                },
-                                "anchor_end": {
-                                    "type": "string",
-                                    "description": "范围操作的结束锚点，如 '15:b7'（可选）"
-                                },
-                                "lines": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "新内容行列表（delete 操作不需要）"
-                                }
-                            },
-                            "required": ["op", "anchor"]
-                        }
-                    }
+                    "oldString": {
+                        "type": "string",
+                        "description": "要替换的旧文本（精确匹配）",
+                    },
+                    "newString": {"type": "string", "description": "替换后的新文本"},
                 },
-                "required": ["operations"],
+                "required": ["oldString", "newString"],
             },
         },
     },
@@ -849,11 +694,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_project_note",
-            "description": "读取当前项目笔记内容，返回 hashline 格式（每行标注 LINE:HASH|content）。需要查看或引用当前项目笔记内容时使用。内容很长时可以通过 offset/limit 分页读取，和普通 read 工具用法一致。",
+            "description": "读取当前项目笔记内容。返回原文，可选通过 offset/limit 分页读取。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "offset": {"type": "integer", "description": "起始行号（从 1 开始），默认 1"},
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始行号（从 1 开始），默认 1",
+                    },
                     "limit": {"type": "integer", "description": "读取行数，默认 500"},
                 },
                 "required": [],
@@ -875,9 +723,18 @@ TOOL_SCHEMAS = [
                             "type": "object",
                             "properties": {
                                 "id": {"type": "string", "description": "序号"},
-                                "content": {"type": "string", "description": "待办事项内容"},
-                                "status": {"type": "string", "description": "状态: pending/in_progress/completed"},
-                                "priority": {"type": "string", "description": "优先级: high/medium/low"},
+                                "content": {
+                                    "type": "string",
+                                    "description": "待办事项内容",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "description": "状态: pending/in_progress/completed",
+                                },
+                                "priority": {
+                                    "type": "string",
+                                    "description": "优先级: high/medium/low",
+                                },
                             },
                             "required": ["content"],
                         },
@@ -913,8 +770,14 @@ TOOL_SCHEMAS = [
                                     "type": "string",
                                     "description": "子智能体名称。",
                                 },
-                                "description": {"type": "string", "description": "任务描述"},
-                                "context": {"type": "string", "description": "详细上下文信息（可选）"},
+                                "description": {
+                                    "type": "string",
+                                    "description": "任务描述",
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": "详细上下文信息（可选）",
+                                },
                             },
                             "required": ["agent", "description"],
                         },
@@ -950,7 +813,7 @@ TOOL_SCHEMAS = [
                         "type": "boolean",
                         "description": "是否包含执行结果（默认 True）",
                     },
-                }
+                },
             },
         },
     },
@@ -987,9 +850,14 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "问题内容及描述，尽量简洁，不要包含选项内容"},
-                    "options": {"type": "array",
-                                "description": "选项列表。当有多个可选方案或需要用户确认时，**必须提供选项列表**，不要留空让用户文本输入。"},
+                    "question": {
+                        "type": "string",
+                        "description": "问题内容及描述，尽量简洁，不要包含选项内容",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "选项列表。当有多个可选方案或需要用户确认时，**必须提供选项列表**，不要留空让用户文本输入。",
+                    },
                     "multiple": {
                         "type": "boolean",
                         "description": "是否允许多选，默认false",
@@ -1019,15 +887,15 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     """
     # 动态获取子智能体名称列表
     subagent_names = []
-    if agent_manager and hasattr(agent_manager, 'list_subagent_names'):
+    if agent_manager and hasattr(agent_manager, "list_subagent_names"):
         try:
             subagent_names = agent_manager.list_subagent_names(include_hidden=True)
         except Exception:
             pass
-    
+
     # Make a copy to avoid modifying the original
     schemas = [s.copy() for s in TOOL_SCHEMAS]
-    
+
     # 动态生成 task_batch 工具描述
     task_batch_desc = (
         f"批量分发多个子智能体任务（并行执行）。无需等待子智能体结果，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，发布完任务后可以继续自身任务。"
@@ -1036,22 +904,22 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     if subagent_names:
         subagent_list = ", ".join(subagent_names)
         task_batch_desc += f"\n\n可用子智能体: {subagent_list}"
-    
+
     # Update the task_batch schema with dynamic content
     for schema in schemas:
-        if schema['function']['name'] == 'task_batch':
-            schema['function']['description'] = task_batch_desc
+        if schema["function"]["name"] == "task_batch":
+            schema["function"]["description"] = task_batch_desc
             if subagent_names:
-                schema['function']['parameters']['properties']['tasks']['items']['properties']['agent'][
-                    'description'
-                ] += f" (可选：{', '.join(subagent_names)})"
+                schema["function"]["parameters"]["properties"]["tasks"]["items"][
+                    "properties"
+                ]["agent"]["description"] += f" (可选：{', '.join(subagent_names)})"
             break
-    
+
     # 动态注入 MCP 工具 schema
-    if builtin_tools and hasattr(builtin_tools, '_mcp_manager'):
+    if builtin_tools and hasattr(builtin_tools, "_mcp_manager"):
         mcp_schemas = builtin_tools._mcp_manager.get_tool_schemas()
         if mcp_schemas:
             schemas.extend(mcp_schemas)
             logger.info(f"[BuiltinTools] 注入 {len(mcp_schemas)} 个 MCP 工具 schema")
-    
+
     return schemas

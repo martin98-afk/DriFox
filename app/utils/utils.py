@@ -103,6 +103,10 @@ def migrate_app_data_if_needed():
 
     旧路径: <安装目录>/.drifox (Program Files 等，可能权限受限)
     新路径: ~/.drifox 或 macOS: Application Support
+
+    迁移仅在以下情况执行：
+    1. 旧目录存在有效数据（app.config 或 sessions.db）
+    2. 新目录不存在，或新目录存在但没有有效数据（只有 logs/ 等空壳子目录）
     """
     global _MIGRATED_FLAG
     if _MIGRATED_FLAG:
@@ -116,14 +120,26 @@ def migrate_app_data_if_needed():
     from loguru import logger
     import shutil
 
-    # 旧路径（安装目录旁）
+    # 旧路径：安装目录旁（Program Files）
     old_dir = Path(sys._MEIPASS).parent / '.drifox' if hasattr(sys, '_MEIPASS') else None
     if not old_dir or not old_dir.exists():
+        logger.debug(f"[迁移] 旧目录不存在，跳过迁移: {old_dir}")
+        return
+
+    # 检查旧目录是否有有效数据
+    has_old_data = (old_dir / "app.config").exists() or (old_dir / "sessions.db").exists()
+    if not has_old_data:
+        logger.debug(f"[迁移] 旧目录无有效数据，跳过迁移: {old_dir}")
         return
 
     new_dir = get_app_data_dir()
     if new_dir.exists():
-        return
+        # 新目录已存在：检查是否有有效数据，有则跳过，无则覆盖
+        has_new_data = (new_dir / "app.config").exists() or (new_dir / "sessions.db").exists()
+        if has_new_data:
+            logger.info(f"[迁移] 目标目录已有数据，跳过迁移: {new_dir}")
+            return
+        logger.info(f"[迁移] 目标目录存在但无有效数据，准备覆盖: {new_dir}")
 
     # 关键：先 checkpoint SQLite 数据库，把 WAL 数据刷回主文件
     # 否则 shutil.copytree 可能只复制到不完整的 .db 文件
@@ -133,7 +149,10 @@ def migrate_app_data_if_needed():
 
     logger.info(f"[迁移] 复制数据: {old_dir} → {new_dir}")
     new_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(str(old_dir), str(new_dir), dirs_exist_ok=True)
+    # 如果新目录存在但无有效数据，先删除再复制，避免残留旧 logs/ 等
+    if new_dir.exists():
+        shutil.rmtree(str(new_dir))
+    shutil.copytree(str(old_dir), str(new_dir), dirs_exist_ok=False)
 
     # 验证迁移结果
     old_db = old_dir / "sessions.db"
