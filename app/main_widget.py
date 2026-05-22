@@ -6277,7 +6277,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._save_current_session_to_history()
         InfoBar.warning(
             title="已中止",
-            content="问答请求已被手动中止。",
+            content="",
             orient=Qt.Horizontal,
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
