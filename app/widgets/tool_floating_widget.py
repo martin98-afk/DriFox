@@ -388,7 +388,8 @@ class ToolFloatingWidget(SimpleCardWidget):
         Colors.refresh()
         bg = Colors.REALTIME_BG
         if bg.startswith("rgba("):
-            alpha = int(opacity * 255)
+            # 最小 alpha 为 1，避免完全透明导致卡片"消失"
+            alpha = max(1, int(opacity * 255))
             bg = bg.rsplit(",", 1)[0] + f", {alpha})"
         # 根据当前状态保持边框颜色
         if self._is_running:

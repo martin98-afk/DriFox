@@ -19,7 +19,7 @@ from PyQt5.QtCore import (
     QThreadPool,
     Qt,
 )
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QPalette
 from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
@@ -713,9 +713,27 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
+        # 更新主窗口背景透明度
+        self._update_window_bg_opacity(opacity)
 
+    def _update_window_bg_opacity(self, opacity: float):
+        """更新窗口背景透明度"""
+        if not hasattr(self, '_window_bg_color'):
+            return
+        import re
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', self._window_bg_color)
+        if m:
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            # 原始 alpha * 窗口透明度
+            base_alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
+            final_alpha = int(base_alpha * opacity)
+            from PyQt5.QtGui import QColor, QPalette
+            color = QColor(r, g, b, max(0, final_alpha))
+            p = QPalette()
+            p.setColor(QPalette.Window, color)
+            self.setPalette(p)
+    
     def _apply_branch_or_create_session(self):
-        """处理分支会话或创建新会话"""
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, '_is_destroyed', False):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before branch session creation, skipping")
@@ -859,27 +877,29 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.setContentsMargins(1, 1, 4, 1)
         layout.setSpacing(1)
 
-        # 设置窗口背景渐变（需要 setAutoFillBackground + palette）
+        # 设置窗口背景色（非常淡的主题色）
         from app.utils.theme_manager import theme_manager
-        window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
-        gradient_start = window.get('gradient_start', 'rgba(10, 14, 22, 255)')
-        gradient_end = window.get('gradient_end', 'rgba(15, 20, 30, 255)')
-        self.setStyleSheet(f"""
-            OpenAIChatToolWindow {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {gradient_start},
-                    stop:1 {gradient_end});
-            }}
-        """)
-        self.setAutoFillBackground(True)
-        p = self.palette()
-        # 设置窗口背景色（用作 CSS 渐变的 fallback）
+        colors = theme_manager.get_current_colors()
+        window_bg = colors.get('window_bg', 'rgba(102, 198, 255, 0.04)')
+        
+        # 保存原始颜色供透明度变化时使用
+        self._window_bg_color = window_bg
+        
+        # 解析颜色（包含 alpha）
         import re
-        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', gradient_start)
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', window_bg)
         if m:
-            from PyQt5.QtGui import QColor
-            p.setColor(self.backgroundRole(), QColor(int(m.group(1)), int(m.group(2)), int(m.group(3))))
-        self.setPalette(p)
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10  # 保留原始 alpha
+            from PyQt5.QtGui import QColor, QPalette
+            color = QColor(r, g, b, alpha)
+            p = QPalette()
+            p.setColor(QPalette.Window, color)
+            self.setPalette(p)
+            self.setAutoFillBackground(True)
+        
+        # 字体样式
+        self.setStyleSheet("")
 
         session_bar_layout = QHBoxLayout()
 
@@ -931,6 +951,7 @@ class OpenAIChatToolWindow(ToolWindow):
         font_css = get_font_family_css()
         title_style = TITLE_STYLE.replace("    QLabel {", f"    QLabel {{\n        {font_css}")
         title_style = title_style.replace("font-size: 15px;", font_size_css(15))
+        title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
         self.title_edit.setCursor(Qt.PointingHandCursor)
         self.title_edit.mouseDoubleClickEvent = self._on_title_double_click
@@ -2245,24 +2266,24 @@ class OpenAIChatToolWindow(ToolWindow):
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
         from app.utils.theme_manager import theme_manager
-        window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
-        gradient_start = window.get('gradient_start', 'rgba(10, 14, 22, 255)')
-        gradient_end = window.get('gradient_end', 'rgba(15, 20, 30, 255)')
-        self.setStyleSheet(f"""
-            OpenAIChatToolWindow {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {gradient_start},
-                    stop:1 {gradient_end});
-            }}
-        """)
-        self.setAutoFillBackground(True)
+        colors = theme_manager.get_current_colors()
+        
+        # 窗口淡背景（保留原始 alpha）
+        window_bg = colors.get('window_bg', 'rgba(102, 198, 255, 0.04)')
+        self._window_bg_color = window_bg  # 保存供透明度变化时使用
+        
         import re
-        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', gradient_start)
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', window_bg)
         if m:
-            from PyQt5.QtGui import QColor
-            p = self.palette()
-            p.setColor(self.backgroundRole(), QColor(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
+            from PyQt5.QtGui import QColor, QPalette
+            color = QColor(r, g, b, alpha)
+            p = QPalette()
+            p.setColor(QPalette.Window, color)
             self.setPalette(p)
+            self.setAutoFillBackground(True)
+        
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):

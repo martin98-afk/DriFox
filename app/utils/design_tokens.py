@@ -153,7 +153,7 @@ def get_window_style() -> str:
     from app.utils.theme_manager import theme_manager
     window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
     return f"""
-    OpenAIChatToolWindow {{
+    #OpenAIChatToolWindow {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
             stop:0 {window.get('gradient_start', 'rgba(10, 14, 22, 255)')},
             stop:1 {window.get('gradient_end', 'rgba(15, 20, 30, 255)')});

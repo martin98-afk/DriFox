@@ -101,20 +101,16 @@ class ToolWindowTitleBar(QWidget):
             except Exception:
                 font_name = "Microsoft YaHei"
 
-        if isDarkTheme():
-            bg = "#2d2d2d"
-            title_color = "#e0e0e0"
-            btn_hover = "rgba(255, 255, 255, 15)"
-            border_color = "#3a3a3a"
-        else:
-            bg = "#f5f5f5"
-            title_color = "#333333"
-            btn_hover = "rgba(0, 0, 0, 10)"
-            border_color = "#e0e0e0"
+        # 使用主题颜色
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+        title_color = Colors.TEXT_PRIMARY
+        btn_hover = Colors.HOVER_BG
+        border_color = Colors.BORDER
 
         self.setStyleSheet(f"""
             ToolWindowTitleBar {{
-                background-color: {bg};
+                background-color: {Colors.CONTENT_BG};
                 border-bottom: 1px solid {border_color};
             }}
             #titleLabel {{
@@ -198,6 +194,7 @@ class ToolWindow(QWidget):
 
         self._init_unified_font()
         self._init_title_bar()
+        self.setObjectName("OpenAIChatToolWindow")
 
     def _init_title_bar(self):
         if self._title_bar:
@@ -232,8 +229,9 @@ class ToolWindow(QWidget):
         font.setFamily(font_name)
         self.setFont(font)
 
+        # 只设置字体，不设置背景（背景由子类的 setup_ui 处理）
         self.setStyleSheet(f"""
-            ToolWindow, QWidget {{
+            ToolWindow {{
                 font-family: "{font_name}";
             }}
             QLabel, QPushButton, QLineEdit, QComboBox, QTreeWidget, QTableWidget {{
