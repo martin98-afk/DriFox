@@ -240,6 +240,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
+        self._lazy_card_timer_active = False  # 懒渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：增加防抖时间减少卡顿
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
@@ -2707,6 +2708,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
+            # 先收集需要回收的卡片ID，用于清理懒渲染队列
+            recycled_card_ids = set()
             # 回收前面超出缓冲区的批次
             for batch_idx in range(0, active_start):
                 if self._batch_cards[batch_idx] is not None:
@@ -2716,6 +2719,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     if cards:
                         for card in cards:
+                            recycled_card_ids.add(id(card))
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                                 card.cleanup()
                                 card.deleteLater()
@@ -2731,11 +2735,19 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     if cards:
                         for card in cards:
+                            recycled_card_ids.add(id(card))
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                                 card.cleanup()
                                 card.deleteLater()
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+
+            # 从懒渲染队列中移除已回收的卡片，避免对已销毁的 widget 调用 ensure_rendered
+            if recycled_card_ids:
+                self._pending_lazy_cards = [
+                    c for c in self._pending_lazy_cards
+                    if id(c) not in recycled_card_ids and self._is_widget_alive(c)
+                ]
 
             # 回收完成，如果有回收触发GC
             if recycled_count > 0 or lazy_render_count > 0:
@@ -3204,8 +3216,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         pending_lazy_cards.append(card)
 
         # 批量触发懒渲染，使用延迟加载减少卡顿
-        if pending_lazy_cards:
-            self._pending_lazy_cards = pending_lazy_cards
+        # 同一卡片可能已在队列中（如滚动回来触发的重新加载），需去重
+        existing_ids = {id(c) for c in self._pending_lazy_cards}
+        for card in pending_lazy_cards:
+            if id(card) not in existing_ids:
+                self._pending_lazy_cards.append(card)
+                existing_ids.add(id(card))
+        if pending_lazy_cards and not self._lazy_card_timer_active:
+            self._lazy_card_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_card)
 
     def _get_rendered_message_cards(self) -> List[MessageCard]:
@@ -3221,10 +3239,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_lazy_cards:
             # 所有懒渲染完成
             self._loading_session = False
+            self._lazy_card_timer_active = False
             return
 
         card = self._pending_lazy_cards.pop(0)
-        # 检查卡片是否仍然有效
+        # 检查卡片是否仍然有效且未被回收
         if self._is_widget_alive(card) and not getattr(card, '_lazy_rendered', False):
             card.ensure_rendered()
 
@@ -3240,6 +3259,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 继续处理下一个，使用 QTimer 异步调度释放事件循环
         if self._pending_lazy_cards:
             QTimer.singleShot(0, self._process_next_lazy_card)
+        else:
+            self._loading_session = False
+            self._lazy_card_timer_active = False
 
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
