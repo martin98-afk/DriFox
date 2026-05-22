@@ -13,22 +13,19 @@
 - 损坏隔离
 """
 
-import orjson as json
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 
 from loguru import logger
 
-from app.utils.db_manager import DatabaseManager
-from app.core.message_content import consolidate_messages
-from app.utils.utils import get_app_data_dir
-
+from app.core.store.file_operation_repository import FileOperationRepository
+from app.core.store.memory_repository import MemoryRepository
 # 导入子模块
 from app.core.store.session_repository import SessionRepository
-from app.core.store.memory_repository import MemoryRepository
-from app.core.store.file_operation_repository import FileOperationRepository
+from app.core.store.subagent_log_repository import SubAgentLogRepository
+from app.utils.db_manager import DatabaseManager
+from app.utils.utils import get_app_data_dir
 
 
 class SessionStore:
@@ -69,6 +66,7 @@ class SessionStore:
         self._session_repo: Optional[SessionRepository] = None
         self._memory_repo: Optional[MemoryRepository] = None
         self._file_op_repo: Optional[FileOperationRepository] = None
+        self._subagent_log_repo: Optional[SubAgentLogRepository] = None
         
         self._init_schema()
 
@@ -131,6 +129,20 @@ class SessionStore:
                     {"name": "created_at", "type": "TEXT"},
                 ])
 
+                # 创建子智能体日志表
+                self._db.create_table("sub_agent_logs", [
+                    {"name": "task_id", "type": "TEXT", "primary_key": True},
+                    {"name": "agent_name", "type": "TEXT"},
+                    {"name": "task_description", "type": "TEXT"},
+                    {"name": "status", "type": "TEXT"},
+                    {"name": "result", "type": "TEXT"},
+                    {"name": "error", "type": "TEXT"},
+                    {"name": "logs", "type": "TEXT"},
+                    {"name": "summary", "type": "TEXT"},
+                    {"name": "created_at", "type": "TEXT"},
+                    {"name": "updated_at", "type": "TEXT"},
+                ])
+
                 # 创建索引
                 self._db.execute_sql(
                     f'CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)'
@@ -147,6 +159,7 @@ class SessionStore:
                 self._session_repo = SessionRepository(self._db)
                 self._memory_repo = MemoryRepository(self._db)
                 self._file_op_repo = FileOperationRepository(self._db)
+                self._subagent_log_repo = SubAgentLogRepository(self._db)
 
                 self._initialized = True
                 logger.info("[SessionStore] 初始化完成（仓储模式）")
@@ -379,6 +392,56 @@ class SessionStore:
             logger.error(f"[SessionStore] 记忆迁移失败: {e}")
             return 0
 
+    # ==================== 子智能体日志操作（委托给 SubAgentLogRepository）====================
+
+    def save_subagent_task(self, task_id: str, agent_name: str, task_description: str,
+                           status: str = "running", result: str = None, error: str = None,
+                           logs: List[Dict] = None, summary: Dict = None) -> bool:
+        """保存子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.save_task(
+                task_id, agent_name, task_description, status, result, error, logs, summary
+            )
+        return False
+
+    def update_subagent_task_status(self, task_id: str, status: str, result: str = None,
+                                     error: str = None, logs: List[Dict] = None,
+                                     summary: Dict = None) -> bool:
+        """更新子智能体任务状态"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.update_status(task_id, status, result, error, logs, summary)
+        return False
+
+    def get_subagent_task(self, task_id: str) -> Optional[Dict]:
+        """获取单个子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.get_task(task_id)
+        return None
+
+    def get_subagent_tasks(self, task_ids: List[str]) -> List[Dict]:
+        """获取多个子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.get_tasks(task_ids)
+        return []
+
+    def get_all_subagent_tasks(self, limit: int = 100) -> List[Dict]:
+        """获取所有子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.get_all_tasks(limit)
+        return []
+
+    def delete_subagent_task(self, task_id: str) -> bool:
+        """删除子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.delete_task(task_id)
+        return False
+
+    def clear_old_subagent_tasks(self, days: int = 7) -> int:
+        """清理旧子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.clear_old_tasks(days)
+        return 0
+
     # ==================== 文件操作记录（委托给 FileOperationRepository）====================
 
     def record_file_operation(self, session_id: str, call_id: str,
@@ -436,6 +499,7 @@ class SessionStore:
             self._session_repo = None
             self._memory_repo = None
             self._file_op_repo = None
+            self._subagent_log_repo = None
 
     # ==================== 公开子模块访问 ====================
 
@@ -453,3 +517,8 @@ class SessionStore:
     def file_op_repo(self) -> Optional[FileOperationRepository]:
         """获取文件操作记录仓储（用于高级操作）"""
         return self._file_op_repo
+
+    @property
+    def subagent_log_repo(self) -> Optional[SubAgentLogRepository]:
+        """获取子智能体日志仓储（用于高级操作）"""
+        return self._subagent_log_repo

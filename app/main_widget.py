@@ -368,17 +368,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._init_sub_agent_log_store()
 
     def _init_sub_agent_log_store(self):
-        """初始化子智能体日志存储"""
-        from app.core import SubAgentLogStore
-        from app.utils.utils import get_app_data_dir
-
+        """初始化子智能体日志存储（委托给 Backend.session_store）"""
         try:
-            db_path = get_app_data_dir() / "sessions.db"
-
-            log_store = SubAgentLogStore()
-            log_store.init(str(db_path))
-            self._sub_agent_manager.set_log_store(log_store)
-            logger.info(f"[LLMChatter] 子智能体日志存储初始化完成")
+            # 直接使用 backend 的 session_store（共享单一数据库连接）
+            session_store = self.backend.session_store
+            
+            # 直接使用 SessionStore 的方法，无需中间的 SubAgentLogStore
+            self._sub_agent_manager.set_session_store(session_store)
+            logger.info(f"[LLMChatter] 子智能体日志存储初始化完成（通过 SessionStore）")
         except Exception as e:
             logger.error(f"[LLMChatter] 子智能体日志存储初始化失败: {e}")
 
