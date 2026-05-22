@@ -486,7 +486,7 @@ def render_tool_block(
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
     # 文件编辑工具判断
-    file_edit_tools = {"write", "edit"}
+    file_edit_tools = {"write", "edit", "multi_edit"}
     is_file_edit = tool_name in file_edit_tools
 
     # 差异统计（+N/-N）

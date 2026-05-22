@@ -10,6 +10,8 @@ from pathlib import Path
 from loguru import logger
 from typing import Dict, Optional, Callable
 
+from app.core.hook_manager import HookDecision
+
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
 
@@ -24,7 +26,7 @@ class ToolExecutor:
 
     # 需要记录的文件操作
     _FILE_OPS_TO_TRACK = {
-        "write", "edit"
+        "write", "edit", "multi_edit"
     }
 
     def __init__(self, homepage=None, workdir: str = None, backend=None):
@@ -364,7 +366,6 @@ class ToolExecutor:
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         if self._backend and self._backend.hook_manager:
             import os
-            from app.core.hook_manager import HookDecision
             context = {
                 "project_root": self._workdir or os.getcwd(),
                 "tool_name": tool_name,
