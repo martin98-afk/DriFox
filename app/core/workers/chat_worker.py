@@ -5,9 +5,7 @@ Chat Worker - OpenAI 对话执行器
 
 import re
 import time
-from collections import deque
 from datetime import datetime
-from threading import Event
 from typing import Dict, List, Callable, Optional, Any
 
 import httpcore
@@ -21,13 +19,13 @@ from openai import (
 )
 
 from app.constants import PARAM_SCHEMA
-from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
 from app.core.conversation.config import PermissionCache
+from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
-from app.core.workers.worker_event_bus import WorkerEventBus, WorkerEvent
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
+from app.core.workers.worker_event_bus import WorkerEventBus, WorkerEvent
 
 # 预编译正则表达式
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -468,7 +466,6 @@ class OpenAIChatWorker(QThread):
             self._permission_cache.deny(tool_name)
 
     def approve_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
-        from loguru import logger
         if (
                 self._permission_pending
                 and self._permission_pending.get("tool_call_id") == tool_call_id

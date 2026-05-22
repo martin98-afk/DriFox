@@ -654,7 +654,8 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         Colors.refresh()
         bg = Colors.REALTIME_BG
         if bg.startswith("rgba("):
-            alpha = int(opacity * 255)
+            # 最小 alpha 为 1，避免完全透明导致卡片"消失"
+            alpha = max(1, int(opacity * 255))
             bg = bg.rsplit(",", 1)[0] + f", {alpha})"
         self.setStyleSheet(f"""
             CardWidget {{

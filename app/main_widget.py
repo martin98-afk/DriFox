@@ -7,19 +7,19 @@ import os
 import subprocess
 import sys
 import time
-import sip
-import orjson as json
-
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+import orjson as json
+import sip
 from PyQt5.QtCore import (
     QTimer,
     pyqtSignal,
     QThreadPool,
     Qt,
 )
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QPalette
 from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
@@ -56,7 +56,6 @@ from app.utils.config import Settings
 from app.utils.design_tokens import (
     Colors,
     font_size_css,
-    get_capsule_style,
     get_window_style,
     scale_font_size,
     apply_font_size_to_widget,
@@ -240,6 +239,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
+        self._lazy_card_timer_active = False  # 懒渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：增加防抖时间减少卡顿
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
@@ -713,9 +713,27 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
+        # 更新主窗口背景透明度
+        self._update_window_bg_opacity(opacity)
 
+    def _update_window_bg_opacity(self, opacity: float):
+        """更新窗口背景透明度"""
+        if not hasattr(self, '_window_bg_color'):
+            return
+        import re
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', self._window_bg_color)
+        if m:
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            # 原始 alpha * 窗口透明度
+            base_alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
+            final_alpha = int(base_alpha * opacity)
+            from PyQt5.QtGui import QColor, QPalette
+            color = QColor(r, g, b, max(0, final_alpha))
+            p = QPalette()
+            p.setColor(QPalette.Window, color)
+            self.setPalette(p)
+    
     def _apply_branch_or_create_session(self):
-        """处理分支会话或创建新会话"""
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, '_is_destroyed', False):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before branch session creation, skipping")
@@ -859,11 +877,31 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.setContentsMargins(1, 1, 4, 1)
         layout.setSpacing(1)
 
-        self.setStyleSheet(get_window_style())
+        # 设置窗口背景色（非常淡的主题色）
+        from app.utils.theme_manager import theme_manager
+        colors = theme_manager.get_current_colors()
+        window_bg = colors.get('window_bg', 'rgba(102, 198, 255, 0.04)')
+        
+        # 保存原始颜色供透明度变化时使用
+        self._window_bg_color = window_bg
+        
+        # 解析颜色（包含 alpha）
+        import re
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', window_bg)
+        if m:
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10  # 保留原始 alpha
+            from PyQt5.QtGui import QColor, QPalette
+            color = QColor(r, g, b, alpha)
+            p = QPalette()
+            p.setColor(QPalette.Window, color)
+            self.setPalette(p)
+            self.setAutoFillBackground(True)
+        
+        # 字体样式
+        self.setStyleSheet("")
 
         session_bar_layout = QHBoxLayout()
-        session_bar_layout.setContentsMargins(0, 0, 0, 0)
-        session_bar_layout.setSpacing(4)
 
         # 项目选择标签（跟随主题色）
         self._project_label = QLabel(self._current_project, self)
@@ -913,6 +951,7 @@ class OpenAIChatToolWindow(ToolWindow):
         font_css = get_font_family_css()
         title_style = TITLE_STYLE.replace("    QLabel {", f"    QLabel {{\n        {font_css}")
         title_style = title_style.replace("font-size: 15px;", font_size_css(15))
+        title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
         self.title_edit.setCursor(Qt.PointingHandCursor)
         self.title_edit.mouseDoubleClickEvent = self._on_title_double_click
@@ -938,6 +977,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session_bar_layout.addStretch()
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
+
+        # 时间线节点
+        self.node_preview = ConversationNodePreview(self)
+        self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
+        layout.addWidget(self.node_preview)
 
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
@@ -1115,132 +1159,172 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_loop_running_card.setVisible(False)
         layout.addWidget(self._auto_loop_running_card)
 
-        self.node_preview = ConversationNodePreview(self)
-        self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
-        layout.addWidget(self.node_preview)
-
-        self.chat_scroll_area.verticalScrollBar().valueChanged.connect(
-            self._on_scroll_changed
-        )
-
         self._question_floating_widget = QuestionFloatingWidget(self)
         self._question_floating_widget.setVisible(False)
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
         layout.addWidget(self._question_floating_widget)
 
-        hlayout = QHBoxLayout()
-        hlayout.setContentsMargins(0, 0, 0, 0)
-        hlayout.setSpacing(4)
+        self.chat_scroll_area.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_changed
+        )
 
-        # 模型选择 + 配置按钮组 - 紧凑式设计
-        self._model_btn_container = QWidget(self)
-        self._model_btn_container.setFixedHeight(30)
-        self._model_btn_container.setStyleSheet(get_capsule_style())
-        model_layout = QHBoxLayout(self._model_btn_container)
-        model_layout.setContentsMargins(0, 0, 0, 0)
-        model_layout.setSpacing(0)
+        # ===== 底部输入区域（一体化圆弧卡片设计）=====
+        self._bottom_input_container = QWidget(self)
+        self._bottom_input_container.setStyleSheet("QWidget#bottomContainer { background: transparent; }")
+        self._bottom_input_container.setObjectName("bottomContainer")
+        bottom_layout = QVBoxLayout(self._bottom_input_container)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(0)
 
-        # 模型选择按钮（可点击弹出模型选择）
-        self.current_model_btn = QWidget(self._model_btn_container)
-        self.current_model_btn.setCursor(Qt.PointingHandCursor)
-        self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
-        self.current_model_btn.setMouseTracking(True)
-        self.current_model_btn.mousePressEvent = lambda e: self._show_model_selector_popup()
-        btn_layout = QHBoxLayout(self.current_model_btn)
-        btn_layout.setContentsMargins(8, 4, 0, 4)
-        btn_layout.setSpacing(4)
-        self._model_btn_icon = QLabel(self.current_model_btn)
-        self._model_btn_icon.setStyleSheet("""background: transparent; border: none;""")
-        self._model_btn_icon.setFixedSize(18, 18)
-        btn_layout.addWidget(self._model_btn_icon)
-        self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
-        self._model_btn_text.setStyleSheet(MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(13)))
-        btn_layout.addWidget(self._model_btn_text)
-        model_layout.addWidget(self.current_model_btn, 1)
-        # 配置按钮（点击弹出配置卡片）
-        self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
-        self.settings_btn.setFixedSize(26, 26)
-        self.settings_btn.setToolTip("模型参数配置")
-        self.settings_btn.clicked.connect(self._toggle_model_config_card)
-        model_layout.addWidget(self.settings_btn)
+        # ===== 一体化输入卡片（圆角大弧线包裹输入框+工具栏）=====
+        self._input_card = QWidget(self._bottom_input_container)
+        Colors.refresh()
+        self._input_card.setStyleSheet(f"""
+            QWidget {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {Colors.INPUT_BG_START},
+                    stop:1 {Colors.INPUT_BG_END});
+                border: 1px solid {Colors.INPUT_BORDER};
+                border-radius: 16px;
+            }}
+        """)
+        card_layout = QVBoxLayout(self._input_card)
+        card_layout.setContentsMargins(2, 2, 2, 2)
+        card_layout.setSpacing(0)
 
-        hlayout.addWidget(self._model_btn_container)
-
-        # 记下当前选中的服务商和模型，供弹窗使用
-        self._current_provider_name = ""
-        self._current_model_name = ""
-
-        # 智能体切换按钮组 - 金属质感+简约科技风
-        self._agent_switch_widget = self._create_agent_switch_buttons()
-        hlayout.addWidget(self._agent_switch_widget)
-
-        hlayout.addStretch(1)
-
-        # 工具栏右侧按钮组 - 胶囊包裹，无分隔线
-        self._toolbar_capsule = QWidget(self)
-        self._toolbar_capsule.setFixedHeight(30)
-        self._toolbar_capsule.setStyleSheet(get_capsule_style())
-        capsule_layout = QHBoxLayout(self._toolbar_capsule)
-        capsule_layout.setContentsMargins(4, 2, 4, 2)
-        capsule_layout.setSpacing(0)
-
-        # AutoLoop 按钮
-        self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
-        self.auto_loop_btn.setFixedSize(26, 26)
-        self.auto_loop_btn.setToolTip("AutoLoop 自动循环")
-        self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
-        capsule_layout.addWidget(self.auto_loop_btn)
-
-        # 分隔竖线
-        sep = QFrame(self._toolbar_capsule)
-        sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color: rgba(255,255,255,0.12); margin: 2px 0;")
-        sep.setFixedWidth(1)
-        capsule_layout.addWidget(sep)
-
-        # Diff 按钮 - 查看文件差异
-        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
-        self.diff_btn.setFixedSize(26, 26)
-        self.diff_btn.setToolTip("查看文件差异")
-        self.diff_btn.clicked.connect(self._open_diff_viewer)
-        capsule_layout.addWidget(self.diff_btn)
-
-        # 记忆按钮
-        self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
-        self.memory_btn.setFixedSize(26, 26)
-        self.memory_btn.setToolTip("长期记忆管理")
-        self.memory_btn.clicked.connect(self._show_soul_memory)
-        capsule_layout.addWidget(self.memory_btn)
-
-        # 历史按钮
-        self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
-        self.history_btn.setFixedSize(26, 26)
-        self.history_btn.setToolTip("历史会话")
-        self.history_btn.clicked.connect(self._toggle_history_card)
-        capsule_layout.addWidget(self.history_btn)
-
-        # 新建按钮
-        self.new_session_btn = TransparentToolButton(FluentIcon.ADD, self._toolbar_capsule)
-        self.new_session_btn.setFixedSize(26, 26)
-        self.new_session_btn.setToolTip("新建对话")
-        self.new_session_btn.clicked.connect(self._create_new_session)
-        capsule_layout.addWidget(self.new_session_btn)
-
-        hlayout.addWidget(self._toolbar_capsule)
-
-        layout.addLayout(hlayout)
-        # 输入框 - 在工具栏下方
-        self.input_area = SendableTextEdit(self)
-        self.input_area._agent_combo.hide()  # 隐藏输入框内部的下拉框，用工具栏的按钮组代替
-        self.input_area._initializing = False  # 初始化完成后启用高度调整
+        # 输入框（融入卡片，无边框）
+        self.input_area = SendableTextEdit(self._input_card)
+        self.input_area._agent_combo.hide()
+        self.input_area._initializing = False
+        self.input_area.setFixedHeight(52)
+        self.input_area.setPlaceholderText("给 DriFox 发送消息...")
         setFont(self.input_area, scale_font_size(15))
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
         self.input_area.clearRequested.connect(self._on_clear_shortcut)
         self.input_area.newSessionRequested.connect(self._create_new_session)
         self.input_area.agentChanged.connect(self._on_agent_changed)
-        layout.addWidget(self.input_area)
+        self.input_area.textChanged.connect(self._on_input_area_height_changed)
+        card_layout.addWidget(self.input_area)
+
+        # 分隔线
+        separator = QFrame(self._input_card)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background: rgba(255,255,255,0.06); border: none;")
+        card_layout.addWidget(separator)
+
+        # ===== 工具栏（卡片内部，分隔线下方）=====
+        toolbar_widget = QWidget(self._input_card)
+        toolbar_widget.setFixedHeight(34)
+        toolbar_widget.setStyleSheet("background: transparent; border: none;")
+        toolbar_layout = QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(8, 2, 8, 2)
+        toolbar_layout.setSpacing(8)
+
+        # 模型选择（无边框，只保留背景）
+        self._model_btn_container = QWidget(toolbar_widget)
+        self._model_btn_container.setFixedHeight(26)
+        self._model_btn_container.setStyleSheet(f"""
+            background: rgba(255,255,255,0.05);
+            border: none;
+            border-radius: 8px;
+        """)
+        model_layout = QHBoxLayout(self._model_btn_container)
+        model_layout.setContentsMargins(8, 0, 4, 0)
+        model_layout.setSpacing(0)
+        self.current_model_btn = QWidget(self._model_btn_container)
+        self.current_model_btn.setCursor(Qt.PointingHandCursor)
+        self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
+        self.current_model_btn.mousePressEvent = lambda e: self._show_model_selector_popup()
+        btn_layout = QHBoxLayout(self.current_model_btn)
+        btn_layout.setContentsMargins(2, 2, 0, 2)
+        btn_layout.setSpacing(4)
+        self._model_btn_icon = QLabel(self.current_model_btn)
+        self._model_btn_icon.setStyleSheet("background: transparent; border: none;")
+        self._model_btn_icon.setFixedSize(15, 15)
+        btn_layout.addWidget(self._model_btn_icon)
+        self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
+        self._model_btn_text.setStyleSheet(MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(11)))
+        btn_layout.addWidget(self._model_btn_text)
+        model_layout.addWidget(self.current_model_btn, 1)
+        self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
+        self.settings_btn.setFixedSize(22, 22)
+        self.settings_btn.setToolTip("模型参数配置")
+        self.settings_btn.clicked.connect(self._toggle_model_config_card)
+        model_layout.addWidget(self.settings_btn)
+        toolbar_layout.addWidget(self._model_btn_container)
+
+        self._current_provider_name = ""
+        self._current_model_name = ""
+
+        # 智能体切换（无边框）
+        self._agent_switch_widget = self._create_agent_switch_buttons()
+        self._agent_switch_widget.setFixedHeight(26)
+        toolbar_layout.addWidget(self._agent_switch_widget)
+
+        toolbar_layout.addStretch(1)
+
+        # 右侧功能按钮组（无边框，间距加宽）
+        self._toolbar_capsule = QWidget(toolbar_widget)
+        self._toolbar_capsule.setFixedHeight(26)
+        self._toolbar_capsule.setStyleSheet(f"""
+            background: rgba(255,255,255,0.05);
+            border: none;
+            border-radius: 8px;
+        """)
+        capsule_layout = QHBoxLayout(self._toolbar_capsule)
+        capsule_layout.setContentsMargins(6, 2, 6, 2)
+        capsule_layout.setSpacing(6)
+
+        btn_capsule_style = """
+            TransparentToolButton { background: transparent; border: none; }
+            TransparentToolButton:hover { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        """
+
+        self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
+        self.auto_loop_btn.setFixedSize(22, 22)
+        self.auto_loop_btn.setToolTip("AutoLoop")
+        self.auto_loop_btn.setStyleSheet(btn_capsule_style)
+        self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
+        capsule_layout.addWidget(self.auto_loop_btn)
+
+        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
+        self.diff_btn.setFixedSize(22, 22)
+        self.diff_btn.setStyleSheet(btn_capsule_style)
+        self.diff_btn.setToolTip("差异对比")
+        self.diff_btn.clicked.connect(self._open_diff_viewer)
+        capsule_layout.addWidget(self.diff_btn)
+
+        self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
+        self.memory_btn.setFixedSize(22, 22)
+        self.memory_btn.setStyleSheet(btn_capsule_style)
+        self.memory_btn.setToolTip("长期记忆")
+        self.memory_btn.clicked.connect(self._show_soul_memory)
+        capsule_layout.addWidget(self.memory_btn)
+
+        self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
+        self.history_btn.setFixedSize(22, 22)
+        self.history_btn.setStyleSheet(btn_capsule_style)
+        self.history_btn.setToolTip("历史会话")
+        self.history_btn.clicked.connect(self._toggle_history_card)
+        capsule_layout.addWidget(self.history_btn)
+
+        self.new_session_btn = TransparentToolButton(FluentIcon.ADD, self._toolbar_capsule)
+        self.new_session_btn.setFixedSize(22, 22)
+        self.new_session_btn.setStyleSheet(btn_capsule_style)
+        self.new_session_btn.setToolTip("新建对话")
+        self.new_session_btn.clicked.connect(self._create_new_session)
+        capsule_layout.addWidget(self.new_session_btn)
+
+        toolbar_layout.addWidget(self._toolbar_capsule)
+
+        card_layout.addWidget(toolbar_widget)
+
+        bottom_layout.addWidget(self._input_card)
+
+        layout.addWidget(self._bottom_input_container)
 
     def _show_model_selector_popup(self):
         """显示扁平式模型选择上拉框"""
@@ -1795,11 +1879,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """创建智能体切换按钮 - 单胶囊设计，中间用分隔线"""
         Colors.refresh()
         container = QWidget()
-        container.setFixedHeight(30)
+        container.setFixedHeight(26)
         container.setStyleSheet(f"""
-            background: {Colors.CAPSULE_BG};
-            border: 1px solid {Colors.CAPSULE_BORDER};
-            border-radius: 12px;
+            background: rgba(255,255,255,0.05);
+            border: none;
+            border-radius: 8px;
         """)
         layout = QHBoxLayout(container)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -2181,7 +2265,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
-        self.setStyleSheet(get_window_style())
+        from app.utils.theme_manager import theme_manager
+        colors = theme_manager.get_current_colors()
+        
+        # 窗口淡背景（保留原始 alpha）
+        window_bg = colors.get('window_bg', 'rgba(102, 198, 255, 0.04)')
+        self._window_bg_color = window_bg  # 保存供透明度变化时使用
+        
+        import re
+        m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', window_bg)
+        if m:
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
+            from PyQt5.QtGui import QColor, QPalette
+            color = QColor(r, g, b, alpha)
+            p = QPalette()
+            p.setColor(QPalette.Window, color)
+            self.setPalette(p)
+            self.setAutoFillBackground(True)
+        
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):
@@ -2189,14 +2291,33 @@ class OpenAIChatToolWindow(ToolWindow):
             title_style = title_style.replace("font-size: 15px;", font_size_css(15))
             title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
             self.title_edit.setStyleSheet(title_style)
+        # 刷新输入卡片背景
+        if hasattr(self, '_input_card'):
+            self._input_card.setStyleSheet(f"""
+                QWidget {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {Colors.INPUT_BG_START},
+                        stop:1 {Colors.INPUT_BG_END});
+                    border: 1px solid {Colors.INPUT_BORDER};
+                    border-radius: 16px;
+                }}
+            """)
         if hasattr(self, "_model_btn_container"):
-            self._model_btn_container.setStyleSheet(get_capsule_style())
+            self._model_btn_container.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
+            """)
         if hasattr(self, "_model_btn_text"):
             btn_text_style = MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(13))
             btn_text_style = btn_text_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
             self._model_btn_text.setStyleSheet(btn_text_style)
         if hasattr(self, "_toolbar_capsule"):
-            self._toolbar_capsule.setStyleSheet(get_capsule_style())
+            self._toolbar_capsule.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
+            """)
         if hasattr(self, "input_area"):
             setFont(self.input_area, scale_font_size(15))
             if hasattr(self.input_area, "refresh_style"):
@@ -2224,9 +2345,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_agent_switch_widget"):
             Colors.refresh()
             self._agent_switch_widget.setStyleSheet(f"""
-                background: {Colors.CAPSULE_BG};
-                border: 1px solid {Colors.CAPSULE_BORDER};
-                border-radius: 12px;
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
             """)
         self._refresh_agent_button_styles()
         # 刷新设置卡片
@@ -2387,6 +2508,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_agent = agent_name
         self.backend.switch_agent(agent_name)
         self._update_agent_status(agent_name)
+
+    def _on_input_area_height_changed(self):
+        """根据输入框内容自动调整卡片高度"""
+        if not hasattr(self, '_input_card'):
+            return
+        if getattr(self, '_is_destroyed', False):
+            return
+        try:
+            input_height = self.input_area.height()
+            toolbar_height = 34
+            separator_height = 1
+            card_padding = 4  # 上下各2px
+            card_height = input_height + separator_height + toolbar_height + card_padding
+            if self._input_card.height() != card_height:
+                self._input_card.setFixedHeight(card_height)
+        except Exception:
+            pass
 
     def _show_agent_intro(self, agent_name: str):
         """显示智能体介绍卡片"""
@@ -2629,6 +2767,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
+            # 先收集需要回收的卡片ID，用于清理懒渲染队列
+            recycled_card_ids = set()
             # 回收前面超出缓冲区的批次
             for batch_idx in range(0, active_start):
                 if self._batch_cards[batch_idx] is not None:
@@ -2638,6 +2778,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     if cards:
                         for card in cards:
+                            recycled_card_ids.add(id(card))
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                                 card.cleanup()
                                 card.deleteLater()
@@ -2653,11 +2794,19 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     if cards:
                         for card in cards:
+                            recycled_card_ids.add(id(card))
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                                 card.cleanup()
                                 card.deleteLater()
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+
+            # 从懒渲染队列中移除已回收的卡片，避免对已销毁的 widget 调用 ensure_rendered
+            if recycled_card_ids:
+                self._pending_lazy_cards = [
+                    c for c in self._pending_lazy_cards
+                    if id(c) not in recycled_card_ids and self._is_widget_alive(c)
+                ]
 
             # 回收完成，如果有回收触发GC
             if recycled_count > 0 or lazy_render_count > 0:
@@ -3126,8 +3275,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         pending_lazy_cards.append(card)
 
         # 批量触发懒渲染，使用延迟加载减少卡顿
-        if pending_lazy_cards:
-            self._pending_lazy_cards = pending_lazy_cards
+        # 同一卡片可能已在队列中（如滚动回来触发的重新加载），需去重
+        existing_ids = {id(c) for c in self._pending_lazy_cards}
+        for card in pending_lazy_cards:
+            if id(card) not in existing_ids:
+                self._pending_lazy_cards.append(card)
+                existing_ids.add(id(card))
+        if pending_lazy_cards and not self._lazy_card_timer_active:
+            self._lazy_card_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_card)
 
     def _get_rendered_message_cards(self) -> List[MessageCard]:
@@ -3143,10 +3298,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_lazy_cards:
             # 所有懒渲染完成
             self._loading_session = False
+            self._lazy_card_timer_active = False
             return
 
         card = self._pending_lazy_cards.pop(0)
-        # 检查卡片是否仍然有效
+        # 检查卡片是否仍然有效且未被回收
         if self._is_widget_alive(card) and not getattr(card, '_lazy_rendered', False):
             card.ensure_rendered()
 
@@ -3162,6 +3318,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 继续处理下一个，使用 QTimer 异步调度释放事件循环
         if self._pending_lazy_cards:
             QTimer.singleShot(0, self._process_next_lazy_card)
+        else:
+            self._loading_session = False
+            self._lazy_card_timer_active = False
 
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
