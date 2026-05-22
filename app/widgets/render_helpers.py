@@ -264,14 +264,15 @@ def _render_diff_preview(diff_text: str) -> str:
 
     支持: 文件头(---/+++) → hunk 头(@@) → 逐行差异
     连续 -/+ 行对会做字符级 word diff。
-    超过 80 行时截断，保留头尾。
+    超过 500 行时截断并显示行数。
     """
     lines = diff_text.split("\n")
-    MAX_LINES = 80
+    MAX_LINES = 500
     truncated = False
     if len(lines) > MAX_LINES:
         truncated = True
         half = MAX_LINES // 2
+        shown = len(lines) - MAX_LINES
         lines = lines[:half] + [None] + lines[-half:]
 
     rows = []
@@ -289,7 +290,7 @@ def _render_diff_preview(diff_text: str) -> str:
     while i < len(lines):
         line = lines[i]
         if line is None:
-            rows.append('<div class="diff-line diff-truncated"><span class="line-code">⋯ 中间省略</span></div>')
+            rows.append(f'<div class="diff-line diff-truncated"><span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>')
             i += 1
             continue
 

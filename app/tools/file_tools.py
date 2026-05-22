@@ -478,13 +478,32 @@ class FileTools:
             
             full_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # 写入前读取旧内容，用于 diff 计算
+            old_content = ""
+            try:
+                if full_path.exists():
+                    old_content = full_path.read_text(encoding="utf-8")
+            except Exception:
+                old_content = ""
+
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(content if content is not None else "")
+
+            # 计算 unified diff
+            diff_str = ""
+            if old_content or content:
+                diff_lines = list(difflib.unified_diff(
+                    old_content.splitlines(),
+                    (content or "").splitlines(),
+                    fromfile=path, tofile=path,
+                    lineterm=''
+                ))
+                diff_str = "\n".join(diff_lines)
 
             # 更新修改时间记录
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
-            return ToolResult(True, content=f"Successfully written to {path}")
+            return ToolResult(True, content=f"Successfully written to {path}", diff=diff_str or None)
         except Exception as e:
             return ToolResult(False, error=f"Write error: {str(e)}")
 
