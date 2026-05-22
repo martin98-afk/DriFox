@@ -1718,7 +1718,7 @@ class CodeWebViewer(QWebEngineView):
                     padding: 10px 12px;
                     border-top: 1px solid var(--border);
                     background: transparent;
-                    color: var(--text-muted) !important;
+                    color: var(--text-secondary) !important;
                     font-style: italic;
                     font-size: {code_font_size}px;
                     font-family: '{font_family}', sans-serif;

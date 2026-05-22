@@ -428,7 +428,7 @@ class FileTools:
                                   file_lines: List[str], path: str) -> ToolResult:
         """
         构建 hashline 硬拒绝错误信息。
-        类似 oh-my-pi 的 HashlineMismatchError，让 LLM 重新读取文件。
+        显示每个失败锚点的详细信息：expected vs actual hash，以及上下文。
         """
         lines = []
         noun = "anchor does" if len(mismatches) == 1 else "anchors do"
@@ -439,6 +439,16 @@ class FileTools:
             "The edit was NOT applied. Please use the updated file content below, "
             "and issue another edit tool-call with correct anchors."
         )
+        lines.append("")
+
+        # 显示每个失败锚点的详细信息
+        for m in mismatches:
+            ln = m["line"]
+            expected = m.get("expected", "?")
+            actual = m.get("actual", "?")
+            op_idx = m.get("op_idx")
+            idx_info = f" (operation index {op_idx})" if op_idx is not None else ""
+            lines.append(f"  Line {ln}{idx_info}: expected hash '{expected}', actual hash '{actual}'")
         lines.append("")
 
         # 标出不匹配行 ±2 行上下文
@@ -502,8 +512,9 @@ class FileTools:
 
             _VALID_OP_TYPES = frozenset({"replace", "insert_after", "insert_before", "delete"})
 
-            # ── 第一遍：严格校验所有锚点，不自动修正 ──
+            # ── 第一遍：校验所有锚点，收集所有错误而非逐个早退 ──
             resolved_ops = []  # [(anchor_line, end_line, op, orig_idx), ...]
+            mismatches = []     # 收集所有哈希不匹配的锚点
 
             for idx, op in enumerate(operations):
                 if not isinstance(op, dict):
@@ -550,10 +561,8 @@ class FileTools:
                 actual_hash = _line_hash(actual_content, orig_line)
 
                 if actual_hash != expected_hash:
-                    return self._build_hashline_rejection(
-                        [{"line": orig_line, "expected": expected_hash, "actual": actual_hash}],
-                        all_lines, path
-                    )
+                    mismatches.append({"line": orig_line, "expected": expected_hash, "actual": actual_hash, "op_idx": idx})
+                    continue  # 跳过此操作，继续校验后续操作
 
                 actual_line = orig_line
 
@@ -580,10 +589,8 @@ class FileTools:
                     end_actual_hash = _line_hash(end_content, orig_end_line)
 
                     if end_actual_hash != end_hash:
-                        return self._build_hashline_rejection(
-                            [{"line": orig_end_line, "expected": end_hash, "actual": end_actual_hash}],
-                            all_lines, path
-                        )
+                        mismatches.append({"line": orig_end_line, "expected": end_hash, "actual": end_actual_hash, "op_idx": idx})
+                        continue  # 跳过此操作，继续校验后续操作
 
                     actual_end_line = orig_end_line
 
@@ -594,6 +601,10 @@ class FileTools:
                         )
 
                 resolved_ops.append((actual_line, actual_end_line, op, idx))
+
+            # 如果有任何锚点不匹配，一次性报告所有错误
+            if mismatches:
+                return self._build_hashline_rejection(mismatches, all_lines, path)
 
             # ── 清洗 operations 中 lines 的 hashline 前缀 ──
             for _, _, op, _ in resolved_ops:

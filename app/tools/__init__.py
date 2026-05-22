@@ -252,11 +252,21 @@ class BuiltinTools(QObject):
         logger.info(f"[BuiltinTools] Workdir updated to: {self.workdir}")
 
     def _build_hashline_rejection(self, mismatches, all_lines):
-        """构建 hashline 拒绝信息（与 file_tools._build_hashline_rejection 一致）。"""
+        """构建 hashline 拒绝信息，显示每个失败锚点的详细错误。"""
         lines = []
         noun = "anchor does" if len(mismatches) == 1 else "anchors do"
         lines.append(f"Edit rejected: {len(mismatches)} {noun} not match the current file.")
         lines.append("The edit was NOT applied. Please re-read the file and issue another edit tool-call.")
+        lines.append("")
+
+        # 显示每个失败锚点的详细信息
+        for m in mismatches:
+            ln = m["line"]
+            expected = m.get("expected", "?")
+            actual = m.get("actual", "?")
+            op_idx = m.get("op_idx")
+            idx_info = f" (operation index {op_idx})" if op_idx is not None else ""
+            lines.append(f"  Line {ln}{idx_info}: expected hash '{expected}', actual hash '{actual}'")
         lines.append("")
 
         mismatch_lines = {m["line"] for m in mismatches}
@@ -303,8 +313,9 @@ class BuiltinTools(QObject):
 
         _VALID_OP_TYPES = frozenset({"replace", "insert_after", "insert_before", "delete"})
 
-        # ── 第一遍：严格校验所有锚点，不自动修正 ──
+        # ── 第一遍：校验所有锚点，收集所有错误而非逐个早退 ──
         resolved_ops = []
+        mismatches = []     # 收集所有哈希不匹配的锚点
 
         for idx, op in enumerate(operations):
             if not isinstance(op, dict):
@@ -317,7 +328,7 @@ class BuiltinTools(QObject):
             if op_type not in _VALID_OP_TYPES:
                 return ToolResult(
                     False,
-                    error=f"编辑拒绝：未知操作类型 '{op_type}'（索引 {idx}）。有效类型：{', '.join(sorted(_VALID_OP_TYPES))}"
+                    error=f"编辑拒绝：未知操作类型 '{op_type}'（索引 {idx}）。有效类型：{', '.join(sorted(_VALID_OP_TYPES))}"    
                 )
 
             anchor_str = op.get("anchor", "")
@@ -337,10 +348,8 @@ class BuiltinTools(QObject):
             actual_content = all_lines[orig_line - 1].rstrip('\n')
             actual_hash = _line_hash(actual_content)
             if actual_hash != expected_hash:
-                return self._build_hashline_rejection(
-                    [{"line": orig_line, "expected": expected_hash, "actual": actual_hash}],
-                    all_lines
-                )
+                mismatches.append({"line": orig_line, "expected": expected_hash, "actual": actual_hash, "op_idx": idx})
+                continue  # 跳过此操作，继续校验后续操作
 
             actual_line = orig_line
 
@@ -363,16 +372,18 @@ class BuiltinTools(QObject):
                 end_content = all_lines[orig_end_line - 1].rstrip('\n')
                 end_actual_hash = _line_hash(end_content)
                 if end_actual_hash != end_hash:
-                    return self._build_hashline_rejection(
-                        [{"line": orig_end_line, "expected": end_hash, "actual": end_actual_hash}],
-                        all_lines
-                    )
+                    mismatches.append({"line": orig_end_line, "expected": end_hash, "actual": end_actual_hash, "op_idx": idx})
+                    continue  # 跳过此操作，继续校验后续操作
 
                 actual_end_line = orig_end_line
                 if actual_end_line < actual_line:
                     return ToolResult(False, error=f"End line {actual_end_line} is before start line {actual_line}")
 
             resolved_ops.append((actual_line, actual_end_line, op, idx))
+
+        # 如果有任何锚点不匹配，一次性报告所有错误
+        if mismatches:
+            return self._build_hashline_rejection(mismatches, all_lines)
 
         # ── 清洗 operations 中 lines 的 hashline 前缀 ──
         for _, _, op, _ in resolved_ops:
