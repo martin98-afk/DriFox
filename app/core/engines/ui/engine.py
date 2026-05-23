@@ -85,7 +85,7 @@ class UIEngine(BaseEngine):
         self._adapter.tool_call_started.connect(lambda i, n, a, r: self._emit("tool_call_started", i, n, a, r))
         self._adapter.tool_args_updated.connect(lambda i, n, p: self._emit("tool_args_updated", i, n, p))
         self._adapter.tool_result_received.connect(lambda i, n, a, r: self._emit("tool_result_received", i, n, a, r))
-        self._adapter.question_asked.connect(lambda i, q, o, m: self._emit("question_asked", i, q, o, m))
+        self._adapter.question_asked.connect(lambda i, q, e: self._emit("question_asked", i, q, e))
         self._adapter.permission_approval_requested.connect(lambda i, n, a: self._emit("permission_approval_requested", i, n, a))
         self._adapter.stream_finished.connect(lambda r: self._on_worker_finished(r))
         self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))

@@ -42,7 +42,7 @@ class OpenAIChatWorker(QThread):
     tool_call_started = pyqtSignal(str, str, dict, str)
     tool_args_updated = pyqtSignal(str, str, dict)  # 工具参数流式更新 (tool_call_id, tool_name, partial_args)
     tool_result_received = pyqtSignal(str, str, dict, object)
-    question_asked = pyqtSignal(str, str, list, bool)
+    question_asked = pyqtSignal(str, list, object)  # id, questions, extra
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
@@ -1763,27 +1763,34 @@ class OpenAIChatWorker(QThread):
                     QApplication.processEvents()
 
             if tool_name == "question":
-                question_text = arguments.get("question", "")
-                options = arguments.get("options", [])
-                # 确保 options 是 list 类型（可能是模型生成时出错导致的字符串）
-                if isinstance(options, str):
-                    try:
-                        options = json.loads(options)
-                    except (json.JSONDecodeError, TypeError):
-                        options = []
-                multiple = arguments.get("multiple", False)
-                # 确保 multiple 是 bool 类型（模型可能生成字符串 "true"/"false"）
-                if isinstance(multiple, str):
-                    multiple = multiple.strip().lower() in ["true", "1", "yes", "y"]
-                elif not isinstance(multiple, bool):
-                    multiple = bool(multiple)
-                self._emit_with_callback("question_asked", self.question_asked, tool_call_id, question_text, options,
-                                         multiple)
+                questions = arguments.get("questions", [])
+                # 向后兼容旧格式
+                if not questions and "question" in arguments:
+                    questions = [{
+                        "question": arguments["question"],
+                        "options": arguments.get("options", []),
+                        "multiple": arguments.get("multiple", False),
+                    }]
+                # 规范化 questions 中的选项格式
+                for q in questions:
+                    opts = q.get("options", [])
+                    normalized = []
+                    for opt in opts:
+                        if isinstance(opt, str):
+                            normalized.append({"label": opt, "description": ""})
+                        elif isinstance(opt, dict):
+                            normalized.append({
+                                "label": opt.get("label", opt.get("name", str(opt))),
+                                "description": opt.get("description", ""),
+                            })
+                        else:
+                            normalized.append({"label": str(opt), "description": ""})
+                    q["options"] = normalized
+                extra = {"tool_call_id": tool_call_id}
+                self._emit_with_callback("question_asked", self.question_asked, tool_call_id, questions, extra)
                 self._question_pending = {
                     "tool_call_id": tool_call_id,
-                    "question": question_text,
-                    "options": options,
-                    "multiple": multiple,
+                    "questions": questions,
                 }
                 return None
 

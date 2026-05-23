@@ -5858,21 +5858,28 @@ class OpenAIChatToolWindow(ToolWindow):
         # tool 和 sub_agent 有自我生命周期管理，不需要强制恢复
 
     def _on_question_asked(
-            self, tool_call_id: str, question: str, options: list, multiple: bool = False
+            self, tool_call_id: str, questions: list, extra: dict = None
     ):
         if getattr(self, '_is_destroyed', False):
             return
+        # 隐藏输入框，让用户专注看问题
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(False)
         self._card_manager.show_card("question", self._window_id)
         self._question_tool_call_id = tool_call_id
-        if not isinstance(options, list):
-            options = []
-        self._question_floating_widget.show_question(question, options, multiple)
-        self._notify_if_inactive("需要回答问题", question[:100])
+        if not isinstance(questions, list):
+            questions = []
+        self._question_floating_widget.show_question(questions)
+        question_text = questions[0].get("question", "") if questions else ""
+        self._notify_if_inactive("需要回答问题", question_text[:100])
 
     def _on_question_answered(self, answer: str):
         if getattr(self, '_is_destroyed', False):
             return
         self._card_manager.hide_card("question", self._window_id)
+        # 恢复输入框
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(True)
         self._restore_after_question_close()
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -5906,6 +5913,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, '_is_destroyed', False):
             return
         self._card_manager.hide_card("question", self._window_id)
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(True)
         self._restore_after_question_close()
 
         if self._pending_permission_tool_call_id:

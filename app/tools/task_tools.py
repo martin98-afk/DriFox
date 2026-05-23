@@ -319,14 +319,25 @@ class TaskTools:
             return ToolResult(False, error=f"stage_files error: {str(e)}")
 
     def ask_question(
-            self, question: str, options: List[str] = None, multiple: bool = False
+            self, questions: List[Dict] = None, **kwargs
     ) -> ToolResult:
+        """向用户提问，支持一次问多个问题
+        
+        Args:
+            questions: 问题列表，每个元素为 {"question": str, "options": [...], "multiple": bool}
+                       其中 options 的每个元素为 {"label": str, "description": str}
+        """
+        # 向后兼容旧格式
+        if not questions and "question" in kwargs:
+            questions = [{
+                "question": kwargs["question"],
+                "options": kwargs.get("options", []),
+                "multiple": kwargs.get("multiple", False),
+            }]
         return ToolResult(
             True,
             content={
-                "question": question,
-                "options": options or [],
-                "multiple": multiple,
+                "questions": questions or [],
                 "type": "question",
             },
         )
