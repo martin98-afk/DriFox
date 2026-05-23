@@ -100,9 +100,6 @@ from app.widgets.cards.settings.model_config_card import (
     ModelConfigCard,
 )
 from app.widgets.project_selector_popup import ProjectSelectorPopup
-from app.widgets.provider_edit_card import (
-    ProviderEditCard,
-)
 from app.widgets.cards.floating.question_floating_widget import (
     QuestionFloatingWidget,
 )
@@ -1569,7 +1566,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_hook_add_card(self):
         """显示添加 Hook 卡片"""
-        from app.widgets.hook_setting_card import HookEditCard
+        from app.widgets.cards.settings.hook_setting_card import HookEditCard
         self._settings_popup.hide()
         self._hook_edit_card.set_title("➕ 添加 Hook")
         # 重新创建 HookEditCard
@@ -1588,7 +1585,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_hook_edit_card(self, event: str, hook_data: dict):
         """显示编辑 Hook 卡片"""
-        from app.widgets.hook_setting_card import HookEditCard
+        from app.widgets.cards.settings.hook_setting_card import HookEditCard
         self._settings_popup.hide()
         self._hook_edit_card.set_title("✏️ 编辑 Hook")
         # 创建携带原始数据的 HookEditCard
