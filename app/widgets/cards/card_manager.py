@@ -52,6 +52,11 @@ class CardManager:
         # 回调函数
         self._shown_callbacks: Dict[str, List[Callable]] = {}
         self._hidden_callbacks: Dict[str, List[Callable]] = {}
+    
+    def _ensure_state_initialized(self):
+        """确保状态已初始化"""
+        if not hasattr(self, '_visible_cards') or self._visible_cards is None:
+            self.__init_state()
 
     def register_card(
         self,
@@ -95,6 +100,8 @@ class CardManager:
             card_id: 卡片ID
             force: 是否强制显示（True=不执行恢复机制，直接显示）
         """
+        self._ensure_state_initialized()
+        
         if card_id not in self._card_containers:
             logger.warning(f"[CardManager] 未注册的卡片: {card_id}")
             return
@@ -130,6 +137,8 @@ class CardManager:
 
     def hide_card(self, card_id: str):
         """隐藏指定卡片"""
+        self._ensure_state_initialized()
+        
         if card_id not in self._card_containers:
             return
         
@@ -184,13 +193,18 @@ class CardManager:
 
     def get_visible_card(self, container_type: ContainerType) -> Optional[str]:
         """获取容器中当前可见的卡片ID"""
-        return self._visible_cards[container_type]
+        if not hasattr(self, '_visible_cards') or self._visible_cards is None:
+            return None
+        return self._visible_cards.get(container_type)
 
     def is_card_visible(self, card_id: str) -> bool:
         """检查卡片是否可见"""
         if card_id not in self._card_containers:
             return False
-        return self._visible_cards[self._card_containers[card_id]] == card_id
+        container_type = self._card_containers[card_id]
+        if not hasattr(self, '_visible_cards') or self._visible_cards is None:
+            return False
+        return self._visible_cards.get(container_type) == card_id
 
     def restore_after_hide(self, excluded_card_id: str = None):
         """恢复之前被隐藏的卡片
