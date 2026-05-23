@@ -314,13 +314,27 @@ class OpenAIChatToolWindow(ToolWindow):
         self._init_auto_update_check()
 
     def _init_auto_update_check(self):
-        """启动时静默检查更新"""
+        """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
         from app.update_checker import UpdateChecker
+
         # 检查是否启用自动更新
         if not self.cfg.auto_check_update.value:
             return
 
-        checker = UpdateChecker.get_instance()
+        # 延迟 500ms 确保 ToolPopupDialog 完全显示后再检查更新
+        # 这样 InfoBar 能正确显示在已就绪的窗口上
+        QTimer.singleShot(500, lambda: self._do_auto_update_check())
+
+    def _do_auto_update_check(self):
+        """执行自动更新检查"""
+        from app.update_checker import UpdateChecker
+
+        # 检查窗口是否已销毁（防止多窗口切换时的问题）
+        if getattr(self, '_is_destroyed', False):
+            return
+
+        # 更新单例的 parent，确保 InfoBar 显示在正确的父窗口上
+        checker = UpdateChecker.get_instance(self)
         checker.check_update()
 
     def _setup_engine_callbacks(self):
