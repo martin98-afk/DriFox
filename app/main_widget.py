@@ -1096,7 +1096,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(self._hook_edit_popup._on_save)
         self._hook_edit_card.setVisible(False)
         self._hook_edit_card.closed.connect(self._on_hook_edit_card_closed)
-        layout.addWidget(self._hook_edit_card)
+        # Hook Edit 卡片已添加到容器，不再需要直接 layout.addWidget
 
         # 服务商编辑卡片
         self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
@@ -1111,7 +1111,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(save_handler)
         self._provider_edit_card.setVisible(False)
         self._provider_edit_card.closed.connect(self._on_provider_edit_card_closed)
-        layout.addWidget(self._provider_edit_card)
+        # Provider Edit 卡片已添加到容器，不再需要直接 layout.addWidget
 
         # MCP 编辑卡片
         self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
@@ -1130,6 +1130,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
+
+        # 下方卡片容器 - 添加 Tool 和 SubAgent
+        self._bottom_card_container.add_card("tool", self._tool_floating_widget)
+        self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
 
         # 上方卡片容器 - 添加 Todo
         self._top_card_container.add_card("todo", self._todo_floating_widget)
