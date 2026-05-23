@@ -47,7 +47,7 @@ class CardManager:
         self._hidden_callbacks: Dict[str, List[Callable]] = {}
     
     def _ensure_state_initialized(self):
-        if not hasattr(self, '_visible_cards') or self._visible_cards is None:
+        if not hasattr(self, '_visible_cards') or not isinstance(self._visible_cards, dict) or ContainerType.TOP not in self._visible_cards:
             self.__init_state()
 
     def register_card(self, container_type: ContainerType, card_id: str, card_widget):
@@ -69,10 +69,13 @@ class CardManager:
             return
         
         container_type = self._card_containers[card_id]
-        card_widget = self._cards[container_type][card_id]
+        card_widget = self._cards.get(container_type, {}).get(card_id)
+        if card_widget is None:
+            logger.warning(f"[CardManager] 卡片 {card_id} 找不到控件")
+            return
         
         # 如果卡片已经可见，不做任何事
-        if self._visible_cards[container_type] == card_id:
+        if self._visible_cards.get(container_type) == card_id:
             return
         
         # 隐藏同容器其他卡片
@@ -102,10 +105,12 @@ class CardManager:
             return
         
         container_type = self._card_containers[card_id]
-        card_widget = self._cards[container_type][card_id]
+        card_widget = self._cards.get(container_type, {}).get(card_id)
+        if card_widget is None:
+            return
         
         # 如果已经不可见，不做任何事
-        if self._visible_cards[container_type] != card_id:
+        if self._visible_cards.get(container_type) != card_id:
             return
         
         card_widget.setVisible(False)
