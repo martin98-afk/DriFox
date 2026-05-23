@@ -103,6 +103,7 @@ from app.widgets.project_selector_popup import ProjectSelectorPopup
 from app.widgets.cards.floating.question_floating_widget import (
     QuestionFloatingWidget,
 )
+from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
@@ -1177,6 +1178,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 下方卡片容器
         layout.addWidget(self._bottom_card_container)
 
+        # 历史会话卡片
+        self._history_card = BaseSettingsCard("历史会话", "📜", self)
+        self._history_card.setFixedHeight(350)
+        # 设置历史/归档标签
+        self._history_card.setup_tabs([
+            ("history", "历史会话"),
+            ("archived", "归档"),
+        ], "history")
+        self._history_card.tabChanged.connect(self._on_history_tab_changed)
+
         self._history_popup_card = HistoryCard()
         self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
         self._history_popup_card.sessionArchived.connect(self._archive_history_session)
@@ -1195,6 +1206,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
+        self._history_card.closed.connect(self._restore_after_system_close)
         # 搜索框（历史会话和归档标签都显示）
         self._history_card.set_search_handler(
             "🔍 搜索会话...",
@@ -1202,12 +1214,38 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("history", self._history_card)
 
+        # 记忆管理卡片
+        self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
+        self._memory_card.setFixedHeight(350)
+        # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
+        self._memory_card.setup_tabs([
+            ("entries", "条目记忆"),
+            ("notes", "项目笔记"),
+            ("docs", "关键文档"),
+        ], "entries")
+        self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
+        # 搜索框（三个tab都显示）
+        self._memory_card.set_search_handler(
+            "🔍 搜索条目记忆...",
+            lambda text: self._memory_card_popup.set_search_filter(text)
+        )
+        self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
+        self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
+        # 工作目录变更 → 同步到工具执行器
+        self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
+        self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
+        self._memory_card.content_layout.addWidget(self._memory_card_popup)
+        self._memory_card.setVisible(False)
+        self._memory_card.closed.connect(self._restore_after_system_close)
+        self._bottom_card_container.add_card("memory", self._memory_card)
+
         # 模型配置卡片
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
         self._model_config_card.setVisible(False)
+        self._model_config_card.closed.connect(self._restore_after_system_close)
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片

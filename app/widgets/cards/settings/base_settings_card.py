@@ -3,7 +3,7 @@
 通用设置卡片基类 — 继承自 SystemCardFrame，获得统一的头部布局和固定边框
 """
 
-from app.widgets.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
 class BaseSettingsCard(SystemCardFrame):

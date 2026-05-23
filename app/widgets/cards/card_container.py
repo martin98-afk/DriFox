@@ -53,23 +53,20 @@ class CardContainer(QWidget):
     def bind_card_manager(self, card_manager: CardManager):
         """绑定 CardManager 以同步显示状态"""
         self._card_manager = card_manager
-        card_manager.cardShown.connect(self._on_card_shown)
-        card_manager.cardHidden.connect(self._on_card_hidden)
+        # 注册回调
+        card_manager.on_card_shown("any", self._on_card_shown)
+        card_manager.on_card_hidden("any", self._on_card_hidden)
     
     def _on_card_shown(self, card_id: str):
         """CardManager 显示卡片时的回调"""
-        if card_id not in self._cards:
-            return
         # 展开容器
         self._content_widget.setVisible(True)
         self._expand()
     
     def _on_card_hidden(self, card_id: str):
         """CardManager 隐藏卡片时的回调"""
-        if card_id not in self._cards:
-            return
         # 检查是否还有可见卡片
-        visible = self._card_manager and self._card_manager.get_visible_card(self._container_type)
+        visible = self._card_manager.get_visible_card(self._container_type) if self._card_manager else None
         if visible is None:
             self._content_widget.setVisible(False)
             self._collapse()

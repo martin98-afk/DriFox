@@ -28,7 +28,7 @@ from app.constants import (
     FREE_PROVIDERS,
 )
 from app.utils.utils import get_icon, get_font_family_css
-from app.widgets.provider_setting_card import ProviderIconWidget
+from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 from app.widgets.model_list_edit_dialog import ModelListEditDialog
 

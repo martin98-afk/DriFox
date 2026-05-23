@@ -18,6 +18,7 @@ from app.widgets.cards.floating.todo_floating_widget import TodoFloatingWidget
 from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget
 
 # 对话组件
+from app.widgets.message_card import MessageCard, create_welcome_card
 from app.widgets.bottom_input_area import SendableTextEdit
 from app.widgets.context_usage_ring import ContextUsageRing
 from app.widgets.conversation_node_preview import ConversationNodePreview

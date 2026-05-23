@@ -7,9 +7,9 @@ from app.widgets.cards.settings.model_config_card import ModelConfigCard
 from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
 from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 from app.widgets.cards.settings.mcp_setting_card import MCPEditCard
-from app.widgets.cards.settings.hook_setting_card import HookEditCard
-from app.widgets.cards.settings.list_setting_card import ListSettingCard
-from app.widgets.cards.settings.provider_setting_card import ProviderSettingCard
+from app.widgets.cards.settings.hook_setting_card import HookEditCard, HookListSettingCard
+from app.widgets.cards.settings.list_setting_card import FontListSettingCard, SkillListSettingCard, PackageListSettingCard
+from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
@@ -24,8 +24,11 @@ __all__ = [
     "LLMSettingsCard",
     "MCPEditCard",
     "HookEditCard",
-    "ListSettingCard",
-    "ProviderSettingCard",
+    "HookListSettingCard",
+    "FontListSettingCard",
+    "SkillListSettingCard",
+    "PackageListSettingCard",
+    "ProviderListSettingCard",
     "ProviderEditCard",
     "SystemCardFrame",
 ]

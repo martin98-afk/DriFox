@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
 )
 from qfluentwidgets import FluentIcon, TransparentToolButton
-from app.widgets.provider_setting_card import ProviderIconWidget
+from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css

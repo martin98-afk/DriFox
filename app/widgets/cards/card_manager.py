@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
-from PyQt5.QtCore import QObject, pyqtSignal
+from typing import Dict, List, Optional, Callable
 from loguru import logger
 
 
@@ -10,7 +9,7 @@ class ContainerType(Enum):
     BOTTOM = "bottom"  # chatscroll 下方
 
 
-class CardManager(QObject):
+class CardManager:
     """中央卡片管理器 - 统一管理所有卡片的显示状态
     
     规则：
@@ -20,36 +19,39 @@ class CardManager(QObject):
     - 恢复机制：高优先级卡片关闭后恢复之前的卡片状态
     """
     
-    # 信号：卡片显示/隐藏时触发
-    cardShown = pyqtSignal(str)      # card_id
-    cardHidden = pyqtSignal(str)     # card_id
-    
     _instance = None
 
     @classmethod
     def get_instance(cls) -> "CardManager":
         if cls._instance is None:
-            cls._instance = CardManager()
+            cls._instance = object.__new__(cls)
+            cls._instance.__init_state()
         return cls._instance
 
     def __init__(self):
-        super().__init__()
-        # 容器类型 -> {card_id: widget}
-        self._cards: Dict[ContainerType, Dict[str, object]] = {
+        # 避免重复初始化
+        pass
+
+    def __init_state(self):
+        """初始化实例状态（分离出来避免 __init__ 问题）"""
+        self._cards = {
             ContainerType.TOP: {},
             ContainerType.BOTTOM: {},
         }
         # card_id -> container_type
         self._card_containers: Dict[str, ContainerType] = {}
         # card_id -> 是否强制覆盖卡片（Question）
-        self._override_cards: set = {"question"}
+        self._override_cards = {"question"}
         # card_id -> 之前的可见状态（用于恢复）
         self._previous_visible_state: Dict[str, bool] = {}
         # 当前可见的卡片（按容器分组）
-        self._visible_cards: Dict[ContainerType, Optional[str]] = {
+        self._visible_cards = {
             ContainerType.TOP: None,
             ContainerType.BOTTOM: None,
         }
+        # 回调函数
+        self._shown_callbacks: Dict[str, List[Callable]] = {}
+        self._hidden_callbacks: Dict[str, List[Callable]] = {}
 
     def register_card(
         self,
@@ -57,13 +59,15 @@ class CardManager(QObject):
         card_id: str,
         card_widget,
     ):
-        """注册卡片到管理器
+        """注册卡片到管理器"""
+        # 确保状态已初始化
+        if not hasattr(self, '_cards') or self._cards is None:
+            self.__init_state()
         
-        Args:
-            container_type: 容器类型 (TOP/BOTTOM)
-            card_id: 卡片唯一标识
-            card_widget: 卡片控件对象
-        """
+        # 确保 _cards 有正确的键
+        if container_type not in self._cards:
+            self._cards[container_type] = {}
+        
         if card_id in self._card_containers:
             logger.warning(f"[CardManager] 卡片 {card_id} 已注册，将被覆盖")
         
@@ -113,7 +117,15 @@ class CardManager(QObject):
         card_widget.setVisible(True)
         self._visible_cards[container_type] = card_id
         
-        self.cardShown.emit(card_id)
+        # 触发回调
+        if card_id in self._shown_callbacks:
+            for callback in self._shown_callbacks[card_id]:
+                callback(card_id)
+        # 触发 "any" 回调
+        if "any" in self._shown_callbacks:
+            for callback in self._shown_callbacks["any"]:
+                callback(card_id)
+        
         logger.debug(f"[CardManager] 显示卡片: {card_id} (容器:{container_type.value})")
 
     def hide_card(self, card_id: str):
@@ -129,7 +141,15 @@ class CardManager(QObject):
         if self._visible_cards[container_type] == card_id:
             self._visible_cards[container_type] = None
         
-        self.cardHidden.emit(card_id)
+        # 触发回调
+        if card_id in self._hidden_callbacks:
+            for callback in self._hidden_callbacks[card_id]:
+                callback(card_id)
+        # 触发 "any" 回调
+        if "any" in self._hidden_callbacks:
+            for callback in self._hidden_callbacks["any"]:
+                callback(card_id)
+        
         logger.debug(f"[CardManager] 隐藏卡片: {card_id}")
 
     def toggle_card(self, card_id: str):
@@ -138,6 +158,18 @@ class CardManager(QObject):
             self.hide_card(card_id)
         else:
             self.show_card(card_id)
+
+    def on_card_shown(self, card_id: str, callback: Callable):
+        """注册卡片显示回调"""
+        if card_id not in self._shown_callbacks:
+            self._shown_callbacks[card_id] = []
+        self._shown_callbacks[card_id].append(callback)
+
+    def on_card_hidden(self, card_id: str, callback: Callable):
+        """注册卡片隐藏回调"""
+        if card_id not in self._hidden_callbacks:
+            self._hidden_callbacks[card_id] = []
+        self._hidden_callbacks[card_id].append(callback)
 
     def _hide_all_cards(self):
         """隐藏所有卡片"""
