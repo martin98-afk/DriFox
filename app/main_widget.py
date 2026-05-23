@@ -1325,7 +1325,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.history_btn.clicked.connect(self._toggle_history_card)
         capsule_layout.addWidget(self.history_btn)
 
-        self.new_session_btn = TransparentToolButton(FluentIcon.ADD, self._toolbar_capsule)
+        self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
         self.new_session_btn.setFixedSize(22, 22)
         self.new_session_btn.setStyleSheet(btn_capsule_style)
         self.new_session_btn.setToolTip("新建对话")
