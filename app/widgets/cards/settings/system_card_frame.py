@@ -213,7 +213,6 @@ class SystemCardFrame(QFrame):
             }}
         """)
         self._search_input.textChanged.connect(callback)
-        self._search_input.setVisible(False)
         self._search_container.addWidget(self._search_input)
 
     def set_count_label(self, text: str):
