@@ -1,0 +1,27 @@
+def _on_hook_edit_saved(self, values: dict):
+        """Hook 保存回调"""
+        self._hook_edit_card.hide()
+        if hasattr(self._settings_popup, 'hookListCard'):
+            original = self._hook_edit_popup.get_original_data()
+            if original:
+                # 编辑已有 hook
+                orig_event = original.get("_event", values["event"])
+                orig_command = original.get("command", "")
+                orig_matcher = original.get("matcher", "")
+                self._settings_popup.hookListCard._update_hook(
+                    original_event=orig_event,
+                    original_command=orig_command,
+                    original_matcher=orig_matcher,
+                    new_values=values
+                )
+            else:
+                # 新增 hook
+                self._settings_popup.hookListCard._add_hook(
+                    event=values["event"],
+                    command=values["command"],
+                    matcher=values["matcher"],
+                    hook_type=values["type"],
+                    enabled=values["enabled"]
+                )
+        self._settings_popup.show()
+

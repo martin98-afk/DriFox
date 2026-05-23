@@ -1,4 +1,0 @@
-def _toggle_settings_card(self)
-def _toggle_model_config_card(self)
-def _toggle_history_card(self)
-def _toggle_memory_card(self)
