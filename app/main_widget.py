@@ -439,6 +439,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         mgr = self._card_manager
         
+        # 绑定容器到 CardManager
+        self._top_card_container.bind_card_manager(mgr)
+        self._bottom_card_container.bind_card_manager(mgr)
+        
         # ===== TopCardContainer (chatscroll 上方) =====
         # 系统配置卡片，互斥显示
         mgr.register_card(ContainerType.TOP, "todo", self._todo_floating_widget)
@@ -1115,7 +1119,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._mcp_edit_popup = None
         self._mcp_edit_card.setVisible(False)
         self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
-        layout.addWidget(self._mcp_edit_card)
+        # MCP Edit 卡片已添加到容器，不再需要直接 layout.addWidget
 
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
@@ -1187,38 +1191,20 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
-        self._history_card.closed.connect(self._restore_after_system_close)
         # 搜索框（历史会话和归档标签都显示）
         self._history_card.set_search_handler(
             "🔍 搜索会话...",
             lambda text: self._history_popup_card.set_search_filter(text)
         )
-        layout.addWidget(self._history_card)
+        self._bottom_card_container.add_card("history", self._history_card)
 
-        # 记忆管理卡片 - 和历史会话卡片同位置
-        self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setFixedHeight(350)
-        # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
-        self._memory_card.setup_tabs([
-            ("entries", "条目记忆"),
-            ("notes", "项目笔记"),
-            ("docs", "关键文档"),
-        ], "entries")
-        self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
-        # 搜索框（三个tab都显示）
-        self._memory_card.set_search_handler(
-            "🔍 搜索条目记忆...",
-            lambda text: self._memory_card_popup.set_search_filter(text)
-        )
-        self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
-        self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
-        # 工作目录变更 → 同步到工具执行器
-        self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
-        self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
-        self._memory_card.content_layout.addWidget(self._memory_card_popup)
-        self._memory_card.setVisible(False)
-        # 记忆管理卡片添加到下方容器
-        self._bottom_card_container.add_card("memory", self._memory_card)
+        # 模型配置卡片
+        self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
+        self._model_config_popup = ModelConfigCard()
+        self._model_config_popup.configApplied.connect(self._on_config_applied)
+        self._model_config_card.content_layout.addWidget(self._model_config_popup)
+        self._model_config_card.setVisible(False)
+        self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Dict
+from typing import Dict, Optional
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt5.QtCore import pyqtSignal
 from loguru import logger
@@ -14,6 +14,7 @@ class CardContainer(QWidget):
     - 管理多个卡片的显示/隐藏
     - 单卡片互斥显示（同一时间只显示一个卡片）
     - 支持动态展开/收起
+    - 订阅 CardManager 的信号以同步卡片显示状态
     """
     
     # 卡片关闭信号
@@ -23,6 +24,7 @@ class CardContainer(QWidget):
         super().__init__()
         self._container_type = container_type
         self._cards: Dict[str, QWidget] = {}
+        self._card_manager: Optional[CardManager] = None
         self._setup_ui()
     
     def _setup_ui(self):
@@ -47,6 +49,30 @@ class CardContainer(QWidget):
     @property
     def container_type(self) -> ContainerType:
         return self._container_type
+    
+    def bind_card_manager(self, card_manager: CardManager):
+        """绑定 CardManager 以同步显示状态"""
+        self._card_manager = card_manager
+        card_manager.cardShown.connect(self._on_card_shown)
+        card_manager.cardHidden.connect(self._on_card_hidden)
+    
+    def _on_card_shown(self, card_id: str):
+        """CardManager 显示卡片时的回调"""
+        if card_id not in self._cards:
+            return
+        # 展开容器
+        self._content_widget.setVisible(True)
+        self._expand()
+    
+    def _on_card_hidden(self, card_id: str):
+        """CardManager 隐藏卡片时的回调"""
+        if card_id not in self._cards:
+            return
+        # 检查是否还有可见卡片
+        visible = self._card_manager and self._card_manager.get_visible_card(self._container_type)
+        if visible is None:
+            self._content_widget.setVisible(False)
+            self._collapse()
     
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器"""
@@ -92,10 +118,17 @@ class CardContainer(QWidget):
         widget = self._cards[card_id]
         widget.setVisible(False)
         
-        has_visible = any(w.isVisible() for w in self._cards.values())
-        if not has_visible:
-            self._content_widget.setVisible(False)
-            self._collapse()
+        # 检查是否还有可见卡片
+        if self._card_manager:
+            visible = self._card_manager.get_visible_card(self._container_type)
+            if visible is None:
+                self._content_widget.setVisible(False)
+                self._collapse()
+        else:
+            has_visible = any(w.isVisible() for w in self._cards.values())
+            if not has_visible:
+                self._content_widget.setVisible(False)
+                self._collapse()
     
     def _expand(self):
         """展开容器"""
