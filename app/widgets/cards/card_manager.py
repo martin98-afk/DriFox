@@ -93,13 +93,11 @@ class CardManager:
     def register_window(self, window_id: str):
         """注册窗口到管理器（窗口创建时调用）"""
         self._ensure_window_initialized(window_id)
-        logger.debug(f"[CardManager] 注册窗口: {window_id}")
     
     def unregister_window(self, window_id: str):
         """注销窗口及其所有卡片数据（窗口关闭时调用）"""
         if window_id in self._window_data:
             del self._window_data[window_id]
-            logger.debug(f"[CardManager] 注销窗口: {window_id}")
     
     def register_card(self, window_id: str, container_type: ContainerType, card_id: str, card_widget, system_card: bool = False):
         """注册卡片到管理器
@@ -124,8 +122,6 @@ class CardManager:
         win_data["containers"][card_id] = container_type
         if system_card:
             win_data["system_cards"].add(card_id)
-        
-        logger.debug(f"[CardManager] 注册卡片: {card_id} (窗口:{window_id}, 容器:{container_type.value}, 系统卡片:{system_card})")
 
     def show_card(self, card_id: str, window_id: str):
         """显示指定窗口的指定卡片"""
@@ -178,8 +174,6 @@ class CardManager:
         if card_id in win_data["shown_callbacks"]:
             for cb in win_data["shown_callbacks"][card_id]:
                 cb(card_id)
-        
-        logger.debug(f"[CardManager] 显示卡片: {card_id} (窗口:{window_id}, 容器:{container_type.value})")
 
     def hide_card(self, card_id: str, window_id: str):
         """隐藏指定窗口的指定卡片"""
@@ -215,9 +209,7 @@ class CardManager:
         if card_id in win_data["hidden_callbacks"]:
             for cb in win_data["hidden_callbacks"][card_id]:
                 cb(card_id)
-        
-        logger.debug(f"[CardManager] 隐藏卡片: {card_id} (窗口:{window_id})")
-    
+
     # ========== 兼容旧 API（使用默认窗口）==========
     # 这些方法保留用于向后兼容，但新代码应使用带 window_id 的版本
 

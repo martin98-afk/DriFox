@@ -69,9 +69,6 @@ class CardContainer(QWidget):
     
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器，并注册专属回调"""
-        if card_id in self._cards:
-            logger.warning(f"[CardContainer] 卡片 {card_id} 已存在，将被替换")
-        
         self._cards[card_id] = card_widget
         self._layout.addWidget(card_widget)
         card_widget.setVisible(False)
@@ -137,8 +134,6 @@ class CardContainer(QWidget):
         self.setMinimumHeight(0)
         self.setMaximumHeight(0)
         self.updateGeometry()
-        logger.debug(f"[CardContainer] {self._container_type.value} 收起")
-
 
 class TopCardContainer(CardContainer):
     def __init__(self):
