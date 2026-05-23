@@ -422,7 +422,9 @@ class CommandCard(QWidget):
         self._current_query = query
         self._refresh_data()
         self.load_items(query)
-        self._visible = len(self._filtered_items) > 0
+        has_items = len(self._filtered_items) > 0
+        self._visible = has_items
+        self.setVisible(has_items)
 
     @property
     def is_card_visible(self) -> bool:

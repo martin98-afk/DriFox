@@ -1510,9 +1510,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """输入框 / 触发 - 更新命令卡片并显示"""
         if not hasattr(self, '_command_card'):
             return
+        # 先让 CardManager 处理互斥和容器展开（仅首次生效，后续因卡片已可见而跳过）
+        self._card_manager.show_card("command", self._window_id)
+        # 再以正确 query 加载数据（CardManager 内部 show_card 会重置 query 为空）
         self._command_card.show_card(query)
         if self._command_card.filtered_count > 0:
-            self._card_manager.show_card("command", self._window_id)
             # 把焦点还给输入框（卡片不抢焦点）
             self.input_area.setFocus(Qt.OtherFocusReason)
 
@@ -4615,39 +4617,22 @@ class OpenAIChatToolWindow(ToolWindow):
                 round_ranges = get_user_round_ranges(canonical_messages)
                 if 0 <= card._round_index < len(round_ranges):
                     start_idx, end_idx = round_ranges[card._round_index]
+                    msg_count = end_idx - start_idx
                     self._undo_delete_cache = {
                         "session_id": session.session_id,
                         "messages": list(session.messages[start_idx:end_idx]),
                         "insert_index": start_idx,
+                        "count": msg_count,
                     }
             except Exception:
                 self._undo_delete_cache = {}
-
-        # 统计被删除的卡片数
-        card_count = 1
-        card_layout_idx = -1
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item and item.widget() is card:
-                card_layout_idx = i
-                break
-        if card_layout_idx >= 0:
-            for i in range(card_layout_idx + 1, self.chat_layout.count()):
-                item = self.chat_layout.itemAt(i)
-                if not item or not item.widget():
-                    continue
-                w = item.widget()
-                if hasattr(w, 'role') and w.role == "user" and not getattr(w, "_is_welcome", False):
-                    break
-                card_count += 1
 
         # 执行删除
         self._delete_user_round(card)
 
         # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
         if self._undo_delete_cache:
-            self._undo_delete_cache["count"] = card_count
-            self._undo_delete_card.set_count(card_count)
+            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
             if self._card_manager.is_card_visible("undo_delete", self._window_id):
                 self._card_manager.hide_card("undo_delete", self._window_id)
             self._card_manager.show_card("undo_delete", self._window_id)
@@ -4697,6 +4682,26 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
         except Exception as e:
             logger.error(f"[RESTORE] Failed to persist session: {e}")
+
+        # 恢复文件操作（重写 AI 编辑后的文件内容）
+        file_restore_ops = cache.get("file_restore_ops", [])
+        for fr_op in file_restore_ops:
+            try:
+                fp = fr_op["file_path"]
+                tn = fr_op["tool_name"]
+                if tn == "write_file":
+                    content = fr_op.get("content", "")
+                    Path(fp).parent.mkdir(parents=True, exist_ok=True)
+                    with open(fp, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    logger.info(f"[RESTORE] 已恢复文件编辑: {fp}")
+                elif tn == "delete_file":
+                    p = Path(fp)
+                    if p.exists():
+                        p.unlink()
+                    logger.info(f"[RESTORE] 已恢复文件删除: {fp}")
+            except Exception as e:
+                logger.error(f"[RESTORE] 文件恢复失败: {fr_op.get('file_path')} - {e}")
 
         # 刷新视图
         self._invalidate_current_session_card_cache()
@@ -4851,10 +4856,12 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             # 撤销：删除从该 round 到末尾的所有消息
             start_idx = round_ranges_now[round_index][0]
+            msg_count = len(session.messages) - start_idx
             self._undo_delete_cache = {
                 "session_id": session.session_id,
                 "messages": list(session.messages[start_idx:]),  # 从 round 开始到末尾
                 "insert_index": start_idx,
+                "count": msg_count,
             }
         except Exception:
             self._undo_delete_cache = {}
@@ -4884,6 +4891,30 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 执行回滚 - 只还原选中的操作
                 selected_ops = dialog.get_selected_operations()
                 if selected_ops:
+                    # 在回滚前，缓存文件当前内容（AI 编辑后的版本），用于后续恢复
+                    file_restore_ops = []
+                    for op in selected_ops:
+                        fp = op.get("file_path")
+                        tn = op.get("tool_name", "")
+                        if tn == "write_file" and fp and Path(fp).exists():
+                            try:
+                                with open(fp, "r", encoding="utf-8") as f:
+                                    content = f.read()
+                                file_restore_ops.append({
+                                    "tool_name": "write_file",
+                                    "file_path": fp,
+                                    "content": content,
+                                })
+                            except Exception as e:
+                                logger.warning(f"[UNDO] 无法读取文件内容用于恢复: {fp} - {e}")
+                        elif tn == "delete_file" and fp:
+                            # delete_file 先记录路径，回滚后文件会被恢复，恢复时重新删除
+                            file_restore_ops.append({
+                                "tool_name": "delete_file",
+                                "file_path": fp,
+                            })
+                    self._undo_delete_cache["file_restore_ops"] = file_restore_ops
+
                     result = self.backend.file_recorder.rollback_operations(selected_ops)
                     self._show_undo_result(result)
 
@@ -4906,27 +4937,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
 
-        # 统计被删除的卡片数（从 card 到末尾）
-        card_count = 1
-        card_layout_idx = -1
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item and item.widget() is card:
-                card_layout_idx = i
-                break
-        if card_layout_idx >= 0:
-            for i in range(card_layout_idx + 1, self.chat_layout.count()):
-                item = self.chat_layout.itemAt(i)
-                if item and item.widget():
-                    w = item.widget()
-                    if hasattr(w, '_is_welcome') and w._is_welcome:
-                        continue
-                    card_count += 1
-
         # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
         if self._undo_delete_cache:
-            self._undo_delete_cache["count"] = card_count
-            self._undo_delete_card.set_count(card_count)
+            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
             if self._card_manager.is_card_visible("undo_delete", self._window_id):
                 self._card_manager.hide_card("undo_delete", self._window_id)
             self._card_manager.show_card("undo_delete", self._window_id)
