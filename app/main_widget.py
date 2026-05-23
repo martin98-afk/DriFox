@@ -1071,9 +1071,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
         self._settings_popup.configChanged.connect(self._on_settings_config_changed)
-        
-        # 将 settings_popup 添加到 top_card_container
-        self._top_card_container.add_card("settings", self._settings_popup)
 
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)

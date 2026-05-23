@@ -96,15 +96,20 @@ class CardContainer(QWidget):
         total_height = 0
         for widget in self._cards.values():
             if widget.isVisible():
-                # 使用 widget.height() 获取实际高度，优先于 sizeHint
+                # 让卡片自适应高度
+                widget.adjustSize()
                 h = widget.height()
                 if h <= 0:
                     h = widget.sizeHint().height()
+                if h <= 0:
+                    h = widget.minimumHeight()
+                if h <= 0:
+                    h = 300  # 默认最低高度
                 total_height += h
         
         if total_height > 0:
-            total_height += 4  # 微小边距
-            self.setMaximumHeight(total_height + 10)
+            total_height += 2  # 微小边距
+            self.setMaximumHeight(total_height + 20)
             self.setMinimumHeight(0)
         else:
             self.setMaximumHeight(500)  # 回退高度
