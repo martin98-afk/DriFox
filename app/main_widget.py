@@ -5870,11 +5870,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
         if getattr(self, '_is_destroyed', False):
             return
+        self._card_manager.hide_card("question")
         self._restore_after_question_close()
-        
-        # 恢复之前被 Question 隐藏的卡片
-        self._card_manager.restore_after_hide(excluded_card_id="question")
-        
+
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None

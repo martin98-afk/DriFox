@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -220,7 +221,6 @@ class QuestionFloatingWidget(SimpleCardWidget):
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.setMaximumHeight(420)
         self.setMinimumHeight(128)
         self._apply_card_style()
 
@@ -228,6 +228,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
         main_layout.setContentsMargins(16, 12, 16, 14)
         main_layout.setSpacing(10)
 
+        # ── Header ──
         header = QHBoxLayout()
         header.setSpacing(10)
 
@@ -253,20 +254,47 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self.close_btn.clicked.connect(self._on_cancel)
         header.addWidget(self.close_btn)
 
+        # ── Question text ──
         self.question_label = QLabel("", self)
         self.question_label.setFont(get_unified_font(10))
         self.question_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
         self.question_label.setWordWrap(True)
         self.question_label.setMinimumHeight(28)
 
-        self.options_container = QWidget(self)
-        self.options_layout = QGridLayout(self.options_container)
+        # ── Options in ScrollArea ──
+        self._options_scroll = QScrollArea(self)
+        self._options_scroll.setWidgetResizable(True)
+        self._options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._options_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._options_scroll.setMaximumHeight(300)
+        self._options_scroll.setMinimumHeight(0)
+        self._options_scroll.setStyleSheet("""
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical { width: 6px; background: transparent; }
+            QScrollBar::handle:vertical { background: #555; border-radius: 3px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        """)
+
+        self._options_scroll_content = QWidget()
+        self.options_layout = QGridLayout(self._options_scroll_content)
         self.options_layout.setContentsMargins(0, 0, 0, 0)
         self.options_layout.setHorizontalSpacing(10)
         self.options_layout.setVerticalSpacing(10)
 
-        self.custom_entry_bar = QHBoxLayout()
-        self.custom_entry_bar.setSpacing(8)
+        self._options_scroll.setWidget(self._options_scroll_content)
+
+        # ── Text Input (hidden initially) ──
+        self.text_input = QTextEdit(self)
+        self.text_input.setPlaceholderText("输入你想补充的内容")
+        self.text_input.setFont(get_unified_font(10))
+        self.text_input.setMaximumHeight(104)
+        self.text_input.setVisible(False)
+        self.text_input.textChanged.connect(self._update_submit_state)
+        self._apply_text_input_style()
+
+        # ── Bottom bar: hint + toggle on same line ──
+        self.bottom_bar = QHBoxLayout()
+        self.bottom_bar.setSpacing(8)
 
         self.custom_hint_label = QLabel("没有合适的选项？", self)
         self.custom_hint_label.setFont(get_unified_font(9))
@@ -277,18 +305,11 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._apply_toggle_btn_style()
         self.toggle_text_mode_btn.clicked.connect(self._toggle_text_mode)
 
-        self.custom_entry_bar.addWidget(self.custom_hint_label)
-        self.custom_entry_bar.addStretch()
-        self.custom_entry_bar.addWidget(self.toggle_text_mode_btn)
+        self.bottom_bar.addWidget(self.custom_hint_label)
+        self.bottom_bar.addStretch()
+        self.bottom_bar.addWidget(self.toggle_text_mode_btn)
 
-        self.text_input = QTextEdit(self)
-        self.text_input.setPlaceholderText("输入你想补充的内容")
-        self.text_input.setFont(get_unified_font(10))
-        self.text_input.setMaximumHeight(104)
-        self.text_input.setVisible(False)
-        self.text_input.textChanged.connect(self._update_submit_state)
-        self._apply_text_input_style()
-
+        # ── Footer ──
         self.footer_layout = QHBoxLayout()
         self.footer_layout.setSpacing(8)
 
@@ -305,11 +326,12 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self.footer_layout.addStretch()
         self.footer_layout.addWidget(self.confirm_btn)
 
+        # ── Assemble ──
         main_layout.addLayout(header)
         main_layout.addWidget(self.question_label)
-        main_layout.addWidget(self.options_container)
-        main_layout.addLayout(self.custom_entry_bar)
+        main_layout.addWidget(self._options_scroll)
         main_layout.addWidget(self.text_input)
+        main_layout.addLayout(self.bottom_bar)
         main_layout.addLayout(self.footer_layout)
 
         self._update_mode_ui()
@@ -437,7 +459,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
         has_options = bool(self._options)
         text_visible = self._text_input_mode or not has_options
 
-        self.options_container.setVisible(has_options)
+        self._options_scroll.setVisible(has_options and not text_visible)
         self.custom_hint_label.setVisible(has_options)
         self.toggle_text_mode_btn.setVisible(has_options)
         self.text_input.setVisible(text_visible)
@@ -446,15 +468,14 @@ class QuestionFloatingWidget(SimpleCardWidget):
             self.mode_hint_label.setVisible(True)
             self.mode_hint_label.setText("文本输入")
             self.selection_hint_label.setText("直接输入回答")
-            self.toggle_text_mode_btn.setText("改为输入")
         elif self._multiple:
             self.mode_hint_label.setVisible(True)
             self.mode_hint_label.setText("多选")
             if text_visible:
                 self.selection_hint_label.setText("可多选，也可补充说明")
-                self.toggle_text_mode_btn.setText("收起输入")
+                self.toggle_text_mode_btn.setText("返回选项")
             else:
-                self.selection_hint_label.setText("可多选，必要时再补充说明")
+                self.selection_hint_label.setText("请选择一个选项")
                 self.toggle_text_mode_btn.setText("改为输入")
         else:
             self.mode_hint_label.setVisible(True)
@@ -463,7 +484,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
                 self.selection_hint_label.setText("文本输入会替代选项选择")
                 self.toggle_text_mode_btn.setText("返回选项")
             else:
-                self.selection_hint_label.setText("点击选项可直接提交")
+                self.selection_hint_label.setText("请选择一个选项")
                 self.toggle_text_mode_btn.setText("改为输入")
 
         self._update_submit_state()
@@ -505,14 +526,12 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._update_mode_ui()
 
     def _on_cancel(self):
-        self.setVisible(False)
         self.cancelled.emit()
 
     def _on_confirm(self):
         answer = self._build_answer()
         if not answer:
             return
-        self.setVisible(False)
         self.answered.emit(answer)
 
     def _on_select(self, option):
@@ -565,7 +584,6 @@ class QuestionFloatingWidget(SimpleCardWidget):
                 self._option_widgets.append(widget)
 
         self._update_mode_ui()
-        self.setVisible(True)
         self.raise_()
 
     def clear(self):
