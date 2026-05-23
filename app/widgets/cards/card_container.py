@@ -77,6 +77,10 @@ class CardContainer(QWidget):
         if self._card_manager and self._window_id:
             self._card_manager.on_card_shown(self._window_id, card_id, self._on_card_shown)
             self._card_manager.on_card_hidden(self._window_id, card_id, self._on_card_hidden)
+        
+        # 连接卡片内部高度变化信号 → 容器重新展开（支持拖拽、自适应等动态高度）
+        if hasattr(card_widget, 'heightChanged'):
+            card_widget.heightChanged.connect(self._expand)
     
     def remove_card(self, card_id: str):
         """从容器移除卡片"""
