@@ -117,6 +117,7 @@ from app.widgets.cards.floating.tool_floating_widget import (
     ToolFloatingWidget,
 )
 from app.widgets.cards.floating.command_card import CommandCard
+from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import add_message_to_layout, refresh_history_card_if_visible, \
     init_new_session_after_archive, clear_and_show_welcome, refresh_session_view, save_or_archive_session, \
@@ -1333,6 +1334,17 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card)
         self._bottom_card_container.add_card("command", self._command_card)
 
+        # 撤销删除卡片
+        self._undo_delete_card = UndoDeleteCard(self._bottom_input_container)
+        self._undo_delete_card.setVisible(False)
+        self._undo_delete_card.restoreRequested.connect(self._restore_deleted_message)
+        self._undo_delete_card.dismissed.connect(self._on_undo_delete_dismissed)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "undo_delete", self._undo_delete_card)
+        self._bottom_card_container.add_card("undo_delete", self._undo_delete_card)
+
+        # 初始化撤销删除缓存（只缓存一步）
+        self._undo_delete_cache = {}
+
         # 初始化内置命令
         self._init_builtin_commands()
 
@@ -1944,7 +1956,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存 todo 可见状态，用于系统卡片关闭后恢复
         self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
         # 通过 CardManager 隐藏所有卡片
-        for card_id in ["todo", "tool", "sub_agent", "question", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit"]:
+        for card_id in ["todo", "tool", "sub_agent", "question", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit", "undo_delete"]:
             self._card_manager.hide_card(card_id, self._window_id)
         if not self._is_auto_loop_running:
             self._card_manager.hide_card("auto_loop_running", self._window_id)
@@ -4534,7 +4546,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session = self.session_manager.get_current_session()
         if not session:
-            logger.error("[UNDO] No session found")
             return False
 
         # === 1. 删除 UI 卡片：从 card 到末尾 ===
@@ -4561,22 +4572,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.widgets.ui_helpers import delete_widgets_from_layout
                 # 注意：不调用 cleanup，因为撤销操作需要在删除后仍能访问卡片数据
                 deleted_count = delete_widgets_from_layout(widgets_to_remove, self.chat_layout, call_cleanup=False)
-                logger.info(f"[UNDO] Removed {deleted_count} cards from UI")
-            else:
-                logger.warning("[UNDO] Card not found in layout, UI cards not deleted")
-        else:
-            logger.warning("[UNDO] No card provided, skipping UI deletion")
 
         # === 2. 基于 session.messages 计算截断位置 ===
         canonical_messages = consolidate_messages(session.messages)
         round_ranges = get_user_round_ranges(canonical_messages)
 
         if round_index < 0 or round_index >= len(round_ranges):
-            logger.error(f"[UNDO] Invalid round_index: {round_index}, available: {len(round_ranges)}")
             return False
 
         cutoff_index = round_ranges[round_index][0]
-        logger.info(f"[UNDO] Truncating session: round_index={round_index}, cutoff_index={cutoff_index}")
 
         # === 3. 截断 session.messages ===
         session.set_messages(
@@ -4602,8 +4606,71 @@ class OpenAIChatToolWindow(ToolWindow):
     def _delete_message(self, card: MessageCard):
         if card.role != "user":
             return
-        # 直接传 card 对象，不依赖 round_index 定位 UI 卡片
+
+        # === 缓存删除数据，用于撤销恢复（只缓存一步）===
+        session = self.session_manager.get_current_session()
+        if session and card._round_index is not None:
+            try:
+                canonical_messages = consolidate_messages(session.messages)
+                round_ranges = get_user_round_ranges(canonical_messages)
+                if 0 <= card._round_index < len(round_ranges):
+                    start_idx, end_idx = round_ranges[card._round_index]
+                    self._undo_delete_cache = {
+                        "session_id": session.session_id,
+                        "messages": list(session.messages[start_idx:end_idx]),
+                        "insert_index": start_idx,
+                    }
+            except Exception:
+                self._undo_delete_cache = {}
+
+        # 执行删除
         self._delete_user_round(card)
+
+        # 显示撤销卡片（只缓存一步，新的删除会覆盖旧的）
+        if self._undo_delete_cache:
+            self._card_manager.show_card("undo_delete", self._window_id)
+
+    def _restore_deleted_message(self):
+        """恢复被撤销删除的消息"""
+        from loguru import logger
+
+        if not self._undo_delete_cache:
+            return
+
+        cache = self._undo_delete_cache
+        self._undo_delete_cache = {}  # 立即清空，防止重复恢复
+
+        session = self.session_manager.get_current_session()
+        if not session or session.session_id != cache["session_id"]:
+            logger.warning("[RESTORE] Session changed, cannot restore")
+            return
+
+        # 恢复消息到 session
+        messages = list(session.messages)
+        insert_at = min(cache["insert_index"], len(messages))
+        messages[insert_at:insert_at] = cache["messages"]
+        session.set_messages(messages, preserve_compaction=False)
+
+        # 保存并刷新视图
+        if self._current_session_id != session.session_id:
+            self._current_session_id = session.session_id
+
+        try:
+            self._persist_session_after_mutation()
+        except Exception as e:
+            logger.error(f"[RESTORE] Failed to persist session: {e}")
+            return
+
+        # 刷新视图
+        self._invalidate_current_session_card_cache()
+        self._display_current_session()
+
+        # 确保用户看到恢复后的最后一条消息
+        QTimer.singleShot(200, self._scroll_to_bottom)
+
+    def _on_undo_delete_dismissed(self):
+        """撤销删除卡片自动消失或被关闭时，清空缓存"""
+        self._undo_delete_cache = {}
 
     def _delete_user_round(self, card: MessageCard):
         """
@@ -4660,6 +4727,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if round_index < 0 or round_index >= len(round_ranges):
             logger.warning(f"[DELETE] Invalid round_index: {round_index}")
+            # 仍显示撤销卡片（缓存已设置）
+            if self._undo_delete_cache:
+                self._card_manager.show_card("undo_delete", self._window_id)
             return
 
         success, old_count, new_count = truncate_and_remove_round(
@@ -4740,6 +4810,18 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
 
+        # === 缓存撤销数据，用于恢复（只缓存一步）===
+        try:
+            start_idx = round_ranges_now[round_index][0]
+            end_idx = round_ranges_now[round_index][1]
+            self._undo_delete_cache = {
+                "session_id": session.session_id,
+                "messages": list(session.messages[start_idx:end_idx]),
+                "insert_index": start_idx,
+            }
+        except Exception:
+            self._undo_delete_cache = {}
+
         if self._is_streaming:
             self._on_stop_clicked()
 
@@ -4786,6 +4868,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
+
+        # 显示撤销卡片（只缓存一步，新的删除/撤销会覆盖旧的）
+        if self._undo_delete_cache:
+            self._card_manager.show_card("undo_delete", self._window_id)
 
         # 恢复输入框内容
         restore_input_from_card(self.input_area, card)
@@ -5966,7 +6052,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存 todo 可见状态（用于 question 关闭后恢复）
         self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
         # 通过 CardManager 隐藏所有卡片
-        for card_id in ["todo", "tool", "sub_agent", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit"]:
+        for card_id in ["todo", "tool", "sub_agent", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit", "undo_delete"]:
             self._card_manager.hide_card(card_id, self._window_id)
         if not self._is_auto_loop_running:
             self._card_manager.hide_card("auto_loop_running", self._window_id)

@@ -4,6 +4,7 @@ import plistlib
 import subprocess
 import tempfile
 import glob
+import weakref
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QApplication, QProgressDialog, QHBoxLayout
@@ -34,10 +35,11 @@ class UpdateChecker(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         if self._initialized:
-            self.parent = parent  # 允许更新 parent
+            # 使用 weakref 存储 parent，避免循环引用导致 C++ 对象被删除
+            self._parent_ref = weakref.ref(parent) if parent else None
             return
         self._initialized = True
-        self.parent = parent
+        self._parent_ref = weakref.ref(parent) if parent else None
         self.cfg = Settings.get_instance()
 
         # --- 修复报错：初始化 AsyncUpdateChecker 依赖的属性 ---
@@ -54,14 +56,38 @@ class UpdateChecker(QWidget):
     @classmethod
     def get_instance(cls, parent=None):
         """获取单例实例"""
+        # 检查旧实例是否仍然有效（C++ 对象未被删除）
+        if cls._instance is not None:
+            # 通过尝试获取 parent 来判断实例是否有效
+            try:
+                if cls._instance.parent() is not None or cls._instance._parent_ref is not None:
+                    pass  # 实例有效，可以复用
+            except Exception:
+                # 实例已失效，重置为 None
+                cls._instance = None
+
         if cls._instance is None:
             cls._instance = cls(parent)
         elif parent is not None:
-            cls._instance.parent = parent
+            cls._instance._parent_ref = weakref.ref(parent)
+
         return cls._instance
+
+    def parent_widget(self):
+        """安全获取父窗口"""
+        if self._parent_ref is not None:
+            parent = self._parent_ref()
+            if parent is not None:
+                return parent
+        return super().parent()
 
     def check_update(self):
         """检查更新入口"""
+        # 安全检查：确保 parent 仍然有效（C++ 对象未删除）
+        parent = self.parent_widget()
+        if parent is None or not self.isVisible():
+            return
+
         self.async_checker = AsyncUpdateChecker(self)
         self.async_checker.finished.connect(self._on_check_finished)
         self.async_checker.error.connect(
