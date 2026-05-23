@@ -745,10 +745,10 @@ class OpenAIChatToolWindow(ToolWindow):
             raise
 
     def eventFilter(self, obj, event):
-        """处理 viewport 大小变化，调整背景图片"""
-        if hasattr(self, "chat_scroll_area") and obj == self.chat_scroll_area.viewport() and event.type() == event.Type.Resize:
-            if hasattr(self, "_bg_label"):
-                self._bg_label.resize(self.chat_scroll_area.viewport().size())
+        """处理窗口大小变化，调整背景图片"""
+        if obj == self and event.type() == event.Type.Resize:
+            if hasattr(self, "_bg_label") and self._bg_label is not None:
+                self._bg_label.resize(self.size())
         return super().eventFilter(obj, event)
 
     def _connect_opacity_signal(self):
@@ -1933,16 +1933,27 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.utils.design_tokens import Colors
             Colors.refresh()
             bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
+            # 获取背景配置 - 优先使用 chat_list（原有行为），也支持 window_bg
             chat_list = bg_config.get("chat_list", {})
-            if chat_list.get("enabled", True):
-                image = chat_list.get("image", ":/icons/fox_bg.png")
+            window_bg = bg_config.get("window_bg", {})
+            
+            # 检查是否有可用的背景图片配置
+            if chat_list.get("enabled", True) and chat_list.get("image"):
+                image = chat_list["image"]
                 opacity = chat_list.get("opacity", 0.1)
-                viewport = self.chat_scroll_area.viewport()
+            elif window_bg.get("enabled", True) and window_bg.get("image"):
+                image = window_bg["image"]
+                opacity = window_bg.get("opacity", 0.1)
+            else:
+                image = None
+                opacity = 0.1
+            
+            if image:
                 # 先清除旧背景
                 if hasattr(self, '_bg_label') and self._bg_label is not None:
                     self._bg_label.deleteLater()
                     self._bg_label = None
-                self._bg_label = QLabel(viewport)
+                self._bg_label = QLabel(self)
                 self._bg_label.setPixmap(QPixmap(image))
                 self._bg_label.setScaledContents(True)
                 self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
@@ -1950,9 +1961,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._bg_label.setGraphicsEffect(self._bg_opacity)
                 self._bg_label.lower()
                 self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-                self._bg_label.resize(viewport.size())
+                self._bg_label.resize(self.size())
                 self._bg_label.show()
-                viewport.installEventFilter(self)
+                # 安装事件过滤器监听窗口大小变化
+                self.installEventFilter(self)
             else:
                 # 主题禁用背景图，清除旧背景
                 if hasattr(self, '_bg_label') and self._bg_label is not None:

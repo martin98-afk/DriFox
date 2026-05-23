@@ -74,6 +74,7 @@ class ToolFloatingWidget(QWidget):
         self._rotation_timer.timeout.connect(self._update_rotation)
         self._rotating = False
         self._svg_renderer = _RotatingIcon(":/icons/执行中.svg", size=18)
+        self._svg_success = _RotatingIcon(":/icons/成功.svg", size=18)
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(2000)
@@ -82,67 +83,39 @@ class ToolFloatingWidget(QWidget):
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setFixedHeight(72)
+        self.setFixedHeight(36)  # 一行高度
         self._update_style(None)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 8, 10, 8)
-        main_layout.setSpacing(6)
+        main_layout = QHBoxLayout(self)  # 横向布局
+        main_layout.setContentsMargins(12, 4, 12, 4)
+        main_layout.setSpacing(8)
 
-        # ===== 顶栏 =====
-        header = QHBoxLayout()
-        header.setSpacing(8)
-
+        # 状态图标
         self.icon_label = QLabel(self)
-        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
         self.icon_label.setPixmap(self._svg_renderer.current_pixmap())
+        main_layout.addWidget(self.icon_label)
 
+        # 工具名称标签
         self.tool_name_label = QLabel("", self)
         self.tool_name_label.setFont(get_unified_font(10))
         self._apply_tool_name_style()
+        main_layout.addWidget(self.tool_name_label)
 
-        self.title_label = QLabel("正在执行工具", self)
-        self.title_label.setFont(get_unified_font(11, True))
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
-
-        header.addWidget(self.icon_label)
-        header.addWidget(self.tool_name_label)
-        header.addWidget(self.title_label)
-        header.addStretch()
-
-        self.cancel_btn = QPushButton("中止", self)
-        self.cancel_btn.setFixedSize(50, 24)
-        self.cancel_btn.setCursor(Qt.PointingHandCursor)
-        self.cancel_btn.setFont(get_unified_font(9, True))
-        self.cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: rgba(239, 83, 80, 0.9);
-                color: white;
-                border: 1px solid rgba(239, 83, 80, 0.3);
-                border-radius: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: rgba(239, 83, 80, 1);
-                border: 1px solid rgba(239, 83, 80, 0.6);
-            }}
-            QPushButton:disabled {{
-                background-color: rgba(117, 117, 117, 0.6);
-                border: 1px solid rgba(117, 117, 117, 0.3);
-            }}
-        """)
-        self.cancel_btn.clicked.connect(self._on_cancel)
-        header.addWidget(self.cancel_btn)
-
-        main_layout.addLayout(header)
-
-        # ===== 任务描述 =====
-        self.task_label = QLabel("等待执行...", self)
+        # 参数/结果内容（一行显示）
+        self.task_label = QLabel("", self)
         self.task_label.setFont(get_unified_font(10))
         self.task_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self.task_label.setWordWrap(True)
+        self.task_label.setWordWrap(False)
         self.task_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        main_layout.addWidget(self.task_label)
+        self.task_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        main_layout.addWidget(self.task_label, 1)  # 弹性拉伸
+
+        # 隐藏 title_label 和 cancel_btn（不再使用）
+        self.title_label = QLabel("", self)
+        self.cancel_btn = QPushButton("", self)
+        self.cancel_btn.setVisible(False)
 
     def _apply_tool_name_style(self):
         Colors.refresh()
@@ -174,11 +147,9 @@ class ToolFloatingWidget(QWidget):
     def _on_cancel(self):
         self._is_running = False
         self._stop_rotation()
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.setText("已中止")
-        self.title_label.setText("执行已中止")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
+        self.icon_label.setText("⏹")
         self._update_style(False)
+        self.task_label.setText("已中止")
         self.cancelled.emit()
         self._hide_timer.start()
 
@@ -212,31 +183,25 @@ class ToolFloatingWidget(QWidget):
         self._current_tool = tool_name
         self._current_process = None
 
-        self.title_label.setText("正在执行工具")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
         self._update_style(None)
-
         self._start_rotation()
 
         self.tool_name_label.setText(f" {tool_name} ")
 
+        # 参数预览
         args_preview = ""
         if args:
             display_args = {k: v for k, v in args.items() if not k.startswith("_")}
             if display_args:
                 args_str = json.dumps(display_args).decode('utf-8')
-                if len(args_str) > 60:
-                    args_preview = f"{args_str[:60]}..."
+                if len(args_str) > 80:
+                    args_preview = f"{args_str[:80]}..."
                 else:
                     args_preview = f"{args_str}"
             else:
-                args_preview = "正在准备参数..."
+                args_preview = "..."
 
-        self.task_label.setText(f"⏳ {args_preview}")
-
-        self.cancel_btn.setEnabled(True)
-        self.cancel_btn.setText("中止")
-        self.cancel_btn.setVisible(True)
+        self.task_label.setText(args_preview)
 
         if self._suppress_visible:
             self.setVisible(False)
@@ -250,7 +215,7 @@ class ToolFloatingWidget(QWidget):
 
     def update_progress(self, message: str):
         """更新进度"""
-        self.task_label.setText(f"⏳ {message}")
+        self.task_label.setText(message)
 
     def add_tool_call(self, tool_name: str, args: dict = None):
         """添加工具调用"""
@@ -266,24 +231,17 @@ class ToolFloatingWidget(QWidget):
         self._current_process = None
         self._stop_rotation()
 
-        self.icon_label.setPixmap(QPixmap())
-        self.icon_label.setFixedSize(22, 22)
-        self.icon_label.setFont(get_unified_font(13))
+        self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
-        self.icon_label.setText("✅" if success else "❌")
+        self.icon_label.setPixmap(self._svg_success.current_pixmap())
 
         self._update_style(success)
 
         if success:
-            self.title_label.setText("执行完成")
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS};")
-            self.task_label.setText("✓ 工具执行成功")
-            self.cancel_btn.setVisible(False)
+            self.task_label.setText(result or "")
         else:
-            self.title_label.setText("执行失败")
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
-            error_msg = result if result else "执行失败"
-            self.task_label.setText(f"✗ {error_msg[:50]}")
+            error_msg = result if result else ""
+            self.task_label.setText(error_msg[:80])
 
         if self._suppress_visible:
             self._needs_show_after_unsuppress = True
@@ -308,15 +266,12 @@ class ToolFloatingWidget(QWidget):
         self._rotation_angle = 0
         self._needs_show_after_unsuppress = False
         self.setVisible(False)
-        self.cancel_btn.setEnabled(True)
-        self.cancel_btn.setVisible(True)
-        self.cancel_btn.setText("中止")
         self.icon_label.setPixmap(self._svg_renderer.current_pixmap())
         self.icon_label.setText("")
-        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
-        self.title_label.setText("正在执行工具")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
+        self.tool_name_label.setText("")
+        self.task_label.setText("")
         self._update_style(None)
 
     def show_if_needed(self, elapsed: float):
@@ -354,23 +309,11 @@ class ToolFloatingWidget(QWidget):
         """响应主题切换"""
         Colors.refresh()
         self._apply_tool_name_style()
-        if self._is_running:
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
-        elif self.title_label.text() == "执行完成":
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS};")
-        elif self.title_label.text() in ("执行失败", "执行已中止"):
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
-        else:
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
         self.task_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
         if self._is_running:
             self._update_style(None)
-        elif self.title_label.text() == "执行完成":
-            self._update_style(True)
-        elif self.title_label.text() in ("执行失败", "执行已中止"):
-            self._update_style(False)
         else:
-            self._update_style(None)
+            self._update_style(True)
 
     def set_opacity(self, opacity: float):
         """设置透明度，用于响应全局透明度变化"""
@@ -381,16 +324,14 @@ class ToolFloatingWidget(QWidget):
             bg = bg.rsplit(",", 1)[0] + f", {alpha})"
         if self._is_running:
             border_color = Colors.REALTIME_ACCENT_WARM
-        elif self.title_label.text() == "执行完成":
-            border_color = Colors.REALTIME_SUCCESS
         else:
-            border_color = Colors.REALTIME_ERROR
+            border_color = Colors.REALTIME_SUCCESS
         self.setStyleSheet(f"""
             ToolFloatingWidget {{
                 background-color: {bg};
                 border: 1px solid {border_color};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
                 border-bottom-left-radius: 0px;
                 border-bottom-right-radius: 0px;
             }}
