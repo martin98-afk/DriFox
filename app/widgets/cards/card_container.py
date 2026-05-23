@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy, QApplication
 from PyQt5.QtCore import QTimer
 from loguru import logger
 
@@ -62,8 +62,8 @@ class CardContainer(QWidget):
         """更新容器大小：有可见卡片则展开，否则折叠"""
         has_visible = any(w.isVisible() for w in self._cards.values())
         if has_visible:
-            # 展开 - 用 QTimer 延迟计算高度，等待卡片渲染完成
-            QTimer.singleShot(0, self._expand)
+            # 延迟展开 - 等父布局完成后再计算高度
+            QTimer.singleShot(50, self._expand)
         else:
             self._collapse()
     
@@ -96,10 +96,13 @@ class CardContainer(QWidget):
     
     def _expand(self):
         """展开容器"""
+        # 强制刷新布局，确保卡片已获得正确的宽度和高度
+        self.layout().activate()
+        QApplication.processEvents()
+
         total_height = 0
         for widget in self._cards.values():
             if widget.isVisible():
-                widget.adjustSize()
                 h = widget.height()
                 if h <= 0:
                     h = widget.sizeHint().height()
@@ -108,16 +111,17 @@ class CardContainer(QWidget):
                 if h <= 0:
                     h = 400
                 total_height += h
-        
+
         if total_height > 0:
             self.setMaximumHeight(total_height + 4)
         else:
             self._collapse()
-        
-        QTimer.singleShot(100, self._delayed_expand)
+
+        # 再次延迟展开 - 处理动态添加的内容（仅高度变化时应用，避免抖动）
+        QTimer.singleShot(50, self._delayed_expand)
     
     def _delayed_expand(self):
-        """延迟展开 - 处理动态添加的内容"""
+        """延迟展开 - 处理动态添加的内容（仅高度变化时应用，避免抖动）"""
         total_height = 0
         for widget in self._cards.values():
             if widget.isVisible():
@@ -128,8 +132,11 @@ class CardContainer(QWidget):
                     h = 400
                 total_height += h
         if total_height > 0:
-            self.setMaximumHeight(total_height + 4)
-            self.updateGeometry()
+            new_max = total_height + 4
+            # 仅当高度变化超过 2px 时才应用，避免微小抖动
+            if abs(new_max - self.maximumHeight()) > 2:
+                self.setMaximumHeight(new_max)
+                self.updateGeometry()
         else:
             self._collapse()
     

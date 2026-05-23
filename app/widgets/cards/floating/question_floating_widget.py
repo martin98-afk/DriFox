@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from functools import partial
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QCheckBox,
     QGridLayout,
@@ -46,12 +46,6 @@ class WrappedOptionButton(QPushButton):
 
         layout.addWidget(self.label)
 
-        self.hint_label = QLabel("点击选择", self)
-        self.hint_label.setFont(get_unified_font(9))
-        self.hint_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
-        self.hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self.hint_label, 0, Qt.AlignRight | Qt.AlignVCenter)
-
         self._apply_state_style()
 
     def text(self):
@@ -61,7 +55,6 @@ class WrappedOptionButton(QPushButton):
         Colors.refresh()
         background = "rgba(255, 255, 255, 0.05)"
         text_color = Colors.REALTIME_TEXT
-        hint_color = Colors.REALTIME_ACCENT
         if self._selected:
             background = Colors.REALTIME_TAG_BG
             text_color = "#ffffff"
@@ -84,9 +77,6 @@ class WrappedOptionButton(QPushButton):
             """
         )
         self.label.setStyleSheet(f"color: {text_color}; background: transparent;")
-        self.hint_label.setStyleSheet(
-            f"color: {hint_color}; background: transparent; font-size: 9pt;"
-        )
 
     def set_selected(self, selected: bool):
         self._selected = selected
@@ -197,6 +187,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
 
     answered = pyqtSignal(str)
     cancelled = pyqtSignal()
+    heightChanged = pyqtSignal()  # 内部高度变化时触发，通知容器重新布局
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -525,6 +516,8 @@ class QuestionFloatingWidget(SimpleCardWidget):
             self.text_input.setFocus()
         # 不再清空输入框，保留用户已输入的文字
         self._update_mode_ui()
+        # 切换选项/输入模式，布局高度变化
+        QTimer.singleShot(0, self.heightChanged.emit)
 
     def _on_cancel(self):
         self.cancelled.emit()
@@ -585,6 +578,8 @@ class QuestionFloatingWidget(SimpleCardWidget):
                 self._option_widgets.append(widget)
 
         self._update_mode_ui()
+        # 内容/布局已变化（延迟等布局稳定），通知容器重新计算高度
+        QTimer.singleShot(0, self.heightChanged.emit)
         self.raise_()
 
     def clear(self):
