@@ -42,7 +42,7 @@ class OpenAIChatWorker(QThread):
     tool_call_started = pyqtSignal(str, str, dict, str)
     tool_args_updated = pyqtSignal(str, str, dict)  # 工具参数流式更新 (tool_call_id, tool_name, partial_args)
     tool_result_received = pyqtSignal(str, str, dict, object)
-    question_asked = pyqtSignal(str, str, list, bool)
+    question_asked = pyqtSignal(str, list, object)  # id, questions, extra
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
@@ -266,19 +266,35 @@ class OpenAIChatWorker(QThread):
         self._is_cancelled = True
         self._tool_execution_cancelled = True
         self._answer_event.set()
-        if self._question_pending:
-            self._question_pending = None
-            self._state.permission.pending_question = None
+        # 注意：不清除 _question_pending，由 cleanup() 统一清理。
+        # cancel() 已设置 _is_cancelled=True，worker 线程会在 wait 循环后
+        # 通过 if self._is_cancelled: return 提前返回，不访问 _question_pending。
+        # 若此处清除 _question_pending，可能和 cleanup() 重置 _is_cancelled
+        # 形成竞态：worker 读到 _is_cancelled=False 但 _question_pending=None 导致崩溃。
         if self._permission_pending:
             self._permission_pending = None
             self._state.permission.pending_permission = None
 
     def get_interrupted_messages(self) -> List[Dict]:
-        # 性能优化：使用 extend 代替 + 操作
+        """
+        获取被中断时的消息快照。
+
+        仅保存 worker 本次新增的消息（助理回复 + 工具结果 + 局部流式响应）。
+        原有会话消息（含用户输入）已在外部 session 中持久化，不需要重复保存。
+
+        策略：
+        1. 以 _current_session_messages 为基线（含原始会话消息 + 已完成的工具迭代消息）
+        2. 叠加当前流式生成的局部响应（_build_response_message_sequence）
+
+        Returns:
+            整合后的消息列表
+        """
         snapshot = list(self._current_session_messages or self.session_messages or [])
         partial_sequence = self._build_response_message_sequence()
         if partial_sequence:
-            snapshot.extend(partial_sequence)
+            for msg in partial_sequence:
+                if msg not in snapshot:
+                    snapshot.append(msg)
         return consolidate_messages(snapshot)
 
     def _clear_pending_response_state(self):
@@ -537,6 +553,8 @@ class OpenAIChatWorker(QThread):
                 tool_results = self._execute_all_tools()
 
                 if tool_results is None:
+                    # 提前捕获 _question_pending，避免 cancel+cleanup 竞态导致丢失引用
+                    q = self._question_pending
                     self._answer_event.clear()
                     while self._pending_answer is None and not self._is_cancelled:
                         if self._answer_event.wait(timeout=1.0):
@@ -545,20 +563,22 @@ class OpenAIChatWorker(QThread):
                     if self._is_cancelled:
                         return
 
-                    q = self._question_pending
-                    response_sequence = self._build_response_message_sequence()
-                    current_messages.extend(response_sequence)
-                    current_session_messages.extend(response_sequence)
+                    # 先构造 question_result，再传入 _build_response_message_sequence，
+                    # 避免 tool_results=None 被误判为"取消中断"场景而清空 tool_calls
                     question_result = {
                         "role": "tool",
                         "tool_call_id": q["tool_call_id"],
+                        "name": "question",
+                        "arguments": {},
                         "content": self._pending_answer,
+                        "success": True,
                     }
-                    current_messages.append(question_result)
-                    current_session_messages.append(question_result)
+                    response_sequence = self._build_response_message_sequence([question_result])
+                    current_messages.extend(response_sequence)
+                    current_session_messages.extend(response_sequence)
                     self._current_session_messages = list(current_session_messages)
                     # 更新 API 消息缓存
-                    self._append_to_api_cache(response_sequence + [question_result])
+                    self._append_to_api_cache(response_sequence)
                     self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                              current_session_messages)
                     self._question_pending = None
@@ -604,6 +624,18 @@ class OpenAIChatWorker(QThread):
 
         except Exception as e:
             logger.exception("请求失败!")
+            # 🔧 异常时保存已生成的部分消息到会话
+            try:
+                partial_sequence = self._build_response_message_sequence()
+                if partial_sequence:
+                    current_session_messages.extend(partial_sequence)
+                self._current_session_messages = list(current_session_messages)
+                # 只发射 finished_with_messages（保存消息到会话），不发射 finished_with_content
+                # （避免 UI 将其视为正常完成）
+                self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                         current_session_messages)
+            except Exception as save_err:
+                logger.warning(f"[ChatWorker] Failed to save partial messages on error: {save_err}")
             self._handle_error(e)
         finally:
             # 工具执行完成后，清理 round 缓存（为下一轮 API 调用做准备）
@@ -693,6 +725,7 @@ class OpenAIChatWorker(QThread):
         # 预防性修复：过滤掉没有对应 tool 结果的 tool_call
         # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
         if tool_result_map:
+            # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
             valid_tc_ids = set(tool_result_map.keys())
             filtered_tool_call_map = {}
             for tc_id, tc in tool_call_map.items():
@@ -720,6 +753,7 @@ class OpenAIChatWorker(QThread):
                     continue
 
                 tool_call_id = str(block.get("tool_call_id") or "")
+                # 在取消中断场景下，tool_call_marker 已被过滤掉，不会走到这里
                 assistant_msg: Dict[str, Any] = {
                     "role": "assistant",
                     "timestamp": now_ts,
@@ -1729,27 +1763,34 @@ class OpenAIChatWorker(QThread):
                     QApplication.processEvents()
 
             if tool_name == "question":
-                question_text = arguments.get("question", "")
-                options = arguments.get("options", [])
-                # 确保 options 是 list 类型（可能是模型生成时出错导致的字符串）
-                if isinstance(options, str):
-                    try:
-                        options = json.loads(options)
-                    except (json.JSONDecodeError, TypeError):
-                        options = []
-                multiple = arguments.get("multiple", False)
-                # 确保 multiple 是 bool 类型（模型可能生成字符串 "true"/"false"）
-                if isinstance(multiple, str):
-                    multiple = multiple.strip().lower() in ["true", "1", "yes", "y"]
-                elif not isinstance(multiple, bool):
-                    multiple = bool(multiple)
-                self._emit_with_callback("question_asked", self.question_asked, tool_call_id, question_text, options,
-                                         multiple)
+                questions = arguments.get("questions", [])
+                # 向后兼容旧格式
+                if not questions and "question" in arguments:
+                    questions = [{
+                        "question": arguments["question"],
+                        "options": arguments.get("options", []),
+                        "multiple": arguments.get("multiple", False),
+                    }]
+                # 规范化 questions 中的选项格式
+                for q in questions:
+                    opts = q.get("options", [])
+                    normalized = []
+                    for opt in opts:
+                        if isinstance(opt, str):
+                            normalized.append({"label": opt, "description": ""})
+                        elif isinstance(opt, dict):
+                            normalized.append({
+                                "label": opt.get("label", opt.get("name", str(opt))),
+                                "description": opt.get("description", ""),
+                            })
+                        else:
+                            normalized.append({"label": str(opt), "description": ""})
+                    q["options"] = normalized
+                extra = {"tool_call_id": tool_call_id}
+                self._emit_with_callback("question_asked", self.question_asked, tool_call_id, questions, extra)
                 self._question_pending = {
                     "tool_call_id": tool_call_id,
-                    "question": question_text,
-                    "options": options,
-                    "multiple": multiple,
+                    "questions": questions,
                 }
                 return None
 

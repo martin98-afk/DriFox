@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import re
 import time
 
 import orjson as json
@@ -10,12 +11,12 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QHBoxLayout,
-    QWidget, QApplication,
+    QWidget, QApplication, QSizePolicy,
 )
-from qfluentwidgets import SimpleCardWidget
 
 from app.utils.design_tokens import Colors
 from app.utils.utils import get_unified_font
+from app.widgets.cards.floating.command_card import _ElidedLabel
 
 
 class _RotatingIcon(QWidget):
@@ -56,7 +57,7 @@ class _RotatingIcon(QWidget):
         p.end()
 
 
-class ToolFloatingWidget(SimpleCardWidget):
+class ToolFloatingWidget(QWidget):
     """工具执行悬浮框组件 - 当工具执行时间过长时显示"""
 
     cancelled = pyqtSignal()
@@ -75,6 +76,12 @@ class ToolFloatingWidget(SimpleCardWidget):
         self._rotation_timer.timeout.connect(self._update_rotation)
         self._rotating = False
         self._svg_renderer = _RotatingIcon(":/icons/执行中.svg", size=18)
+        self._svg_success_pixmap = QPixmap(18, 18)
+        self._svg_success_pixmap.fill(Qt.transparent)
+        _svg_success_renderer = QSvgRenderer(":/icons/成功.svg")
+        p = QPainter(self._svg_success_pixmap)
+        _svg_success_renderer.render(p, QRectF(0, 0, 18, 18))
+        p.end()
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(2000)
@@ -82,73 +89,46 @@ class ToolFloatingWidget(SimpleCardWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setSizePolicy(1, 0)
-        self.setFixedHeight(75)
-        self._update_style(False)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFixedHeight(36)  # 一行高度
+        self._update_style(None)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 12, 6, 12)
+        main_layout = QHBoxLayout(self)  # 横向布局
+        main_layout.setContentsMargins(12, 4, 12, 4)
         main_layout.setSpacing(8)
 
-        header = QHBoxLayout()
-        header.setSpacing(10)
-
+        # 状态图标
         self.icon_label = QLabel(self)
-        self.icon_label.setFixedSize(22, 22)
+        self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
-        # 初始显示静态 SVG
         self.icon_label.setPixmap(self._svg_renderer.current_pixmap())
+        main_layout.addWidget(self.icon_label)
 
+        # 工具名称标签
         self.tool_name_label = QLabel("", self)
         self.tool_name_label.setFont(get_unified_font(10))
         self._apply_tool_name_style()
+        main_layout.addWidget(self.tool_name_label)
 
-        self.title_label = QLabel("正在执行工具", self)
-        self.title_label.setFont(get_unified_font(11, True))
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
-
-        header.addWidget(self.icon_label)
-        header.addWidget(self.tool_name_label)
-        header.addWidget(self.title_label)
-        header.addStretch()
-
-        self.cancel_btn = QPushButton("中止", self)
-        self.cancel_btn.setFixedSize(52, 26)
-        self.cancel_btn.setCursor(Qt.PointingHandCursor)
-        self.cancel_btn.setFont(get_unified_font(9, True))
-        self.cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: rgba(239, 83, 80, 0.9);
-                color: white;
-                border: 1px solid rgba(239, 83, 80, 0.3);
-                border-radius: 6px;
-            }}
-            QPushButton:hover {{
-                background-color: rgba(239, 83, 80, 1);
-                border: 1px solid rgba(239, 83, 80, 0.6);
-            }}
-            QPushButton:disabled {{
-                background-color: rgba(117, 117, 117, 0.6);
-                border: 1px solid rgba(117, 117, 117, 0.3);
-            }}
-        """)
-        self.cancel_btn.clicked.connect(self._on_cancel)
-        header.addWidget(self.cancel_btn)
-
-        main_layout.addLayout(header)
-
-        self.task_label = QLabel("等待执行...", self)
+        # 参数/结果内容（一行显示）
+        self.task_label = _ElidedLabel("", self)
         self.task_label.setFont(get_unified_font(10))
         self.task_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self.task_label.setWordWrap(True)
+        self.task_label.setWordWrap(False)
         self.task_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        main_layout.addWidget(self.task_label)
+        self.task_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        main_layout.addWidget(self.task_label, 1)  # 弹性拉伸
+
+        # 隐藏 title_label 和 cancel_btn（不再使用）
+        self.title_label = QLabel("", self)
+        self.cancel_btn = QPushButton("", self)
+        self.cancel_btn.setVisible(False)
 
     def _apply_tool_name_style(self):
         Colors.refresh()
         self.tool_name_label.setStyleSheet(
             f"color: {Colors.REALTIME_ACCENT}; background-color: {Colors.REALTIME_TAG_BG}; "
-            f"padding: 2px 8px; border-radius: 6px;"
+            f"padding: 0px 0px; border-radius: 5px;"
         )
 
     # ── 旋转图标 ──────────────────────────────────────────
@@ -156,7 +136,7 @@ class ToolFloatingWidget(SimpleCardWidget):
     def _start_rotation(self):
         if not self._rotating:
             self._rotating = True
-            self._rotation_timer.start(30)  # 30ms ≈ 33fps，流畅旋转
+            self._rotation_timer.start(30)
 
     def _stop_rotation(self):
         self._rotating = False
@@ -174,11 +154,9 @@ class ToolFloatingWidget(SimpleCardWidget):
     def _on_cancel(self):
         self._is_running = False
         self._stop_rotation()
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.setText("已中止")
-        self.title_label.setText("执行已中止")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
+        self.icon_label.setText("⏹")
         self._update_style(False)
+        self.task_label.setText("已中止")
         self.cancelled.emit()
         self._hide_timer.start()
 
@@ -201,12 +179,14 @@ class ToolFloatingWidget(SimpleCardWidget):
         """设置当前进程以便中止"""
         self._current_process = process
 
+    def _flatten_text(self, text: str) -> str:
+        """将换行符替换为空格，用于单行显示"""
+        return re.sub(r"[\n\r]+", " ", text)
+
     def start_tool(self, tool_name: str, args: dict = None):
         """开始执行工具"""
-        # mcp工具去除mcp头
         if tool_name.startswith("mcp__"):
             tool_name = "__".join(tool_name.split("__")[2:])
-        # 取消之前的自动隐藏定时器，防止上一个工具的隐藏影响当前工具
         self._hide_timer.stop()
 
         self._task_start_time = time.time()
@@ -214,36 +194,27 @@ class ToolFloatingWidget(SimpleCardWidget):
         self._current_tool = tool_name
         self._current_process = None
 
-        self.title_label.setText("正在执行工具")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
         self._update_style(None)
-
         self._start_rotation()
 
         self.tool_name_label.setText(f" {tool_name} ")
 
+        # 参数预览
         args_preview = ""
         if args:
-            # 过滤掉内部字段（_status、_preview_hint 等），只显示实际参数
             display_args = {k: v for k, v in args.items() if not k.startswith("_")}
             if display_args:
                 args_str = json.dumps(display_args).decode('utf-8')
-                if len(args_str) > 60:
-                    args_preview = f"{args_str[:60]}..."
+                if len(args_str) > 80:
+                    args_preview = f"{args_str[:80]}..."
                 else:
                     args_preview = f"{args_str}"
             else:
-                # 只有内部字段（预览阶段），显示友好的等待消息
-                args_preview = "正在准备参数..."
+                args_preview = "..."
 
-        self.task_label.setText(f"⏳ {args_preview}")
-
-        self.cancel_btn.setEnabled(True)
-        self.cancel_btn.setText("中止")
-        self.cancel_btn.setVisible(True)
+        self.task_label.setText(self._flatten_text(args_preview))
 
         if self._suppress_visible:
-            # 压制状态下记录任务但不显示
             self.setVisible(False)
         else:
             self.setVisible(True)
@@ -251,11 +222,11 @@ class ToolFloatingWidget(SimpleCardWidget):
         QApplication.processEvents()
 
     def _append_progress(self, text: str):
-        self.task_label.setText(text)
+        self.task_label.setText(self._flatten_text(text))
 
     def update_progress(self, message: str):
         """更新进度"""
-        self.task_label.setText(f"⏳ {message}")
+        self.task_label.setText(self._flatten_text(message))
 
     def add_tool_call(self, tool_name: str, args: dict = None):
         """添加工具调用"""
@@ -271,27 +242,18 @@ class ToolFloatingWidget(SimpleCardWidget):
         self._current_process = None
         self._stop_rotation()
 
-        # 清除旋转 pixmap，显示结果表情
-        self.icon_label.setPixmap(QPixmap())
-        self.icon_label.setFixedSize(24, 24)
-        self.icon_label.setFont(get_unified_font(14))
+        self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
-        self.icon_label.setText("✅" if success else "❌")
+        self.icon_label.setPixmap(self._svg_success_pixmap)
 
         self._update_style(success)
 
         if success:
-            self.title_label.setText("执行完成")
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS};")
-            self.task_label.setText("✓ 工具执行成功")
-            self.cancel_btn.setVisible(False)  # 成功时立即隐藏中止按钮
+            self.task_label.setText(self._flatten_text(result) or "")
         else:
-            self.title_label.setText("执行失败")
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
-            error_msg = result if result else "执行失败"
-            self.task_label.setText(f"✗ {error_msg[:50]}")
+            error_msg = result if result else ""
+            self.task_label.setText(self._flatten_text(error_msg[:80]))
 
-        # 工具完成时根据压制状态决定是否显示
         if self._suppress_visible:
             self._needs_show_after_unsuppress = True
             self.setVisible(False)
@@ -313,17 +275,14 @@ class ToolFloatingWidget(SimpleCardWidget):
         self._current_process = None
         self._stop_rotation()
         self._rotation_angle = 0
-        self._needs_show_after_unsuppress = False  # 重置待显示标志
+        self._needs_show_after_unsuppress = False
         self.setVisible(False)
-        self.cancel_btn.setEnabled(True)
-        self.cancel_btn.setVisible(True)
-        self.cancel_btn.setText("中止")
         self.icon_label.setPixmap(self._svg_renderer.current_pixmap())
         self.icon_label.setText("")
-        self.icon_label.setFixedSize(22, 22)
+        self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
-        self.title_label.setText("正在执行工具")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
+        self.tool_name_label.setText("")
+        self.task_label.setText("")
         self._update_style(None)
 
     def show_if_needed(self, elapsed: float):
@@ -340,20 +299,20 @@ class ToolFloatingWidget(SimpleCardWidget):
         """更新卡片样式，根据状态改变边框颜色"""
         Colors.refresh()
         if success is None:
-            # 运行中
-            border_color = Colors.REALTIME_ACCENT_WARM
+            border_color = Colors.REALTIME_BORDER if not self._is_running else Colors.REALTIME_ACCENT_WARM
         elif success:
-            # 成功
             border_color = Colors.REALTIME_SUCCESS
         else:
-            # 失败
             border_color = Colors.REALTIME_ERROR
 
         self.setStyleSheet(f"""
-            CardWidget {{
+            ToolFloatingWidget {{
                 background-color: {Colors.REALTIME_BG};
                 border: 1px solid {border_color};
-                border-radius: 10px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
         """)
 
@@ -361,47 +320,30 @@ class ToolFloatingWidget(SimpleCardWidget):
         """响应主题切换"""
         Colors.refresh()
         self._apply_tool_name_style()
-        # 刷新标题颜色（根据当前状态）
-        if self._is_running:
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
-        elif self.title_label.text() == "执行完成":
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS};")
-        elif self.title_label.text() == "执行失败":
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
-        elif self.title_label.text() == "执行已中止":
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ERROR};")
-        else:
-            self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT_WARM};")
         self.task_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        # 刷新边框样式
         if self._is_running:
             self._update_style(None)
-        elif self.title_label.text() == "执行完成":
-            self._update_style(True)
-        elif self.title_label.text() in ("执行失败", "执行已中止"):
-            self._update_style(False)
         else:
-            self._update_style(None)
+            self._update_style(True)
 
     def set_opacity(self, opacity: float):
         """设置透明度，用于响应全局透明度变化"""
         Colors.refresh()
         bg = Colors.REALTIME_BG
         if bg.startswith("rgba("):
-            # 最小 alpha 为 1，避免完全透明导致卡片"消失"
             alpha = max(1, int(opacity * 255))
             bg = bg.rsplit(",", 1)[0] + f", {alpha})"
-        # 根据当前状态保持边框颜色
         if self._is_running:
             border_color = Colors.REALTIME_ACCENT_WARM
-        elif self.title_label.text() == "执行完成":
-            border_color = Colors.REALTIME_SUCCESS
         else:
-            border_color = Colors.REALTIME_ERROR
+            border_color = Colors.REALTIME_SUCCESS
         self.setStyleSheet(f"""
-            CardWidget {{
+            ToolFloatingWidget {{
                 background-color: {bg};
                 border: 1px solid {border_color};
-                border-radius: 10px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
         """)

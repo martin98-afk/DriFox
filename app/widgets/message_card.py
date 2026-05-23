@@ -2314,7 +2314,14 @@ class CodeWebViewer(QWebEngineView):
             md = get_markdown_instance()
             md.reset()
             html_content = md.convert(processed_md)
-            return _wrap_code_blocks_with_copy_button_web(html_content)
+            html_content = _wrap_code_blocks_with_copy_button_web(html_content)
+            
+            # 流式模式：追加字数统计显示
+            if self._streaming:
+                char_count_html = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
+                html_content = html_content + char_count_html
+            
+            return html_content
         except Exception:
             return f"<pre>{escape(raw_md)}</pre>"
 
@@ -3589,7 +3596,7 @@ class MessageCard(SimpleCardWidget):
         elif self.role == "user":
             horizontal_margin = 180
         else:
-            horizontal_margin = 72
+            horizontal_margin = 40
 
         target_width = max(320, parent_width - horizontal_margin)
 

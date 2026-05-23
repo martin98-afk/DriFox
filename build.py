@@ -14,6 +14,7 @@ extra_modules = [
 to_remove_common = [
     "scipy",
     "cv2",
+    "cryptography",
     "pandas",
     "pyarrow",
     "jieba",
@@ -34,6 +35,7 @@ to_remove_common = [
 to_remove_windows = [
     "numpy",
     "PyQt5/Qt5/bin/libGLESv2.dll",
+    "PyQt5/Qt5/bin/opengl32sw.dll",
     "PyQt5/Qt5/bin/d3dcompiler_47.dll",
     "PyQt5/Qt5/bin/Qt5Quick3D.dll",
     "PyQt5/Qt5/bin/Qt5Quick3DAssetImport.dll",

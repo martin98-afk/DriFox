@@ -339,7 +339,7 @@ class ToolExecutor:
         "task_status": [],
         "skill": ["name"],
         "list_skills": [],
-        "question": ["question"],
+        "question": ["questions"]
     }
 
     def execute(self, tool_name: str, args: dict, cancelled_ref: list = None) -> ToolResult:
@@ -543,9 +543,8 @@ class ToolExecutor:
             "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
             "list_skills": lambda: self._builtin_tools.list_skills(),
             "question": lambda: self._builtin_tools.ask_question(
-                args.get("question", ""),
-                args.get("options"),
-                args.get("multiple", False),
+                args.get("questions"),
+                **args,
             ),
             "mcp_list_servers": lambda: ToolResult(
                 True,

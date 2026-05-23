@@ -559,9 +559,44 @@ class AsyncUpdateChecker(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.repo = parent.repo
-        self.platform = parent.platform
-        self.token = parent.token
+        # 使用 weakref 避免循环引用导致 parent 被删除后仍持有引用
+        self._parent_ref = weakref.ref(parent) if parent else None
+
+    @property
+    def repo(self):
+        if self._parent_ref is not None:
+            p = self._parent_ref()
+            if p is not None:
+                return p.repo
+        return getattr(self, '_repo', None)
+
+    @repo.setter
+    def repo(self, value):
+        self._repo = value
+
+    @property
+    def platform(self):
+        if self._parent_ref is not None:
+            p = self._parent_ref()
+            if p is not None:
+                return p.platform
+        return getattr(self, '_platform', None)
+
+    @platform.setter
+    def platform(self, value):
+        self._platform = value
+
+    @property
+    def token(self):
+        if self._parent_ref is not None:
+            p = self._parent_ref()
+            if p is not None:
+                return p.token
+        return getattr(self, '_token', None)
+
+    @token.setter
+    def token(self, value):
+        self._token = value
 
     async def fetch_github(self):
         headers = {

@@ -22,7 +22,7 @@ class UIConversationAdapter(QObject):
     tool_call_started = pyqtSignal(str, str, dict, str)  # id, name, args, round
     tool_args_updated = pyqtSignal(str, str, dict)
     tool_result_received = pyqtSignal(str, str, dict, object)
-    question_asked = pyqtSignal(str, str, list, bool)  # id, question, options, multiple
+    question_asked = pyqtSignal(str, list, object)  # id, questions(list), extra(dict)
     permission_approval_requested = pyqtSignal(str, str, dict)
     stream_started = pyqtSignal()
     stream_finished = pyqtSignal(str)
@@ -64,8 +64,8 @@ class UIConversationAdapter(QObject):
     def on_tool_result_received(self, tool_call_id: str, tool_name: str, arguments: dict, result):
         self.tool_result_received.emit(tool_call_id, tool_name, arguments, result)
 
-    def on_question_asked(self, tool_call_id: str, question: str, options: list, multiple: bool):
-        self.question_asked.emit(tool_call_id, question, options, multiple)
+    def on_question_asked(self, tool_call_id: str, questions: list, extra: dict = None):
+        self.question_asked.emit(tool_call_id, questions, extra)
 
     def on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         self.permission_approval_requested.emit(tool_call_id, tool_name, arguments)

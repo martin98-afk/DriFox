@@ -2,294 +2,18 @@
 import os
 import re
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRect, QPoint, QSize
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QKeyEvent, QKeySequence, QTextCursor, QColor, QTextCharFormat
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
-from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QApplication, QLabel
+from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
 from qfluentwidgets import FluentIcon, ComboBox
 from qfluentwidgets import TextEdit, TransparentToolButton
 
-from app.utils.utils import get_font_family_css, get_local_skills
+from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
 
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
-
-
-class SkillListItem(QWidget):
-    """带高亮的技能列表项"""
-    def __init__(self, skill_name: str, query: str, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(36)
-        self._skill_name = skill_name
-        self._query = query
-        self.setStyleSheet("""
-            SkillListItem {
-                background: transparent;
-                padding: 4px 12px;
-                border-radius: 6px;
-            }
-            SkillListItem:hover {
-                background: rgba(255, 255, 255, 0.08);
-            }
-        """)
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        self._label = QLabel()
-        self._update_highlight()
-        layout.addWidget(self._label)
-
-    def _update_highlight(self):
-        """更新高亮显示"""
-        name = self._skill_name
-        query = self._query
-        
-        if query:
-            # 高亮匹配的字母
-            html = ''
-            lower_name = name.lower()
-            lower_query = query.lower()
-            last_end = 0
-            for i in range(len(lower_query)):
-                idx = lower_name.find(lower_query[i], last_end)
-                if idx >= 0:
-                    html += name[last_end:idx]
-                    html += f'<span style="color: #C9A85C; font-weight: bold;">{name[idx]}</span>'
-                    last_end = idx + 1
-                else:
-                    break
-            html += name[last_end:]
-            self._label.setText(html)
-        else:
-            self._label.setText(name)
-            
-        self._label.setStyleSheet(f"""
-            QLabel {{
-                color: #EAF2FF;
-                {get_font_family_css()} {font_size_css(13)}
-            }}
-        """)
-
-
-class SkillCompleterPopup(QWidget):
-    """技能补全弹窗"""
-
-    skillSelected = pyqtSignal(str)  # 选择技能信号
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.NoDropShadowWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        # macOS 上顶层 Tool 窗口更容易抢占输入焦点，补全窗只负责展示和鼠标选择，
-        # 键盘事件仍由文本框统一处理。
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFocusPolicy(Qt.NoFocus)
-        self.setFixedWidth(220)
-        self.setMinimumHeight(40)
-        self.setMaximumHeight(280)
-
-        self._list_widget = QListWidget(self)
-        self._list_widget.setFrameShape(QListWidget.NoFrame)  # 去掉默认 frame，尺寸完全由样式表控制
-        self._list_widget.setFocusPolicy(Qt.NoFocus)
-        self._list_widget.setStyleSheet(f"""
-            QListWidget {{
-                background: rgba(25, 34, 50, 245);
-                border: 1px solid #2B3850;
-                border-radius: 10px;
-                padding: 4px;
-            }}
-            QListWidget::item {{
-                color: #EAF2FF;
-                background: transparent;
-            }}
-            QListWidget::item:selected {{
-                background: rgba(139, 115, 85, 0.6);
-            }}
-            QListWidget::item:hover {{
-                background: rgba(255, 255, 255, 0.08);
-            }}
-        """)
-        self._list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._list_widget.itemClicked.connect(self._on_item_clicked)
-        self._list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.addWidget(self._list_widget)
-
-        self._skills = []
-        self._current_query = ""
-
-    def load_skills(self, skills: list, query: str = ""):
-        """加载技能列表——只添加匹配的项，不再操作隐藏项"""
-        self._skills = skills
-        self._current_query = query
-        self._list_widget.clear()
-
-        matched_count = 0
-        for skill in skills:
-            name = skill["name"]
-            if query and query.lower() not in name.lower():
-                continue  # 不匹配直接跳过，不创建 item
-            matched_count += 1
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, name)
-            widget = SkillListItem(name, query)
-            item.setSizeHint(QSize(212, 36))
-            self._list_widget.addItem(item)
-            self._list_widget.setItemWidget(item, widget)
-
-        # 没有匹配项则隐藏弹窗
-        if matched_count == 0:
-            self.hide()
-            return
-
-        self._list_widget.setCurrentRow(0)
-        self._adjust_height()
-
-    def _adjust_height(self):
-        """精确计算弹窗高度，基于已知像素值，避免 QListWidget 内部坐标系的歧义"""
-        count = self._list_widget.count()
-        if count == 0:
-            self.hide()
-            return
-
-        # 各层空间消耗（像素值均来自样式表/布局设置）：
-        #   SkillCompleterPopup 布局 margin:    4 top + 4 bottom = 8
-        #   QListWidget 样式表 border:          1 top + 1 bottom = 2
-        #   QListWidget 样式表 padding:         4 top + 4 bottom = 8
-        #   items (每个 36px):                  count * 36
-        #   总计: count * 36 + 18
-        item_area = count * 36
-        list_border_and_padding = 10  # 1(border-top) + 1(border-bottom) + 4(padding-top) + 4(padding-bottom)
-        layout_margins = self.layout().contentsMargins()
-        margin_vertical = layout_margins.top() + layout_margins.bottom()
-
-        outer_height = item_area + list_border_and_padding + margin_vertical
-        outer_height = min(outer_height, 280)
-        self.setFixedHeight(max(40, outer_height))
-
-    def _on_item_clicked(self, item):
-        self._select_current()
-
-    def _on_item_double_clicked(self, item):
-        self._select_current()
-
-    def _select_current(self):
-        """选择当前行（所有行都是可见的）"""
-        current_row = self._list_widget.currentRow()
-        if current_row < 0 or current_row >= self._list_widget.count():
-            return
-        skill_name = self._list_widget.item(current_row).data(Qt.UserRole)
-        self.skillSelected.emit(skill_name)
-        self.hide()
-
-    def key_event(self, event: QKeyEvent):
-        """处理键盘事件"""
-        key = event.key()
-        if key == Qt.Key_Down:
-            self._move_selection(1)
-            event.accept()
-            return True
-        elif key == Qt.Key_Up:
-            self._move_selection(-1)
-            event.accept()
-            return True
-        elif key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
-            self._select_current()
-            event.accept()
-            return True
-        elif key == Qt.Key_Escape:
-            self.hide()
-            event.accept()
-            return True
-        return False
-
-    def _move_selection(self, delta: int):
-        """移动选择（所有项都是可见的，简化循环逻辑）"""
-        count = self._list_widget.count()
-        if count == 0:
-            return
-
-        current = self._list_widget.currentRow()
-        new_idx = current + delta
-        if new_idx < 0:
-            new_idx = count - 1
-        elif new_idx >= count:
-            new_idx = 0
-
-        self._list_widget.setCurrentRow(new_idx)
-
-    def show_at_cursor(self, text_edit, cursor_top_global: QPoint, prefer_below: bool = True):
-        """在光标位置显示，自动换向避免超出屏幕
-        
-        Args:
-            text_edit: 文本编辑控件
-            cursor_top_global: 光标顶部在全局坐标系中的位置
-            prefer_below: 是否优先显示在下方
-        """
-        screen = QApplication.screenAt(cursor_top_global) or QApplication.primaryScreen()
-        if screen:
-            screen_geo = screen.geometry()
-        else:
-            screen_geo = QRect(0, 0, 1920, 1080)
-        
-        popup_width = self.width()
-        popup_height = self.height()
-        
-        cursor_x = cursor_top_global.x()
-        cursor_y = cursor_top_global.y()
-        
-        # 检查右边界
-        if cursor_x + popup_width > screen_geo.right():
-            cursor_x = screen_geo.right() - popup_width - 10
-        
-        x = cursor_x
-        self._show_below = True
-        
-        # 判断应该在下方还是上方
-        space_below = screen_geo.bottom() - cursor_y
-        space_above = cursor_y - screen_geo.top()
-        
-        # 优先下方，但下方空间不够时用上方
-        if prefer_below and space_below >= popup_height:
-            # 下方足够，弹窗顶部对齐光标顶部
-            y = cursor_y + 2
-            self._show_below = True
-        elif space_above >= popup_height:
-            # 上方足够，弹窗底部对齐光标顶部
-            y = cursor_y - popup_height - 2
-            self._show_below = False
-        elif space_below >= popup_height:
-            # 回退到下方
-            y = cursor_y + 2
-            self._show_below = True
-        elif space_above >= popup_height:
-            # 回退到上方
-            y = cursor_y - popup_height - 2
-            self._show_below = False
-        else:
-            # 空间都不够，选择较大的
-            if space_above > space_below:
-                y = cursor_y - popup_height - 2
-                self._show_below = False
-            else:
-                y = cursor_y + 2
-                self._show_below = True
-        
-        # 确保不超出边界
-        if x < screen_geo.left():
-            x = screen_geo.left() + 10
-        if y < screen_geo.top():
-            y = screen_geo.top() + 10
-            
-        self.move(x, y)
-        self.show()
-        if text_edit is not None:
-            text_edit.setFocus(Qt.OtherFocusReason)
 
 
 class SendableTextEdit(TextEdit):
@@ -300,6 +24,8 @@ class SendableTextEdit(TextEdit):
     historyUpRequested = pyqtSignal()
     historyDownRequested = pyqtSignal()
     agentChanged = pyqtSignal(str)
+    slashTriggered = pyqtSignal(str)     # 检测到 / 触发，携带查询文本
+    slashDismissed = pyqtSignal()        # / 触发结束
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -328,7 +54,7 @@ class SendableTextEdit(TextEdit):
         self.send_btn.setDisabled(True)
         self._apply_send_btn_style()
         self.textChanged.connect(self._on_text_changed)
-        self.textChanged.connect(self._on_at_trigger_check)
+        self.textChanged.connect(self._on_slash_trigger_check)
 
         # 关闭 qfluentwidgets TextEdit 焦点时的底部高亮
         if hasattr(self, 'layer'):
@@ -336,11 +62,9 @@ class SendableTextEdit(TextEdit):
 
         self._setup_keyboard_shortcuts()
 
-        # 技能补全弹窗
-        self._completer_popup = SkillCompleterPopup(self)
-        self._completer_popup.hide()
-        self._completer_popup.skillSelected.connect(self._on_skill_selected)
-        self._at_trigger_pos = -1  # @ 触发位置
+        # 命令卡片引用（由 main_widget 注入）
+        self._command_card_ref = None
+        self._slash_trigger_pos = -1  # / 触发位置
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
@@ -370,8 +94,19 @@ class SendableTextEdit(TextEdit):
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
 
-    def _on_at_trigger_check(self):
-        """检测 @ 触发——统一逻辑：始终检查光标前是否有 @，不再依赖弹窗可见性"""
+    def set_command_card(self, card):
+        """注入命令卡片引用（由 main_widget 创建并注册）"""
+        self._command_card_ref = card
+        card.commandSelected.connect(self._on_command_selected)
+        card.dismissed.connect(self._on_card_dismissed)
+
+    def _get_card(self):
+        """获取命令卡片引用"""
+        return self._command_card_ref
+
+    def _on_slash_trigger_check(self):
+        """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片"""
+        card = self._get_card()
         try:
             cursor = self.textCursor()
             text = self.toPlainText()
@@ -380,81 +115,74 @@ class SendableTextEdit(TextEdit):
             if cursor_pos < 0 or cursor_pos > len(text):
                 return
 
+            # 仅当 / 在文本开头（位置0）时触发
             text_before_cursor = text[:cursor_pos]
-            last_at = text_before_cursor.rfind("@")
-
-            if last_at >= 0:
-                query = text_before_cursor[last_at + 1:]
-                # 如果有空格或换行，说明 @ 触发已结束
+            
+            # 检查开头是否有 /
+            if text.startswith("/"):
+                query = text[1:cursor_pos] if cursor_pos > 1 else ""
+                # 如果有空格或换行，说明 / 触发已结束
                 if " " in query or "\n" in query:
-                    if self._completer_popup.isVisible():
-                        self._completer_popup.hide()
-                    self._at_trigger_pos = -1
+                    if card and card.is_card_visible:
+                        self.slashDismissed.emit()
+                    self._slash_trigger_pos = -1
                     return
 
-                # 还在 @ 触发中
-                self._at_trigger_pos = last_at
-                self._completer_popup.load_skills(get_local_skills(), query)
-
-                # load_skills 只会在无匹配时隐藏弹窗，但不会主动显示（首次触发时弹窗处于隐藏状态）
-                # 因此需要根据是否有匹配项来决定是否显示
-                if self._completer_popup._list_widget.count() > 0:
-                    self._show_completer_popup()
+                # 在开头触发
+                self._slash_trigger_pos = 0
+                self.slashTriggered.emit(query)
             else:
-                # 没有 @ 符号
-                if self._completer_popup.isVisible():
-                    self._completer_popup.hide()
-                self._at_trigger_pos = -1
+                # 没有在开头
+                if card and card.is_card_visible:
+                    self.slashDismissed.emit()
+                self._slash_trigger_pos = -1
         except Exception:
             pass
 
-    def _show_completer_popup(self):
-        """显示补全弹窗，位置紧贴光标"""
-        rect = self.cursorRect()
-        # 获取光标顶部在全局坐标系中的位置
-        viewport_pos = self.viewport().mapToGlobal(QPoint(0, 0))
-        cursor_x = viewport_pos.x() + rect.left()
-        cursor_y = viewport_pos.y() + rect.top()
-        
-        global_pos = QPoint(cursor_x, cursor_y)
-        self._completer_popup.show_at_cursor(self, global_pos)
-
-    def _on_skill_selected(self, skill_name: str):
-        """技能被选中"""
+    def insert_command_text(self, item_name: str):
+        """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""
         cursor = self.textCursor()
         text = self.toPlainText()
         cursor_pos = cursor.position()
 
-        # 用局部变量保存，防止后续 insertText() 触发 textChanged → _on_at_trigger_check
-        # 递归修改 self._at_trigger_pos 导致定位错乱
-        trigger_pos = self._at_trigger_pos
+        trigger_pos = self._slash_trigger_pos
 
         if trigger_pos >= 0:
-            # 删除 @ 符号和后面的内容
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
 
-            # 插入技能名，@符号也保留但给 @ 高亮
-            insert_text = f"@{skill_name} "
+            # 确定插入格式：命令用 /xxx，技能用 @xxx
+            from app.core.command_manager import CommandManager
+            is_command = CommandManager.get_instance().is_known_command_name(item_name)
+            insert_prefix = "/" if is_command else "@"
+
+            insert_text = f"{insert_prefix}{item_name} "
             cursor.insertText(insert_text)
 
-            # 高亮显示 @ 部分（用特殊颜色）
-            cursor.setPosition(trigger_pos)
-            cursor.setPosition(trigger_pos + 1 + len(skill_name), QTextCursor.KeepAnchor)
-
-            # 创建高亮格式
-            highlight_format = cursor.charFormat()
-            highlight_format.setForeground(QColor("#C9A85C"))
-            highlight_format.setFontWeight(700)
-            cursor.setCharFormat(highlight_format)
-
-            # 恢复光标到插入文本之后
             cursor.setPosition(trigger_pos + len(insert_text))
             self.setTextCursor(cursor)
 
-        self._completer_popup.hide()
-        self._at_trigger_pos = -1
+        self._slash_trigger_pos = -1
         self.setFocus(Qt.OtherFocusReason)
+
+    def _on_command_selected(self, item_name: str):
+        """命令/技能被选中（由 CommandCard.commandSelected 触发）"""
+        card = self._get_card()
+        self.insert_command_text(item_name)
+        if card:
+            card.dismiss()
+        self.slashDismissed.emit()
+
+    def _on_card_dismissed(self):
+        """卡片被关闭时的清理"""
+        self._slash_trigger_pos = -1
+
+    def _tab_complete_if_card_visible(self):
+        """Tab 补全：卡片可见时选中当前项"""
+        card = self._get_card()
+        if card and card.is_card_visible:
+            card.select_current()
+        self._slash_trigger_pos = -1
 
     def _on_agent_changed(self, text: str):
         self.agentChanged.emit(text)
@@ -553,9 +281,37 @@ class SendableTextEdit(TextEdit):
             self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
-        # 先检查补全弹窗是否可见
-        if self._completer_popup.isVisible():
-            if self._completer_popup.key_event(event):
+        card = self._get_card()
+        # 先检查命令卡片是否可见
+        if card and card.is_card_visible:
+            if event.key() == Qt.Key_Down:
+                card.select_next()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Up:
+                card.select_prev()
+                event.accept()
+                return
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                card.select_current()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Escape:
+                card.dismiss()
+                self.slashDismissed.emit()
+                event.accept()
+                return
+
+        # Tab 键：开头有 / 时触发补全
+        if event.key() == Qt.Key_Tab:
+            text = self.toPlainText()
+            if text.startswith("/"):
+                # 模拟 / 触发，然后选择当前项
+                self._slash_trigger_pos = 0
+                self.slashTriggered.emit(text[1:] if len(text) > 1 else "")
+                # 延迟选中（等待卡片加载）
+                QTimer.singleShot(10, lambda: self._tab_complete_if_card_visible())
+                event.accept()
                 return
 
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -833,11 +589,17 @@ class SendableTextEdit(TextEdit):
             self.ensureCursorVisible()
 
     def mousePressEvent(self, event):
-        # 点击时隐藏补全弹窗
-        self._completer_popup.hide()
+        # 点击时隐藏命令卡片
+        card = self._get_card()
+        if card and card.is_card_visible:
+            card.dismiss()
+            self.slashDismissed.emit()
         super().mousePressEvent(event)
 
     def wheelEvent(self, event):
-        # 滚轮时隐藏补全弹窗
-        self._completer_popup.hide()
+        # 滚轮时隐藏命令卡片
+        card = self._get_card()
+        if card and card.is_card_visible:
+            card.dismiss()
+            self.slashDismissed.emit()
         super().wheelEvent(event)

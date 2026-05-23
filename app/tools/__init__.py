@@ -846,24 +846,48 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "question",
-            "description": "向用户提问并获取回答。当需要了解用户偏好、需求或让用户做选择时，**必须**使用此工具，不要自行生成问卷或选项。\n\n## 使用原则\n1. **优先使用选项而非文本输入**: 总是通过 options 参数提供选项列表，让用户直接点击选择。选项可以是功能点、技术方案、确认操作等。\n2. **每个问题独立提问**: 当有多个独立问题时，应分多次调用 question 工具，每次只问一个核心问题。避免在一个 question 调用中塞入多个问题要求用户手动输入文本。\n3. **优先多次选择**: 如果需要用户做多个决定或确认多个点，使用多次 question 调用（每次设置 multiple=true 或提供选项），让用户通过选择完成，而非让他们自行组织文本回复。\n\n## 参数说明\n- question: 问题内容，尽量简洁\n- options: 选项列表（**推荐始终提供**），每个选项应该是完整的、可直接选择的\n- multiple: 是否允许多选",
+            "description": "向用户提问并获取回答。当需要了解用户偏好、需求或让用户做选择时，**必须**使用此工具。\n\n支持一次性提多个问题，每个问题可以有自己的选项列表。\n\n## 参数说明\n- questions: 问题列表（**必填**），列表里每个元素是一个独立的问题对象\n  - question: 问题内容（字符串，必填）\n  - options: 选项列表（数组，可选）。每个选项是一个对象：\n    - label: 选项标题（字符串，必填）\n    - description: 选项描述（字符串，可选，小字显示在标题下方）\n  - multiple: 是否允许多选（布尔值，可选，默认 false）",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "问题内容及描述，尽量简洁，不要包含选项内容",
-                    },
-                    "options": {
+                    "questions": {
                         "type": "array",
-                        "description": "选项列表。当有多个可选方案或需要用户确认时，**必须提供选项列表**，不要留空让用户文本输入。",
-                    },
-                    "multiple": {
-                        "type": "boolean",
-                        "description": "是否允许多选，默认false",
+                        "description": "问题列表。列表里每个元素是一个独立的问题对象，包含 question（问题内容）、options（选项列表，每个选项有 label+description）、multiple（是否多选）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "问题内容，尽量简洁",
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "description": "选项列表（可选）。每个选项包含 label（标题）和 description（描述）,一个问题最多提出4个选项",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {
+                                                "type": "string",
+                                                "description": "选项标题",
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "选项描述，小字显示在标题下方",
+                                            },
+                                        },
+                                        "required": ["label"],
+                                    },
+                                },
+                                "multiple": {
+                                    "type": "boolean",
+                                    "description": "是否允许多选（可选，默认 false）",
+                                },
+                            },
+                            "required": ["question"],
+                        },
                     },
                 },
-                "required": ["question"],
+                "required": ["questions"],
             },
         },
     },

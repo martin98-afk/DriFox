@@ -496,15 +496,7 @@ class SubAgentExecutor(QThread):
             tool_call_id = tc["id"]
 
             if tool_name == "question":
-                question_text = arguments.get("question", "")
-                options = arguments.get("options", [])
-                multiple = arguments.get("multiple", False)
-                self._question_pending = {
-                    "tool_call_id": tool_call_id,
-                    "question": question_text,
-                    "options": options,
-                    "multiple": multiple,
-                }
+                # 子智能体不需要 question 工具
                 return None
 
             self._tool_call_count += 1

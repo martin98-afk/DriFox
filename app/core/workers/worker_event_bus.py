@@ -74,9 +74,8 @@ class ToolResultPayload:
 class QuestionPayload:
     """问题负载"""
     tool_call_id: str
-    question: str
-    options: list
-    multiple: bool
+    questions: list
+    extra: dict = None
 
 
 @dataclass

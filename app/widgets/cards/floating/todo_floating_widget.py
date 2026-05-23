@@ -20,7 +20,7 @@ class _DragHandle(QWidget):
     def __init__(self, card, parent=None):
         super().__init__(parent)
         self._card = card
-        self.setFixedHeight(10)
+        self.setFixedHeight(4)
         self.setCursor(Qt.SizeVerCursor)
         self._dragging = False
         self._start_y = 0
@@ -99,6 +99,7 @@ class TodoFloatingWidget(SimpleCardWidget):
     """TODO 悬浮框组件"""
 
     closed = pyqtSignal()
+    heightChanged = pyqtSignal()  # 内部高度变化时触发（拖拽/自适应），通知容器重新布局
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -174,6 +175,7 @@ class TodoFloatingWidget(SimpleCardWidget):
         self.scroll_area.setMaximumHeight(scroll_height)
         self.scroll_area.setMinimumHeight(scroll_height)
         self.updateGeometry()
+        self.heightChanged.emit()  # 通知容器重新计算高度
 
     def _reset_user_height(self):
         """双击把手：重置为自适应高度"""
@@ -221,6 +223,7 @@ class TodoFloatingWidget(SimpleCardWidget):
         self.scroll_area.setMinimumHeight(0)
         self.scroll_area.setMaximumHeight(max_h)
         self.updateGeometry()
+        self.heightChanged.emit()  # 通知容器重新计算高度
 
     # ---- 样式 ----
 
@@ -317,8 +320,8 @@ class TodoFloatingWidget(SimpleCardWidget):
         self.progress_label.setText(progress_text)
         self.content_label.setText("<br>".join(lines))
 
-        # 延迟计算高度（等布局完成）
-        QTimer.singleShot(0, self._adjust_scroll_height)
+        # 同步计算高度（确保在容器 _expand 之前设置好 scroll_area 约束）
+        self._adjust_scroll_height()
 
         # 滚动到第一个 in_progress 项
         if first_in_progress_idx is not None:

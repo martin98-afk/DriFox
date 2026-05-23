@@ -495,7 +495,7 @@ class ToolPopupDialog(QDialog):
         self._geometry_save_timer.timeout.connect(self._save_geometry)
         self._resize_edge = ResizeEdge.EDGE_NONE
         self._resize_start_geometry = None
-        self._edge_size = 6  # 边缘检测区域宽度
+        self._edge_size = 15  # 边缘检测区域宽度（加大，方便拖拽）
         self.setWindowTitle(tool_instance.name)
         self.setWindowFlags(
             Qt.Window
@@ -505,7 +505,8 @@ class ToolPopupDialog(QDialog):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(400, 300)
-        self.setSizeGripEnabled(True)
+        # 禁用系统 SizeGrip，使用自定义边缘拖拽（边缘区域已加大，更易用）
+        self.setSizeGripEnabled(False)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -874,6 +875,9 @@ class ToolPopupDialog(QDialog):
                 return
 
     def mouseMoveEvent(self, event):
+        # 每次鼠标移动都清除应用级光标覆盖（QSizeGrip 系统级 resize 后可能残留）
+        while QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
         # 始终更新光标（不受拖拽状态影响）
         title_bar = self.tool_instance.get_title_bar()
         title_height = title_bar.height() if title_bar else 0
@@ -918,6 +922,10 @@ class ToolPopupDialog(QDialog):
         self._drag_pos = None
         self._resize_edge = ResizeEdge.EDGE_NONE
         self._resize_start_geometry = None
+        # 释放鼠标后彻底清空应用级光标栈（Qt 内部 resize 可能叠了多层覆盖）
+        while QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+        self.setCursor(Qt.ArrowCursor)
         if event.button() == Qt.LeftButton:
             self._save_geometry()
         super().mouseReleaseEvent(event)
@@ -1024,4 +1032,6 @@ class ToolPopupDialog(QDialog):
 
     def leaveEvent(self, e):
         super().leaveEvent(e)
+        # 离开窗口时取消自定义光标，让系统恢复默认
+        self.unsetCursor()
         self._hide_timer_start()

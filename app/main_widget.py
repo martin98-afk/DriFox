@@ -52,6 +52,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
+from app.core.command_manager import CommandManager, CommandResult
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -115,6 +116,8 @@ from app.widgets.cards.floating.todo_floating_widget import (
 from app.widgets.cards.floating.tool_floating_widget import (
     ToolFloatingWidget,
 )
+from app.widgets.cards.floating.command_card import CommandCard
+from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import add_message_to_layout, refresh_history_card_if_visible, \
     init_new_session_after_archive, clear_and_show_welcome, refresh_session_view, save_or_archive_session, \
@@ -182,6 +185,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离：实例级模型配置缓存（必须覆盖类变量，防止多窗口共享）
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
         self._is_destroyed = False
+        # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
+        import uuid
+        self._window_id = str(uuid.uuid4())[:8]
+        
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
         self.backend = ChatBackend()
@@ -286,8 +293,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._current_session_id = self.session_manager.get_current_session().session_id
 
-        # 初始化卡片管理器
+        # 初始化卡片管理器（注册当前窗口）
         self._card_manager = CardManager.get_instance()
+        self._card_manager.register_window(self._window_id)
 
         # 初始化 UI
         self.setup_ui()
@@ -440,56 +448,54 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         mgr = self._card_manager
         
-        # 绑定容器到 CardManager
-        self._top_card_container.bind_card_manager(mgr)
-        self._bottom_card_container.bind_card_manager(mgr)
+        # 绑定容器到 CardManager（传入窗口ID用于隔离）
+        self._top_card_container.bind_card_manager(mgr, self._window_id)
+        self._bottom_card_container.bind_card_manager(mgr, self._window_id)
         
         # ===== TopCardContainer (chatscroll 上方) =====
         # 系统配置卡片，互斥显示
-        mgr.register_card(ContainerType.TOP, "todo", self._todo_floating_widget)
+        mgr.register_card(self._window_id, ContainerType.TOP, "todo", self._todo_floating_widget)
         self._top_card_container.add_card("todo", self._todo_floating_widget)
         
-        mgr.register_card(ContainerType.TOP, "mcp_edit", self._mcp_edit_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.TOP, "mcp_edit", self._mcp_edit_card, system_card=True)
         self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
         
-        mgr.register_card(ContainerType.TOP, "settings", self._settings_popup, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.TOP, "settings", self._settings_popup, system_card=True)
         self._top_card_container.add_card("settings", self._settings_popup)
         
-        mgr.register_card(ContainerType.TOP, "provider_edit", self._provider_edit_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.TOP, "provider_edit", self._provider_edit_card, system_card=True)
         self._top_card_container.add_card("provider_edit", self._provider_edit_card)
         
-        mgr.register_card(ContainerType.TOP, "hook_edit", self._hook_edit_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.TOP, "hook_edit", self._hook_edit_card, system_card=True)
         self._top_card_container.add_card("hook_edit", self._hook_edit_card)
         
         # ===== BottomCardContainer (chatscroll 下方) =====
         # Question: 强制覆盖所有其他卡片
         # Tool/SubAgent: 实时卡片
         # History/Memory/ModelConfig/AutoLoop: 系统卡片
-        mgr.register_card(ContainerType.BOTTOM, "question", self._question_floating_widget)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "question", self._question_floating_widget)
         self._bottom_card_container.add_card("question", self._question_floating_widget)
         
-        mgr.register_card(ContainerType.BOTTOM, "tool", self._tool_floating_widget)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "tool", self._tool_floating_widget)
         self._bottom_card_container.add_card("tool", self._tool_floating_widget)
         
-        mgr.register_card(ContainerType.BOTTOM, "sub_agent", self._sub_agent_floating_widget)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "sub_agent", self._sub_agent_floating_widget)
         self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
         
-        mgr.register_card(ContainerType.BOTTOM, "history", self._history_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True)
         self._bottom_card_container.add_card("history", self._history_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "memory", self._memory_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "memory", self._memory_card, system_card=True)
         self._bottom_card_container.add_card("memory", self._memory_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "model_config", self._model_config_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "model_config", self._model_config_card, system_card=True)
         self._bottom_card_container.add_card("model_config", self._model_config_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card, system_card=True)
         self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True)
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
-        
-        logger.info("[CardManager] 所有卡片注册并添加到容器完成")
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -516,7 +522,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_settings_card(self):
         """切换设置卡片的显示"""
-        self._card_manager.toggle_card("settings")
+        self._card_manager.toggle_card("settings", self._window_id)
 
     def _open_api_docs(self):
         """打开 API 文档页面"""
@@ -741,10 +747,10 @@ class OpenAIChatToolWindow(ToolWindow):
             raise
 
     def eventFilter(self, obj, event):
-        """处理 viewport 大小变化，调整背景图片"""
-        if hasattr(self, "chat_scroll_area") and obj == self.chat_scroll_area.viewport() and event.type() == event.Type.Resize:
-            if hasattr(self, "_bg_label"):
-                self._bg_label.resize(self.chat_scroll_area.viewport().size())
+        """处理窗口大小变化，调整背景图片"""
+        if obj == self and event.type() == event.Type.Resize:
+            if hasattr(self, "_bg_label") and self._bg_label is not None:
+                self._bg_label.resize(self.size())
         return super().eventFilter(obj, event)
 
     def _connect_opacity_signal(self):
@@ -949,7 +955,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 动态更新主题选项
         update_theme_options()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 4, 1)
+        layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(1)
         
         # 创建卡片容器
@@ -1071,7 +1077,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
         self._settings_popup.configChanged.connect(self._on_settings_config_changed)
-        self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings"))
+        self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", self._window_id))
 
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
@@ -1207,7 +1213,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
-        self._history_card.closed.connect(lambda: self._card_manager.hide_card("history"))
+        self._history_card.closed.connect(lambda: self._card_manager.hide_card("history", self._window_id))
         # 搜索框（历史会话和归档标签都显示）
         self._history_card.set_search_handler(
             "🔍 搜索会话...",
@@ -1239,7 +1245,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
         self._memory_card.content_layout.addWidget(self._memory_card_popup)
         self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(lambda: self._card_manager.hide_card("memory"))
+        self._memory_card.closed.connect(lambda: self._card_manager.hide_card("memory", self._window_id))
         self._bottom_card_container.add_card("memory", self._memory_card)
 
         # 模型配置卡片
@@ -1248,14 +1254,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
         self._model_config_card.setVisible(False)
-        self._model_config_card.closed.connect(lambda: self._card_manager.hide_card("model_config"))
+        self._model_config_card.closed.connect(lambda: self._card_manager.hide_card("model_config", self._window_id))
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
-        self._auto_loop_config_card.closed.connect(lambda: self._card_manager.hide_card("auto_loop_config"))
+        self._auto_loop_config_card.closed.connect(lambda: self._card_manager.hide_card("auto_loop_config", self._window_id))
         self._auto_loop_config_card.setVisible(False)
         self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
 
@@ -1288,9 +1294,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ===== 一体化输入卡片（圆角大弧线包裹输入框+工具栏）=====
         self._input_card = QWidget(self._bottom_input_container)
+        self._input_card.setObjectName("_input_card")
         Colors.refresh()
         self._input_card.setStyleSheet(f"""
-            QWidget {{
+            QWidget#_input_card {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {Colors.INPUT_BG_START},
                     stop:1 {Colors.INPUT_BG_END});
@@ -1315,7 +1322,31 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.newSessionRequested.connect(self._create_new_session)
         self.input_area.agentChanged.connect(self._on_agent_changed)
         self.input_area.textChanged.connect(self._on_input_area_height_changed)
+        self.input_area.slashTriggered.connect(self._on_slash_triggered)
+        self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         card_layout.addWidget(self.input_area)
+
+        # 命令卡片（必须是输入框创建后）
+        self._command_card = CommandCard(self._bottom_input_container)
+        self._command_card.setVisible(False)
+        self.input_area.set_command_card(self._command_card)
+        mgr = self._card_manager
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card)
+        self._bottom_card_container.add_card("command", self._command_card)
+
+        # 撤销删除卡片
+        self._undo_delete_card = UndoDeleteCard(self._bottom_input_container)
+        self._undo_delete_card.setVisible(False)
+        self._undo_delete_card.restoreRequested.connect(self._restore_deleted_message)
+        self._undo_delete_card.dismissed.connect(self._on_undo_delete_dismissed)
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "undo_delete", self._undo_delete_card)
+        self._bottom_card_container.add_card("undo_delete", self._undo_delete_card)
+
+        # 初始化撤销删除缓存（只缓存一步）
+        self._undo_delete_cache = {}
+
+        # 初始化内置命令
+        self._init_builtin_commands()
 
         # 分隔线
         separator = QFrame(self._input_card)
@@ -1434,6 +1465,131 @@ class OpenAIChatToolWindow(ToolWindow):
         bottom_layout.addWidget(self._input_card)
 
         layout.addWidget(self._bottom_input_container)
+
+    # ========== 内置命令初始化 ==========
+
+    def _init_builtin_commands(self):
+        """注册并初始化所有内置命令"""
+        cmd_mgr = CommandManager.get_instance()
+        # 先清空，避免重复注册
+        for name in list(cmd_mgr.get_command_names()):
+            cmd_mgr.unregister(name)
+
+        cmd_mgr.register("new", "function", description="新建会话")
+        cmd_mgr.register("new-window", "function", description="新建窗口")
+        cmd_mgr.register("branch", "function", description="新建分支窗口")
+
+        # 提示词替换命令 - init：项目笔记初始化
+        INIT_PROMPT = (
+            "请分析此代码库并编写项目笔记，包含以下内容：\n"
+            "1. 构建/lint/测试命令 - 特别是运行单个测试的方法\n"
+            "2. 代码风格规范，包括导入、格式化、类型、命名约定、错误处理等\n\n"
+            "你创建的文件将被提供给在此仓库中操作的 AI 编码智能体（如你自己）。内容约 150 行。\n"
+            "如果有 Cursor 规则（在 .cursor/rules/ 或 .cursorrules 中）"
+            "或 Copilot 规则（在 .github/copilot-instructions.md 中），请确保包含它们。\n\n"
+            "如果已有项目笔记，请改进它。"
+        )
+        cmd_mgr.register("init", "prompt", description="项目笔记初始化", prompt_text=INIT_PROMPT)
+
+        review_prompt = """You are a code reviewer. Your job is to review code changes and provide actionable feedback.
+---
+## Determining What to Review
+Based on the input provided, determine which type of review to perform:
+1. **No arguments (default)**: Review all uncommitted changes
+   - Run: `git diff` for unstaged changes
+   - Run: `git diff --cached` for staged changes
+   - Run: `git status --short` to identify untracked (net new) files
+2. **Commit hash** (40-char SHA or short hash): Review that specific commit
+   - Run: `git show <hash>`
+3. **Branch name**: Compare current branch to the specified branch
+   - Run: `git diff <branch>...HEAD`
+4. **PR URL or number** (contains "github.com" or "pull" or looks like a PR number): Review the pull request
+   - Run: `gh pr view <number>` to get PR context
+   - Run: `gh pr diff <number>` to get the diff
+Use best judgement when processing input.
+---
+## Gathering Context
+**Diffs alone are not enough.** After getting the diff, read the entire file(s) being modified to understand the full context. Code that looks wrong in isolation may be correct given surrounding logic—and vice versa.
+- Use the diff to identify which files changed
+- Use `git status --short` to identify untracked files, then read their full contents
+- Read the full file to understand existing patterns, control flow, and error handling
+- Check for existing style guide or conventions files (CONVENTIONS.md, AGENTS.md, .editorconfig, etc.)
+---
+## What to Look For
+**Bugs** - Your primary focus.
+- Logic errors, off-by-one mistakes, incorrect conditionals
+- If-else guards: missing guards, incorrect branching, unreachable code paths
+- Edge cases: null/empty/undefined inputs, error conditions, race conditions
+- Security issues: injection, auth bypass, data exposure
+- Broken error handling that swallows failures, throws unexpectedly or returns error types that are not caught.
+**Structure** - Does the code fit the codebase?
+- Does it follow existing patterns and conventions?
+- Are there established abstractions it should use but doesn't?
+- Excessive nesting that could be flattened with early returns or extraction
+**Performance** - Only flag if obviously problematic.
+- O(n²) on unbounded data, N+1 queries, blocking I/O on hot paths
+**Behavior Changes** - If a behavioral change is introduced, raise it (especially if it's possibly unintentional).
+---
+## Before You Flag Something
+**Be certain.** If you're going to call something a bug, you need to be confident it actually is one.
+- Only review the changes - do not review pre-existing code that wasn't modified
+- Don't flag something as a bug if you're unsure - investigate first
+- Don't invent hypothetical problems - if an edge case matters, explain the realistic scenario where it breaks
+- If you need more context to be sure, use the tools below to get it
+**Don't be a zealot about style.** When checking code against conventions:
+- Verify the code is *actually* in violation. Don't complain about else statements if early returns are already being used correctly.
+- Some "violations" are acceptable when they're the simplest option. A `let` statement is fine if the alternative is convoluted.
+- Excessive nesting is a legitimate concern regardless of other style choices.
+- Don't flag style preferences as issues unless they clearly violate established project conventions.
+---
+## Tools
+Use these to inform your review:
+- **Explore agent** - Find how existing code handles similar problems. Check patterns, conventions, and prior art before claiming something doesn't fit.
+- **Exa Code Context** - Verify correct usage of libraries/APIs before flagging something as wrong.
+- **Exa Web Search** - Research best practices if you're unsure about a pattern.
+If you're uncertain about something and can't verify it with these tools, say "I'm not sure about X" rather than flagging it as a definite issue.
+---
+## Output
+1. If there is a bug, be direct and clear about why it is a bug.
+2. Clearly communicate severity of issues. Do not overstate severity.
+3. Critiques should clearly and explicitly communicate the scenarios, environments, or inputs that are necessary for the bug to arise. The comment should immediately indicate that the issue's severity depends on these factors.
+4. Your tone should be matter-of-fact and not accusatory or overly positive. It should read as a helpful AI assistant suggestion without sounding too much like a human reviewer.
+5. Write so the reader can quickly understand the issue without reading too closely.
+6. AVOID flattery, do not give any comments that are not helpful to the reader. Avoid phrasing like "Great job ...", "Thanks for ..."."""
+        cmd_mgr.register("review", "prompt", description="审查更改代码", prompt_text=review_prompt)
+
+    def _execute_command(self, command_name: str):
+        """执行内置函数型命令
+
+        Args:
+            command_name: 命令名（不含 /）
+        """
+        if command_name == "new":
+            self._create_new_session()
+        elif command_name == "new-window":
+            self._duplicate_window(branch=False)
+        elif command_name == "branch":
+            self._duplicate_window(branch=True)
+
+    # ========== 命令卡片处理 ==========
+
+    def _on_slash_triggered(self, query: str):
+        """输入框 / 触发 - 更新命令卡片并显示"""
+        if not hasattr(self, '_command_card'):
+            return
+        # 先让 CardManager 处理互斥和容器展开（仅首次生效，后续因卡片已可见而跳过）
+        self._card_manager.show_card("command", self._window_id)
+        # 再以正确 query 加载数据（CardManager 内部 show_card 会重置 query 为空）
+        self._command_card.show_card(query)
+        if self._command_card.filtered_count > 0:
+            # 把焦点还给输入框（卡片不抢焦点）
+            self.input_area.setFocus(Qt.OtherFocusReason)
+
+    def _on_slash_dismissed(self):
+        """输入框 / 触发结束 - 隐藏命令卡片"""
+        if not hasattr(self, '_command_card'):
+            return
+        self._card_manager.hide_card("command", self._window_id)
 
     def _show_model_selector_popup(self):
         """显示扁平式模型选择上拉框"""
@@ -1607,8 +1763,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _open_settings_popup(self):
         """打开设置卡片"""
-        self._card_manager.toggle_card("settings")
-        if self._card_manager.is_card_visible("settings"):
+        self._card_manager.toggle_card("settings", self._window_id)
+        if self._card_manager.is_card_visible("settings", self._window_id):
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
@@ -1619,8 +1775,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
 
         # 隐藏服务商编辑卡片，显示设置卡片
-        self._card_manager.hide_card("provider_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("provider_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
 
         # 关闭模型选择器popup，下次打开会重新加载数据
         if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
@@ -1634,8 +1790,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_provider_edit_closed(self):
         """服务商编辑关闭后的回调"""
         # 隐藏服务商编辑卡片，显示设置卡片
-        self._card_manager.hide_card("provider_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("provider_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
         # 关闭模型选择器popup，确保下次打开重新加载数据
         if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
             self._model_selector_popup.close()
@@ -1644,7 +1800,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _show_provider_add_card(self):
         """显示添加服务商卡片"""
         # 隐藏设置卡片
-        self._card_manager.hide_card("settings")
+        self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
         self._provider_edit_card.set_title("⚙️ 添加服务商")
         # 重新创建 ProviderEditCard 用于添加
@@ -1661,14 +1817,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(
             lambda: self._provider_edit_popup._on_save()
         )
-        self._card_manager.show_card("provider_edit")
+        self._card_manager.show_card("provider_edit", self._window_id)
 
     # ========== Hook 编辑卡片 ==========
 
     def _show_hook_add_card(self):
         """显示添加 Hook 卡片"""
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
-        self._card_manager.hide_card("settings")
+        self._card_manager.hide_card("settings", self._window_id)
         self._hook_edit_card.set_title("➕ 添加 Hook")
         # 重新创建 HookEditCard
         self._hook_edit_popup = HookEditCard(parent=self)
@@ -1682,12 +1838,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
-        self._card_manager.show_card("hook_edit")
+        self._card_manager.show_card("hook_edit", self._window_id)
 
     def _show_hook_edit_card(self, event: str, hook_data: dict):
         """显示编辑 Hook 卡片"""
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
-        self._card_manager.hide_card("settings")
+        self._card_manager.hide_card("settings", self._window_id)
         self._hook_edit_card.set_title("✏️ 编辑 Hook")
         # 创建携带原始数据的 HookEditCard
         self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self)
@@ -1701,13 +1857,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
-        self._card_manager.show_card("hook_edit")
+        self._card_manager.show_card("hook_edit", self._window_id)
 
     def _on_hook_edit_saved(self, values: dict):
         """Hook 保存回调"""
-        self._card_manager.hide_card("hook_edit")
+        self._card_manager.hide_card("hook_edit", self._window_id)
         # 显示设置卡片（使用 show_card 触发系统卡片互斥）
-        self._card_manager.show_card("settings")
+        self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'hookListCard'):
             original = self._hook_edit_popup.get_original_data()
             if original:
@@ -1730,17 +1886,17 @@ class OpenAIChatToolWindow(ToolWindow):
                     hook_type=values["type"],
                     enabled=values["enabled"]
                 )
-        self._card_manager.show_card("settings")
+        self._card_manager.show_card("settings", self._window_id)
 
     def _on_hook_edit_closed(self):
         """Hook 编辑关闭回调"""
-        self._card_manager.hide_card("hook_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("hook_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
 
     def _show_provider_edit_card(self, provider_name: str, provider_info: dict):
         """显示编辑服务商卡片"""
         # 隐藏设置卡片
-        self._card_manager.hide_card("settings")
+        self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
         self._provider_edit_card.set_title(f"⚙️ 编辑: {provider_name}")
         # 重新创建 ProviderEditCard 用于编辑
@@ -1759,13 +1915,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(
             lambda: self._provider_edit_popup._on_save()
         )
-        self._card_manager.show_card("provider_edit")
+        self._card_manager.show_card("provider_edit", self._window_id)
 
     # ========== MCP 编辑卡片 ==========
 
     def _show_mcp_add_card(self):
         """显示添加 MCP 服务器卡片"""
-        self._card_manager.hide_card("settings")
+        self._card_manager.hide_card("settings", self._window_id)
         self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
         self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
@@ -1779,12 +1935,12 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
-        self._card_manager.show_card("mcp_edit")
+        self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
         """显示编辑 MCP 服务器卡片"""
-        self._card_manager.hide_card("settings")
-        self._card_manager.show_card("mcp_edit")
+        self._card_manager.hide_card("settings", self._window_id)
+        self._card_manager.show_card("mcp_edit", self._window_id)
         self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
         self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
@@ -1798,7 +1954,7 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
-        self._card_manager.show_card("mcp_edit")
+        self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _setup_mcp_edit_mode_buttons(self):
         """设置 MCP 编辑卡头的模式切换按钮"""
@@ -1824,8 +1980,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_mcp_edit_saved(self, server_data: dict):
         """MCP 编辑保存回调"""
-        self._card_manager.hide_card("mcp_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("mcp_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
             name = server_data.get("name", "")
             servers = list(self._settings_popup.mcpListCard.cfg.mcp_servers.value or [])
@@ -1839,24 +1995,24 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_mcp_edit_closed(self):
         """MCP 编辑关闭回调"""
-        self._card_manager.hide_card("mcp_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("mcp_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
             self._settings_popup.mcpListCard.refresh_connections()
 
     def _on_hook_edit_card_closed(self):
         """Hook 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("hook_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("hook_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
 
     def _on_provider_edit_card_closed(self):
         """服务商编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("provider_edit")
-        self._card_manager.show_card("settings")
+        self._card_manager.hide_card("provider_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
 
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._mcp_edit_card.hide()
+        self._card_manager.hide_card("mcp_edit", self._window_id)
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
@@ -1869,10 +2025,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存 todo 可见状态，用于系统卡片关闭后恢复
         self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
         # 通过 CardManager 隐藏所有卡片
-        for card_id in ["todo", "tool", "sub_agent", "question", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit"]:
-            self._card_manager.hide_card(card_id)
+        for card_id in ["todo", "tool", "sub_agent", "question", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit", "undo_delete"]:
+            self._card_manager.hide_card(card_id, self._window_id)
         if not self._is_auto_loop_running:
-            self._card_manager.hide_card("auto_loop_running")
+            self._card_manager.hide_card("auto_loop_running", self._window_id)
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
@@ -1904,12 +2060,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if chat_list.get("enabled", True):
                 image = chat_list.get("image", ":/icons/fox_bg.png")
                 opacity = chat_list.get("opacity", 0.1)
-                viewport = self.chat_scroll_area.viewport()
+            else:
+                image = None
+                opacity = 0.1
+            
+            if image:
                 # 先清除旧背景
                 if hasattr(self, '_bg_label') and self._bg_label is not None:
                     self._bg_label.deleteLater()
                     self._bg_label = None
-                self._bg_label = QLabel(viewport)
+                self._bg_label = QLabel(self)
                 self._bg_label.setPixmap(QPixmap(image))
                 self._bg_label.setScaledContents(True)
                 self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
@@ -1917,9 +2077,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._bg_label.setGraphicsEffect(self._bg_opacity)
                 self._bg_label.lower()
                 self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-                self._bg_label.resize(viewport.size())
+                self._bg_label.resize(self.size())
                 self._bg_label.show()
-                viewport.installEventFilter(self)
+                # 安装事件过滤器监听窗口大小变化
+                self.installEventFilter(self)
             else:
                 # 主题禁用背景图，清除旧背景
                 if hasattr(self, '_bg_label') and self._bg_label is not None:
@@ -1927,17 +2088,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._bg_label = None
         except Exception:
             pass
-    def _restore_after_system_close(self):
-        """系统卡片关闭后，恢复之前被隐藏的卡片
-        现在由 CardManager 的 restore_after_hide 处理
-        """
-        pass  # CardManager 会自动处理恢复
 
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
-        self._card_manager.toggle_card("model_config")
+        self._card_manager.toggle_card("model_config", self._window_id)
         # 显示时刷新模型配置数据
-        if self._card_manager.is_card_visible("model_config"):
+        if self._card_manager.is_card_visible("model_config", self._window_id):
             self._load_model_config_to_card()
 
     def _load_model_config_to_card(self):
@@ -2116,9 +2272,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
-        self._card_manager.toggle_card("history")
+        self._card_manager.toggle_card("history", self._window_id)
         # 显示时刷新历史会话数据
-        if self._card_manager.is_card_visible("history"):
+        if self._card_manager.is_card_visible("history", self._window_id):
             self._refresh_history_toggle_panel()
 
     def _sync_search_box_visibility(self):
@@ -2233,9 +2389,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # 关闭历史会话卡片
-        self._history_card.hide()
-        self._restore_after_system_close()
+        # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
+        self._card_manager.hide_card("history", self._window_id)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2374,7 +2529,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新输入卡片背景
         if hasattr(self, '_input_card'):
             self._input_card.setStyleSheet(f"""
-                QWidget {{
+                QWidget#_input_card {{
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 {Colors.INPUT_BG_START},
                         stop:1 {Colors.INPUT_BG_END});
@@ -3176,6 +3331,25 @@ class OpenAIChatToolWindow(ToolWindow):
             self._user_prefix_cache.append(
                 self._user_prefix_cache[-1] + (1 if is_user else 0)
             )
+
+    def _refresh_all_cards_round_index(self):
+        """
+        删除/撤销操作后，重新同步所有存活 user 卡片的 _round_index。
+        因为删除前面的 round 会导致后面卡片的 round_index 偏移。
+        """
+        user_count = 0
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not item or not item.widget():
+                continue
+            widget = item.widget()
+            if not isinstance(widget, MessageCard):
+                continue
+            if getattr(widget, '_is_welcome', False):
+                continue
+            if widget.role == "user":
+                widget._round_index = user_count
+                user_count += 1
 
     # ==================== Batch 结构同步 ====================
 
@@ -4441,7 +4615,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session = self.session_manager.get_current_session()
         if not session:
-            logger.error("[UNDO] No session found")
             return False
 
         # === 1. 删除 UI 卡片：从 card 到末尾 ===
@@ -4468,22 +4641,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.widgets.ui_helpers import delete_widgets_from_layout
                 # 注意：不调用 cleanup，因为撤销操作需要在删除后仍能访问卡片数据
                 deleted_count = delete_widgets_from_layout(widgets_to_remove, self.chat_layout, call_cleanup=False)
-                logger.info(f"[UNDO] Removed {deleted_count} cards from UI")
-            else:
-                logger.warning("[UNDO] Card not found in layout, UI cards not deleted")
-        else:
-            logger.warning("[UNDO] No card provided, skipping UI deletion")
 
         # === 2. 基于 session.messages 计算截断位置 ===
         canonical_messages = consolidate_messages(session.messages)
         round_ranges = get_user_round_ranges(canonical_messages)
 
         if round_index < 0 or round_index >= len(round_ranges):
-            logger.error(f"[UNDO] Invalid round_index: {round_index}, available: {len(round_ranges)}")
             return False
 
         cutoff_index = round_ranges[round_index][0]
-        logger.info(f"[UNDO] Truncating session: round_index={round_index}, cutoff_index={cutoff_index}")
 
         # === 3. 截断 session.messages ===
         session.set_messages(
@@ -4498,7 +4664,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # === 5. 保存 session ===
         self._persist_session_after_mutation()
 
-        # === 6. 收尾 ===
+        # === 6. 刷新剩余卡片的 round_index ===
+        self._refresh_all_cards_round_index()
+
+        # === 7. 收尾 ===
         self._finalize_local_session_mutation()
 
         return True
@@ -4506,8 +4675,111 @@ class OpenAIChatToolWindow(ToolWindow):
     def _delete_message(self, card: MessageCard):
         if card.role != "user":
             return
-        # 直接传 card 对象，不依赖 round_index 定位 UI 卡片
+
+        # === 缓存删除数据，用于撤销恢复（只缓存一步）===
+        session = self.session_manager.get_current_session()
+        if session and card._round_index is not None:
+            try:
+                canonical_messages = consolidate_messages(session.messages)
+                round_ranges = get_user_round_ranges(canonical_messages)
+                if 0 <= card._round_index < len(round_ranges):
+                    start_idx, end_idx = round_ranges[card._round_index]
+                    msg_count = end_idx - start_idx
+                    self._undo_delete_cache = {
+                        "session_id": session.session_id,
+                        "messages": list(session.messages[start_idx:end_idx]),
+                        "insert_index": start_idx,
+                        "count": msg_count,
+                    }
+            except Exception:
+                self._undo_delete_cache = {}
+
+        # 执行删除
         self._delete_user_round(card)
+
+        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
+        if self._undo_delete_cache:
+            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
+            if self._card_manager.is_card_visible("undo_delete", self._window_id):
+                self._card_manager.hide_card("undo_delete", self._window_id)
+            self._card_manager.show_card("undo_delete", self._window_id)
+
+    def _restore_deleted_message(self):
+        """恢复被撤销删除的消息"""
+        from loguru import logger
+
+        if not self._undo_delete_cache:
+            return
+
+        cache = self._undo_delete_cache
+        self._undo_delete_cache = {}  # 立即清空，防止重复恢复
+
+        session = self.session_manager.get_current_session()
+        if not session or session.session_id != cache["session_id"]:
+            logger.warning("[RESTORE] Session changed, cannot restore")
+            return
+
+        # 恢复消息到 session
+        messages = list(session.messages)
+        insert_at = min(cache["insert_index"], len(messages))
+        messages[insert_at:insert_at] = cache["messages"]
+        session.set_messages(messages, preserve_compaction=False)
+
+        # 保存并刷新视图
+        if self._current_session_id != session.session_id:
+            self._current_session_id = session.session_id
+
+        # 直接保存到 history_manager，确保数据不丢失
+        try:
+            if self.history_manager:
+                from app.widgets.ui_helpers import get_session_compaction_info
+                compaction_info = get_session_compaction_info(session)
+                idx = self.history_manager.find_index_by_session_id(self._current_session_id)
+                if idx is not None:
+                    self.history_manager.update_session(
+                        idx,
+                        session.messages,
+                        **compaction_info
+                    )
+                else:
+                    self.history_manager.save_session(
+                        session.messages,
+                        session_id=session.session_id,
+                        **compaction_info
+                    )
+        except Exception as e:
+            logger.error(f"[RESTORE] Failed to persist session: {e}")
+
+        # 恢复文件操作（重写 AI 编辑后的文件内容）
+        file_restore_ops = cache.get("file_restore_ops", [])
+        for fr_op in file_restore_ops:
+            try:
+                fp = fr_op["file_path"]
+                tn = fr_op["tool_name"]
+                if tn == "write_file":
+                    content = fr_op.get("content", "")
+                    Path(fp).parent.mkdir(parents=True, exist_ok=True)
+                    with open(fp, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    logger.info(f"[RESTORE] 已恢复文件编辑: {fp}")
+                elif tn == "delete_file":
+                    p = Path(fp)
+                    if p.exists():
+                        p.unlink()
+                    logger.info(f"[RESTORE] 已恢复文件删除: {fp}")
+            except Exception as e:
+                logger.error(f"[RESTORE] 文件恢复失败: {fr_op.get('file_path')} - {e}")
+
+        # 刷新视图
+        self._invalidate_current_session_card_cache()
+        self._display_current_session()
+
+        # 确保用户看到恢复后的最后一条消息
+        QTimer.singleShot(200, self._scroll_to_bottom)
+
+    def _on_undo_delete_dismissed(self):
+        """撤销删除卡片自动消失或被关闭时，清空缓存"""
+        self._undo_delete_cache = {}
 
     def _delete_user_round(self, card: MessageCard):
         """
@@ -4564,6 +4836,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if round_index < 0 or round_index >= len(round_ranges):
             logger.warning(f"[DELETE] Invalid round_index: {round_index}")
+            # 仍显示撤销卡片（缓存已设置）
+            if self._undo_delete_cache:
+                self._card_manager.show_card("undo_delete", self._window_id)
             return
 
         success, old_count, new_count = truncate_and_remove_round(
@@ -4588,6 +4863,8 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[DELETE] Failed to persist session: {e}")
 
+        # 同步剩余卡片的 _round_index（删除后后面卡片的 round 会偏移）
+        self._refresh_all_cards_round_index()
         self._finalize_local_session_mutation()
 
     def _undo_from_message(self, card: MessageCard):
@@ -4598,29 +4875,63 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        # 优先使用 card._round_index（卡创建时已正确设置）
-        # 避免使用 session 模糊匹配导致的错误（重复文本、时间戳格式差异）
+        # 同步 _current_session_id（与 _delete_user_round 保持一致）
+        if self._current_session_id != session.session_id:
+            self._current_session_id = session.session_id
+
+        # 获取当前 session 的 round_ranges，用于验证 round_index
+        canonical_now = consolidate_messages(session.messages)
+        round_ranges_now = get_user_round_ranges(canonical_now)
+
+        # 优先使用 card._round_index，但需要验证是否仍然有效
+        # （删除/撤销前面的 round 会导致后面卡片的 round_index 偏移）
         round_index = card._round_index
+        if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
+            # round_index 已过时，降级重算
+            round_index = None
+
         if round_index is None:
-            # 降级：尝试使用 _message_index 计算 round_index
+            # 降级方法 1：通过布局遍历确定卡片位置（最可靠）
+            round_index = self._find_user_round_index_for_card(card)
+            if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
+                round_index = None
+
+        if round_index is None:
+            # 降级方法 2：使用 _message_index 估算
             if card._message_index is not None:
-                # 计算该 batch 之前的 user batch 数量
                 round_index = 0
                 for idx in range(card._message_index):
                     if idx < len(self._message_batch) and self._message_batch[idx] and \
                        self._message_batch[idx][0].get("role") == "user":
                         round_index += 1
-            else:
-                # 最终降级：使用 session 文本匹配
-                user_text = card.get_plain_text()
-                timestamp = card.timestamp
-                round_index = self._find_user_round_index_from_session(
-                    session, user_text, timestamp
-                )
+                if round_index >= len(round_ranges_now):
+                    round_index = None
 
-        if round_index is None or round_index < 0:
-            logger.warning("[UNDO] Cannot determine round_index for card")
+        if round_index is None:
+            # 最终降级：使用 session 文本匹配
+            user_text = card.get_plain_text()
+            timestamp = card.timestamp
+            round_index = self._find_user_round_index_from_session(
+                session, user_text, timestamp
+            )
+
+        if round_index is None or round_index < 0 or round_index >= len(round_ranges_now):
+            logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
+
+        # === 缓存撤销数据，用于恢复（只缓存一步）===
+        try:
+            # 撤销：删除从该 round 到末尾的所有消息
+            start_idx = round_ranges_now[round_index][0]
+            msg_count = len(session.messages) - start_idx
+            self._undo_delete_cache = {
+                "session_id": session.session_id,
+                "messages": list(session.messages[start_idx:]),  # 从 round 开始到末尾
+                "insert_index": start_idx,
+                "count": msg_count,
+            }
+        except Exception:
+            self._undo_delete_cache = {}
 
         if self._is_streaming:
             self._on_stop_clicked()
@@ -4647,11 +4958,58 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 执行回滚 - 只还原选中的操作
                 selected_ops = dialog.get_selected_operations()
                 if selected_ops:
+                    # 在回滚前，缓存文件当前内容（AI 编辑后的版本），用于后续恢复
+                    file_restore_ops = []
+                    for op in selected_ops:
+                        fp = op.get("file_path")
+                        tn = op.get("tool_name", "")
+                        if tn == "write_file" and fp and Path(fp).exists():
+                            try:
+                                with open(fp, "r", encoding="utf-8") as f:
+                                    content = f.read()
+                                file_restore_ops.append({
+                                    "tool_name": "write_file",
+                                    "file_path": fp,
+                                    "content": content,
+                                })
+                            except Exception as e:
+                                logger.warning(f"[UNDO] 无法读取文件内容用于恢复: {fp} - {e}")
+                        elif tn == "delete_file" and fp:
+                            # delete_file 先记录路径，回滚后文件会被恢复，恢复时重新删除
+                            file_restore_ops.append({
+                                "tool_name": "delete_file",
+                                "file_path": fp,
+                            })
+                    self._undo_delete_cache["file_restore_ops"] = file_restore_ops
+
                     result = self.backend.file_recorder.rollback_operations(selected_ops)
                     self._show_undo_result(result)
 
+        # 再次验证 round_index 是否仍有效（dialog.exec_() 期间 session 可能变化）
+        session_final = self.session_manager.get_current_session()
+        if session_final:
+            canonical_final = consolidate_messages(session_final.messages)
+            round_ranges_final = get_user_round_ranges(canonical_final)
+            if round_index < 0 or round_index >= len(round_ranges_final):
+                logger.warning(
+                    "[UNDO] round_index became invalid after dialog, recalculating: "
+                    f"round_index={round_index}, available={len(round_ranges_final)}"
+                )
+                # 尝试通过布局重新计算
+                round_index = self._find_user_round_index_for_card(card)
+                if round_index is None or round_index < 0 or round_index >= len(round_ranges_final):
+                    logger.error("[UNDO] Cannot recover round_index after dialog, aborting undo")
+                    return
+
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
+
+        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
+        if self._undo_delete_cache:
+            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
+            if self._card_manager.is_card_visible("undo_delete", self._window_id):
+                self._card_manager.hide_card("undo_delete", self._window_id)
+            self._card_manager.show_card("undo_delete", self._window_id)
 
         # 恢复输入框内容
         restore_input_from_card(self.input_area, card)
@@ -5180,6 +5538,20 @@ class OpenAIChatToolWindow(ToolWindow):
         if not user_text:
             return
 
+        # ---- 内置命令拦截 ----
+        cmd_mgr = CommandManager.get_instance()
+        cmd_result = cmd_mgr.execute(user_text)
+        if cmd_result.handled:
+            if cmd_result.is_function:
+                # 函数型命令：执行对应处理，不清除用户输入（不发送给 AI）
+                self._execute_command(cmd_result.command_name)
+                return
+            elif cmd_result.is_prompt:
+                # 提示词替换命令：用替换文本代替原输入继续发送
+                user_text = cmd_result.replacement
+                self.input_area.clear()
+        # ---- 内置命令拦截结束 ----
+
         # 检查模型配置
         llm_config = self._get_current_model_config()
         if not llm_config or not llm_config.get("API_KEY"):
@@ -5323,11 +5695,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if tool_name in ("todowrite", "todoread"):
             # 更新数据，但只有在系统卡片未打开时才能显示
             if not self._is_system_card_visible:
-                self._card_manager.show_card("todo")
+                self._card_manager.show_card("todo", self._window_id)
             return
 
         # 使用 CardManager 显示工具卡片
-        self._card_manager.show_card("tool")
+        self._card_manager.show_card("tool", self._window_id)
         self._tool_floating_widget.start_tool(tool_name, arguments)
 
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
@@ -5762,6 +6134,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
 
+        # 🔧 异常时保存已生成的部分消息到历史记录
+        # finished_with_messages 信号已先于 error_occurred 被处理，
+        # 会话已包含部分消息，这里持久化到历史
+        if self.history_manager:
+            self._save_current_session_to_history()
+
         current_title = self.title_edit.text() if self.title_edit else "对话"
         self._notify_if_inactive(f"{current_title} - 错误", error[:100])
 
@@ -5812,10 +6190,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存 todo 可见状态（用于 question 关闭后恢复）
         self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
         # 通过 CardManager 隐藏所有卡片
-        for card_id in ["todo", "tool", "sub_agent", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit"]:
-            self._card_manager.hide_card(card_id)
+        for card_id in ["todo", "tool", "sub_agent", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit", "undo_delete"]:
+            self._card_manager.hide_card(card_id, self._window_id)
         if not self._is_auto_loop_running:
-            self._card_manager.hide_card("auto_loop_running")
+            self._card_manager.hide_card("auto_loop_running", self._window_id)
 
     def _restore_after_question_close(self):
         """Question 卡片关闭后，恢复非系统卡片的显示状态"""
@@ -5825,21 +6203,28 @@ class OpenAIChatToolWindow(ToolWindow):
         # tool 和 sub_agent 有自我生命周期管理，不需要强制恢复
 
     def _on_question_asked(
-            self, tool_call_id: str, question: str, options: list, multiple: bool = False
+            self, tool_call_id: str, questions: list, extra: dict = None
     ):
         if getattr(self, '_is_destroyed', False):
             return
-        self._card_manager.show_card("question")
+        # 隐藏输入框，让用户专注看问题
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(False)
+        self._card_manager.show_card("question", self._window_id)
         self._question_tool_call_id = tool_call_id
-        if not isinstance(options, list):
-            options = []
-        self._question_floating_widget.show_question(question, options, multiple)
-        self._notify_if_inactive("需要回答问题", question[:100])
+        if not isinstance(questions, list):
+            questions = []
+        self._question_floating_widget.show_question(questions)
+        question_text = questions[0].get("question", "") if questions else ""
+        self._notify_if_inactive("需要回答问题", question_text[:100])
 
     def _on_question_answered(self, answer: str):
         if getattr(self, '_is_destroyed', False):
             return
-        self._card_manager.hide_card("question")
+        self._card_manager.hide_card("question", self._window_id)
+        # 恢复输入框
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(True)
         self._restore_after_question_close()
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -5872,7 +6257,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
         if getattr(self, '_is_destroyed', False):
             return
-        self._card_manager.hide_card("question")
+        self._card_manager.hide_card("question", self._window_id)
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(True)
         self._restore_after_question_close()
 
         if self._pending_permission_tool_call_id:
@@ -6338,9 +6725,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_memory_card(self):
         """切换记忆管理卡片的显示"""
-        self._card_manager.toggle_card("memory")
+        self._card_manager.toggle_card("memory", self._window_id)
         # 显示时刷新记忆数据
-        if self._card_manager.is_card_visible("memory") and hasattr(self, '_memory_card_popup'):
+        if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, '_memory_card_popup'):
             # 强制刷新当前 tab 的内容
             current_tab = getattr(self._memory_card, '_current_tab', 'entries')
             # 强制切换 tab（即使相同也触发刷新）
@@ -6436,6 +6823,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
         
+        # 多窗口隔离：注销窗口及其卡片数据
+        try:
+            from app.widgets.cards.card_manager import CardManager
+            CardManager.get_instance().unregister_window(self._window_id)
+            logger.debug(f"[OpenAIChatToolWindow] 注销窗口卡片: {self._window_id}")
+        except Exception:
+            pass
+        
         # 设置关闭标志，阻止 Settings.save() 写入磁盘（防止覆盖用户粘贴的配置）
         if hasattr(self, 'backend') and self.backend:
             try:
@@ -6483,10 +6878,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_cancelled_by_user = False
         # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
         self._topic_summary_cancelled = True
-        interrupted_messages: List[Dict[str, Any]] = []
 
+        # 🛡️ 防止重复点击停止按钮
+        if getattr(self, '_stop_deferred_pending', False):
+            return
+        self._stop_deferred_pending = True
+
+        # ===== 第一阶段：非阻塞取消 + 立即更新 UI =====
+        # 先取消 worker（仅设置标志 + 断开信号，不阻塞）
         if self.backend.chat_engine:
-            interrupted_messages = self.backend.stop_streaming() or []
+            self.backend.cancel_streaming()
 
         self._is_streaming = False
 
@@ -6499,10 +6900,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.finish_streaming()
 
-        if interrupted_messages:
-            self._on_messages_updated(interrupted_messages)
-            if self.history_manager:
-                self._save_current_session_to_history()
+        # 优先显示中止提示，让用户立即感知到操作已生效
         InfoBar.warning(
             title="已中止",
             content="",
@@ -6514,6 +6912,32 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if self.input_area:
             self.input_area.setFocus()
+
+        # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 保存消息）=====
+        # 使用 QTimer.singleShot 延迟到 UI 事件处理完成后执行，
+        # 避免 worker.wait() 等阻塞操作影响界面响应
+        QTimer.singleShot(0, self._deferred_stop_handler)
+
+    def _deferred_stop_handler(self):
+        """延迟停止处理：等待 worker 结束 + 收集中断消息 + 保存会话
+
+        此方法在 _on_stop_clicked() 的 UI 更新完成后执行，
+        包含可能会阻塞的 worker.wait() 和 I/O 操作。
+        """
+        if getattr(self, '_is_destroyed', False):
+            return
+
+        self._stop_deferred_pending = False
+        interrupted_messages: List[Dict[str, Any]] = []
+
+        # 完成停止流程（可能会阻塞等待 worker 线程结束）
+        if self.backend and self.backend.chat_engine:
+            interrupted_messages = self.backend.finalize_stop() or []
+
+        if interrupted_messages:
+            self._on_messages_updated(interrupted_messages)
+            if self.history_manager:
+                self._save_current_session_to_history()
 
     def _create_context_menu(self):
         self._context_menu_actions = {}
@@ -6565,7 +6989,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """显示/隐藏 AutoLoop 配置卡（类似记忆卡片，点击切换）"""
         if self._is_auto_loop_running:
             return
-        self._card_manager.toggle_card("auto_loop_config")
+        self._card_manager.toggle_card("auto_loop_config", self._window_id)
 
     def _on_auto_loop_start(self, config: 'AutoLoopConfig'):
         """开始 AutoLoop"""
