@@ -1,9 +1,0 @@
-SimpleCardWidget sizeHint: -1
-SimpleCardWidget minH: 0
-SimpleCardWidget maxH: 16777215
-SimpleCardWidget minSizeHint: -1
-SimpleCardWidget sp: h=5, v=5
-QFrame sizeHint: -1
-QFrame minH: 0
-QFrame sp: h=5, v=5
-After setFixedHeight(75): sizeHint=-1, minH=75, maxH=75

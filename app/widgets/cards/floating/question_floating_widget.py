@@ -14,10 +14,11 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import PrimaryPushButton, SimpleCardWidget, TransparentToolButton, FluentIcon
+from qfluentwidgets import PrimaryPushButton, TransparentToolButton, FluentIcon
 
 from app.utils.design_tokens import Colors
 from app.utils.utils import get_unified_font, get_font_family_css
+from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
 
 class WrappedOptionButton(QPushButton):
@@ -192,67 +193,28 @@ class WrappedCheckOption(QWidget):
         super().mousePressEvent(event)
 
 
-class QuestionFloatingWidget(SimpleCardWidget):
-    """悬浮提问卡片，支持单选、多选和切换为文本输入。"""
+class QuestionFloatingWidget(BaseSettingsCard):
+    """悬浮提问卡片 — 使用 BaseSettingsCard 基类，行为与系统卡片一致"""
 
     answered = pyqtSignal(str)
     cancelled = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__("等待你的选择", "❓", parent)
         self._question = ""
         self._options = []
         self._multiple = False
         self._text_input_mode = False
         self._option_widgets = []
-        self._setup_ui()
+        self._setup_content()
 
-    def _apply_card_style(self):
-        Colors.refresh()
-        self.setStyleSheet(
-            f"""
-            CardWidget {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-radius: 8px;
-            }}
-            """
-        )
+        # 基类的关闭按钮 → 发射 cancelled 信号
+        self.closed.connect(self._on_cancel)
 
-    def _setup_ui(self):
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.setMinimumHeight(0)
-        self._apply_card_style()
-
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 12, 6, 14)
-        main_layout.setSpacing(10)
-
-        # ── Header ──
-        header = QHBoxLayout()
-        header.setSpacing(10)
-
-        self.icon_label = QLabel("?", self)
-        self.icon_label.setFont(get_unified_font(14, True))
-        self.icon_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT};")
-
-        self.title_label = QLabel("等待你的选择", self)
-        self.title_label.setFont(get_unified_font(11, True))
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT};")
-
-        self.mode_hint_label = QLabel("", self)
-        self.mode_hint_label.setFont(get_unified_font(9))
-        self._apply_mode_hint_style()
-        self.mode_hint_label.setVisible(False)
-
-        header.addWidget(self.icon_label)
-        header.addWidget(self.title_label)
-        header.addWidget(self.mode_hint_label)
-        header.addStretch()
-        self.close_btn = TransparentToolButton(FluentIcon.CLOSE)
-        self.close_btn.setFixedSize(24, 24)
-        self.close_btn.clicked.connect(self._on_cancel)
-        header.addWidget(self.close_btn)
+    def _setup_content(self):
+        # 使用基类的 content_layout，移除 scroll_area（选项自己带滚动）
+        self.scroll_area.setParent(None)
+        self.scroll_area.deleteLater()
 
         # ── Question text ──
         self.question_label = QLabel("", self)
@@ -282,7 +244,6 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self.options_layout.setContentsMargins(0, 0, 0, 0)
         self.options_layout.setHorizontalSpacing(10)
         self.options_layout.setVerticalSpacing(10)
-
         self._options_scroll.setWidget(self._options_scroll_content)
 
         # ── Text Input (hidden initially) ──
@@ -328,28 +289,38 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self.footer_layout.addStretch()
         self.footer_layout.addWidget(self.confirm_btn)
 
-        # ── Assemble ──
-        main_layout.addLayout(header)
-        main_layout.addWidget(self.question_label)
-        main_layout.addWidget(self._options_scroll)
-        main_layout.addWidget(self.text_input)
-        main_layout.addLayout(self.bottom_bar)
-        main_layout.addLayout(self.footer_layout)
+        # ── Assemble into content_layout ──
+        self.content_layout.setContentsMargins(0, 2, 0, 2)
+        self.content_layout.setSpacing(8)
+        self.content_layout.addWidget(self.question_label)
+        self.content_layout.addWidget(self._options_scroll)
+        self.content_layout.addWidget(self.text_input)
+        self.content_layout.addLayout(self.bottom_bar)
+        self.content_layout.addLayout(self.footer_layout)
 
         self._update_mode_ui()
 
-    def _apply_mode_hint_style(self):
-        self.mode_hint_label.setStyleSheet(
+    def _apply_text_input_style(self):
+        Colors.refresh()
+        self.text_input.setStyleSheet(
             f"""
-            color: {Colors.REALTIME_ACCENT};
-            background-color: {Colors.REALTIME_TAG_BG};
-            border: 1px solid {Colors.REALTIME_TAG_BORDER};
-            border-radius: 10px;
-            padding: 2px 8px;
+            QTextEdit {{
+                background-color: {Colors.REALTIME_BG};
+                color: {Colors.REALTIME_TEXT};
+                border: 1px solid {Colors.REALTIME_TAG_BORDER};
+                border-radius: 8px;
+                padding: 10px 12px;
+                selection-background-color: {Colors.REALTIME_ACCENT};
+                {get_font_family_css()} font-size: 10pt;
+            }}
+            QTextEdit:focus {{
+                border-color: {Colors.REALTIME_ACCENT};
+            }}
             """
         )
 
     def _apply_toggle_btn_style(self):
+        Colors.refresh()
         self.toggle_text_mode_btn.setStyleSheet(
             f"""
             QPushButton {{
@@ -368,25 +339,8 @@ class QuestionFloatingWidget(SimpleCardWidget):
             """
         )
 
-    def _apply_text_input_style(self):
-        self.text_input.setStyleSheet(
-            f"""
-            QTextEdit {{
-                background-color: {Colors.REALTIME_BG};
-                color: {Colors.REALTIME_TEXT};
-                border: 1px solid {Colors.REALTIME_TAG_BORDER};
-                border-radius: 8px;
-                padding: 10px 12px;
-                selection-background-color: {Colors.REALTIME_ACCENT};
-                {get_font_family_css()} font-size: 10pt;
-            }}
-            QTextEdit:focus {{
-                border-color: {Colors.REALTIME_ACCENT};
-            }}
-            """
-        )
-
     def _apply_confirm_btn_style(self):
+        Colors.refresh()
         self.confirm_btn.setStyleSheet(
             f"""
             PrimaryPushButton {{
@@ -411,13 +365,10 @@ class QuestionFloatingWidget(SimpleCardWidget):
     def refresh_style(self):
         """响应主题切换"""
         Colors.refresh()
-        self._apply_card_style()
-        self.icon_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT};")
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT};")
+        super().refresh_style()
         self.question_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
         self.custom_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
         self.selection_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self._apply_mode_hint_style()
         self._apply_toggle_btn_style()
         self._apply_text_input_style()
         self._apply_confirm_btn_style()
@@ -467,12 +418,8 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self.text_input.setVisible(text_visible)
 
         if not has_options:
-            self.mode_hint_label.setVisible(True)
-            self.mode_hint_label.setText("文本输入")
             self.selection_hint_label.setText("直接输入回答")
         elif self._multiple:
-            self.mode_hint_label.setVisible(True)
-            self.mode_hint_label.setText("多选")
             if text_visible:
                 self.selection_hint_label.setText("可多选，也可补充说明")
                 self.toggle_text_mode_btn.setText("返回选项")
@@ -480,8 +427,6 @@ class QuestionFloatingWidget(SimpleCardWidget):
                 self.selection_hint_label.setText("请选择一个选项")
                 self.toggle_text_mode_btn.setText("改为输入")
         else:
-            self.mode_hint_label.setVisible(True)
-            self.mode_hint_label.setText("单选")
             if text_visible:
                 self.selection_hint_label.setText("文本输入会替代选项选择")
                 self.toggle_text_mode_btn.setText("返回选项")
@@ -523,7 +468,6 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._text_input_mode = not self._text_input_mode
         if self._text_input_mode:
             self.text_input.setFocus()
-        # 不再清空输入框，保留用户已输入的文字
         self._update_mode_ui()
 
     def _on_cancel(self):
@@ -545,7 +489,6 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._emit_single_answer(str(answer))
 
     def _emit_single_answer(self, answer: str):
-        self.setVisible(False)
         self.answered.emit(answer)
 
     def _on_checkbox_toggled(self, _checked):
@@ -590,24 +533,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
     def clear(self):
         self._question = ""
         self._options = []
-        self._multiple = False
-        self._text_input_mode = False
-        self.text_input.clear()
+        self._option_widgets = []
         self._clear_options()
-        self.setVisible(False)
-
-    def set_opacity(self, opacity: float):
-        """设置透明度，用于响应全局透明度变化"""
-        Colors.refresh()
-        bg = Colors.REALTIME_BG
-        if bg.startswith("rgba("):
-            # 最小 alpha 为 1，避免完全透明导致卡片"消失"
-            alpha = max(1, int(opacity * 255))
-            bg = bg.rsplit(",", 1)[0] + f", {alpha})"
-        self.setStyleSheet(f"""
-            CardWidget {{
-                background-color: {bg};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-radius: 8px;
-            }}
-        """)
+        self.question_label.clear()
+        self.text_input.clear()

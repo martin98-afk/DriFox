@@ -92,14 +92,43 @@ class CardContainer(QWidget):
             self.setMaximumHeight(0)
     
     def _expand(self):
-        """展开容器 - 让布局自适应卡片高度"""
-        # 通知父布局重新计算
-        self.updateGeometry()
+        """展开容器"""
+        total_height = 0
+        for widget in self._cards.values():
+            if widget.isVisible():
+                widget.adjustSize()
+                h = widget.height()
+                if h <= 0:
+                    h = widget.sizeHint().height()
+                if h <= 0:
+                    h = widget.minimumHeight()
+                if h <= 0:
+                    h = 400
+                total_height += h
+        
+        if total_height > 0:
+            self.setMaximumHeight(total_height + 4)
+        else:
+            self._collapse()
+        
         QTimer.singleShot(100, self._delayed_expand)
     
     def _delayed_expand(self):
-        """延迟展开 - 确保动态内容加载后的布局更新"""
-        self.updateGeometry()
+        """延迟展开 - 处理动态添加的内容"""
+        total_height = 0
+        for widget in self._cards.values():
+            if widget.isVisible():
+                h = widget.height()
+                if h <= 0:
+                    h = widget.sizeHint().height()
+                if h <= 0:
+                    h = 400
+                total_height += h
+        if total_height > 0:
+            self.setMaximumHeight(total_height + 4)
+            self.updateGeometry()
+        else:
+            self._collapse()
     
     def _collapse(self):
         """收起容器"""
