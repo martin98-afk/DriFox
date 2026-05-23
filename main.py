@@ -69,6 +69,17 @@ def main():
     # 禁用默认退出行为（让最后一个窗口隐藏到托盘而不是退出）
     app.setQuitOnLastWindowClosed(False)
 
+    # ========== 单实例检查 ==========
+    # 在 QApplication 创建之后立即检查，
+    # 避免在已运行的情况下重复创建窗口
+    from app.core.single_instance import SingleInstanceGuard
+    _guard = SingleInstanceGuard("Drifox")
+    if not _guard.try_lock():
+        # 已有实例在运行 → 通知其显示窗口，然后本实例退出
+        _guard.request_show_window()
+        _guard.cleanup()
+        return
+
     # 设置主题
     from qfluentwidgets import Theme, setTheme
     setTheme(Theme.DARK)
@@ -154,6 +165,14 @@ def main():
     # 等 chat_window 的 __init__ 完成后再创建弹窗，避免窗口渲染阻塞主线程
     from PyQt5.QtCore import QTimer
 
+    def _activate_window(window):
+        """激活窗口：显示 + 置前 + 还原（从最小化/隐藏恢复）"""
+        window.show()
+        window.activateWindow()
+        window.raise_()
+        if window.isMinimized():
+            window.showNormal()
+
     def _show_popup():
         # TrayManager 懒初始化（首次访问时才创建 QSystemTrayIcon）
         from app.tray_manager import TrayManager
@@ -167,8 +186,14 @@ def main():
         # 跳过历史会话恢复
         chat_window._skip_restore_history = True
 
+        # 连接单实例信号：当其他实例启动时，激活本窗口
+        _guard.show_requested.connect(lambda: _activate_window(popup))
+
         popup.show()
         logger.info("LLM Chatter 启动成功")
+
+    # 应用退出时清理单实例资源（共享内存 + IPC 服务器）
+    app.aboutToQuit.connect(_guard.cleanup)
 
     # 等 chat_window.__init__ 完成后再创建弹窗
     QTimer.singleShot(0, _show_popup)
