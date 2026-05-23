@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import gc
 import os
+import re
 import subprocess
 import sys
 import time
@@ -19,7 +20,7 @@ from PyQt5.QtCore import (
     QThreadPool,
     Qt,
 )
-from PyQt5.QtGui import QPixmap, QPalette
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
@@ -52,14 +53,14 @@ from app.core import (
     TopicSummaryTask,
 )
 from app.tool_popup import ToolWindow
-from app.utils.config import Settings
+from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
     font_size_css,
-    get_window_style,
     scale_font_size,
     apply_font_size_to_widget,
 )
+from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.base_settings_card import (
@@ -315,7 +316,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
-        from app.update_checker import UpdateChecker
 
         # 检查是否启用自动更新
         if not self.cfg.auto_check_update.value:
@@ -885,14 +885,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def setup_ui(self):
         Colors.refresh()
         # 动态更新主题选项
-        from app.utils.config import update_theme_options
         update_theme_options()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 4, 1)
         layout.setSpacing(1)
 
         # 设置窗口背景色（非常淡的主题色）
-        from app.utils.theme_manager import theme_manager
         colors = theme_manager.get_current_colors()
         window_bg = colors.get('window_bg', 'rgba(102, 198, 255, 0.04)')
         
@@ -900,7 +898,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._window_bg_color = window_bg
         
         # 解析颜色（包含 alpha）
-        import re
         m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)', window_bg)
         if m:
             r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
