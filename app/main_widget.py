@@ -107,6 +107,7 @@ from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.cards import CardManager, ContainerType
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
@@ -284,6 +285,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._current_session_id = self.session_manager.get_current_session().session_id
 
+        # 初始化卡片管理器
+        self._card_manager = CardManager.get_instance()
+
         # 初始化 UI
         self.setup_ui()
 
@@ -420,6 +424,99 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
 
                 stop_llm_api_service()
+
+    def _register_cards_to_manager(self):
+        """注册所有卡片到 CardManager
+        
+        优先级规则（数值越小权限越高）：
+        - 10: Question（最高，强制覆盖其他）
+        - 20: Tool, SubAgent（同级可共存）
+        - 30: History, Memory（同级可共存）
+        - 40: ModelConfig, AutoLoop
+        """
+        mgr = self._card_manager
+        
+        # Question 卡片 - 优先级10（最高）
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "question",
+            self._question_floating_widget,
+            priority=10
+        )
+        
+        # Tool 卡片 - 优先级20
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "tool",
+            self._tool_floating_widget,
+            priority=20
+        )
+        
+        # SubAgent 卡片 - 优先级20（与 Tool 同级可共存）
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "sub_agent",
+            self._sub_agent_floating_widget,
+            priority=20
+        )
+        
+        # History 卡片 - 优先级30
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "history",
+            self._history_card,
+            priority=30
+        )
+        
+        # Memory 卡片 - 优先级30（与 History 同级可共存）
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "memory",
+            self._memory_card,
+            priority=30
+        )
+        
+        # ModelConfig 卡片 - 优先级40
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "model_config",
+            self._model_config_card,
+            priority=40
+        )
+        
+        # AutoLoop Config 卡片 - 优先级40
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "auto_loop_config",
+            self._auto_loop_config_card,
+            priority=40
+        )
+        
+        # AutoLoop Running 卡片 - 优先级40
+        mgr.register_card(
+            ContainerType.BOTTOM,
+            "auto_loop_running",
+            self._auto_loop_running_card,
+            priority=40
+        )
+        
+        # Todo 卡片 - 优先级20（在 Top 容器）
+        mgr.register_card(
+            ContainerType.TOP,
+            "todo",
+            self._todo_floating_widget,
+            priority=20
+        )
+        
+        # MCP Edit 卡片 - 优先级40
+        mgr.register_card(
+            ContainerType.TOP,
+            "mcp_edit",
+            self._mcp_edit_card,
+            priority=40
+        )
+        
+        logger.info("[CardManager] 所有卡片注册完成")
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1172,6 +1269,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
         layout.addWidget(self._question_floating_widget)
+
+        # 注册卡片到 CardManager（优先级：数值越小权限越高）
+        self._register_cards_to_manager()
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(
             self._on_scroll_changed
@@ -5808,6 +5908,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, '_is_destroyed', False):
             return
         self._restore_after_question_close()
+        
+        # 恢复之前被 Question 隐藏的卡片
+        self._card_manager.restore_after_hide(excluded_card_id="question")
+        
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
