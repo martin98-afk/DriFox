@@ -1,0 +1,6 @@
+_settings_popup.closed: found=False
+_auto_loop_config_card.closed: found=False
+_auto_loop_running_card.closed: found=False
+settings_popup.closed: found=False
+auto_loop_config.closed: found=False
+auto_loop_running.closed: found=False

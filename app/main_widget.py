@@ -1071,6 +1071,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
         self._settings_popup.configChanged.connect(self._on_settings_config_changed)
+        self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings"))
 
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
@@ -1254,6 +1255,7 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
+        self._auto_loop_config_card.closed.connect(lambda: self._card_manager.hide_card("auto_loop_config"))
         self._auto_loop_config_card.setVisible(False)
         self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
 

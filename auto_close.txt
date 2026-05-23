@@ -1,0 +1,24 @@
+ # 关闭按钮
+        self.close_btn = TransparentToolButton(FluentIcon.CLOSE
+
+uentIcon.CLOSE)
+        self.close_btn.setFixedSize(24, 24)
+        self.close
+
+xedSize(24, 24)
+        self.close_btn.mousePressEvent = lambda e: self._on_clo
+
+essEvent = lambda e: self._on_close()
+        title_layout.addWidget(self.close
+
+  title_layout.addWidget(self.close_btn)
+
+        layout.addLayout(title_layou
+
+}
+        """
+
+    def _on_close(self):
+        self.setVisible(False)
+
+  

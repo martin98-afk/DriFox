@@ -36,7 +36,9 @@ FONT_CSS = get_font_family_css()
 class AutoLoopConfigCard(QFrame):
     """AutoLoop 配置卡片 — 插入到聊天区的竖排布局"""
 
-    startRequested = pyqtSignal(AutoLoopConfig)  # 用户点击开始
+    startRequested = pyqtSignal(AutoLoopConfig)
+
+    closed = pyqtSignal()  # 关闭按钮通知  # 用户点击开始
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -292,6 +294,7 @@ class AutoLoopConfigCard(QFrame):
 
     def _on_close(self):
         self.setVisible(False)
+        self.closed.emit()
 
     def refresh_font_size(self):
         """刷新字体大小配置"""

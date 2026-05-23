@@ -1,0 +1,10 @@
+def _on_close: byte 11536
+def _on_close(self):
+        self.setVisible(False)
+
+    def refresh_font_siz
+
+class AutoLoopRunningCard: byte 14034
+class AutoLoopRunningCard(QFrame):
+    """AutoLoop 运行状态卡 — 彩虹�
+

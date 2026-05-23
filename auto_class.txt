@@ -1,0 +1,5 @@
+class AutoLoopConfigCard(QFrame):
+  
+
+class AutoLoopRunningCard(QFrame):
+  
