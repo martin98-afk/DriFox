@@ -3,26 +3,25 @@
 llm_chatter widgets - 大模型对话框 UI 组件
 """
 
-# 核心卡片
-from app.widgets.base_settings_card import BaseSettingsCard
-from app.widgets.llm_settings_card import LLMSettingsCard
-from app.widgets.history_card import HistoryCard, get_message_preview
-from app.widgets.message_card import MessageCard, create_welcome_card
-from app.widgets.model_config_card import ModelConfigCard
-from app.widgets.model_selector_popup import ModelSelectorPopup
+# 核心卡片（已迁移到 cards/settings/）
+from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+from app.widgets.cards.settings.history_card import HistoryCard, get_message_preview
+from app.widgets.cards.settings.model_config_card import ModelConfigCard
+from app.widgets.cards.settings.memory_card import MemoryCardContent
+from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 
-# 悬浮组件
-from app.widgets.tool_floating_widget import ToolFloatingWidget
-from app.widgets.sub_agent_floating_widget import SubAgentFloatingWidget
-from app.widgets.todo_floating_widget import TodoFloatingWidget
-from app.widgets.question_floating_widget import QuestionFloatingWidget
+# 悬浮组件（已迁移到 cards/floating/）
+from app.widgets.cards.floating.tool_floating_widget import ToolFloatingWidget
+from app.widgets.cards.floating.sub_agent_floating_widget import SubAgentFloatingWidget
+from app.widgets.cards.floating.todo_floating_widget import TodoFloatingWidget
+from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget
 
 # 对话组件
 from app.widgets.bottom_input_area import SendableTextEdit
 from app.widgets.context_usage_ring import ContextUsageRing
 from app.widgets.conversation_node_preview import ConversationNodePreview
-from app.widgets.memory_card import MemoryCardContent
-from app.widgets.provider_edit_card import ProviderEditCard
+from app.widgets.model_selector_popup import ModelSelectorPopup
 
 # 对话框
 from app.widgets.file_undo_dialog import FileUndoPreviewDialog
