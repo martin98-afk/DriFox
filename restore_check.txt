@@ -1,9 +1,0 @@
-Found at 91134: restore_after_hide 处理
-        """
-        pass  # CardManager 会自动处理恢复
-
-    def
-Found at 261303: restore_after_hide(excluded_card_id="question")
-        
-        if self._pending_permission_tool_
-Total: 2

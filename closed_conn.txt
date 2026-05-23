@@ -1,0 +1,87 @@
+ect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        self._hook_edit_card.content_layout.addWidget(se
+
+===
+
+ok_edit_card.setVisible(False)
+        self._hook_edit_card.closed.connect(self._on_hook_edit_card_closed)
+        # Hook Edit 卡片已添加到容器，不�
+
+===
+
+._on_provider_edit_saved)
+        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
+        self._provider_edit_card.content_layout.addW
+
+===
+
+dit_card.setVisible(False)
+        self._provider_edit_card.closed.connect(self._on_provider_edit_card_closed)
+        # Provider Edit 卡片已添加到容�
+
+===
+
+mcp_edit_card.setVisible(False)
+        self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
+        # MCP Edit 卡片已添加到容器，不再
+
+===
+
+._history_card.setVisible(False)
+        self._history_card.closed.connect(self._restore_after_system_close)
+        # 搜索框（历史会话和归档标签
+
+===
+
+lf._memory_card.setVisible(False)
+        self._memory_card.closed.connect(self._restore_after_system_close)
+        self._bottom_card_container.add_card("mem
+
+===
+
+nfig_card.setVisible(False)
+        self._model_config_card.closed.connect(self._restore_after_system_close)
+        self._bottom_card_container.add_card("mod
+
+===
+
+._on_provider_edit_saved)
+        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
+        # 替换卡片内容
+        while self._pr
+
+===
+
+ect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        while self._hook_edit_card.content_layout.count(
+
+===
+
+ect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        while self._hook_edit_card.content_layout.count(
+
+===
+
+._on_provider_edit_saved)
+        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
+        # 替换卡片内容
+        while self._pr
+
+===
+
+nnect(self._on_mcp_edit_saved)
+        self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
+        while self._mcp_edit_card.content_layout.count():
+
+===
+
+nnect(self._on_mcp_edit_saved)
+        self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
+        while self._mcp_edit_card.content_layout.count():
+
+===
+
+Total: 14

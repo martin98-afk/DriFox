@@ -1,0 +1,6 @@
+def _restore_after_system_close(self):
+        """系统卡片关闭后，恢复之前被隐藏的卡片
+        现在由 CardManager 的 restore_after_hide 处理
+        """
+        pass  # CardManager 会自动处理恢复
+

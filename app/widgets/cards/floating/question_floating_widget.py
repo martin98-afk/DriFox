@@ -270,12 +270,14 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._options_scroll.setMinimumHeight(0)
         self._options_scroll.setStyleSheet("""
             QScrollArea { border: none; background: transparent; }
+            QScrollArea > QWidget > QWidget { background: transparent; }
             QScrollBar:vertical { width: 6px; background: transparent; }
             QScrollBar::handle:vertical { background: #555; border-radius: 3px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """)
 
         self._options_scroll_content = QWidget()
+        self._options_scroll_content.setStyleSheet("background: transparent;")
         self.options_layout = QGridLayout(self._options_scroll_content)
         self.options_layout.setContentsMargins(0, 0, 0, 0)
         self.options_layout.setHorizontalSpacing(10)

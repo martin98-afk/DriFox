@@ -1206,7 +1206,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
-        self._history_card.closed.connect(self._restore_after_system_close)
+        self._history_card.closed.connect(lambda: self._card_manager.hide_card("history"))
         # 搜索框（历史会话和归档标签都显示）
         self._history_card.set_search_handler(
             "🔍 搜索会话...",
@@ -1238,7 +1238,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
         self._memory_card.content_layout.addWidget(self._memory_card_popup)
         self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(self._restore_after_system_close)
+        self._memory_card.closed.connect(lambda: self._card_manager.hide_card("memory"))
         self._bottom_card_container.add_card("memory", self._memory_card)
 
         # 模型配置卡片
@@ -1247,7 +1247,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
         self._model_config_card.setVisible(False)
-        self._model_config_card.closed.connect(self._restore_after_system_close)
+        self._model_config_card.closed.connect(lambda: self._card_manager.hide_card("model_config"))
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片
