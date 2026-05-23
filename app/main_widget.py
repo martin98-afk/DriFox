@@ -1249,8 +1249,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_card.setVisible(False)
         self._model_config_card.closed.connect(self._restore_after_system_close)
         self._bottom_card_container.add_card("model_config", self._model_config_card)
-        # 强制渲染初始 tab 内容
-        self._model_config_card.set_current_tab("default")
 
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
