@@ -206,22 +206,37 @@ class CardManager:
             return False
         return self._visible_cards.get(container_type) == card_id
 
-    def restore_after_hide(self, excluded_card_id: str = None):
+    def restore_after_hide(self, closed_card_id: str = None):
         """恢复之前被隐藏的卡片
         
-        当高优先级卡片关闭后调用，恢复之前显示的低优先级卡片
+        Args:
+            closed_card_id: 刚刚关闭的卡片ID，用于确定恢复方向
+                             - 如果关闭的是 Top 卡片，恢复 Bottom 卡片
+                             - 如果关闭的是 Bottom 卡片，恢复 Top 卡片
         """
-        for card_id, was_visible in self._previous_visible_state.items():
-            if was_visible and card_id != excluded_card_id:
+        if not self._previous_visible_state:
+            return
+        
+        # 确定应该恢复哪个容器
+        closed_container = None
+        if closed_card_id and closed_card_id in self._card_containers:
+            closed_container = self._card_containers[closed_card_id]
+        
+        # 只恢复对侧容器中之前可见的卡片
+        for card_id, container in list(self._previous_visible_state.items()):
+            if closed_container == ContainerType.TOP and container == ContainerType.BOTTOM:
+                self.show_card(card_id, force=True)
+            elif closed_container == ContainerType.BOTTOM and container == ContainerType.TOP:
                 self.show_card(card_id, force=True)
         
         self._previous_visible_state.clear()
-        logger.debug(f"[CardManager] 恢复卡片: {[k for k, v in self._previous_visible_state.items() if v]}")
+        logger.debug(f"[CardManager] 恢复卡片完成")
 
     def _save_visible_state(self):
-        """保存当前可见状态"""
+        """保存当前可见状态（按容器分组）"""
         self._previous_visible_state.clear()
         for container_type in ContainerType:
-            card_id = self._visible_cards[container_type]
+            card_id = self._visible_cards.get(container_type)
             if card_id:
-                self._previous_visible_state[card_id] = True
+                # 按容器类型分组保存
+                self._previous_visible_state[card_id] = container_type
