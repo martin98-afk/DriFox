@@ -14,11 +14,11 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import PrimaryPushButton, TransparentToolButton, FluentIcon
+from qfluentwidgets import PrimaryPushButton, FluentIcon
 
 from app.utils.design_tokens import Colors
 from app.utils.utils import get_unified_font, get_font_family_css
-from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
 class WrappedOptionButton(QPushButton):
@@ -193,37 +193,84 @@ class WrappedCheckOption(QWidget):
         super().mousePressEvent(event)
 
 
-class QuestionFloatingWidget(BaseSettingsCard):
-    """悬浮提问卡片 — 使用 BaseSettingsCard 基类，行为与系统卡片一致"""
+class QuestionFloatingWidget(SystemCardFrame):
+    """悬浮提问卡片，支持单选、多选和切换为文本输入"""
 
     answered = pyqtSignal(str)
     cancelled = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__("等待你的选择", "❓", parent)
         self._question = ""
         self._options = []
         self._multiple = False
         self._text_input_mode = False
         self._option_widgets = []
-        self._setup_content()
+        super().__init__(parent)
+        # 覆盖 SystemCardFrame 的固定高度
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self._override_style()
+        self._setup_question_ui()
 
-        # 基类的关闭按钮 → 发射 cancelled 信号
-        self.closed.connect(self._on_cancel)
+    def _override_style(self):
+        """覆盖 SystemCardFrame 样式，使用 REALTIME 颜色"""
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.REALTIME_BG};
+                border: 1px solid {Colors.REALTIME_BORDER};
+                border-radius: 8px;
+            }}
+        """)
 
-    def _setup_content(self):
-        # 使用基类的 content_layout，移除 scroll_area（选项自己带滚动）
-        self.scroll_area.setParent(None)
-        self.scroll_area.deleteLater()
+    def refresh_style(self):
+        """响应主题切换"""
+        Colors.refresh()
+        self._override_style()
+        self._refresh_question_label_style()
+        self._apply_toggle_btn_style()
+        self._apply_text_input_style()
+        self._apply_confirm_btn_style()
 
-        # ── Question text ──
-        self.question_label = QLabel("", self)
-        self.question_label.setFont(get_unified_font(10))
-        self.question_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self.question_label.setWordWrap(True)
-        self.question_label.setMinimumHeight(28)
+    def _setup_question_ui(self):
+        """设置卡片内容（替换 SystemCardFrame 的 scroll_area）"""
+        # 移除现有的 scroll_area
+        if hasattr(self, 'scroll_area') and self.scroll_area:
+            self.scroll_area.deleteLater()
 
-        # ── Options in ScrollArea ──
+        # 清空 content_layout 中的所有 widget
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # 设置自定义标题
+        self.icon_label.setText("?")
+        self.title_label.setText("等待你的选择")
+
+        # ── 模式标签 ──
+        self._mode_hint_label = QLabel("", self)
+        self._mode_hint_label.setFont(get_unified_font(9))
+        self._mode_hint_label.setStyleSheet(
+            f"""
+            color: {Colors.REALTIME_ACCENT};
+            background-color: {Colors.REALTIME_TAG_BG};
+            border: 1px solid {Colors.REALTIME_TAG_BORDER};
+            border-radius: 10px;
+            padding: 2px 8px;
+            """
+        )
+        self._mode_hint_label.setVisible(False)
+        self._header_layout.insertWidget(2, self._mode_hint_label)
+
+        # ── 问题文本 ──
+        self._question_label = QLabel("", self)
+        self._question_label.setFont(get_unified_font(10))
+        self._refresh_question_label_style()
+        self._question_label.setWordWrap(True)
+        self._question_label.setMinimumHeight(28)
+        self._content_layout.addWidget(self._question_label)
+
+        # ── 选项区（ScrollArea）──
         self._options_scroll = QScrollArea(self)
         self._options_scroll.setWidgetResizable(True)
         self._options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -240,88 +287,67 @@ class QuestionFloatingWidget(BaseSettingsCard):
 
         self._options_scroll_content = QWidget()
         self._options_scroll_content.setStyleSheet("background: transparent;")
-        self.options_layout = QGridLayout(self._options_scroll_content)
-        self.options_layout.setContentsMargins(0, 0, 0, 0)
-        self.options_layout.setHorizontalSpacing(10)
-        self.options_layout.setVerticalSpacing(10)
+        self._options_layout = QGridLayout(self._options_scroll_content)
+        self._options_layout.setContentsMargins(0, 0, 0, 0)
+        self._options_layout.setHorizontalSpacing(10)
+        self._options_layout.setVerticalSpacing(10)
+
         self._options_scroll.setWidget(self._options_scroll_content)
+        self._content_layout.addWidget(self._options_scroll, 1)
 
-        # ── Text Input (hidden initially) ──
-        self.text_input = QTextEdit(self)
-        self.text_input.setPlaceholderText("输入你想补充的内容")
-        self.text_input.setFont(get_unified_font(10))
-        self.text_input.setMaximumHeight(104)
-        self.text_input.setVisible(False)
-        self.text_input.textChanged.connect(self._update_submit_state)
+        # ── 文本输入（默认隐藏）──
+        self._text_input = QTextEdit(self)
+        self._text_input.setPlaceholderText("输入你想补充的内容")
+        self._text_input.setFont(get_unified_font(10))
+        self._text_input.setMaximumHeight(104)
+        self._text_input.setVisible(False)
+        self._text_input.textChanged.connect(self._update_submit_state)
         self._apply_text_input_style()
+        self._content_layout.addWidget(self._text_input)
 
-        # ── Bottom bar: hint + toggle on same line ──
-        self.bottom_bar = QHBoxLayout()
-        self.bottom_bar.setSpacing(8)
+        # ── 底部栏：提示 + 切换按钮 ──
+        self._bottom_bar = QHBoxLayout()
+        self._bottom_bar.setSpacing(8)
 
-        self.custom_hint_label = QLabel("没有合适的选项？", self)
-        self.custom_hint_label.setFont(get_unified_font(9))
-        self.custom_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
+        self._custom_hint_label = QLabel("没有合适的选项？", self)
+        self._custom_hint_label.setFont(get_unified_font(9))
+        self._custom_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
 
-        self.toggle_text_mode_btn = QPushButton("改为输入", self)
-        self.toggle_text_mode_btn.setCursor(Qt.PointingHandCursor)
+        self._toggle_text_mode_btn = QPushButton("改为输入", self)
+        self._toggle_text_mode_btn.setCursor(Qt.PointingHandCursor)
         self._apply_toggle_btn_style()
-        self.toggle_text_mode_btn.clicked.connect(self._toggle_text_mode)
+        self._toggle_text_mode_btn.clicked.connect(self._toggle_text_mode)
 
-        self.bottom_bar.addWidget(self.custom_hint_label)
-        self.bottom_bar.addStretch()
-        self.bottom_bar.addWidget(self.toggle_text_mode_btn)
+        self._bottom_bar.addWidget(self._custom_hint_label)
+        self._bottom_bar.addStretch()
+        self._bottom_bar.addWidget(self._toggle_text_mode_btn)
+        self._content_layout.addLayout(self._bottom_bar)
 
-        # ── Footer ──
-        self.footer_layout = QHBoxLayout()
-        self.footer_layout.setSpacing(8)
+        # ── Footer：选择提示 + 提交按钮 ──
+        self._footer_layout = QHBoxLayout()
+        self._footer_layout.setSpacing(8)
 
-        self.selection_hint_label = QLabel("", self)
-        self.selection_hint_label.setFont(get_unified_font(9))
-        self.selection_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
+        self._selection_hint_label = QLabel("", self)
+        self._selection_hint_label.setFont(get_unified_font(9))
+        self._selection_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
 
-        self.confirm_btn = PrimaryPushButton("提交", self)
-        self.confirm_btn.setCursor(Qt.PointingHandCursor)
-        self.confirm_btn.clicked.connect(self._on_confirm)
+        self._confirm_btn = PrimaryPushButton("提交", self)
+        self._confirm_btn.setCursor(Qt.PointingHandCursor)
+        self._confirm_btn.clicked.connect(self._on_confirm)
         self._apply_confirm_btn_style()
 
-        self.footer_layout.addWidget(self.selection_hint_label)
-        self.footer_layout.addStretch()
-        self.footer_layout.addWidget(self.confirm_btn)
-
-        # ── Assemble into content_layout ──
-        self.content_layout.setContentsMargins(0, 2, 0, 2)
-        self.content_layout.setSpacing(8)
-        self.content_layout.addWidget(self.question_label)
-        self.content_layout.addWidget(self._options_scroll)
-        self.content_layout.addWidget(self.text_input)
-        self.content_layout.addLayout(self.bottom_bar)
-        self.content_layout.addLayout(self.footer_layout)
+        self._footer_layout.addWidget(self._selection_hint_label)
+        self._footer_layout.addStretch()
+        self._footer_layout.addWidget(self._confirm_btn)
+        self._content_layout.addLayout(self._footer_layout)
 
         self._update_mode_ui()
 
-    def _apply_text_input_style(self):
-        Colors.refresh()
-        self.text_input.setStyleSheet(
-            f"""
-            QTextEdit {{
-                background-color: {Colors.REALTIME_BG};
-                color: {Colors.REALTIME_TEXT};
-                border: 1px solid {Colors.REALTIME_TAG_BORDER};
-                border-radius: 8px;
-                padding: 10px 12px;
-                selection-background-color: {Colors.REALTIME_ACCENT};
-                {get_font_family_css()} font-size: 10pt;
-            }}
-            QTextEdit:focus {{
-                border-color: {Colors.REALTIME_ACCENT};
-            }}
-            """
-        )
+    def _refresh_question_label_style(self):
+        self._question_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
 
     def _apply_toggle_btn_style(self):
-        Colors.refresh()
-        self.toggle_text_mode_btn.setStyleSheet(
+        self._toggle_text_mode_btn.setStyleSheet(
             f"""
             QPushButton {{
                 color: {Colors.REALTIME_ACCENT};
@@ -339,9 +365,26 @@ class QuestionFloatingWidget(BaseSettingsCard):
             """
         )
 
+    def _apply_text_input_style(self):
+        self._text_input.setStyleSheet(
+            f"""
+            QTextEdit {{
+                background-color: {Colors.REALTIME_BG};
+                color: {Colors.REALTIME_TEXT};
+                border: 1px solid {Colors.REALTIME_TAG_BORDER};
+                border-radius: 8px;
+                padding: 10px 12px;
+                selection-background-color: {Colors.REALTIME_ACCENT};
+                {get_font_family_css()} font-size: 10pt;
+            }}
+            QTextEdit:focus {{
+                border-color: {Colors.REALTIME_ACCENT};
+            }}
+            """
+        )
+
     def _apply_confirm_btn_style(self):
-        Colors.refresh()
-        self.confirm_btn.setStyleSheet(
+        self._confirm_btn.setStyleSheet(
             f"""
             PrimaryPushButton {{
                 background-color: {Colors.REALTIME_ACCENT};
@@ -362,21 +405,10 @@ class QuestionFloatingWidget(BaseSettingsCard):
             """
         )
 
-    def refresh_style(self):
-        """响应主题切换"""
-        Colors.refresh()
-        super().refresh_style()
-        self.question_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self.custom_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self.selection_hint_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
-        self._apply_toggle_btn_style()
-        self._apply_text_input_style()
-        self._apply_confirm_btn_style()
-
     def _clear_options(self):
         self._option_widgets = []
-        while self.options_layout.count():
-            item = self.options_layout.takeAt(0)
+        while self._options_layout.count():
+            item = self._options_layout.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
 
@@ -393,10 +425,10 @@ class QuestionFloatingWidget(BaseSettingsCard):
         ]
 
     def _has_text_input(self):
-        return bool(self.text_input.toPlainText().strip())
+        return bool(self._text_input.toPlainText().strip())
 
     def _build_answer(self):
-        text = self.text_input.toPlainText().strip()
+        text = self._text_input.toPlainText().strip()
 
         if self._multiple:
             selected = self._selected_options()
@@ -413,53 +445,59 @@ class QuestionFloatingWidget(BaseSettingsCard):
         text_visible = self._text_input_mode or not has_options
 
         self._options_scroll.setVisible(has_options and not text_visible)
-        self.custom_hint_label.setVisible(has_options)
-        self.toggle_text_mode_btn.setVisible(has_options)
-        self.text_input.setVisible(text_visible)
+        self._custom_hint_label.setVisible(has_options)
+        self._toggle_text_mode_btn.setVisible(has_options)
+        self._text_input.setVisible(text_visible)
 
         if not has_options:
-            self.selection_hint_label.setText("直接输入回答")
+            self._mode_hint_label.setVisible(True)
+            self._mode_hint_label.setText("文本输入")
+            self._selection_hint_label.setText("直接输入回答")
         elif self._multiple:
+            self._mode_hint_label.setVisible(True)
+            self._mode_hint_label.setText("多选")
             if text_visible:
-                self.selection_hint_label.setText("可多选，也可补充说明")
-                self.toggle_text_mode_btn.setText("返回选项")
+                self._selection_hint_label.setText("可多选，也可补充说明")
+                self._toggle_text_mode_btn.setText("返回选项")
             else:
-                self.selection_hint_label.setText("请选择一个选项")
-                self.toggle_text_mode_btn.setText("改为输入")
+                self._selection_hint_label.setText("请选择一个选项")
+                self._toggle_text_mode_btn.setText("改为输入")
         else:
+            self._mode_hint_label.setVisible(True)
+            self._mode_hint_label.setText("单选")
             if text_visible:
-                self.selection_hint_label.setText("文本输入会替代选项选择")
-                self.toggle_text_mode_btn.setText("返回选项")
+                self._selection_hint_label.setText("文本输入会替代选项选择")
+                self._toggle_text_mode_btn.setText("返回选项")
             else:
-                self.selection_hint_label.setText("请选择一个选项")
-                self.toggle_text_mode_btn.setText("改为输入")
+                self._selection_hint_label.setText("请选择一个选项")
+                self._toggle_text_mode_btn.setText("改为输入")
 
         self._update_submit_state()
 
     def _update_submit_state(self):
         if not self._options:
-            self.confirm_btn.setVisible(True)
-            self.confirm_btn.setEnabled(self._has_text_input())
-            self.confirm_btn.setText("提交")
+            self._confirm_btn.setVisible(True)
+            self._confirm_btn.setEnabled(self._has_text_input())
+            self._confirm_btn.setText("提交")
             return
 
         if self._multiple:
             selected_count = len(self._selected_options())
             has_text = self._has_text_input()
-            self.confirm_btn.setVisible(True)
-            self.confirm_btn.setEnabled(selected_count > 0 or has_text)
+            self._confirm_btn.setVisible(True)
+            self._confirm_btn.setEnabled(selected_count > 0 or has_text)
             if selected_count > 0:
-                self.confirm_btn.setText(f"提交 ({selected_count})")
+                self._confirm_btn.setText(f"提交 ({selected_count})")
             else:
-                self.confirm_btn.setText("提交")
+                self._confirm_btn.setText("提交")
             return
 
         if self._text_input_mode:
-            self.confirm_btn.setVisible(True)
-            self.confirm_btn.setEnabled(self._has_text_input())
-            self.confirm_btn.setText("提交")
+            self._confirm_btn.setVisible(True)
+            self._confirm_btn.setEnabled(self._has_text_input())
+            self._confirm_btn.setText("提交")
         else:
-            self.confirm_btn.setVisible(False)
+            self._confirm_btn.setVisible(False)
 
     def _toggle_text_mode(self):
         if not self._options:
@@ -467,7 +505,7 @@ class QuestionFloatingWidget(BaseSettingsCard):
 
         self._text_input_mode = not self._text_input_mode
         if self._text_input_mode:
-            self.text_input.setFocus()
+            self._text_input.setFocus()
         self._update_mode_ui()
 
     def _on_cancel(self):
@@ -510,8 +548,8 @@ class QuestionFloatingWidget(BaseSettingsCard):
         self._multiple = bool(multiple)
         self._text_input_mode = not self._options
 
-        self.question_label.setText(self._question)
-        self.text_input.clear()
+        self._question_label.setText(self._question)
+        self._text_input.clear()
         self._clear_options()
 
         if self._options:
@@ -524,7 +562,7 @@ class QuestionFloatingWidget(BaseSettingsCard):
                     if self._multiple
                     else self._create_button(option)
                 )
-                self.options_layout.addWidget(widget, row, col)
+                self._options_layout.addWidget(widget, row, col)
                 self._option_widgets.append(widget)
 
         self._update_mode_ui()
@@ -534,6 +572,8 @@ class QuestionFloatingWidget(BaseSettingsCard):
         self._question = ""
         self._options = []
         self._option_widgets = []
+        self._text_input_mode = False
+        self._question_label.setText("")
         self._clear_options()
-        self.question_label.clear()
-        self.text_input.clear()
+        self._text_input.clear()
+        self._update_mode_ui()

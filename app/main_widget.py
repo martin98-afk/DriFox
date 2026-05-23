@@ -1269,6 +1269,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.setVisible(False)
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
+        self._question_floating_widget.closed.connect(lambda: self._card_manager.hide_card("question"))
         self._bottom_card_container.add_card("question", self._question_floating_widget)
 
         # 注册卡片到 CardManager（优先级：数值越小权限越高）
