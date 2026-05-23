@@ -505,7 +505,8 @@ class ToolPopupDialog(QDialog):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(400, 300)
-        self.setSizeGripEnabled(True)
+        # 禁用 SizeGrip（使用自定义边缘拖拽，不需要它）
+        self.setSizeGripEnabled(False)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -918,6 +919,11 @@ class ToolPopupDialog(QDialog):
         self._drag_pos = None
         self._resize_edge = ResizeEdge.EDGE_NONE
         self._resize_start_geometry = None
+        # 释放鼠标后重置光标 - 使用 QApplication 强制重置
+        from PyQt5.QtWidgets import QApplication
+        QApplication.restoreOverrideCursor()
+        self.setCursor(Qt.ArrowCursor)
+        logger.debug("[Cursor] mouseReleaseEvent - reset to ArrowCursor")
         if event.button() == Qt.LeftButton:
             self._save_geometry()
         super().mouseReleaseEvent(event)
@@ -1024,4 +1030,9 @@ class ToolPopupDialog(QDialog):
 
     def leaveEvent(self, e):
         super().leaveEvent(e)
+        # 离开窗口时重置光标 - 强制清除系统级光标状态
+        from PyQt5.QtWidgets import QApplication
+        QApplication.restoreOverrideCursor()
+        self.setCursor(Qt.ArrowCursor)
         self._hide_timer_start()
+        logger.debug("[Cursor] leaveEvent - reset to ArrowCursor")

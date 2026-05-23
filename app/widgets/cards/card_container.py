@@ -22,6 +22,7 @@ class CardContainer(QWidget):
         self._container_type = container_type
         self._cards: Dict[str, QWidget] = {}
         self._card_manager: Optional[CardManager] = None
+        self._window_id: Optional[str] = None  # 多窗口隔离
         self._setup_ui()
     
     def _setup_ui(self):
@@ -38,9 +39,10 @@ class CardContainer(QWidget):
     def container_type(self) -> ContainerType:
         return self._container_type
     
-    def bind_card_manager(self, card_manager: CardManager):
-        """绑定 CardManager"""
+    def bind_card_manager(self, card_manager: CardManager, window_id: str):
+        """绑定 CardManager（多窗口隔离）"""
         self._card_manager = card_manager
+        self._window_id = window_id
     
     def _on_card_shown(self, card_id: str):
         """某张卡片被显示"""
@@ -74,10 +76,10 @@ class CardContainer(QWidget):
         self._layout.addWidget(card_widget)
         card_widget.setVisible(False)
         
-        # 注册此卡片专属的回调
-        if self._card_manager:
-            self._card_manager.on_card_shown(card_id, self._on_card_shown)
-            self._card_manager.on_card_hidden(card_id, self._on_card_hidden)
+        # 注册此卡片专属的回调（传入 window_id 用于多窗口隔离）
+        if self._card_manager and self._window_id:
+            self._card_manager.on_card_shown(self._window_id, card_id, self._on_card_shown)
+            self._card_manager.on_card_hidden(self._window_id, card_id, self._on_card_hidden)
     
     def remove_card(self, card_id: str):
         """从容器移除卡片"""
