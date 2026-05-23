@@ -428,6 +428,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager
         
+        容器分配：
+        - TopCardContainer (chatscroll 上方): Todo、MCP Edit、Hook Edit、Settings 等系统配置
+        - BottomCardContainer (chatscroll 下方): 长期记忆、历史会话、模型参数、AutoLoop、Tool、Question、SubAgent
+        
         规则：
         - 同位置互斥：Top/Bottom 各自只能显示一个卡片
         - Question 强制覆盖：Question 显示时同时关闭其他所有卡片
@@ -435,77 +439,26 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         mgr = self._card_manager
         
-        # ===== Bottom 容器（chatscroll 下方）=====
-        # Question 卡片 - 强制覆盖所有其他卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "question",
-            self._question_floating_widget,
-        )
+        # ===== TopCardContainer (chatscroll 上方) =====
+        # 系统配置卡片，互斥显示
+        mgr.register_card(ContainerType.TOP, "todo", self._todo_floating_widget)
+        mgr.register_card(ContainerType.TOP, "mcp_edit", self._mcp_edit_card)
+        mgr.register_card(ContainerType.TOP, "settings", self._settings_popup)
+        mgr.register_card(ContainerType.TOP, "provider_edit", self._provider_edit_card)
+        mgr.register_card(ContainerType.TOP, "hook_edit", self._hook_edit_card)
         
-        # Tool 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "tool",
-            self._tool_floating_widget,
-        )
-        
-        # SubAgent 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "sub_agent",
-            self._sub_agent_floating_widget,
-        )
-        
-        # History 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "history",
-            self._history_card,
-        )
-        
-        # Memory 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "memory",
-            self._memory_card,
-        )
-        
-        # ModelConfig 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "model_config",
-            self._model_config_card,
-        )
-        
-        # AutoLoop Config 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "auto_loop_config",
-            self._auto_loop_config_card,
-        )
-        
-        # AutoLoop Running 卡片
-        mgr.register_card(
-            ContainerType.BOTTOM,
-            "auto_loop_running",
-            self._auto_loop_running_card,
-        )
-        
-        # ===== Top 容器（chatscroll 上方）=====
-        # Todo 卡片
-        mgr.register_card(
-            ContainerType.TOP,
-            "todo",
-            self._todo_floating_widget,
-        )
-        
-        # MCP Edit 卡片
-        mgr.register_card(
-            ContainerType.TOP,
-            "mcp_edit",
-            self._mcp_edit_card,
-        )
+        # ===== BottomCardContainer (chatscroll 下方) =====
+        # Question: 强制覆盖所有其他卡片
+        # Tool/SubAgent: 实时卡片
+        # History/Memory/ModelConfig/AutoLoop: 系统卡片
+        mgr.register_card(ContainerType.BOTTOM, "question", self._question_floating_widget)
+        mgr.register_card(ContainerType.BOTTOM, "tool", self._tool_floating_widget)
+        mgr.register_card(ContainerType.BOTTOM, "sub_agent", self._sub_agent_floating_widget)
+        mgr.register_card(ContainerType.BOTTOM, "history", self._history_card)
+        mgr.register_card(ContainerType.BOTTOM, "memory", self._memory_card)
+        mgr.register_card(ContainerType.BOTTOM, "model_config", self._model_config_card)
+        mgr.register_card(ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card)
+        mgr.register_card(ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card)
         
         logger.info("[CardManager] 所有卡片注册完成")
 
@@ -534,12 +487,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_settings_card(self):
         """切换设置卡片的显示"""
-        if self._settings_popup.isVisible():
-            self._settings_popup.hide()
-            self._restore_after_system_close()
-        else:
-            self._hide_main_popups()  # 隐藏其他主面板
-            self._settings_popup.show()
+        self._card_manager.toggle_card("settings")
 
     def _open_api_docs(self):
         """打开 API 文档页面"""
@@ -1942,15 +1890,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
-        # 切换当前卡片
-        if self._model_config_card.isVisible():
-            self._model_config_card.hide()
-            self._restore_after_system_close()
-        else:
-            self._hide_main_popups()  # 隐藏其他主面板
-            # 每次打开都重新加载配置
-            self._load_model_config_to_card()
-            self._model_config_card.show()
+        self._card_manager.toggle_card("model_config")
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
@@ -2128,17 +2068,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
-        # 切换当前卡片
-        if self._history_card.isVisible():
-            self._history_card.hide()
-            self._restore_after_system_close()
-        else:
-            self._hide_main_popups()  # 隐藏其他主面板
-            self._history_card.show()
-            # 同步搜索框可见性（根据当前标签）
-            self._sync_search_box_visibility()
-            # 延迟刷新数据，让弹窗先显示出来再填充内容（提升流畅度）
-            QTimer.singleShot(0, self._refresh_history_toggle_panel)
+        self._card_manager.toggle_card("history")
 
     def _sync_search_box_visibility(self):
         """同步搜索框：两个标签页都显示搜索框"""
