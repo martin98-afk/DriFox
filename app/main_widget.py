@@ -1158,7 +1158,7 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._memory_card)
 
         # AutoLoop 配置卡片 - 和历史会话/记忆卡片同位置
-        from app.widgets.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
+        from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
         self._auto_loop_config_card.setVisible(False)
@@ -6095,7 +6095,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._toggle_memory_card()
         # 确保切换到关键文档 Tab
         if hasattr(self, '_memory_card_popup') and self._memory_card_popup:
-            from app.widgets.memory_card import TAB_KEY_DOCUMENTS
+            from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
             self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
             # 同步卡片 Tab 按钮
             if hasattr(self, '_memory_card') and self._memory_card:
