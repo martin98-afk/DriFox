@@ -34,6 +34,7 @@ class ConversationExecutor:
 
         self._current_worker: Optional[Any] = None  # 不再硬编码 OpenAIChatWorker
         self._is_streaming = False
+        self._finalize_worker: Optional[Any] = None  # 两阶段停止：保存 worker 供 finalize_stop() 使用
 
     @property
     def is_streaming(self) -> bool:
@@ -180,6 +181,82 @@ class ConversationExecutor:
 
         return check
 
+    def cancel_worker(self):
+        """非阻塞取消当前 Worker
+
+        仅执行非阻塞操作：
+        1. 标记流式已停止
+        2. 断开所有信号连接
+        3. 调用 worker.cancel() 设置取消标志
+        4. 保存 worker 引用供 finalize_stop() 使用
+
+        不等待 worker 线程结束，不获取中断消息，不清理资源。
+        调用后需在适当时机调用 finalize_stop() 完成后续操作。
+        """
+        self._is_streaming = False
+        worker = self._current_worker
+        self._current_worker = None
+
+        if worker:
+            # 断开所有信号连接，防止已取消的 worker 继续向 UI 发送事件
+            for signal_name in ("retry_status", "error_occurred", "finished_with_content",
+                                "finished_with_messages", "content_received", "reasoning_content_received",
+                                 "tool_call_started", "tool_args_updated", "tool_result_received",
+                                 "question_asked", "permission_approval_requested", "thinking_started",
+                                 "retry_resolved", "compaction_status_changed",
+                                 "finished"):
+                try:
+                    signal = getattr(worker, signal_name, None)
+                    if signal is not None:
+                        signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+
+            # 设置取消标志（非阻塞，worker 线程会在下次检查时主动退出）
+            worker.cancel()
+            # 保存 worker 引用供 finalize_stop() 使用
+            self._finalize_worker = worker
+
+    def finalize_stop(self) -> List[Dict]:
+        """完成停止流程（阻塞操作）
+
+        在 cancel_worker() 调用后执行，等待 worker 线程结束并收集结果。
+        此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
+
+        Returns:
+            被中断的消息列表
+        """
+        worker = getattr(self, '_finalize_worker', None)
+        self._finalize_worker = None
+
+        interrupted: List[Dict] = []
+        if not worker:
+            return interrupted
+
+        # 等待 worker 线程结束（最多等 3 秒）
+        if worker.isRunning():
+            if not worker.wait(3000):
+                logger.warning(f"[ConversationExecutor] Worker did not finish within 3s, force quit")
+                worker.quit()
+                if not worker.wait(1000):
+                    logger.warning(f"[ConversationExecutor] Worker force quit timeout, terminating")
+                    worker.terminate()
+                    worker.wait()
+
+        # worker 已停止，状态已稳定，安全获取中断消息
+        try:
+            interrupted = worker.get_interrupted_messages()
+        except Exception as e:
+            logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
+
+        # 清理 worker 资源
+        try:
+            worker.cleanup()
+        except Exception as e:
+            logger.warning(f"[ConversationExecutor] Failed to cleanup worker: {e}")
+
+        return interrupted
+
     def _connect_callbacks(self, callbacks: Dict[str, Callable]):
         """连接 Worker 信号到回调"""
         if not self._current_worker:
@@ -210,64 +287,18 @@ class ConversationExecutor:
         safe_connect("retry_resolved", "retry_resolved")
 
     def stop(self) -> List[Dict]:
-        """停止当前 Worker，返回中断的消息
+        """停止当前 Worker，返回中断的消息（同步方式，可能阻塞 UI 线程）
 
-        流程说明（修正了竞态条件）：
-        1. 标记流式已停止
-        2. 断开所有信号连接（阻止 worker 继续向 UI 发送事件）
-        3. 调用 worker.cancel() 设置取消标志（阻止 worker 线程继续修改状态）
-        4. 等待 worker 线程结束（最多等 3 秒）
-        5. 在线程安全停止后，获取中断消息（此时 worker 状态已稳定）
-        6. 清理 worker 资源
+        内部使用两阶段停止：
+        1. cancel_worker() - 非阻塞操作
+        2. finalize_stop() - 阻塞操作（wait + 获取消息 + 清理）
+
+        如果需要在 UI 线程中快速响应，建议分别调用：
+          executor.cancel_worker()        # 立即返回
+          QTimer.singleShot(0, lambda: ... executor.finalize_stop())
         """
-        self._is_streaming = False
-        worker = self._current_worker
-        self._current_worker = None
-
-        interrupted: List[Dict] = []
-        if worker:
-            # 🛡️ 第一步：断开信号连接，防止已取消的 worker 继续向 UI 发送事件
-            # 注意：必须包含 "finished"（QThread.finished），否则旧 worker 完成后
-            # 会触发 _on_worker_finished 擦除新的 worker 引用（竞态条件 RC1）
-            for signal_name in ("retry_status", "error_occurred", "finished_with_content",
-                                "finished_with_messages", "content_received", "reasoning_content_received",
-                                 "tool_call_started", "tool_args_updated", "tool_result_received",
-                                 "question_asked", "permission_approval_requested", "thinking_started",
-                                 "retry_resolved", "compaction_status_changed",
-                                 "finished"):
-                try:
-                    signal = getattr(worker, signal_name, None)
-                    if signal is not None:
-                        signal.disconnect()
-                except (TypeError, RuntimeError):
-                    pass  # 信号可能未连接或对象已销毁
-
-            # 🛡️ 第二步：先 cancel（设置取消标志），停止 worker 线程继续修改状态
-            worker.cancel()
-
-            # 🛡️ 第三步：等待 worker 线程结束（最多等 3 秒）
-            if worker.isRunning():
-                if not worker.wait(3000):  # 3秒超时
-                    logger.warning(f"[ConversationExecutor] Worker did not finish within 3s, force quit")
-                    worker.quit()
-                    if not worker.wait(1000):
-                        logger.warning(f"[ConversationExecutor] Worker force quit timeout, terminating")
-                        worker.terminate()
-                        worker.wait()
-
-            # 🛡️ 第四步：worker 已停止，状态已稳定，安全获取中断消息
-            try:
-                interrupted = worker.get_interrupted_messages()
-            except Exception as e:
-                logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
-
-            # 🛡️ 第五步：清理 worker 资源
-            try:
-                worker.cleanup()
-            except Exception as e:
-                logger.warning(f"[ConversationExecutor] Failed to cleanup worker: {e}")
-
-        return interrupted
+        self.cancel_worker()
+        return self.finalize_stop()
 
     def cleanup(self):
         """清理当前 Worker"""

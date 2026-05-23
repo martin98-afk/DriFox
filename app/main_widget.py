@@ -3251,6 +3251,25 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._user_prefix_cache[-1] + (1 if is_user else 0)
             )
 
+    def _refresh_all_cards_round_index(self):
+        """
+        删除/撤销操作后，重新同步所有存活 user 卡片的 _round_index。
+        因为删除前面的 round 会导致后面卡片的 round_index 偏移。
+        """
+        user_count = 0
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not item or not item.widget():
+                continue
+            widget = item.widget()
+            if not isinstance(widget, MessageCard):
+                continue
+            if getattr(widget, '_is_welcome', False):
+                continue
+            if widget.role == "user":
+                widget._round_index = user_count
+                user_count += 1
+
     # ==================== Batch 结构同步 ====================
 
     def _sync_batch_structures(self):
@@ -4572,7 +4591,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # === 5. 保存 session ===
         self._persist_session_after_mutation()
 
-        # === 6. 收尾 ===
+        # === 6. 刷新剩余卡片的 round_index ===
+        self._refresh_all_cards_round_index()
+
+        # === 7. 收尾 ===
         self._finalize_local_session_mutation()
 
         return True
@@ -4662,6 +4684,8 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[DELETE] Failed to persist session: {e}")
 
+        # 同步剩余卡片的 _round_index（删除后后面卡片的 round 会偏移）
+        self._refresh_all_cards_round_index()
         self._finalize_local_session_mutation()
 
     def _undo_from_message(self, card: MessageCard):
@@ -4672,28 +4696,48 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        # 优先使用 card._round_index（卡创建时已正确设置）
-        # 避免使用 session 模糊匹配导致的错误（重复文本、时间戳格式差异）
+        # 同步 _current_session_id（与 _delete_user_round 保持一致）
+        if self._current_session_id != session.session_id:
+            self._current_session_id = session.session_id
+
+        # 获取当前 session 的 round_ranges，用于验证 round_index
+        canonical_now = consolidate_messages(session.messages)
+        round_ranges_now = get_user_round_ranges(canonical_now)
+
+        # 优先使用 card._round_index，但需要验证是否仍然有效
+        # （删除/撤销前面的 round 会导致后面卡片的 round_index 偏移）
         round_index = card._round_index
+        if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
+            # round_index 已过时，降级重算
+            round_index = None
+
         if round_index is None:
-            # 降级：尝试使用 _message_index 计算 round_index
+            # 降级方法 1：通过布局遍历确定卡片位置（最可靠）
+            round_index = self._find_user_round_index_for_card(card)
+            if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
+                round_index = None
+
+        if round_index is None:
+            # 降级方法 2：使用 _message_index 估算
             if card._message_index is not None:
-                # 计算该 batch 之前的 user batch 数量
                 round_index = 0
                 for idx in range(card._message_index):
                     if idx < len(self._message_batch) and self._message_batch[idx] and \
                        self._message_batch[idx][0].get("role") == "user":
                         round_index += 1
-            else:
-                # 最终降级：使用 session 文本匹配
-                user_text = card.get_plain_text()
-                timestamp = card.timestamp
-                round_index = self._find_user_round_index_from_session(
-                    session, user_text, timestamp
-                )
+                if round_index >= len(round_ranges_now):
+                    round_index = None
 
-        if round_index is None or round_index < 0:
-            logger.warning("[UNDO] Cannot determine round_index for card")
+        if round_index is None:
+            # 最终降级：使用 session 文本匹配
+            user_text = card.get_plain_text()
+            timestamp = card.timestamp
+            round_index = self._find_user_round_index_from_session(
+                session, user_text, timestamp
+            )
+
+        if round_index is None or round_index < 0 or round_index >= len(round_ranges_now):
+            logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
 
         if self._is_streaming:
@@ -4723,6 +4767,22 @@ class OpenAIChatToolWindow(ToolWindow):
                 if selected_ops:
                     result = self.backend.file_recorder.rollback_operations(selected_ops)
                     self._show_undo_result(result)
+
+        # 再次验证 round_index 是否仍有效（dialog.exec_() 期间 session 可能变化）
+        session_final = self.session_manager.get_current_session()
+        if session_final:
+            canonical_final = consolidate_messages(session_final.messages)
+            round_ranges_final = get_user_round_ranges(canonical_final)
+            if round_index < 0 or round_index >= len(round_ranges_final):
+                logger.warning(
+                    "[UNDO] round_index became invalid after dialog, recalculating: "
+                    f"round_index={round_index}, available={len(round_ranges_final)}"
+                )
+                # 尝试通过布局重新计算
+                round_index = self._find_user_round_index_for_card(card)
+                if round_index is None or round_index < 0 or round_index >= len(round_ranges_final):
+                    logger.error("[UNDO] Cannot recover round_index after dialog, aborting undo")
+                    return
 
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
@@ -6594,10 +6654,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_cancelled_by_user = False
         # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
         self._topic_summary_cancelled = True
-        interrupted_messages: List[Dict[str, Any]] = []
 
+        # 🛡️ 防止重复点击停止按钮
+        if getattr(self, '_stop_deferred_pending', False):
+            return
+        self._stop_deferred_pending = True
+
+        # ===== 第一阶段：非阻塞取消 + 立即更新 UI =====
+        # 先取消 worker（仅设置标志 + 断开信号，不阻塞）
         if self.backend.chat_engine:
-            interrupted_messages = self.backend.stop_streaming() or []
+            self.backend.cancel_streaming()
 
         self._is_streaming = False
 
@@ -6610,10 +6676,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.finish_streaming()
 
-        if interrupted_messages:
-            self._on_messages_updated(interrupted_messages)
-            if self.history_manager:
-                self._save_current_session_to_history()
+        # 优先显示中止提示，让用户立即感知到操作已生效
         InfoBar.warning(
             title="已中止",
             content="",
@@ -6625,6 +6688,32 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if self.input_area:
             self.input_area.setFocus()
+
+        # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 保存消息）=====
+        # 使用 QTimer.singleShot 延迟到 UI 事件处理完成后执行，
+        # 避免 worker.wait() 等阻塞操作影响界面响应
+        QTimer.singleShot(0, self._deferred_stop_handler)
+
+    def _deferred_stop_handler(self):
+        """延迟停止处理：等待 worker 结束 + 收集中断消息 + 保存会话
+
+        此方法在 _on_stop_clicked() 的 UI 更新完成后执行，
+        包含可能会阻塞的 worker.wait() 和 I/O 操作。
+        """
+        if getattr(self, '_is_destroyed', False):
+            return
+
+        self._stop_deferred_pending = False
+        interrupted_messages: List[Dict[str, Any]] = []
+
+        # 完成停止流程（可能会阻塞等待 worker 线程结束）
+        if self.backend and self.backend.chat_engine:
+            interrupted_messages = self.backend.finalize_stop() or []
+
+        if interrupted_messages:
+            self._on_messages_updated(interrupted_messages)
+            if self.history_manager:
+                self._save_current_session_to_history()
 
     def _create_context_menu(self):
         self._context_menu_actions = {}

@@ -41,8 +41,30 @@ class BaseEngine:
 
     # ========== 公共方法 ==========
 
+    def cancel_streaming(self):
+        """非阻塞取消流式输出
+
+        仅设置取消标志并断开信号，不等待 worker 线程结束。
+        调用后可以立即更新 UI，然后在适当时机调用 finalize_stop()。
+        """
+        if self._conversation_executor:
+            self._conversation_executor.cancel_worker()
+
+    def finalize_stop(self) -> List[Dict]:
+        """完成停止流程（阻塞操作，获取中断消息并清理）
+
+        在 cancel_streaming() 调用后执行。
+        此方法是阻塞的，应在 UI 更新后调用。
+
+        Returns:
+            被中断的消息列表
+        """
+        if self._conversation_executor:
+            return self._conversation_executor.finalize_stop()
+        return []
+
     def stop(self) -> List[Dict]:
-        """停止当前执行，返回被中断的消息列表"""
+        """停止当前执行，返回被中断的消息列表（同步方式，可能阻塞）"""
         return self._conversation_executor.stop()
 
     def cleanup(self):

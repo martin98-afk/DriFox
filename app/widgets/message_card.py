@@ -2417,13 +2417,7 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
-        # 流式停止时使用短延迟渲染而非立即渲染，
-        # 避免 content_to_markdown + render_markdown_to_html + runJavaScript
-        # 同步阻塞 UI 线程导致卡顿。
-        # 延迟 16ms 让 UI 线程先处理停止动画、InfoBar 弹出等操作。
-        if self._render_timer.isActive():
-            self._render_timer.stop()
-        self._render_timer.start(16)
+        self._schedule_render(immediate=True)
 
     def get_plain_text(self) -> str:
         return self._markdown_text
