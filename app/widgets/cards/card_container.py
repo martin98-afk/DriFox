@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy, QApplication
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QEvent, QTimer
 from loguru import logger
 
 from app.widgets.cards.card_manager import CardManager, ContainerType
@@ -27,7 +27,7 @@ class CardContainer(QWidget):
     
     def _setup_ui(self):
         """初始化UI"""
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.setMinimumHeight(0)
         self.setMaximumHeight(0)  # 默认折叠
         
@@ -72,6 +72,7 @@ class CardContainer(QWidget):
         self._cards[card_id] = card_widget
         self._layout.addWidget(card_widget)
         card_widget.setVisible(False)
+        card_widget.installEventFilter(self)
         
         # 注册此卡片专属的回调（传入 window_id 用于多窗口隔离）
         if self._card_manager and self._window_id:
@@ -88,6 +89,7 @@ class CardContainer(QWidget):
             return
         
         widget = self._cards[card_id]
+        widget.removeEventFilter(self)
         self._layout.removeWidget(widget)
         del self._cards[card_id]
         
@@ -145,6 +147,11 @@ class CardContainer(QWidget):
         self.setMinimumHeight(0)
         self.setMaximumHeight(0)
         self.updateGeometry()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize and obj in self._cards.values():
+            QTimer.singleShot(0, self._expand)
+        return super().eventFilter(obj, event)
 
 class TopCardContainer(CardContainer):
     def __init__(self):

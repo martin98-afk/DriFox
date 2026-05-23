@@ -211,7 +211,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
         )
 
     def _setup_ui(self):
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMinimumHeight(128)
         self._apply_card_style()
 
@@ -457,6 +457,11 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self.toggle_text_mode_btn.setVisible(has_options)
         self.text_input.setVisible(text_visible)
 
+        if has_options and not text_visible:
+            self._update_options_scroll_min_height()
+        else:
+            self._options_scroll.setMinimumHeight(0)
+
         if not has_options:
             self.mode_hint_label.setVisible(True)
             self.mode_hint_label.setText("文本输入")
@@ -481,6 +486,16 @@ class QuestionFloatingWidget(SimpleCardWidget):
                 self.toggle_text_mode_btn.setText("改为输入")
 
         self._update_submit_state()
+
+    def _update_options_scroll_min_height(self):
+        if not self._options:
+            self._options_scroll.setMinimumHeight(0)
+            return
+
+        columns = 2 if len(self._options) > 2 else max(1, len(self._options))
+        rows = (len(self._options) + columns - 1) // columns
+        min_height = max(72, rows * 58)
+        self._options_scroll.setMinimumHeight(min(min_height, 160))
 
     def _update_submit_state(self):
         if not self._options:
