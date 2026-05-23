@@ -563,25 +563,22 @@ class OpenAIChatWorker(QThread):
                     if self._is_cancelled:
                         return
 
-                    # 防御检查：_execute_all_tools 返回 None 可能是 permission 取消
-                    # （此时 _question_pending 从未被设置），不是 question 触发
-                    if q is None:
-                        logger.warning("tool_results is None but _question_pending is None, "
-                                       "likely permission cancelled, skipping question flow")
-                        continue
-                    response_sequence = self._build_response_message_sequence()
-                    current_messages.extend(response_sequence)
-                    current_session_messages.extend(response_sequence)
+                    # 先构造 question_result，再传入 _build_response_message_sequence，
+                    # 避免 tool_results=None 被误判为"取消中断"场景而清空 tool_calls
                     question_result = {
                         "role": "tool",
                         "tool_call_id": q["tool_call_id"],
+                        "name": "question",
+                        "arguments": {},
                         "content": self._pending_answer,
+                        "success": True,
                     }
-                    current_messages.append(question_result)
-                    current_session_messages.append(question_result)
+                    response_sequence = self._build_response_message_sequence([question_result])
+                    current_messages.extend(response_sequence)
+                    current_session_messages.extend(response_sequence)
                     self._current_session_messages = list(current_session_messages)
                     # 更新 API 消息缓存
-                    self._append_to_api_cache(response_sequence + [question_result])
+                    self._append_to_api_cache(response_sequence)
                     self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                              current_session_messages)
                     self._question_pending = None
@@ -725,22 +722,9 @@ class OpenAIChatWorker(QThread):
                     "anchors": item.get("anchors"),
                 }
 
-        # ========== 修复：用户中断时的消息清理 ==========
-        # 当 tool_results 为 None（取消中断场景）时，过滤掉所有没有对应 tool_result 的 tool_call，
-        # 以及对应的 tool_call_marker 块。只保留纯文本内容，避免保存无效的部分工具调用消息到会话。
-        has_tool_results = bool(tool_result_map)
-
-        if not has_tool_results:
-            # 取消中断：清理所有 tool_call 相关数据，只保留文本内容
-            tool_call_map.clear()
-            # 过滤掉 _response_content_blocks 中的 tool_call_marker，只保留文本块
-            response_blocks = self._response_content_blocks
-            filtered_blocks = [b for b in (response_blocks or [])
-                               if isinstance(b, dict) and b.get("type") == "text"]
-            # 重建 _response_content_blocks 引用为纯文本块（用于后续处理）
-            self._response_content_blocks = filtered_blocks if filtered_blocks else response_blocks
-        else:
-            # 正常执行完成：仍然过滤掉没有对应 tool 结果的 tool_call
+        # 预防性修复：过滤掉没有对应 tool 结果的 tool_call
+        # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
+        if tool_result_map:
             # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
             valid_tc_ids = set(tool_result_map.keys())
             filtered_tool_call_map = {}

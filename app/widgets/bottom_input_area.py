@@ -27,7 +27,7 @@ class SkillListItem(QWidget):
             SkillListItem {
                 background: transparent;
                 padding: 4px 12px;
-                border-radius: 6px;
+                border: none;
             }
             SkillListItem:hover {
                 background: rgba(255, 255, 255, 0.08);
@@ -89,6 +89,13 @@ class SkillCompleterPopup(QWidget):
         self.setFixedWidth(220)
         self.setMinimumHeight(40)
         self.setMaximumHeight(280)
+        # 阻断外部 QWidget 样式级联，确保自身及内部无边框
+        self.setStyleSheet("""
+            SkillCompleterPopup {
+                border: none;
+                background: transparent;
+            }
+        """)
 
         self._list_widget = QListWidget(self)
         self._list_widget.setFrameShape(QListWidget.NoFrame)  # 去掉默认 frame，尺寸完全由样式表控制
@@ -96,19 +103,25 @@ class SkillCompleterPopup(QWidget):
         self._list_widget.setStyleSheet(f"""
             QListWidget {{
                 background: rgba(25, 34, 50, 245);
-                border: 1px solid #2B3850;
-                border-radius: 10px;
+                border: none;
                 padding: 4px;
             }}
             QListWidget::item {{
                 color: #EAF2FF;
                 background: transparent;
+                border: none;
+                outline: none;
             }}
             QListWidget::item:selected {{
                 background: rgba(139, 115, 85, 0.6);
+                border: none;
             }}
             QListWidget::item:hover {{
                 background: rgba(255, 255, 255, 0.08);
+                border: none;
+            }}
+            QListWidget::item:selected:hover {{
+                border: none;
             }}
         """)
         self._list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

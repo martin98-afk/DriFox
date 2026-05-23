@@ -1291,9 +1291,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ===== 一体化输入卡片（圆角大弧线包裹输入框+工具栏）=====
         self._input_card = QWidget(self._bottom_input_container)
+        self._input_card.setObjectName("_input_card")
         Colors.refresh()
         self._input_card.setStyleSheet(f"""
-            QWidget {{
+            QWidget#_input_card {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {Colors.INPUT_BG_START},
                     stop:1 {Colors.INPUT_BG_END});
@@ -2371,7 +2372,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新输入卡片背景
         if hasattr(self, '_input_card'):
             self._input_card.setStyleSheet(f"""
-                QWidget {{
+                QWidget#_input_card {{
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 {Colors.INPUT_BG_START},
                         stop:1 {Colors.INPUT_BG_END});
