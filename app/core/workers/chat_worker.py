@@ -276,11 +276,25 @@ class OpenAIChatWorker(QThread):
             self._state.permission.pending_permission = None
 
     def get_interrupted_messages(self) -> List[Dict]:
-        # 性能优化：使用 extend 代替 + 操作
+        """
+        获取被中断时的消息快照。
+
+        仅保存 worker 本次新增的消息（助理回复 + 工具结果 + 局部流式响应）。
+        原有会话消息（含用户输入）已在外部 session 中持久化，不需要重复保存。
+
+        策略：
+        1. 以 _current_session_messages 为基线（含原始会话消息 + 已完成的工具迭代消息）
+        2. 叠加当前流式生成的局部响应（_build_response_message_sequence）
+
+        Returns:
+            整合后的消息列表
+        """
         snapshot = list(self._current_session_messages or self.session_messages or [])
         partial_sequence = self._build_response_message_sequence()
         if partial_sequence:
-            snapshot.extend(partial_sequence)
+            for msg in partial_sequence:
+                if msg not in snapshot:
+                    snapshot.append(msg)
         return consolidate_messages(snapshot)
 
     def _clear_pending_response_state(self):
@@ -613,6 +627,18 @@ class OpenAIChatWorker(QThread):
 
         except Exception as e:
             logger.exception("请求失败!")
+            # 🔧 异常时保存已生成的部分消息到会话
+            try:
+                partial_sequence = self._build_response_message_sequence()
+                if partial_sequence:
+                    current_session_messages.extend(partial_sequence)
+                self._current_session_messages = list(current_session_messages)
+                # 只发射 finished_with_messages（保存消息到会话），不发射 finished_with_content
+                # （避免 UI 将其视为正常完成）
+                self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                         current_session_messages)
+            except Exception as save_err:
+                logger.warning(f"[ChatWorker] Failed to save partial messages on error: {save_err}")
             self._handle_error(e)
         finally:
             # 工具执行完成后，清理 round 缓存（为下一轮 API 调用做准备）
@@ -699,9 +725,23 @@ class OpenAIChatWorker(QThread):
                     "anchors": item.get("anchors"),
                 }
 
-        # 预防性修复：过滤掉没有对应 tool 结果的 tool_call
-        # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
-        if tool_result_map:
+        # ========== 修复：用户中断时的消息清理 ==========
+        # 当 tool_results 为 None（取消中断场景）时，过滤掉所有没有对应 tool_result 的 tool_call，
+        # 以及对应的 tool_call_marker 块。只保留纯文本内容，避免保存无效的部分工具调用消息到会话。
+        has_tool_results = bool(tool_result_map)
+
+        if not has_tool_results:
+            # 取消中断：清理所有 tool_call 相关数据，只保留文本内容
+            tool_call_map.clear()
+            # 过滤掉 _response_content_blocks 中的 tool_call_marker，只保留文本块
+            response_blocks = self._response_content_blocks
+            filtered_blocks = [b for b in (response_blocks or [])
+                               if isinstance(b, dict) and b.get("type") == "text"]
+            # 重建 _response_content_blocks 引用为纯文本块（用于后续处理）
+            self._response_content_blocks = filtered_blocks if filtered_blocks else response_blocks
+        else:
+            # 正常执行完成：仍然过滤掉没有对应 tool 结果的 tool_call
+            # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
             valid_tc_ids = set(tool_result_map.keys())
             filtered_tool_call_map = {}
             for tc_id, tc in tool_call_map.items():
@@ -729,6 +769,7 @@ class OpenAIChatWorker(QThread):
                     continue
 
                 tool_call_id = str(block.get("tool_call_id") or "")
+                # 在取消中断场景下，tool_call_marker 已被过滤掉，不会走到这里
                 assistant_msg: Dict[str, Any] = {
                     "role": "assistant",
                     "timestamp": now_ts,

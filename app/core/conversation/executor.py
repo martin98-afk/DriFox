@@ -210,19 +210,23 @@ class ConversationExecutor:
         safe_connect("retry_resolved", "retry_resolved")
 
     def stop(self) -> List[Dict]:
-        """停止当前 Worker，返回中断的消息"""
+        """停止当前 Worker，返回中断的消息
+
+        流程说明（修正了竞态条件）：
+        1. 标记流式已停止
+        2. 断开所有信号连接（阻止 worker 继续向 UI 发送事件）
+        3. 调用 worker.cancel() 设置取消标志（阻止 worker 线程继续修改状态）
+        4. 等待 worker 线程结束（最多等 3 秒）
+        5. 在线程安全停止后，获取中断消息（此时 worker 状态已稳定）
+        6. 清理 worker 资源
+        """
         self._is_streaming = False
         worker = self._current_worker
         self._current_worker = None
 
         interrupted: List[Dict] = []
         if worker:
-            try:
-                interrupted = worker.get_interrupted_messages()
-            except Exception as e:
-                logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
-            
-            # 🛡️ 断开信号连接，防止已取消的 worker 继续向 UI 发送事件
+            # 🛡️ 第一步：断开信号连接，防止已取消的 worker 继续向 UI 发送事件
             # 注意：必须包含 "finished"（QThread.finished），否则旧 worker 完成后
             # 会触发 _on_worker_finished 擦除新的 worker 引用（竞态条件 RC1）
             for signal_name in ("retry_status", "error_occurred", "finished_with_content",
@@ -237,10 +241,27 @@ class ConversationExecutor:
                         signal.disconnect()
                 except (TypeError, RuntimeError):
                     pass  # 信号可能未连接或对象已销毁
-            
+
+            # 🛡️ 第二步：先 cancel（设置取消标志），停止 worker 线程继续修改状态
             worker.cancel()
+
+            # 🛡️ 第三步：等待 worker 线程结束（最多等 3 秒）
             if worker.isRunning():
-                worker.quit()
+                if not worker.wait(3000):  # 3秒超时
+                    logger.warning(f"[ConversationExecutor] Worker did not finish within 3s, force quit")
+                    worker.quit()
+                    if not worker.wait(1000):
+                        logger.warning(f"[ConversationExecutor] Worker force quit timeout, terminating")
+                        worker.terminate()
+                        worker.wait()
+
+            # 🛡️ 第四步：worker 已停止，状态已稳定，安全获取中断消息
+            try:
+                interrupted = worker.get_interrupted_messages()
+            except Exception as e:
+                logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
+
+            # 🛡️ 第五步：清理 worker 资源
             try:
                 worker.cleanup()
             except Exception as e:

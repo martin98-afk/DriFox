@@ -5759,6 +5759,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
 
+        # 🔧 异常时保存已生成的部分消息到历史记录
+        # finished_with_messages 信号已先于 error_occurred 被处理，
+        # 会话已包含部分消息，这里持久化到历史
+        if self.history_manager:
+            self._save_current_session_to_history()
+
         current_title = self.title_edit.text() if self.title_edit else "对话"
         self._notify_if_inactive(f"{current_title} - 错误", error[:100])
 
