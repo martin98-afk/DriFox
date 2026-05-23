@@ -36,24 +36,33 @@ class CommandResult:
     handled: bool = False          # 是否匹配到了命令
     is_function: bool = False      # 是否为函数型命令
     is_prompt: bool = False        # 是否为提示词替换命令
+    is_agent: bool = False         # 是否为智能体命令
     command_name: str = ""         # 匹配到的命令名
-    replacement: str = ""          # 提示词替换文本（仅 prompt 命令）
+    replacement: str = ""          # 提示词替换文本（仅 prompt/agent 命令）
 
 
 @dataclass
 class CommandDefinition:
     """单个命令的定义"""
     name: str
-    type: str                      # "function" or "prompt"
+    type: str                      # "function", "prompt", "agent"
     description: str = ""
-    prompt_text: str = ""          # 仅 prompt 命令使用
+    prompt_text: str = ""          # prompt/agent 命令使用
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
+        # 根据 command_type 映射显示类型
+        # prompt 类型用于区分智能体（在 agents 目录加载的命令）
+        type_map = {
+            "function": "command",
+            "prompt": "agent",   # prompt 类型表示从 agents 目录加载的智能体
+            "agent": "agent",
+        }
+        display_type = type_map.get(self.type, "command")
         return {
             "name": self.name,
             "description": self.description,
-            "type": "command",
+            "type": display_type,
         }
 
 
@@ -94,9 +103,9 @@ class CommandManager:
 
         Args:
             name: 命令名（不含 /）
-            command_type: "function" 或 "prompt"
+            command_type: "function", "prompt" 或 "agent"
             description: 描述文本（显示在命令卡片中）
-            prompt_text: 仅 prompt 命令使用，替换后的提示词文本
+            prompt_text: prompt/agent 命令使用，替换后的提示词文本
         """
         self._commands[name] = CommandDefinition(
             name=name,
@@ -182,6 +191,13 @@ class CommandManager:
             return CommandResult(
                 handled=True,
                 is_prompt=True,
+                command_name=cmd_name,
+                replacement=cmd.prompt_text,
+            )
+        elif cmd.type == "agent":
+            return CommandResult(
+                handled=True,
+                is_agent=True,
                 command_name=cmd_name,
                 replacement=cmd.prompt_text,
             )

@@ -1558,6 +1558,54 @@ If you're uncertain about something and can't verify it with these tools, say "I
 6. AVOID flattery, do not give any comments that are not helpful to the reader. Avoid phrasing like "Great job ...", "Thanks for ..."."""
         cmd_mgr.register("review", "prompt", description="审查更改代码", prompt_text=review_prompt)
 
+        # 加载内置智能体为命令
+        self._register_builtin_agents_as_commands()
+
+    def _register_builtin_agents_as_commands(self):
+        """从 app/agents 目录加载内置智能体并注册为命令"""
+        import yaml
+        from pathlib import Path
+
+        agents_dir = Path(__file__).parent / "agents"
+        if not agents_dir.exists():
+            return
+
+        cmd_mgr = CommandManager.get_instance()
+
+        for md_file in agents_dir.glob("*.md"):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                if not content.startswith("---"):
+                    continue
+
+                parts = content.split("---", 2)
+                if len(parts) < 3:
+                    continue
+
+                frontmatter = parts[1]
+                body = parts[2].strip()
+
+                meta = yaml.safe_load(frontmatter)
+                if not meta:
+                    continue
+
+                # 获取描述
+                description = meta.get("description", "")
+                # 加载所有智能体（不跳过 hidden）
+                # hidden 的智能体依然注册为命令，但不显示标签
+
+                # 注册为 prompt 命令，使用完整提示词内容
+                cmd_mgr.register(
+                    name=md_file.stem,
+                    command_type="prompt",
+                    description=description,
+                    prompt_text=body,
+                )
+                logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}")
+
+            except Exception as e:
+                logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")
+
     def _execute_command(self, command_name: str):
         """执行内置函数型命令
 
