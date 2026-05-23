@@ -63,7 +63,7 @@ from app.utils.design_tokens import (
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
-from app.widgets.base_settings_card import (
+from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
 )
 from app.widgets.bottom_input_area import (
@@ -78,7 +78,7 @@ from app.widgets.conversation_node_preview import (
 from app.widgets.file_undo_dialog import (
     FileUndoPreviewDialog,
 )
-from app.widgets.history_card import (
+from app.widgets.cards.settings.history_card import (
     HistoryCard,
     get_message_preview,
 )
@@ -89,31 +89,31 @@ from app.widgets.llm_settings_card import (
 from app.widgets.mcp_setting_card import (
     MCPEditCard,
 )
-from app.widgets.memory_card import (
+from app.widgets.cards.settings.memory_card import (
     MemoryCardContent, TAB_PROJECT_NOTES,
 )
 from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
 )
-from app.widgets.model_config_card import (
+from app.widgets.cards.settings.model_config_card import (
     ModelConfigCard,
 )
 from app.widgets.project_selector_popup import ProjectSelectorPopup
 from app.widgets.provider_edit_card import (
     ProviderEditCard,
 )
-from app.widgets.question_floating_widget import (
+from app.widgets.cards.floating.question_floating_widget import (
     QuestionFloatingWidget,
 )
-from app.widgets.sub_agent_floating_widget import (
+from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
 from app.widgets.system_card_frame import SystemCardFrame
-from app.widgets.todo_floating_widget import (
+from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
-from app.widgets.tool_floating_widget import (
+from app.widgets.cards.floating.tool_floating_widget import (
     ToolFloatingWidget,
 )
 from app.widgets.ui_helpers import *
