@@ -211,8 +211,9 @@ class QuestionFloatingWidget(SimpleCardWidget):
         )
 
     def _setup_ui(self):
+        # Preferred 垂直策略：允许组件随内容增长，与其他卡片保持一致
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setMinimumHeight(128)
+        self.setMinimumHeight(0)  # 无硬编码最小高度，自适应内容
         self._apply_card_style()
 
         main_layout = QVBoxLayout(self)
@@ -257,8 +258,9 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._options_scroll.setWidgetResizable(True)
         self._options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._options_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._options_scroll.setMaximumHeight(300)
         self._options_scroll.setMinimumHeight(0)
+        # 最大高度限 300px，超出可滚动，与 TodoFloatingWidget 行为一致
+        self._options_scroll.setMaximumHeight(300)
         self._options_scroll.setStyleSheet("""
             QScrollArea { border: none; background: transparent; }
             QScrollArea > QWidget > QWidget { background: transparent; }

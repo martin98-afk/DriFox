@@ -449,6 +449,12 @@ class UIEngine(BaseEngine):
             self._emit("stream_started")
 
     def _on_worker_finished(self, response: str):
+        # 🛡️ 防御性检查：如果 Executor 已不在流式状态（stop() 已调用或被新 worker 覆盖），
+        # 忽略此残留信号（防止 RC3：Qt 事件队列中残留的 finished_with_content 触发 UI 更新）
+        if not self._conversation_executor.is_streaming:
+            logger.debug("[UIEngine] Ignoring stale stream_finished (stream already stopped)")
+            return
+
         self._emit("stream_finished", response)
 
         # Trigger PostAssistantMessage hook

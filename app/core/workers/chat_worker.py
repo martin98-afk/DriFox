@@ -266,9 +266,11 @@ class OpenAIChatWorker(QThread):
         self._is_cancelled = True
         self._tool_execution_cancelled = True
         self._answer_event.set()
-        if self._question_pending:
-            self._question_pending = None
-            self._state.permission.pending_question = None
+        # 注意：不清除 _question_pending，由 cleanup() 统一清理。
+        # cancel() 已设置 _is_cancelled=True，worker 线程会在 wait 循环后
+        # 通过 if self._is_cancelled: return 提前返回，不访问 _question_pending。
+        # 若此处清除 _question_pending，可能和 cleanup() 重置 _is_cancelled
+        # 形成竞态：worker 读到 _is_cancelled=False 但 _question_pending=None 导致崩溃。
         if self._permission_pending:
             self._permission_pending = None
             self._state.permission.pending_permission = None
@@ -537,6 +539,8 @@ class OpenAIChatWorker(QThread):
                 tool_results = self._execute_all_tools()
 
                 if tool_results is None:
+                    # 提前捕获 _question_pending，避免 cancel+cleanup 竞态导致丢失引用
+                    q = self._question_pending
                     self._answer_event.clear()
                     while self._pending_answer is None and not self._is_cancelled:
                         if self._answer_event.wait(timeout=1.0):
@@ -545,7 +549,12 @@ class OpenAIChatWorker(QThread):
                     if self._is_cancelled:
                         return
 
-                    q = self._question_pending
+                    # 防御检查：_execute_all_tools 返回 None 可能是 permission 取消
+                    # （此时 _question_pending 从未被设置），不是 question 触发
+                    if q is None:
+                        logger.warning("tool_results is None but _question_pending is None, "
+                                       "likely permission cancelled, skipping question flow")
+                        continue
                     response_sequence = self._build_response_message_sequence()
                     current_messages.extend(response_sequence)
                     current_session_messages.extend(response_sequence)

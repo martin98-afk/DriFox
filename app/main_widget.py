@@ -493,8 +493,6 @@ class OpenAIChatToolWindow(ToolWindow):
         
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True)
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
-        
-        logger.info(f"[CardManager] 窗口 {self._window_id} 所有卡片注册完成")
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1861,7 +1859,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._mcp_edit_card.hide()
+        self._card_manager.hide_card("mcp_edit", self._window_id)
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
@@ -1932,11 +1930,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._bg_label = None
         except Exception:
             pass
-    def _restore_after_system_close(self):
-        """系统卡片关闭后，恢复之前被隐藏的卡片
-        现在由 CardManager 的 restore_after_hide 处理
-        """
-        pass  # CardManager 会自动处理恢复
 
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
@@ -2238,9 +2231,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # 关闭历史会话卡片
-        self._history_card.hide()
-        self._restore_after_system_close()
+        # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
+        self._card_manager.hide_card("history", self._window_id)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

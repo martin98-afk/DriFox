@@ -113,7 +113,11 @@ class ConversationExecutor:
         self._connect_callbacks(callbacks)
 
         # Worker 完成后重置流式状态（start 前连接，避免竞态）
-        self._current_worker.finished.connect(self._on_worker_finished)
+        # 传入 worker 引用用于身份检查，防止旧 worker 的 finished 信号擦除新 worker
+        current_worker = self._current_worker
+        current_worker.finished.connect(
+            lambda w=current_worker: self._on_worker_finished(w)
+        )
 
         # 启动
         self._is_streaming = True
@@ -126,8 +130,16 @@ class ConversationExecutor:
 
         return True
 
-    def _on_worker_finished(self):
-        """Worker 线程结束，重置流式状态"""
+    def _on_worker_finished(self, worker):
+        """Worker 线程结束，重置流式状态
+
+        Args:
+            worker: 触发回调的 worker 实例。用于身份检查，
+                    防止旧 worker 的 finished 信号擦除新 worker（竞态条件 RC1）。
+        """
+        if worker is not self._current_worker:
+            # 旧 worker 的 finished 信号，忽略（新 worker 已创建）
+            return
         self._is_streaming = False
         self._current_worker = None
 
@@ -211,11 +223,14 @@ class ConversationExecutor:
                 logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
             
             # 🛡️ 断开信号连接，防止已取消的 worker 继续向 UI 发送事件
+            # 注意：必须包含 "finished"（QThread.finished），否则旧 worker 完成后
+            # 会触发 _on_worker_finished 擦除新的 worker 引用（竞态条件 RC1）
             for signal_name in ("retry_status", "error_occurred", "finished_with_content",
                                 "finished_with_messages", "content_received", "reasoning_content_received",
                                  "tool_call_started", "tool_args_updated", "tool_result_received",
                                  "question_asked", "permission_approval_requested", "thinking_started",
-                                 "retry_resolved", "compaction_status_changed"):
+                                 "retry_resolved", "compaction_status_changed",
+                                 "finished"):
                 try:
                     signal = getattr(worker, signal_name, None)
                     if signal is not None:
@@ -236,11 +251,20 @@ class ConversationExecutor:
     def cleanup(self):
         """清理当前 Worker"""
         if self._current_worker:
+            worker = self._current_worker
             try:
-                self._current_worker.cancel()
-                if self._current_worker.isRunning():
-                    self._current_worker.quit()
-                self._current_worker.cleanup()
+                # 断开信号，防止旧 worker 的 finished 信号影响新 worker
+                for signal_name in ("finished",):
+                    try:
+                        signal = getattr(worker, signal_name, None)
+                        if signal is not None:
+                            signal.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+                worker.cancel()
+                if worker.isRunning():
+                    worker.quit()
+                worker.cleanup()
             except Exception as e:
                 logger.warning(f"[ConversationExecutor] Cleanup error: {e}")
             self._current_worker = None
