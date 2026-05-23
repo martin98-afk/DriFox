@@ -1933,17 +1933,10 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.utils.design_tokens import Colors
             Colors.refresh()
             bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
-            # 获取背景配置 - 优先使用 chat_list（原有行为），也支持 window_bg
             chat_list = bg_config.get("chat_list", {})
-            window_bg = bg_config.get("window_bg", {})
-            
-            # 检查是否有可用的背景图片配置
-            if chat_list.get("enabled", True) and chat_list.get("image"):
-                image = chat_list["image"]
+            if chat_list.get("enabled", True):
+                image = chat_list.get("image", ":/icons/fox_bg.png")
                 opacity = chat_list.get("opacity", 0.1)
-            elif window_bg.get("enabled", True) and window_bg.get("image"):
-                image = window_bg["image"]
-                opacity = window_bg.get("opacity", 0.1)
             else:
                 image = None
                 opacity = 0.1

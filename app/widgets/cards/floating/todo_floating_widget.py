@@ -20,7 +20,7 @@ class _DragHandle(QWidget):
     def __init__(self, card, parent=None):
         super().__init__(parent)
         self._card = card
-        self.setFixedHeight(10)
+        self.setFixedHeight(4)
         self.setCursor(Qt.SizeVerCursor)
         self._dragging = False
         self._start_y = 0
