@@ -523,8 +523,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._text_input_mode = not self._text_input_mode
         if self._text_input_mode:
             self.text_input.setFocus()
-        else:
-            self.text_input.clear()
+        # 不再清空输入框，保留用户已输入的文字
         self._update_mode_ui()
 
     def _on_cancel(self):
