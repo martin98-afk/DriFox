@@ -148,5 +148,33 @@ class TopCardContainer(CardContainer):
 
 
 class BottomCardContainer(CardContainer):
+    """下方卡片容器 - 底部直角设计，与输入框视觉融合"""
+    
     def __init__(self):
         super().__init__(ContainerType.BOTTOM)
+        self.setStyleSheet("""
+            BottomCardContainer {
+                background: transparent;
+                border: none;
+            }
+        """)
+    
+    def add_card(self, card_id: str, card_widget: QWidget):
+        """添加卡片并修正底部圆角为直角，与下方输入框视觉融合"""
+        # 将卡片底部圆角置零（覆盖宽泛的 border-radius 规则）
+        old = card_widget.styleSheet() or ""
+        card_widget.setStyleSheet(old + """
+        
+            border-bottom-left-radius: 0px;
+            border-bottom-right-radius: 0px;
+        
+        """)
+        super().add_card(card_id, card_widget)
+    
+    def add_card(self, card_id: str, card_widget: QWidget):
+        """添加卡片并修正底部圆角，使其与下方输入框视觉融合"""
+        # 修正卡片底部圆角为直角
+        card_widget.setProperty("bottomCard", True)
+        card_widget.style().unpolish(card_widget)
+        card_widget.style().polish(card_widget)
+        super().add_card(card_id, card_widget)
