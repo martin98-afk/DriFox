@@ -52,6 +52,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
+from app.core.command_manager import CommandManager, CommandResult
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -1332,6 +1333,9 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card)
         self._bottom_card_container.add_card("command", self._command_card)
 
+        # 初始化内置命令
+        self._init_builtin_commands()
+
         # 分隔线
         separator = QFrame(self._input_card)
         separator.setFrameShape(QFrame.HLine)
@@ -1449,6 +1453,44 @@ class OpenAIChatToolWindow(ToolWindow):
         bottom_layout.addWidget(self._input_card)
 
         layout.addWidget(self._bottom_input_container)
+
+    # ========== 内置命令初始化 ==========
+
+    def _init_builtin_commands(self):
+        """注册并初始化所有内置命令"""
+        cmd_mgr = CommandManager.get_instance()
+        # 先清空，避免重复注册
+        for name in list(cmd_mgr.get_command_names()):
+            cmd_mgr.unregister(name)
+
+        cmd_mgr.register("new", "function", description="新建会话")
+        cmd_mgr.register("new-window", "function", description="新建窗口")
+        cmd_mgr.register("branch", "function", description="新建分支窗口")
+
+        # 提示词替换命令 - init：项目笔记初始化
+        INIT_PROMPT = (
+            "请分析此代码库并编写项目笔记，包含以下内容：\n"
+            "1. 构建/lint/测试命令 - 特别是运行单个测试的方法\n"
+            "2. 代码风格规范，包括导入、格式化、类型、命名约定、错误处理等\n\n"
+            "你创建的文件将被提供给在此仓库中操作的 AI 编码智能体（如你自己）。内容约 150 行。\n"
+            "如果有 Cursor 规则（在 .cursor/rules/ 或 .cursorrules 中）"
+            "或 Copilot 规则（在 .github/copilot-instructions.md 中），请确保包含它们。\n\n"
+            "如果已有项目笔记，请改进它。"
+        )
+        cmd_mgr.register("init", "prompt", description="项目笔记初始化", prompt_text=INIT_PROMPT)
+
+    def _execute_command(self, command_name: str):
+        """执行内置函数型命令
+
+        Args:
+            command_name: 命令名（不含 /）
+        """
+        if command_name == "new":
+            self._create_new_session()
+        elif command_name == "new-window":
+            self._duplicate_window(branch=False)
+        elif command_name == "branch":
+            self._duplicate_window(branch=True)
 
     # ========== 命令卡片处理 ==========
 
@@ -5211,6 +5253,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if not user_text:
             return
+
+        # ---- 内置命令拦截 ----
+        cmd_mgr = CommandManager.get_instance()
+        cmd_result = cmd_mgr.execute(user_text)
+        if cmd_result.handled:
+            if cmd_result.is_function:
+                # 函数型命令：执行对应处理，不清除用户输入（不发送给 AI）
+                self._execute_command(cmd_result.command_name)
+                return
+            elif cmd_result.is_prompt:
+                # 提示词替换命令：用替换文本代替原输入继续发送
+                user_text = cmd_result.replacement
+                self.input_area.clear()
+        # ---- 内置命令拦截结束 ----
 
         # 检查模型配置
         llm_config = self._get_current_model_config()

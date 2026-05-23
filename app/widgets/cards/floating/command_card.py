@@ -3,7 +3,7 @@
 斜杠命令卡片 - 输入框上方展开，显示命令和技能列表
 
 触发方式：在输入框输入 / 后，卡片自动展开
-数据来源：内置命令（clear/help/new）+ get_local_skills()
+数据来源：CommandManager 内置命令 + get_local_skills()
 交互方式：↑/↓ 导航，Enter 选中，Esc 关闭
 """
 from typing import List, Dict
@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
 
 from app.utils.utils import get_font_family_css, get_local_skills
 from app.utils.design_tokens import Colors, font_size_css
+from app.core.command_manager import CommandManager
 
 
 class _ElidedLabel(QLabel):
@@ -50,13 +51,6 @@ class _ElidedLabel(QLabel):
     def was_elided(self) -> bool:
         return self._was_elided
 
-
-# 内置命令
-BUILTIN_COMMANDS: List[Dict[str, str]] = [
-    {"name": "clear", "description": "清空对话", "type": "command"},
-    {"name": "help", "description": "帮助", "type": "command"},
-    {"name": "new", "description": "新建会话", "type": "command"},
-]
 
 ITEM_HEIGHT = 36       # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
@@ -300,7 +294,8 @@ class CommandCard(QWidget):
 
     def _refresh_data(self):
         """刷新完整数据列表（命令 + 技能）"""
-        commands = list(BUILTIN_COMMANDS)
+        cmd_mgr = CommandManager.get_instance()
+        commands = cmd_mgr.get_all_commands()
         skills = [
             {"name": s["name"], "description": s.get("description", ""), "type": "skill"}
             for s in get_local_skills()

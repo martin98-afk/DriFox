@@ -152,8 +152,8 @@ class SendableTextEdit(TextEdit):
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
 
             # 确定插入格式：命令用 /xxx，技能用 @xxx
-            from app.widgets.cards.floating.command_card import BUILTIN_COMMANDS
-            is_command = any(cmd["name"] == item_name for cmd in BUILTIN_COMMANDS)
+            from app.core.command_manager import CommandManager
+            is_command = CommandManager.get_instance().is_known_command_name(item_name)
             insert_prefix = "/" if is_command else "@"
 
             insert_text = f"{insert_prefix}{item_name} "
