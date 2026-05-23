@@ -292,6 +292,12 @@ class _CustomInputCard(QWidget):
             return self._text_edit.toPlainText().strip()
         return self._text_value.strip()
 
+    def set_content(self, text: str):
+        """恢复已保存的文本内容"""
+        self._text_value = text
+        if self._active:
+            self._text_edit.setPlainText(text)
+
     def _apply_style(self):
         Colors.refresh()
         if self._active:
@@ -587,6 +593,7 @@ class QuestionFloatingWidget(QWidget):
             self._answers[self._current_index] = {
                 "text": "；".join(parts),
                 "custom": has_custom,
+                "custom_text": custom,  # 保存原始自定义输入文本，用于恢复
             }
         else:
             self._answers.pop(self._current_index, None)
@@ -612,6 +619,13 @@ class QuestionFloatingWidget(QWidget):
                 w.set_checked(text and w._label_text in text)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(custom_used)
+            if custom_used and isinstance(answer, dict):
+                custom_text = answer.get("custom_text", "") or answer.get("text", "")
+                # 如果是混合答案（选项+自定义），提取纯自定义部分
+                import re
+                pure = re.sub(r'【[^】]+】[；]?', '', custom_text).strip("；").strip()
+                if pure:
+                    self._custom_input_widget.set_content(pure)
 
     def _on_back(self):
         self._save_current_answer()
