@@ -113,7 +113,7 @@ class TodoFloatingWidget(SimpleCardWidget):
         self._apply_style()
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(14, 10, 14, 6)
+        main_layout.setContentsMargins(6, 10, 6, 6)
         main_layout.setSpacing(6)
 
         # ---- 标题栏 ----

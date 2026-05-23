@@ -225,7 +225,7 @@ class QuestionFloatingWidget(SimpleCardWidget):
         self._apply_card_style()
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 12, 16, 14)
+        main_layout.setContentsMargins(6, 12, 6, 14)
         main_layout.setSpacing(10)
 
         # ── Header ──
