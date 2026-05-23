@@ -43,27 +43,31 @@ class CardContainer(QWidget):
         self._card_manager = card_manager
     
     def _on_card_shown(self, card_id: str):
-        """某张卡片被显示"""
+        """某张卡片被显示 → 移除高度限制，让布局自然展开"""
         if card_id not in self._cards:
             return
-        # 展开容器
-        self._update_container_size()
+        # 延迟一帧执行，等待卡片渲染完成
+        QTimer.singleShot(0, self._release_height)
     
     def _on_card_hidden(self, card_id: str):
-        """某张卡片被隐藏"""
+        """某张卡片被隐藏 → 若无可见卡片则折叠"""
         if card_id not in self._cards:
             return
-        # 检查容器内是否还有可见卡片
         self._update_container_size()
     
     def _update_container_size(self):
-        """更新容器大小：有可见卡片则展开，否则折叠"""
+        """更新容器大小：有可见卡片则释放高度，否则折叠"""
         has_visible = any(w.isVisible() for w in self._cards.values())
         if has_visible:
-            # 展开 - 用 QTimer 延迟计算高度，等待卡片渲染完成
-            QTimer.singleShot(0, self._expand)
+            QTimer.singleShot(0, self._release_height)
         else:
             self._collapse()
+    
+    def _release_height(self):
+        """移除高度限制，让布局自然决定容器高度"""
+        if any(w.isVisible() for w in self._cards.values()):
+            self.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+            self.updateGeometry()
     
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器，并注册专属回调"""
@@ -91,45 +95,6 @@ class CardContainer(QWidget):
         if len(self._cards) == 0:
             self.setMaximumHeight(0)
     
-    def _expand(self):
-        """展开容器"""
-        total_height = 0
-        for widget in self._cards.values():
-            if widget.isVisible():
-                widget.adjustSize()
-                h = widget.height()
-                if h <= 0:
-                    h = widget.sizeHint().height()
-                if h <= 0:
-                    h = widget.minimumHeight()
-                if h <= 0:
-                    h = 400
-                total_height += h
-        
-        if total_height > 0:
-            self.setMaximumHeight(total_height + 4)
-        else:
-            self._collapse()
-        
-        QTimer.singleShot(100, self._delayed_expand)
-    
-    def _delayed_expand(self):
-        """延迟展开 - 处理动态添加的内容"""
-        total_height = 0
-        for widget in self._cards.values():
-            if widget.isVisible():
-                h = widget.height()
-                if h <= 0:
-                    h = widget.sizeHint().height()
-                if h <= 0:
-                    h = 400
-                total_height += h
-        if total_height > 0:
-            self.setMaximumHeight(total_height + 4)
-            self.updateGeometry()
-        else:
-            self._collapse()
-    
     def _collapse(self):
         """收起容器"""
         self.setMinimumHeight(0)
@@ -154,23 +119,3 @@ class BottomCardContainer(CardContainer):
                 border: none;
             }
         """)
-    
-    def add_card(self, card_id: str, card_widget: QWidget):
-        """添加卡片并修正底部圆角为直角，与下方输入框视觉融合"""
-        # 将卡片底部圆角置零（覆盖宽泛的 border-radius 规则）
-        old = card_widget.styleSheet() or ""
-        card_widget.setStyleSheet(old + """
-        
-            border-bottom-left-radius: 0px;
-            border-bottom-right-radius: 0px;
-        
-        """)
-        super().add_card(card_id, card_widget)
-    
-    def add_card(self, card_id: str, card_widget: QWidget):
-        """添加卡片并修正底部圆角，使其与下方输入框视觉融合"""
-        # 修正卡片底部圆角为直角
-        card_widget.setProperty("bottomCard", True)
-        card_widget.style().unpolish(card_widget)
-        card_widget.style().polish(card_widget)
-        super().add_card(card_id, card_widget)
