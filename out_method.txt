@@ -1,0 +1,25 @@
+def _hide_main_popups(self):
+        """隐藏主要的悬浮面板（互斥显示）
+
+        包括：系统设置、模型配置、历史会话、记忆管理、AutoLoop
+        现在也保存并隐藏 todo/tool/sub_agent 实时卡片
+        """
+        # 标记系统卡片打开状态，阻止实时卡片自行显示
+        self._is_system_card_visible = True
+        # 保存 todo 可见状态，用于系统卡片关闭后恢复
+        self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
+        # 隐藏实时卡片
+        self._todo_floating_widget.setVisible(False)
+        self._tool_floating_widget.setVisible(False)
+        self._tool_floating_widget.set_suppress_visible(True)  # 压制工具卡片显示
+        self._sub_agent_floating_widget.setVisible(False)
+        # 隐藏系统卡片
+        self._model_config_card.hide()
+        self._history_card.hide()
+        self._settings_popup.hide()
+        self._memory_card.hide()
+        self._provider_edit_card.hide()
+        self._auto_loop_config_card.hide()
+        if not self._is_auto_loop_running:
+            self._auto_loop_running_card.hide()
+

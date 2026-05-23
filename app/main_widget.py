@@ -449,16 +449,16 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(ContainerType.TOP, "todo", self._todo_floating_widget)
         self._top_card_container.add_card("todo", self._todo_floating_widget)
         
-        mgr.register_card(ContainerType.TOP, "mcp_edit", self._mcp_edit_card)
+        mgr.register_card(ContainerType.TOP, "mcp_edit", self._mcp_edit_card, system_card=True)
         self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
         
-        mgr.register_card(ContainerType.TOP, "settings", self._settings_popup)
+        mgr.register_card(ContainerType.TOP, "settings", self._settings_popup, system_card=True)
         self._top_card_container.add_card("settings", self._settings_popup)
         
-        mgr.register_card(ContainerType.TOP, "provider_edit", self._provider_edit_card)
+        mgr.register_card(ContainerType.TOP, "provider_edit", self._provider_edit_card, system_card=True)
         self._top_card_container.add_card("provider_edit", self._provider_edit_card)
         
-        mgr.register_card(ContainerType.TOP, "hook_edit", self._hook_edit_card)
+        mgr.register_card(ContainerType.TOP, "hook_edit", self._hook_edit_card, system_card=True)
         self._top_card_container.add_card("hook_edit", self._hook_edit_card)
         
         # ===== BottomCardContainer (chatscroll 下方) =====
@@ -474,19 +474,19 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(ContainerType.BOTTOM, "sub_agent", self._sub_agent_floating_widget)
         self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
         
-        mgr.register_card(ContainerType.BOTTOM, "history", self._history_card)
+        mgr.register_card(ContainerType.BOTTOM, "history", self._history_card, system_card=True)
         self._bottom_card_container.add_card("history", self._history_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "memory", self._memory_card)
+        mgr.register_card(ContainerType.BOTTOM, "memory", self._memory_card, system_card=True)
         self._bottom_card_container.add_card("memory", self._memory_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "model_config", self._model_config_card)
+        mgr.register_card(ContainerType.BOTTOM, "model_config", self._model_config_card, system_card=True)
         self._bottom_card_container.add_card("model_config", self._model_config_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card)
+        mgr.register_card(ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card, system_card=True)
         self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
         
-        mgr.register_card(ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card)
+        mgr.register_card(ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True)
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
         
         logger.info("[CardManager] 所有卡片注册并添加到容器完成")
@@ -1815,7 +1815,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_mcp_edit_saved(self, server_data: dict):
         """MCP 编辑保存回调"""
-        self._mcp_edit_card.hide()
+        self._card_manager.hide_card("mcp_edit")
         self._settings_popup.show()
         if hasattr(self._settings_popup, 'mcpListCard'):
             name = server_data.get("name", "")
@@ -1842,8 +1842,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_provider_edit_card_closed(self):
         """服务商编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._provider_edit_card.hide()
-        self._card_manager.restore_after_hide(excluded_card_id="provider_edit")
+        self._card_manager.hide_card("provider_edit")
 
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
@@ -1859,20 +1858,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_system_card_visible = True
         # 保存 todo 可见状态，用于系统卡片关闭后恢复
         self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
-        # 隐藏实时卡片
-        self._todo_floating_widget.setVisible(False)
-        self._tool_floating_widget.setVisible(False)
-        self._tool_floating_widget.set_suppress_visible(True)  # 压制工具卡片显示
-        self._sub_agent_floating_widget.setVisible(False)
-        # 隐藏系统卡片
-        self._model_config_card.hide()
-        self._history_card.hide()
-        self._settings_popup.hide()
-        self._memory_card.hide()
-        self._provider_edit_card.hide()
-        self._auto_loop_config_card.hide()
+        # 通过 CardManager 隐藏所有卡片
+        for card_id in ["todo", "tool", "sub_agent", "question", "model_config", "history", "settings", "memory", "provider_edit", "auto_loop_config", "hook_edit"]:
+            self._card_manager.hide_card(card_id)
         if not self._is_auto_loop_running:
-            self._auto_loop_running_card.hide()
+            self._card_manager.hide_card("auto_loop_running")
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
