@@ -82,11 +82,11 @@ from app.widgets.cards.settings.history_card import (
     HistoryCard,
     get_message_preview,
 )
-from app.widgets.hook_setting_card import HookEditCard
-from app.widgets.llm_settings_card import (
+from app.widgets.cards.settings.hook_setting_card import HookEditCard
+from app.widgets.cards.settings.llm_settings_card import (
     LLMSettingsCard,
 )
-from app.widgets.mcp_setting_card import (
+from app.widgets.cards.settings.mcp_setting_card import (
     MCPEditCard,
 )
 from app.widgets.cards.settings.memory_card import (
@@ -109,7 +109,7 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
-from app.widgets.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )

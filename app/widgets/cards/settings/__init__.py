@@ -2,15 +2,30 @@
 
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.history_card import HistoryCard
-from app.widgets.cards.settings.memory_card import MemoryCardContent
+from app.widgets.cards.settings.memory_card import MemoryCardContent, TAB_PROJECT_NOTES
 from app.widgets.cards.settings.model_config_card import ModelConfigCard
 from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
+from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+from app.widgets.cards.settings.mcp_setting_card import MCPEditCard
+from app.widgets.cards.settings.hook_setting_card import HookEditCard
+from app.widgets.cards.settings.list_setting_card import ListSettingCard
+from app.widgets.cards.settings.provider_setting_card import ProviderSettingCard
+from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 __all__ = [
     "BaseSettingsCard",
     "HistoryCard",
     "MemoryCardContent",
+    "TAB_PROJECT_NOTES",
     "ModelConfigCard",
     "AutoLoopConfigCard",
     "AutoLoopRunningCard",
+    "LLMSettingsCard",
+    "MCPEditCard",
+    "HookEditCard",
+    "ListSettingCard",
+    "ProviderSettingCard",
+    "ProviderEditCard",
+    "SystemCardFrame",
 ]
