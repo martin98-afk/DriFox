@@ -1934,6 +1934,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
         self._card_manager.toggle_card("model_config")
+        # 显示时刷新模型配置数据
+        if self._card_manager.is_card_visible("model_config") and hasattr(self, '_model_config_popup'):
+            self._model_config_popup.refresh()
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
@@ -2112,6 +2115,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
         self._card_manager.toggle_card("history")
+        # 显示时刷新历史会话数据
+        if self._card_manager.is_card_visible("history"):
+            self._refresh_history_toggle_panel()
 
     def _sync_search_box_visibility(self):
         """同步搜索框：两个标签页都显示搜索框"""
@@ -6333,6 +6339,11 @@ class OpenAIChatToolWindow(ToolWindow):
     def _toggle_memory_card(self):
         """切换记忆管理卡片的显示"""
         self._card_manager.toggle_card("memory")
+        # 显示时刷新记忆数据
+        if self._card_manager.is_card_visible("memory") and hasattr(self, '_memory_card_popup'):
+            # 强制刷新当前 tab 的内容
+            current_tab = getattr(self._memory_card, '_current_tab', 'entries')
+            self._memory_card_popup.switch_tab(current_tab)
 
     def _on_memory_card_saved(self, memories: list):
         """记忆卡片保存后的回调"""
