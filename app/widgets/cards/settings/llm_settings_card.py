@@ -30,11 +30,11 @@ from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_unified_font, get_font_family_css
 from app.widgets.gateway_setting_card import GatewaySettingCard
-from app.widgets.base_settings_card import BaseSettingsCard
-from app.widgets.list_setting_card import SkillListSettingCard
-from app.widgets.mcp_setting_card import MCPListSettingCard
-from app.widgets.provider_setting_card import ProviderListSettingCard
-from app.widgets.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
+from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
+from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -216,7 +216,7 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.addWidget(self.llmSkillsCard)
 
         # Hooks 管理
-        from app.widgets.hook_setting_card import HookListSettingCard
+        from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
 
         hook_manager = getattr(self.parent(), 'backend', None)
         if hook_manager:

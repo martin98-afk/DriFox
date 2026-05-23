@@ -87,7 +87,7 @@ class ToolFloatingWidget(SimpleCardWidget):
         self._update_style(False)
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setContentsMargins(6, 12, 6, 12)
         main_layout.setSpacing(8)
 
         header = QHBoxLayout()

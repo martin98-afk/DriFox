@@ -70,6 +70,80 @@ class SessionStore:
         
         self._init_schema()
 
+    def _check_and_repair_database(self):
+        """检查并修复损坏的 SQLite 数据库
+        
+        PyInstaller 打包后运行时可能遇到数据库损坏问题：
+        1. WAL 文件与主数据库文件不同步
+        2. 数据库文件被不完整地复制或更新
+        3. 并发写入导致文件锁定冲突
+        
+        修复策略：
+        1. 先尝试执行 PRAGMA wal_checkpoint(TRUNCATE) 同步 WAL
+        2. 删除不匹配的 WAL/SHM 文件（如果存在）
+        3. 执行 VACUUM 重建数据库
+        """
+        if not self._db or not self._db.is_connected:
+            logger.warning("[SessionStore] 数据库未连接，跳过检查")
+            return
+        
+        db_path = Path(self._db.db_path)
+        
+        try:
+            # 检查 WAL 模式
+            success, result = self._db.execute_sql('PRAGMA journal_mode')
+            if not success:
+                logger.warning("[SessionStore] 无法读取 journal_mode")
+                return
+            journal_mode = result[0][0] if result else 'unknown'
+            
+            # 获取数据库路径信息
+            wal_path = db_path.with_suffix('.db-wal')
+            shm_path = db_path.with_suffix('.db-shm')
+            
+            if journal_mode == 'wal':
+                # WAL 模式下检查是否需要同步
+                try:
+                    self._db.execute_sql('PRAGMA wal_checkpoint(TRUNCATE)')
+                    logger.debug("[SessionStore] WAL 检查点执行完成")
+                except Exception as e:
+                    logger.warning(f"[SessionStore] WAL 检查点失败: {e}")
+                    
+                    # 删除 WAL/SHM 文件强制同步
+                    for p in [(wal_path, "WAL"), (shm_path, "SHM")]:
+                        if p[0].exists():
+                            try:
+                                p[0].unlink()
+                                logger.info(f"[SessionStore] 已删除损坏的 {p[1]} 文件")
+                            except Exception as e2:
+                                logger.warning(f"[SessionStore] 无法删除 {p[1]} 文件: {e2}")
+            
+            # 尝试执行完整性检查
+            try:
+                success, result = self._db.execute_sql('PRAGMA integrity_check')
+                if success and result:
+                    check_result = result[0][0] if isinstance(result[0], tuple) else result[0].get(0, 'ok')
+                    if check_result != 'ok':
+                        logger.warning(f"[SessionStore] 数据库完整性检查失败: {check_result}")
+                        self._repair_database()
+                    else:
+                        logger.debug("[SessionStore] 数据库完整性检查通过")
+            except Exception as e:
+                logger.warning(f"[SessionStore] 完整性检查异常: {e}")
+                
+        except Exception as e:
+            logger.warning(f"[SessionStore] 数据库检查异常（继续初始化）: {e}")
+
+    def _repair_database(self):
+        """尝试修复损坏的数据库"""
+        try:
+            # 切换为 DELETE 模式并执行 VACUUM
+            self._db.execute_sql('PRAGMA journal_mode=DELETE')
+            self._db.execute_sql('VACUUM')
+            logger.info("[SessionStore] 数据库修复成功")
+        except Exception as e:
+            logger.error(f"[SessionStore] 数据库修复失败: {e}")
+
     def _init_schema(self):
         """初始化数据库和表结构"""
         if self._initialized:
@@ -83,6 +157,11 @@ class SessionStore:
                 # 使用 DatabaseManager（单例模式）
                 self._db = DatabaseManager()
                 self._db.connect(self._db_path)
+
+                # ========== 数据库完整性检查与自动修复 ==========
+                # 必须在连接之后执行，因为需要 DatabaseManager 实例来修复
+                self._check_and_repair_database()
+                # ================================================
 
                 # ========== WAL 模式优化：提升并发读写性能 ==========
                 self._db.execute_sql('PRAGMA journal_mode=WAL')

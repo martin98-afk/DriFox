@@ -17,8 +17,9 @@ from qfluentwidgets import (
 
 from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.utils.design_tokens import scale_font_size, Sizes, ButtonStyles, SwitchStyles
-from app.widgets.mcp_setting_card import _ElidedLabel
+from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel, EDIT_CARD_STYLE, _make_row
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
 class HookItem(QWidget):
@@ -107,7 +108,6 @@ class HookEditCard(QWidget):
         return dict(self._hook_data) if not self._is_new else {}
     
     def _setup_ui(self):
-        from app.widgets.mcp_setting_card import EDIT_CARD_STYLE, _make_row
         self.setStyleSheet(EDIT_CARD_STYLE)
 
         main_layout = QVBoxLayout(self)
