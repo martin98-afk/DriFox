@@ -1,0 +1,135 @@
+=== def _show_provider_add_card ===
+def _show_provider_add_card(self):
+        """显示添加服务商卡片"""
+        # 隐藏设置卡片，显示服务商编辑卡片
+        self._settings_popup.hide()
+        # 设置卡片标题
+        self._provider_edit_card.set_title("⚙️ 添加服务商")
+        # 重新创建 ProviderEditCard 用于添加
+        self._provider_edit_popup = ProviderEditCard(provider_name="", provider_info={}, is_new=True, parent=self)
+        self._provider_edit_popup.saved.connect(self._on_provider_edit_saved)
+        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
+        # 替换卡片内容
+        while self._provider_edit_card.content_layout.count():
+            item = self._provider_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
+        # 重新绑定保存按钮
+        self._provider_edit_card.set_save_button_handler(
+            lambda: self._provider_edit_popup._on_save()
+        )
+        self._provider_edit_card.show()
+
+    # ========== Hook 编辑卡片 ==========
+
+
+=== def _show_provider_edit_card ===
+def _show_provider_edit_card(self, provider_name: str, provider_info: dict):
+        """显示编辑服务商卡片"""
+        # 隐藏设置卡片，显示服务商编辑卡片
+        self._settings_popup.hide()
+        # 设置卡片标题
+        self._provider_edit_card.set_title(f"⚙️ 编辑: {provider_name}")
+        # 重新创建 ProviderEditCard 用于编辑
+        self._provider_edit_popup = ProviderEditCard(
+            provider_name=provider_name, provider_info=provider_info, is_new=False, parent=self
+        )
+        self._provider_edit_popup.saved.connect(self._on_provider_edit_saved)
+        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
+        # 替换卡片内容
+        while self._provider_edit_card.content_layout.count():
+            item = self._provider_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
+        # 重新绑定保存按钮
+        self._provider_edit_card.set_save_button_handler(
+            lambda: self._provider_edit_popup._on_save()
+        )
+        self._provider_edit_card.show()
+
+    # ========== MCP 编辑卡片 ==========
+
+
+=== def _show_mcp_add_card ===
+def _show_mcp_add_card(self):
+        """显示添加 MCP 服务器卡片"""
+        self._settings_popup.hide()
+        self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
+        self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self)
+        self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
+        self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
+        while self._mcp_edit_card.content_layout.count():
+            item = self._mcp_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._mcp_edit_card.content_layout.addWidget(self._mcp_edit_popup)
+        self._mcp_edit_card.set_save_button_handler(
+            lambda: self._mcp_edit_popup._on_save()
+        )
+        self._setup_mcp_edit_mode_buttons()
+        self._mcp_edit_card.show()
+
+
+=== def _show_mcp_edit_card ===
+def _show_mcp_edit_card(self, name: str, server_data: dict):
+        """显示编辑 MCP 服务器卡片"""
+        self._settings_popup.hide()
+        self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
+        self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self)
+        self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
+        self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
+        while self._mcp_edit_card.content_layout.count():
+            item = self._mcp_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._mcp_edit_card.content_layout.addWidget(self._mcp_edit_popup)
+        self._mcp_edit_card.set_save_button_handler(
+            lambda: self._mcp_edit_popup._on_save()
+        )
+        self._setup_mcp_edit_mode_buttons()
+        self._mcp_edit_card.show()
+
+
+=== def _show_hook_add_card ===
+def _show_hook_add_card(self):
+        """显示添加 Hook 卡片"""
+        from app.widgets.cards.settings.hook_setting_card import HookEditCard
+        self._settings_popup.hide()
+        self._hook_edit_card.set_title("➕ 添加 Hook")
+        # 重新创建 HookEditCard
+        self._hook_edit_popup = HookEditCard(parent=self)
+        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        while self._hook_edit_card.content_layout.count():
+            item = self._hook_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
+        self._hook_edit_card.set_save_button_handler(
+            lambda: self._hook_edit_popup._on_save()
+        )
+        self._hook_edit_card.show()
+
+
+=== def _show_hook_edit_card ===
+def _show_hook_edit_card(self, event: str, hook_data: dict):
+        """显示编辑 Hook 卡片"""
+        from app.widgets.cards.settings.hook_setting_card import HookEditCard
+        self._settings_popup.hide()
+        self._hook_edit_card.set_title("✏️ 编辑 Hook")
+        # 创建携带原始数据的 HookEditCard
+        self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self)
+        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        while self._hook_edit_card.content_layout.count():
+            item = self._hook_edit_card.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
+        self._hook_edit_card.set_save_button_handler(
+            lambda: self._hook_edit_popup._on_save()
+        )
+        self._hook_edit_card.show()
+

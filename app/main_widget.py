@@ -1605,10 +1605,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _open_settings_popup(self):
         """打开设置卡片"""
-        self._hide_main_popups()
-        self._settings_popup.show()
-        self._settings_popup.raise_()
-        self._settings_popup.activateWindow()
+        self._card_manager.toggle_card("settings")
+        if self._card_manager.is_card_visible("settings"):
+            self._settings_popup.raise_()
+            self._settings_popup.activateWindow()
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict):
         """服务商编辑保存后的回调"""
@@ -1641,8 +1641,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_provider_add_card(self):
         """显示添加服务商卡片"""
-        # 隐藏设置卡片，显示服务商编辑卡片
-        self._settings_popup.hide()
+        # 隐藏设置卡片
+        self._card_manager.hide_card("settings")
         # 设置卡片标题
         self._provider_edit_card.set_title("⚙️ 添加服务商")
         # 重新创建 ProviderEditCard 用于添加
@@ -1659,14 +1659,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(
             lambda: self._provider_edit_popup._on_save()
         )
-        self._provider_edit_card.show()
+        self._card_manager.show_card("provider_edit")
 
     # ========== Hook 编辑卡片 ==========
 
     def _show_hook_add_card(self):
         """显示添加 Hook 卡片"""
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
-        self._settings_popup.hide()
+        self._card_manager.hide_card("settings")
         self._hook_edit_card.set_title("➕ 添加 Hook")
         # 重新创建 HookEditCard
         self._hook_edit_popup = HookEditCard(parent=self)
@@ -1680,12 +1680,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
-        self._hook_edit_card.show()
+        self._card_manager.show_card("hook_edit")
 
     def _show_hook_edit_card(self, event: str, hook_data: dict):
         """显示编辑 Hook 卡片"""
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
-        self._settings_popup.hide()
+        self._card_manager.hide_card("settings")
         self._hook_edit_card.set_title("✏️ 编辑 Hook")
         # 创建携带原始数据的 HookEditCard
         self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self)
@@ -1699,7 +1699,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
-        self._hook_edit_card.show()
+        self._card_manager.show_card("hook_edit")
 
     def _on_hook_edit_saved(self, values: dict):
         """Hook 保存回调"""
@@ -1728,7 +1728,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     hook_type=values["type"],
                     enabled=values["enabled"]
                 )
-        self._settings_popup.show()
+        self._card_manager.show_card("settings")
 
     def _on_hook_edit_closed(self):
         """Hook 编辑关闭回调"""
@@ -1737,8 +1737,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_provider_edit_card(self, provider_name: str, provider_info: dict):
         """显示编辑服务商卡片"""
-        # 隐藏设置卡片，显示服务商编辑卡片
-        self._settings_popup.hide()
+        # 隐藏设置卡片
+        self._card_manager.hide_card("settings")
         # 设置卡片标题
         self._provider_edit_card.set_title(f"⚙️ 编辑: {provider_name}")
         # 重新创建 ProviderEditCard 用于编辑
@@ -1757,13 +1757,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(
             lambda: self._provider_edit_popup._on_save()
         )
-        self._provider_edit_card.show()
+        self._card_manager.show_card("provider_edit")
 
     # ========== MCP 编辑卡片 ==========
 
     def _show_mcp_add_card(self):
         """显示添加 MCP 服务器卡片"""
-        self._settings_popup.hide()
+        self._card_manager.hide_card("settings")
         self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
         self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
@@ -1777,11 +1777,12 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
-        self._mcp_edit_card.show()
+        self._card_manager.show_card("mcp_edit")
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
         """显示编辑 MCP 服务器卡片"""
-        self._settings_popup.hide()
+        self._card_manager.hide_card("settings")
+        self._card_manager.show_card("mcp_edit")
         self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
         self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
@@ -1795,7 +1796,7 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
-        self._mcp_edit_card.show()
+        self._card_manager.show_card("mcp_edit")
 
     def _setup_mcp_edit_mode_buttons(self):
         """设置 MCP 编辑卡头的模式切换按钮"""
