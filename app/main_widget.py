@@ -1613,7 +1613,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _open_settings_popup(self):
         """打开设置卡片"""
         self._card_manager.toggle_card("settings", self._window_id)
-        if self._card_manager.is_card_visible(self._window_id, "settings"):
+        if self._card_manager.is_card_visible("settings", self._window_id):
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
@@ -1625,7 +1625,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 隐藏服务商编辑卡片，显示设置卡片
         self._card_manager.hide_card("provider_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
 
         # 关闭模型选择器popup，下次打开会重新加载数据
         if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
@@ -1640,7 +1640,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """服务商编辑关闭后的回调"""
         # 隐藏服务商编辑卡片，显示设置卡片
         self._card_manager.hide_card("provider_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
         # 关闭模型选择器popup，确保下次打开重新加载数据
         if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
             self._model_selector_popup.close()
@@ -1666,7 +1666,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(
             lambda: self._provider_edit_popup._on_save()
         )
-        self._card_manager.show_card(self._window_id, "provider_edit")
+        self._card_manager.show_card("provider_edit", self._window_id)
 
     # ========== Hook 编辑卡片 ==========
 
@@ -1687,7 +1687,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
-        self._card_manager.show_card(self._window_id, "hook_edit")
+        self._card_manager.show_card("hook_edit", self._window_id)
 
     def _show_hook_edit_card(self, event: str, hook_data: dict):
         """显示编辑 Hook 卡片"""
@@ -1706,13 +1706,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
-        self._card_manager.show_card(self._window_id, "hook_edit")
+        self._card_manager.show_card("hook_edit", self._window_id)
 
     def _on_hook_edit_saved(self, values: dict):
         """Hook 保存回调"""
         self._card_manager.hide_card("hook_edit", self._window_id)
         # 显示设置卡片（使用 show_card 触发系统卡片互斥）
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'hookListCard'):
             original = self._hook_edit_popup.get_original_data()
             if original:
@@ -1735,12 +1735,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     hook_type=values["type"],
                     enabled=values["enabled"]
                 )
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
 
     def _on_hook_edit_closed(self):
         """Hook 编辑关闭回调"""
         self._card_manager.hide_card("hook_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
 
     def _show_provider_edit_card(self, provider_name: str, provider_info: dict):
         """显示编辑服务商卡片"""
@@ -1764,7 +1764,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card.set_save_button_handler(
             lambda: self._provider_edit_popup._on_save()
         )
-        self._card_manager.show_card(self._window_id, "provider_edit")
+        self._card_manager.show_card("provider_edit", self._window_id)
 
     # ========== MCP 编辑卡片 ==========
 
@@ -1784,12 +1784,12 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
-        self._card_manager.show_card(self._window_id, "mcp_edit")
+        self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
         """显示编辑 MCP 服务器卡片"""
         self._card_manager.hide_card("settings", self._window_id)
-        self._card_manager.show_card(self._window_id, "mcp_edit")
+        self._card_manager.show_card("mcp_edit", self._window_id)
         self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
         self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
@@ -1803,7 +1803,7 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
-        self._card_manager.show_card(self._window_id, "mcp_edit")
+        self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _setup_mcp_edit_mode_buttons(self):
         """设置 MCP 编辑卡头的模式切换按钮"""
@@ -1830,7 +1830,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_mcp_edit_saved(self, server_data: dict):
         """MCP 编辑保存回调"""
         self._card_manager.hide_card("mcp_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
             name = server_data.get("name", "")
             servers = list(self._settings_popup.mcpListCard.cfg.mcp_servers.value or [])
@@ -1845,19 +1845,19 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_mcp_edit_closed(self):
         """MCP 编辑关闭回调"""
         self._card_manager.hide_card("mcp_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
             self._settings_popup.mcpListCard.refresh_connections()
 
     def _on_hook_edit_card_closed(self):
         """Hook 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
         self._card_manager.hide_card("hook_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
 
     def _on_provider_edit_card_closed(self):
         """服务商编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
         self._card_manager.hide_card("provider_edit", self._window_id)
-        self._card_manager.show_card(self._window_id, "settings")
+        self._card_manager.show_card("settings", self._window_id)
 
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
@@ -1942,7 +1942,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """切换模型配置卡片的显示"""
         self._card_manager.toggle_card("model_config", self._window_id)
         # 显示时刷新模型配置数据
-        if self._card_manager.is_card_visible(self._window_id, "model_config"):
+        if self._card_manager.is_card_visible("model_config", self._window_id):
             self._load_model_config_to_card()
 
     def _load_model_config_to_card(self):
@@ -2123,7 +2123,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """切换历史会话卡片的显示"""
         self._card_manager.toggle_card("history", self._window_id)
         # 显示时刷新历史会话数据
-        if self._card_manager.is_card_visible(self._window_id, "history"):
+        if self._card_manager.is_card_visible("history", self._window_id):
             self._refresh_history_toggle_panel()
 
     def _sync_search_box_visibility(self):
@@ -5328,11 +5328,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if tool_name in ("todowrite", "todoread"):
             # 更新数据，但只有在系统卡片未打开时才能显示
             if not self._is_system_card_visible:
-                self._card_manager.show_card(self._window_id, "todo")
+                self._card_manager.show_card("todo", self._window_id)
             return
 
         # 使用 CardManager 显示工具卡片
-        self._card_manager.show_card(self._window_id, "tool")
+        self._card_manager.show_card("tool", self._window_id)
         self._tool_floating_widget.start_tool(tool_name, arguments)
 
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
@@ -5834,7 +5834,7 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         if getattr(self, '_is_destroyed', False):
             return
-        self._card_manager.show_card(self._window_id, "question")
+        self._card_manager.show_card("question", self._window_id)
         self._question_tool_call_id = tool_call_id
         if not isinstance(options, list):
             options = []
@@ -6345,7 +6345,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """切换记忆管理卡片的显示"""
         self._card_manager.toggle_card("memory", self._window_id)
         # 显示时刷新记忆数据
-        if self._card_manager.is_card_visible(self._window_id, "memory") and hasattr(self, '_memory_card_popup'):
+        if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, '_memory_card_popup'):
             # 强制刷新当前 tab 的内容
             current_tab = getattr(self._memory_card, '_current_tab', 'entries')
             # 强制切换 tab（即使相同也触发刷新）
