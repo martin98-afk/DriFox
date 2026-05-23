@@ -428,92 +428,83 @@ class OpenAIChatToolWindow(ToolWindow):
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager
         
-        优先级规则（数值越小权限越高）：
-        - 10: Question（最高，强制覆盖其他）
-        - 20: Tool, SubAgent（同级可共存）
-        - 30: History, Memory（同级可共存）
-        - 40: ModelConfig, AutoLoop
+        规则：
+        - 同位置互斥：Top/Bottom 各自只能显示一个卡片
+        - Question 强制覆盖：Question 显示时同时关闭其他所有卡片
+        - 不同位置可共存：Top 的卡片和 Bottom 的卡片可以同时显示
         """
         mgr = self._card_manager
         
-        # Question 卡片 - 优先级10（最高）
+        # ===== Bottom 容器（chatscroll 下方）=====
+        # Question 卡片 - 强制覆盖所有其他卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "question",
             self._question_floating_widget,
-            priority=10
         )
         
-        # Tool 卡片 - 优先级20
+        # Tool 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "tool",
             self._tool_floating_widget,
-            priority=20
         )
         
-        # SubAgent 卡片 - 优先级20（与 Tool 同级可共存）
+        # SubAgent 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "sub_agent",
             self._sub_agent_floating_widget,
-            priority=20
         )
         
-        # History 卡片 - 优先级30
+        # History 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "history",
             self._history_card,
-            priority=30
         )
         
-        # Memory 卡片 - 优先级30（与 History 同级可共存）
+        # Memory 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "memory",
             self._memory_card,
-            priority=30
         )
         
-        # ModelConfig 卡片 - 优先级40
+        # ModelConfig 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "model_config",
             self._model_config_card,
-            priority=40
         )
         
-        # AutoLoop Config 卡片 - 优先级40
+        # AutoLoop Config 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "auto_loop_config",
             self._auto_loop_config_card,
-            priority=40
         )
         
-        # AutoLoop Running 卡片 - 优先级40
+        # AutoLoop Running 卡片
         mgr.register_card(
             ContainerType.BOTTOM,
             "auto_loop_running",
             self._auto_loop_running_card,
-            priority=40
         )
         
-        # Todo 卡片 - 优先级20（在 Top 容器）
+        # ===== Top 容器（chatscroll 上方）=====
+        # Todo 卡片
         mgr.register_card(
             ContainerType.TOP,
             "todo",
             self._todo_floating_widget,
-            priority=20
         )
         
-        # MCP Edit 卡片 - 优先级40
+        # MCP Edit 卡片
         mgr.register_card(
             ContainerType.TOP,
             "mcp_edit",
             self._mcp_edit_card,
-            priority=40
         )
         
         logger.info("[CardManager] 所有卡片注册完成")
