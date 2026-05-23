@@ -105,7 +105,7 @@ class SendableTextEdit(TextEdit):
         return self._command_card_ref
 
     def _on_slash_trigger_check(self):
-        """检测 / 触发——统一逻辑：检查光标前是否有 /"""
+        """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片"""
         card = self._get_card()
         try:
             cursor = self.textCursor()
@@ -115,11 +115,12 @@ class SendableTextEdit(TextEdit):
             if cursor_pos < 0 or cursor_pos > len(text):
                 return
 
+            # 仅当 / 在文本开头（位置0）时触发
             text_before_cursor = text[:cursor_pos]
-            last_slash = text_before_cursor.rfind("/")
-
-            if last_slash >= 0:
-                query = text_before_cursor[last_slash + 1:]
+            
+            # 检查开头是否有 /
+            if text.startswith("/"):
+                query = text[1:cursor_pos] if cursor_pos > 1 else ""
                 # 如果有空格或换行，说明 / 触发已结束
                 if " " in query or "\n" in query:
                     if card and card.is_card_visible:
@@ -127,11 +128,11 @@ class SendableTextEdit(TextEdit):
                     self._slash_trigger_pos = -1
                     return
 
-                # 还在 / 触发中
-                self._slash_trigger_pos = last_slash
+                # 在开头触发
+                self._slash_trigger_pos = 0
                 self.slashTriggered.emit(query)
             else:
-                # 没有 / 符号
+                # 没有在开头
                 if card and card.is_card_visible:
                     self.slashDismissed.emit()
                 self._slash_trigger_pos = -1
@@ -174,6 +175,13 @@ class SendableTextEdit(TextEdit):
 
     def _on_card_dismissed(self):
         """卡片被关闭时的清理"""
+        self._slash_trigger_pos = -1
+
+    def _tab_complete_if_card_visible(self):
+        """Tab 补全：卡片可见时选中当前项"""
+        card = self._get_card()
+        if card and card.is_card_visible:
+            card.select_current()
         self._slash_trigger_pos = -1
 
     def _on_agent_changed(self, text: str):
@@ -284,13 +292,25 @@ class SendableTextEdit(TextEdit):
                 card.select_prev()
                 event.accept()
                 return
-            elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
                 card.select_current()
                 event.accept()
                 return
             elif event.key() == Qt.Key_Escape:
                 card.dismiss()
                 self.slashDismissed.emit()
+                event.accept()
+                return
+
+        # Tab 键：开头有 / 时触发补全
+        if event.key() == Qt.Key_Tab:
+            text = self.toPlainText()
+            if text.startswith("/"):
+                # 模拟 / 触发，然后选择当前项
+                self._slash_trigger_pos = 0
+                self.slashTriggered.emit(text[1:] if len(text) > 1 else "")
+                # 延迟选中（等待卡片加载）
+                QTimer.singleShot(10, lambda: self._tab_complete_if_card_visible())
                 event.accept()
                 return
 

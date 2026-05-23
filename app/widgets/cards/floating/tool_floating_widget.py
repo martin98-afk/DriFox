@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import re
 import time
 
 import orjson as json
@@ -15,6 +16,7 @@ from PyQt5.QtWidgets import (
 
 from app.utils.design_tokens import Colors
 from app.utils.utils import get_unified_font
+from app.widgets.cards.floating.command_card import _ElidedLabel
 
 
 class _RotatingIcon(QWidget):
@@ -74,7 +76,12 @@ class ToolFloatingWidget(QWidget):
         self._rotation_timer.timeout.connect(self._update_rotation)
         self._rotating = False
         self._svg_renderer = _RotatingIcon(":/icons/执行中.svg", size=18)
-        self._svg_success = _RotatingIcon(":/icons/成功.svg", size=18)
+        self._svg_success_pixmap = QPixmap(18, 18)
+        self._svg_success_pixmap.fill(Qt.transparent)
+        _svg_success_renderer = QSvgRenderer(":/icons/成功.svg")
+        p = QPainter(self._svg_success_pixmap)
+        _svg_success_renderer.render(p, QRectF(0, 0, 18, 18))
+        p.end()
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(2000)
@@ -104,7 +111,7 @@ class ToolFloatingWidget(QWidget):
         main_layout.addWidget(self.tool_name_label)
 
         # 参数/结果内容（一行显示）
-        self.task_label = QLabel("", self)
+        self.task_label = _ElidedLabel("", self)
         self.task_label.setFont(get_unified_font(10))
         self.task_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
         self.task_label.setWordWrap(False)
@@ -121,7 +128,7 @@ class ToolFloatingWidget(QWidget):
         Colors.refresh()
         self.tool_name_label.setStyleSheet(
             f"color: {Colors.REALTIME_ACCENT}; background-color: {Colors.REALTIME_TAG_BG}; "
-            f"padding: 2px 8px; border-radius: 5px;"
+            f"padding: 0px 0px; border-radius: 5px;"
         )
 
     # ── 旋转图标 ──────────────────────────────────────────
@@ -201,7 +208,7 @@ class ToolFloatingWidget(QWidget):
             else:
                 args_preview = "..."
 
-        self.task_label.setText(args_preview)
+        self.task_label.setText(re.sub(r"[\n\r]+", "\\n", args_preview))
 
         if self._suppress_visible:
             self.setVisible(False)
@@ -211,11 +218,11 @@ class ToolFloatingWidget(QWidget):
         QApplication.processEvents()
 
     def _append_progress(self, text: str):
-        self.task_label.setText(text)
+        self.task_label.setText(re.sub(r"[\n\r]+", "\\n", text))
 
     def update_progress(self, message: str):
         """更新进度"""
-        self.task_label.setText(message)
+        self.task_label.setText(re.sub(r"[\n\r]+", "\\n", message))
 
     def add_tool_call(self, tool_name: str, args: dict = None):
         """添加工具调用"""
@@ -233,15 +240,15 @@ class ToolFloatingWidget(QWidget):
 
         self.icon_label.setFixedSize(18, 18)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
-        self.icon_label.setPixmap(self._svg_success.current_pixmap())
+        self.icon_label.setPixmap(self._svg_success_pixmap)
 
         self._update_style(success)
 
         if success:
-            self.task_label.setText(result or "")
+            self.task_label.setText(re.sub(r"[\n\r]+", "\\n", result) or "")
         else:
             error_msg = result if result else ""
-            self.task_label.setText(error_msg[:80])
+            self.task_label.setText(re.sub(r"[\n\r]+", "\\n", error_msg[:80]))
 
         if self._suppress_visible:
             self._needs_show_after_unsuppress = True

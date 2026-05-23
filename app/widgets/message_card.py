@@ -3596,7 +3596,7 @@ class MessageCard(SimpleCardWidget):
         elif self.role == "user":
             horizontal_margin = 180
         else:
-            horizontal_margin = 72
+            horizontal_margin = 40
 
         target_width = max(320, parent_width - horizontal_margin)
 

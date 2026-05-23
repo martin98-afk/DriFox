@@ -862,7 +862,7 @@ TOOL_SCHEMAS = [
                                 },
                                 "options": {
                                     "type": "array",
-                                    "description": "选项列表（可选）。每个选项包含 label（标题）和 description（描述）",
+                                    "description": "选项列表（可选）。每个选项包含 label（标题）和 description（描述）,一个问题最多提出4个选项",
                                     "items": {
                                         "type": "object",
                                         "properties": {
