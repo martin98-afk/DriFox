@@ -1,24 +1,21 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import QTimer
 from loguru import logger
 
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
 
 class CardContainer(QWidget):
-    """通用卡片容器 - 支持嵌入布局的卡片显示
+    """通用卡片容器 - 每个容器只管理一个位置的卡片
     
     功能：
-    - 管理多个卡片的显示/隐藏
-    - 单卡片互斥显示（同一时间只显示一个卡片）
-    - 支持动态展开/收起
-    - 订阅 CardManager 的信号以同步卡片显示状态
+    - 管理同位置多张卡片的显示/隐藏
+    - 单卡片互斥：同一时间只显示一张
+    - 动态展开/收起容器
+    - 只响应自己容器内的卡片事件
     """
-    
-    # 卡片关闭信号
-    cardClosed = pyqtSignal(str)  # card_id
     
     def __init__(self, container_type: ContainerType):
         super().__init__()
@@ -29,56 +26,58 @@ class CardContainer(QWidget):
     
     def _setup_ui(self):
         """初始化UI"""
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.setMinimumHeight(0)
         self.setMaximumHeight(0)  # 默认折叠
         
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        
-        self._content_widget = QWidget(self)
-        self._content_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        self._content_widget.setVisible(False)
-        layout.addWidget(self._content_widget)
-        
-        self._card_layout = QVBoxLayout(self._content_widget)
-        self._card_layout.setContentsMargins(0, 0, 0, 0)
-        self._card_layout.setSpacing(8)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
     
     @property
     def container_type(self) -> ContainerType:
         return self._container_type
     
     def bind_card_manager(self, card_manager: CardManager):
-        """绑定 CardManager 以同步显示状态"""
+        """绑定 CardManager"""
         self._card_manager = card_manager
-        # 注册回调
-        card_manager.on_card_shown("any", self._on_card_shown)
-        card_manager.on_card_hidden("any", self._on_card_hidden)
     
     def _on_card_shown(self, card_id: str):
-        """CardManager 显示卡片时的回调"""
+        """某张卡片被显示"""
+        if card_id not in self._cards:
+            return
         # 展开容器
-        self._content_widget.setVisible(True)
-        self._expand()
+        self._update_container_size()
     
     def _on_card_hidden(self, card_id: str):
-        """CardManager 隐藏卡片时的回调"""
-        # 检查是否还有可见卡片
-        visible = self._card_manager.get_visible_card(self._container_type) if self._card_manager else None
-        if visible is None:
-            self._content_widget.setVisible(False)
+        """某张卡片被隐藏"""
+        if card_id not in self._cards:
+            return
+        # 检查容器内是否还有可见卡片
+        self._update_container_size()
+    
+    def _update_container_size(self):
+        """更新容器大小：有可见卡片则展开，否则折叠"""
+        has_visible = any(w.isVisible() for w in self._cards.values())
+        if has_visible:
+            # 展开 - 用 QTimer 延迟计算高度，等待卡片渲染完成
+            QTimer.singleShot(0, self._expand)
+        else:
             self._collapse()
     
     def add_card(self, card_id: str, card_widget: QWidget):
-        """添加卡片到容器"""
+        """添加卡片到容器，并注册专属回调"""
         if card_id in self._cards:
             logger.warning(f"[CardContainer] 卡片 {card_id} 已存在，将被替换")
         
         self._cards[card_id] = card_widget
-        self._card_layout.addWidget(card_widget)
+        self._layout.addWidget(card_widget)
         card_widget.setVisible(False)
+        
+        # 注册此卡片专属的回调
+        if self._card_manager:
+            self._card_manager.on_card_shown(card_id, self._on_card_shown)
+            self._card_manager.on_card_hidden(card_id, self._on_card_hidden)
     
     def remove_card(self, card_id: str):
         """从容器移除卡片"""
@@ -86,76 +85,46 @@ class CardContainer(QWidget):
             return
         
         widget = self._cards[card_id]
-        self._card_layout.removeWidget(widget)
+        self._layout.removeWidget(widget)
         del self._cards[card_id]
         
         if len(self._cards) == 0:
             self.setMaximumHeight(0)
-            self._content_widget.setVisible(False)
-    
-    def show_card(self, card_id: str):
-        """显示指定卡片（隐藏其他同容器卡片）"""
-        if card_id not in self._cards:
-            return
-        
-        for cid, widget in self._cards.items():
-            if cid != card_id:
-                widget.setVisible(False)
-        
-        widget = self._cards[card_id]
-        widget.setVisible(True)
-        self._content_widget.setVisible(True)
-        self._expand()
-    
-    def hide_card(self, card_id: str):
-        """隐藏指定卡片"""
-        if card_id not in self._cards:
-            return
-        
-        widget = self._cards[card_id]
-        widget.setVisible(False)
-        
-        # 检查是否还有可见卡片
-        if self._card_manager:
-            visible = self._card_manager.get_visible_card(self._container_type)
-            if visible is None:
-                self._content_widget.setVisible(False)
-                self._collapse()
-        else:
-            has_visible = any(w.isVisible() for w in self._cards.values())
-            if not has_visible:
-                self._content_widget.setVisible(False)
-                self._collapse()
     
     def _expand(self):
         """展开容器"""
         total_height = 0
         for widget in self._cards.values():
             if widget.isVisible():
-                total_height += widget.sizeHint().height() + self._card_layout.spacing()
+                # 使用 widget.height() 获取实际高度，优先于 sizeHint
+                h = widget.height()
+                if h <= 0:
+                    h = widget.sizeHint().height()
+                total_height += h
         
         if total_height > 0:
-            total_height += self._card_layout.contentsMargins().top() + self._card_layout.contentsMargins().bottom()
+            total_height += 4  # 微小边距
+            self.setMaximumHeight(total_height + 10)
+            self.setMinimumHeight(0)
+        else:
+            self.setMaximumHeight(500)  # 回退高度
         
-        self.setMaximumHeight(total_height if total_height > 0 else 500)
         self.updateGeometry()
+        logger.debug(f"[CardContainer] {self._container_type.value} 展开: 高度={total_height}")
     
     def _collapse(self):
         """收起容器"""
+        self.setMinimumHeight(0)
         self.setMaximumHeight(0)
-        self._content_widget.setVisible(False)
         self.updateGeometry()
+        logger.debug(f"[CardContainer] {self._container_type.value} 收起")
 
 
 class TopCardContainer(CardContainer):
-    """上方卡片容器 - chatscroll 上方"""
-    
     def __init__(self):
         super().__init__(ContainerType.TOP)
 
 
 class BottomCardContainer(CardContainer):
-    """下方卡片容器 - chatscroll 下方"""
-    
     def __init__(self):
         super().__init__(ContainerType.BOTTOM)
