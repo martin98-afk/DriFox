@@ -103,14 +103,14 @@ class CardContainer(QWidget):
                 if h <= 0:
                     h = widget.minimumHeight()
                 if h <= 0:
-                    h = 400  # 默认最低高度
+                    h = 400
                 total_height += h
         
         if total_height > 0:
-            total_height += 2
-            self.setMaximumHeight(total_height + 20)
+            self.setMaximumHeight(total_height + 4)
+        else:
+            self._collapse()
         
-        # 延迟再次计算高度，处理动态内容
         QTimer.singleShot(100, self._delayed_expand)
     
     def _delayed_expand(self):
@@ -125,14 +125,10 @@ class CardContainer(QWidget):
                     h = 400
                 total_height += h
         if total_height > 0:
-            self.setMaximumHeight(total_height + 20)
+            self.setMaximumHeight(total_height + 4)
             self.updateGeometry()
-            self.setMinimumHeight(0)
         else:
-            self.setMaximumHeight(500)  # 回退高度
-        
-        self.updateGeometry()
-        logger.debug(f"[CardContainer] {self._container_type.value} 展开: 高度={total_height}")
+            self._collapse()
     
     def _collapse(self):
         """收起容器"""
