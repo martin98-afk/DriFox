@@ -115,6 +115,7 @@ from app.widgets.cards.floating.todo_floating_widget import (
 from app.widgets.cards.floating.tool_floating_widget import (
     ToolFloatingWidget,
 )
+from app.widgets.cards.floating.command_card import CommandCard
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import add_message_to_layout, refresh_history_card_if_visible, \
     init_new_session_after_archive, clear_and_show_welcome, refresh_session_view, save_or_archive_session, \
@@ -1319,7 +1320,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.newSessionRequested.connect(self._create_new_session)
         self.input_area.agentChanged.connect(self._on_agent_changed)
         self.input_area.textChanged.connect(self._on_input_area_height_changed)
+        self.input_area.slashTriggered.connect(self._on_slash_triggered)
+        self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         card_layout.addWidget(self.input_area)
+
+        # 命令卡片（必须是输入框创建后）
+        self._command_card = CommandCard(self._bottom_input_container)
+        self._command_card.setVisible(False)
+        self.input_area.set_command_card(self._command_card)
+        mgr = self._card_manager
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card)
+        self._bottom_card_container.add_card("command", self._command_card)
 
         # 分隔线
         separator = QFrame(self._input_card)
@@ -1438,6 +1449,24 @@ class OpenAIChatToolWindow(ToolWindow):
         bottom_layout.addWidget(self._input_card)
 
         layout.addWidget(self._bottom_input_container)
+
+    # ========== 命令卡片处理 ==========
+
+    def _on_slash_triggered(self, query: str):
+        """输入框 / 触发 - 更新命令卡片并显示"""
+        if not hasattr(self, '_command_card'):
+            return
+        self._command_card.show_card(query)
+        if self._command_card.filtered_count > 0:
+            self._card_manager.show_card("command", self._window_id)
+            # 把焦点还给输入框（卡片不抢焦点）
+            self.input_area.setFocus(Qt.OtherFocusReason)
+
+    def _on_slash_dismissed(self):
+        """输入框 / 触发结束 - 隐藏命令卡片"""
+        if not hasattr(self, '_command_card'):
+            return
+        self._card_manager.hide_card("command", self._window_id)
 
     def _show_model_selector_popup(self):
         """显示扁平式模型选择上拉框"""
