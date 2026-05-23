@@ -220,8 +220,8 @@ class QuestionFloatingWidget(SimpleCardWidget):
         )
 
     def _setup_ui(self):
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.setMinimumHeight(128)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setMinimumHeight(0)
         self._apply_card_style()
 
         main_layout = QVBoxLayout(self)
