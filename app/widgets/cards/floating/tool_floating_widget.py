@@ -179,6 +179,10 @@ class ToolFloatingWidget(QWidget):
         """设置当前进程以便中止"""
         self._current_process = process
 
+    def _flatten_text(self, text: str) -> str:
+        """将换行符替换为空格，用于单行显示"""
+        return re.sub(r"[\n\r]+", " ", text)
+
     def start_tool(self, tool_name: str, args: dict = None):
         """开始执行工具"""
         if tool_name.startswith("mcp__"):
@@ -208,7 +212,7 @@ class ToolFloatingWidget(QWidget):
             else:
                 args_preview = "..."
 
-        self.task_label.setText(re.sub(r"[\n\r]+", "\\n", args_preview))
+        self.task_label.setText(self._flatten_text(args_preview))
 
         if self._suppress_visible:
             self.setVisible(False)
@@ -218,11 +222,11 @@ class ToolFloatingWidget(QWidget):
         QApplication.processEvents()
 
     def _append_progress(self, text: str):
-        self.task_label.setText(re.sub(r"[\n\r]+", "\\n", text))
+        self.task_label.setText(self._flatten_text(text))
 
     def update_progress(self, message: str):
         """更新进度"""
-        self.task_label.setText(re.sub(r"[\n\r]+", "\\n", message))
+        self.task_label.setText(self._flatten_text(message))
 
     def add_tool_call(self, tool_name: str, args: dict = None):
         """添加工具调用"""
@@ -245,10 +249,10 @@ class ToolFloatingWidget(QWidget):
         self._update_style(success)
 
         if success:
-            self.task_label.setText(re.sub(r"[\n\r]+", "\\n", result) or "")
+            self.task_label.setText(self._flatten_text(result) or "")
         else:
             error_msg = result if result else ""
-            self.task_label.setText(re.sub(r"[\n\r]+", "\\n", error_msg[:80]))
+            self.task_label.setText(self._flatten_text(error_msg[:80]))
 
         if self._suppress_visible:
             self._needs_show_after_unsuppress = True

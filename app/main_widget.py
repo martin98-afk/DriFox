@@ -955,7 +955,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 动态更新主题选项
         update_theme_options()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 4, 1)
+        layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(1)
         
         # 创建卡片容器
@@ -4623,11 +4623,33 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 self._undo_delete_cache = {}
 
+        # 统计被删除的卡片数
+        card_count = 1
+        card_layout_idx = -1
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item and item.widget() is card:
+                card_layout_idx = i
+                break
+        if card_layout_idx >= 0:
+            for i in range(card_layout_idx + 1, self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if not item or not item.widget():
+                    continue
+                w = item.widget()
+                if hasattr(w, 'role') and w.role == "user" and not getattr(w, "_is_welcome", False):
+                    break
+                card_count += 1
+
         # 执行删除
         self._delete_user_round(card)
 
-        # 显示撤销卡片（只缓存一步，新的删除会覆盖旧的）
+        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
         if self._undo_delete_cache:
+            self._undo_delete_cache["count"] = card_count
+            self._undo_delete_card.set_count(card_count)
+            if self._card_manager.is_card_visible("undo_delete", self._window_id):
+                self._card_manager.hide_card("undo_delete", self._window_id)
             self._card_manager.show_card("undo_delete", self._window_id)
 
     def _restore_deleted_message(self):
@@ -4655,11 +4677,26 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id != session.session_id:
             self._current_session_id = session.session_id
 
+        # 直接保存到 history_manager，确保数据不丢失
         try:
-            self._persist_session_after_mutation()
+            if self.history_manager:
+                from app.widgets.ui_helpers import get_session_compaction_info
+                compaction_info = get_session_compaction_info(session)
+                idx = self.history_manager.find_index_by_session_id(self._current_session_id)
+                if idx is not None:
+                    self.history_manager.update_session(
+                        idx,
+                        session.messages,
+                        **compaction_info
+                    )
+                else:
+                    self.history_manager.save_session(
+                        session.messages,
+                        session_id=session.session_id,
+                        **compaction_info
+                    )
         except Exception as e:
             logger.error(f"[RESTORE] Failed to persist session: {e}")
-            return
 
         # 刷新视图
         self._invalidate_current_session_card_cache()
@@ -4812,11 +4849,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # === 缓存撤销数据，用于恢复（只缓存一步）===
         try:
+            # 撤销：删除从该 round 到末尾的所有消息
             start_idx = round_ranges_now[round_index][0]
-            end_idx = round_ranges_now[round_index][1]
             self._undo_delete_cache = {
                 "session_id": session.session_id,
-                "messages": list(session.messages[start_idx:end_idx]),
+                "messages": list(session.messages[start_idx:]),  # 从 round 开始到末尾
                 "insert_index": start_idx,
             }
         except Exception:
@@ -4869,8 +4906,29 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
 
-        # 显示撤销卡片（只缓存一步，新的删除/撤销会覆盖旧的）
+        # 统计被删除的卡片数（从 card 到末尾）
+        card_count = 1
+        card_layout_idx = -1
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item and item.widget() is card:
+                card_layout_idx = i
+                break
+        if card_layout_idx >= 0:
+            for i in range(card_layout_idx + 1, self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget():
+                    w = item.widget()
+                    if hasattr(w, '_is_welcome') and w._is_welcome:
+                        continue
+                    card_count += 1
+
+        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
         if self._undo_delete_cache:
+            self._undo_delete_cache["count"] = card_count
+            self._undo_delete_card.set_count(card_count)
+            if self._card_manager.is_card_visible("undo_delete", self._window_id):
+                self._card_manager.hide_card("undo_delete", self._window_id)
             self._card_manager.show_card("undo_delete", self._window_id)
 
         # 恢复输入框内容

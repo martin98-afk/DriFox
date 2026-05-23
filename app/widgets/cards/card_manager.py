@@ -162,7 +162,11 @@ class CardManager:
         
         # 显示卡片
         try:
-            card_widget.setVisible(True)
+            # 调用卡片的 show_card 方法（由卡片自己管理计时器）
+            if hasattr(card_widget, 'show_card'):
+                card_widget.show_card()
+            else:
+                card_widget.setVisible(True)
         except RuntimeError:
             # 竞态条件：检测后 widget 被删除了
             self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
@@ -198,7 +202,10 @@ class CardManager:
             return
         
         try:
-            card_widget.setVisible(False)
+            if hasattr(card_widget, 'hide_card'):
+                card_widget.hide_card()
+            else:
+                card_widget.setVisible(False)
         except RuntimeError:
             self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
             return
@@ -297,7 +304,10 @@ class CardManager:
                 if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
                     continue
                 try:
-                    card_widget.setVisible(False)
+                    if hasattr(card_widget, 'hide_card'):
+                        card_widget.hide_card()
+                    else:
+                        card_widget.setVisible(False)
                 except RuntimeError:
                     self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
                     continue
