@@ -800,6 +800,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_window_bg_opacity(self, opacity: float):
         """更新窗口背景透明度"""
+        # 更新背景图片透明度（如果存在）
+        if hasattr(self, '_bg_opacity') and self._bg_opacity is not None:
+            self._bg_opacity.setOpacity(opacity)
+        
+        # 更新窗口调色板颜色
         if not hasattr(self, '_window_bg_color'):
             return
         import re
@@ -1099,7 +1104,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
         self._settings_popup.configChanged.connect(self._on_settings_config_changed)
-        self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", self._window_id))
+        self._settings_popup.closed.connect(lambda: (self._card_manager.hide_card("settings", self._window_id), self._restore_after_system_close()))
 
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
@@ -1236,7 +1241,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
-        self._history_card.closed.connect(lambda: self._card_manager.hide_card("history", self._window_id))
+        self._history_card.closed.connect(lambda: (self._card_manager.hide_card("history", self._window_id), self._restore_after_system_close()))
         # 搜索框（历史会话和归档标签都显示）
         self._history_card.set_search_handler(
             "🔍 搜索会话...",
@@ -1268,7 +1273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
         self._memory_card.content_layout.addWidget(self._memory_card_popup)
         self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(lambda: self._card_manager.hide_card("memory", self._window_id))
+        self._memory_card.closed.connect(lambda: (self._card_manager.hide_card("memory", self._window_id), self._restore_after_system_close()))
         self._bottom_card_container.add_card("memory", self._memory_card)
 
         # 模型配置卡片
@@ -1277,14 +1282,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
         self._model_config_card.setVisible(False)
-        self._model_config_card.closed.connect(lambda: self._card_manager.hide_card("model_config", self._window_id))
+        self._model_config_card.closed.connect(lambda: (self._card_manager.hide_card("model_config", self._window_id), self._restore_after_system_close()))
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
-        self._auto_loop_config_card.closed.connect(lambda: self._card_manager.hide_card("auto_loop_config", self._window_id))
+        self._auto_loop_config_card.closed.connect(lambda: (self._card_manager.hide_card("auto_loop_config", self._window_id), self._restore_after_system_close()))
         self._auto_loop_config_card.setVisible(False)
         self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
 
@@ -1357,7 +1362,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._command_card.setVisible(False)
         self.input_area.set_command_card(self._command_card)
         mgr = self._card_manager
-        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card)
+        # 命令卡片压制 tool 和 sub_agent
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card, suppress_others=["tool", "sub_agent"])
         self._bottom_card_container.add_card("command", self._command_card)
 
         # 撤销删除卡片
@@ -1511,6 +1517,65 @@ class OpenAIChatToolWindow(ToolWindow):
             self._duplicate_window(branch=False)
         elif command_name == "branch":
             self._duplicate_window(branch=True)
+        elif command_name == "compact":
+            self._trigger_context_compaction()
+
+    def _trigger_context_compaction(self):
+        """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
+        session = self.session_manager.get_current_session()
+        if not session or not session.messages:
+            InfoBar.warning("无法压缩", "当前会话没有对话内容", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if not sub_agent_mgr:
+            InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        import uuid
+        task_id = f"compact_{uuid.uuid4().hex[:8]}"
+
+        sub_agent_mgr.execute_task(
+            task_id=task_id,
+            agent_name="compaction",
+            task_description="请压缩当前对话上下文，生成工作摘要",
+            parent_context="",
+            share_context=True,  # 接入主智能体完整上下文
+            on_finished=lambda result: self._on_compaction_finished(task_id, result),
+            on_error=lambda error: self._on_compaction_error(task_id, error),
+        )
+
+        InfoBar.info("压缩中", "正在调用子智能体压缩对话上下文...", parent=self, duration=2000, position=InfoBarPosition.BOTTOM)
+
+    def _on_compaction_finished(self, task_id: str, result: str):
+        """压缩任务完成"""
+        if getattr(self, '_is_destroyed', False):
+            return
+
+        # 将压缩结果以系统消息形式写入会话并刷新
+        if result and result.strip():
+            session = self.session_manager.get_current_session()
+            if session:
+                summary_msg = {
+                    "role": "assistant",
+                    "content": f"📋 **上下文压缩摘要**\n\n{result.strip()}",
+                }
+                messages = list(session.messages)
+                messages.append(summary_msg)
+                # 更新会话消息（触发 _on_messages_updated → 刷新上下文指示器）
+                session.set_messages(messages, preserve_compaction=False)
+                self._refresh_context_usage_indicator()
+                # 持久化到历史
+                if self.history_manager:
+                    self._save_current_session_to_history()
+
+        InfoBar.success("压缩完成", "对话上下文已压缩", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+
+    def _on_compaction_error(self, task_id: str, error: str):
+        """压缩任务出错"""
+        if getattr(self, '_is_destroyed', False):
+            return
+        InfoBar.error("压缩失败", f"上下文压缩出错: {error}", parent=self, position=InfoBarPosition.BOTTOM)
 
     # ========== 命令卡片处理 ==========
 
@@ -1990,6 +2055,17 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.isVisible():
                 return True
         return False
+
+    def _restore_after_system_close(self):
+        """系统卡片关闭后，恢复 todo/tool/sub_agent 实时卡片"""
+        if not self._is_any_system_card_visible():
+            # 只有当所有系统卡片都关闭时才重置标志
+            self._is_system_card_visible = False
+            # 解除工具卡片压制（内部会恢复显示）
+            self._tool_floating_widget.set_suppress_visible(False)
+        # 恢复 todo（如果之前是显示的且还有内容）
+        if self._todo_was_visible_before_system and self._todo_floating_widget._todo_list:
+            self._todo_floating_widget.setVisible(True)
 
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
@@ -5521,8 +5597,6 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning("AutoLoop", "运行中无法发送消息，请先停止 AutoLoop", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
             self.input_area.clear()
             return
-        if self._is_streaming:
-            self._on_stop_clicked()
 
         if not user_text:
             user_text = self.input_area.toPlainText().strip()
@@ -5533,12 +5607,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 记录输入到历史 ----
         self._record_input_history(user_text)
 
-        # ---- 内置命令拦截 ----
+        # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
         cmd_result = cmd_mgr.execute(user_text)
         if cmd_result.handled:
             if cmd_result.is_function:
-                # 函数型命令：执行对应处理，不清除用户输入（不发送给 AI）
+                # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
+                self.input_area.clear()
                 self._execute_command(cmd_result.command_name)
                 return
             elif cmd_result.is_prompt or cmd_result.is_agent:
@@ -5546,8 +5621,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 user_text = cmd_result.replacement
                 if cmd_result.remainder:
                     user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
-                self.input_area.clear()
+                # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
+
+        # 非函数命令：检查是否正在流式输出
+        if self._is_streaming:
+            self._on_stop_clicked()
 
         # 检查模型配置
         llm_config = self._get_current_model_config()

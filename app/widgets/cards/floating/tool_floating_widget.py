@@ -68,7 +68,7 @@ class ToolFloatingWidget(QWidget):
         self._is_running = False
         self._current_tool = None
         self._current_process = None
-        self._suppress_visible = False  # 被系统卡片压制，工具调用期间不自行显示
+        self._is_hide_suppressed = False  # 被其他卡片压制，工具调用期间不自行显示
         self._needs_show_after_unsuppress = False  # 工具完成但被压制，解除压制后需要显示
         self._rotation_angle = 0
         self._rotation_timer = QTimer(self)
@@ -160,9 +160,9 @@ class ToolFloatingWidget(QWidget):
         self._hide_timer.start()
 
     def set_suppress_visible(self, suppressed: bool):
-        """设置压制状态：系统卡片打开时压制工具卡片显示"""
-        old_suppressed = self._suppress_visible
-        self._suppress_visible = suppressed
+        """设置压制状态：其他卡片打开时压制工具卡片显示"""
+        old_suppressed = self._is_hide_suppressed
+        self._is_hide_suppressed = suppressed
         if suppressed and not old_suppressed:
             if self.isVisible() or self._is_running:
                 self._needs_show_after_unsuppress = True
@@ -213,7 +213,7 @@ class ToolFloatingWidget(QWidget):
 
         self.task_label.setText(self._flatten_text(args_preview))
 
-        if self._suppress_visible:
+        if self._is_hide_suppressed:
             self.setVisible(False)
         else:
             self.setVisible(True)
@@ -253,7 +253,7 @@ class ToolFloatingWidget(QWidget):
             error_msg = result if result else ""
             self.task_label.setText(self._flatten_text(error_msg[:80]))
 
-        if self._suppress_visible:
+        if self._is_hide_suppressed:
             self._needs_show_after_unsuppress = True
             self.setVisible(False)
         else:
@@ -291,7 +291,7 @@ class ToolFloatingWidget(QWidget):
 
     def show_when_ready(self):
         """统一控制显示时机（考虑压制状态）"""
-        if not self._suppress_visible:
+        if not self._is_hide_suppressed:
             self.setVisible(True)
 
     def _update_style(self, success: bool = None):

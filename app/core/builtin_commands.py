@@ -107,9 +107,11 @@ DriFox 的主题系统基于 YAML 文件，每个主题包含 `name`、`id`、`w
 ---
 ## 主题结构
 
-### meta 字段
-- `name`: 主题显示名（中文，如"紫罗兰"）
-- `id`: 主题唯一 ID（小写英文，如 "violet"）
+基本信息
+```yaml
+name: 主题显示名（中文，如"紫罗兰"）
+id: 主题唯一 ID（小写英文，如 "violet"）
+```
 
 ### window（窗口渐变背景）
 - `gradient_start` / `gradient_end`: 窗口左上到右下的线性渐变，两个 rgba(...,255) 颜色
@@ -261,6 +263,8 @@ def register_all_commands():
     cmd_mgr.register("new", "function", description="新建会话")
     cmd_mgr.register("new-window", "function", description="新建窗口")
     cmd_mgr.register("branch", "function", description="新建分支窗口")
+    cmd_mgr.register("compact", "function",
+                     description="手动触发上下文压缩（调用子智能体压缩当前对话摘要）")
 
     # ---- prompt 命令 ----
     cmd_mgr.register("init", "prompt",
