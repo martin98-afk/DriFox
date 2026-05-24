@@ -77,6 +77,7 @@ class SendableTextEdit(TextEdit):
         # 输入历史浏览
         self._history_list: list = []          # 最近输入历史（最新在前）
         self._history_index: int = -1          # -1 = 不在浏览模式
+        self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
@@ -118,6 +119,15 @@ class SendableTextEdit(TextEdit):
 
     def _on_slash_trigger_check(self):
         """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流"""
+        # 历史浏览模式下，如果当前历史项以 / 开头，阻止命令卡片触发
+        if self._suppress_slash_trigger:
+            self._suppress_slash_trigger = False
+            card = self._get_card()
+            if card and card.is_card_visible:
+                card.dismiss()
+                self.slashDismissed.emit()
+            return
+
         card = self._get_card()
         try:
             cursor = self.textCursor()
@@ -238,6 +248,12 @@ class SendableTextEdit(TextEdit):
         """进入历史浏览模式：加载最新一条"""
         if not self._history_list:
             return
+        # 进入历史模式时，隐藏命令卡片
+        card = self._get_card()
+        if card and card.is_card_visible:
+            card.dismiss()
+            self.slashDismissed.emit()
+        self._suppress_slash_trigger = False
         self._history_index = 0
         self._set_history_text()
 
@@ -246,6 +262,8 @@ class SendableTextEdit(TextEdit):
         if 0 <= self._history_index < len(self._history_list):
             text = self._history_list[self._history_index]
             self.setPlainText(text)
+            # 如果历史项以 / 开头，临时阻止命令卡片触发
+            self._suppress_slash_trigger = text.strip().startswith("/")
             # 选中全部文本，方便继续编辑
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.End)
@@ -386,9 +404,12 @@ class SendableTextEdit(TextEdit):
             self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
+        # 历史浏览模式下，↑↓ 始终导航历史，不受命令卡片影响
+        in_history_mode = self._history_index >= 0
+
         card = self._get_card()
-        # 先检查命令卡片是否可见
-        if card and card.is_card_visible:
+        # 先检查命令卡片是否可见（但历史浏览模式时跳过）
+        if card and card.is_card_visible and not in_history_mode:
             if event.key() == Qt.Key_Down:
                 card.select_next()
                 event.accept()

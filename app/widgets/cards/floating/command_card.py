@@ -51,6 +51,11 @@ class _ElidedLabel(QLabel):
     def was_elided(self) -> bool:
         return self._was_elided
 
+    @property
+    def item_data(self) -> Dict[str, str]:
+        """返回项数据（用于增量更新时的比较）"""
+        return self._data
+
 
 ITEM_HEIGHT = 36       # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
@@ -325,8 +330,13 @@ class CommandCard(QWidget):
         ]
         self._all_items = commands + skills
 
-    def load_items(self, query: str = ""):
-        """根据 query 筛选并渲染列表"""
+    def load_items(self, query: str = "", incremental: bool = False):
+        """根据 query 筛选并渲染列表
+
+        Args:
+            query: 搜索查询
+            incremental: 是否增量更新（保留已有 widget，重用匹配项）
+        """
         query = query.strip().lower()
 
         if not query:
@@ -342,7 +352,7 @@ class CommandCard(QWidget):
         sort_order = {"command": 0, "skill": 1, "agent": 2}
         self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
 
-        self._render()
+        self._render(incremental=incremental)
 
         if len(self._filtered_items) > 0:
             self._selected_index = 0
@@ -350,46 +360,114 @@ class CommandCard(QWidget):
             # 延迟滚动到顶部：等待布局完成后强制归零，避免初始渲染时 scroll 位置偏移
             QTimer.singleShot(0, lambda: self._scroll_area.verticalScrollBar().setValue(0))
 
-    def _render(self):
-        """渲染当前筛选结果"""
-        # 清除旧 widget
-        for w in self._item_widgets:
-            self._scroll_layout.removeWidget(w)
-            w.deleteLater()
-        self._item_widgets.clear()
+    def _render(self, incremental: bool = False):
+        """渲染当前筛选结果
 
-        # 清除上一次的分隔线（否则每次刷新都会留下旧的 QFrame 在 layout 中积累）
-        if self._divider is not None:
-            self._scroll_layout.removeWidget(self._divider)
-            self._divider.deleteLater()
-            self._divider = None
+        Args:
+            incremental: 是否增量更新（保留匹配项，重用已有 widget）
+        """
+        new_items = self._filtered_items
+        old_widgets = list(self._item_widgets)  # 复制一份
 
-        # 检查是否需要分隔线（命令/技能在前，智能体在后）
-        has_commands_or_skills = any(item["type"] in ("command", "skill") for item in self._filtered_items)
-        has_agents = any(item["type"] == "agent" for item in self._filtered_items)
+        # 构建旧 widget 的 key 映射
+        old_by_key = {}
+        for w in old_widgets:
+            try:
+                _ = w.isVisible()
+                d = w.item_data
+                key = (d["name"], d["type"])
+                if key not in old_by_key:
+                    old_by_key[key] = w
+            except RuntimeError:
+                continue
+
+        # 检查是否需要分隔线
+        has_commands_or_skills = any(item["type"] in ("command", "skill") for item in new_items)
+        has_agents = any(item["type"] == "agent" for item in new_items)
         insert_divider = has_commands_or_skills and has_agents
+
+        # 增量模式：需要分隔线但还没有时，退化到全量（简化逻辑）
+        if incremental and insert_divider and self._divider is None:
+            self._render(incremental=False)
+            return
+
+        # 重建 _item_widgets：根据新顺序匹配或创建 widget
+        new_widgets: List[CommandItemWidget] = []
+        old_by_key_copy = dict(old_by_key)  # 副本，用于消耗
+        seen_keys = set()
+
+        for item in new_items:
+            key = (item["name"], item["type"])
+            # 优先复用未用过的旧 widget
+            if key in old_by_key_copy and key not in seen_keys:
+                w = old_by_key_copy.pop(key)  # 消耗掉这个 key
+                seen_keys.add(key)
+                # 更新高亮查询（query 变化时重新渲染名称）
+                w._query = self._current_query
+                w._update_display()
+                new_widgets.append(w)
+            else:
+                # 创建新 widget
+                w = CommandItemWidget(item, self._current_query, self._scroll_content)
+                w.clicked.connect(self._on_item_clicked)
+                new_widgets.append(w)
+
+        self._item_widgets = new_widgets
+
+        # 删除不再需要的旧 widget（未被复用的）
+        for w in old_by_key_copy.values():
+            try:
+                self._scroll_layout.removeWidget(w)
+                w.deleteLater()
+            except RuntimeError:
+                continue
+
+        # 处理分隔线（仅非增量模式）
+        if not incremental:
+            if self._divider is not None:
+                try:
+                    self._scroll_layout.removeWidget(self._divider)
+                    self._divider.deleteLater()
+                except RuntimeError:
+                    pass
+                self._divider = None
+
+        # 清空 layout，重新按正确顺序添加 widget
+        while self._scroll_layout.count():
+            child = self._scroll_layout.takeAt(0)
+            if child.widget():
+                pass  # 仅移除，不删除（widget 在 _item_widgets 中）
+
+        # 添加 widget，按顺序
         divider_inserted = False
-
-        for item in self._filtered_items:
-            # 在第一个智能体前插入分隔线
-            if insert_divider and not divider_inserted and item["type"] == "agent":
-                divider = QFrame()
-                divider.setFrameShape(QFrame.HLine)
-                divider.setFixedHeight(1)
-                divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
-                divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                self._scroll_layout.addWidget(divider)
-                self._divider = divider  # 缓存引用，下次刷新时清除
-                divider_inserted = True
-
-            widget = CommandItemWidget(item, self._current_query, self._scroll_content)
-            widget.clicked.connect(self._on_item_clicked)
-            self._item_widgets.append(widget)
+        for i, widget in enumerate(self._item_widgets):
+            # 在第一个智能体前插入分隔线（非增量模式）
+            if not incremental and insert_divider and not divider_inserted:
+                item = new_items[i]
+                if i > 0 and item["type"] == "agent" and new_items[i - 1]["type"] in ("command", "skill"):
+                    divider = QFrame()
+                    divider.setFrameShape(QFrame.HLine)
+                    divider.setFixedHeight(1)
+                    divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
+                    divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                    self._scroll_layout.addWidget(divider)
+                    self._divider = divider
+                    divider_inserted = True
             self._scroll_layout.addWidget(widget)
 
+        # 非增量模式下添加分隔线
+        if not incremental and insert_divider and self._divider is None:
+            divider = QFrame()
+            divider.setFrameShape(QFrame.HLine)
+            divider.setFixedHeight(1)
+            divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
+            divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._scroll_layout.addWidget(divider)
+            self._divider = divider
+
         # 计算卡片高度
-        item_count = len(self._filtered_items)
-        divider_count = 1 if divider_inserted else 0
+        item_count = len(new_items)
+        divider_count = 1 if (divider_inserted and not incremental) else 0
         total_items = item_count + divider_count
 
         if total_items == 0:
@@ -410,6 +488,15 @@ class CommandCard(QWidget):
 
     def _update_selection(self):
         """更新选中高亮"""
+        safe_widgets = []
+        for widget in self._item_widgets:
+            try:
+                _ = widget.isVisible()
+                safe_widgets.append(widget)
+            except RuntimeError:
+                continue
+        self._item_widgets = safe_widgets
+
         for i, widget in enumerate(self._item_widgets):
             widget.set_selected(i == self._selected_index)
 
@@ -444,11 +531,16 @@ class CommandCard(QWidget):
         self.setVisible(False)
         self.dismissed.emit()
 
-    def show_card(self, query: str = ""):
-        """加载数据并显示（显示由 CardManager 控制，此方法只准备数据）"""
+    def show_card(self, query: str = "", incremental: bool = True):
+        """加载数据并显示（显示由 CardManager 控制，此方法只准备数据）
+
+        Args:
+            query: 搜索查询
+            incremental: 是否增量更新（默认开启，可提升流畅性）
+        """
         self._current_query = query
         self._refresh_data()
-        self.load_items(query)
+        self.load_items(query, incremental=incremental)
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)

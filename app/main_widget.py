@@ -5630,9 +5630,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
                 # 函数型命令：执行对应处理，不清除用户输入（不发送给 AI）
                 self._execute_command(cmd_result.command_name)
                 return
-            elif cmd_result.is_prompt:
-                # 提示词替换命令：用替换文本代替原输入继续发送
+            elif cmd_result.is_prompt or cmd_result.is_agent:
+                # 提示词替换命令：替换 + 追加用户命令
                 user_text = cmd_result.replacement
+                if cmd_result.remainder:
+                    user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
                 self.input_area.clear()
         # ---- 内置命令拦截结束 ----
 
