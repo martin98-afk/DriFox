@@ -17,6 +17,7 @@
     <file>siliconflow.png</file>
     <file>主题风格.svg</file>
     <file>云通信.svg</file>
+    <file>企业微信.svg</file>
     <file>分支.svg</file>
     <file>复制.svg</file>
     <file>大模型.svg</file>
@@ -53,6 +54,7 @@
     <file>解锁.svg</file>
     <file>配置管理.svg</file>
     <file>重命名.svg</file>
+    <file>钉钉.svg</file>
     <file>锁定.svg</file>
     <file>长期记忆.svg</file>
   </qresource>

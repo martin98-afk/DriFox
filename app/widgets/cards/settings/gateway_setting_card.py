@@ -7,6 +7,8 @@ Gateway 通讯平台设置卡片
 """
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap, QIcon
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -14,7 +16,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QFormLayout,
-    QStackedWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
@@ -25,13 +26,12 @@ from qfluentwidgets import (
     SwitchButton,
     StrongBodyLabel,
     ToolButton,
-    FluentIcon,
+    FluentIcon, IconWidget,
 )
 from qfluentwidgets import InfoBar, InfoBarPosition
 
-from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, scale_font_size, Sizes
-from app.utils.utils import get_icon, get_font_family_css
-
+from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes
+from app.utils.utils import get_font_family_css, get_icon
 
 # ═══════════════════════════════════════════════════════════
 # 共用表单样式
@@ -260,7 +260,7 @@ class PlatformStatusRow(CardWidget):
     editRequested = pyqtSignal(str)  # platform
     enabledChanged = pyqtSignal(str, bool)
     
-    def __init__(self, platform: str, name: str, icon: str, parent=None):
+    def __init__(self, platform: str, name: str, icon: QIcon, parent=None):
         super().__init__(parent)
         self._platform = platform
         self._name = name
@@ -274,8 +274,7 @@ class PlatformStatusRow(CardWidget):
         layout.setSpacing(10)
         
         # 平台图标
-        icon_label = QLabel(self._icon)
-        icon_label.setFixedWidth(30)
+        icon_label = IconWidget(self._icon)
         layout.addWidget(icon_label)
         
         # 名称
@@ -438,13 +437,13 @@ class GatewaySettingCard(ExpandSettingCard):
         self.view.setStyleSheet("background-color: transparent;")
         
         # 企业微信行
-        self.wecom_row = PlatformStatusRow("wecom", "企业微信", "💼", self.view)
+        self.wecom_row = PlatformStatusRow("wecom", "企业微信", get_icon("企业微信"), self.view)
         self.wecom_row.editRequested.connect(self._show_edit_card)
         self.wecom_row.enabledChanged.connect(self._on_platform_enabled_changed)
         self.viewLayout.addWidget(self.wecom_row)
         
         # 钉钉行
-        self.dingtalk_row = PlatformStatusRow("dingtalk", "钉钉", "🔔", self.view)
+        self.dingtalk_row = PlatformStatusRow("dingtalk", "钉钉", get_icon("钉钉"), self.view)
         self.dingtalk_row.editRequested.connect(self._show_edit_card)
         self.dingtalk_row.enabledChanged.connect(self._on_platform_enabled_changed)
         self.viewLayout.addWidget(self.dingtalk_row)
