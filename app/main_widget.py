@@ -6359,6 +6359,9 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
+        # 隐藏输入框，让用户专注看问题
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(False)
         # 显示 question 卡片（权限审批不需要自定义输入选项）
         self._card_manager.show_card("question", self._window_id)
         try:
