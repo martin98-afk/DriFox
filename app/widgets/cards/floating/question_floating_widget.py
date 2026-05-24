@@ -7,7 +7,7 @@
 """
 from functools import partial
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
 from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QWidget, QTextEdit,
@@ -214,6 +214,7 @@ class _CustomInputCard(QWidget):
 
     PLACEHOLDER = "输入你的答案..."
     activated = pyqtSignal()  # 用户主动点击选中时触发
+    heightNeedsUpdate = pyqtSignal()  # 高度需要更新时触发
 
     def __init__(self, multiple: bool = False, parent=None):
         super().__init__(parent)
@@ -281,7 +282,14 @@ class _CustomInputCard(QWidget):
             self._text_edit.setFocus()
             if self._text_value:
                 self._text_edit.setPlainText(self._text_value)
+            # 延迟发出高度更新信号，确保布局完成
+            QTimer.singleShot(10, self._emit_height_update)
         self._apply_style()
+
+    def _emit_height_update(self):
+        """触发高度更新，让父级重新布局"""
+        self.updateGeometry()
+        self.heightNeedsUpdate.emit()
 
     def toggle(self):
         new_state = not self._active
@@ -566,12 +574,17 @@ class QuestionFloatingWidget(QWidget):
         self._custom_input_widget = _CustomInputCard(multiple, self._options_container)
         if not multiple:
             self._custom_input_widget.activated.connect(self._on_custom_input_activated)
+        self._custom_input_widget.heightNeedsUpdate.connect(self._on_options_height_changed)
         self._options_layout.addWidget(self._custom_input_widget)
 
         # 恢复已保存答案
         saved = self._answers.get(self._current_index)
         if saved:
             self._restore_answer(saved)
+
+        # 如果自定义输入已激活，延迟触发高度更新
+        if self._custom_input_widget and self._custom_input_widget._active:
+            QTimer.singleShot(20, self._on_options_height_changed)
 
         self._update_footer(total)
 
@@ -594,8 +607,13 @@ class QuestionFloatingWidget(QWidget):
             if hasattr(w, 'set_selected'):
                 w.set_selected(False)
 
+    def _on_options_height_changed(self):
+        """选项区域高度变化时，更新卡片高度"""
+        QTimer.singleShot(0, self.heightChanged.emit)
+
     def _clear_options(self):
         if self._custom_input_widget:
+            self._custom_input_widget.heightNeedsUpdate.disconnect()
             self._options_layout.removeWidget(self._custom_input_widget)
             self._custom_input_widget.deleteLater()
             self._custom_input_widget = None

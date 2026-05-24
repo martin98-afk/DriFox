@@ -5816,7 +5816,7 @@ If you're uncertain about something and can't verify it with these tools, say "I
             sub_agent_mgr._batch_completed = 0
 
     def _do_trigger_callback(self, sub_agent_mgr):
-        """执行回调触发"""
+        """执行回调触发 - 支持强制中断当前流式输出"""
         total = len(sub_agent_mgr._finished_tasks)
         failed = sum(1 for t in sub_agent_mgr._finished_tasks.values() if t.get("error") and t.get("error") != "")
 
@@ -5828,8 +5828,29 @@ If you're uncertain about something and can't verify it with these tools, say "I
 
 请使用 task_status 工具获取详细结果。"""
 
-        # 绕过 streaming 检查直接发送
-        self.backend.set_streaming_state(False)
+        # 检查是否正在流式输出，如果是则强制中断并保存已有内容
+        if self.backend.chat_engine and self.backend.chat_engine.is_streaming:
+            logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming")
+
+            # 1. 非阻塞取消流式输出（断开信号、设置取消标志）
+            self.backend.cancel_streaming()
+
+            # 2. 标记 UI 停止流式状态（_is_streaming 在 _on_stream_finished 中会被重置）
+            self._is_streaming = False
+
+            # 3. 完成当前卡片的流式动画（保留已显示的内容）
+            if self._current_assistant_card:
+                self._current_assistant_card.finish_streaming()
+
+            # 4. 阻塞获取中断消息并清理 worker（内部会等待线程结束，最多 3s）
+            interrupted_msgs = self.backend.finalize_stop()
+            if interrupted_msgs:
+                logger.info(f"[ChatEngine] Saved {len(interrupted_msgs)} interrupted messages")
+
+            # 5. 重置状态并发送回调消息
+            self._toggle_send_stop(False)
+
+        # 发送回调消息到引擎
         self.backend.send_message_to_engine(callback_text)
 
     def _on_sub_agent_finished(self, task_id: str, result: str):

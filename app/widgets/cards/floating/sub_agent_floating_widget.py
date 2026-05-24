@@ -227,6 +227,7 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         self._segment_items: Dict[str, object] = {}  # task_id -> segment item (用于更新按钮文字)
         self._active_task_id: str = None
         self._batch_started: bool = False  # 当前批次是否已开始
+        self._auto_hide_timer: QTimer = None  # 自动隐藏定时器（用于取消）
         self._timer: QTimer = None
         self._auto_showed: bool = False  # 是否自动弹出的面板
         self._was_auto_showed: bool = False  # 是否曾经自动弹出过（用于决定是否自动关闭）
@@ -359,6 +360,10 @@ class SubAgentFloatingWidget(SimpleCardWidget):
                 child.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY};")
 
     def _on_close(self):
+        # 取消自动隐藏定时器
+        if self._auto_hide_timer:
+            self._auto_hide_timer.stop()
+            self._auto_hide_timer = None
         self.setVisible(False)
         self._batch_started = False
         self._auto_showed = False
@@ -495,7 +500,11 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         self._show_task_log(task_id)
         # 手动查看时重置自动弹出标记
         self._auto_showed = False
-        # 但不重置 _was_auto_showed（保持曾经自动弹出的记录）
+        # 取消自动隐藏定时器（手动查看不自动隐藏）
+        if self._auto_hide_timer:
+            self._auto_hide_timer.stop()
+            self._auto_hide_timer = None
+        # 不重置 _was_auto_showed（保持曾经自动弹出的记录）
         self.setVisible(True)
 
     def update_progress(self, task_id: str, message: str):
@@ -560,7 +569,13 @@ class SubAgentFloatingWidget(SimpleCardWidget):
 
         if all_done and self._was_auto_showed:
             # 延迟 3 秒后隐藏（曾经自动弹出的面板）
-            QTimer.singleShot(3000, self.hide)
+            # 使用成员变量引用，便于手动取消
+            if self._auto_hide_timer:
+                self._auto_hide_timer.stop()
+            self._auto_hide_timer = QTimer(self)
+            self._auto_hide_timer.setSingleShot(True)
+            self._auto_hide_timer.timeout.connect(self.hide)
+            self._auto_hide_timer.start(3000)
 
     def _switch_to_next_active(self):
         """切换到下一个活跃任务"""
@@ -621,6 +636,11 @@ class SubAgentFloatingWidget(SimpleCardWidget):
 
     def clear(self):
         """清空所有任务"""
+        # 取消自动隐藏定时器
+        if self._auto_hide_timer:
+            self._auto_hide_timer.stop()
+            self._auto_hide_timer = None
+
         # 从 layout 中移除所有 widget
         for widget in list(self._tasks.values()):
             self.log_container_layout.removeWidget(widget)
