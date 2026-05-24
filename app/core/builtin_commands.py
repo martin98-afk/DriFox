@@ -114,8 +114,10 @@ DriFox 的主题系统基于 YAML 文件，每个主题包含 `name`、`id`、`w
 ### window（窗口渐变背景）
 - `gradient_start` / `gradient_end`: 窗口左上到右下的线性渐变，两个 rgba(...,255) 颜色
 
-### background（背景图片）
-保持默认即可：
+### background（背景图片，可选）
+**背景图片可自定义，也可使用内置默认图片。**
+
+默认使用内置图片（无需创建文件）：
 ```yaml
 background:
   chat_list:
@@ -123,6 +125,23 @@ background:
     opacity: 0.1
     enabled: true
 ```
+
+如果用户想自定义背景图片：
+1. 将图片放入主题文件夹（相对路径引用）：
+   ```
+   ~/.drifox/themes/{theme_id}/
+   ├── {theme_id}.yaml
+   └── user_bg.png        # 你的背景图片
+   ```
+2. 在 YAML 中引用：
+   ```yaml
+   background:
+     chat_list:
+       image: user_bg.png
+       opacity: 0.15      # 可调整透明度
+       enabled: true
+   ```
+3. 如果不想用背景图片：`enabled: false`
 
 ### colors（颜色系统）
 
