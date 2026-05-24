@@ -14,7 +14,6 @@ import orjson as json
 
 from copy import deepcopy
 from enum import Enum
-from uuid import uuid4
 from loguru import logger
 from qfluentwidgets import (
     ConfigSerializer,

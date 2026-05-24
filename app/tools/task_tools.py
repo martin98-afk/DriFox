@@ -146,63 +146,6 @@ class TaskTools:
             logger.error(f"[Task] task_execute_batch exception: {e}")
             return ToolResult(False, error=f"批量任务启动失败: {str(e)}")
 
-        if not hasattr(self, "_sub_agent_manager") or not self._sub_agent_manager:
-            return ToolResult(False, error="子智能体管理器未初始化")
-
-        results = []
-        start_time = time.time()
-        last_cleanup_check = start_time
-        pending = set(task_ids)
-
-        try:
-            while pending:
-                now = time.time()
-
-                # 每 10 秒检查一次卡死的任务
-                if now - last_cleanup_check > 10:
-                    self._sub_agent_manager.cleanup_dead_tasks(timeout_seconds=300)
-                    last_cleanup_check = now
-
-                if now - start_time > timeout:
-                    logger.warning(f"[task_wait] Timeout after {timeout}s, pending: {pending}")
-                    # 超时后，先清理卡死任务（这会将它们移到 _finished_tasks）
-                    self._sub_agent_manager.cleanup_dead_tasks(timeout_seconds=300)
-                    # 然后从 _finished_tasks 获取结果
-                    for tid in pending:
-                        existing = self._sub_agent_manager.get_task_result(tid)
-                        if existing.get("result"):
-                            results.append({"task_id": tid, "status": "finished", "result": existing.get("result", "")})
-                        elif existing.get("error"):
-                            results.append(
-                                {"task_id": tid, "status": "timeout", "result": "", "error": existing.get("error", "")})
-                        else:
-                            results.append(
-                                {"task_id": tid, "status": "timeout", "result": "", "error": "Task execution timeout"})
-                    break
-
-                # 检查已完成的任务
-                self._sub_agent_manager.get_finished_tasks()  # 清理已完成的
-                for tid in list(pending):
-                    task_info = self._sub_agent_manager.get_task_result(tid)
-                    if task_info.get("result") or task_info.get("error"):
-                        results.append(task_info)
-                        pending.remove(tid)
-
-                if pending:
-                    time.sleep(poll_interval)
-
-            return ToolResult(
-                True,
-                content={
-                    "count": len(results),
-                    "results": results,
-                },
-            )
-
-        except Exception as e:
-            logger.error(f"[task_wait] Exception: {e}")
-            return ToolResult(False, error=f"等待任务失败: {str(e)}")
-
     def task_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True) -> ToolResult:
         """
         查询任务状态。
