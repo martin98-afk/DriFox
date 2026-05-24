@@ -165,6 +165,13 @@ class CardManager:
         if win_data["visible_cards"].get(container_type) == card_id:
             return
         
+        # ---- 命令卡片保护：流式对话中，除 question 外不打断 command 卡片 ----
+        # command 卡片正在显示时，其他非 question 的卡片不应将其隐藏
+        if card_id not in ("command", "question"):
+            if self.is_card_visible("command", window_id):
+                logger.debug(f"[CardManager] command 卡片可见，跳过显示 {card_id}（仅 question 可打断）")
+                return
+        
         # 系统卡片：窗口内互斥（隐藏所有其他系统卡片）
         if card_id in win_data["system_cards"]:
             self._hide_system_cards(window_id, exclude_card_id=card_id)

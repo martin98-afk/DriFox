@@ -1104,7 +1104,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup = LLMSettingsCard(self)
         self._settings_popup.setVisible(False)
         self._settings_popup.configChanged.connect(self._on_settings_config_changed)
-        self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", self._window_id))
+        self._settings_popup.closed.connect(lambda: (self._card_manager.hide_card("settings", self._window_id), self._restore_after_system_close()))
 
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
@@ -1241,7 +1241,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
-        self._history_card.closed.connect(lambda: self._card_manager.hide_card("history", self._window_id))
+        self._history_card.closed.connect(lambda: (self._card_manager.hide_card("history", self._window_id), self._restore_after_system_close()))
         # 搜索框（历史会话和归档标签都显示）
         self._history_card.set_search_handler(
             "🔍 搜索会话...",
@@ -1273,7 +1273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
         self._memory_card.content_layout.addWidget(self._memory_card_popup)
         self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(lambda: self._card_manager.hide_card("memory", self._window_id))
+        self._memory_card.closed.connect(lambda: (self._card_manager.hide_card("memory", self._window_id), self._restore_after_system_close()))
         self._bottom_card_container.add_card("memory", self._memory_card)
 
         # 模型配置卡片
@@ -1282,14 +1282,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
         self._model_config_card.setVisible(False)
-        self._model_config_card.closed.connect(lambda: self._card_manager.hide_card("model_config", self._window_id))
+        self._model_config_card.closed.connect(lambda: (self._card_manager.hide_card("model_config", self._window_id), self._restore_after_system_close()))
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
-        self._auto_loop_config_card.closed.connect(lambda: self._card_manager.hide_card("auto_loop_config", self._window_id))
+        self._auto_loop_config_card.closed.connect(lambda: (self._card_manager.hide_card("auto_loop_config", self._window_id), self._restore_after_system_close()))
         self._auto_loop_config_card.setVisible(False)
         self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
 
@@ -1544,16 +1544,6 @@ class OpenAIChatToolWindow(ToolWindow):
             on_finished=lambda result: self._on_compaction_finished(task_id, result),
             on_error=lambda error: self._on_compaction_error(task_id, error),
         )
-
-        # 显示子智能体浮窗
-        if hasattr(self, '_sub_agent_floating_widget'):
-            self._sub_agent_floating_widget.show_task_from_data({
-                "task_id": task_id,
-                "agent_name": "compaction",
-                "task_description": "正在压缩对话上下文...",
-                "status": "running",
-            })
-            self._sub_agent_floating_widget.setVisible(True)
 
         InfoBar.info("压缩中", "正在调用子智能体压缩对话上下文...", parent=self, duration=2000, position=InfoBarPosition.BOTTOM)
 
@@ -2065,6 +2055,17 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.isVisible():
                 return True
         return False
+
+    def _restore_after_system_close(self):
+        """系统卡片关闭后，恢复 todo/tool/sub_agent 实时卡片"""
+        if not self._is_any_system_card_visible():
+            # 只有当所有系统卡片都关闭时才重置标志
+            self._is_system_card_visible = False
+            # 解除工具卡片压制（内部会恢复显示）
+            self._tool_floating_widget.set_suppress_visible(False)
+        # 恢复 todo（如果之前是显示的且还有内容）
+        if self._todo_was_visible_before_system and self._todo_floating_widget._todo_list:
+            self._todo_floating_widget.setVisible(True)
 
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
