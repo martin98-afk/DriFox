@@ -645,10 +645,12 @@ class QuestionFloatingWidget(QWidget):
     def _clear_options(self):
         if self._custom_input_widget:
             self._custom_input_widget.heightNeedsUpdate.disconnect()
+            self._custom_input_widget.setVisible(False)  # 先隐藏，防止 ghost
             self._options_layout.removeWidget(self._custom_input_widget)
             self._custom_input_widget.deleteLater()
             self._custom_input_widget = None
         for w in self._option_widgets:
+            w.setVisible(False)  # 先隐藏，防止 ghost
             self._options_layout.removeWidget(w)
             w.deleteLater()
         self._option_widgets = []

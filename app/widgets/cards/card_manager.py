@@ -8,6 +8,12 @@
 - 非系统卡片同容器互斥：Tool/SubAgent 等同容器内互斥
 - 不同容器可共存（如 Top 的 Todo + Bottom 的 Tool）
 - Question 强制覆盖所有
+- 系统卡片活跃时（question 除外）：压制所有非系统卡片
+
+优先级层级：
+  1. Question（强制覆盖一切）
+  2. 系统卡片（settings/history/memory 等）
+  3. 实时卡片（todo/tool/sub_agent）—— 系统卡片存在时被压制
 """
 from enum import Enum
 from typing import Dict, List, Optional, Callable, Any
@@ -62,8 +68,9 @@ class CardManager:
         #       "containers": {"card_id": ContainerType, ...},
         #       "system_cards": set(),
         #       "visible_cards": {ContainerType.TOP: None, ContainerType.BOTTOM: None},
-        #       "shown_callbacks": {},
-        #       "hidden_callbacks": {},
+        #       "shown_callbacks": {"card_id": [cb1, cb2]},
+        #       "hidden_callbacks": {"card_id": [cb1, cb2]},
+        #       "suppressed_by_system": False,  # 系统卡片活跃时压制非系统卡片
         #   }
         # }
         self._window_data: Dict[str, Dict[str, Any]] = {}
