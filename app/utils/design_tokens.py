@@ -2,6 +2,8 @@
 """
 统一的设计系统 - Design Tokens 和样式常量
 所有 UI 组件应引用此模块以保持视觉一致性
+
+主题完全从 app/themes/ 目录读取，不硬编码主题数据
 """
 
 from PyQt5.QtCore import QSize
@@ -26,8 +28,6 @@ FONT_SIZE_OPTIONS = {
     "medium": {"label": "中", "delta": 0, "base": 14},
     "large": {"label": "大", "delta": 2, "base": 16},
 }
-
-THEME_STYLE_OPTIONS = {}  # 在模块底部动态构建
 
 
 def get_ui_font_size_key() -> str:
@@ -107,50 +107,13 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
         )
 
 
-
-def _build_theme_options() -> dict:
-    """从 ThemeManager 构建 THEME_STYLE_OPTIONS 兼容格式"""
-    result = {}
-    for tid, name in theme_manager.list_themes().items():
-        theme = theme_manager.get_theme(tid)
-        if not theme:
-            continue
-        colors = theme.get("colors", {})
-        window = theme.get("window", {})
-        entry = {
-            "label": name,
-            "window_start": window.get("gradient_start", "rgba(10, 14, 22, 255)"),
-            "window_end": window.get("gradient_end", "rgba(15, 20, 30, 255)"),
-        }
-        for k, v in colors.items():
-            entry[k] = v
-        result[tid] = entry
-    return result
-
-def get_theme_style_key() -> str:
-    try:
-        from app.utils.config import Settings
-        key = Settings.get_instance().ui_theme_style.value
-    except Exception:
-        key = "midnight"
-    return key if key in THEME_STYLE_OPTIONS else "midnight"
-
-
 def current_theme() -> dict:
-    """获取当前主题的扁平 colors 字典，始终从 ThemeManager 实时读取"""
-    from app.utils.theme_manager import theme_manager
-    colors = theme_manager.get_current_colors()
-    if colors:
-        return colors
-    # fallback：使用 THEME_STYLE_OPTIONS
-    key = get_theme_style_key()
-    if key in THEME_STYLE_OPTIONS:
-        return THEME_STYLE_OPTIONS[key]
-    return THEME_STYLE_OPTIONS.get("midnight", {})
+    """获取当前主题的扁平 colors 字典"""
+    return theme_manager.get_current_colors()
 
 
 def get_window_style() -> str:
-    from app.utils.theme_manager import theme_manager
+    """获取窗口渐变背景样式"""
     window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
     return f"""
     #OpenAIChatToolWindow {{
@@ -162,6 +125,7 @@ def get_window_style() -> str:
 
 
 def get_capsule_style() -> str:
+    """获取胶囊样式"""
     theme = current_theme()
     return f"""
         background: {theme["capsule_bg"]};
@@ -172,35 +136,26 @@ def get_capsule_style() -> str:
 
 # ============ 颜色系统 ============
 class Colors:
-    """颜色 Token"""
-    # 主背景
-    CARD_BG = "rgba(33, 33, 38, {alpha})"  # 卡片背景，alpha 可配置
-    CARD_BG_SOLID = "rgba(33, 33, 38, 250)"  # 固定透明度版本
+    """颜色 Token - 动态从 ThemeManager 读取"""
     
-    # 内容区背景
+    # 默认值（fallback，用于主题未加载时）
+    CARD_BG = "rgba(33, 33, 38, {alpha})"
+    CARD_BG_SOLID = "rgba(33, 33, 38, 250)"
     CONTENT_BG = "#2a2a2e"
-    
-    # 边框
     BORDER = "#3d3d3d"
-    BORDER_ACCENT = "#f59e0b"  # 强调边框（如工具折叠框）
-    
-    # 文字颜色
+    BORDER_ACCENT = "#f59e0b"
     TEXT_PRIMARY = "#ffffff"
     TEXT_SECONDARY = "rgba(255, 255, 255, 0.5)"
     TEXT_SECONDARY_HOVER = "rgba(255, 255, 255, 0.8)"
-    TEXT_ACCENT = "#f59e0b"  # 标题强调色
+    TEXT_ACCENT = "#f59e0b"
     TEXT_MUTED = "#888888"
-    
-    # 标签颜色
     TAB_ACTIVE_BG = "rgba(102, 198, 255, 0.3)"
     TAB_INACTIVE = "rgba(255, 255, 255, 0.5)"
     TAB_HOVER_BG = "rgba(255, 255, 255, 0.1)"
-    
-    # 交互状态
     HOVER_BG = "rgba(255, 255, 255, 0.08)"
     SELECTED_BG = "rgba(102, 198, 255, 0.35)"
     
-    # === 组件级颜色 ===
+    # 组件级颜色
     USER_CARD_BG = "rgba(27, 42, 67, 150)"
     USER_CARD_ACCENT = "#9FC3FF"
     USER_CARD_TEXT = "#F4F7FD"
@@ -222,8 +177,8 @@ class Colors:
     INPUT_BORDER = "#2B3850"
     INPUT_FOCUS_BORDER = "#C9A85C"
     INPUT_PLACEHOLDER = "rgba(242, 246, 255, 0.4)"
-
-    # === 实时卡片色（对话类：todo/tool/question/sub_agent）===
+    
+    # 实时卡片色
     REALTIME_BORDER = "#4a90d9"
     REALTIME_ACCENT = "#7dd3fc"
     REALTIME_ACCENT_WARM = "#fbbf24"
@@ -234,36 +189,38 @@ class Colors:
     REALTIME_TEXT_SECONDARY = "rgba(226, 235, 249, 0.7)"
     REALTIME_TAG_BG = "rgba(125, 211, 252, 0.15)"
     REALTIME_TAG_BORDER = "rgba(125, 211, 252, 0.3)"
-
-    # === 系统卡片色 ===
+    
+    # 系统卡片色
     SYSTEM_BORDER = "#3d4a60"
     SYSTEM_ACCENT = "#66c6ff"
-
-
-    # === 新增主题属性 ===
+    
+    # 发送按钮
     SEND_BTN_START = "#C9A85C"
     SEND_BTN_END = "#B8956A"
     SEND_BTN_HOVER_START = "#D4B878"
     SEND_BTN_HOVER_END = "#C9A060"
-
+    
+    # 时间线
     TIMELINE_NODE = "#5A5A5A"
     TIMELINE_NODE_HOVER = "#6BA3FF"
     TIMELINE_NODE_VISIBLE = "#00FF7F"
     TIMELINE_NODE_SELECTED = "#FFA500"
     TIMELINE_LINE = "#3A3A3A"
     TIMELINE_LINE_PROGRESS = "#00FF7F"
-
+    
+    # 上下文圆环
     RING_NORMAL = "#5aa9ff"
     RING_WARNING = "#f6c453"
     RING_DANGER = "#ff6b6b"
     RING_COMPACTED = "#9b59b6"
-
+    
+    # 分支标签
     BRANCH_LABEL_BG = "rgba(102, 198, 255, 0.15)"
     BRANCH_LABEL_BORDER = "rgba(102, 198, 255, 0.3)"
-
+    
     # 窗口淡背景色
     WINDOW_BG = "rgba(102, 198, 255, 0.04)"
-
+    
     # 语义色
     SUCCESS = "#22c55e"
     WARNING = "#f59e0b"
@@ -272,25 +229,30 @@ class Colors:
 
     @classmethod
     def refresh(cls) -> None:
+        """从 ThemeManager 同步当前主题颜色到类属性"""
         theme = current_theme()
+        if not theme:
+            return
+        
         cls.CARD_BG = (
             theme["card_bg"].rsplit(",", 1)[0] + ", {alpha})"
             if theme["card_bg"].startswith("rgba(")
             else theme["card_bg"]
         )
-        cls.CARD_BG_SOLID = theme["card_bg_solid"]
-        cls.CONTENT_BG = theme["content_bg"]
-        cls.BORDER = theme["border"]
-        cls.BORDER_ACCENT = theme["border_accent"]
-        cls.TEXT_PRIMARY = theme["text_primary"]
-        cls.TEXT_SECONDARY = theme["text_secondary"]
-        cls.TEXT_SECONDARY_HOVER = theme["text_primary"]
-        cls.TEXT_ACCENT = theme["accent"]
-        cls.TEXT_MUTED = theme["text_muted"]
-        cls.TAB_ACTIVE_BG = theme["selected_bg"]
-        cls.TAB_HOVER_BG = theme["hover_bg"]
-        cls.HOVER_BG = theme["hover_bg"]
-        cls.SELECTED_BG = theme["selected_bg"]
+        cls.CARD_BG_SOLID = theme.get("card_bg_solid", cls.CARD_BG_SOLID)
+        cls.CONTENT_BG = theme.get("content_bg", cls.CONTENT_BG)
+        cls.BORDER = theme.get("border", cls.BORDER)
+        cls.BORDER_ACCENT = theme.get("border_accent", cls.BORDER_ACCENT)
+        cls.TEXT_PRIMARY = theme.get("text_primary", cls.TEXT_PRIMARY)
+        cls.TEXT_SECONDARY = theme.get("text_secondary", cls.TEXT_SECONDARY)
+        cls.TEXT_SECONDARY_HOVER = theme.get("text_primary", cls.TEXT_PRIMARY)
+        cls.TEXT_ACCENT = theme.get("accent", cls.TEXT_ACCENT)
+        cls.TEXT_MUTED = theme.get("text_muted", cls.TEXT_MUTED)
+        cls.TAB_ACTIVE_BG = theme.get("selected_bg", cls.TAB_ACTIVE_BG)
+        cls.TAB_HOVER_BG = theme.get("hover_bg", cls.TAB_HOVER_BG)
+        cls.HOVER_BG = theme.get("hover_bg", cls.HOVER_BG)
+        cls.SELECTED_BG = theme.get("selected_bg", cls.SELECTED_BG)
+        
         # 组件级颜色
         cls.USER_CARD_BG = theme.get("user_card_bg", cls.USER_CARD_BG)
         cls.USER_CARD_ACCENT = theme.get("user_card_accent", cls.USER_CARD_ACCENT)
@@ -315,6 +277,7 @@ class Colors:
         cls.INPUT_PLACEHOLDER = theme.get("input_placeholder", cls.INPUT_PLACEHOLDER)
         cls.CAPSULE_BG = theme.get("capsule_bg", "rgba(27, 35, 50, 180)")
         cls.CAPSULE_BORDER = theme.get("capsule_border", "rgba(43, 56, 80, 200)")
+        
         # 实时卡片色
         cls.REALTIME_BORDER = theme.get("realtime_border", cls.REALTIME_BORDER)
         cls.REALTIME_ACCENT = theme.get("realtime_accent", cls.REALTIME_ACCENT)
@@ -326,35 +289,38 @@ class Colors:
         cls.REALTIME_TEXT_SECONDARY = theme.get("realtime_text_secondary", cls.REALTIME_TEXT_SECONDARY)
         cls.REALTIME_TAG_BG = theme.get("realtime_tag_bg", cls.REALTIME_TAG_BG)
         cls.REALTIME_TAG_BORDER = theme.get("realtime_tag_border", cls.REALTIME_TAG_BORDER)
+        
         # 系统卡片色
         cls.SYSTEM_BORDER = theme.get("system_border", cls.SYSTEM_BORDER)
         cls.SYSTEM_ACCENT = theme.get("system_accent", cls.SYSTEM_ACCENT)
-        # 新增主题属性
+        
+        # 发送按钮
         cls.SEND_BTN_START = theme.get("send_btn_start", cls.SEND_BTN_START)
         cls.SEND_BTN_END = theme.get("send_btn_end", cls.SEND_BTN_END)
         cls.SEND_BTN_HOVER_START = theme.get("send_btn_hover_start", cls.SEND_BTN_HOVER_START)
         cls.SEND_BTN_HOVER_END = theme.get("send_btn_hover_end", cls.SEND_BTN_HOVER_END)
-
+        
+        # 时间线
         cls.TIMELINE_NODE = theme.get("timeline_node", cls.TIMELINE_NODE)
         cls.TIMELINE_NODE_HOVER = theme.get("timeline_node_hover", cls.TIMELINE_NODE_HOVER)
         cls.TIMELINE_NODE_VISIBLE = theme.get("timeline_node_visible", cls.TIMELINE_NODE_VISIBLE)
         cls.TIMELINE_NODE_SELECTED = theme.get("timeline_node_selected", cls.TIMELINE_NODE_SELECTED)
         cls.TIMELINE_LINE = theme.get("timeline_line", cls.TIMELINE_LINE)
         cls.TIMELINE_LINE_PROGRESS = theme.get("timeline_line_progress", cls.TIMELINE_LINE_PROGRESS)
-
+        
+        # 上下文圆环
         cls.RING_NORMAL = theme.get("ring_normal", cls.RING_NORMAL)
         cls.RING_WARNING = theme.get("ring_warning", cls.RING_WARNING)
         cls.RING_DANGER = theme.get("ring_danger", cls.RING_DANGER)
         cls.RING_COMPACTED = theme.get("ring_compacted", cls.RING_COMPACTED)
-
+        
+        # 分支标签
         cls.BRANCH_LABEL_BG = theme.get("branch_label_bg", cls.BRANCH_LABEL_BG)
         cls.BRANCH_LABEL_BORDER = theme.get("branch_label_border", cls.BRANCH_LABEL_BORDER)
         cls.WINDOW_BG = theme.get("window_bg", cls.WINDOW_BG)
 
 
-
-# 确保 THEME_STYLE_OPTIONS 被构建
-THEME_STYLE_OPTIONS = _build_theme_options()
+# 初始化 Colors
 Colors.refresh()
 
 

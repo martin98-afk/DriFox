@@ -1,0 +1,75 @@
+name: 曜石紫
+id: obsidian
+window:
+  gradient_start: rgba(14, 11, 24, 255)
+  gradient_end: rgba(25, 15, 37, 255)
+background:
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.1
+    enabled: true
+colors:
+  card_bg: rgba(37, 27, 53, 232)
+  card_bg_solid: rgba(37, 27, 53, 250)
+  content_bg: '#2b2139'
+  border: '#5a476f'
+  border_accent: '#b792ff'
+  text_primary: '#f7f2ff'
+  text_secondary: rgba(238, 228, 255, 0.74)
+  text_muted: '#a99ab9'
+  accent: '#b792ff'
+  accent_warm: '#ffb86b'
+  hover_bg: rgba(183, 146, 255, 0.13)
+  selected_bg: rgba(183, 146, 255, 0.34)
+  capsule_bg: rgba(38, 27, 55, 185)
+  capsule_border: rgba(88, 68, 110, 205)
+  user_card_bg: rgba(40, 22, 68, 170)
+  user_card_accent: '#c9a8ff'
+  user_card_text: '#f7f2ff'
+  user_card_muted: '#a99ab9'
+  assistant_card_bg: rgba(55, 28, 22, 170)
+  assistant_card_accent: '#ff9a5c'
+  assistant_card_text: '#ffe6d4'
+  assistant_card_muted: '#b89888'
+  agent_btn_text: '#a99ab9'
+  agent_btn_text_active: '#d4b8ff'
+  agent_btn_bg_active: rgba(183, 146, 255, 0.22)
+  agent_btn_separator: rgba(90, 71, 111, 150)
+  input_bg_start: rgba(28, 18, 42, 150)
+  input_bg_end: rgba(38, 24, 55, 150)
+  input_focus_bg_start: rgba(35, 22, 50, 220)
+  input_focus_bg_end: rgba(45, 28, 60, 220)
+  input_text: '#f0e6ff'
+  input_focus_text: '#f7f2ff'
+  input_border: '#5a476f'
+  input_focus_border: '#b792ff'
+  input_placeholder: rgba(240, 230, 255, 0.4)
+  realtime_border: '#8b5cf6'
+  realtime_accent: '#c4b5fd'
+  realtime_accent_warm: '#fbbf24'
+  realtime_success: '#34d399'
+  realtime_error: '#f87171'
+  realtime_bg: rgba(32, 22, 50, 242)
+  realtime_text: '#f7f2ff'
+  realtime_text_secondary: rgba(238, 228, 255, 0.7)
+  realtime_tag_bg: rgba(196, 181, 253, 0.15)
+  realtime_tag_border: rgba(196, 181, 253, 0.3)
+  system_border: '#5a476f'
+  system_accent: '#b792ff'
+  send_btn_start: '#b792ff'
+  send_btn_end: '#8a6fd0'
+  send_btn_hover_start: '#c8a8ff'
+  send_btn_hover_end: '#9b7ee0'
+  timeline_node: '#5A5A5A'
+  timeline_node_hover: '#b792ff'
+  timeline_node_visible: '#c4b5fd'
+  timeline_node_selected: '#FFA500'
+  timeline_line: '#3A3A3A'
+  timeline_line_progress: '#c4b5fd'
+  ring_normal: '#b792ff'
+  ring_warning: '#f6c453'
+  ring_danger: '#ff6b6b'
+  ring_compacted: '#9b59b6'
+  branch_label_bg: rgba(183, 146, 255, 0.15)
+  branch_label_border: rgba(183, 146, 255, 0.3)
+  window_bg: rgba(183, 146, 255, 0.04)

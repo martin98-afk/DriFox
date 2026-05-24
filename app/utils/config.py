@@ -150,7 +150,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.2.0"
+    current_version = "v0.2.1"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -201,8 +201,8 @@ class Settings(QConfig):
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "midnight",
-        OptionsValidator(["midnight"]),  # 运行时动态补充
+        "fallout",
+        OptionsValidator(["fallout"]),  # 运行时动态补充
     )
 
     # ========== 会话项目管理 ==========

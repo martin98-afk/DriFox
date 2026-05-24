@@ -8,6 +8,12 @@
 - 非系统卡片同容器互斥：Tool/SubAgent 等同容器内互斥
 - 不同容器可共存（如 Top 的 Todo + Bottom 的 Tool）
 - Question 强制覆盖所有
+- 系统卡片活跃时（question 除外）：压制所有非系统卡片
+
+优先级层级：
+  1. Question（强制覆盖一切）
+  2. 系统卡片（settings/history/memory 等）
+  3. 实时卡片（todo/tool/sub_agent）—— 系统卡片存在时被压制
 """
 from enum import Enum
 from typing import Dict, List, Optional, Callable, Any
@@ -62,8 +68,9 @@ class CardManager:
         #       "containers": {"card_id": ContainerType, ...},
         #       "system_cards": set(),
         #       "visible_cards": {ContainerType.TOP: None, ContainerType.BOTTOM: None},
-        #       "shown_callbacks": {},
-        #       "hidden_callbacks": {},
+        #       "shown_callbacks": {"card_id": [cb1, cb2]},
+        #       "hidden_callbacks": {"card_id": [cb1, cb2]},
+        #       "suppressed_by_system": False,  # 系统卡片活跃时压制非系统卡片
         #   }
         # }
         self._window_data: Dict[str, Dict[str, Any]] = {}
@@ -126,13 +133,11 @@ class CardManager:
     def show_card(self, card_id: str, window_id: str):
         """显示指定窗口的指定卡片"""
         if window_id not in self._window_data:
-            logger.warning(f"[CardManager] 未注册的窗口: {window_id}")
             return
         
         win_data = self._window_data[window_id]
         
         if card_id not in win_data["containers"]:
-            logger.warning(f"[CardManager] 窗口 {window_id} 未注册的卡片: {card_id}")
             return
         
         container_type = win_data["containers"][card_id]
@@ -152,13 +157,21 @@ class CardManager:
         if card_id in win_data["system_cards"]:
             self._hide_system_cards(window_id, exclude_card_id=card_id)
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+            # 系统卡片激活，压制非系统卡片
+            win_data["suppressed_by_system"] = True
         else:
+            # 非系统卡片：检查是否被系统卡片压制（question 除外）
+            if card_id not in {"question"} and win_data.get("suppressed_by_system", False):
+                return
+            
             # 非系统卡片：同容器互斥
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
             # 非系统卡片显示时，如果系统卡片可见则隐藏（让系统卡片优先变成互斥）
             # 但 Question 特殊：强制关闭所有
             if card_id in {"question"}:
                 self._hide_all_cards(window_id)
+                # question 激活时不压制其他卡片（它自己会处理）
+                win_data["suppressed_by_system"] = False
         
         # 显示卡片
         try:

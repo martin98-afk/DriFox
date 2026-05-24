@@ -18,10 +18,10 @@ import time
 from datetime import datetime
 from typing import Optional, List, Any, Tuple, Callable
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from app.utils.design_tokens import Colors
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QLabel
+from PyQt5.QtWidgets import QLabel, QWidget, QLineEdit, QHBoxLayout
 from loguru import logger
 
 from app.widgets import MessageCard
@@ -38,6 +38,7 @@ __all__ = [
     "WINDOW_STYLE",
     "CHAT_SCROLL_STYLE",
     "TITLE_STYLE",
+    "TitleEditWidget",
     "MODEL_BTN_STYLE",
     "MODEL_BTN_TEXT_STYLE",
     # UI 辅助函数
@@ -1705,3 +1706,141 @@ def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:
             chat_layout.addWidget(widget, 0, Qt.AlignLeft)
     else:
         chat_layout.addWidget(widget)
+
+
+# ==================== 标题编辑控件 ====================
+
+class TitleEditWidget(QWidget):
+    """标题编辑控件：显示时用 QLabel（自动省略），点击切换到 QLineEdit 行内编辑
+    
+    对外暴露 text() / setText() / setStyleSheet() 等兼容 QLineEdit 的 API，
+    使得 main_widget.py 中 self.title_edit 的引用几乎无需修改。
+    """
+    returnPressed = pyqtSignal()
+    editingFinished = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full_text = text
+        self._editing = False
+        self._label_style_cache = ""  # 存 QSS 中 QLabel 部分
+        self._edit_style_cache = ""   # 存 QSS 中 QLineEdit 部分
+
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+        # 显示标签 — 有省略能力
+        self._label = QLabel(text, self)
+        self._label.setCursor(Qt.IBeamCursor)
+        self._label.setMinimumWidth(0)  # 允许缩窄以触发省略
+        self._label.mousePressEvent = self._on_label_clicked
+        self._layout.addWidget(self._label)
+
+        # 编辑输入框 — 编辑模式使用
+        self._edit = QLineEdit(text, self)
+        self._edit.setCursor(Qt.IBeamCursor)
+        self._edit.returnPressed.connect(self._on_edit_return)
+        self._edit.editingFinished.connect(self._on_edit_finished)
+        self._edit.setVisible(False)
+        self._layout.addWidget(self._edit)
+
+        self.setReadOnly(True)  # 默认显示模式
+        self.setFixedHeight(32)
+
+    # ── 对外兼容 API ──
+
+    def text(self) -> str:
+        return self._full_text
+
+    def setText(self, text: str):
+        self._full_text = text
+        self._label.setText(text)
+        self._edit.setText(text)
+        self._update_label_elide()
+
+    def setReadOnly(self, readonly: bool):
+        """True = 显示模式（QLabel），False = 编辑模式（QLineEdit）"""
+        self._label.setVisible(readonly)
+        self._edit.setVisible(not readonly)
+        if not readonly:
+            self._edit.setFocus()
+            self._edit.selectAll()
+
+    def isReadOnly(self) -> bool:
+        return self._label.isVisible()
+
+    def setFocus(self):
+        if self._edit.isVisible():
+            self._edit.setFocus()
+
+    def selectAll(self):
+        self._edit.selectAll()
+
+    def clear(self):
+        self.setText("")
+
+    # ── 样式代理 ──
+
+    def setStyleSheet(self, style_sheet: str):
+        """解析 QSS：QLabel 部分给 label，QLineEdit 部分给 edit"""
+        # 分离两种控件的样式
+        label_part = ""
+        edit_part = ""
+        if "QLabel" in style_sheet:
+            # 提取 QLabel 样式块
+            idx = style_sheet.find("QLabel {")
+            if idx >= 0:
+                end = style_sheet.find("}", idx)
+                if end >= 0:
+                    label_part = style_sheet[idx:end+1]
+            # 其余部分给 QLineEdit
+            rest = style_sheet.replace(label_part, "")
+            if "QLineEdit" in rest or style_sheet:
+                edit_part = style_sheet
+        else:
+            edit_part = style_sheet
+
+        if label_part:
+            self._label.setStyleSheet(label_part)
+        if edit_part:
+            self._edit.setStyleSheet(edit_part)
+
+        self._label_style_cache = label_part or style_sheet
+        self._edit_style_cache = edit_part
+
+    # ── 事件处理 ──
+
+    def _on_label_clicked(self, event):
+        """点击标签进入编辑模式"""
+        if self._editing:
+            return
+        self._editing = True
+        self.setReadOnly(False)
+
+    def _on_edit_return(self):
+        self._editing = False
+        self._apply_edit()
+        self.returnPressed.emit()
+
+    def _on_edit_finished(self):
+        self._editing = False
+        self._apply_edit()
+        self.editingFinished.emit()
+
+    def _apply_edit(self):
+        new_text = self._edit.text().strip()
+        if new_text:
+            self._full_text = new_text
+        self._label.setText(self._full_text)
+        self.setReadOnly(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_label_elide()
+
+    def _update_label_elide(self):
+        fm = self._label.fontMetrics()
+        elided = fm.elidedText(self._full_text, Qt.ElideRight, self._label.width())
+        if elided != self._label.text():
+            self._label.setText(elided)

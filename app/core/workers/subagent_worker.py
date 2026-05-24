@@ -973,7 +973,8 @@ class SubAgentManager(QObject):
         tasks_info = []
 
         for task_id, task_info in self._finished_tasks.items():
-            if any(t.get("agent") == task_info.get("agent_name", "") for t in tasks_info):
+            # 跳过当前正在运行的任务（它们应该由 _running_tasks 处理）
+            if task_id in self._running_tasks:
                 continue
 
             task_entry = {

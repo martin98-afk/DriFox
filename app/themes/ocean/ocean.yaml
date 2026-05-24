@@ -1,0 +1,75 @@
+name: 深海蓝
+id: ocean
+window:
+  gradient_start: rgba(10, 14, 24, 255)
+  gradient_end: rgba(16, 26, 48, 255)
+background:
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.1
+    enabled: true
+colors:
+  card_bg: rgba(24, 40, 65, 232)
+  card_bg_solid: rgba(24, 40, 65, 250)
+  content_bg: '#182842'
+  border: '#3a5880'
+  border_accent: '#5dade2'
+  text_primary: '#e8f0fc'
+  text_secondary: rgba(232, 240, 252, 0.72)
+  text_muted: '#8898b0'
+  accent: '#3498db'
+  accent_warm: '#f59e0b'
+  hover_bg: rgba(52, 152, 219, 0.13)
+  selected_bg: rgba(52, 152, 219, 0.32)
+  capsule_bg: rgba(20, 34, 58, 185)
+  capsule_border: rgba(52, 78, 118, 205)
+  user_card_bg: rgba(18, 48, 80, 170)
+  user_card_accent: '#7fc0f0'
+  user_card_text: '#e8f0fc'
+  user_card_muted: '#98a8c0'
+  assistant_card_bg: rgba(45, 30, 20, 170)
+  assistant_card_accent: '#d08040'
+  assistant_card_text: '#f5e8d8'
+  assistant_card_muted: '#b0a090'
+  agent_btn_text: '#8898b0'
+  agent_btn_text_active: '#5dade2'
+  agent_btn_bg_active: rgba(93, 173, 226, 0.22)
+  agent_btn_separator: rgba(58, 88, 128, 150)
+  input_bg_start: rgba(14, 22, 36, 150)
+  input_bg_end: rgba(20, 30, 50, 150)
+  input_focus_bg_start: rgba(18, 28, 44, 220)
+  input_focus_bg_end: rgba(24, 36, 56, 220)
+  input_text: '#d8e4f2'
+  input_focus_text: '#e8f0fc'
+  input_border: '#3a5880'
+  input_focus_border: '#3498db'
+  input_placeholder: rgba(216, 228, 242, 0.4)
+  realtime_border: '#2980b9'
+  realtime_accent: '#5dade2'
+  realtime_accent_warm: '#fbbf24'
+  realtime_success: '#2ecc71'
+  realtime_error: '#e74c3c'
+  realtime_bg: rgba(18, 30, 52, 242)
+  realtime_text: '#e8f0fc'
+  realtime_text_secondary: rgba(232, 240, 252, 0.7)
+  realtime_tag_bg: rgba(93, 173, 226, 0.15)
+  realtime_tag_border: rgba(93, 173, 226, 0.3)
+  system_border: '#3a5880'
+  system_accent: '#3498db'
+  send_btn_start: '#3498db'
+  send_btn_end: '#2980b9'
+  send_btn_hover_start: '#5dade2'
+  send_btn_hover_end: '#3498db'
+  timeline_node: '#5A5A5A'
+  timeline_node_hover: '#5dade2'
+  timeline_node_visible: '#3498db'
+  timeline_node_selected: '#FFA500'
+  timeline_line: '#3A3A3A'
+  timeline_line_progress: '#5dade2'
+  ring_normal: '#3498db'
+  ring_warning: '#f6c453'
+  ring_danger: '#ff6b6b'
+  ring_compacted: '#9b59b6'
+  branch_label_bg: rgba(52, 152, 219, 0.15)
+  branch_label_border: rgba(52, 152, 219, 0.3)
+  window_bg: rgba(52, 152, 219, 0.04)

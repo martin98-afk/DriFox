@@ -101,6 +101,7 @@ class SessionRepository:
                 messages[-1].get("timestamp") if messages else None
             ) or d.get("updated_at", ""),
             "saved_at": d.get("saved_at") or d.get("created_at", ""),
+            "user_edited_title": d.get("user_edited_title", False),
         }
 
     def save(self, session: Dict) -> bool:
@@ -124,6 +125,7 @@ class SessionRepository:
 
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            user_edited = 1 if session.get("user_edited_title", False) else 0
             session_data = {
                 "session_id": session_id,
                 # 优先使用 topic_summary（UI/Agent生成），其次 name（Gateway创建），兜底空字符串
@@ -134,14 +136,15 @@ class SessionRepository:
                 "compaction_state": json.dumps(session.get("compaction_state", {})).decode('utf-8'),
                 "compaction_cache": json.dumps(session.get("compaction_cache", {})).decode('utf-8'),
                 "message_count": session.get("message_count", 0),
+                "user_edited_title": user_edited,
             }
 
             success, result = self._execute(f'''
                 INSERT OR REPLACE INTO {self.TABLE_NAME}
                 (session_id, title, project, messages, system_prompt,
-                 compaction_state, compaction_cache, message_count,
+                 compaction_state, compaction_cache, message_count, user_edited_title,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             ''', (
@@ -153,6 +156,7 @@ class SessionRepository:
                 session_data["compaction_state"],
                 session_data["compaction_cache"],
                 session_data["message_count"],
+                session_data["user_edited_title"],
                 session_id,  # for coalesce
                 now,  # created_at default
                 now,  # updated_at

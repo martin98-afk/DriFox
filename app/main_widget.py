@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsOpacityEffect,
     QLabel,
     QPushButton,
-    QButtonGroup, QFrame, QScrollArea, QSizePolicy,
+    QButtonGroup, QFrame, QScrollArea, QSizePolicy, QLineEdit,
 )
 from loguru import logger
 from qfluentwidgets import (
@@ -1029,19 +1029,42 @@ class OpenAIChatToolWindow(ToolWindow):
         self._branch_layout.addWidget(self._branch_label)
 
         self._update_branch()
-        # 标题
-        self.title_edit = QLabel("新对话", self)
+        # 标题编辑（行内编辑模式）
+        self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
-        title_style = TITLE_STYLE.replace("    QLabel {", f"    QLabel {{\n        {font_css}")
-        title_style = title_style.replace("font-size: 15px;", font_size_css(15))
+        title_style = """QLabel {
+            color: #f3f6fc;
+            font-size: 15px;
+            font-weight: bold;
+            padding: 6px 4px;
+            border-radius: 10px;
+            background-color: transparent;
+        }
+        QLabel:hover {
+            background-color: rgba(255, 255, 255, 0.06);
+        }
+        QLineEdit {
+            color: #f3f6fc;
+            font-size: 15px;
+            font-weight: bold;
+            padding: 6px 4px;
+            border-radius: 10px;
+            background-color: transparent;
+            border: none;
+        }
+        QLineEdit:focus {
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+    """
         title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
-        self.title_edit.setCursor(Qt.PointingHandCursor)
-        self.title_edit.mouseDoubleClickEvent = self._on_title_double_click
+        self.title_edit.returnPressed.connect(self._on_title_edit_finished)
+        self.title_edit.editingFinished.connect(self._on_title_edit_finished)
 
         session_bar_layout.addWidget(self._project_label)
         session_bar_layout.addWidget(self._branch_widget)
-        session_bar_layout.addWidget(self.title_edit)
+        session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
         # right_layout 保持简化，显示余额和 context_usage_ring
         right_layout = QHBoxLayout()
@@ -1057,7 +1080,6 @@ class OpenAIChatToolWindow(ToolWindow):
         right_layout.addWidget(self.context_usage_ring)
         right_layout.addSpacing(10)
 
-        session_bar_layout.addStretch()
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
 
@@ -1327,6 +1349,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         card_layout.addWidget(self.input_area)
 
+        # 加载输入历史
+        self._load_input_history()
+
         # 命令卡片（必须是输入框创建后）
         self._command_card = CommandCard(self._bottom_input_container)
         self._command_card.setVisible(False)
@@ -1471,141 +1496,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _init_builtin_commands(self):
         """注册并初始化所有内置命令"""
-        cmd_mgr = CommandManager.get_instance()
-        # 先清空，避免重复注册
-        for name in list(cmd_mgr.get_command_names()):
-            cmd_mgr.unregister(name)
-
-        cmd_mgr.register("new", "function", description="新建会话")
-        cmd_mgr.register("new-window", "function", description="新建窗口")
-        cmd_mgr.register("branch", "function", description="新建分支窗口")
-
-        # 提示词替换命令 - init：项目笔记初始化
-        INIT_PROMPT = (
-            "请分析此代码库并编写项目笔记，包含以下内容：\n"
-            "1. 构建/lint/测试命令 - 特别是运行单个测试的方法\n"
-            "2. 代码风格规范，包括导入、格式化、类型、命名约定、错误处理等\n\n"
-            "你创建的文件将被提供给在此仓库中操作的 AI 编码智能体（如你自己）。内容约 150 行。\n"
-            "如果有 Cursor 规则（在 .cursor/rules/ 或 .cursorrules 中）"
-            "或 Copilot 规则（在 .github/copilot-instructions.md 中），请确保包含它们。\n\n"
-            "如果已有项目笔记，请改进它。"
-        )
-        cmd_mgr.register("init", "prompt", description="项目笔记初始化", prompt_text=INIT_PROMPT)
-
-        review_prompt = """You are a code reviewer. Your job is to review code changes and provide actionable feedback.
----
-## Determining What to Review
-Based on the input provided, determine which type of review to perform:
-1. **No arguments (default)**: Review all uncommitted changes
-   - Run: `git diff` for unstaged changes
-   - Run: `git diff --cached` for staged changes
-   - Run: `git status --short` to identify untracked (net new) files
-2. **Commit hash** (40-char SHA or short hash): Review that specific commit
-   - Run: `git show <hash>`
-3. **Branch name**: Compare current branch to the specified branch
-   - Run: `git diff <branch>...HEAD`
-4. **PR URL or number** (contains "github.com" or "pull" or looks like a PR number): Review the pull request
-   - Run: `gh pr view <number>` to get PR context
-   - Run: `gh pr diff <number>` to get the diff
-Use best judgement when processing input.
----
-## Gathering Context
-**Diffs alone are not enough.** After getting the diff, read the entire file(s) being modified to understand the full context. Code that looks wrong in isolation may be correct given surrounding logic—and vice versa.
-- Use the diff to identify which files changed
-- Use `git status --short` to identify untracked files, then read their full contents
-- Read the full file to understand existing patterns, control flow, and error handling
-- Check for existing style guide or conventions files (CONVENTIONS.md, AGENTS.md, .editorconfig, etc.)
----
-## What to Look For
-**Bugs** - Your primary focus.
-- Logic errors, off-by-one mistakes, incorrect conditionals
-- If-else guards: missing guards, incorrect branching, unreachable code paths
-- Edge cases: null/empty/undefined inputs, error conditions, race conditions
-- Security issues: injection, auth bypass, data exposure
-- Broken error handling that swallows failures, throws unexpectedly or returns error types that are not caught.
-**Structure** - Does the code fit the codebase?
-- Does it follow existing patterns and conventions?
-- Are there established abstractions it should use but doesn't?
-- Excessive nesting that could be flattened with early returns or extraction
-**Performance** - Only flag if obviously problematic.
-- O(n²) on unbounded data, N+1 queries, blocking I/O on hot paths
-**Behavior Changes** - If a behavioral change is introduced, raise it (especially if it's possibly unintentional).
----
-## Before You Flag Something
-**Be certain.** If you're going to call something a bug, you need to be confident it actually is one.
-- Only review the changes - do not review pre-existing code that wasn't modified
-- Don't flag something as a bug if you're unsure - investigate first
-- Don't invent hypothetical problems - if an edge case matters, explain the realistic scenario where it breaks
-- If you need more context to be sure, use the tools below to get it
-**Don't be a zealot about style.** When checking code against conventions:
-- Verify the code is *actually* in violation. Don't complain about else statements if early returns are already being used correctly.
-- Some "violations" are acceptable when they're the simplest option. A `let` statement is fine if the alternative is convoluted.
-- Excessive nesting is a legitimate concern regardless of other style choices.
-- Don't flag style preferences as issues unless they clearly violate established project conventions.
----
-## Tools
-Use these to inform your review:
-- **Explore agent** - Find how existing code handles similar problems. Check patterns, conventions, and prior art before claiming something doesn't fit.
-- **Exa Code Context** - Verify correct usage of libraries/APIs before flagging something as wrong.
-- **Exa Web Search** - Research best practices if you're unsure about a pattern.
-If you're uncertain about something and can't verify it with these tools, say "I'm not sure about X" rather than flagging it as a definite issue.
----
-## Output
-1. If there is a bug, be direct and clear about why it is a bug.
-2. Clearly communicate severity of issues. Do not overstate severity.
-3. Critiques should clearly and explicitly communicate the scenarios, environments, or inputs that are necessary for the bug to arise. The comment should immediately indicate that the issue's severity depends on these factors.
-4. Your tone should be matter-of-fact and not accusatory or overly positive. It should read as a helpful AI assistant suggestion without sounding too much like a human reviewer.
-5. Write so the reader can quickly understand the issue without reading too closely.
-6. AVOID flattery, do not give any comments that are not helpful to the reader. Avoid phrasing like "Great job ...", "Thanks for ..."."""
-        cmd_mgr.register("review", "prompt", description="审查更改代码", prompt_text=review_prompt)
-
-        # 加载内置智能体为命令
-        self._register_builtin_agents_as_commands()
-
-    def _register_builtin_agents_as_commands(self):
-        """从 app/agents 目录加载内置智能体并注册为命令"""
-        import yaml
-        from pathlib import Path
-
-        agents_dir = Path(__file__).parent / "agents"
-        if not agents_dir.exists():
-            return
-
-        cmd_mgr = CommandManager.get_instance()
-
-        for md_file in agents_dir.glob("*.md"):
-            try:
-                content = md_file.read_text(encoding="utf-8")
-                if not content.startswith("---"):
-                    continue
-
-                parts = content.split("---", 2)
-                if len(parts) < 3:
-                    continue
-
-                frontmatter = parts[1]
-                body = parts[2].strip()
-
-                meta = yaml.safe_load(frontmatter)
-                if not meta:
-                    continue
-
-                # 获取描述
-                description = meta.get("description", "")
-                # 加载所有智能体（不跳过 hidden）
-                # hidden 的智能体依然注册为命令，但不显示标签
-
-                # 注册为 prompt 命令，使用完整提示词内容
-                cmd_mgr.register(
-                    name=md_file.stem,
-                    command_type="prompt",
-                    description=description,
-                    prompt_text=body,
-                )
-                logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}")
-
-            except Exception as e:
-                logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")
+        from app.core.builtin_commands import register_all_commands
+        register_all_commands()
 
     def _execute_command(self, command_name: str):
         """执行内置函数型命令
@@ -2062,6 +1954,7 @@ If you're uncertain about something and can't verify it with these tools, say "I
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
         self._card_manager.hide_card("mcp_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
@@ -2118,6 +2011,14 @@ If you're uncertain about something and can't verify it with these tools, say "I
                 if hasattr(self, '_bg_label') and self._bg_label is not None:
                     self._bg_label.deleteLater()
                     self._bg_label = None
+                # 解析图片路径：主题文件夹内的相对路径基于主题目录
+                import os as _os
+                if not image.startswith(":") and not _os.path.isabs(image):
+                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
+                    if theme_dir:
+                        abs_path = str(theme_dir / image)
+                        if _os.path.exists(abs_path):
+                            image = abs_path
                 self._bg_label = QLabel(self)
                 self._bg_label.setPixmap(QPixmap(image))
                 self._bg_label.setScaledContents(True)
@@ -2571,9 +2472,31 @@ If you're uncertain about something and can't verify it with these tools, say "I
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):
-            title_style = TITLE_STYLE.replace("    QLabel {", f"    QLabel {{\n        {get_font_family_css()}")
-            title_style = title_style.replace("font-size: 15px;", font_size_css(15))
-            title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
+            title_style = """QLabel {
+                color: %s;
+                font-size: 15px;
+                font-weight: bold;
+                padding: 6px 4px;
+                border-radius: 10px;
+                background-color: transparent;
+            }
+            QLabel:hover {
+                background-color: rgba(255, 255, 255, 0.06);
+            }
+            QLineEdit {
+                color: %s;
+                font-size: 15px;
+                font-weight: bold;
+                padding: 6px 4px;
+                border-radius: 10px;
+                background-color: transparent;
+                border: none;
+            }
+            QLineEdit:focus {
+                background-color: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            """ % (Colors.TEXT_PRIMARY, Colors.TEXT_PRIMARY)
             self.title_edit.setStyleSheet(title_style)
         # 刷新输入卡片背景
         if hasattr(self, '_input_card'):
@@ -5566,6 +5489,26 @@ If you're uncertain about something and can't verify it with these tools, say "I
         else:
             logger.warning(f"未找到 session_id: {session_id}")
 
+    def _load_input_history(self):
+        """从数据库加载输入历史到输入框"""
+        try:
+            if hasattr(self, 'session_store') and self.session_store:
+                history = self.session_store.get_input_history()
+                self.input_area.load_history(history)
+        except Exception:
+            pass
+
+    def _record_input_history(self, text: str):
+        """记录用户输入到历史数据库"""
+        try:
+            if hasattr(self, 'session_store') and self.session_store:
+                self.session_store.add_input_history(text)
+                # 更新输入框的历史缓存
+                history = self.session_store.get_input_history()
+                self.input_area.load_history(history)
+        except Exception:
+            pass
+
     def send_preset_question(self, question: str):
         if not isinstance(question, str) or not question.strip():
             return
@@ -5587,6 +5530,9 @@ If you're uncertain about something and can't verify it with these tools, say "I
         if not user_text:
             return
 
+        # ---- 记录输入到历史 ----
+        self._record_input_history(user_text)
+
         # ---- 内置命令拦截 ----
         cmd_mgr = CommandManager.get_instance()
         cmd_result = cmd_mgr.execute(user_text)
@@ -5595,9 +5541,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
                 # 函数型命令：执行对应处理，不清除用户输入（不发送给 AI）
                 self._execute_command(cmd_result.command_name)
                 return
-            elif cmd_result.is_prompt:
-                # 提示词替换命令：用替换文本代替原输入继续发送
+            elif cmd_result.is_prompt or cmd_result.is_agent:
+                # 提示词替换命令：替换 + 追加用户命令
                 user_text = cmd_result.replacement
+                if cmd_result.remainder:
+                    user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
                 self.input_area.clear()
         # ---- 内置命令拦截结束 ----
 
@@ -5728,17 +5676,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
 
         if tool_name == "question":
+            # question 工具由 chat_worker 的 question_asked 信号 →
+            # _on_question_asked 统一处理（含规范化后的数据）
+            # 这里只需记录 ID，不做显示避免竞态
+            self._question_tool_call_id = tool_call_id
             self._hide_all_cards_for_question()
-            question_text = arguments.get("question", "")
-            options = arguments.get("options", [])
-            multiple = arguments.get("multiple", False)
-            if question_text:
-                self._question_tool_call_id = tool_call_id
-                if not isinstance(options, list):
-                    options = []
-                self._question_floating_widget.show_question(
-                    question_text, options, multiple
-                )
             return
 
         if tool_name in ("todowrite", "todoread"):
@@ -5816,7 +5758,7 @@ If you're uncertain about something and can't verify it with these tools, say "I
             sub_agent_mgr._batch_completed = 0
 
     def _do_trigger_callback(self, sub_agent_mgr):
-        """执行回调触发"""
+        """执行回调触发 - 支持强制中断当前流式输出"""
         total = len(sub_agent_mgr._finished_tasks)
         failed = sum(1 for t in sub_agent_mgr._finished_tasks.values() if t.get("error") and t.get("error") != "")
 
@@ -5828,8 +5770,29 @@ If you're uncertain about something and can't verify it with these tools, say "I
 
 请使用 task_status 工具获取详细结果。"""
 
-        # 绕过 streaming 检查直接发送
-        self.backend.set_streaming_state(False)
+        # 检查是否正在流式输出，如果是则强制中断并保存已有内容
+        if self.backend.chat_engine and self.backend.chat_engine.is_streaming:
+            logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming")
+
+            # 1. 非阻塞取消流式输出（断开信号、设置取消标志）
+            self.backend.cancel_streaming()
+
+            # 2. 标记 UI 停止流式状态（_is_streaming 在 _on_stream_finished 中会被重置）
+            self._is_streaming = False
+
+            # 3. 完成当前卡片的流式动画（保留已显示的内容）
+            if self._current_assistant_card:
+                self._current_assistant_card.finish_streaming()
+
+            # 4. 阻塞获取中断消息并清理 worker（内部会等待线程结束，最多 3s）
+            interrupted_msgs = self.backend.finalize_stop()
+            if interrupted_msgs:
+                logger.info(f"[ChatEngine] Saved {len(interrupted_msgs)} interrupted messages")
+
+            # 5. 重置状态并发送回调消息
+            self._toggle_send_stop(False)
+
+        # 发送回调消息到引擎
         self.backend.send_message_to_engine(callback_text)
 
     def _on_sub_agent_finished(self, task_id: str, result: str):
@@ -6259,11 +6222,14 @@ If you're uncertain about something and can't verify it with these tools, say "I
         # 隐藏输入框，让用户专注看问题
         if hasattr(self, '_bottom_input_container'):
             self._bottom_input_container.setVisible(False)
-        self._card_manager.show_card("question", self._window_id)
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
+        # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
+        self._card_manager.show_card("question", self._window_id)
+        self._question_floating_widget.setUpdatesEnabled(False)
         self._question_floating_widget.show_question(questions)
+        self._question_floating_widget.setUpdatesEnabled(True)
         question_text = questions[0].get("question", "") if questions else ""
         self._notify_if_inactive("需要回答问题", question_text[:100])
 
@@ -6278,11 +6244,12 @@ If you're uncertain about something and can't verify it with these tools, say "I
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
-            if answer == "允许":
+            # answer 格式为 "问题「...」的回答：\n【允许】"，用 in 匹配标签
+            if "【允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, False, False)
-            elif answer == "允许且该轮对话自动允许":
+            elif "【允许且该轮对话自动允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, True, False)
-            elif answer == "本次会话允许":
+            elif "【本次会话允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, False, True)
             else:
                 self.backend.deny_tool_permission(tool_call_id)
@@ -6343,17 +6310,33 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
-        self._hide_all_cards_for_question()  # question卡片最高优先级
+        # 隐藏输入框，让用户专注看问题
+        if hasattr(self, '_bottom_input_container'):
+            self._bottom_input_container.setVisible(False)
+        # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
+        self._card_manager.show_card("question", self._window_id)
+        self._question_floating_widget.setUpdatesEnabled(False)
         try:
             arg_str = str(arguments)[:200] if arguments else ""
             question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数: {arg_str}"
-            options = ["允许", "允许且该轮对话自动允许", "本次会话允许", "不允许"]
-            self._question_floating_widget.show_question(question_text, options, False)
+            options = [
+                {"label": "允许", "description": ""},
+                {"label": "允许且该轮对话自动允许", "description": ""},
+                {"label": "本次会话允许", "description": ""},
+                {"label": "不允许", "description": ""},
+            ]
+            self._question_floating_widget.show_question(
+                [{"question": question_text, "options": options, "multiple": False}],
+                show_custom_input=False,
+            )
         except Exception as e:
+            self._question_floating_widget.setUpdatesEnabled(True)
             logger.error(f"[Permission] Approval error: {e}")
             self.backend.deny_tool_permission(tool_call_id)
             self._pending_permission_tool_call_id = None
             self._restore_after_question_close()
+            return
+        self._question_floating_widget.setUpdatesEnabled(True)
 
     def _on_compaction_updated(self, task_id: str, new_summary: str):
         if getattr(self, '_is_destroyed', False):
@@ -6420,6 +6403,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
             logger.warning("[Topic Summary] No session found, skipping")
             return
 
+        # 🛡️ 如果用户已手动编辑过标题，跳过自动生成
+        if getattr(session, 'user_edited_title', False):
+            logger.info("[Topic Summary] User edited title, skipping auto generation")
+            return
+
         user_messages = [m for m in session.messages if m.get("role") == "user"]
         if not user_messages:
             logger.warning("[Topic Summary] No user messages found, skipping")
@@ -6446,6 +6434,12 @@ If you're uncertain about something and can't verify it with these tools, say "I
             logger.error(f"[Topic Summary] Failed to generate: {error}")
             return
         if not result:
+            return
+
+        # 🛡️ 如果用户已手动编辑过标题，跳过自动生成结果的更新
+        session = self.session_manager.get_current_session()
+        if session and getattr(session, 'user_edited_title', False):
+            logger.info("[Topic Summary] User edited title, skipping result update")
             return
 
         if isinstance(result, dict):
@@ -6795,24 +6789,38 @@ If you're uncertain about something and can't verify it with these tools, say "I
         self.backend.update_user_memories(memories)
         InfoBar.success("已保存", "长期记忆已更新", parent=self, duration=1500, position=InfoBarPosition.BOTTOM)
 
-    def _on_title_double_click(self, event):
-        from PyQt5.QtWidgets import QInputDialog, QLineEdit
-
-        current_title = self.title_edit.text()
-        new_title, ok = QInputDialog.getText(
-            self, "编辑标题", "请输入新标题:", QLineEdit.Normal, current_title
-        )
-        if ok and new_title.strip():
-            self._update_title(new_title.strip())
-
-    def _update_title(self, new_title: str):
+    def _on_title_edit_finished(self):
+        """标题编辑完成 - 保存用户编辑的标题"""
+        new_title = self.title_edit.text().strip()
+        if not new_title:
+            return
+        self._save_edited_title(new_title)
+    
+    def _save_edited_title(self, new_title: str):
+        """保存用户编辑的标题"""
         self.title_edit.setText(new_title)
+        
+        # 标记 session 的 user_edited_title = True
+        session = self.session_manager.get_current_session()
+        if session:
+            session.set_user_edited_title(True)
+        
+        # 更新 history_manager 中的标题
         if self._current_session_id is not None:
             idx = self.history_manager.find_index_by_session_id(
                 self._current_session_id
             )
             if idx is not None:
                 self.history_manager.update_session_title(idx, new_title)
+                # 同步 user_edited_title 标记
+                self.history_manager.set_user_edited_title(idx, True)
+    
+    def _restore_title_display(self):
+        """恢复标题显示（编辑取消时）"""
+        session = self.session_manager.get_current_session()
+        if session:
+            current_title = session.topic_summary or session.name or "新对话"
+            self.title_edit.setText(current_title)
 
     def _auto_save_current_session(self):
         session = self.session_manager.get_current_session()

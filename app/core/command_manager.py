@@ -39,6 +39,7 @@ class CommandResult:
     is_agent: bool = False         # 是否为智能体命令
     command_name: str = ""         # 匹配到的命令名
     replacement: str = ""          # 提示词替换文本（仅 prompt/agent 命令）
+    remainder: str = ""            # 命令后的用户输入（保留部分）
 
 
 @dataclass
@@ -188,18 +189,37 @@ class CommandManager:
                 command_name=cmd_name,
             )
         elif cmd.type == "prompt":
+            # 提取命令后的用户输入（保留部分）
+            remainder = ""
+            text_stripped = text.strip()
+            if text_stripped.startswith("/"):
+                # 找到 /cmd 后的部分
+                first_space = text_stripped.find(" ")
+                if first_space > 0:
+                    remainder = text_stripped[first_space + 1:]
+            
             return CommandResult(
                 handled=True,
                 is_prompt=True,
                 command_name=cmd_name,
                 replacement=cmd.prompt_text,
+                remainder=remainder,
             )
         elif cmd.type == "agent":
+            # 提取命令后的用户输入（保留部分）
+            remainder = ""
+            text_stripped = text.strip()
+            if text_stripped.startswith("/"):
+                first_space = text_stripped.find(" ")
+                if first_space > 0:
+                    remainder = text_stripped[first_space + 1:]
+            
             return CommandResult(
                 handled=True,
                 is_agent=True,
                 command_name=cmd_name,
                 replacement=cmd.prompt_text,
+                remainder=remainder,
             )
 
         return CommandResult(handled=False)

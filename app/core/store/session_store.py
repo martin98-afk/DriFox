@@ -20,6 +20,7 @@ from typing import List, Dict, Optional, Any, Tuple
 from loguru import logger
 
 from app.core.store.file_operation_repository import FileOperationRepository
+from app.core.store.input_history_repo import InputHistoryRepository
 from app.core.store.memory_repository import MemoryRepository
 # 导入子模块
 from app.core.store.session_repository import SessionRepository
@@ -67,6 +68,7 @@ class SessionStore:
         self._memory_repo: Optional[MemoryRepository] = None
         self._file_op_repo: Optional[FileOperationRepository] = None
         self._subagent_log_repo: Optional[SubAgentLogRepository] = None
+        self._input_history_repo: Optional[InputHistoryRepository] = None
         
         self._init_schema()
 
@@ -222,6 +224,13 @@ class SessionStore:
                     {"name": "updated_at", "type": "TEXT"},
                 ])
 
+                # 创建输入历史表
+                self._db.create_table("input_history", [
+                    {"name": "id", "type": "INTEGER", "primary_key": True, "auto_increment": True},
+                    {"name": "content", "type": "TEXT", "not_null": True},
+                    {"name": "created_at", "type": "TEXT"},
+                ])
+
                 # 创建索引
                 self._db.execute_sql(
                     f'CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)'
@@ -233,12 +242,15 @@ class SessionStore:
                 # 迁移逻辑
                 self._migrate_add_project_column()
                 self._migrate_remove_canvas_id()
+                self._migrate_add_user_edited_title_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
                 self._memory_repo = MemoryRepository(self._db)
                 self._file_op_repo = FileOperationRepository(self._db)
                 self._subagent_log_repo = SubAgentLogRepository(self._db)
+                self._input_history_repo = InputHistoryRepository(self._db)
+                self._input_history_repo.create_table()
 
                 self._initialized = True
                 logger.info("[SessionStore] 初始化完成（仓储模式）")
@@ -304,6 +316,22 @@ class SessionStore:
                 logger.info("[SessionStore] memories 表 canvas_id 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] canvas_id 列迁移失败(可能已不存在): {e}")
+
+    def _migrate_add_user_edited_title_column(self):
+        """迁移：添加 user_edited_title 列（如果不存在）"""
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "user_edited_title" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 user_edited_title 列")
+                self._db.execute_sql(
+                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN user_edited_title INTEGER DEFAULT 0"
+                )
+                logger.info("[SessionStore] user_edited_title 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] user_edited_title 列迁移失败(可能已存在): {e}")
 
     @property
     def is_initialized(self) -> bool:
@@ -567,6 +595,20 @@ class SessionStore:
             return self._file_op_repo.delete_by_call_id(session_id, call_id)
         return 0
 
+    # ==================== 输入历史操作（委托给 InputHistoryRepository）====================
+
+    def add_input_history(self, content: str) -> bool:
+        """添加输入历史"""
+        if self._input_history_repo:
+            return self._input_history_repo.add(content)
+        return False
+
+    def get_input_history(self, limit: int = 50):
+        """获取输入历史列表"""
+        if self._input_history_repo:
+            return self._input_history_repo.get_all(limit)
+        return []
+
     # ==================== 生命周期 ====================
 
     def close(self):
@@ -579,6 +621,7 @@ class SessionStore:
             self._memory_repo = None
             self._file_op_repo = None
             self._subagent_log_repo = None
+            self._input_history_repo = None
 
     # ==================== 公开子模块访问 ====================
 

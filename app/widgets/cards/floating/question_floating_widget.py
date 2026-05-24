@@ -7,7 +7,8 @@
 """
 from functools import partial
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from loguru import logger
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
 from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QWidget, QTextEdit,
@@ -90,6 +91,18 @@ class _OptionRadioCard(QWidget):
     def set_selected(self, s: bool):
         self._selected = s
         self._icon.setText("●" if s else "○")
+        self._apply_style()
+
+    def reuse(self, label: str, description: str = ""):
+        """复用卡片更新内容（代替销毁重建，避免幽灵窗口）"""
+        self._label_text = label
+        self._desc_text = description
+        self._selected = False
+        self._hovered = False
+        self._icon.setText("○")
+        self._title_label.setText(label)
+        self._desc_label.setText(description)
+        self._desc_label.setVisible(bool(description))
         self._apply_style()
 
     def enterEvent(self, e):
@@ -190,6 +203,18 @@ class _OptionCheckCard(QWidget):
     def isChecked(self):
         return self._checked
 
+    def reuse(self, label: str, description: str = ""):
+        """复用卡片更新内容（代替销毁重建，避免幽灵窗口）"""
+        self._label_text = label
+        self._desc_text = description
+        self._checked = False
+        self._hovered = False
+        self._icon.setText("□")
+        self._title_label.setText(label)
+        self._desc_label.setText(description)
+        self._desc_label.setVisible(bool(description))
+        self._apply_style()
+
     def enterEvent(self, e):
         self._hovered = True
         if not self._checked: self._apply_style()
@@ -214,6 +239,7 @@ class _CustomInputCard(QWidget):
 
     PLACEHOLDER = "输入你的答案..."
     activated = pyqtSignal()  # 用户主动点击选中时触发
+    heightNeedsUpdate = pyqtSignal()  # 高度需要更新时触发
 
     def __init__(self, multiple: bool = False, parent=None):
         super().__init__(parent)
@@ -281,7 +307,14 @@ class _CustomInputCard(QWidget):
             self._text_edit.setFocus()
             if self._text_value:
                 self._text_edit.setPlainText(self._text_value)
+            # 延迟发出高度更新信号，确保布局完成
+            QTimer.singleShot(10, self._emit_height_update)
         self._apply_style()
+
+    def _emit_height_update(self):
+        """触发高度更新，让父级重新布局"""
+        self.updateGeometry()
+        self.heightNeedsUpdate.emit()
 
     def toggle(self):
         new_state = not self._active
@@ -358,6 +391,7 @@ class QuestionFloatingWidget(QWidget):
         self._answers = {}
         self._option_widgets = []
         self._custom_input_widget = None
+        self._show_custom_input = True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -503,10 +537,11 @@ class QuestionFloatingWidget(QWidget):
 
     # ────────────── 公开接口 ──────────────
 
-    def show_question(self, questions: list):
+    def show_question(self, questions: list, show_custom_input: bool = True):
         self._questions = questions if isinstance(questions, list) else []
         self._current_index = 0
         self._answers = {}
+        self._show_custom_input = show_custom_input
         self._render_current()
         QTimer.singleShot(0, self.heightChanged.emit)
 
@@ -514,13 +549,43 @@ class QuestionFloatingWidget(QWidget):
         self._questions = []
         self._current_index = 0
         self._answers = {}
-        self._clear_options()
+        self._full_clear_options()
         self.setVisible(False)
 
-    # ────────────── 渲染 ──────────────
+    # ────────────── 工具方法 ──────────────
+
+    @staticmethod
+    def _extract_label_desc(opt) -> tuple:
+        """从选项数据中提取 (label, description)"""
+        desc = opt.get("description", "") if isinstance(opt, dict) else ""
+        if isinstance(opt, dict):
+            # 稳健推导 label：label > name > text > value > title > description > str(opt)
+            label = opt.get("label")
+            if not label:
+                for key in ("name", "text", "value", "title"):
+                    label = opt.get(key)
+                    if label:
+                        break
+            if not label:
+                if desc and len(opt) <= 1:
+                    label = desc
+                    desc = ""  # 避免重复
+                else:
+                    desc = ""
+                    for v in opt.values():
+                        if isinstance(v, str):
+                            label = v
+                            break
+                    if not label:
+                        label = str(opt)
+        else:
+            label, desc = str(opt), ""
+        return label, desc
+
+    # ────────────── 渲染（widget 复用，避免幽灵窗口）──────────────
 
     def _render_current(self):
-        self._clear_options()
+        self._recycle_options()
         self._apply_card_style()
 
         total = len(self._questions)
@@ -536,9 +601,15 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         q_data = self._questions[self._current_index]
+        if not isinstance(q_data, dict):
+            logger.warning(f"[QuestionWidget] q_data 不是 dict: {type(q_data)}, 跳过渲染")
+            self._on_ignore()
+            return
         question_text = q_data.get("question", "")
         options = q_data.get("options", [])
         multiple = q_data.get("multiple", False)
+        if not isinstance(options, list):
+            options = []
 
         self._page_label.setText(f"{self._current_index + 1}/{total} 个问题")
         self._page_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
@@ -550,28 +621,50 @@ class QuestionFloatingWidget(QWidget):
             "选择一个答案" if options else ""
         )
 
-        # 渲染选项
-        for opt in options:
-            label = opt.get("label", str(opt))
-            desc = opt.get("description", "")
+        # ── 复用 option widgets（不销毁重建） ──
+        count = len(options)
+        expected_type = _OptionCheckCard if multiple else _OptionRadioCard
+
+        # 如果类型变了（multiple 前后不一致），只能全部重建
+        if self._option_widgets and not isinstance(self._option_widgets[0], expected_type):
+            self._full_clear_options()
+
+        # 确保 pool 数量足够
+        while len(self._option_widgets) < count:
             if multiple:
-                card = _OptionCheckCard(label, desc, self._options_container)
+                card = _OptionCheckCard("", "", self._options_container)
             else:
-                card = _OptionRadioCard(label, desc, self._options_container)
+                card = _OptionRadioCard("", "", self._options_container)
                 card.clicked.connect(partial(self._on_radio_selected, card))
             self._options_layout.addWidget(card)
             self._option_widgets.append(card)
 
-        # 自定义输入
-        self._custom_input_widget = _CustomInputCard(multiple, self._options_container)
-        if not multiple:
-            self._custom_input_widget.activated.connect(self._on_custom_input_activated)
-        self._options_layout.addWidget(self._custom_input_widget)
+        # 更新已有 widget 的内容
+        for i, opt in enumerate(options):
+            label, desc = self._extract_label_desc(opt)
+            self._option_widgets[i].reuse(label, desc)
+            self._option_widgets[i].setVisible(True)
+
+        # 隐藏多余 widget
+        for i in range(count, len(self._option_widgets)):
+            self._option_widgets[i].setVisible(False)
+
+        # ── 自定义输入 ──
+        if self._show_custom_input:
+            self._custom_input_widget = _CustomInputCard(multiple, self._options_container)
+            if not multiple:
+                self._custom_input_widget.activated.connect(self._on_custom_input_activated)
+            self._custom_input_widget.heightNeedsUpdate.connect(self._on_options_height_changed)
+            self._options_layout.addWidget(self._custom_input_widget)
 
         # 恢复已保存答案
         saved = self._answers.get(self._current_index)
         if saved:
             self._restore_answer(saved)
+
+        # 如果自定义输入已激活，延迟触发高度更新
+        if self._custom_input_widget and self._custom_input_widget._active:
+            QTimer.singleShot(20, self._on_options_height_changed)
 
         self._update_footer(total)
 
@@ -594,19 +687,40 @@ class QuestionFloatingWidget(QWidget):
             if hasattr(w, 'set_selected'):
                 w.set_selected(False)
 
-    def _clear_options(self):
+    def _on_options_height_changed(self):
+        """选项区域高度变化时，更新卡片高度"""
+        QTimer.singleShot(0, self.heightChanged.emit)
+
+    def _recycle_options(self):
+        """仅隐藏 old option widgets（不销毁），供下次 _render_current 复用"""
+        for w in self._option_widgets:
+            w.setVisible(False)
         if self._custom_input_widget:
+            self._custom_input_widget.heightNeedsUpdate.disconnect()
+            self._custom_input_widget.setVisible(False)  # 先隐藏，防止 ghost
             self._options_layout.removeWidget(self._custom_input_widget)
             self._custom_input_widget.deleteLater()
             self._custom_input_widget = None
+
+    def _full_clear_options(self):
+        """完全销毁所有 option widgets（类型变更时使用）"""
         for w in self._option_widgets:
+            w.setVisible(False)
             self._options_layout.removeWidget(w)
             w.deleteLater()
         self._option_widgets = []
+        if self._custom_input_widget:
+            self._custom_input_widget.heightNeedsUpdate.disconnect()
+            self._custom_input_widget.setVisible(False)
+            self._options_layout.removeWidget(self._custom_input_widget)
+            self._custom_input_widget.deleteLater()
+            self._custom_input_widget = None
 
     def _get_selected_options(self) -> list:
         results = []
         for w in self._option_widgets:
+            if not w.isVisible():
+                continue
             if hasattr(w, '_selected') and w._selected:
                 results.append({"label": w._label_text, "description": w._desc_text})
             elif hasattr(w, 'isChecked') and w.isChecked():
@@ -639,10 +753,11 @@ class QuestionFloatingWidget(QWidget):
     def _restore_answer(self, answer):
         if answer is None:
             for w in self._option_widgets:
-                if hasattr(w, 'set_selected'):
-                    w.set_selected(False)
-                elif hasattr(w, 'set_checked'):
-                    w.set_checked(False)
+                if w.isVisible():
+                    if hasattr(w, 'set_selected'):
+                        w.set_selected(False)
+                    elif hasattr(w, 'set_checked'):
+                        w.set_checked(False)
             if self._custom_input_widget:
                 self._custom_input_widget.set_active(False)
             return
@@ -651,10 +766,11 @@ class QuestionFloatingWidget(QWidget):
         custom_used = answer.get("custom", False) if isinstance(answer, dict) else ("输入自己的答案" in text)
 
         for w in self._option_widgets:
-            if hasattr(w, 'set_selected'):
-                w.set_selected(text and w._label_text in text)
-            elif hasattr(w, 'set_checked'):
-                w.set_checked(text and w._label_text in text)
+            if w.isVisible():
+                if hasattr(w, 'set_selected'):
+                    w.set_selected(text and w._label_text in text)
+                elif hasattr(w, 'set_checked'):
+                    w.set_checked(text and w._label_text in text)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(custom_used)
             if custom_used and isinstance(answer, dict):
@@ -669,14 +785,18 @@ class QuestionFloatingWidget(QWidget):
         self._save_current_answer()
         if self._current_index > 0:
             self._current_index -= 1
+            self.setUpdatesEnabled(False)
             self._render_current()
+            self.setUpdatesEnabled(True)
 
     def _on_next(self):
         self._save_current_answer()
         total = len(self._questions)
         if self._current_index < total - 1:
             self._current_index += 1
+            self.setUpdatesEnabled(False)
             self._render_current()
+            self.setUpdatesEnabled(True)
         else:
             self._build_and_emit_answer()
 

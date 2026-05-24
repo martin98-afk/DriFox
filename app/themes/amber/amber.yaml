@@ -1,0 +1,75 @@
+name: 琥珀日落
+id: amber
+window:
+  gradient_start: rgba(20, 16, 8, 255)
+  gradient_end: rgba(45, 31, 13, 255)
+background:
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.1
+    enabled: true
+colors:
+  card_bg: rgba(55, 38, 18, 232)
+  card_bg_solid: rgba(55, 38, 18, 250)
+  content_bg: '#3d2912'
+  border: '#6a4e30'
+  border_accent: '#f0b34b'
+  text_primary: '#f5edd8'
+  text_secondary: rgba(245, 237, 216, 0.72)
+  text_muted: '#b89868'
+  accent: '#d4893b'
+  accent_warm: '#7fc7ff'
+  hover_bg: rgba(212, 137, 59, 0.15)
+  selected_bg: rgba(212, 137, 59, 0.34)
+  capsule_bg: rgba(48, 32, 14, 185)
+  capsule_border: rgba(95, 72, 45, 205)
+  user_card_bg: rgba(55, 35, 15, 170)
+  user_card_accent: '#f0c070'
+  user_card_text: '#f5edd8'
+  user_card_muted: '#c0a878'
+  assistant_card_bg: rgba(45, 38, 20, 170)
+  assistant_card_accent: '#d08040'
+  assistant_card_text: '#f0dcc0'
+  assistant_card_muted: '#b0a080'
+  agent_btn_text: '#b89868'
+  agent_btn_text_active: '#f0b34b'
+  agent_btn_bg_active: rgba(240, 179, 75, 0.22)
+  agent_btn_separator: rgba(90, 72, 48, 150)
+  input_bg_start: rgba(30, 20, 10, 150)
+  input_bg_end: rgba(40, 28, 14, 150)
+  input_focus_bg_start: rgba(38, 24, 12, 220)
+  input_focus_bg_end: rgba(48, 30, 16, 220)
+  input_text: '#e8dcce'
+  input_focus_text: '#f5edd8'
+  input_border: '#6a4e30'
+  input_focus_border: '#d4893b'
+  input_placeholder: rgba(232, 220, 206, 0.4)
+  realtime_border: '#e09a45'
+  realtime_accent: '#f0c070'
+  realtime_accent_warm: '#7fc7ff'
+  realtime_success: '#6aaa70'
+  realtime_error: '#d05030'
+  realtime_bg: rgba(42, 28, 12, 242)
+  realtime_text: '#f5edd8'
+  realtime_text_secondary: rgba(245, 237, 216, 0.7)
+  realtime_tag_bg: rgba(240, 192, 112, 0.15)
+  realtime_tag_border: rgba(240, 192, 112, 0.3)
+  system_border: '#6a4e30'
+  system_accent: '#d4893b'
+  send_btn_start: '#d4893b'
+  send_btn_end: '#b87530'
+  send_btn_hover_start: '#e09a45'
+  send_btn_hover_end: '#c88538'
+  timeline_node: '#5A5A5A'
+  timeline_node_hover: '#f0b34b'
+  timeline_node_visible: '#f0c070'
+  timeline_node_selected: '#FFA500'
+  timeline_line: '#3A3A3A'
+  timeline_line_progress: '#f0c070'
+  ring_normal: '#f0b34b'
+  ring_warning: '#f6c453'
+  ring_danger: '#ff6b6b'
+  ring_compacted: '#9b59b6'
+  branch_label_bg: rgba(212, 137, 59, 0.15)
+  branch_label_border: rgba(212, 137, 59, 0.3)
+  window_bg: rgba(212, 137, 59, 0.04)

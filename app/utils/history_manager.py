@@ -239,6 +239,7 @@ class HistoryManager:
             "compaction_state": dict(compaction_state or {}),
             "compaction_cache": dict(compaction_cache or {}),
             "system_prompt": system_prompt or "",
+            "user_edited_title": False,
         }
 
     def get_current_title(self, index: int) -> str:
@@ -249,6 +250,17 @@ class HistoryManager:
     def update_session_title(self, index: int, new_title: str):
         if 0 <= index < len(self._history_sessions):
             self._history_sessions[index]["title"] = new_title
+
+    def set_user_edited_title(self, index: int, edited: bool = True):
+        """标记会话标题已被用户编辑"""
+        if 0 <= index < len(self._history_sessions):
+            self._history_sessions[index]["user_edited_title"] = edited
+
+    def get_user_edited_title(self, index: int) -> bool:
+        """获取会话标题是否被用户编辑"""
+        if 0 <= index < len(self._history_sessions):
+            return self._history_sessions[index].get("user_edited_title", False)
+        return False
 
     def update_topic_summary(self, index: int, summary: str):
         self.update_session_title(index, summary)

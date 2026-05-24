@@ -1,0 +1,75 @@
+name: 暗酒红
+id: bordeaux
+window:
+  gradient_start: rgba(26, 12, 12, 255)
+  gradient_end: rgba(45, 24, 21, 255)
+background:
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.1
+    enabled: true
+colors:
+  card_bg: rgba(55, 30, 28, 232)
+  card_bg_solid: rgba(55, 30, 28, 250)
+  content_bg: '#2d1815'
+  border: '#5a3530'
+  border_accent: '#e74c3c'
+  text_primary: '#f0e0da'
+  text_secondary: rgba(240, 224, 218, 0.72)
+  text_muted: '#b08070'
+  accent: '#c0392b'
+  accent_warm: '#f0a030'
+  hover_bg: rgba(192, 57, 43, 0.13)
+  selected_bg: rgba(192, 57, 43, 0.32)
+  capsule_bg: rgba(48, 25, 22, 185)
+  capsule_border: rgba(90, 50, 45, 205)
+  user_card_bg: rgba(65, 30, 25, 170)
+  user_card_accent: '#e88a80'
+  user_card_text: '#f5ece8'
+  user_card_muted: '#c0a098'
+  assistant_card_bg: rgba(55, 35, 20, 170)
+  assistant_card_accent: '#d06830'
+  assistant_card_text: '#f0dcc8'
+  assistant_card_muted: '#b8a088'
+  agent_btn_text: '#b08070'
+  agent_btn_text_active: '#e74c3c'
+  agent_btn_bg_active: rgba(231, 76, 60, 0.22)
+  agent_btn_separator: rgba(90, 53, 48, 150)
+  input_bg_start: rgba(30, 16, 14, 150)
+  input_bg_end: rgba(40, 22, 18, 150)
+  input_focus_bg_start: rgba(38, 20, 16, 220)
+  input_focus_bg_end: rgba(48, 26, 20, 220)
+  input_text: '#e8d4ce'
+  input_focus_text: '#f0e0da'
+  input_border: '#5a3530'
+  input_focus_border: '#c0392b'
+  input_placeholder: rgba(232, 212, 206, 0.4)
+  realtime_border: '#d05040'
+  realtime_accent: '#e07060'
+  realtime_accent_warm: '#f0a030'
+  realtime_success: '#6aab70'
+  realtime_error: '#d04030'
+  realtime_bg: rgba(42, 22, 18, 242)
+  realtime_text: '#f0e0da'
+  realtime_text_secondary: rgba(240, 224, 218, 0.7)
+  realtime_tag_bg: rgba(224, 112, 96, 0.15)
+  realtime_tag_border: rgba(224, 112, 96, 0.3)
+  system_border: '#5a3530'
+  system_accent: '#c0392b'
+  send_btn_start: '#c0392b'
+  send_btn_end: '#a03020'
+  send_btn_hover_start: '#d05040'
+  send_btn_hover_end: '#b04030'
+  timeline_node: '#5A5A5A'
+  timeline_node_hover: '#e07060'
+  timeline_node_visible: '#e88a80'
+  timeline_node_selected: '#FFA500'
+  timeline_line: '#3A3A3A'
+  timeline_line_progress: '#e88a80'
+  ring_normal: '#e07060'
+  ring_warning: '#f6c453'
+  ring_danger: '#ff6b6b'
+  ring_compacted: '#9b59b6'
+  branch_label_bg: rgba(192, 57, 43, 0.15)
+  branch_label_border: rgba(192, 57, 43, 0.3)
+  window_bg: rgba(192, 57, 43, 0.04)
