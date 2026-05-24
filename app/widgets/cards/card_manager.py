@@ -133,13 +133,11 @@ class CardManager:
     def show_card(self, card_id: str, window_id: str):
         """显示指定窗口的指定卡片"""
         if window_id not in self._window_data:
-            logger.warning(f"[CardManager] 未注册的窗口: {window_id}")
             return
         
         win_data = self._window_data[window_id]
         
         if card_id not in win_data["containers"]:
-            logger.warning(f"[CardManager] 窗口 {window_id} 未注册的卡片: {card_id}")
             return
         
         container_type = win_data["containers"][card_id]
@@ -164,7 +162,6 @@ class CardManager:
         else:
             # 非系统卡片：检查是否被系统卡片压制（question 除外）
             if card_id not in {"question"} and win_data.get("suppressed_by_system", False):
-                logger.debug(f"[CardManager] 窗口 {window_id} 的卡片 {card_id} 被系统卡片压制，禁止显示")
                 return
             
             # 非系统卡片：同容器互斥

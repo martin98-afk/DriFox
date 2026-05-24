@@ -11,19 +11,16 @@ Gateway 通讯平台设置卡片
 - 连接中时显示"断开"（黄色）
 - 未连接时显示"连接"（默认颜色）
 """
-from functools import partial
 import threading
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QVBoxLayout,
     QWidget,
-    QFormLayout, QScrollArea,
-)
+    QFormLayout, )
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
@@ -39,6 +36,7 @@ from qfluentwidgets import InfoBar, InfoBarPosition
 
 from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.cards.floating.command_card import _ElidedLabel
 
 # ═══════════════════════════════════════════════════════════
 # 共用表单样式（白色标签 + 深色输入框）
@@ -181,9 +179,10 @@ class PlatformStatusRow(CardWidget):
         self.name_label.setFixedWidth(80)
         layout.addWidget(self.name_label)
 
-        # 状态
-        self.status_label = BodyLabel("未连接")
-        self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        # 状态（使用 ElidedLabel 处理长错误信息）
+        self.status_label = _ElidedLabel("未连接")
+        self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 13px;")
+        self.status_label.setToolTip("")
         layout.addWidget(self.status_label, 1)
 
         # 开关
@@ -237,6 +236,12 @@ class PlatformStatusRow(CardWidget):
             self._do_connect()
         else:
             self._do_disconnect()
+    
+    def set_error(self, error_msg: str):
+        """外部设置错误信息"""
+        self._is_connecting = False
+        self._is_connected = False
+        self._update_status_safe(False, error_msg)
 
     def _on_edit(self):
         self.editRequested.emit(self._platform)
@@ -248,6 +253,8 @@ class PlatformStatusRow(CardWidget):
         if self._is_connecting:
             return
         
+        self._is_connecting = True
+        self._update_status_safe(False, None, connecting=True)  # 显示连接中
         platform_enum = self._resolve_enum()
 
         def _do():
@@ -255,13 +262,16 @@ class PlatformStatusRow(CardWidget):
                 from app.gateway.manager import get_platform_manager
                 manager = get_platform_manager()
                 if not manager:
-                    self._set_status(False, error="管理器未就绪")
+                    self._update_status_safe(False, "管理器未就绪")
+                    self._is_connecting = False
                     return
+                
                 success = manager.start_platform(platform_enum)
-                # 延迟刷新状态（等待连接完成）
-                QTimer.singleShot(1000, self._refresh_status_from_manager)
+                # 等待一小段时间后刷新状态
+                QTimer.singleShot(2000, self._refresh_status_from_manager)
             except Exception as e:
-                self._set_status(False, error=str(e)[:30])
+                self._update_status_safe(False, str(e))
+                self._is_connecting = False
 
         t = threading.Thread(target=_do, daemon=True)
         t.start()
@@ -271,6 +281,7 @@ class PlatformStatusRow(CardWidget):
         if self._is_connecting:
             return
         
+        self._is_connecting = True
         platform_enum = self._resolve_enum()
 
         def _do():
@@ -281,8 +292,10 @@ class PlatformStatusRow(CardWidget):
                     manager.stop_platform(platform_enum)
                     # 延迟刷新状态
                     QTimer.singleShot(500, self._refresh_status_from_manager)
+                else:
+                    self._update_status_safe(False, None)
             except Exception as e:
-                print(f"[PlatformStatusRow] Disconnect error: {e}")
+                self._update_status_safe(False, str(e))
 
         t = threading.Thread(target=_do, daemon=True)
         t.start()
@@ -298,12 +311,17 @@ class PlatformStatusRow(CardWidget):
                 connected = platform_status.get("connected", False)
                 error = platform_status.get("error")
                 
-                self._is_connected = connected
+                # 重置连接状态
                 self._is_connecting = False
+                self._is_connected = connected
                 self._update_status(connected, error)
+            else:
+                self._is_connecting = False
+                self._update_status(False, "管理器未就绪")
         
-        except Exception:
-            pass
+        except Exception as e:
+            self._is_connecting = False
+            self._update_status(False, f"获取状态失败: {e}")
 
     def _set_status(self, connected: bool, error: str = None):
         """设置状态（在主线程）"""
@@ -311,18 +329,27 @@ class PlatformStatusRow(CardWidget):
         self._is_connecting = False
         self._update_status(connected, error)
 
-    def _update_status(self, connected: bool, error: str = None):
+    def _update_status_safe(self, connected: bool, error: str = None, connecting: bool = False):
+        """线程安全的 UI 更新"""
+        QTimer.singleShot(0, lambda: self._update_status(connected, error, connecting))
+
+    def _update_status(self, connected: bool, error: str = None, connecting: bool = False):
         """更新状态显示"""
         if connected:
             self.status_label.setText("已连接 ✓")
-            self.status_label.setStyleSheet("color: #52c41a;")
+            self.status_label.setStyleSheet("color: #52c41a; font-size: 13px;")
+            self.status_label.setToolTip("")
+        elif connecting:
+            self.status_label.setText("连接中...")
+            self.status_label.setStyleSheet("color: #faad14; font-size: 13px;")
+            self.status_label.setToolTip("")
         elif error:
-            self.status_label.setText(error[:15])
-            self.status_label.setStyleSheet("color: #ff4d4f;")
+            self.status_label.setText(str(error))
+            self.status_label.setStyleSheet("color: #ff4d4f; font-size: 13px;")
             self.status_label.setToolTip(error)
         else:
             self.status_label.setText("未连接")
-            self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+            self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 13px;")
             self.status_label.setToolTip("")
 
 

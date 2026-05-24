@@ -155,6 +155,7 @@ class WeComAdapter(BasePlatformAdapter):
             
         except Exception as e:
             logger.error("[WeCom] Connection failed: %s", e, exc_info=True)
+            self._last_error = f"连接失败: {e}"
             await self._cleanup()
             return False
     

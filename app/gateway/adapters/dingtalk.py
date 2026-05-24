@@ -94,10 +94,12 @@ class DingTalkAdapter(BasePlatformAdapter):
             from dingtalk_stream import DingTalkStreamClient, Credential
         except ImportError:
             logger.error("[DingTalk] dingtalk-stream not installed. Run: pip install 'dingtalk-stream>=0.20'")
+            self._last_error = "依赖不可用"
             return False
         
         if not self._client_id or not self._client_secret:
             logger.error("[DingTalk] client_id and client_secret are required")
+            self._last_error = "缺少 client_id 或 client_secret"
             return False
         
         try:

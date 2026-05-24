@@ -75,10 +75,12 @@ class TelegramAdapter(BasePlatformAdapter):
         """连接到 Telegram Bot API"""
         if not check_telegram_requirements():
             logger.error("[Telegram] Dependencies not available")
+            self._last_error = "依赖不可用"
             return False
         
         if not self.config.token:
             logger.error("[Telegram] No bot token configured")
+            self._last_error = "未配置 Bot Token"
             return False
         
         try:

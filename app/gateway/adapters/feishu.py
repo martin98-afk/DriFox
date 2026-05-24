@@ -81,6 +81,7 @@ class FeishuAdapter(BasePlatformAdapter):
         """连接到飞书 WebSocket"""
         if not check_feishu_requirements():
             logger.error("[Feishu] Dependencies not available. Run: pip install lark-oapi")
+            self._last_error = "依赖不可用"
             return False
         
         # 从配置重新获取（确保最新）
@@ -93,6 +94,7 @@ class FeishuAdapter(BasePlatformAdapter):
         
         if not self._app_id or not self._app_secret:
             logger.error("[Feishu] app_id and app_secret are required")
+            self._last_error = "缺少 app_id 或 app_secret"
             return False
         
         try:
@@ -313,9 +315,21 @@ class FeishuAdapter(BasePlatformAdapter):
         
         if self._ws_client:
             try:
-                self._ws_client.stop()
+                # 飞书 SDK 的 Client 可能使用不同方法停止
+                # 方法1: stop() 方法
+                if hasattr(self._ws_client, 'stop'):
+                    self._ws_client.stop()
+                # 方法2: close() 方法  
+                elif hasattr(self._ws_client, 'close'):
+                    self._ws_client.close()
+                # 方法3: 直接设置运行标志
+                elif hasattr(self._ws_client, '_running'):
+                    self._ws_client._running = False
+            except AttributeError:
+                # Client 对象可能没有这些属性，忽略
+                pass
             except Exception as e:
-                logger.warning("[Feishu] Error during disconnect: %s", e)
+                logger.debug("[Feishu] Disconnect note: %s", e)
         
         # 停止 handler loop
         if self._handler_loop is not None and self._handler_loop.is_running():
