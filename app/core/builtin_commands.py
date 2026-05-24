@@ -263,6 +263,8 @@ def register_all_commands():
     cmd_mgr.register("new", "function", description="新建会话")
     cmd_mgr.register("new-window", "function", description="新建窗口")
     cmd_mgr.register("branch", "function", description="新建分支窗口")
+    cmd_mgr.register("compact", "function",
+                     description="手动触发上下文压缩（调用子智能体压缩当前对话摘要）")
 
     # ---- prompt 命令 ----
     cmd_mgr.register("init", "prompt",

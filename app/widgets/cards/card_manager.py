@@ -12,8 +12,9 @@
 
 优先级层级：
   1. Question（强制覆盖一切）
-  2. 系统卡片（settings/history/memory 等）
-  3. 实时卡片（todo/tool/sub_agent）—— 系统卡片存在时被压制
+  2. 命令卡片（压制 tool/sub_agent）
+  3. 系统卡片（settings/history/memory 等）
+  4. 实时卡片（todo/tool/sub_agent）—— 系统卡片存在时被压制
 """
 from enum import Enum
 from typing import Dict, List, Optional, Callable, Any
@@ -71,6 +72,8 @@ class CardManager:
         #       "shown_callbacks": {"card_id": [cb1, cb2]},
         #       "hidden_callbacks": {"card_id": [cb1, cb2]},
         #       "suppressed_by_system": False,  # 系统卡片活跃时压制非系统卡片
+        #       "suppress_others_map": {},  # card_id -> set of suppressed card_ids
+        #       "suppressed_by_others": set(),  # 被其他卡片压制的 card_id 集合
         #   }
         # }
         self._window_data: Dict[str, Dict[str, Any]] = {}
@@ -91,6 +94,8 @@ class CardManager:
                 },
                 "shown_callbacks": {},
                 "hidden_callbacks": {},
+                "suppress_others_map": {},  # card_id -> set of suppressed card_ids
+                "suppressed_by_others": set(),  # 被其他卡片压制的 card_id 集合
             }
     
     def _ensure_state_initialized(self):
@@ -106,7 +111,7 @@ class CardManager:
         if window_id in self._window_data:
             del self._window_data[window_id]
     
-    def register_card(self, window_id: str, container_type: ContainerType, card_id: str, card_widget, system_card: bool = False):
+    def register_card(self, window_id: str, container_type: ContainerType, card_id: str, card_widget, system_card: bool = False, suppress_others: list = None):
         """注册卡片到管理器
         
         Args:
@@ -115,6 +120,7 @@ class CardManager:
             card_id: 卡片标识
             card_widget: 控件
             system_card: 是否为系统卡片（系统卡片窗口内互斥）
+            suppress_others: 该卡片显示时需要压制的其他卡片 ID 列表
         """
         self._ensure_window_initialized(window_id)
         
@@ -129,6 +135,12 @@ class CardManager:
         win_data["containers"][card_id] = container_type
         if system_card:
             win_data["system_cards"].add(card_id)
+        
+        # 处理压制关系：注册时记录该卡片会压制哪些其他卡片
+        if suppress_others:
+            win_data["suppress_others_map"][card_id] = set(suppress_others)
+            for suppressed_id in suppress_others:
+                win_data["suppressed_by_others"].add(suppressed_id)
 
     def show_card(self, card_id: str, window_id: str):
         """显示指定窗口的指定卡片"""
@@ -166,6 +178,14 @@ class CardManager:
             
             # 非系统卡片：同容器互斥
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+            
+            # 处理压制关系：该卡片压制其他卡片
+            suppress_map = win_data.get("suppress_others_map", {})
+            suppressed_ids = suppress_map.get(card_id, set())
+            for suppressed_id in suppressed_ids:
+                if self.is_card_visible(suppressed_id, window_id):
+                    self.hide_card(suppressed_id, window_id)
+            
             # 非系统卡片显示时，如果系统卡片可见则隐藏（让系统卡片优先变成互斥）
             # 但 Question 特殊：强制关闭所有
             if card_id in {"question"}:
