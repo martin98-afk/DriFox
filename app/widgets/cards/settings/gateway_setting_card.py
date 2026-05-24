@@ -100,6 +100,15 @@ PLATFORM_DEFS = {
         ],
         "hint": "💡 需要在钉钉开放平台创建应用并启用 Stream Mode。",
     },
+    "feishu": {
+        "name": "飞书",
+        "icon": "飞书",
+        "fields": [
+            ("app_id", "App ID", "", "飞书开放平台 App ID"),
+            ("app_secret", "App Secret", "password", "飞书开放平台 App Secret"),
+        ],
+        "hint": "💡 需要在飞书开放平台创建企业自建应用，配置事件订阅（长连接模式）。",
+    },
     "telegram": {
         "name": "Telegram",
         "icon": "Telegram",
@@ -117,15 +126,6 @@ PLATFORM_DEFS = {
             ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
         ],
         "hint": "💡 需要在 Discord Developer Portal 创建 Bot 并开启 Message Content Intent。",
-    },
-    "feishu": {
-        "name": "飞书",
-        "icon": "飞书",
-        "fields": [
-            ("app_id", "App ID", "", "飞书开放平台 App ID"),
-            ("app_secret", "App Secret", "password", "飞书开放平台 App Secret"),
-        ],
-        "hint": "💡 需要在飞书开放平台创建企业自建应用，配置事件订阅（长连接模式）。",
     },
     "slack": {
         "name": "Slack",
