@@ -10,7 +10,7 @@ from functools import partial
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QWidget, QTextEdit,
+    QScrollArea, QSizePolicy, QWidget, QTextEdit,
 )
 
 from app.utils.design_tokens import Colors
@@ -58,6 +58,7 @@ class _OptionRadioCard(QWidget):
 
         self._desc_label = QLabel(self._desc_text)
         self._desc_label.setFont(get_unified_font(9))
+        self._desc_label.setWordWrap(True)
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setVisible(bool(self._desc_text))
 
@@ -147,6 +148,7 @@ class _OptionCheckCard(QWidget):
 
         self._desc_label = QLabel(self._desc_text)
         self._desc_label.setFont(get_unified_font(9))
+        self._desc_label.setWordWrap(True)
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setVisible(bool(self._desc_text))
 
@@ -387,13 +389,49 @@ class QuestionFloatingWidget(QWidget):
         header.addWidget(self._close_btn)
         main_layout.addLayout(header)
 
-        # ── 问题标题 ──
+        # ── 问题标题（超出 160px 高度时滚动） ──
+        self._question_scroll = QScrollArea()
+        self._question_scroll.setWidgetResizable(True)
+        self._question_scroll.setMaximumHeight(160)
+        self._question_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._question_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._question_scroll.viewport().setAutoFillBackground(False)
+        self._question_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget#qt_scrollarea_viewport {
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 4px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255,255,255,0.25);
+                border-radius: 2px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255,255,255,0.4);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
+
         self._question_label = QLabel("")
         self._question_label.setFont(get_unified_font(12, True))
         self._question_label.setWordWrap(True)
         self._question_label.setMinimumHeight(24)
         self._question_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        main_layout.addWidget(self._question_label)
+        self._question_scroll.setWidget(self._question_label)
+        main_layout.addWidget(self._question_scroll)
 
         # ── 提示 ──
         self._hint_label = QLabel("")

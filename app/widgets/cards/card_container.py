@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy, QApplication
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt5.QtCore import QEvent, QTimer
 from loguru import logger
 
@@ -13,16 +13,20 @@ class CardContainer(QWidget):
     功能：
     - 管理同位置多张卡片的显示/隐藏
     - 单卡片互斥：同一时间只显示一张
-    - 动态展开/收起容器
+    - 动态展开/收起容器（放开/限制最大高度，让 Qt 自然布局）
     - 只响应自己容器内的卡片事件
     """
     
+    # 展开时放开最大高度限制，让 Qt 布局系统自动计算合适高度
+    _EXPAND_MAX = 16777215
+
     def __init__(self, container_type: ContainerType):
         super().__init__()
         self._container_type = container_type
         self._cards: Dict[str, QWidget] = {}
         self._card_manager: Optional[CardManager] = None
         self._window_id: Optional[str] = None  # 多窗口隔离
+        self._expand_timer: Optional[QTimer] = None  # 防抖展开定时器
         self._setup_ui()
     
     def _setup_ui(self):
@@ -48,24 +52,35 @@ class CardContainer(QWidget):
         """某张卡片被显示"""
         if card_id not in self._cards:
             return
-        # 展开容器
-        self._update_container_size()
+        self._schedule_expand()
     
     def _on_card_hidden(self, card_id: str):
         """某张卡片被隐藏"""
         if card_id not in self._cards:
             return
-        # 检查容器内是否还有可见卡片
-        self._update_container_size()
+        self._schedule_expand()
     
-    def _update_container_size(self):
-        """更新容器大小：有可见卡片则展开，否则折叠"""
+    def _schedule_expand(self):
+        """防抖调度：有可见卡片则展开，否则折叠"""
+        # 取消上次未执行的防抖
+        if self._expand_timer:
+            self._expand_timer.stop()
+        else:
+            self._expand_timer = QTimer(self)
+            self._expand_timer.setSingleShot(True)
+            self._expand_timer.setInterval(0)
+            self._expand_timer.timeout.connect(self._do_expand)
+        self._expand_timer.start()
+    
+    def _do_expand(self):
+        """执行展开/折叠"""
         has_visible = any(w.isVisible() for w in self._cards.values())
         if has_visible:
-            # 延迟展开 - 等父布局完成后再计算高度
-            QTimer.singleShot(50, self._expand)
+            # 放开最大高度限制，让 Qt 布局系统自动计算合适高度
+            self.setMaximumHeight(self._EXPAND_MAX)
         else:
-            self._collapse()
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(0)
     
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器，并注册专属回调"""
@@ -81,7 +96,7 @@ class CardContainer(QWidget):
         
         # 连接卡片内部高度变化信号 → 容器重新展开（支持拖拽、自适应等动态高度）
         if hasattr(card_widget, 'heightChanged'):
-            card_widget.heightChanged.connect(self._expand)
+            card_widget.heightChanged.connect(self._schedule_expand)
     
     def remove_card(self, card_id: str):
         """从容器移除卡片"""
@@ -95,63 +110,12 @@ class CardContainer(QWidget):
         
         if len(self._cards) == 0:
             self.setMaximumHeight(0)
-    
-    def _expand(self):
-        """展开容器"""
-        # 强制刷新布局，确保卡片已获得正确的宽度和高度
-        self.layout().activate()
-        QApplication.processEvents()
-
-        total_height = 0
-        for widget in self._cards.values():
-            if widget.isVisible():
-                h = widget.height()
-                if h <= 0:
-                    h = widget.sizeHint().height()
-                if h <= 0:
-                    h = widget.minimumHeight()
-                if h <= 0:
-                    h = 400
-                total_height += h
-
-        if total_height > 0:
-            self.setMaximumHeight(total_height + 4)
-        else:
-            self._collapse()
-
-        # 再次延迟展开 - 处理动态添加的内容（仅高度变化时应用，避免抖动）
-        QTimer.singleShot(50, self._delayed_expand)
-    
-    def _delayed_expand(self):
-        """延迟展开 - 处理动态添加的内容（仅高度变化时应用，避免抖动）"""
-        total_height = 0
-        for widget in self._cards.values():
-            if widget.isVisible():
-                h = widget.height()
-                if h <= 0:
-                    h = widget.sizeHint().height()
-                if h <= 0:
-                    h = 400
-                total_height += h
-        if total_height > 0:
-            new_max = total_height + 4
-            # 仅当高度变化超过 2px 时才应用，避免微小抖动
-            if abs(new_max - self.maximumHeight()) > 2:
-                self.setMaximumHeight(new_max)
-                self.updateGeometry()
-        else:
-            self._collapse()
-    
-    def _collapse(self):
-        """收起容器"""
-        self.setMinimumHeight(0)
-        self.setMaximumHeight(0)
-        self.updateGeometry()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Resize and obj in self._cards.values():
-            QTimer.singleShot(0, self._expand)
+            self._schedule_expand()
         return super().eventFilter(obj, event)
+
 
 class TopCardContainer(CardContainer):
     def __init__(self):

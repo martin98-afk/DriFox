@@ -303,9 +303,10 @@ class CommandCard(QWidget):
         self._scroll_layout = QVBoxLayout(self._scroll_content)
         self._scroll_layout.setContentsMargins(0, 0, 0, 0)
         self._scroll_layout.setSpacing(0)
-        self._scroll_layout.addStretch()
 
         self._scroll_area.setWidget(self._scroll_content)
+        # 确保 viewport 没有多余的边距/内边距（这是导致顶部空白的根本原因）
+        self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
 
         # 刷新所有数据
@@ -352,11 +353,6 @@ class CommandCard(QWidget):
             w.deleteLater()
         self._item_widgets.clear()
 
-        # 取 stretch 前的位置
-        stretch_idx = self._scroll_layout.count() - 1
-        if stretch_idx < 0:
-            stretch_idx = 0
-
         # 检查是否需要分隔线（命令/技能在前，智能体在后）
         has_commands_or_skills = any(item["type"] in ("command", "skill") for item in self._filtered_items)
         has_agents = any(item["type"] == "agent" for item in self._filtered_items)
@@ -371,15 +367,13 @@ class CommandCard(QWidget):
                 divider.setFixedHeight(1)
                 divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
                 divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                self._scroll_layout.insertWidget(stretch_idx, divider)
-                stretch_idx += 1
+                self._scroll_layout.addWidget(divider)
                 divider_inserted = True
 
             widget = CommandItemWidget(item, self._current_query, self._scroll_content)
             widget.clicked.connect(self._on_item_clicked)
             self._item_widgets.append(widget)
-            self._scroll_layout.insertWidget(stretch_idx, widget)
-            stretch_idx += 1
+            self._scroll_layout.addWidget(widget)
 
         # 计算卡片高度
         item_count = len(self._filtered_items)
