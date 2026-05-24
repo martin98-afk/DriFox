@@ -393,7 +393,17 @@ class PlatformManager:
         """
         platforms = {}
         
-        for platform in [Platform.WECOM, Platform.DINGTALK]:
+        all_platforms = [
+            Platform.WECOM,
+            Platform.DINGTALK,
+            Platform.TELEGRAM,
+            Platform.DISCORD,
+            Platform.WHATSAPP,
+            Platform.FEISHU,
+            Platform.SLACK,
+        ]
+        
+        for platform in all_platforms:
             adapter = self._adapters.get(platform)
             config = self._config.get_platform_config(platform)
             

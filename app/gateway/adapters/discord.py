@@ -7,9 +7,10 @@ Discord 平台适配器
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from typing import Any, Dict, List, Optional
+
+from loguru import logger
 
 from app.gateway.base import (
     BasePlatformAdapter,
@@ -20,7 +21,6 @@ from app.gateway.base import (
     SendResult,
 )
 
-logger = logging.getLogger(__name__)
 
 # 延迟导入
 DISCORD_AVAILABLE = False
@@ -98,7 +98,7 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._client.start(self.config.token)
             
         except Exception as e:
-            logger.error("[Discord] Failed to connect: %s", e)
+            logger.error(f"[Discord] Failed to connect: {e}")
             return False
     
     async def _handle_message(self, message):
@@ -206,7 +206,7 @@ class DiscordAdapter(BasePlatformAdapter):
             try:
                 await self._client.close()
             except Exception as e:
-                logger.warning("[Discord] Error during disconnect: %s", e)
+                logger.warning(f"[Discord] Error during disconnect: {e}")
         
         self._connected = False
         logger.info("[Discord] Disconnected")
@@ -256,7 +256,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             
         except Exception as e:
-            logger.error("[Discord] Send failed: %s", e)
+            logger.error(f"[Discord] Send failed: {e}")
             return SendResult(success=False, error=str(e))
     
     def _split_message(self, content: str) -> List[str]:
@@ -317,7 +317,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=str(msg.id))
             
         except Exception as e:
-            logger.error("[Discord] Send image failed: %s", e)
+            logger.error(f"[Discord] Send image failed: {e}")
             return SendResult(success=False, error=str(e))
     
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -344,6 +344,6 @@ class DiscordAdapter(BasePlatformAdapter):
                     "type": "dm" if isinstance(channel, discord.DMChannel) else "group",
                 }
         except Exception as e:
-            logger.error("[Discord] get_chat_info failed: %s", e)
+            logger.error(f"[Discord] get_chat_info failed: {e}")
         
         return {"name": str(chat_id), "type": "dm"}

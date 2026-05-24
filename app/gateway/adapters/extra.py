@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
-import hashlib
 from typing import Any, Dict, List, Optional
-
+from loguru import logger
 from app.gateway.base import (
     BasePlatformAdapter,
     Platform,
@@ -21,8 +19,6 @@ from app.gateway.base import (
     MessageType,
     SendResult,
 )
-
-logger = logging.getLogger(__name__)
 
 # 延迟导入
 TWILIO_AVAILABLE = False
@@ -416,7 +412,7 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             
         except Exception as e:
-            logger.error("[Feishu] Send failed: %s", e)
+            logger.error(f"[Feishu] Send failed: {e}")
             return SendResult(success=False, error=str(e))
     
     def _format_feishu_text(self, content: str) -> str:

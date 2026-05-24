@@ -7,10 +7,11 @@ Telegram 平台适配器
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
+
+from loguru import logger
 
 from app.gateway.base import (
     BasePlatformAdapter,
@@ -21,7 +22,6 @@ from app.gateway.base import (
     SendResult,
 )
 
-logger = logging.getLogger(__name__)
 
 # 延迟导入避免在没有安装时崩溃
 TELEGRAM_AVAILABLE = False
@@ -109,7 +109,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
             
         except Exception as e:
-            logger.error("[Telegram] Failed to connect: %s", e)
+            logger.error(f"[Telegram] Failed to connect: {e}")
             return False
     
     async def _run_polling(self):
@@ -117,7 +117,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             await self._app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         except Exception as e:
-            logger.error("[Telegram] Polling error: %s", e)
+            logger.error(f"[Telegram] Polling error: {e}")
             self._connected = False
     
     async def _handle_message(self, update, context):
@@ -257,7 +257,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 await self._app.stop()
                 await self._app.shutdown()
             except Exception as e:
-                logger.warning("[Telegram] Error during disconnect: %s", e)
+                logger.warning(f"[Telegram] Error during disconnect: {e}")
         
         self._connected = False
         logger.info("[Telegram] Disconnected")
@@ -298,7 +298,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=str(msg.message_id))
             
         except Exception as e:
-            logger.error("[Telegram] Send failed: %s", e)
+            logger.error(f"[Telegram] Send failed: {e}")
             return SendResult(success=False, error=str(e))
     
     def _format_telegram_text(self, content: str) -> str:
@@ -342,7 +342,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=str(msg.message_id))
             
         except Exception as e:
-            logger.error("[Telegram] Send image failed: %s", e)
+            logger.error(f"[Telegram] Send image failed: {e}")
             return SendResult(success=False, error=str(e))
     
     async def send_document(
@@ -374,7 +374,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=str(msg.message_id))
                 
         except Exception as e:
-            logger.error("[Telegram] Send document failed: %s", e)
+            logger.error(f"[Telegram] Send document failed: {e}")
             return SendResult(success=False, error=str(e))
     
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -400,5 +400,5 @@ class TelegramAdapter(BasePlatformAdapter):
                 "type": "dm" if chat.type == "private" else "group",
             }
         except Exception as e:
-            logger.error("[Telegram] get_chat_info failed: %s", e)
+            logger.error(f"[Telegram] get_chat_info failed: {e}")
             return {"name": str(chat_id), "type": "dm"}
