@@ -275,6 +275,7 @@ class PlatformStatusRow(CardWidget):
         
         # 平台图标
         icon_label = IconWidget(self._icon)
+        icon_label.setFixedSize(24, 24)
         layout.addWidget(icon_label)
         
         # 名称
