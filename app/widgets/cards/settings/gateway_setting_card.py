@@ -4,10 +4,17 @@ Gateway 通讯平台设置卡片
 
 接入企业微信、钉钉、Telegram、Discord、飞书、Slack，
 让 AI 能够通过这些平台与用户对话。
+
+特性：
+- 开关打开时自动连接，关闭时自动断开
+- 已连接时按钮变成"断开"（红色）
+- 连接中时显示"断开"（黄色）
+- 未连接时显示"连接"（默认颜色）
 """
 from functools import partial
+import threading
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -68,6 +75,46 @@ QLabel {{
 }}
 """
 
+# 按钮样式
+DISCONNECT_BTN_STYLE = """
+QPushButton {
+    background-color: rgba(255, 77, 79, 180);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+}
+QPushButton:hover {
+    background-color: rgba(255, 77, 79, 220);
+}
+"""
+
+CONNECTING_BTN_STYLE = """
+QPushButton {
+    background-color: rgba(250, 173, 20, 180);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+}
+"""
+
+CONNECT_BTN_STYLE = """
+QPushButton {
+    background-color: rgba(82, 196, 26, 180);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+}
+QPushButton:hover {
+    background-color: rgba(82, 196, 26, 220);
+}
+"""
+
 
 # ═══════════════════════════════════════════════════════════
 # 平台定义
@@ -118,7 +165,7 @@ PLATFORM_DEFS = {
             ("app_id", "App ID", "", "飞书开放平台 App ID"),
             ("app_secret", "App Secret", "password", "飞书开放平台 App Secret"),
         ],
-        "hint": "💡 需要在飞书开放平台创建企业自建应用。",
+        "hint": "💡 需要在飞书开放平台创建企业自建应用，配置事件订阅（长连接模式）。",
     },
     "slack": {
         "name": "Slack",
@@ -131,14 +178,233 @@ PLATFORM_DEFS = {
     },
 }
 
-PLATFORM_ENUM_MAP = {
-    "wecom": "Platform.WECOM",
-    "dingtalk": "Platform.DINGTALK",
-    "telegram": "Platform.TELEGRAM",
-    "discord": "Platform.DISCORD",
-    "feishu": "Platform.FEISHU",
-    "slack": "Platform.SLACK",
-}
+
+# ═══════════════════════════════════════════════════════════
+# PlatformStatusRow — 平台状态行（优化版）
+# ═══════════════════════════════════════════════════════════
+
+class PlatformStatusRow(CardWidget):
+    """平台状态行（优化版）"""
+
+    editRequested = pyqtSignal(str)
+    enabledChanged = pyqtSignal(str, bool)
+
+    def __init__(self, platform: str, name: str, icon: QIcon, parent=None):
+        super().__init__(parent)
+        self._platform = platform
+        self._name = name
+        self._icon = icon
+        self._is_connecting = False
+        self._is_connected = False
+        self._setup_ui()
+        self._load_config()
+        
+        # 定时刷新状态
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._refresh_status_from_manager)
+        self._refresh_timer.start(2000)  # 每2秒刷新一次
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(10)
+
+        # 平台图标
+        icon_label = IconWidget(self._icon)
+        icon_label.setFixedSize(24, 24)
+        layout.addWidget(icon_label)
+
+        # 名称
+        self.name_label = StrongBodyLabel(self._name)
+        self.name_label.setFixedWidth(80)
+        layout.addWidget(self.name_label)
+
+        # 状态
+        self.status_label = BodyLabel("未连接")
+        self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        layout.addWidget(self.status_label, 1)
+
+        # 开关
+        self.enable_switch = SwitchButton()
+        SwitchStyles.configure(self.enable_switch)
+        self.enable_switch.setOffText("")
+        self.enable_switch.setOnText("")
+        self.enable_switch.checkedChanged.connect(self._on_enabled_changed)
+        layout.addWidget(self.enable_switch)
+
+        # 编辑按钮
+        self.edit_btn = ToolButton(FluentIcon.EDIT)
+        self.edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
+        self.edit_btn.setStyleSheet(ButtonStyles.tool_button())
+        self.edit_btn.clicked.connect(self._on_edit)
+        layout.addWidget(self.edit_btn)
+
+        # 连接/断开按钮
+        self.action_btn = PushButton("连接")
+        self.action_btn.setFixedWidth(60)
+        self.action_btn.setStyleSheet(CONNECT_BTN_STYLE)
+        self.action_btn.clicked.connect(self._on_action)
+        layout.addWidget(self.action_btn)
+
+    def _resolve_enum(self):
+        from app.gateway.base import Platform
+        mapping = {
+            "wecom": Platform.WECOM,
+            "dingtalk": Platform.DINGTALK,
+            "telegram": Platform.TELEGRAM,
+            "discord": Platform.DISCORD,
+            "feishu": Platform.FEISHU,
+            "slack": Platform.SLACK,
+        }
+        return mapping.get(self._platform, Platform.WECOM)
+
+    def _load_config(self):
+        try:
+            from app.gateway.config import get_gateway_config
+            cfg = get_gateway_config().get_platform_config(self._resolve_enum())
+            self.enable_switch.setChecked(cfg.enabled)
+            self._refresh_status_from_manager()
+        except Exception:
+            pass
+
+    def _on_enabled_changed(self, checked: bool):
+        """开关变化时自动连接或断开"""
+        try:
+            from app.gateway.config import get_gateway_config
+            get_gateway_config().set_platform_enabled(self._resolve_enum(), checked)
+        except Exception as e:
+            print(f"[PlatformStatusRow] Save enabled error: {e}")
+        
+        self.enabledChanged.emit(self._platform, checked)
+        
+        # 根据开关状态自动连接或断开
+        if checked:
+            self._do_connect()
+        else:
+            self._do_disconnect()
+
+    def _on_edit(self):
+        self.editRequested.emit(self._platform)
+
+    def _on_action(self):
+        """点击按钮：已连接则断开，未连接则连接"""
+        if self._is_connected:
+            self._do_disconnect()
+        else:
+            self._do_connect()
+
+    def _do_connect(self):
+        """执行连接"""
+        if self._is_connecting:
+            return
+        
+        platform_enum = self._resolve_enum()
+        self._is_connecting = True
+        self._update_action_button(connecting=True)
+
+        def _do():
+            try:
+                from app.gateway.manager import get_platform_manager
+                manager = get_platform_manager()
+                if not manager:
+                    self._set_status(False, error="管理器未就绪")
+                    return
+                success = manager.start_platform(platform_enum)
+                # 延迟刷新状态（等待连接完成）
+                QTimer.singleShot(1000, self._refresh_status_from_manager)
+            except Exception as e:
+                self._set_status(False, error=str(e)[:30])
+
+        t = threading.Thread(target=_do, daemon=True)
+        t.start()
+
+    def _do_disconnect(self):
+        """执行断开"""
+        if self._is_connecting:
+            return
+        
+        platform_enum = self._resolve_enum()
+
+        def _do():
+            try:
+                from app.gateway.manager import get_platform_manager
+                manager = get_platform_manager()
+                if manager:
+                    manager.stop_platform(platform_enum)
+                    # 延迟刷新状态
+                    QTimer.singleShot(500, self._refresh_status_from_manager)
+            except Exception as e:
+                print(f"[PlatformStatusRow] Disconnect error: {e}")
+
+        t = threading.Thread(target=_do, daemon=True)
+        t.start()
+
+    def _refresh_status_from_manager(self):
+        """从管理器刷新状态"""
+        try:
+            from app.gateway.manager import get_platform_manager
+            manager = get_platform_manager()
+            if manager:
+                status = manager.get_status()
+                platform_status = status.get("platforms", {}).get(self._platform, {})
+                connected = platform_status.get("connected", False)
+                error = platform_status.get("error")
+                
+                self._is_connected = connected
+                self._is_connecting = False
+                self._update_status(connected, error)
+                self._update_action_button(connected=connected)
+        except Exception:
+            pass
+
+    def _set_status(self, connected: bool, error: str = None):
+        """设置状态（在主线程）"""
+        self._is_connected = connected
+        self._is_connecting = False
+        self._update_status(connected, error)
+        self._update_action_button(connected=connected)
+
+    def _update_status(self, connected: bool, error: str = None):
+        """更新状态显示"""
+        if connected:
+            self.status_label.setText("已连接 ✓")
+            self.status_label.setStyleSheet("color: #52c41a;")
+        elif error:
+            self.status_label.setText(error[:15])
+            self.status_label.setStyleSheet("color: #ff4d4f;")
+            self.status_label.setToolTip(error)
+        else:
+            self.status_label.setText("未连接")
+            self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+            self.status_label.setToolTip("")
+
+    def _update_action_button(self, connected: bool = None, connecting: bool = False):
+        """更新按钮状态"""
+        if connecting or self._is_connecting:
+            self.action_btn.setText("断开")
+            self.action_btn.setStyleSheet(CONNECTING_BTN_STYLE)
+            self.action_btn.setEnabled(True)
+        elif connected or self._is_connected:
+            self.action_btn.setText("断开")
+            self.action_btn.setStyleSheet(DISCONNECT_BTN_STYLE)
+            self.action_btn.setEnabled(True)
+        else:
+            self.action_btn.setText("连接")
+            self.action_btn.setStyleSheet(CONNECT_BTN_STYLE)
+            self.action_btn.setEnabled(True)
+
+    def update_status(self, connected: bool, error: str = None):
+        """外部更新状态（兼容旧接口）"""
+        self._set_status(connected, error)
+
+    def set_enabled(self, enabled: bool):
+        self.enable_switch.setChecked(enabled)
+
+    def set_connection_state(self, connected: bool):
+        """设置连接状态（用于外部控制）"""
+        self._is_connected = connected
+        self._is_connecting = False
+        self._update_action_button(connected=connected)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -254,16 +520,6 @@ class PlatformEditCard(QWidget):
             return self._config.extra.get(key)
         return None
 
-    def _build_config_dict(self) -> dict:
-        """从表单构建配置字典"""
-        result = {"enabled": self._config.enabled if self._config else False}
-        for key, input_widget in self._inputs.items():
-            val = input_widget.text().strip()
-            if key == "require_mention":
-                val = val.lower() in ("true", "1", "yes")
-            result[key] = val
-        return result
-
     def _on_save(self):
         """保存配置"""
         try:
@@ -344,133 +600,6 @@ class PlatformEditCard(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════
-# PlatformStatusRow — 平台状态行
-# ═══════════════════════════════════════════════════════════
-
-class PlatformStatusRow(CardWidget):
-    """平台状态行"""
-
-    editRequested = pyqtSignal(str)
-    enabledChanged = pyqtSignal(str, bool)
-
-    def __init__(self, platform: str, name: str, icon: QIcon, parent=None):
-        super().__init__(parent)
-        self._platform = platform
-        self._name = name
-        self._icon = icon
-        self._setup_ui()
-        self._load_config()
-
-    def _setup_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
-
-        icon_label = IconWidget(self._icon)
-        icon_label.setFixedSize(24, 24)
-        layout.addWidget(icon_label)
-
-        self.name_label = StrongBodyLabel(self._name)
-        self.name_label.setFixedWidth(80)
-        layout.addWidget(self.name_label)
-
-        self.status_label = BodyLabel("未连接")
-        self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
-        layout.addWidget(self.status_label, 1)
-
-        self.enable_switch = SwitchButton()
-        SwitchStyles.configure(self.enable_switch)
-        self.enable_switch.setOffText("")
-        self.enable_switch.setOnText("")
-        self.enable_switch.checkedChanged.connect(self._on_enabled_changed)
-        layout.addWidget(self.enable_switch)
-
-        self.edit_btn = ToolButton(FluentIcon.EDIT)
-        self.edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
-        self.edit_btn.setStyleSheet(ButtonStyles.tool_button())
-        self.edit_btn.clicked.connect(self._on_edit)
-        layout.addWidget(self.edit_btn)
-
-        self.connect_btn = PushButton("连接")
-        self.connect_btn.setFixedWidth(60)
-        self.connect_btn.clicked.connect(self._on_connect)
-        layout.addWidget(self.connect_btn)
-
-    def _resolve_enum(self):
-        from app.gateway.base import Platform
-        mapping = {
-            "wecom": Platform.WECOM,
-            "dingtalk": Platform.DINGTALK,
-            "telegram": Platform.TELEGRAM,
-            "discord": Platform.DISCORD,
-            "feishu": Platform.FEISHU,
-            "slack": Platform.SLACK,
-        }
-        return mapping.get(self._platform, Platform.WECOM)
-
-    def _load_config(self):
-        try:
-            from app.gateway.config import get_gateway_config
-            cfg = get_gateway_config().get_platform_config(self._resolve_enum())
-            self.enable_switch.setChecked(cfg.enabled)
-        except Exception:
-            pass
-
-    def _on_enabled_changed(self, checked: bool):
-        self._save_enabled(checked)
-        self.enabledChanged.emit(self._platform, checked)
-
-    def _on_edit(self):
-        self.editRequested.emit(self._platform)
-
-    def _on_connect(self):
-        from app.gateway.base import Platform
-        import threading
-
-        platform_enum = self._resolve_enum()
-
-        def _do_connect():
-            try:
-                from app.gateway.manager import get_platform_manager
-                manager = get_platform_manager()
-                if not manager:
-                    self.update_status(connected=False, error="管理器未就绪")
-                    return
-                success = manager.start_platform(platform_enum)
-                if success:
-                    self.update_status(connected=True)
-                else:
-                    self.update_status(connected=False, error="连接失败")
-            except Exception as e:
-                self.update_status(connected=False, error=str(e)[:30])
-
-        t = threading.Thread(target=_do_connect, daemon=True)
-        t.start()
-        self.update_status(connected=False, error="连接中...")
-
-    def _save_enabled(self, enabled: bool):
-        try:
-            from app.gateway.config import get_gateway_config
-            get_gateway_config().set_platform_enabled(self._resolve_enum(), enabled)
-        except Exception as e:
-            print(f"[PlatformStatusRow] Save enabled error: {e}")
-
-    def update_status(self, connected: bool, error: str = None):
-        if connected:
-            self.status_label.setText("已连接 ✓")
-            self.status_label.setStyleSheet("color: #52c41a;")
-        elif error:
-            self.status_label.setText(error)
-            self.status_label.setStyleSheet("color: #ff4d4f;")
-        else:
-            self.status_label.setText("未连接")
-            self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
-
-    def set_enabled(self, enabled: bool):
-        self.enable_switch.setChecked(enabled)
-
-
-# ═══════════════════════════════════════════════════════════
 # GatewaySettingCard — 主卡片
 # ═══════════════════════════════════════════════════════════
 
@@ -481,9 +610,6 @@ class GatewaySettingCard(ExpandSettingCard):
     管理企业微信、钉钉、Telegram、Discord、飞书、Slack 的连接配置。
     """
 
-    # 线程安全的刷新信号（管理器回调可能来自后台线程）
-    _statusRefreshNeeded = pyqtSignal()
-
     def __init__(self, icon, title: str, content: str = None, parent=None, home=None):
         super().__init__(icon, title, content, parent)
         self._home = home
@@ -492,19 +618,7 @@ class GatewaySettingCard(ExpandSettingCard):
         self._rows: dict = {}
 
         self._setup_ui()
-        self._statusRefreshNeeded.connect(self._refresh)
-        self._register_status_callback()
         self._refresh()
-
-    def _register_status_callback(self):
-        """注册管理器状态变化回调，连接成功/失败时自动刷新 UI"""
-        try:
-            from app.gateway.manager import get_platform_manager
-            mgr = get_platform_manager()
-            if mgr:
-                mgr.on_status_change(lambda s: self._statusRefreshNeeded.emit())
-        except Exception:
-            pass
 
     def _setup_ui(self):
         self.viewLayout.setSpacing(2)
@@ -559,9 +673,11 @@ class GatewaySettingCard(ExpandSettingCard):
         self._adjustViewSize()
 
     def _on_edit_saved(self, platform: str, config: dict):
+        """编辑保存后刷新"""
         self._refresh()
 
     def _on_platform_enabled_changed(self, platform: str, enabled: bool):
+        """平台启用状态改变"""
         self._refresh()
 
     def _refresh(self):
@@ -569,7 +685,6 @@ class GatewaySettingCard(ExpandSettingCard):
         try:
             from app.gateway.config import get_gateway_config
             from app.gateway.base import Platform
-            from app.gateway.manager import get_platform_manager
 
             config_helper = get_gateway_config()
             mapping = {
@@ -580,27 +695,12 @@ class GatewaySettingCard(ExpandSettingCard):
                 "feishu": Platform.FEISHU,
                 "slack": Platform.SLACK,
             }
-
-            # 获取管理器状态
-            manager = get_platform_manager()
-            mgr_status = manager.get_status() if manager else {}
-
             for key, enum in mapping.items():
                 row = self._rows.get(key)
                 if row:
                     try:
                         pc = config_helper.get_platform_config(enum)
                         row.set_enabled(pc.enabled)
-
-                        # 从管理器状态更新连接状态
-                        if manager and enum.value in mgr_status.get("platforms", {}):
-                            plat = mgr_status["platforms"][enum.value]
-                            if plat["connected"]:
-                                row.update_status(connected=True)
-                            elif plat.get("error"):
-                                row.update_status(connected=False, error=plat["error"])
-                            else:
-                                row.update_status(connected=False)
                     except Exception:
                         pass
         except Exception as e:

@@ -107,6 +107,7 @@ class PlatformManager:
         from app.gateway.adapters import (
             check_telegram_requirements,
             check_discord_requirements,
+            check_feishu_requirements,
         )
         
         # 企业微信
@@ -151,9 +152,13 @@ class PlatformManager:
         #     logger.info("[PlatformManager] WhatsApp adapter skipped (missing dependencies)")
         
         # 飞书
-        feishu_config = self._config.get_platform_config(Platform.FEISHU)
-        self._adapters[Platform.FEISHU] = FeishuAdapter(feishu_config)
-        logger.info("[PlatformManager] Feishu adapter loaded")
+        from app.gateway.adapters.feishu import FeishuAdapter, check_feishu_requirements
+        if check_feishu_requirements():
+            feishu_config = self._config.get_platform_config(Platform.FEISHU)
+            self._adapters[Platform.FEISHU] = FeishuAdapter(feishu_config)
+            logger.info("[PlatformManager] Feishu adapter loaded")
+        else:
+            logger.info("[PlatformManager] Feishu adapter skipped (missing lark-oapi)")
         
         # Slack
         slack_config = self._config.get_platform_config(Platform.SLACK)
@@ -292,6 +297,8 @@ class PlatformManager:
                 # 更新配置到适配器
                 adapter._app_id = config.extra.get("app_id")
                 adapter._app_secret = config.extra.get("app_secret")
+                adapter._encrypt_key = config.extra.get("encrypt_key", "")
+                adapter._verification_token = config.extra.get("verification_token", "")
             elif platform == Platform.SLACK:
                 if not config.extra.get("bot_token"):
                     logger.error("[PlatformManager] Slack bot_token is required")

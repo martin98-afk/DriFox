@@ -114,9 +114,6 @@ class OpenAIChatWorker(QThread):
         # 保留以兼容旧的直接回调接口
         self._legacy_direct_callbacks: Dict[str, Callable] = {}
 
-        # ========== 流式响应引用（用于取消时快速关闭 HTTP 连接）==========
-        self._current_stream_response = None  # OpenAI Stream 对象引用
-
     def _sync_state_from_state(self):
         """
         将 self._state 的值同步到旧的实例属性名（向后兼容）。
@@ -269,11 +266,6 @@ class OpenAIChatWorker(QThread):
         self._is_cancelled = True
         self._tool_execution_cancelled = True
         self._answer_event.set()
-
-        # 主动关闭 HTTP 流连接，让 _process_response 中的 for chunk in response:
-        # 立即退出，避免 worker 线程阻塞等待下一个 chunk 导致 UI 卡顿
-        self._close_stream_response()
-
         # 注意：不清除 _question_pending，由 cleanup() 统一清理。
         # cancel() 已设置 _is_cancelled=True，worker 线程会在 wait 循环后
         # 通过 if self._is_cancelled: return 提前返回，不访问 _question_pending。
@@ -282,22 +274,6 @@ class OpenAIChatWorker(QThread):
         if self._permission_pending:
             self._permission_pending = None
             self._state.permission.pending_permission = None
-
-    def _close_stream_response(self):
-        """关闭当前活跃的 HTTP 流式响应连接
-
-        此方法从主线程调用（cancel 时），强制关闭底层 HTTP 连接，
-        使 worker 线程的流式迭代立即退出，从而加速停止流程。
-        """
-        stream = getattr(self, '_current_stream_response', None)
-        if stream is not None:
-            try:
-                # OpenAI Stream 对象的 close() 会关闭底层 httpx.Response 连接
-                stream.close()
-            except Exception:
-                # 关闭连接可能抛异常（如连接已关闭），可安全忽略
-                pass
-            self._current_stream_response = None
 
     def get_interrupted_messages(self) -> List[Dict]:
         """
@@ -361,9 +337,6 @@ class OpenAIChatWorker(QThread):
         # 清理 HTTP 客户端缓存
         self._http_client = None
         self._cached_api_config = None
-
-        # 清理流式响应引用
-        self._current_stream_response = None
 
     # ========== 缓存追踪方法 ==========
 
@@ -1260,197 +1233,14 @@ class OpenAIChatWorker(QThread):
         _content_batch = ""  # 批量积累 content，减少信号频率
         _content_batch_time = time.time()  # 上次发射 content 的时间
         chunk_count = 0  # chunk 计数器，用于定期 yield 主线程
+        for chunk in response:
+            if self._is_cancelled:
+                return False, False  # 返回元组而不是单个布尔值
 
-        # 保存当前流响应引用，供 cancel() 关闭 HTTP 连接
-        self._current_stream_response = response
-
-        try:
-            for chunk in response:
-                if self._is_cancelled:
-                    return False, False  # 返回元组而不是单个布尔值
-
-                # 兼容新模型（如 GPT-5.5）：流式响应可能包含 choices 为空的 chunk
-                # （例如 usage 事件、ping 事件等），直接跳过即可
-                if not chunk.choices:
-                    #但仍需检查 usage 信息（部分模型在空 choices 的 chunk 中携带 usage）
-                    usage = getattr(chunk, "usage", None)
-                    if usage:
-                        self._last_usage = {
-                            "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                            "completion_tokens": getattr(usage, "completion_tokens", 0),
-                            "total_tokens": getattr(usage, "total_tokens", 0),
-                        }
-                        # 同步更新缓存追踪器
-                        self._cache_tracker.record_usage(usage)
-                    continue
-
-                delta = chunk.choices[0].delta
-                content = getattr(delta, "content", None)
-
-                tool_calls = getattr(delta, "tool_calls", None)
-                if tool_calls:
-                    tool_calls_found = True
-                    for tc in tool_calls:
-                        tc_id = tc.id
-                        if tc_id is None:
-                            if self._tool_calls_buffer:
-                                tc_id = list(self._tool_calls_buffer.keys())[-1]
-                            else:
-                                continue
-
-                        if tc_id not in self._tool_calls_buffer:
-                            self._tool_calls_buffer[tc_id] = {
-                                "id": tc_id,
-                                "type": getattr(tc, "type", "function"),
-                                "function": {"name": "", "arguments": ""},
-                            }
-                            self._response_content_blocks.append(
-                                {
-                                    "type": "tool_call_marker",
-                                    "tool_call_id": tc_id,
-                                }
-                            )
-
-                        buffer = self._tool_calls_buffer[tc_id]
-                        tool_name = ""
-                        if tc.function and tc.function.name:
-                            buffer["function"]["name"] = tc.function.name
-                            tool_name = buffer["function"]["name"]
-
-                            # 收到 tool name 时立即添加到 _current_tool_calls（如果是新工具）
-                            if tc_id not in self._current_tool_calls:
-                                self._current_tool_calls[tc_id] = {
-                                    "id": tc_id,
-                                    "type": getattr(tc, "type", "function"),
-                                    "function": {
-                                        "name": tool_name,
-                                        "arguments": "",
-                                    },
-                                }
-
-                            if (
-                                    tool_name
-                                    and tool_name not in self._DEFERRED_PREVIEW_TOOLS
-                                    and tc_id not in self._previewed_tool_call_ids
-                            ):
-                                self._previewed_tool_call_ids.add(tc_id)
-                                # preview 阶段：arguments 可能还没接收完，显示 "加载中..." 而不是空 {}
-                                preview_args = {"_status": "loading", "_preview_hint": "参数接收中..."}
-                                if self.tool_start_callback:
-                                    self.tool_start_callback(
-                                        tc_id, tool_name, preview_args, "preview"
-                                    )
-                                else:
-                                    self._emit_with_callback(
-                                        "tool_call_started", self.tool_call_started,
-                                        tc_id, tool_name, preview_args, "preview"
-                                    )
-                        if tc.function and tc.function.arguments:
-                            buffer["function"]["arguments"] += tc.function.arguments
-
-                        # 【优化】不在此处逐 chunk 执行 json.loads()。
-                        # 对于 write/edit 等超长 content 参数，arguments 可能分 50-200 个 chunks 到达。
-                        # 每次全量 json.loads() 都会失败并产生异常开销。
-                        # 改为流结束后在 _process_response 末尾一次性解析。
-                        if buffer["function"]["name"] and buffer["function"]["arguments"]:
-                            # 仅在累积字符串达到一定长度时才尝试预解析（用于更新预览状态）
-                            # 对于超长场景（>1000 字符），跳过所有逐块解析，等流结束再做
-                            args_len = len(buffer["function"]["arguments"])
-                            if args_len <= 1000:
-                                try:
-                                    parsed_args = json.loads(buffer["function"]["arguments"])
-                                    tool_args_pending = False
-                                    # 更新 _current_tool_calls 中对应 id 的 arguments
-                                    if tc_id in self._current_tool_calls:
-                                        self._current_tool_calls[tc_id]["function"]["arguments"] = buffer["function"][
-                                            "arguments"]
-                                    # 标记已完成解析（用于决定是否发送 tool_call_started）
-                                    self._current_tool_calls[tc_id]["_args_parsed"] = True
-                                    self._tool_calls_buffer.pop(tc_id, None)
-                                    # 流式中间状态：推送实际参数到 UI 更新预览
-                                    self._emit_with_callback(
-                                        "tool_args_updated", self.tool_args_updated,
-                                        tc_id, tool_name, parsed_args
-                                    )
-                                except json.JSONDecodeError:
-                                    # 短参数的 JSON 解析失败，记录到等待队列
-                                    # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
-                                    prev = self._last_progress_len.get(tc_id, 0)
-                                    if not prev or args_len - prev >= 200:
-                                        self._last_progress_len[tc_id] = args_len
-                                        tail = buffer["function"]["arguments"][-40:].replace('\n', ' ')
-                                        progress_args = {
-                                            "_status": "loading",
-                                            "_preview_hint": f"接收参数中({args_len}字符):{tail}",
-                                        }
-                                        self._emit_with_callback(
-                                            "tool_args_updated", self.tool_args_updated,
-                                            tc_id, tool_name, progress_args
-                                        )
-                                    if tc_id not in self._waiting_tool_params:
-                                        self._waiting_tool_params[tc_id] = {
-                                            "buffer": buffer,
-                                            "attempt_count": 0,
-                                            "first_failure_time": time.time(),
-                                        }
-                                    self._waiting_tool_params[tc_id]["attempt_count"] += 1
-                            else:
-                                # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
-                                # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
-                                prev = self._last_progress_len.get(tc_id, 0)
-                                if not prev or args_len - prev >= 500:
-                                    self._last_progress_len[tc_id] = args_len
-                                    # 取累积参数末尾 50 字符作为实时预览（最新到达的内容）
-                                    tail = buffer["function"]["arguments"][-50:].replace('\n', ' ')
-                                    progress_args = {
-                                        "_status": "loading",
-                                        "_preview_hint": f"接收参数中({args_len}字符):{tail}",
-                                    }
-                                    self._emit_with_callback(
-                                        "tool_args_updated", self.tool_args_updated,
-                                        tc_id, tool_name, progress_args
-                                    )
-                                # 放入等待队列，等流结束后一次性解析
-                                if tc_id not in self._waiting_tool_params:
-                                    self._waiting_tool_params[tc_id] = {
-                                        "buffer": buffer,
-                                        "attempt_count": 0,
-                                        "first_failure_time": None,  # None 表示流中不计算超时
-                                    }
-                                self._waiting_tool_params[tc_id]["attempt_count"] += 1
-
-                # 提取 reasoning_content (DeepSeek V4 thinking mode)
-                reasoning_delta = getattr(delta, "reasoning_content", None)
-                if reasoning_delta:
-                    if not reasoning_started_this_call:
-                        reasoning_started_this_call = True
-                        self._emit_with_callback("thinking_started", self.thinking_started)
-                    # 性能优化：使用 list append 代替字符串拼接
-                    self._reasoning_chunks.append(reasoning_delta)
-                    # 批量发送：积累到 10 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
-                    _reasoning_batch += reasoning_delta
-                    now = time.time()
-                    if len(_reasoning_batch) >= 10 or (now - _reasoning_batch_time) > 0.05:
-                        self._emit_with_callback("reasoning_content_received", self.reasoning_content_received,
-                                                 _reasoning_batch)
-                        _reasoning_batch = ""
-                        _reasoning_batch_time = now
-
-                if content:
-                    # 性能优化：使用 list append + join 代替字符串拼接
-                    self._response_chunks.append(content)
-                    self._response_content_blocks = append_text_block(
-                        self._response_content_blocks, content
-                    )
-                    # 批量发送：积累到 15 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
-                    _content_batch += content
-                    now = time.time()
-                    if len(_content_batch) >= 15 or (now - _content_batch_time) > 0.05:
-                        self._emit_with_callback("content_received", self.content_received, _content_batch)
-                        _content_batch = ""
-                        _content_batch_time = now
-
-                # 保存 token usage（如果这个 chunk 包含 usage 信息，OpenAI/Groq 流式最后一个chunk会带）
+            # 兼容新模型（如 GPT-5.5）：流式响应可能包含 choices 为空的 chunk
+            # （例如 usage 事件、ping 事件等），直接跳过即可
+            if not chunk.choices:
+                #但仍需检查 usage 信息（部分模型在空 choices 的 chunk 中携带 usage）
                 usage = getattr(chunk, "usage", None)
                 if usage:
                     self._last_usage = {
@@ -1460,23 +1250,189 @@ class OpenAIChatWorker(QThread):
                     }
                     # 同步更新缓存追踪器
                     self._cache_tracker.record_usage(usage)
-                # 每处理 5 个 chunk 就让渡一次 CPU，确保主线程能及时处理排队的 Qt 信号
-                # 避免 content_received 等信号堆积到工具执行完毕后一次性处理
-                chunk_count += 1
-                if chunk_count % 5 == 0:
-                    QCoreApplication.processEvents()
+                continue
 
-        except Exception:
-            # 取消时，cancel() 关闭 HTTP 连接后 for chunk in response 会抛出异常，
-            # 这里统一吞掉，让方法在 finally 清理后正常退出。
-            self._current_stream_response = None
-            if self._is_cancelled:
-                return False, False
-            # 如果不是取消导致的异常，重新抛出让上层处理
-            raise
+            delta = chunk.choices[0].delta
+            content = getattr(delta, "content", None)
 
-        # 流式循环正常结束或取消后，清理流引用
-        self._current_stream_response = None
+            tool_calls = getattr(delta, "tool_calls", None)
+            if tool_calls:
+                tool_calls_found = True
+                for tc in tool_calls:
+                    tc_id = tc.id
+                    if tc_id is None:
+                        if self._tool_calls_buffer:
+                            tc_id = list(self._tool_calls_buffer.keys())[-1]
+                        else:
+                            continue
+
+                    if tc_id not in self._tool_calls_buffer:
+                        self._tool_calls_buffer[tc_id] = {
+                            "id": tc_id,
+                            "type": getattr(tc, "type", "function"),
+                            "function": {"name": "", "arguments": ""},
+                        }
+                        self._response_content_blocks.append(
+                            {
+                                "type": "tool_call_marker",
+                                "tool_call_id": tc_id,
+                            }
+                        )
+
+                    buffer = self._tool_calls_buffer[tc_id]
+                    tool_name = ""
+                    if tc.function and tc.function.name:
+                        buffer["function"]["name"] = tc.function.name
+                        tool_name = buffer["function"]["name"]
+
+                        # 收到 tool name 时立即添加到 _current_tool_calls（如果是新工具）
+                        if tc_id not in self._current_tool_calls:
+                            self._current_tool_calls[tc_id] = {
+                                "id": tc_id,
+                                "type": getattr(tc, "type", "function"),
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": "",
+                                },
+                            }
+
+                        if (
+                                tool_name
+                                and tool_name not in self._DEFERRED_PREVIEW_TOOLS
+                                and tc_id not in self._previewed_tool_call_ids
+                        ):
+                            self._previewed_tool_call_ids.add(tc_id)
+                            # preview 阶段：arguments 可能还没接收完，显示 "加载中..." 而不是空 {}
+                            preview_args = {"_status": "loading", "_preview_hint": "参数接收中..."}
+                            if self.tool_start_callback:
+                                self.tool_start_callback(
+                                    tc_id, tool_name, preview_args, "preview"
+                                )
+                            else:
+                                self._emit_with_callback(
+                                    "tool_call_started", self.tool_call_started,
+                                    tc_id, tool_name, preview_args, "preview"
+                                )
+                    if tc.function and tc.function.arguments:
+                        buffer["function"]["arguments"] += tc.function.arguments
+
+                    # 【优化】不在此处逐 chunk 执行 json.loads()。
+                    # 对于 write/edit 等超长 content 参数，arguments 可能分 50-200 个 chunks 到达。
+                    # 每次全量 json.loads() 都会失败并产生异常开销。
+                    # 改为流结束后在 _process_response 末尾一次性解析。
+                    if buffer["function"]["name"] and buffer["function"]["arguments"]:
+                        # 仅在累积字符串达到一定长度时才尝试预解析（用于更新预览状态）
+                        # 对于超长场景（>1000 字符），跳过所有逐块解析，等流结束再做
+                        args_len = len(buffer["function"]["arguments"])
+                        if args_len <= 1000:
+                            try:
+                                parsed_args = json.loads(buffer["function"]["arguments"])
+                                tool_args_pending = False
+                                # 更新 _current_tool_calls 中对应 id 的 arguments
+                                if tc_id in self._current_tool_calls:
+                                    self._current_tool_calls[tc_id]["function"]["arguments"] = buffer["function"][
+                                        "arguments"]
+                                # 标记已完成解析（用于决定是否发送 tool_call_started）
+                                self._current_tool_calls[tc_id]["_args_parsed"] = True
+                                self._tool_calls_buffer.pop(tc_id, None)
+                                # 流式中间状态：推送实际参数到 UI 更新预览
+                                self._emit_with_callback(
+                                    "tool_args_updated", self.tool_args_updated,
+                                    tc_id, tool_name, parsed_args
+                                )
+                            except json.JSONDecodeError:
+                                # 短参数的 JSON 解析失败，记录到等待队列
+                                # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
+                                prev = self._last_progress_len.get(tc_id, 0)
+                                if not prev or args_len - prev >= 200:
+                                    self._last_progress_len[tc_id] = args_len
+                                    tail = buffer["function"]["arguments"][-40:].replace('\n', ' ')
+                                    progress_args = {
+                                        "_status": "loading",
+                                        "_preview_hint": f"接收参数中({args_len}字符):{tail}",
+                                    }
+                                    self._emit_with_callback(
+                                        "tool_args_updated", self.tool_args_updated,
+                                        tc_id, tool_name, progress_args
+                                    )
+                                if tc_id not in self._waiting_tool_params:
+                                    self._waiting_tool_params[tc_id] = {
+                                        "buffer": buffer,
+                                        "attempt_count": 0,
+                                        "first_failure_time": time.time(),
+                                    }
+                                self._waiting_tool_params[tc_id]["attempt_count"] += 1
+                        else:
+                            # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
+                            # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
+                            prev = self._last_progress_len.get(tc_id, 0)
+                            if not prev or args_len - prev >= 500:
+                                self._last_progress_len[tc_id] = args_len
+                                # 取累积参数末尾 50 字符作为实时预览（最新到达的内容）
+                                tail = buffer["function"]["arguments"][-50:].replace('\n', ' ')
+                                progress_args = {
+                                    "_status": "loading",
+                                    "_preview_hint": f"接收参数中({args_len}字符):{tail}",
+                                }
+                                self._emit_with_callback(
+                                    "tool_args_updated", self.tool_args_updated,
+                                    tc_id, tool_name, progress_args
+                                )
+                            # 放入等待队列，等流结束后一次性解析
+                            if tc_id not in self._waiting_tool_params:
+                                self._waiting_tool_params[tc_id] = {
+                                    "buffer": buffer,
+                                    "attempt_count": 0,
+                                    "first_failure_time": None,  # None 表示流中不计算超时
+                                }
+                            self._waiting_tool_params[tc_id]["attempt_count"] += 1
+
+            # 提取 reasoning_content (DeepSeek V4 thinking mode)
+            reasoning_delta = getattr(delta, "reasoning_content", None)
+            if reasoning_delta:
+                if not reasoning_started_this_call:
+                    reasoning_started_this_call = True
+                    self._emit_with_callback("thinking_started", self.thinking_started)
+                # 性能优化：使用 list append 代替字符串拼接
+                self._reasoning_chunks.append(reasoning_delta)
+                # 批量发送：积累到 10 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
+                _reasoning_batch += reasoning_delta
+                now = time.time()
+                if len(_reasoning_batch) >= 10 or (now - _reasoning_batch_time) > 0.05:
+                    self._emit_with_callback("reasoning_content_received", self.reasoning_content_received,
+                                             _reasoning_batch)
+                    _reasoning_batch = ""
+                    _reasoning_batch_time = now
+
+            if content:
+                # 性能优化：使用 list append + join 代替字符串拼接
+                self._response_chunks.append(content)
+                self._response_content_blocks = append_text_block(
+                    self._response_content_blocks, content
+                )
+                # 批量发送：积累到 15 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
+                _content_batch += content
+                now = time.time()
+                if len(_content_batch) >= 15 or (now - _content_batch_time) > 0.05:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
+                    _content_batch_time = now
+
+            # 保存 token usage（如果这个 chunk 包含 usage 信息，OpenAI/Groq 流式最后一个chunk会带）
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                self._last_usage = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(usage, "completion_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
+                # 同步更新缓存追踪器
+                self._cache_tracker.record_usage(usage)
+            # 每处理 5 个 chunk 就让渡一次 CPU，确保主线程能及时处理排队的 Qt 信号
+            # 避免 content_received 等信号堆积到工具执行完毕后一次性处理
+            chunk_count += 1
+            if chunk_count % 5 == 0:
+                QCoreApplication.processEvents()
 
         # 非流式响应：usage 在 response 对象本身（而非 chunk）
         if not self.stream:

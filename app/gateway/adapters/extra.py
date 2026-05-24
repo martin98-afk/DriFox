@@ -288,65 +288,7 @@ def check_whatsapp_requirements() -> bool:
 # 飞书 (Feishu/Lark) 适配器
 # ============================================================
 
-class FeishuAdapter(BasePlatformAdapter):
-    """
-    飞书 (Feishu/Lark) 适配器
-    
-    使用飞书开放平台 API 进行消息收发。
-    """
-    
-    MAX_MESSAGE_LENGTH = 2000
-    
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.FEISHU)
-        
-        self._app_id = config.extra.get("app_id") or os.getenv("FEISHU_APP_ID")
-        self._app_secret = config.extra.get("app_secret") or os.getenv("FEISHU_APP_SECRET")
-        self._access_token = None
-        self._tenant_access_token = None
-    
-    async def connect(self) -> bool:
-        """获取飞书 access token"""
-        # 从配置重新获取（确保最新）
-        from app.gateway.config import get_gateway_config
-        cfg = get_gateway_config().get_platform_config(Platform.FEISHU)
-        self._app_id = cfg.extra.get("app_id") if cfg.extra else None
-        self._app_secret = cfg.extra.get("app_secret") if cfg.extra else None
-        
-        if not self._app_id or not self._app_secret:
-            logger.error("[Feishu] app_id and app_secret are required")
-            return False
-        
-        try:
-            import httpx
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-                    json={
-                        "app_id": self._app_id,
-                        "app_secret": self._app_secret,
-                    },
-                    timeout=30.0,
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("code") == 0:
-                        self._tenant_access_token = data.get("tenant_access_token")
-                        self._connected = True
-                        logger.info("[Feishu] Connected successfully")
-                        return True
-                    else:
-                        logger.error("[Feishu] Auth failed: %s", data.get("msg"))
-                else:
-                    logger.error("[Feishu] HTTP error: %s", response.status_code)
-            
-            return False
-            
-        except Exception as e:
-            logger.error("[Feishu] Failed to connect: %s", e)
-            return False
+# 注意：飞书适配器已移至 feishu.py，使用 lark_oapi SDK
     
     async def disconnect(self) -> None:
         """断开连接"""
