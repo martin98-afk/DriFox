@@ -7,6 +7,7 @@
 """
 from functools import partial
 
+from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
 from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
@@ -366,6 +367,7 @@ class QuestionFloatingWidget(QWidget):
         self._answers = {}
         self._option_widgets = []
         self._custom_input_widget = None
+        self._show_custom_input = True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -511,10 +513,11 @@ class QuestionFloatingWidget(QWidget):
 
     # ────────────── 公开接口 ──────────────
 
-    def show_question(self, questions: list):
+    def show_question(self, questions: list, show_custom_input: bool = True):
         self._questions = questions if isinstance(questions, list) else []
         self._current_index = 0
         self._answers = {}
+        self._show_custom_input = show_custom_input
         self._render_current()
         QTimer.singleShot(0, self.heightChanged.emit)
 
@@ -544,9 +547,15 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         q_data = self._questions[self._current_index]
+        if not isinstance(q_data, dict):
+            logger.warning(f"[QuestionWidget] q_data 不是 dict: {type(q_data)}, 跳过渲染")
+            self._on_ignore()
+            return
         question_text = q_data.get("question", "")
         options = q_data.get("options", [])
         multiple = q_data.get("multiple", False)
+        if not isinstance(options, list):
+            options = []
 
         self._page_label.setText(f"{self._current_index + 1}/{total} 个问题")
         self._page_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
@@ -560,8 +569,29 @@ class QuestionFloatingWidget(QWidget):
 
         # 渲染选项
         for opt in options:
-            label = opt.get("label", str(opt))
-            desc = opt.get("description", "")
+            desc = opt.get("description", "") if isinstance(opt, dict) else ""
+            if isinstance(opt, dict):
+                # 稳健推导 label：label > name > text > value > title > description > str(opt)
+                label = opt.get("label")
+                if not label:
+                    for key in ("name", "text", "value", "title"):
+                        label = opt.get(key)
+                        if label:
+                            break
+                if not label:
+                    if desc and len(opt) <= 1:
+                        label = desc
+                        desc = ""  # 避免重复
+                    else:
+                        desc = ""
+                        for v in opt.values():
+                            if isinstance(v, str):
+                                label = v
+                                break
+                        if not label:
+                            label = str(opt)
+            else:
+                label = str(opt)
             if multiple:
                 card = _OptionCheckCard(label, desc, self._options_container)
             else:
@@ -570,12 +600,13 @@ class QuestionFloatingWidget(QWidget):
             self._options_layout.addWidget(card)
             self._option_widgets.append(card)
 
-        # 自定义输入
-        self._custom_input_widget = _CustomInputCard(multiple, self._options_container)
-        if not multiple:
-            self._custom_input_widget.activated.connect(self._on_custom_input_activated)
-        self._custom_input_widget.heightNeedsUpdate.connect(self._on_options_height_changed)
-        self._options_layout.addWidget(self._custom_input_widget)
+        # 自定义输入（权限审批等场景不需要）
+        if self._show_custom_input:
+            self._custom_input_widget = _CustomInputCard(multiple, self._options_container)
+            if not multiple:
+                self._custom_input_widget.activated.connect(self._on_custom_input_activated)
+            self._custom_input_widget.heightNeedsUpdate.connect(self._on_options_height_changed)
+            self._options_layout.addWidget(self._custom_input_widget)
 
         # 恢复已保存答案
         saved = self._answers.get(self._current_index)

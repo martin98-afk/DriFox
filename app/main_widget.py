@@ -5728,17 +5728,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
 
         if tool_name == "question":
+            # question 工具由 chat_worker 的 question_asked 信号 →
+            # _on_question_asked 统一处理（含规范化后的数据）
+            # 这里只需记录 ID，不做显示避免竞态
+            self._question_tool_call_id = tool_call_id
             self._hide_all_cards_for_question()
-            question_text = arguments.get("question", "")
-            options = arguments.get("options", [])
-            multiple = arguments.get("multiple", False)
-            if question_text:
-                self._question_tool_call_id = tool_call_id
-                if not isinstance(options, list):
-                    options = []
-                self._question_floating_widget.show_question(
-                    question_text, options, multiple
-                )
             return
 
         if tool_name in ("todowrite", "todoread"):
@@ -6299,11 +6293,12 @@ If you're uncertain about something and can't verify it with these tools, say "I
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
-            if answer == "允许":
+            # answer 格式为 "问题「...」的回答：\n【允许】"，用 in 匹配标签
+            if "【允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, False, False)
-            elif answer == "允许且该轮对话自动允许":
+            elif "【允许且该轮对话自动允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, True, False)
-            elif answer == "本次会话允许":
+            elif "【本次会话允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, False, True)
             else:
                 self.backend.deny_tool_permission(tool_call_id)
@@ -6364,12 +6359,21 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
-        self._hide_all_cards_for_question()  # question卡片最高优先级
+        # 显示 question 卡片（权限审批不需要自定义输入选项）
+        self._card_manager.show_card("question", self._window_id)
         try:
             arg_str = str(arguments)[:200] if arguments else ""
             question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数: {arg_str}"
-            options = ["允许", "允许且该轮对话自动允许", "本次会话允许", "不允许"]
-            self._question_floating_widget.show_question(question_text, options, False)
+            options = [
+                {"label": "允许", "description": ""},
+                {"label": "允许且该轮对话自动允许", "description": ""},
+                {"label": "本次会话允许", "description": ""},
+                {"label": "不允许", "description": ""},
+            ]
+            self._question_floating_widget.show_question(
+                [{"question": question_text, "options": options, "multiple": False}],
+                show_custom_input=False,
+            )
         except Exception as e:
             logger.error(f"[Permission] Approval error: {e}")
             self.backend.deny_tool_permission(tool_call_id)

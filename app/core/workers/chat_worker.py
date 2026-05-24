@@ -1832,10 +1832,28 @@ class OpenAIChatWorker(QThread):
                         if isinstance(opt, str):
                             normalized.append({"label": opt, "description": ""})
                         elif isinstance(opt, dict):
-                            normalized.append({
-                                "label": opt.get("label", opt.get("name", str(opt))),
-                                "description": opt.get("description", ""),
-                            })
+                            desc = opt.get("description", "")
+                            # 推导 label：label > name > text > value > title > description > 首字符串值 > str(opt)
+                            label = opt.get("label")
+                            if not label:
+                                for key in ("name", "text", "value", "title"):
+                                    label = opt.get(key)
+                                    if label:
+                                        break
+                            if not label:
+                                if desc and len(opt) <= 1:
+                                    # 只有 description 没有 label，用 desc 当 label，清空 desc 避免重复
+                                    label = desc
+                                    desc = ""
+                                else:
+                                    # 尝试找第一个字符串字段值
+                                    for v in opt.values():
+                                        if isinstance(v, str):
+                                            label = v
+                                            break
+                                    if not label:
+                                        label = str(opt)
+                            normalized.append({"label": label, "description": desc})
                         else:
                             normalized.append({"label": str(opt), "description": ""})
                     q["options"] = normalized
