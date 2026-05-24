@@ -75,45 +75,7 @@ QLabel {{
 }}
 """
 
-# 按钮样式
-DISCONNECT_BTN_STYLE = """
-QPushButton {
-    background-color: rgba(255, 77, 79, 180);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 4px 12px;
-    font-size: 12px;
-}
-QPushButton:hover {
-    background-color: rgba(255, 77, 79, 220);
-}
-"""
 
-CONNECTING_BTN_STYLE = """
-QPushButton {
-    background-color: rgba(250, 173, 20, 180);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 4px 12px;
-    font-size: 12px;
-}
-"""
-
-CONNECT_BTN_STYLE = """
-QPushButton {
-    background-color: rgba(82, 196, 26, 180);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 4px 12px;
-    font-size: 12px;
-}
-QPushButton:hover {
-    background-color: rgba(82, 196, 26, 220);
-}
-"""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -239,13 +201,6 @@ class PlatformStatusRow(CardWidget):
         self.edit_btn.clicked.connect(self._on_edit)
         layout.addWidget(self.edit_btn)
 
-        # 连接/断开按钮
-        self.action_btn = PushButton("连接")
-        self.action_btn.setFixedWidth(60)
-        self.action_btn.setStyleSheet(CONNECT_BTN_STYLE)
-        self.action_btn.clicked.connect(self._on_action)
-        layout.addWidget(self.action_btn)
-
     def _resolve_enum(self):
         from app.gateway.base import Platform
         mapping = {
@@ -286,12 +241,7 @@ class PlatformStatusRow(CardWidget):
     def _on_edit(self):
         self.editRequested.emit(self._platform)
 
-    def _on_action(self):
-        """点击按钮：已连接则断开，未连接则连接"""
-        if self._is_connected:
-            self._do_disconnect()
-        else:
-            self._do_connect()
+
 
     def _do_connect(self):
         """执行连接"""
@@ -299,8 +249,6 @@ class PlatformStatusRow(CardWidget):
             return
         
         platform_enum = self._resolve_enum()
-        self._is_connecting = True
-        self._update_action_button(connecting=True)
 
         def _do():
             try:
@@ -353,7 +301,7 @@ class PlatformStatusRow(CardWidget):
                 self._is_connected = connected
                 self._is_connecting = False
                 self._update_status(connected, error)
-                self._update_action_button(connected=connected)
+        
         except Exception:
             pass
 
@@ -362,7 +310,6 @@ class PlatformStatusRow(CardWidget):
         self._is_connected = connected
         self._is_connecting = False
         self._update_status(connected, error)
-        self._update_action_button(connected=connected)
 
     def _update_status(self, connected: bool, error: str = None):
         """更新状态显示"""
@@ -378,20 +325,7 @@ class PlatformStatusRow(CardWidget):
             self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
             self.status_label.setToolTip("")
 
-    def _update_action_button(self, connected: bool = None, connecting: bool = False):
-        """更新按钮状态"""
-        if connecting or self._is_connecting:
-            self.action_btn.setText("断开")
-            self.action_btn.setStyleSheet(CONNECTING_BTN_STYLE)
-            self.action_btn.setEnabled(True)
-        elif connected or self._is_connected:
-            self.action_btn.setText("断开")
-            self.action_btn.setStyleSheet(DISCONNECT_BTN_STYLE)
-            self.action_btn.setEnabled(True)
-        else:
-            self.action_btn.setText("连接")
-            self.action_btn.setStyleSheet(CONNECT_BTN_STYLE)
-            self.action_btn.setEnabled(True)
+
 
     def update_status(self, connected: bool, error: str = None):
         """外部更新状态（兼容旧接口）"""
@@ -400,11 +334,7 @@ class PlatformStatusRow(CardWidget):
     def set_enabled(self, enabled: bool):
         self.enable_switch.setChecked(enabled)
 
-    def set_connection_state(self, connected: bool):
-        """设置连接状态（用于外部控制）"""
-        self._is_connected = connected
-        self._is_connecting = False
-        self._update_action_button(connected=connected)
+
 
 
 # ═══════════════════════════════════════════════════════════

@@ -1,0 +1,35 @@
+# DriFox 核心依赖
+PyQt5>=5.15.0
+PyQtWebEngine>=5.15.0
+PyQt-Fluent-Widgets
+qtpy>=2.0.0
+loguru>=0.7.0
+openai>=1.0.0
+httpx>=0.25.0
+html2text>=2020.1.16
+beautifulsoup4>=4.12.0
+PyYAML>=6.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+psutil
+pyinstaller~=6.16.0
+markdown
+pygments
+requests
+orjson>=3.8.0
+pypinyin
+mcp>=1.0.0
+
+# Gateway 通讯平台依赖
+# 钉钉
+dingtalk-stream>=0.20
+# Telegram
+python-telegram-bot>=20.0
+# Discord
+discord.py>=2.0
+# Slack
+slack-sdk>=3.0
+# 飞书
+lark-oapi>=1.0
+# 通用异步
+aiohttp>=3.9.0
