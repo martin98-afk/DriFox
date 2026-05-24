@@ -48,6 +48,10 @@ class CardContainer(QWidget):
         self._card_manager = card_manager
         self._window_id = window_id
     
+    def _is_expanded(self) -> bool:
+        """容器是否已展开"""
+        return self.maximumHeight() >= self._EXPAND_MAX
+
     def _on_card_shown(self, card_id: str):
         """某张卡片被显示"""
         if card_id not in self._cards:
@@ -62,6 +66,9 @@ class CardContainer(QWidget):
     
     def _schedule_expand(self):
         """防抖调度：有可见卡片则展开，否则折叠"""
+        has_visible = any(w.isVisible() for w in self._cards.values())
+        if self._is_expanded() and has_visible:
+            return  # 已展开且有可见卡片，不再重复触发布局
         # 取消上次未执行的防抖
         if self._expand_timer:
             self._expand_timer.stop()
