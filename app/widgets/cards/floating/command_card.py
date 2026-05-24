@@ -271,9 +271,11 @@ class CommandCard(QWidget):
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setStyleSheet(f"""
-            QScrollArea {{
+            QScrollArea, QScrollArea * {{
                 background: transparent;
                 border: none;
+                padding: 0;
+                margin: 0;
             }}
             QScrollBar:vertical {{
                 background: transparent;
