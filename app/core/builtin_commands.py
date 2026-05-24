@@ -107,9 +107,11 @@ DriFox 的主题系统基于 YAML 文件，每个主题包含 `name`、`id`、`w
 ---
 ## 主题结构
 
-### meta 字段
-- `name`: 主题显示名（中文，如"紫罗兰"）
-- `id`: 主题唯一 ID（小写英文，如 "violet"）
+基本信息
+```yaml
+name: 主题显示名（中文，如"紫罗兰"）
+id: 主题唯一 ID（小写英文，如 "violet"）
+```
 
 ### window（窗口渐变背景）
 - `gradient_start` / `gradient_end`: 窗口左上到右下的线性渐变，两个 rgba(...,255) 颜色
