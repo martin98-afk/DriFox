@@ -159,7 +159,7 @@ class UpdateChecker(QWidget):
 
         # 添加按钮到容器
         button_layout.addWidget(update_button)
-        # button_layout.addWidget(view_button)
+        button_layout.addWidget(view_button)
 
         # 将按钮容器添加到InfoBar布局
         info_bar.widgetLayout.addWidget(button_container, 0, Qt.AlignRight)
