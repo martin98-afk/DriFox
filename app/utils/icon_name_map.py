@@ -3,6 +3,7 @@ ICON_NAME_TO_FILE = {
     "Anthropic": "Anthropic.svg",
     "baidu": "baidu.svg",
     "deepseek": "deepseek.svg",
+    "discord": "discord.svg",
     "drifox": "drifox.ico",
     "fox_bg": "fox_bg.png",
     "gemini-ai": "gemini-ai.svg",
@@ -14,6 +15,9 @@ ICON_NAME_TO_FILE = {
     "opencode": "opencode.svg",
     "qwen": "qwen.svg",
     "siliconflow": "siliconflow.png",
+    "slack": "slack.svg",
+    "Telegram": "Telegram.svg",
+    "whatsapp": "whatsapp.svg",
     "主题风格": "主题风格.svg",
     "云通信": "云通信.svg",
     "企业微信": "企业微信.svg",
@@ -55,5 +59,6 @@ ICON_NAME_TO_FILE = {
     "重命名": "重命名.svg",
     "钉钉": "钉钉.svg",
     "锁定": "锁定.svg",
-    "长期记忆": "长期记忆.svg"
+    "长期记忆": "长期记忆.svg",
+    "飞书": "飞书.svg"
 }

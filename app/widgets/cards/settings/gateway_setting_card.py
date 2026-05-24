@@ -2,20 +2,20 @@
 """
 Gateway 通讯平台设置卡片
 
-接入企业微信/钉钉，让 AI 能够通过这些平台与用户对话。
-参考 MCPListSettingCard 模式：展开配置界面。
+接入企业微信、钉钉、Telegram、Discord、飞书、Slack，
+让 AI 能够通过这些平台与用户对话。
 """
+from functools import partial
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap, QIcon
-from PyQt5.QtSvg import QSvgRenderer
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QVBoxLayout,
     QWidget,
-    QFormLayout,
+    QFormLayout, QScrollArea,
 )
 from qfluentwidgets import (
     BodyLabel,
@@ -34,8 +34,15 @@ from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes
 from app.utils.utils import get_font_family_css, get_icon
 
 # ═══════════════════════════════════════════════════════════
-# 共用表单样式
+# 共用表单样式（白色标签 + 深色输入框）
 # ═══════════════════════════════════════════════════════════
+
+LABEL_STYLE = f"""
+color: #ffffff;
+font-weight: bold;
+{get_font_family_css()}
+font-size: 13px;
+"""
 
 GATEWAY_EDIT_STYLE = f"""
 QWidget {{
@@ -56,7 +63,82 @@ QLineEdit:focus {{
 QLineEdit::placeholder {{
     color: rgba(255, 255, 255, 0.35);
 }}
+QLabel {{
+    color: #ffffff;
+}}
 """
+
+
+# ═══════════════════════════════════════════════════════════
+# 平台定义
+# ═══════════════════════════════════════════════════════════
+
+PLATFORM_DEFS = {
+    "wecom": {
+        "name": "企业微信",
+        "icon": "企业微信",
+        "fields": [
+            ("bot_id", "Bot ID", "", "企业微信机器人 BotID"),
+            ("secret", "Secret", "password", "机器人密钥 Secret"),
+            ("websocket_url", "WebSocket", "", "wss://openws.work.weixin.qq.com"),
+        ],
+        "hint": "💡 需要在企业微信管理后台创建 AI 机器人。",
+    },
+    "dingtalk": {
+        "name": "钉钉",
+        "icon": "钉钉",
+        "fields": [
+            ("client_id", "AppKey", "", "钉钉应用 AppKey"),
+            ("client_secret", "AppSecret", "password", "钉钉应用 AppSecret"),
+        ],
+        "hint": "💡 需要在钉钉开放平台创建应用并启用 Stream Mode。",
+    },
+    "telegram": {
+        "name": "Telegram",
+        "icon": "Telegram",
+        "fields": [
+            ("token", "Bot Token", "password", "BotFather 获取的 Token"),
+            ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
+        ],
+        "hint": "💡 通过 @BotFather 创建机器人获取 Token。",
+    },
+    "discord": {
+        "name": "Discord",
+        "icon": "discord",
+        "fields": [
+            ("token", "Bot Token", "password", "Discord Developer Portal 获取"),
+            ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
+        ],
+        "hint": "💡 需要在 Discord Developer Portal 创建 Bot 并开启 Message Content Intent。",
+    },
+    "feishu": {
+        "name": "飞书",
+        "icon": "飞书",
+        "fields": [
+            ("app_id", "App ID", "", "飞书开放平台 App ID"),
+            ("app_secret", "App Secret", "password", "飞书开放平台 App Secret"),
+        ],
+        "hint": "💡 需要在飞书开放平台创建企业自建应用。",
+    },
+    "slack": {
+        "name": "Slack",
+        "icon": "slack",
+        "fields": [
+            ("bot_token", "Bot Token", "password", "Slack App Bot Token (xoxb-)"),
+            ("app_token", "App Token", "password", "Slack App Token (xapp-)"),
+        ],
+        "hint": "💡 需要在 Slack API 创建 App 并启用 Socket Mode。",
+    },
+}
+
+PLATFORM_ENUM_MAP = {
+    "wecom": "Platform.WECOM",
+    "dingtalk": "Platform.DINGTALK",
+    "telegram": "Platform.TELEGRAM",
+    "discord": "Platform.DISCORD",
+    "feishu": "Platform.FEISHU",
+    "slack": "Platform.SLACK",
+}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -64,190 +146,201 @@ QLineEdit::placeholder {{
 # ═══════════════════════════════════════════════════════════
 
 class PlatformEditCard(QWidget):
-    """平台配置编辑卡片"""
-    
+    """平台配置编辑卡片（通用）"""
+
     saved = pyqtSignal(str, dict)  # platform, config
     closed = pyqtSignal()
-    
+
     def __init__(self, platform: str, parent=None):
         super().__init__(parent)
         self._platform = platform
+        self._def = PLATFORM_DEFS.get(platform, {})
+        self._inputs = {}
         self._load_config()
         self._init_ui()
-    
+
+    def _resolve_enum(self, platform_name: str):
+        """将平台名转为 Platform 枚举"""
+        from app.gateway.base import Platform
+        mapping = {
+            "wecom": Platform.WECOM,
+            "dingtalk": Platform.DINGTALK,
+            "telegram": Platform.TELEGRAM,
+            "discord": Platform.DISCORD,
+            "feishu": Platform.FEISHU,
+            "slack": Platform.SLACK,
+        }
+        return mapping.get(platform_name, Platform.WECOM)
+
     def _load_config(self):
         """加载配置"""
         try:
             from app.gateway.config import get_gateway_config
-            from app.gateway.base import Platform
-            
-            config = get_gateway_config()
-            platform_enum = Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK
-            self._config = config.get_platform_config(platform_enum)
+            self._config = get_gateway_config().get_platform_config(self._resolve_enum(self._platform))
         except Exception as e:
-            print(f"[PlatformEditCard] Load config error: {e}")
             self._config = None
-    
+
     def _init_ui(self):
         self.setStyleSheet(GATEWAY_EDIT_STYLE)
-        
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(8, 4, 8, 4)
         main_layout.setSpacing(12)
-        
+
         # 标题
-        title = StrongBodyLabel("平台配置")
-        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: bold;")
+        name = self._def.get("name", self._platform)
+        title = StrongBodyLabel(f"{name} 配置")
+        title.setStyleSheet(LABEL_STYLE)
         main_layout.addWidget(title)
-        
-        if self._platform == "wecom":
-            self._setup_wecom_form(main_layout)
-        else:
-            self._setup_dingtalk_form(main_layout)
-        
+
+        # 表单
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(10)
+
+        for key, label, echo_mode, placeholder in self._def.get("fields", []):
+            input_widget = QLineEdit()
+            input_widget.setPlaceholderText(placeholder)
+            if echo_mode == "password":
+                input_widget.setEchoMode(QLineEdit.Password)
+            # 填充现有值
+            current_val = self._get_config_value(key)
+            if current_val is not None:
+                input_widget.setText(str(current_val))
+
+            # 标签白色
+            lbl = BodyLabel(label)
+            lbl.setStyleSheet(LABEL_STYLE)
+
+            form.addRow(lbl, input_widget)
+            self._inputs[key] = input_widget
+
+        # 提示
+        hint_text = self._def.get("hint", "")
+        if hint_text:
+            hint = BodyLabel(hint_text)
+            hint.setStyleSheet(
+                f"color: rgba(255,255,255,0.5); padding: 8px 0; {get_font_family_css()} font-size: 11px;")
+            form.addRow("", hint)
+
+        main_layout.addLayout(form)
+
         # 按钮
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
+
         self.save_btn = PrimaryPushButton("保存", self)
         self.save_btn.setFixedWidth(80)
         self.save_btn.clicked.connect(self._on_save)
         btn_layout.addWidget(self.save_btn)
-        
+
         self.cancel_btn = PushButton("取消", self)
         self.cancel_btn.setFixedWidth(80)
         self.cancel_btn.clicked.connect(self.closed.emit)
         btn_layout.addWidget(self.cancel_btn)
-        
+
         main_layout.addLayout(btn_layout)
-    
-    def _setup_wecom_form(self, parent_layout):
-        """企业微信表单"""
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(10)
-        
-        # Bot ID
-        self.bot_id_input = QLineEdit()
-        self.bot_id_input.setPlaceholderText("企业微信机器人 BotID")
-        self.bot_id_input.setText(self._config.bot_id if self._config else "")
-        row, label = self._make_row("Bot ID:", self.bot_id_input)
-        form.addRow(label, self.bot_id_input)
-        
-        # Secret
-        self.secret_input = QLineEdit()
-        self.secret_input.setPlaceholderText("机器人密钥 Secret")
-        self.secret_input.setEchoMode(QLineEdit.Password)
-        self.secret_input.setText(self._config.secret if self._config else "")
-        form.addRow("Secret:", self.secret_input)
-        
-        # WebSocket URL
-        self.ws_url_input = QLineEdit()
-        self.ws_url_input.setPlaceholderText("wss://openws.work.weixin.qq.com")
-        self.ws_url_input.setText(
-            self._config.websocket_url if self._config and self._config.websocket_url 
-            else "wss://openws.work.weixin.qq.com"
-        )
-        form.addRow("WebSocket:", self.ws_url_input)
-        
-        # 提示
-        hint = BodyLabel(
-            "💡 需要先在企业微信管理后台创建 AI 机器人，\n"
-            "   并部署 AI Bot WebSocket Gateway。"
-        )
-        hint.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 8px 0; {get_font_family_css()} font-size: 11px;")
-        form.addRow("", hint)
-        
-        parent_layout.addLayout(form)
-    
-    def _setup_dingtalk_form(self, parent_layout):
-        """钉钉表单"""
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(10)
-        
-        # AppKey
-        self.appkey_input = QLineEdit()
-        self.appkey_input.setPlaceholderText("钉钉应用 AppKey")
-        self.appkey_input.setText(self._config.client_id if self._config else "")
-        form.addRow("AppKey:", self.appkey_input)
-        
-        # AppSecret
-        self.appsecret_input = QLineEdit()
-        self.appsecret_input.setPlaceholderText("钉钉应用 AppSecret")
-        self.appsecret_input.setEchoMode(QLineEdit.Password)
-        self.appsecret_input.setText(self._config.client_secret if self._config else "")
-        form.addRow("AppSecret:", self.appsecret_input)
-        
-        # 提示
-        hint = BodyLabel(
-            "💡 需要在钉钉开放平台创建应用，\n"
-            "   并启用 Stream Mode。"
-        )
-        hint.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 8px 0; {get_font_family_css()} font-size: 11px;")
-        form.addRow("", hint)
-        
-        parent_layout.addLayout(form)
-    
-    def _make_row(self, label_text: str, widget: QWidget) -> tuple:
-        """构造一行"""
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        label = BodyLabel(label_text)
-        label.setFixedWidth(70)
-        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        row.addWidget(label)
-        row.addWidget(widget, 1)
-        return row, label
-    
+
+    def _get_config_value(self, key: str):
+        """从配置对象读取值"""
+        if not self._config:
+            return None
+        # 尝试直接属性
+        if hasattr(self._config, key):
+            return getattr(self._config, key)
+        # 尝试 extra 字典
+        if hasattr(self._config, "extra") and self._config.extra:
+            return self._config.extra.get(key)
+        return None
+
+    def _build_config_dict(self) -> dict:
+        """从表单构建配置字典"""
+        result = {"enabled": self._config.enabled if self._config else False}
+        for key, input_widget in self._inputs.items():
+            val = input_widget.text().strip()
+            if key == "require_mention":
+                val = val.lower() in ("true", "1", "yes")
+            result[key] = val
+        return result
+
     def _on_save(self):
         """保存配置"""
         try:
             from app.gateway.config import get_gateway_config
             from app.gateway.base import Platform, PlatformConfig
-            
-            config = get_gateway_config()
-            
+
+            config_helper = get_gateway_config()
+            platform_enum = self._resolve_enum(self._platform)
+            existing = config_helper.get_platform_config(platform_enum)
+
+            # 提取字段值
+            def _val(key):
+                if key in self._inputs:
+                    return self._inputs[key].text().strip()
+                return getattr(existing, key, None)
+
+            # 构建 PlatformConfig
             if self._platform == "wecom":
-                platform_config = PlatformConfig(
-                    enabled=self._config.enabled if self._config else False,
+                config_obj = PlatformConfig(
+                    enabled=existing.enabled if existing else False,
                     platform=Platform.WECOM,
-                    bot_id=self.bot_id_input.text().strip(),
-                    secret=self.secret_input.text().strip(),
-                    websocket_url=self.ws_url_input.text().strip() or "wss://openws.work.weixin.qq.com",
+                    bot_id=_val("bot_id"),
+                    secret=_val("secret"),
+                    websocket_url=_val("websocket_url") or "wss://openws.work.weixin.qq.com",
+                )
+            elif self._platform == "dingtalk":
+                config_obj = PlatformConfig(
+                    enabled=existing.enabled if existing else False,
+                    platform=Platform.DINGTALK,
+                    client_id=_val("client_id"),
+                    client_secret=_val("client_secret"),
+                )
+            elif self._platform == "telegram":
+                config_obj = PlatformConfig(
+                    enabled=existing.enabled if existing else False,
+                    platform=Platform.TELEGRAM,
+                    token=_val("token"),
+                    extra={"require_mention": _val("require_mention") or "true"},
+                )
+            elif self._platform == "discord":
+                config_obj = PlatformConfig(
+                    enabled=existing.enabled if existing else False,
+                    platform=Platform.DISCORD,
+                    token=_val("token"),
+                    extra={"require_mention": _val("require_mention") or "true"},
+                )
+            elif self._platform == "feishu":
+                config_obj = PlatformConfig(
+                    enabled=existing.enabled if existing else False,
+                    platform=Platform.FEISHU,
+                    extra={"app_id": _val("app_id"), "app_secret": _val("app_secret")},
+                )
+            elif self._platform == "slack":
+                config_obj = PlatformConfig(
+                    enabled=existing.enabled if existing else False,
+                    platform=Platform.SLACK,
+                    extra={"bot_token": _val("bot_token"), "app_token": _val("app_token")},
                 )
             else:
-                platform_config = PlatformConfig(
-                    enabled=self._config.enabled if self._config else False,
-                    platform=Platform.DINGTALK,
-                    client_id=self.appkey_input.text().strip(),
-                    client_secret=self.appsecret_input.text().strip(),
-                )
-            
-            config.set_platform_config(
-                Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK,
-                platform_config
-            )
-            
+                config_obj = PlatformConfig(enabled=False, platform=platform_enum)
+
+            config_helper.set_platform_config(platform_enum, config_obj)
+
+            name = PLATFORM_DEFS.get(self._platform, {}).get("name", self._platform)
             InfoBar.success(
                 title="保存成功",
-                content=f"{'企业微信' if self._platform == 'wecom' else '钉钉'} 配置已保存",
+                content=f"{name} 配置已保存",
                 parent=self.window(),
                 duration=2000,
                 position=InfoBarPosition.BOTTOM,
             )
-            
-            self.saved.emit(self._platform, platform_config.__dict__)
+
+            self.saved.emit(self._platform, {})
             self.closed.emit()
-            
+
         except Exception as e:
-            InfoBar.error(
-                title="保存失败",
-                content=str(e),
-                parent=self.window()
-            )
+            InfoBar.error(title="保存失败", content=str(e), parent=self.window())
 
 
 # ═══════════════════════════════════════════════════════════
@@ -256,10 +349,10 @@ class PlatformEditCard(QWidget):
 
 class PlatformStatusRow(CardWidget):
     """平台状态行"""
-    
-    editRequested = pyqtSignal(str)  # platform
+
+    editRequested = pyqtSignal(str)
     enabledChanged = pyqtSignal(str, bool)
-    
+
     def __init__(self, platform: str, name: str, icon: QIcon, parent=None):
         super().__init__(parent)
         self._platform = platform
@@ -267,78 +360,74 @@ class PlatformStatusRow(CardWidget):
         self._icon = icon
         self._setup_ui()
         self._load_config()
-    
+
     def _setup_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(10)
-        
-        # 平台图标
+
         icon_label = IconWidget(self._icon)
         icon_label.setFixedSize(24, 24)
         layout.addWidget(icon_label)
-        
-        # 名称
+
         self.name_label = StrongBodyLabel(self._name)
         self.name_label.setFixedWidth(80)
         layout.addWidget(self.name_label)
-        
-        # 状态
+
         self.status_label = BodyLabel("未连接")
         self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
         layout.addWidget(self.status_label, 1)
-        
-        # 开关
+
         self.enable_switch = SwitchButton()
         SwitchStyles.configure(self.enable_switch)
         self.enable_switch.setOffText("")
         self.enable_switch.setOnText("")
         self.enable_switch.checkedChanged.connect(self._on_enabled_changed)
         layout.addWidget(self.enable_switch)
-        
-        # 编辑按钮
+
         self.edit_btn = ToolButton(FluentIcon.EDIT)
         self.edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.edit_btn.setStyleSheet(ButtonStyles.tool_button())
         self.edit_btn.clicked.connect(self._on_edit)
         layout.addWidget(self.edit_btn)
-        
-        # 连接按钮
+
         self.connect_btn = PushButton("连接")
         self.connect_btn.setFixedWidth(60)
         self.connect_btn.clicked.connect(self._on_connect)
         layout.addWidget(self.connect_btn)
-    
+
+    def _resolve_enum(self):
+        from app.gateway.base import Platform
+        mapping = {
+            "wecom": Platform.WECOM,
+            "dingtalk": Platform.DINGTALK,
+            "telegram": Platform.TELEGRAM,
+            "discord": Platform.DISCORD,
+            "feishu": Platform.FEISHU,
+            "slack": Platform.SLACK,
+        }
+        return mapping.get(self._platform, Platform.WECOM)
+
     def _load_config(self):
-        """加载配置"""
         try:
             from app.gateway.config import get_gateway_config
-            from app.gateway.base import Platform
-            
-            config = get_gateway_config()
-            platform_enum = Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK
-            p_config = config.get_platform_config(platform_enum)
-            
-            self.enable_switch.setChecked(p_config.enabled)
-            self._has_config = bool(p_config.bot_id or p_config.client_id)
-            
-        except Exception as e:
-            print(f"[PlatformStatusRow] Load config error: {e}")
-            self._has_config = False
-    
+            cfg = get_gateway_config().get_platform_config(self._resolve_enum())
+            self.enable_switch.setChecked(cfg.enabled)
+        except Exception:
+            pass
+
     def _on_enabled_changed(self, checked: bool):
         self._save_enabled(checked)
         self.enabledChanged.emit(self._platform, checked)
-    
+
     def _on_edit(self):
         self.editRequested.emit(self._platform)
-    
+
     def _on_connect(self):
-        """连接平台（在后台线程运行，不阻塞 UI）"""
         from app.gateway.base import Platform
         import threading
 
-        platform_enum = Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK
+        platform_enum = self._resolve_enum()
 
         def _do_connect():
             try:
@@ -351,61 +440,32 @@ class PlatformStatusRow(CardWidget):
                 if success:
                     self.update_status(connected=True)
                 else:
-                    error = getattr(manager, "_last_error", None) or "连接失败"
-                    self.update_status(connected=False, error=str(error)[:30])
+                    self.update_status(connected=False, error="连接失败")
             except Exception as e:
                 self.update_status(connected=False, error=str(e)[:30])
 
         t = threading.Thread(target=_do_connect, daemon=True)
         t.start()
         self.update_status(connected=False, error="连接中...")
-    
+
     def _save_enabled(self, enabled: bool):
         try:
             from app.gateway.config import get_gateway_config
-            from app.gateway.base import Platform, PlatformConfig
-            
-            config = get_gateway_config()
-            platform_enum = Platform.WECOM if self._platform == "wecom" else Platform.DINGTALK
-            
-            # 读取现有配置
-            p_config = config.get_platform_config(platform_enum)
-            
-            # 更新启用状态
-            if self._platform == "wecom":
-                new_config = PlatformConfig(
-                    enabled=enabled,
-                    platform=Platform.WECOM,
-                    bot_id=p_config.bot_id,
-                    secret=p_config.secret,
-                    websocket_url=p_config.websocket_url,
-                )
-            else:
-                new_config = PlatformConfig(
-                    enabled=enabled,
-                    platform=Platform.DINGTALK,
-                    client_id=p_config.client_id,
-                    client_secret=p_config.client_secret,
-                )
-            
-            config.set_platform_config(platform_enum, new_config)
-            
+            get_gateway_config().set_platform_enabled(self._resolve_enum(), enabled)
         except Exception as e:
             print(f"[PlatformStatusRow] Save enabled error: {e}")
-    
+
     def update_status(self, connected: bool, error: str = None):
         if connected:
             self.status_label.setText("已连接 ✓")
             self.status_label.setStyleSheet("color: #52c41a;")
         elif error:
-            self.status_label.setText(f"错误")
+            self.status_label.setText(error)
             self.status_label.setStyleSheet("color: #ff4d4f;")
-            self.status_label.setToolTip(error)
         else:
             self.status_label.setText("未连接")
             self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
-            self.status_label.setToolTip("")
-    
+
     def set_enabled(self, enabled: bool):
         self.enable_switch.setChecked(enabled)
 
@@ -417,147 +477,100 @@ class PlatformStatusRow(CardWidget):
 class GatewaySettingCard(ExpandSettingCard):
     """
     Gateway 通讯平台设置卡片
-    
-    管理企业微信和钉钉的连接配置。
+
+    管理企业微信、钉钉、Telegram、Discord、飞书、Slack 的连接配置。
     """
-    
+
     def __init__(self, icon, title: str, content: str = None, parent=None, home=None):
         super().__init__(icon, title, content, parent)
         self._home = home
-        
-        # 编辑卡片引用
         self._current_edit_card: PlatformEditCard = None
         self._current_platform: str = None
-        
+        self._rows: dict = {}
+
         self._setup_ui()
         self._refresh()
-    
+
     def _setup_ui(self):
         self.viewLayout.setSpacing(2)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
         self.view.setStyleSheet("background-color: transparent;")
-        
-        # 企业微信行
-        self.wecom_row = PlatformStatusRow("wecom", "企业微信", get_icon("企业微信"), self.view)
-        self.wecom_row.editRequested.connect(self._show_edit_card)
-        self.wecom_row.enabledChanged.connect(self._on_platform_enabled_changed)
-        self.viewLayout.addWidget(self.wecom_row)
-        
-        # 钉钉行
-        self.dingtalk_row = PlatformStatusRow("dingtalk", "钉钉", get_icon("钉钉"), self.view)
-        self.dingtalk_row.editRequested.connect(self._show_edit_card)
-        self.dingtalk_row.enabledChanged.connect(self._on_platform_enabled_changed)
-        self.viewLayout.addWidget(self.dingtalk_row)
-        
-        # 编辑卡片容器（放在 view 中）
+
+        # 为每个平台创建状态行
+        for key, info in PLATFORM_DEFS.items():
+            row = PlatformStatusRow(key, info["name"], get_icon(info["icon"]), self.view)
+            row.editRequested.connect(self._show_edit_card)
+            row.enabledChanged.connect(self._on_platform_enabled_changed)
+            self.viewLayout.addWidget(row)
+            self._rows[key] = row
+
+        # 编辑卡片容器
         self.edit_container = QWidget(self.view)
         self.edit_container.setStyleSheet("background: rgba(30, 30, 30, 100); border-radius: 8px;")
         self.edit_layout = QVBoxLayout(self.edit_container)
         self.edit_layout.setContentsMargins(8, 8, 8, 8)
         self.edit_container.hide()
         self.viewLayout.addWidget(self.edit_container)
-    
+
     def _show_edit_card(self, platform: str):
         """显示编辑卡片"""
-        # 隐藏状态行
-        self.wecom_row.hide()
-        self.dingtalk_row.hide()
-        
+        # 隐藏所有状态行
+        for row in self._rows.values():
+            row.hide()
+
         # 清理旧的编辑卡片
         while self.edit_layout.count():
             item = self.edit_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        
+
         # 创建新的编辑卡片
         self._current_platform = platform
         self._current_edit_card = PlatformEditCard(platform, self.edit_container)
         self._current_edit_card.saved.connect(self._on_edit_saved)
         self._current_edit_card.closed.connect(self._hide_edit_card)
         self.edit_layout.addWidget(self._current_edit_card)
-        
+
         self.edit_container.show()
         self._adjustViewSize()
-    
+
     def _hide_edit_card(self):
-        """隐藏编辑卡片"""
+        """隐藏编辑卡片，恢复状态行"""
         self.edit_container.hide()
-        self.wecom_row.show()
-        self.dingtalk_row.show()
+        for row in self._rows.values():
+            row.show()
         self._current_edit_card = None
         self._current_platform = None
         self._adjustViewSize()
-    
+
     def _on_edit_saved(self, platform: str, config: dict):
-        """编辑保存后刷新"""
         self._refresh()
-    
+
     def _on_platform_enabled_changed(self, platform: str, enabled: bool):
-        """平台启用状态改变"""
         self._refresh()
-    
+
     def _refresh(self):
         """刷新状态"""
         try:
             from app.gateway.config import get_gateway_config
             from app.gateway.base import Platform
-            
-            config = get_gateway_config()
-            
-            # 企业微信
-            wecom_config = config.get_platform_config(Platform.WECOM)
-            self.wecom_row.set_enabled(wecom_config.enabled)
-            
-            # 钉钉
-            dingtalk_config = config.get_platform_config(Platform.DINGTALK)
-            self.dingtalk_row.set_enabled(dingtalk_config.enabled)
-            
-            # 从管理器获取状态
-            self._update_status_from_manager()
-            
+
+            config_helper = get_gateway_config()
+            mapping = {
+                "wecom": Platform.WECOM,
+                "dingtalk": Platform.DINGTALK,
+                "telegram": Platform.TELEGRAM,
+                "discord": Platform.DISCORD,
+                "feishu": Platform.FEISHU,
+                "slack": Platform.SLACK,
+            }
+            for key, enum in mapping.items():
+                row = self._rows.get(key)
+                if row:
+                    try:
+                        pc = config_helper.get_platform_config(enum)
+                        row.set_enabled(pc.enabled)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[GatewaySettingCard] Refresh error: {e}")
-    
-    def _update_status_from_manager(self):
-        """从管理器获取并更新状态"""
-        try:
-            from app.gateway.manager import get_platform_manager
-            from app.gateway.base import Platform
-            
-            manager = get_platform_manager()
-            if manager:
-                status = manager.get_status()
-                platforms = status.get("platforms", {})
-                
-                # 企业微信状态
-                wecom = platforms.get(Platform.WECOM.value, {})
-                self.wecom_row.update_status(
-                    connected=wecom.get("connected", False),
-                    error=wecom.get("error")
-                )
-                
-                # 钉钉状态
-                dingtalk = platforms.get(Platform.DINGTALK.value, {})
-                self.dingtalk_row.update_status(
-                    connected=dingtalk.get("connected", False),
-                    error=dingtalk.get("error")
-                )
-                
-        except Exception as e:
-            print(f"[GatewaySettingCard] Update status error: {e}")
-    
-    def update_status(self, status: dict):
-        """更新所有平台状态"""
-        platforms = status.get("platforms", {})
-        
-        wecom = platforms.get("wecom", {})
-        self.wecom_row.update_status(
-            connected=wecom.get("connected", False),
-            error=wecom.get("error")
-        )
-        
-        dingtalk = platforms.get("dingtalk", {})
-        self.dingtalk_row.update_status(
-            connected=dingtalk.get("connected", False),
-            error=dingtalk.get("error")
-        )

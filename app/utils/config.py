@@ -239,6 +239,32 @@ class Settings(QConfig):
     gateway_dingtalk_enabled = ConfigItem("Gateway", "DingTalk/Enabled", False, BoolValidator())
     gateway_dingtalk_client_id = ConfigItem("Gateway", "DingTalk/ClientID", "")
     gateway_dingtalk_client_secret = ConfigItem("Gateway", "DingTalk/ClientSecret", "")
+    
+    # Telegram
+    gateway_telegram_enabled = ConfigItem("Gateway", "Telegram/Enabled", False, BoolValidator())
+    gateway_telegram_token = ConfigItem("Gateway", "Telegram/Token", "")
+    gateway_telegram_require_mention = ConfigItem("Gateway", "Telegram/RequireMention", True, BoolValidator())
+    
+    # Discord
+    gateway_discord_enabled = ConfigItem("Gateway", "Discord/Enabled", False, BoolValidator())
+    gateway_discord_token = ConfigItem("Gateway", "Discord/Token", "")
+    gateway_discord_require_mention = ConfigItem("Gateway", "Discord/RequireMention", True, BoolValidator())
+    
+    # WhatsApp (Twilio)
+    gateway_whatsapp_enabled = ConfigItem("Gateway", "WhatsApp/Enabled", False, BoolValidator())
+    gateway_whatsapp_account_sid = ConfigItem("Gateway", "WhatsApp/AccountSID", "")
+    gateway_whatsapp_auth_token = ConfigItem("Gateway", "WhatsApp/AuthToken", "")
+    gateway_whatsapp_from_number = ConfigItem("Gateway", "WhatsApp/FromNumber", "")
+    
+    # 飞书
+    gateway_feishu_enabled = ConfigItem("Gateway", "Feishu/Enabled", False, BoolValidator())
+    gateway_feishu_app_id = ConfigItem("Gateway", "Feishu/AppID", "")
+    gateway_feishu_app_secret = ConfigItem("Gateway", "Feishu/AppSecret", "")
+    
+    # Slack
+    gateway_slack_enabled = ConfigItem("Gateway", "Slack/Enabled", False, BoolValidator())
+    gateway_slack_bot_token = ConfigItem("Gateway", "Slack/BotToken", "")
+    gateway_slack_app_token = ConfigItem("Gateway", "Slack/AppToken", "")
 
 
 

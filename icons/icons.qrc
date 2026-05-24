@@ -5,8 +5,10 @@
     <file>MCP.svg</file>
     <file>MiniMax.svg</file>
     <file>Ollama.svg</file>
+    <file>Telegram.svg</file>
     <file>baidu.svg</file>
     <file>deepseek.svg</file>
+    <file>discord.svg</file>
     <file>drifox.ico</file>
     <file>fox_bg.png</file>
     <file>gemini-ai.svg</file>
@@ -15,6 +17,8 @@
     <file>opencode.svg</file>
     <file>qwen.svg</file>
     <file>siliconflow.png</file>
+    <file>slack.svg</file>
+    <file>whatsapp.svg</file>
     <file>主题风格.svg</file>
     <file>云通信.svg</file>
     <file>企业微信.svg</file>
@@ -57,5 +61,6 @@
     <file>钉钉.svg</file>
     <file>锁定.svg</file>
     <file>长期记忆.svg</file>
+    <file>飞书.svg</file>
   </qresource>
 </RCC>

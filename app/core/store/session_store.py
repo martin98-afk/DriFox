@@ -122,7 +122,7 @@ class SessionStore:
             try:
                 success, result = self._db.execute_sql('PRAGMA integrity_check')
                 if success and result:
-                    check_result = result[0][0] if isinstance(result[0], tuple) else result[0].get(0, 'ok')
+                    check_result = result[0][0] if isinstance(result[0], (tuple, list)) else str(result[0]) if not isinstance(result[0], dict) else result[0].get(0, 'ok')
                     if check_result != 'ok':
                         logger.warning(f"[SessionStore] 数据库完整性检查失败: {check_result}")
                         self._repair_database()

@@ -24,6 +24,11 @@ class Platform(Enum):
     """支持的通讯平台"""
     WECOM = "wecom"
     DINGTALK = "dingtalk"
+    TELEGRAM = "telegram"
+    DISCORD = "discord"
+    WHATSAPP = "whatsapp"
+    FEISHU = "feishu"
+    SLACK = "slack"
 
 
 class MessageType(Enum):
@@ -124,6 +129,9 @@ class PlatformConfig:
     # 钉钉配置
     client_id: Optional[str] = None
     client_secret: Optional[str] = None
+    
+    # 通用配置（适用于 Telegram、Discord 等）
+    token: Optional[str] = None
     
     # 通用配置
     extra: Dict[str, Any] = field(default_factory=dict)
