@@ -6977,12 +6977,28 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
 
         self._stop_deferred_pending = False
-        interrupted_messages: List[Dict[str, Any]] = []
 
-        # 完成停止流程（可能会阻塞等待 worker 线程结束）
+        # 🛡️ 在线程中执行阻塞的 finalize_stop，不阻塞 UI 线程
         if self.backend and self.backend.chat_engine:
-            interrupted_messages = self.backend.finalize_stop() or []
+            import threading
+            engine_ref = self.backend.chat_engine
 
+            def _do_finalize():
+                interrupted_messages = engine_ref.finalize_stop() or []
+                # 回到主线程更新 UI
+                if interrupted_messages and not getattr(self, '_is_destroyed', False):
+                    QTimer.singleShot(0, lambda m=interrupted_messages: self._on_finalize_complete(m))
+
+            t = threading.Thread(target=_do_finalize, daemon=True)
+            t.start()
+
+    def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
+        """主线程回调：处理 finalize_stop 异步完成后的消息保存
+
+        由 _deferred_stop_handler 启动的后台线程通过 QTimer.singleShot 调用。
+        """
+        if getattr(self, '_is_destroyed', False):
+            return
         if interrupted_messages:
             self._on_messages_updated(interrupted_messages)
             if self.history_manager:

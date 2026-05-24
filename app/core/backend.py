@@ -713,7 +713,6 @@ class ChatBackend(QObject):
                 """发送中间更新到平台"""
                 if not _ev_loop or not content.strip():
                     return
-                logger.debug(f"[Gateway] _push_to_platform: content_len={len(content)}")
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self._gateway_send_message(gw_platform, chat_id, content),

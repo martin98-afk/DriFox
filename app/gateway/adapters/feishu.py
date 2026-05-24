@@ -68,6 +68,10 @@ class FeishuAdapter(BasePlatformAdapter):
         self._message_handler = None
         self._feishu_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        
+        # 独立的事件循环，用于执行消息处理（不与 WS client 的循环冲突）
+        self._handler_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._handler_loop_thread: Optional[threading.Thread] = None
     
     def set_message_handler(self, handler) -> None:
         """设置消息处理器"""
@@ -92,34 +96,38 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         
         try:
+            import lark_oapi as lark
             from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
             from lark_oapi.ws import Client as FeishuWSClient
+            from lark_oapi.core.const import FEISHU_DOMAIN, LARK_DOMAIN
             
             # 创建事件处理器
-            if self._encrypt_key and self._verification_token:
-                handler = EventDispatcherHandler.builder(
-                    encrypt_key=self._encrypt_key,
-                    verification_token=self._verification_token
-                ).register_p2_im_message_receive_v1(
-                    self._on_feishu_message
-                ).build()
-            else:
-                # 不使用加密
-                handler = EventDispatcherHandler.builder(
-                    encrypt_key="dummy_key_for_non_encrypted",
-                    verification_token="dummy_token_for_non_encrypted"
-                ).register_p2_im_message_receive_v1(
-                    self._on_feishu_message
-                ).build()
+            # 关键：直接传递 encrypt_key 和 verification_token（即使是空字符串）
+            # 不要传 dummy 值！SDK 的 _do_without_validation 方法（WebSocket 使用）
+            # 会跳过验证/解密，所以空值完全 OK
+            handler = EventDispatcherHandler.builder(
+                self._encrypt_key or "",
+                self._verification_token or "",
+            ).register_p2_im_message_receive_v1(
+                self._on_feishu_message
+            ).build()
             
-            # 创建 WebSocket 客户端
+            # 创建 WebSocket 客户端 - 传入 domain 参数
             self._ws_client = FeishuWSClient(
                 app_id=self._app_id,
                 app_secret=self._app_secret,
+                log_level=lark.LogLevel.INFO,
                 event_handler=handler,
+                domain=FEISHU_DOMAIN,  # 明确指定域名
             )
             
-            # 在独立线程中启动（避免事件循环冲突）
+            # 启动独立的事件循环线程，用于执行消息处理回调
+            # 注意：WS client 的 on_message 回调在 WS 线程的事件循环中执行，
+            # 不能直接在回调里调用 asyncio.run()（会冲突），
+            # 所以需要独立的 loop 来执行 message_handler
+            self._start_handler_loop()
+            
+            # 在独立线程中启动 WS client
             self._stop_event.clear()
             self._feishu_thread = threading.Thread(
                 target=self._run_feishu_client,
@@ -129,7 +137,7 @@ class FeishuAdapter(BasePlatformAdapter):
             self._feishu_thread.start()
             
             # 等待连接建立
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
             self._running = True
             self._connected = True
@@ -143,19 +151,51 @@ class FeishuAdapter(BasePlatformAdapter):
             traceback.print_exc()
             return False
     
+    def _start_handler_loop(self) -> None:
+        """启动独立的事件循环线程，用于调度消息处理回调"""
+        if self._handler_loop is not None:
+            return
+        self._handler_loop = asyncio.new_event_loop()
+        self._handler_loop_thread = threading.Thread(
+            target=self._run_handler_loop,
+            name="FeishuHandlerLoop",
+            daemon=True,
+        )
+        self._handler_loop_thread.start()
+
+    def _run_handler_loop(self) -> None:
+        """运行消息处理事件循环"""
+        asyncio.set_event_loop(self._handler_loop)
+        self._handler_loop.run_forever()
+    
     def _run_feishu_client(self) -> None:
-        """在独立线程中运行飞书客户端"""
+        """在独立线程中运行飞书客户端
+
+        参考 hermes-agent 的 _run_official_feishu_ws_client 实现。
+        关键：
+        1. 创建独立事件循环并设置到线程
+        2. 同时设置 lark_oapi.ws.client 模块的 loop 变量
+           （WS 客户端的 _reconnect / _ping_loop 等方法依赖此变量）
+        """
         try:
-            # 创建独立的事件循环
+            import lark_oapi.ws.client as ws_client_module
+            
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            
+            # 关键！设置 ws 模块的全局 loop，否则 WS client 内部会使用
+            # 模块导入时的原始事件循环（可能是主线程的），导致事件循环冲突
+            ws_client_module.loop = loop
             
             # 运行客户端
             try:
                 self._ws_client.start()
             except Exception as e:
-                if "event loop" not in str(e).lower() and "running" not in str(e).lower():
+                msg = str(e).lower()
+                if "event loop" not in msg and "running" not in msg:
                     logger.error("[Feishu] Client error: %s", e)
+                else:
+                    logger.debug("[Feishu] Client stopped (expected): %s", e)
             finally:
                 loop.close()
                 
@@ -163,39 +203,53 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.error("[Feishu] Thread error: %s", e)
     
     def _on_feishu_message(self, data: Any) -> None:
-        """处理接收到的飞书消息"""
+        """处理接收到的飞书消息
+
+        注意：lark_oapi SDK 的 WebSocket 模式通过 _do_without_validation 分发事件，
+        回调接收到的 data 是 P2ImMessageReceiveV1 对象，结构为:
+            data.event          -> P2ImMessageReceiveV1Data
+                .message       -> EventMessage
+                    .message_id, .chat_id, .chat_type, .message_type,
+                    .content (JSON 字符串, 如 '{"text":"hello"}')
+                .sender        -> EventSender
+                    .sender_id  -> UserId {open_id, user_id, union_id}
+                    .sender_type, .tenant_key
+        """
         try:
-            # 飞书 SDK 返回的是 P2ImMessageReceiveV1 对象，不是字典
-            # 需要使用 hasattr 或 getattr 来访问属性
-            
+            # 获取 event 包装层 (P2ImMessageReceiveV1Data)
+            event_wrapper = getattr(data, 'event', None)
+            if event_wrapper is None:
+                logger.debug("[Feishu] No event wrapper in callback data")
+                return
+
             # 获取消息对象
-            message = getattr(data, 'message', None) or getattr(data, 'msg', None)
-            sender = getattr(data, 'sender', None)
-            
+            message = getattr(event_wrapper, 'message', None)
+            sender = getattr(event_wrapper, 'sender', None)
+
             if message is None:
                 logger.debug("[Feishu] No message in callback data")
                 return
-            
-            # 提取字段（使用 getattr 安全访问）
+
+            # 提取字段
             message_id = str(getattr(message, 'message_id', '') or '')
             chat_id = str(getattr(message, 'chat_id', '') or '')
             chat_type = str(getattr(message, 'chat_type', 'p2p') or 'p2p')
-            msg_type = str(getattr(message, 'msg_type', 'text') or 'text')
-            body = getattr(message, 'body', {})
-            
-            # 解析内容
+
+            # EventMessage 使用 message_type（而不是 msg_type），content 是 JSON 字符串
+            msg_type = str(getattr(message, 'message_type', 'text') or 'text')
+            content_str = str(getattr(message, 'content', '') or '')
+
+            # 解析 content JSON 字符串
             text = ""
-            if isinstance(body, dict):
-                text = body.get("text", "") or ""
-            elif hasattr(body, 'text'):
-                text = str(body.text or "")
-            else:
-                text = str(body or "")
-            
-            # 过滤心跳消息
-            if not text and msg_type == "post":
-                return
-            
+            try:
+                if content_str:
+                    content_data = json.loads(content_str)
+                    if isinstance(content_data, dict):
+                        text = content_data.get("text", "") or content_data.get("content", "") or ""
+            except (json.JSONDecodeError, TypeError):
+                # 如果不是 JSON，直接作为文本
+                text = content_str
+
             # 获取发送者信息
             user_id = ""
             user_name = ""
@@ -203,8 +257,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 sender_id = getattr(sender, 'sender_id', None)
                 if sender_id:
                     user_id = str(getattr(sender_id, 'open_id', '') or getattr(sender_id, 'user_id', '') or '')
-                user_name = str(getattr(sender, 'sender_name', '') or user_id)
-            
+                # EventSender 没有 sender_name，用 user_id 代替
+                user_name = user_id
+
             # 确定消息类型
             if text.startswith('/'):
                 event_msg_type = MessageType.COMMAND
@@ -214,7 +269,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 event_msg_type = MessageType.FILE
             else:
                 event_msg_type = MessageType.TEXT
-            
+
             # 构建事件
             event = MessageEvent(
                 text=text,
@@ -227,17 +282,28 @@ class FeishuAdapter(BasePlatformAdapter):
                 chat_type="dm" if chat_type == "p2p" else "group",
                 metadata={"chat_id": chat_id},
             )
-            
+
             # 处理消息
             if self._message_handler:
                 try:
-                    # 在新线程的上下文中处理
-                    asyncio.run(self._message_handler(event))
+                    # 重要：WS client 回调运行在 WS 线程的事件循环中，
+                    # 不能在此调用 asyncio.run()，会触发 RuntimeError。
+                    # 使用独立的 handler_loop 来调度消息处理。
+                    loop = self._handler_loop
+                    if loop is not None and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self._message_handler(event),
+                            loop,
+                        )
+                    else:
+                        logger.error("[Feishu] Handler loop not running, dropping message")
                 except Exception as e:
                     logger.error("[Feishu] Handle message error: %s", e)
-            
+
         except Exception as e:
             logger.error("[Feishu] Parse message error: %s", e)
+            import traceback
+            traceback.print_exc()
     
     async def disconnect(self) -> None:
         """断开连接"""
@@ -250,6 +316,15 @@ class FeishuAdapter(BasePlatformAdapter):
                 self._ws_client.stop()
             except Exception as e:
                 logger.warning("[Feishu] Error during disconnect: %s", e)
+        
+        # 停止 handler loop
+        if self._handler_loop is not None and self._handler_loop.is_running():
+            try:
+                self._handler_loop.call_soon_threadsafe(self._handler_loop.stop)
+            except Exception:
+                pass
+        self._handler_loop = None
+        self._handler_loop_thread = None
         
         logger.info("[Feishu] Disconnected")
     
