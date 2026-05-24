@@ -8,7 +8,7 @@
 """
 from typing import List, Dict
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QMouseEvent, QFontMetrics
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -237,6 +237,7 @@ class CommandCard(QWidget):
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
         self._item_widgets: List[CommandItemWidget] = []
+        self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
         self._current_query = ""
 
@@ -346,6 +347,8 @@ class CommandCard(QWidget):
         if len(self._filtered_items) > 0:
             self._selected_index = 0
             self._update_selection()
+            # 延迟滚动到顶部：等待布局完成后强制归零，避免初始渲染时 scroll 位置偏移
+            QTimer.singleShot(0, lambda: self._scroll_area.verticalScrollBar().setValue(0))
 
     def _render(self):
         """渲染当前筛选结果"""
@@ -354,6 +357,12 @@ class CommandCard(QWidget):
             self._scroll_layout.removeWidget(w)
             w.deleteLater()
         self._item_widgets.clear()
+
+        # 清除上一次的分隔线（否则每次刷新都会留下旧的 QFrame 在 layout 中积累）
+        if self._divider is not None:
+            self._scroll_layout.removeWidget(self._divider)
+            self._divider.deleteLater()
+            self._divider = None
 
         # 检查是否需要分隔线（命令/技能在前，智能体在后）
         has_commands_or_skills = any(item["type"] in ("command", "skill") for item in self._filtered_items)
@@ -370,6 +379,7 @@ class CommandCard(QWidget):
                 divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
                 divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 self._scroll_layout.addWidget(divider)
+                self._divider = divider  # 缓存引用，下次刷新时清除
                 divider_inserted = True
 
             widget = CommandItemWidget(item, self._current_query, self._scroll_content)

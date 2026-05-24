@@ -240,17 +240,17 @@ class FileTools:
             end_idx = min(total_lines, start_idx + limit)
 
             content_slice = all_lines[start_idx:end_idx]
-
+            res_info = f"#File: {path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n#Content:\n"
             if show_line_numbers:
                 # 带行号格式
                 formatted_content = "".join(
-                    f"{i + start_idx + 1:6d} | {line}" for i, line in enumerate(content_slice)
+                    f"{i + start_idx + 1:6d}|{line}" for i, line in enumerate(content_slice)
                 )
-                res_info = f"File: {path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n"
+
                 return ToolResult(True, content=res_info + formatted_content)
             else:
                 # 返回原文
-                return ToolResult(True, content="".join(content_slice))
+                return ToolResult(True, content=res_info + "".join(content_slice))
         except Exception as e:
             return ToolResult(False, error=f"Read error: {str(e)}")
 

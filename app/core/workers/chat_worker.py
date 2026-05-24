@@ -1372,7 +1372,7 @@ class OpenAIChatWorker(QThread):
                                 tail = buffer["function"]["arguments"][-50:].replace('\n', ' ')
                                 progress_args = {
                                     "_status": "loading",
-                                    "_preview_hint": f"接收参数中 ({args_len} 字符) …{tail}",
+                                    "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                 }
                                 self._emit_with_callback(
                                     "tool_args_updated", self.tool_args_updated,
