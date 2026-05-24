@@ -201,8 +201,8 @@ class Settings(QConfig):
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "midnight",
-        OptionsValidator(["midnight"]),  # 运行时动态补充
+        "fallout",
+        OptionsValidator(["fallout"]),  # 运行时动态补充
     )
 
     # ========== 会话项目管理 ==========

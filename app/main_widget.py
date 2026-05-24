@@ -1030,9 +1030,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._update_branch()
         # 标题编辑（行内编辑模式）
-        self.title_edit = QLineEdit("新对话", self)
+        self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
-        title_style = """QLineEdit {
+        title_style = """QLabel {
+            color: #f3f6fc;
+            font-size: 15px;
+            font-weight: bold;
+            padding: 6px 4px;
+            border-radius: 10px;
+            background-color: transparent;
+        }
+        QLabel:hover {
+            background-color: rgba(255, 255, 255, 0.06);
+        }
+        QLineEdit {
             color: #f3f6fc;
             font-size: 15px;
             font-weight: bold;
@@ -1041,28 +1052,19 @@ class OpenAIChatToolWindow(ToolWindow):
             background-color: transparent;
             border: none;
         }
-        QLineEdit:hover {
-            background-color: rgba(255, 255, 255, 0.06);
-        }
         QLineEdit:focus {
             background-color: rgba(255, 255, 255, 0.1);
             border: 1px solid rgba(255, 255, 255, 0.3);
         }
-    """.replace("font-family:", font_css)
+    """
         title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
-        self.title_edit.setFixedHeight(32)
-        self.title_edit.setCursor(Qt.IBeamCursor)
-        self.title_edit.setFocusPolicy(Qt.ClickFocus)
         self.title_edit.returnPressed.connect(self._on_title_edit_finished)
         self.title_edit.editingFinished.connect(self._on_title_edit_finished)
-        # 初始设置为只读，点击后进入编辑模式
-        self.title_edit.setReadOnly(True)
-        self.title_edit.mousePressEvent = self._on_title_clicked
 
         session_bar_layout.addWidget(self._project_label)
         session_bar_layout.addWidget(self._branch_widget)
-        session_bar_layout.addWidget(self.title_edit)
+        session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
         # right_layout 保持简化，显示余额和 context_usage_ring
         right_layout = QHBoxLayout()
@@ -1078,7 +1080,6 @@ class OpenAIChatToolWindow(ToolWindow):
         right_layout.addWidget(self.context_usage_ring)
         right_layout.addSpacing(10)
 
-        session_bar_layout.addStretch()
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
 
@@ -2604,7 +2605,18 @@ If you're uncertain about something and can't verify it with these tools, say "I
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):
-            title_style = """QLineEdit {
+            title_style = """QLabel {
+                color: %s;
+                font-size: 15px;
+                font-weight: bold;
+                padding: 6px 4px;
+                border-radius: 10px;
+                background-color: transparent;
+            }
+            QLabel:hover {
+                background-color: rgba(255, 255, 255, 0.06);
+            }
+            QLineEdit {
                 color: %s;
                 font-size: 15px;
                 font-weight: bold;
@@ -2613,14 +2625,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
                 background-color: transparent;
                 border: none;
             }
-            QLineEdit:hover {
-                background-color: rgba(255, 255, 255, 0.06);
-            }
             QLineEdit:focus {
                 background-color: rgba(255, 255, 255, 0.1);
                 border: 1px solid rgba(255, 255, 255, 0.3);
             }
-            """ % Colors.TEXT_PRIMARY
+            """ % (Colors.TEXT_PRIMARY, Colors.TEXT_PRIMARY)
             self.title_edit.setStyleSheet(title_style)
         # 刷新输入卡片背景
         if hasattr(self, '_input_card'):
@@ -2936,8 +2945,6 @@ If you're uncertain about something and can't verify it with these tools, say "I
         self._current_session_id = session.session_id
         self._history_preview_messages = None
         self._clear_chat_area()
-        self._title_editing_mode = False  # 重置编辑模式
-        self.title_edit.setReadOnly(True)  # 恢复只读模式
         self.title_edit.setText("新对话")
         self.node_preview.clear_nodes()
         if self._todo_floating_widget:
@@ -6916,32 +6923,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
         InfoBar.success("已保存", "长期记忆已更新", parent=self, duration=1500, position=InfoBarPosition.BOTTOM)
 
     def _on_title_edit_finished(self):
-        """标题行内编辑完成"""
-        if not hasattr(self, '_title_editing_mode'):
-            return
-        
+        """标题编辑完成 - 保存用户编辑的标题"""
         new_title = self.title_edit.text().strip()
         if not new_title:
-            # 恢复原标题
-            self._restore_title_display()
             return
-        
-        # 保存编辑后的标题
         self._save_edited_title(new_title)
-        
-        # 退出编辑模式
-        self._title_editing_mode = False
-        self.title_edit.setReadOnly(True)
-    
-    def _on_title_clicked(self, event):
-        """点击标题进入编辑模式"""
-        if getattr(self, '_title_editing_mode', False):
-            return
-        self._title_editing_mode = True
-        self.title_edit.setReadOnly(False)
-        self.title_edit.selectAll()
-        self.title_edit.setFocus()
-        event.accept()
     
     def _save_edited_title(self, new_title: str):
         """保存用户编辑的标题"""
