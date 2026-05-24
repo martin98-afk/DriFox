@@ -74,6 +74,10 @@ class SendableTextEdit(TextEdit):
         self._last_slash_trigger_time = 0  # 上次触发时间（毫秒）
         self._slash_trigger_count = 0  # 快速触发计数
 
+        # 输入历史浏览
+        self._history_list: list = []          # 最近输入历史（最新在前）
+        self._history_index: int = -1          # -1 = 不在浏览模式
+
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
 
@@ -223,6 +227,61 @@ class SendableTextEdit(TextEdit):
         """卡片被关闭时的清理"""
         self._slash_trigger_pos = -1
 
+    # ==================== 输入历史浏览 ====================
+
+    def load_history(self, history_list: list):
+        """从外部加载输入历史列表"""
+        self._history_list = list(history_list)
+        self._history_index = -1
+
+    def _enter_history_mode(self):
+        """进入历史浏览模式：加载最新一条"""
+        if not self._history_list:
+            return
+        self._history_index = 0
+        self._set_history_text()
+
+    def _set_history_text(self):
+        """根据当前 history_index 设置输入框文本"""
+        if 0 <= self._history_index < len(self._history_list):
+            text = self._history_list[self._history_index]
+            self.setPlainText(text)
+            # 选中全部文本，方便继续编辑
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.movePosition(QTextCursor.Start, QTextCursor.KeepAnchor)
+            self.setTextCursor(cursor)
+
+    def _navigate_history(self, direction: int):
+        """方向导航：1 = 更旧（Up），-1 = 更新（Down）"""
+        if not self._history_list:
+            return
+
+        if self._history_index < 0:
+            # 不在浏览模式
+            if direction == 1:  # Up → 进入模式
+                self._enter_history_mode()
+            return
+
+        new_index = self._history_index + direction
+
+        if new_index >= len(self._history_list):
+            # 超过最旧条目，停留在最旧
+            return
+
+        if new_index < 0:
+            # 超过最新条目，退出浏览模式
+            self._history_index = -1
+            self.clear()
+            return
+
+        self._history_index = new_index
+        self._set_history_text()
+
+    def _reset_history_mode(self):
+        """退出历史浏览模式"""
+        self._history_index = -1
+
     def _tab_complete_if_card_visible(self):
         """Tab 补全：卡片可见时选中当前项"""
         card = self._get_card()
@@ -367,13 +426,21 @@ class SendableTextEdit(TextEdit):
                 self._on_send_click()
                 event.accept()
         elif event.key() == Qt.Key_Up:
-            if event.modifiers() & Qt.ControlModifier:
+            if self._history_index >= 0 or not self.toPlainText():
+                # 历史浏览模式，或在空输入框按↑
+                self._navigate_history(1)
+                event.accept()
+            elif event.modifiers() & Qt.ControlModifier:
                 self.historyUpRequested.emit()
                 event.accept()
             else:
                 super().keyPressEvent(event)
         elif event.key() == Qt.Key_Down:
-            if event.modifiers() & Qt.ControlModifier:
+            if self._history_index >= 0:
+                # 历史浏览模式
+                self._navigate_history(-1)
+                event.accept()
+            elif event.modifiers() & Qt.ControlModifier:
                 self.historyDownRequested.emit()
                 event.accept()
             else:
@@ -635,6 +702,9 @@ class SendableTextEdit(TextEdit):
             self.ensureCursorVisible()
 
     def mousePressEvent(self, event):
+        # 点击时退出历史浏览模式
+        if self._history_index >= 0:
+            self._reset_history_mode()
         # 点击时隐藏命令卡片
         card = self._get_card()
         if card and card.is_card_visible:
@@ -649,3 +719,8 @@ class SendableTextEdit(TextEdit):
             card.dismiss()
             self.slashDismissed.emit()
         super().wheelEvent(event)
+
+    def clear(self):
+        """重写 clear 方法，清空输入时退出历史浏览模式"""
+        self._reset_history_mode()
+        super().clear()

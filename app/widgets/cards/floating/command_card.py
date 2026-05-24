@@ -439,8 +439,9 @@ class CommandCard(QWidget):
             self.dismiss()
 
     def dismiss(self):
-        """关闭卡片（仅清理状态，显示由 CardManager 控制）"""
+        """关闭卡片（清理状态并隐藏自身）"""
         self._visible = False
+        self.setVisible(False)
         self.dismissed.emit()
 
     def show_card(self, query: str = ""):

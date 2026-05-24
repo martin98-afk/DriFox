@@ -55,6 +55,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QSizePolicy,
     QTextEdit,
+    QMenu,
 )
 from markdown import Markdown
 from pygments import highlight
@@ -63,7 +64,7 @@ from pygments.lexers import get_lexer_by_name, TextLexer
 from qfluentwidgets import (
     FluentIcon,
     ToolTipFilter,
-    TransparentToolButton,
+    TransparentToolButton, getIconColor,
 )
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
@@ -1170,7 +1171,9 @@ class CodeWebViewer(QWebEngineView):
         # 透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.page().setBackgroundColor(Qt.transparent)
-        self.setContextMenuPolicy(Qt.NoContextMenu)
+        # 使用自定义右键菜单（不是浏览器默认的）
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(40)
@@ -2425,6 +2428,64 @@ class CodeWebViewer(QWebEngineView):
     def get_html(self) -> str:
         return self._markdown_text
 
+    def _show_context_menu(self, pos):
+        """显示大模型卡片右键菜单：查看差异、复制"""
+        from app.utils.design_tokens import Colors
+
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {Colors.CARD_BG_SOLID};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 8px 32px 8px 12px;
+                color: {Colors.TEXT_PRIMARY};
+                font-size: {scale_font_size(13)}px;
+                {get_font_family_css()}
+            }}
+            QMenu::item:selected {{
+                background-color: {Colors.HOVER_BG};
+                border-radius: 4px;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {Colors.BORDER};
+                margin: 4px 8px;
+            }}
+        """)
+
+        # 查看差异
+        diff_action = menu.addAction(get_icon("差异对比"), "查看差异")
+        diff_action.triggered.connect(self._request_view_diff)
+
+        menu.addSeparator()
+
+        # 复制
+        copy_action = menu.addAction(get_icon("复制"), "复制")
+        copy_action.triggered.connect(self._copy_to_clipboard)
+
+        menu.exec_(self.mapToGlobal(pos))
+
+    def _request_view_diff(self):
+        """请求查看差异 - 向上查找 MessageCard 并发出 cardDiffRequested 信号"""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'cardDiffRequested'):
+                # 通知父组件显示卡片差异
+                if parent._round_index is not None and parent._message_index is not None:
+                    parent.cardDiffRequested.emit(parent._round_index, parent._message_index)
+                break
+            parent = parent.parent()
+
+    def _copy_to_clipboard(self):
+        """复制内容到剪贴板"""
+        from PyQt5.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self._markdown_text or "")
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._streaming:
@@ -2549,6 +2610,8 @@ class PlainTextViewer(QWidget):
         self.text_edit.setReadOnly(True)
         self.text_edit.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.text_edit.setFrameShape(QTextEdit.NoFrame)
+        self.text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.text_edit.customContextMenuRequested.connect(self._show_context_menu)
         font_css = get_font_family_css()
         self.text_edit.setStyleSheet(f"""
             QTextEdit {{
@@ -2650,6 +2713,77 @@ class PlainTextViewer(QWidget):
         
         # 清理引用
         self.text_edit = None
+
+    def _show_context_menu(self, pos):
+        """显示用户卡片右键菜单：复制、撤销、删除"""
+        from app.utils.design_tokens import Colors
+
+        menu = QMenu(self.text_edit)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {Colors.CARD_BG_SOLID};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 8px 32px 8px 12px;
+                color: {Colors.TEXT_PRIMARY};
+                font-size: {scale_font_size(13)}px;
+                {get_font_family_css()}
+            }}
+            QMenu::item:selected {{
+                background-color: {Colors.HOVER_BG};
+                border-radius: 4px;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {Colors.BORDER};
+                margin: 4px 8px;
+            }}
+        """)
+
+        # 复制
+        copy_action = menu.addAction(get_icon("复制"), "复制")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard())
+
+        # 撤销
+        undo_action = menu.addAction(get_icon("撤销"), "撤销到这里")
+        undo_action.triggered.connect(lambda: self._request_undo())
+
+        menu.addSeparator()
+
+        # 删除
+        delete_action = menu.addAction(get_icon("删除"), "删除")
+        delete_action.triggered.connect(lambda: self._request_delete())
+
+        menu.exec_(self.text_edit.mapToGlobal(pos))
+
+    def _copy_to_clipboard(self):
+        """复制内容到剪贴板"""
+        from PyQt5.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self._text)
+
+    def _request_undo(self):
+        """请求撤销 - 通知父组件"""
+        # 向上查找 MessageCard 并发出 undoRequested 信号
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'undoRequested'):
+                parent.undoRequested.emit()
+                break
+            parent = parent.parent()
+
+    def _request_delete(self):
+        """请求删除 - 通知父组件"""
+        # 向上查找 MessageCard 并发出 deleteRequested 信号
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'deleteRequested'):
+                parent.deleteRequested.emit()
+                break
+            parent = parent.parent()
 
 
 class MessageCard(SimpleCardWidget):
@@ -2955,7 +3089,7 @@ class MessageCard(SimpleCardWidget):
                     lambda: self.actionRequested.emit(self.get_plain_text(), "copy"),
                 ),
                 (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
-                (FluentIcon.DELETE, "删除", self.deleteRequested.emit),
+                (get_icon("删除"), "删除", self.deleteRequested.emit),
             ]
         for ic, tp, cb in specs:
             b = TransparentToolButton(ic, self)

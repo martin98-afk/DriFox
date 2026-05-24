@@ -1327,6 +1327,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         card_layout.addWidget(self.input_area)
 
+        # 加载输入历史
+        self._load_input_history()
+
         # 命令卡片（必须是输入框创建后）
         self._command_card = CommandCard(self._bottom_input_container)
         self._command_card.setVisible(False)
@@ -5575,6 +5578,26 @@ If you're uncertain about something and can't verify it with these tools, say "I
         else:
             logger.warning(f"未找到 session_id: {session_id}")
 
+    def _load_input_history(self):
+        """从数据库加载输入历史到输入框"""
+        try:
+            if hasattr(self, 'session_store') and self.session_store:
+                history = self.session_store.get_input_history()
+                self.input_area.load_history(history)
+        except Exception:
+            pass
+
+    def _record_input_history(self, text: str):
+        """记录用户输入到历史数据库"""
+        try:
+            if hasattr(self, 'session_store') and self.session_store:
+                self.session_store.add_input_history(text)
+                # 更新输入框的历史缓存
+                history = self.session_store.get_input_history()
+                self.input_area.load_history(history)
+        except Exception:
+            pass
+
     def send_preset_question(self, question: str):
         if not isinstance(question, str) or not question.strip():
             return
@@ -5595,6 +5618,9 @@ If you're uncertain about something and can't verify it with these tools, say "I
 
         if not user_text:
             return
+
+        # ---- 记录输入到历史 ----
+        self._record_input_history(user_text)
 
         # ---- 内置命令拦截 ----
         cmd_mgr = CommandManager.get_instance()

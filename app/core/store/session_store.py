@@ -20,6 +20,7 @@ from typing import List, Dict, Optional, Any, Tuple
 from loguru import logger
 
 from app.core.store.file_operation_repository import FileOperationRepository
+from app.core.store.input_history_repo import InputHistoryRepository
 from app.core.store.memory_repository import MemoryRepository
 # 导入子模块
 from app.core.store.session_repository import SessionRepository
@@ -67,6 +68,7 @@ class SessionStore:
         self._memory_repo: Optional[MemoryRepository] = None
         self._file_op_repo: Optional[FileOperationRepository] = None
         self._subagent_log_repo: Optional[SubAgentLogRepository] = None
+        self._input_history_repo: Optional[InputHistoryRepository] = None
         
         self._init_schema()
 
@@ -222,6 +224,13 @@ class SessionStore:
                     {"name": "updated_at", "type": "TEXT"},
                 ])
 
+                # 创建输入历史表
+                self._db.create_table("input_history", [
+                    {"name": "id", "type": "INTEGER", "primary_key": True, "auto_increment": True},
+                    {"name": "content", "type": "TEXT", "not_null": True},
+                    {"name": "created_at", "type": "TEXT"},
+                ])
+
                 # 创建索引
                 self._db.execute_sql(
                     f'CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)'
@@ -239,6 +248,8 @@ class SessionStore:
                 self._memory_repo = MemoryRepository(self._db)
                 self._file_op_repo = FileOperationRepository(self._db)
                 self._subagent_log_repo = SubAgentLogRepository(self._db)
+                self._input_history_repo = InputHistoryRepository(self._db)
+                self._input_history_repo.create_table()
 
                 self._initialized = True
                 logger.info("[SessionStore] 初始化完成（仓储模式）")
@@ -567,6 +578,20 @@ class SessionStore:
             return self._file_op_repo.delete_by_call_id(session_id, call_id)
         return 0
 
+    # ==================== 输入历史操作（委托给 InputHistoryRepository）====================
+
+    def add_input_history(self, content: str) -> bool:
+        """添加输入历史"""
+        if self._input_history_repo:
+            return self._input_history_repo.add(content)
+        return False
+
+    def get_input_history(self, limit: int = 50):
+        """获取输入历史列表"""
+        if self._input_history_repo:
+            return self._input_history_repo.get_all(limit)
+        return []
+
     # ==================== 生命周期 ====================
 
     def close(self):
@@ -579,6 +604,7 @@ class SessionStore:
             self._memory_repo = None
             self._file_op_repo = None
             self._subagent_log_repo = None
+            self._input_history_repo = None
 
     # ==================== 公开子模块访问 ====================
 
