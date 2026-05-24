@@ -2118,6 +2118,14 @@ If you're uncertain about something and can't verify it with these tools, say "I
                 if hasattr(self, '_bg_label') and self._bg_label is not None:
                     self._bg_label.deleteLater()
                     self._bg_label = None
+                # 解析图片路径：主题文件夹内的相对路径基于主题目录
+                import os as _os
+                if not image.startswith(":") and not _os.path.isabs(image):
+                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
+                    if theme_dir:
+                        abs_path = str(theme_dir / image)
+                        if _os.path.exists(abs_path):
+                            image = abs_path
                 self._bg_label = QLabel(self)
                 self._bg_label.setPixmap(QPixmap(image))
                 self._bg_label.setScaledContents(True)
@@ -6277,9 +6285,11 @@ If you're uncertain about something and can't verify it with these tools, say "I
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
-        # 先渲染内容，再显示卡片，避免旧内容短暂闪现（幽灵窗口）
-        self._question_floating_widget.show_question(questions)
+        # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
         self._card_manager.show_card("question", self._window_id)
+        self._question_floating_widget.setUpdatesEnabled(False)
+        self._question_floating_widget.show_question(questions)
+        self._question_floating_widget.setUpdatesEnabled(True)
         question_text = questions[0].get("question", "") if questions else ""
         self._notify_if_inactive("需要回答问题", question_text[:100])
 
@@ -6363,6 +6373,9 @@ If you're uncertain about something and can't verify it with these tools, say "I
         # 隐藏输入框，让用户专注看问题
         if hasattr(self, '_bottom_input_container'):
             self._bottom_input_container.setVisible(False)
+        # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
+        self._card_manager.show_card("question", self._window_id)
+        self._question_floating_widget.setUpdatesEnabled(False)
         try:
             arg_str = str(arguments)[:200] if arguments else ""
             question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数: {arg_str}"
@@ -6372,19 +6385,18 @@ If you're uncertain about something and can't verify it with these tools, say "I
                 {"label": "本次会话允许", "description": ""},
                 {"label": "不允许", "description": ""},
             ]
-            # 先渲染内容，再显示卡片，避免旧内容短暂闪现（幽灵窗口）
             self._question_floating_widget.show_question(
                 [{"question": question_text, "options": options, "multiple": False}],
                 show_custom_input=False,
             )
         except Exception as e:
+            self._question_floating_widget.setUpdatesEnabled(True)
             logger.error(f"[Permission] Approval error: {e}")
             self.backend.deny_tool_permission(tool_call_id)
             self._pending_permission_tool_call_id = None
             self._restore_after_question_close()
             return
-        # 内容就绪后再显示卡片
-        self._card_manager.show_card("question", self._window_id)
+        self._question_floating_widget.setUpdatesEnabled(True)
 
     def _on_compaction_updated(self, task_id: str, new_summary: str):
         if getattr(self, '_is_destroyed', False):

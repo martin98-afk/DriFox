@@ -159,13 +159,22 @@ class CardManager:
         if card_id in win_data["system_cards"]:
             self._hide_system_cards(window_id, exclude_card_id=card_id)
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+            # 系统卡片激活，压制非系统卡片
+            win_data["suppressed_by_system"] = True
         else:
+            # 非系统卡片：检查是否被系统卡片压制（question 除外）
+            if card_id not in {"question"} and win_data.get("suppressed_by_system", False):
+                logger.debug(f"[CardManager] 窗口 {window_id} 的卡片 {card_id} 被系统卡片压制，禁止显示")
+                return
+            
             # 非系统卡片：同容器互斥
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
             # 非系统卡片显示时，如果系统卡片可见则隐藏（让系统卡片优先变成互斥）
             # 但 Question 特殊：强制关闭所有
             if card_id in {"question"}:
                 self._hide_all_cards(window_id)
+                # question 激活时不压制其他卡片（它自己会处理）
+                win_data["suppressed_by_system"] = False
         
         # 显示卡片
         try:

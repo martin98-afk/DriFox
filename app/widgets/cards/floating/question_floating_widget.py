@@ -720,14 +720,18 @@ class QuestionFloatingWidget(QWidget):
         self._save_current_answer()
         if self._current_index > 0:
             self._current_index -= 1
+            self.setUpdatesEnabled(False)
             self._render_current()
+            self.setUpdatesEnabled(True)
 
     def _on_next(self):
         self._save_current_answer()
         total = len(self._questions)
         if self._current_index < total - 1:
             self._current_index += 1
+            self.setUpdatesEnabled(False)
             self._render_current()
+            self.setUpdatesEnabled(True)
         else:
             self._build_and_emit_answer()
 
