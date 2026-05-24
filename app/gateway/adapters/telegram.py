@@ -104,7 +104,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # 在后台任务中运行轮询
             self._polling_task = asyncio.create_task(self._run_polling())
             
-            self._mark_connected()
+            self._connected = True
             logger.info("[Telegram] Connected successfully (long polling)")
             return True
             
@@ -118,7 +118,7 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         except Exception as e:
             logger.error("[Telegram] Polling error: %s", e)
-            self._mark_disconnected()
+            self._connected = False
     
     async def _handle_message(self, update, context):
         """处理收到的消息"""
@@ -259,7 +259,7 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Telegram] Error during disconnect: %s", e)
         
-        self._mark_disconnected()
+        self._connected = False
         logger.info("[Telegram] Disconnected")
     
     async def send(

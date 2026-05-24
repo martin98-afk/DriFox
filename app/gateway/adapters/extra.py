@@ -86,7 +86,7 @@ def check_whatsapp_requirements() -> bool:
 #             # 验证凭证
 #             self._client.api.accounts(self._account_sid).fetch()
 #
-#             self._mark_connected()
+#             self._connected = True
 #             logger.info("[WhatsApp] Connected to Twilio")
 #             return True
 #
@@ -97,7 +97,7 @@ def check_whatsapp_requirements() -> bool:
 #     async def disconnect(self) -> None:
 #         """断开连接"""
 #         self._client = None
-#         self._mark_disconnected()
+#         self._connected = False
 #         logger.info("[WhatsApp] Disconnected")
 #
 #     async def send(
@@ -311,6 +311,12 @@ class FeishuAdapter(BasePlatformAdapter):
     
     async def connect(self) -> bool:
         """获取飞书 access token"""
+        # 从配置重新获取（确保最新）
+        from app.gateway.config import get_gateway_config
+        cfg = get_gateway_config().get_platform_config(Platform.FEISHU)
+        self._app_id = cfg.extra.get("app_id") if cfg.extra else None
+        self._app_secret = cfg.extra.get("app_secret") if cfg.extra else None
+        
         if not self._app_id or not self._app_secret:
             logger.error("[Feishu] app_id and app_secret are required")
             return False
@@ -332,7 +338,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     data = response.json()
                     if data.get("code") == 0:
                         self._tenant_access_token = data.get("tenant_access_token")
-                        self._mark_connected()
+                        self._connected = True
                         logger.info("[Feishu] Connected successfully")
                         return True
                     else:
@@ -350,7 +356,7 @@ class FeishuAdapter(BasePlatformAdapter):
         """断开连接"""
         self._access_token = None
         self._tenant_access_token = None
-        self._mark_disconnected()
+        self._connected = False
         logger.info("[Feishu] Disconnected")
     
     async def send(
@@ -613,7 +619,7 @@ class SlackAdapter(BasePlatformAdapter):
             # 验证 token
             self._client.auth_test()
             
-            self._mark_connected()
+            self._connected = True
             logger.info("[Slack] Connected successfully")
             return True
             
@@ -632,7 +638,7 @@ class SlackAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Slack] Error during disconnect: %s", e)
         
-        self._mark_disconnected()
+        self._connected = False
         logger.info("[Slack] Disconnected")
     
     async def send(

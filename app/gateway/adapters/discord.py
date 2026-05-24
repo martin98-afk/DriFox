@@ -92,7 +92,7 @@ class DiscordAdapter(BasePlatformAdapter):
             @self._client.event
             async def on_ready():
                 logger.info(f"[Discord] Logged in as {self._client.user}")
-                self._mark_connected()
+                self._connected = True
             
             # 登录
             await self._client.start(self.config.token)
@@ -208,7 +208,7 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Discord] Error during disconnect: %s", e)
         
-        self._mark_disconnected()
+        self._connected = False
         logger.info("[Discord] Disconnected")
     
     async def send(

@@ -289,6 +289,9 @@ class PlatformManager:
                     adapter._last_error = "app_id and app_secret are required"
                     results[platform] = False
                     continue
+                # 更新配置到适配器
+                adapter._app_id = config.extra.get("app_id")
+                adapter._app_secret = config.extra.get("app_secret")
             elif platform == Platform.SLACK:
                 if not config.extra.get("bot_token"):
                     logger.error("[PlatformManager] Slack bot_token is required")
