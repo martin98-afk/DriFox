@@ -481,6 +481,9 @@ class GatewaySettingCard(ExpandSettingCard):
     管理企业微信、钉钉、Telegram、Discord、飞书、Slack 的连接配置。
     """
 
+    # 线程安全的刷新信号（管理器回调可能来自后台线程）
+    _statusRefreshNeeded = pyqtSignal()
+
     def __init__(self, icon, title: str, content: str = None, parent=None, home=None):
         super().__init__(icon, title, content, parent)
         self._home = home
@@ -489,7 +492,19 @@ class GatewaySettingCard(ExpandSettingCard):
         self._rows: dict = {}
 
         self._setup_ui()
+        self._statusRefreshNeeded.connect(self._refresh)
+        self._register_status_callback()
         self._refresh()
+
+    def _register_status_callback(self):
+        """注册管理器状态变化回调，连接成功/失败时自动刷新 UI"""
+        try:
+            from app.gateway.manager import get_platform_manager
+            mgr = get_platform_manager()
+            if mgr:
+                mgr.on_status_change(lambda s: self._statusRefreshNeeded.emit())
+        except Exception:
+            pass
 
     def _setup_ui(self):
         self.viewLayout.setSpacing(2)
@@ -554,6 +569,7 @@ class GatewaySettingCard(ExpandSettingCard):
         try:
             from app.gateway.config import get_gateway_config
             from app.gateway.base import Platform
+            from app.gateway.manager import get_platform_manager
 
             config_helper = get_gateway_config()
             mapping = {
@@ -564,12 +580,27 @@ class GatewaySettingCard(ExpandSettingCard):
                 "feishu": Platform.FEISHU,
                 "slack": Platform.SLACK,
             }
+
+            # 获取管理器状态
+            manager = get_platform_manager()
+            mgr_status = manager.get_status() if manager else {}
+
             for key, enum in mapping.items():
                 row = self._rows.get(key)
                 if row:
                     try:
                         pc = config_helper.get_platform_config(enum)
                         row.set_enabled(pc.enabled)
+
+                        # 从管理器状态更新连接状态
+                        if manager and enum.value in mgr_status.get("platforms", {}):
+                            plat = mgr_status["platforms"][enum.value]
+                            if plat["connected"]:
+                                row.update_status(connected=True)
+                            elif plat.get("error"):
+                                row.update_status(connected=False, error=plat["error"])
+                            else:
+                                row.update_status(connected=False)
                     except Exception:
                         pass
         except Exception as e:

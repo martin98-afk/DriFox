@@ -239,6 +239,7 @@ class PlatformManager:
         ]
         
         for platform in all_platforms:
+            adapter = self._adapters.get(platform)
             if not adapter:
                 continue
             
