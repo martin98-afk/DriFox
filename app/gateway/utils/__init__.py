@@ -5,10 +5,9 @@ Gateway 工具函数
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 def platform_httpx_limits() -> "httpx.Limits":

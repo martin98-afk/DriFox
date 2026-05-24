@@ -66,6 +66,14 @@ class SendableTextEdit(TextEdit):
         self._command_card_ref = None
         self._slash_trigger_pos = -1  # / 触发位置
 
+        # 节流相关
+        self._slash_throttle_timer = QTimer(self)
+        self._slash_throttle_timer.setSingleShot(True)
+        self._slash_throttle_timer.timeout.connect(self._on_slash_throttle_timeout)
+        self._pending_slash_query = ""
+        self._last_slash_trigger_time = 0  # 上次触发时间（毫秒）
+        self._slash_trigger_count = 0  # 快速触发计数
+
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
 
@@ -105,7 +113,7 @@ class SendableTextEdit(TextEdit):
         return self._command_card_ref
 
     def _on_slash_trigger_check(self):
-        """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片"""
+        """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流"""
         card = self._get_card()
         try:
             cursor = self.textCursor()
@@ -123,21 +131,59 @@ class SendableTextEdit(TextEdit):
                 query = text[1:cursor_pos] if cursor_pos > 1 else ""
                 # 如果有空格或换行，说明 / 触发已结束
                 if " " in query or "\n" in query:
+                    self._cancel_slash_throttle()
                     if card and card.is_card_visible:
                         self.slashDismissed.emit()
                     self._slash_trigger_pos = -1
                     return
 
-                # 在开头触发
+                # 在开头触发 - 使用节流
                 self._slash_trigger_pos = 0
-                self.slashTriggered.emit(query)
+                self._apply_slash_throttle(query)
             else:
                 # 没有在开头
+                self._cancel_slash_throttle()
                 if card and card.is_card_visible:
                     self.slashDismissed.emit()
                 self._slash_trigger_pos = -1
         except Exception:
             pass
+
+    def _apply_slash_throttle(self, query: str):
+        """应用节流逻辑：快速输入时降低触发频率"""
+        import time
+        # 计算时间间隔（毫秒）
+        current_ms = int(time.time() * 1000)
+        time_delta = current_ms - self._last_slash_trigger_time if self._last_slash_trigger_time > 0 else 1000
+        self._last_slash_trigger_time = current_ms
+        
+        # 判断输入速度：小于 150ms 认为快速输入
+        is_fast_input = time_delta < 150 and self._slash_trigger_count > 0
+        
+        if is_fast_input:
+            self._slash_trigger_count += 1
+            # 快速输入模式：更新待发送的 query，延长计时器
+            self._pending_slash_query = query
+            # 节流延迟：50ms（快速输入时保持低频）
+            throttle_delay = 50
+            self._slash_throttle_timer.stop()
+            self._slash_throttle_timer.start(throttle_delay)
+        else:
+            self._slash_trigger_count = 0
+            # 正常速度：直接发射信号
+            self._cancel_slash_throttle()
+            self.slashTriggered.emit(query)
+    
+    def _on_slash_throttle_timeout(self):
+        """节流定时器超时：发射最终的 query"""
+        if self._slash_trigger_pos >= 0:
+            self.slashTriggered.emit(self._pending_slash_query)
+    
+    def _cancel_slash_throttle(self):
+        """取消节流定时器"""
+        self._slash_throttle_timer.stop()
+        self._pending_slash_query = ""
+        self._slash_trigger_count = 0
 
     def insert_command_text(self, item_name: str):
         """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""

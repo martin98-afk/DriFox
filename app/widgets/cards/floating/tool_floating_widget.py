@@ -7,7 +7,6 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import QPixmap, QPainter
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
-    QVBoxLayout,
     QLabel,
     QPushButton,
     QHBoxLayout,

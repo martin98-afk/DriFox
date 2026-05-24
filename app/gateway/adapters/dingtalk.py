@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import re
 import uuid
 from typing import Any, Dict, List, Optional
+
+from loguru import logger
 
 from app.gateway.base import (
     BasePlatformAdapter,
@@ -43,7 +44,6 @@ def _ensure_dingtalk_imports():
 # 预导入钉钉 SDK 组件
 _ensure_dingtalk_imports()
 
-logger = logging.getLogger(__name__)
 
 # 消息类型映射
 DINGTALK_TYPE_MAPPING = {
@@ -131,7 +131,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             return True
             
         except Exception as e:
-            logger.error("[DingTalk] Connection failed: %s", e, exc_info=True)
+            logger.error(f"[DingTalk] Connection failed: {e}", exc_info=True)
             await self._cleanup()
             return False
     
@@ -147,7 +147,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             except Exception as e:
                 if not self._running:
                     return
-                logger.warning("[DingTalk] Stream error: %s", e)
+                logger.warning(f"[DingTalk] Stream error: {e}")
                 
                 if not self._running:
                     return
@@ -155,7 +155,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                 delay = RECONNECT_BACKOFF[min(self._backoff_idx, len(RECONNECT_BACKOFF) - 1)]
                 self._backoff_idx += 1
                 
-                logger.info("[DingTalk] Reconnecting in %ds...", delay)
+                logger.info(f"[DingTalk] Reconnecting in {delay}s...")
                 await asyncio.sleep(delay)
     
     async def disconnect(self) -> None:
@@ -207,8 +207,7 @@ class DingTalkAdapter(BasePlatformAdapter):
         
         if session_webhook and chat_id:
             self._session_webhooks[chat_id] = (session_webhook, session_webhook_expired_time)
-            logger.debug("[DingTalk] Stored webhook for %s: %s",
-                        str(chat_id)[:30], str(session_webhook)[:50])
+            logger.debug(f"[DingTalk] Stored webhook for {str(chat_id)[:30]}: {str(session_webhook)[:50]}")
         
         # 提取文本
         text = self._extract_text(message)
@@ -368,12 +367,11 @@ class DingTalkAdapter(BasePlatformAdapter):
     
     async def send(self, chat_id: str, content: str, **kwargs) -> SendResult:
         """发送消息"""
-        logger.debug("[DingTalk] send() called, chat_id=%s, content_len=%d, webhooks=%s",
-                     chat_id[:20], len(content), list(self._session_webhooks.keys()))
+        logger.debug("[DingTalk] send() called, chat_id=" + chat_id[:20] + f", content_len={len(content)}, webhooks={list(self._session_webhooks.keys())}")
         
         webhook_info = self._session_webhooks.get(chat_id)
         if not webhook_info:
-            logger.warning("[DingTalk] No session webhook for chat_id=%s", chat_id[:30])
+            logger.warning(f"[DingTalk] No session webhook for chat_id={chat_id[:30]}")
             return SendResult(success=False, error="No session webhook available", retryable=True)
         
         webhook, expired_time = webhook_info
@@ -405,7 +403,7 @@ class DingTalkAdapter(BasePlatformAdapter):
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Request timeout", retryable=True)
         except Exception as e:
-            logger.error("[DingTalk] Send failed: %s", e, exc_info=True)
+            logger.error(f"[DingTalk] Send failed: {e}", exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
     
     async def send_image(self, chat_id: str, image_path: str, **kwargs) -> SendResult:
@@ -469,7 +467,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                     )
                     
         except Exception as e:
-            logger.error("[DingTalk] Send image failed: %s", e, exc_info=True)
+            logger.error(f"[DingTalk] Send image failed: {e}", exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
     
     async def send_file(self, chat_id: str, file_path: str, **kwargs) -> SendResult:
@@ -501,7 +499,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                     return SendResult(success=False, error=f"HTTP {response.status_code}")
                     
         except Exception as e:
-            logger.error("[DingTalk] Send file failed: %s", e, exc_info=True)
+            logger.error(f"[DingTalk] Send file failed: {e}", exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
     
     async def get_chat_info(self, chat_id: str) -> ChatInfo:

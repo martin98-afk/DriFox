@@ -114,6 +114,9 @@ class OpenAIChatWorker(QThread):
         # 保留以兼容旧的直接回调接口
         self._legacy_direct_callbacks: Dict[str, Callable] = {}
 
+        # ========== HTTP 流式响应引用（供 cancel() 关闭连接）==========
+        self._current_response: Any = None
+
     def _sync_state_from_state(self):
         """
         将 self._state 的值同步到旧的实例属性名（向后兼容）。
@@ -275,6 +278,14 @@ class OpenAIChatWorker(QThread):
             self._permission_pending = None
             self._state.permission.pending_permission = None
 
+        # 🛡️ 关闭流式响应连接，立即中断 worker 线程的 for chunk in response: 等待
+        if self._current_response is not None:
+            try:
+                self._current_response.close()
+            except Exception:
+                pass
+            self._current_response = None
+
     def get_interrupted_messages(self) -> List[Dict]:
         """
         获取被中断时的消息快照。
@@ -334,9 +345,10 @@ class OpenAIChatWorker(QThread):
         # 清理会话缓存
         self._current_session_messages = []
 
-        # 清理 HTTP 客户端缓存
+        # 清理 HTTP 客户端和流式响应引用
         self._http_client = None
         self._cached_api_config = None
+        self._current_response = None
 
     # ========== 缓存追踪方法 ==========
 
@@ -529,10 +541,29 @@ class OpenAIChatWorker(QThread):
                 # 使用 API 消息缓存（首次会重建，后续复用）
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
                 if self._is_cancelled:
+                    # 🛡️ 取消前保存已收到的 partial 响应，避免消息丢失
+                    partial_sequence = self._build_response_message_sequence()
+                    if partial_sequence:
+                        current_messages.extend(partial_sequence)
+                        current_session_messages.extend(partial_sequence)
+                        self._current_session_messages = list(current_session_messages)
+                        self.full_response = ''.join(self._response_chunks)
+                        # 虽然信号可能已被断开，但事件总线仍可能接收
+                        self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                                 current_session_messages)
                     return
                 if tool_calls_found and tool_args_pending:
                     continue
                 if self._is_cancelled:
+                    # 🛡️ 同上，保存 partial 响应
+                    partial_sequence = self._build_response_message_sequence()
+                    if partial_sequence:
+                        current_messages.extend(partial_sequence)
+                        current_session_messages.extend(partial_sequence)
+                        self._current_session_messages = list(current_session_messages)
+                        self.full_response = ''.join(self._response_chunks)
+                        self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                                 current_session_messages)
                     return
 
                 if not tool_calls_found:
@@ -1003,6 +1034,9 @@ class OpenAIChatWorker(QThread):
         2. 使用缓存的 HTTP 客户端，避免每次都创建新客户端
         3. 预构建 API 参数，避免每次都重复处理
         """
+        # 🛡️ 清除旧响应引用，确保 cancel() 不关闭过期连接
+        self._current_response = None
+
         # 性能优化：使用缓存的 API 消息
         if use_cache and self._api_messages_cache is not None:
             sanitized = self._api_messages_cache
@@ -1168,7 +1202,13 @@ class OpenAIChatWorker(QThread):
         # 用户在重试等待中取消时 response 可能为 None
         if response is None:
             return False, False
-        return self._process_response(response)
+        try:
+            return self._process_response(response)
+        except (httpx.ReadError, httpcore.ReadError):
+            # 🛡️ 连接关闭异常（由 cancel() 关闭 HTTP 连接导致），视为用户取消
+            # 此时 _response_chunks 和 _response_content_blocks 已有全部已接收数据，
+            # 后续由 run() 中的 if self._is_cancelled: 分支保存 partial 响应
+            return False, False
 
     def _cap_max_output_tokens(self, model: str, requested: int) -> int:
         """
@@ -1222,6 +1262,8 @@ class OpenAIChatWorker(QThread):
         return min(requested_int, absolute_limit)
 
     def _process_response(self, response):
+        # 🛡️ 保存响应引用，供 cancel() 关闭底层 HTTP 连接以中断流式等待
+        self._current_response = response
         self._response_content_blocks = []
         self._current_tool_calls = {}  # 改成字典，key 是 tool_call_id
         self._tool_calls_buffer = {}
@@ -1235,6 +1277,13 @@ class OpenAIChatWorker(QThread):
         chunk_count = 0  # chunk 计数器，用于定期 yield 主线程
         for chunk in response:
             if self._is_cancelled:
+                # 🛡️ 取消前刷新待处理的 content/reasoning 批次，避免丢失最后一批内容
+                if _reasoning_batch:
+                    self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
+                    _reasoning_batch = ""
+                if _content_batch:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
                 return False, False  # 返回元组而不是单个布尔值
 
             # 兼容新模型（如 GPT-5.5）：流式响应可能包含 choices 为空的 chunk
@@ -1349,7 +1398,7 @@ class OpenAIChatWorker(QThread):
                                     tail = buffer["function"]["arguments"][-40:].replace('\n', ' ')
                                     progress_args = {
                                         "_status": "loading",
-                                        "_preview_hint": f"接收参数中 ({args_len} 字符) …{tail}",
+                                        "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                     }
                                     self._emit_with_callback(
                                         "tool_args_updated", self.tool_args_updated,
@@ -1372,7 +1421,7 @@ class OpenAIChatWorker(QThread):
                                 tail = buffer["function"]["arguments"][-50:].replace('\n', ' ')
                                 progress_args = {
                                     "_status": "loading",
-                                    "_preview_hint": f"接收参数中 ({args_len} 字符) …{tail}",
+                                    "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                 }
                                 self._emit_with_callback(
                                     "tool_args_updated", self.tool_args_updated,
@@ -1549,6 +1598,10 @@ class OpenAIChatWorker(QThread):
             for tc in self._current_tool_calls.values():
                 if not tc["function"]["arguments"] and tc.get("id") in all_pending_ids:
                     tc["function"]["arguments"] = "{}"
+
+        # 🛡️ 清除当前响应引用（已完成，不需要被 cancel 关闭）
+        if self._current_response is not None:
+            self._current_response = None
 
         return tool_calls_found, tool_args_pending
 

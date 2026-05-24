@@ -7,29 +7,29 @@ Gateway 平台管理器
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from app.gateway.base import (
-    BasePlatformAdapter,
-    Platform,
-    PlatformConfig,
-    SendResult,
-)
 from app.gateway.adapters import (
     WeComAdapter,
     DingTalkAdapter,
+    TelegramAdapter,
+    DiscordAdapter,
+    FeishuAdapter,
+    SlackAdapter,
     check_wecom_requirements,
     check_dingtalk_requirements,
+)
+from app.gateway.base import (
+    BasePlatformAdapter,
+    Platform,
+    SendResult,
 )
 from app.gateway.config import get_gateway_config
 from app.gateway.message_handler import MessageHandler
 from app.gateway.session_manager import GatewaySessionManager, GatewaySession
-
-logger = logging.getLogger(__name__)
 
 
 class PlatformManager:
@@ -104,6 +104,12 @@ class PlatformManager:
     
     def _load_adapters(self) -> None:
         """加载平台适配器"""
+        from app.gateway.adapters import (
+            check_telegram_requirements,
+            check_discord_requirements,
+            check_feishu_requirements,
+        )
+        
         # 企业微信
         if check_wecom_requirements():
             wecom_config = self._config.get_platform_config(Platform.WECOM)
@@ -119,6 +125,45 @@ class PlatformManager:
             logger.info("[PlatformManager] DingTalk adapter loaded")
         else:
             logger.info("[PlatformManager] DingTalk adapter skipped (missing dependencies)")
+        
+        # Telegram
+        if check_telegram_requirements():
+            telegram_config = self._config.get_platform_config(Platform.TELEGRAM)
+            self._adapters[Platform.TELEGRAM] = TelegramAdapter(telegram_config)
+            logger.info("[PlatformManager] Telegram adapter loaded")
+        else:
+            logger.info("[PlatformManager] Telegram adapter skipped (missing dependencies)")
+        
+        # Discord
+        if check_discord_requirements():
+            discord_config = self._config.get_platform_config(Platform.DISCORD)
+            self._adapters[Platform.DISCORD] = DiscordAdapter(discord_config)
+            logger.info("[PlatformManager] Discord adapter loaded")
+        else:
+            logger.info("[PlatformManager] Discord adapter skipped (missing dependencies)")
+        
+        # # WhatsApp
+        # from app.gateway.adapters.extra import check_whatsapp_requirements
+        # if check_whatsapp_requirements():
+        #     whatsapp_config = self._config.get_platform_config(Platform.WHATSAPP)
+        #     self._adapters[Platform.WHATSAPP] = WhatsAppAdapter(whatsapp_config)
+        #     logger.info("[PlatformManager] WhatsApp adapter loaded")
+        # else:
+        #     logger.info("[PlatformManager] WhatsApp adapter skipped (missing dependencies)")
+        
+        # 飞书
+        from app.gateway.adapters.feishu import FeishuAdapter, check_feishu_requirements
+        if check_feishu_requirements():
+            feishu_config = self._config.get_platform_config(Platform.FEISHU)
+            self._adapters[Platform.FEISHU] = FeishuAdapter(feishu_config)
+            logger.info("[PlatformManager] Feishu adapter loaded")
+        else:
+            logger.info("[PlatformManager] Feishu adapter skipped (missing lark-oapi)")
+        
+        # Slack
+        slack_config = self._config.get_platform_config(Platform.SLACK)
+        self._adapters[Platform.SLACK] = SlackAdapter(slack_config)
+        logger.info("[PlatformManager] Slack adapter loaded")
     
     def get_adapter(self, platform: Platform) -> Optional[BasePlatformAdapter]:
         """获取平台适配器"""
@@ -188,14 +233,24 @@ class PlatformManager:
                 adapter.set_message_handler(self._message_handler.handle)
         
         # 启动每个启用的平台
-        for platform in [Platform.WECOM, Platform.DINGTALK]:
+        all_platforms = [
+            Platform.WECOM,
+            Platform.DINGTALK,
+            Platform.TELEGRAM,
+            Platform.DISCORD,
+            Platform.WHATSAPP,
+            Platform.FEISHU,
+            Platform.SLACK,
+        ]
+        
+        for platform in all_platforms:
             adapter = self._adapters.get(platform)
             if not adapter:
                 continue
             
             config = self._config.get_platform_config(platform)
             if not config.enabled:
-                logger.info("[PlatformManager] %s not enabled, skipping", platform.value)
+                logger.info(f"[PlatformManager] {platform.value} not enabled, skipping")
                 continue
             
             # 检查配置
@@ -215,18 +270,53 @@ class PlatformManager:
                     continue
                 adapter._client_id = config.client_id
                 adapter._client_secret = config.client_secret
+            elif platform == Platform.TELEGRAM:
+                if not config.token:
+                    logger.error("[PlatformManager] Telegram token is required")
+                    adapter._last_error = "token is required"
+                    results[platform] = False
+                    continue
+            elif platform == Platform.DISCORD:
+                if not config.token:
+                    logger.error("[PlatformManager] Discord bot token is required")
+                    adapter._last_error = "bot token is required"
+                    results[platform] = False
+                    continue
+            elif platform == Platform.WHATSAPP:
+                if not config.extra.get("account_sid") or not config.extra.get("auth_token"):
+                    logger.error("[PlatformManager] WhatsApp Twilio credentials are required")
+                    adapter._last_error = "account_sid and auth_token are required"
+                    results[platform] = False
+                    continue
+            elif platform == Platform.FEISHU:
+                if not config.extra.get("app_id") or not config.extra.get("app_secret"):
+                    logger.error("[PlatformManager] Feishu app_id and app_secret are required")
+                    adapter._last_error = "app_id and app_secret are required"
+                    results[platform] = False
+                    continue
+                # 更新配置到适配器
+                adapter._app_id = config.extra.get("app_id")
+                adapter._app_secret = config.extra.get("app_secret")
+                adapter._encrypt_key = config.extra.get("encrypt_key", "")
+                adapter._verification_token = config.extra.get("verification_token", "")
+            elif platform == Platform.SLACK:
+                if not config.extra.get("bot_token"):
+                    logger.error("[PlatformManager] Slack bot_token is required")
+                    adapter._last_error = "bot_token is required"
+                    results[platform] = False
+                    continue
             
             try:
                 success = await adapter.start()
                 results[platform] = success
                 
                 if success:
-                    logger.info("[PlatformManager] %s started", platform.value)
+                    logger.info(f"[PlatformManager] {platform.value} started",)
                 else:
-                    logger.warning("[PlatformManager] %s failed to start", platform.value)
+                    logger.warning(f"[PlatformManager] {platform.value} failed to start",)
                     
             except Exception as e:
-                logger.error("[PlatformManager] %s start error: %s", platform.value, e, exc_info=True)
+                logger.error(f"[PlatformManager] {platform.value} start error: {e}")
                 results[platform] = False
         
         self._notify_status()
@@ -243,9 +333,9 @@ class PlatformManager:
             if adapter.is_connected:
                 try:
                     await adapter.stop()
-                    logger.info("[PlatformManager] %s stopped", platform.value)
+                    logger.info(f"[PlatformManager] {platform.value} stopped")
                 except Exception as e:
-                    logger.error("[PlatformManager] %s stop error: %s", platform.value, e, exc_info=True)
+                    logger.error(f"[PlatformManager] {platform.value} stop error: {e}", exc_info=True)
         
         self._notify_status()
     
@@ -265,7 +355,7 @@ class PlatformManager:
         """在后台事件循环上启动平台"""
         adapter = self._adapters.get(platform)
         if not adapter:
-            logger.error("[PlatformManager] No adapter for %s", platform.value)
+            logger.error(f"[PlatformManager] No adapter for {platform.value}")
             return False
         
         config = self._config.get_platform_config(platform)
@@ -310,7 +400,17 @@ class PlatformManager:
         """
         platforms = {}
         
-        for platform in [Platform.WECOM, Platform.DINGTALK]:
+        all_platforms = [
+            Platform.WECOM,
+            Platform.DINGTALK,
+            Platform.TELEGRAM,
+            Platform.DISCORD,
+            Platform.WHATSAPP,
+            Platform.FEISHU,
+            Platform.SLACK,
+        ]
+        
+        for platform in all_platforms:
             adapter = self._adapters.get(platform)
             config = self._config.get_platform_config(platform)
             
@@ -346,7 +446,7 @@ class PlatformManager:
             try:
                 callback(status)
             except Exception as e:
-                logger.warning("[PlatformManager] Status callback error: %s", e)
+                logger.warning(f"[PlatformManager] Status callback error: {e}")
 
 
 # 全局实例

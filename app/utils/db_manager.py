@@ -102,7 +102,8 @@ class DatabaseManager:
             cursor = self._conn.cursor()
             cursor.execute(sql, params)
             self._conn.commit()
-            if sql.strip().upper().startswith("SELECT"):
+            stripped_sql = sql.strip().upper()
+            if stripped_sql.startswith("SELECT") or stripped_sql.startswith("PRAGMA"):
                 rows = cursor.fetchall()
                 return True, [dict(row) for row in rows]
             else:

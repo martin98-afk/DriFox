@@ -5,17 +5,16 @@ Gateway 基础模块 - 抽象基类和数据结构
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 from pathlib import Path
-from app.utils.utils import get_app_data_dir
+from typing import Any, Callable, Dict, List, Optional, TypeVar
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from app.utils.utils import get_app_data_dir
 
 T = TypeVar("T")
 
@@ -24,6 +23,11 @@ class Platform(Enum):
     """支持的通讯平台"""
     WECOM = "wecom"
     DINGTALK = "dingtalk"
+    TELEGRAM = "telegram"
+    DISCORD = "discord"
+    WHATSAPP = "whatsapp"
+    FEISHU = "feishu"
+    SLACK = "slack"
 
 
 class MessageType(Enum):
@@ -124,6 +128,9 @@ class PlatformConfig:
     # 钉钉配置
     client_id: Optional[str] = None
     client_secret: Optional[str] = None
+    
+    # 通用配置（适用于 Telegram、Discord 等）
+    token: Optional[str] = None
     
     # 通用配置
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -290,7 +297,7 @@ class BasePlatformAdapter(ABC):
         子平台应该在消息接收时调用此方法。
         """
         if not self._message_handler:
-            logger.warning("[%s] No message handler configured", self.name)
+            logger.warning(f"[{self.name}] No message handler configured")
             return
         
         session_key = self._get_session_key(event)
@@ -298,18 +305,16 @@ class BasePlatformAdapter(ABC):
         # 消息去重：如果正在处理的消息 ID 与新消息相同，丢弃重复投递
         active_msg_id = self._active_message_ids.get(session_key)
         if active_msg_id and event.message_id and active_msg_id == event.message_id:
-            logger.info("[%s] Dropping duplicate message %s for session: %s",
-                        self.name, event.message_id[:12], session_key)
+            logger.info(f"[{self.name}] Dropping duplicate message {event.message_id[:12]} for session: {session_key}")
             return
         
         # 检查是否有活跃会话
         if session_key in self._active_sessions:
             # 活跃会话中：排队消息，但跳过与当前处理中相同 ID 的重复消息
             if event.message_id and active_msg_id == event.message_id:
-                logger.info("[%s] Dropping queued duplicate %s for busy session: %s",
-                            self.name, event.message_id[:12], session_key)
+                logger.info(f"[{self.name}] Dropping queued duplicate {event.message_id[:12]} for busy session: {session_key}")
                 return
-            logger.info("[%s] Queuing message for busy session: %s", self.name, session_key)
+            logger.info(f"[{self.name}] Queuing message for busy session: {session_key}")
             self._pending_messages[session_key] = event
             self._active_sessions[session_key].set()
             return
@@ -321,7 +326,7 @@ class BasePlatformAdapter(ABC):
         try:
             await self._message_handler(event)
         except Exception as e:
-            logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
+            logger.error(f"[{self.name}] Error handling message: {e}", exc_info=True)
         finally:
             self._active_sessions.pop(session_key, None)
             self._active_message_ids.pop(session_key, None)
@@ -332,8 +337,7 @@ class BasePlatformAdapter(ABC):
                 # 去重检查：排队的消息是否与刚处理完的消息相同
                 if (event.message_id and pending.message_id
                         and event.message_id == pending.message_id):
-                    logger.info("[%s] Dropping pending duplicate %s after session completed: %s",
-                                self.name, pending.message_id[:12], session_key)
+                    logger.info(f"[{self.name}] Dropping pending duplicate {pending.message_id[:12]} after session completed: {session_key}")
                     return
                 await self.handle_message(pending)
     
@@ -379,7 +383,7 @@ class BasePlatformAdapter(ABC):
         if success:
             self._running = True
             self._connected = True
-            logger.info("[%s] Started", self.name)
+            logger.info(f"[{self.name}] Started")
         return success
     
     async def stop(self) -> None:
@@ -395,7 +399,7 @@ class BasePlatformAdapter(ABC):
         self._active_sessions.clear()
         self._pending_messages.clear()
         self._active_message_ids.clear()
-        logger.info("[%s] Stopped", self.name)
+        logger.info(f"[{self.name}] Stopped")
 
 
 def get_cache_dir(name: str) -> Path:

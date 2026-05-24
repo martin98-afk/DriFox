@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import re
 import uuid
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+from loguru import logger
 
 from app.gateway.base import (
     BasePlatformAdapter,
@@ -28,7 +28,6 @@ from app.gateway.base import (
     cache_file_from_bytes,
 )
 
-logger = logging.getLogger(__name__)
 
 # 企业微信 WebSocket 地址
 DEFAULT_WS_URL = "wss://openws.work.weixin.qq.com"

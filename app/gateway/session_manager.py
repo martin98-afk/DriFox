@@ -6,7 +6,6 @@ Gateway 会话管理器
 """
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,7 +17,6 @@ from loguru import logger
 from app.gateway.base import Platform, MessageEvent
 from app.utils.utils import get_app_data_dir
 
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -107,7 +105,7 @@ class GatewaySessionManager:
                         user_sessions[session.user_id] = session_id
                         
             except Exception as e:
-                logger.warning("[GatewaySession] Failed to load sessions: %s", e)
+                logger.warning(f"[GatewaySession] Failed to load sessions: {e}")
     
     def _save_sessions(self) -> None:
         """保存会话列表"""
@@ -129,7 +127,7 @@ class GatewaySessionManager:
             with open(sessions_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.warning("[GatewaySession] Failed to save sessions: %s", e)
+            logger.warning(f"[GatewaySession] Failed to save sessions: {e}")
     
     def _generate_session_id(self, platform: Platform, user_id: str) -> str:
         """生成会话 ID"""
@@ -189,10 +187,9 @@ class GatewaySessionManager:
             try:
                 self._on_create_session(session)
             except Exception as e:
-                logger.warning("[GatewaySession] Create callback error: %s", e)
+                logger.warning(f"[GatewaySession] Create callback error: {e}")
         
-        logger.info("[GatewaySession] Created session %s for %s on %s", 
-                   session_id, user_id, platform.value)
+        logger.info(f"[GatewaySession] Created session {session_id} for {user_id} on {platform.value}")
         
         return session
     
@@ -236,7 +233,7 @@ class GatewaySessionManager:
         # 保存
         self._save_sessions()
         
-        logger.info("[GatewaySession] Deleted session %s", session_id)
+        logger.info(f"[GatewaySession] Deleted session {session_id}")
         return True
     
     def reset_session(self, session_id: str) -> bool:
@@ -255,7 +252,7 @@ class GatewaySessionManager:
         session.message_count = 0
         session.last_active = datetime.now()
         
-        logger.info("[GatewaySession] Reset session %s", session_id)
+        logger.info(f"[GatewaySession] Reset session {session_id}")
         return True
     
     def list_sessions(self, platform: Optional[Platform] = None) -> List[GatewaySession]:

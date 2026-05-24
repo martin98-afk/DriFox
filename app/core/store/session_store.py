@@ -95,7 +95,7 @@ class SessionStore:
             if not success:
                 logger.warning("[SessionStore] 无法读取 journal_mode")
                 return
-            journal_mode = result[0][0] if result else 'unknown'
+            journal_mode = list(result[0].values())[0] if result else 'unknown'
             
             # 获取数据库路径信息
             wal_path = db_path.with_suffix('.db-wal')
@@ -122,7 +122,7 @@ class SessionStore:
             try:
                 success, result = self._db.execute_sql('PRAGMA integrity_check')
                 if success and result:
-                    check_result = result[0][0] if isinstance(result[0], tuple) else result[0].get(0, 'ok')
+                    check_result = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
                     if check_result != 'ok':
                         logger.warning(f"[SessionStore] 数据库完整性检查失败: {check_result}")
                         self._repair_database()

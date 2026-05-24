@@ -8,7 +8,6 @@ Gateway 消息处理器
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any, Callable, Dict, Optional
 
 from loguru import logger
@@ -21,7 +20,6 @@ from app.gateway.base import (
 )
 from app.gateway.session_manager import GatewaySession, GatewaySessionManager
 
-logger = logging.getLogger(__name__)
 
 
 class MessageHandler:
@@ -84,9 +82,7 @@ class MessageHandler:
                 )
 
                 if not result.success:
-                    logger.warning(
-                        "[MessageHandler] Failed to send response: %s", result.error
-                    )
+                    logger.warning(f"[MessageHandler] Failed to send response: {result.error}")
 
         except asyncio.TimeoutError:
             logger.error("[MessageHandler] AI processing timeout")
@@ -96,9 +92,7 @@ class MessageHandler:
                 content="抱歉，AI 处理超时了。请稍后重试。",
             )
         except Exception as e:
-            logger.error(
-                "[MessageHandler] Processing error: %s", e, exc_info=True
-            )
+            logger.error(f"[MessageHandler] Processing error: {e}", exc_info=True)
             await self._send_message(
                 platform=event.platform,
                 chat_id=event.chat_id,

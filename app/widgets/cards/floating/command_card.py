@@ -8,7 +8,7 @@
 """
 from typing import List, Dict
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QMouseEvent, QFontMetrics
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -92,9 +92,15 @@ class CommandItemWidget(QWidget):
         self._desc_label.setMinimumWidth(0)
         layout.addWidget(self._desc_label, 1)
 
-        # 类型标签（技能显示【技能】）
-        if self._data["type"] == "skill":
+        # 类型标签（技能显示【技能】，智能体显示【智能体】）
+        item_type = self._data["type"]
+        if item_type == "skill":
             self._tag_label = QLabel("【技能】")
+            self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            layout.addWidget(self._tag_label)
+        elif item_type == "agent":
+            self._tag_label = QLabel("【智能体】")
             self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
             layout.addWidget(self._tag_label)
@@ -141,9 +147,20 @@ class CommandItemWidget(QWidget):
             }}
         """)
 
-        # 技能标签样式
-        if self._data["type"] == "skill":
+        # 标签样式：技能蓝色，智能体紫色
+        item_type = self._data["type"]
+        if item_type == "skill":
             tag_fg = "#66c6ff" if not self._selected else "#aae0ff"
+            self._tag_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {tag_fg};
+                    {get_font_family_css()} {font_size_css(11)};
+                    font-weight: bold;
+                    background: transparent;
+                }}
+            """)
+        elif item_type == "agent":
+            tag_fg = "#b388ff" if not self._selected else "#d1b3ff"
             self._tag_label.setStyleSheet(f"""
                 QLabel {{
                     color: {tag_fg};
@@ -156,7 +173,9 @@ class CommandItemWidget(QWidget):
     def _update_display(self):
         """更新名称显示（含查询高亮）"""
         name = self._data["name"]
-        display_name = f"/{name}" if self._data["type"] == "command" else name
+        # 命令需要加 / 前缀，技能和智能体直接显示名称
+        item_type = self._data["type"]
+        display_name = f"/{name}" if item_type == "command" else name
         query = self._query
 
         if query:
@@ -218,6 +237,7 @@ class CommandCard(QWidget):
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
         self._item_widgets: List[CommandItemWidget] = []
+        self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
         self._current_query = ""
 
@@ -252,9 +272,11 @@ class CommandCard(QWidget):
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setStyleSheet(f"""
-            QScrollArea {{
+            QScrollArea, QScrollArea * {{
                 background: transparent;
                 border: none;
+                padding: 0;
+                margin: 0;
             }}
             QScrollBar:vertical {{
                 background: transparent;
@@ -284,9 +306,10 @@ class CommandCard(QWidget):
         self._scroll_layout = QVBoxLayout(self._scroll_content)
         self._scroll_layout.setContentsMargins(0, 0, 0, 0)
         self._scroll_layout.setSpacing(0)
-        self._scroll_layout.addStretch()
 
         self._scroll_area.setWidget(self._scroll_content)
+        # 确保 viewport 没有多余的边距/内边距（这是导致顶部空白的根本原因）
+        self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
 
         # 刷新所有数据
@@ -315,14 +338,17 @@ class CommandCard(QWidget):
                 or query in item["description"].lower()
             ]
 
-        # 排序：命令在前，技能在后
-        self._filtered_items.sort(key=lambda x: (0 if x["type"] == "command" else 1, x["name"]))
+        # 排序：命令和技能在前，智能体在后，同类型按名称排序
+        sort_order = {"command": 0, "skill": 1, "agent": 2}
+        self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
 
         self._render()
 
         if len(self._filtered_items) > 0:
             self._selected_index = 0
             self._update_selection()
+            # 延迟滚动到顶部：等待布局完成后强制归零，避免初始渲染时 scroll 位置偏移
+            QTimer.singleShot(0, lambda: self._scroll_area.verticalScrollBar().setValue(0))
 
     def _render(self):
         """渲染当前筛选结果"""
@@ -332,34 +358,34 @@ class CommandCard(QWidget):
             w.deleteLater()
         self._item_widgets.clear()
 
-        # 取 stretch 前的位置
-        stretch_idx = self._scroll_layout.count() - 1
-        if stretch_idx < 0:
-            stretch_idx = 0
+        # 清除上一次的分隔线（否则每次刷新都会留下旧的 QFrame 在 layout 中积累）
+        if self._divider is not None:
+            self._scroll_layout.removeWidget(self._divider)
+            self._divider.deleteLater()
+            self._divider = None
 
-        # 检查是否需要分隔线（同时有命令和技能）
-        has_commands = any(item["type"] == "command" for item in self._filtered_items)
-        has_skills = any(item["type"] == "skill" for item in self._filtered_items)
-        insert_divider = has_commands and has_skills
+        # 检查是否需要分隔线（命令/技能在前，智能体在后）
+        has_commands_or_skills = any(item["type"] in ("command", "skill") for item in self._filtered_items)
+        has_agents = any(item["type"] == "agent" for item in self._filtered_items)
+        insert_divider = has_commands_or_skills and has_agents
         divider_inserted = False
 
         for item in self._filtered_items:
-            # 在第一个技能前插入分隔线
-            if insert_divider and not divider_inserted and item["type"] == "skill":
+            # 在第一个智能体前插入分隔线
+            if insert_divider and not divider_inserted and item["type"] == "agent":
                 divider = QFrame()
                 divider.setFrameShape(QFrame.HLine)
                 divider.setFixedHeight(1)
                 divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
                 divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                self._scroll_layout.insertWidget(stretch_idx, divider)
-                stretch_idx += 1
+                self._scroll_layout.addWidget(divider)
+                self._divider = divider  # 缓存引用，下次刷新时清除
                 divider_inserted = True
 
             widget = CommandItemWidget(item, self._current_query, self._scroll_content)
             widget.clicked.connect(self._on_item_clicked)
             self._item_widgets.append(widget)
-            self._scroll_layout.insertWidget(stretch_idx, widget)
-            stretch_idx += 1
+            self._scroll_layout.addWidget(widget)
 
         # 计算卡片高度
         item_count = len(self._filtered_items)

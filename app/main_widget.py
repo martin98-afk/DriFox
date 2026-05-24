@@ -1155,8 +1155,9 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._top_card_container)
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(1)
+        self.chat_scroll_area.setMinimumHeight(0)
         self.chat_scroll_area.setMinimumWidth(400)
+        self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)
         self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
@@ -1557,6 +1558,54 @@ If you're uncertain about something and can't verify it with these tools, say "I
 5. Write so the reader can quickly understand the issue without reading too closely.
 6. AVOID flattery, do not give any comments that are not helpful to the reader. Avoid phrasing like "Great job ...", "Thanks for ..."."""
         cmd_mgr.register("review", "prompt", description="审查更改代码", prompt_text=review_prompt)
+
+        # 加载内置智能体为命令
+        self._register_builtin_agents_as_commands()
+
+    def _register_builtin_agents_as_commands(self):
+        """从 app/agents 目录加载内置智能体并注册为命令"""
+        import yaml
+        from pathlib import Path
+
+        agents_dir = Path(__file__).parent / "agents"
+        if not agents_dir.exists():
+            return
+
+        cmd_mgr = CommandManager.get_instance()
+
+        for md_file in agents_dir.glob("*.md"):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                if not content.startswith("---"):
+                    continue
+
+                parts = content.split("---", 2)
+                if len(parts) < 3:
+                    continue
+
+                frontmatter = parts[1]
+                body = parts[2].strip()
+
+                meta = yaml.safe_load(frontmatter)
+                if not meta:
+                    continue
+
+                # 获取描述
+                description = meta.get("description", "")
+                # 加载所有智能体（不跳过 hidden）
+                # hidden 的智能体依然注册为命令，但不显示标签
+
+                # 注册为 prompt 命令，使用完整提示词内容
+                cmd_mgr.register(
+                    name=md_file.stem,
+                    command_type="prompt",
+                    description=description,
+                    prompt_text=body,
+                )
+                logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}")
+
+            except Exception as e:
+                logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")
 
     def _execute_command(self, command_name: str):
         """执行内置函数型命令
@@ -6928,12 +6977,28 @@ If you're uncertain about something and can't verify it with these tools, say "I
             return
 
         self._stop_deferred_pending = False
-        interrupted_messages: List[Dict[str, Any]] = []
 
-        # 完成停止流程（可能会阻塞等待 worker 线程结束）
+        # 🛡️ 在线程中执行阻塞的 finalize_stop，不阻塞 UI 线程
         if self.backend and self.backend.chat_engine:
-            interrupted_messages = self.backend.finalize_stop() or []
+            import threading
+            engine_ref = self.backend.chat_engine
 
+            def _do_finalize():
+                interrupted_messages = engine_ref.finalize_stop() or []
+                # 回到主线程更新 UI
+                if interrupted_messages and not getattr(self, '_is_destroyed', False):
+                    QTimer.singleShot(0, lambda m=interrupted_messages: self._on_finalize_complete(m))
+
+            t = threading.Thread(target=_do_finalize, daemon=True)
+            t.start()
+
+    def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
+        """主线程回调：处理 finalize_stop 异步完成后的消息保存
+
+        由 _deferred_stop_handler 启动的后台线程通过 QTimer.singleShot 调用。
+        """
+        if getattr(self, '_is_destroyed', False):
+            return
         if interrupted_messages:
             self._on_messages_updated(interrupted_messages)
             if self.history_manager:

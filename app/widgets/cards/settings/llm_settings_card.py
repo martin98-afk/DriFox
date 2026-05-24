@@ -4,7 +4,7 @@
 现已迁移到 SystemCardFrame 基类，获得统一头部布局和固定边框
 """
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRect
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QColor
 from PyQt5.QtWidgets import (
     QFontComboBox,
@@ -14,22 +14,20 @@ from qfluentwidgets import (
     StrongBodyLabel,
     SwitchSettingCard,
     OptionsSettingCard,
-    FluentIcon, SettingCard, PrimaryPushButton, ComboBox, SwitchButton,
-)
+    FluentIcon, SettingCard, PrimaryPushButton, ComboBox, )
 
 from app.utils.config import Settings
 from app.utils.design_tokens import (
     ButtonStyles,
     ComboBoxStyles,
     FONT_SIZE_OPTIONS,
-    THEME_STYLE_OPTIONS,
     Colors,
 )
 from app.utils.design_tokens import get_ui_font_size, apply_font_size_to_widget
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_unified_font, get_font_family_css
-from app.widgets.gateway_setting_card import GatewaySettingCard
+from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard

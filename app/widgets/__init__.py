@@ -28,7 +28,7 @@ from app.widgets.model_selector_popup import ModelSelectorPopup
 from app.widgets.file_undo_dialog import FileUndoPreviewDialog
 
 # Gateway
-from app.widgets.gateway_setting_card import GatewaySettingCard
+from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 
 __all__ = [
     # 核心卡片
