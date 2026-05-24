@@ -2062,6 +2062,7 @@ If you're uncertain about something and can't verify it with these tools, say "I
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
         self._card_manager.hide_card("mcp_edit", self._window_id)
+        self._card_manager.show_card("settings", self._window_id)
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
