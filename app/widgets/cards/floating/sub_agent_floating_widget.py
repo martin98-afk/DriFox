@@ -481,6 +481,8 @@ class SubAgentFloatingWidget(SimpleCardWidget):
             task_widget.finish_task(error, success=False)
 
         # 调用父方法更新 Segment 标签（只调用一次，避免重复）
+        # 手动查看时重置批次状态，避免与自动触发冲突
+        self._batch_started = False  # 重置批次标记，允许新的自动触发清空面板
         if result:
             self.finish_task(task_id, result, True)
         elif error:
