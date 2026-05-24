@@ -16,6 +16,7 @@ class ChatSession:
         self.messages: List[Dict[str, str]] = consolidate_messages(messages or [])
         # topic_summary 初始化为 name 的副本，确保首次保存时 title 字段不为空
         self.topic_summary: str = self.name
+        self.user_edited_title: bool = False  # 用户是否手动编辑过标题
         self.created_at: str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.last_updated: str = self.created_at
         self.message_count: int = len(self.messages)
@@ -148,6 +149,7 @@ class ChatSession:
             "compaction_state": self.compaction_state,
             "compaction_cache": self.compaction_cache,
             "system_prompt": self.system_prompt,
+            "user_edited_title": self.user_edited_title,
             "metadata": self.metadata,
         }
 
@@ -170,7 +172,12 @@ class ChatSession:
         session.set_compaction_cache(data.get("compaction_cache"))
         session.system_prompt = data.get("system_prompt", "") or ""
         session.metadata = data.get("metadata", {}) or {}
+        session.user_edited_title = data.get("user_edited_title", False)
         return session
+
+    def set_user_edited_title(self, edited: bool = True):
+        """标记标题已被用户编辑，后续不会自动覆盖"""
+        self.user_edited_title = edited
 
 
 class SessionManager(QObject):

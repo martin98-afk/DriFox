@@ -242,6 +242,7 @@ class SessionStore:
                 # 迁移逻辑
                 self._migrate_add_project_column()
                 self._migrate_remove_canvas_id()
+                self._migrate_add_user_edited_title_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -315,6 +316,22 @@ class SessionStore:
                 logger.info("[SessionStore] memories 表 canvas_id 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] canvas_id 列迁移失败(可能已不存在): {e}")
+
+    def _migrate_add_user_edited_title_column(self):
+        """迁移：添加 user_edited_title 列（如果不存在）"""
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "user_edited_title" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 user_edited_title 列")
+                self._db.execute_sql(
+                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN user_edited_title INTEGER DEFAULT 0"
+                )
+                logger.info("[SessionStore] user_edited_title 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] user_edited_title 列迁移失败(可能已存在): {e}")
 
     @property
     def is_initialized(self) -> bool:
