@@ -985,13 +985,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 分支分隔符（三角箭头，面包屑风格）
         self._pb_separator = QLabel("▸", self)
-        self._pb_separator.setFixedWidth(16)
         self._pb_separator.setAlignment(Qt.AlignCenter)
         self._pb_separator.setVisible(False)
         pb_layout.addWidget(self._pb_separator)
 
         # Git 分支标签
-        self._branch_widget = PushButton(icon=get_icon("分支"), text="main", parent=self)
+        self._branch_widget = PushButton(text="main", parent=self)
         self._branch_widget.setObjectName("_branchWidget")
         self._branch_widget.clicked.connect(self._on_branch_label_clicked)
         self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
@@ -2494,7 +2493,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self.setAutoFillBackground(True)
         
         if hasattr(self, "_project_label"):
-            self._update_project_label_style()
+            self._refresh_project_branch_style()
         if hasattr(self, "title_edit"):
             font_css = get_font_family_css()
             title_style = f"""QLabel {{
@@ -4084,7 +4083,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = session_project
         self.backend._current_project = session_project
         self._project_label.setText(session_project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
         self._update_branch()
 
         self._display_current_session()
@@ -5509,7 +5508,7 @@ class OpenAIChatToolWindow(ToolWindow):
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
             self._project_label.setText(session_project)
-            self._update_project_label_style()
+            self._refresh_project_branch_style()
             self._update_branch()
             self._display_current_session()
             self._hide_welcome_cards()
@@ -6557,7 +6556,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
 
     def _on_project_label_clicked(self, event):
         """项目标签点击 - 显示项目选择 popup"""
@@ -6573,7 +6572,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 border: none;
                 color: {Colors.TEXT_SECONDARY};
                 {get_font_family_css()}
-                {font_size_css(11)};
+                {font_size_css(12)};
                 padding: 2px 6px 2px 2px;
             }}
             #_branchWidget:hover {{
@@ -6604,7 +6603,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 {get_font_family_css()}
                 {font_size_css(13)}
                 font-weight: bold;
-                padding: 2px 6px 2px 6px;
+                padding: 0px 2px 0px 2px;
                 background: transparent;
                 border: none;
                 border-radius: 4px;
@@ -6618,18 +6617,14 @@ class OpenAIChatToolWindow(ToolWindow):
             QLabel {{
                 color: {Colors.TEXT_MUTED};
                 {get_font_family_css()}
-                {font_size_css(10)}
+                {font_size_css(16)}
                 background: transparent;
                 border: none;
-                padding: 0px;
+                padding: 2px;
             }}
         """)
         # 同步刷新分支按钮样式
         self._refresh_branch_widget_style()
-
-    def _update_project_label_style(self):
-        """更新项目标签样式（跟随主题色）—— 委托给组合控件刷新"""
-        self._refresh_project_branch_style()
 
     def _update_branch(self):
         """从工作目录检测 git 分支并更新分支标签"""
@@ -6708,7 +6703,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
         self._update_branch()
         self.cfg.current_project.value = project
         self.cfg.save()
@@ -6734,7 +6729,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
         self._update_branch()
         # 保存到配置
         self.cfg.current_project.value = project
@@ -6769,7 +6764,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_project = default_project
                 self.backend._current_project = default_project
                 self._project_label.setText(default_project)
-                self._update_project_label_style()
+                self._refresh_project_branch_style()
                 self._update_branch()
                 # 保存到配置
                 self.cfg.current_project.value = default_project
