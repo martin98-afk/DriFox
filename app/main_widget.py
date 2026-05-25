@@ -5630,10 +5630,14 @@ class OpenAIChatToolWindow(ToolWindow):
             if cmd_result.is_function:
                 # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
                 self.input_area.clear()
+                # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
+                self.input_area.toggle_send_button(True)
                 self._execute_command(cmd_result.command_name, cmd_result.remainder)
                 return
             elif cmd_result.is_subagent:
                 # 子智能体命令：触发子智能体任务，不替换提示词
+                # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
+                self.input_area.toggle_send_button(True)
                 self._execute_subagent_task(cmd_result.agent_name, cmd_result.subagent_task)
                 return
             elif cmd_result.is_prompt or cmd_result.is_agent:
