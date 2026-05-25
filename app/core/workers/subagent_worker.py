@@ -547,6 +547,8 @@ class SubAgentManager(QObject):
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
         self._batch_completed = 0
+        # 当前批次的任务ID集合，用于回调时只通知本批次完成的任务
+        self._batch_task_ids: set = set()
         # 已查询过的任务ID集合，避免重复返回结果浪费上下文
         self._queried_tasks: set = set()
         # 获取主智能体历史消息的回调（由外部设置）
@@ -689,6 +691,7 @@ class SubAgentManager(QObject):
 
             # 批次计数：本次启动的任务数
             self._batch_total += 1
+            self._batch_task_ids.add(task_id)
 
             # 保存到数据库
             self._save_task_to_store(task_id, agent_name, task_description, "running")

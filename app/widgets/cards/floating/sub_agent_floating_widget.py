@@ -574,8 +574,13 @@ class SubAgentFloatingWidget(SimpleCardWidget):
                 self._auto_hide_timer.stop()
             self._auto_hide_timer = QTimer(self)
             self._auto_hide_timer.setSingleShot(True)
-            self._auto_hide_timer.timeout.connect(self.hide)
+            self._auto_hide_timer.timeout.connect(self._auto_hide)
             self._auto_hide_timer.start(3000)
+
+    def _auto_hide(self):
+        """自动隐藏（所有任务完成后），重置批次标记以便下一批任务能正确清空面板"""
+        self._batch_started = False
+        self.hide()
 
     def _switch_to_next_active(self):
         """切换到下一个活跃任务"""

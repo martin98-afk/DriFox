@@ -167,6 +167,8 @@ class OpenAIChatToolWindow(ToolWindow):
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
     skillExecutionRequested = pyqtSignal(str, dict)
+    # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
+    _topic_summary_ready = pyqtSignal(object, object)
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
@@ -230,6 +232,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._suspend_auto_scroll = False
         self._gen_thread_pool = QThreadPool()
         self._gen_thread_pool.setMaxThreadCount(2)
+        # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
+        self._topic_summary_ready.connect(self._on_topic_summary_generated)
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -5771,20 +5775,24 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从管理器移除并记录结果
         if executor:
             agent_name = getattr(executor, "agent_name", "")
+            task_description = getattr(executor, "task_description", "")
             del sub_agent_mgr._running_tasks[task_id]
         else:
             agent_name = ""
+            task_description = ""
         sub_agent_mgr._finished_tasks[task_id] = {"result": result, "error": execution_error or "",
-                                                  "agent_name": agent_name}
+                                                  "agent_name": agent_name,
+                                                  "task_description": task_description}
 
         # 批次完成检查：只有当所有任务都完成时才触发回调
         sub_agent_mgr._batch_completed += 1
         if sub_agent_mgr._batch_completed >= sub_agent_mgr._batch_total and sub_agent_mgr._batch_total > 0:
             # 全部任务完成，发送回调通知
             self._do_trigger_callback(sub_agent_mgr)
-            # 重置计数器
+            # 重置计数器和批次任务ID集合
             sub_agent_mgr._batch_total = 0
             sub_agent_mgr._batch_completed = 0
+            sub_agent_mgr._batch_task_ids = set()
 
     def _do_trigger_callback(self, sub_agent_mgr):
         """执行回调触发 - 支持强制中断当前流式输出
@@ -5793,16 +5801,38 @@ class OpenAIChatToolWindow(ToolWindow):
         1. 流式中回调（LLM 调用子智能体）：中断当前流式，发送回调消息
         2. 非流式回调（如 /compact 手动命令）：需要创建 UI 卡片后发送回调消息
         """
-        total = len(sub_agent_mgr._finished_tasks)
-        failed = sum(1 for t in sub_agent_mgr._finished_tasks.values() if t.get("error") and t.get("error") != "")
+        # 只提取本次批次完成的任务信息（不是所有历史任务）
+        batch_ids = sub_agent_mgr._batch_task_ids
+        batch_tasks = []
+        for tid in batch_ids:
+            task_info = sub_agent_mgr._finished_tasks.get(tid, {})
+            is_error = bool(task_info.get("error"))
+            batch_tasks.append({
+                "task_id": tid,
+                "agent_name": task_info.get("agent_name", ""),
+                "task_description": task_info.get("task_description", ""),
+                "success": not is_error,
+            })
+
+        total = len(batch_tasks)
+        failed = sum(1 for t in batch_tasks if not t["success"])
+
+        # 生成任务列表（包含任务名和ID，方便LLM用task_status查询）
+        task_lines = []
+        for t in batch_tasks:
+            status_icon = "✅" if t["success"] else "❌"
+            desc_preview = t["task_description"][:50] + ("..." if len(t["task_description"]) > 50 else "")
+            agent = t["agent_name"]
+            task_lines.append(f"- {status_icon} [{agent}] {desc_preview} (id: {t['task_id']})")
+
+        task_list_text = "\n".join(task_lines) if task_lines else "- (无任务详情)"
 
         callback_text = f"""[后台任务状态]
-所有子智能体任务执行完成。
-- 总任务数: {total}
-- 已完成: {total - failed}
-- 失败: {failed}
+子智能体任务执行完成（共 {total} 个，成功 {total - failed} 个，失败 {failed} 个）。
+本次完成的任务：
+{task_list_text}
 
-请使用 task_status 工具获取详细结果。"""
+请使用 task_status 工具查询以上任务的详细结果。"""
 
         is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
 
@@ -6455,10 +6485,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if idx is not None:
                 previous_summary = self.history_manager.get_topic_summary(idx)
 
+        # 线程安全包装：QRunnable 在后台线程直接调用 callback，
+        # 通过 pyqtSignal emit 桥接到主线程，避免 GUI 操作崩溃
+        def _thread_safe_callback(result, error=None):
+            self._topic_summary_ready.emit(result, error)
+
         task = TopicSummaryTask(
             messages=session.messages,
             llm_config=llm_config,
-            callback=self._on_topic_summary_generated,
+            callback=_thread_safe_callback,
             previous_summary=previous_summary if previous_summary else None,
             cancel_check=lambda: self._topic_summary_cancelled,
         )
@@ -6516,10 +6551,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if idx is not None:
                 self.history_manager.update_topic_summary(idx, clean_summary)
 
-        QTimer.singleShot(300, lambda: self._update_title_display(clean_summary))
-
-    def _update_title_display(self, title: str):
-        self.title_edit.setText(title)
+        self.title_edit.setText(clean_summary)
 
     def _update_project_display(self, project: str):
         """更新项目名称显示"""
