@@ -927,7 +927,7 @@ WELCOME_TIPS = [
     # ===== 文件与输入 =====
     "💡 拖拽文件到输入框即可快速分析",
     "💡 Shift+Enter 换行，Enter 发送消息",
-    "💡 按 ↑/↓ 键可浏览历史输入记录",
+    "💡 输入框为空时按 ↑/↓ 键可快速切换历史输入记录",
 
     # ===== 会话管理 =====
     "💡 Ctrl+N 快速新建对话，Ctrl+L 清空当前会话",
@@ -971,7 +971,10 @@ WELCOME_TIPS = [
     # ===== MCP 系统 =====
     "💡 在系统设置中配置 MCP Server，可扩展 AI 的工具能力",
     "💡 MCP 工具自动获取工具信息，连接后即可直接调用",
-    "💡 通过 npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
+    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
+    "💡 常用MCP服务： npx -y @colbymchenry/codegraph serve --mcp 可以构建本地代码知识图谱",
+    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-github 可让 AI 访问github",
+    "💡 常用MCP服务： npx -y @playwright/mcp@latest --isolated 可让 AI 操作浏览器",
 
     # ===== 内建指令 =====
     "💡 输入 / 可查看所有内建指令，快速调用常用功能",
