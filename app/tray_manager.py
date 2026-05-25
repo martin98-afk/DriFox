@@ -137,7 +137,7 @@ class TrayManager(QObject):
             except RuntimeError:
                 pass
 
-    _SNAP_THRESHOLD = 12  # 吸附阈值（像素）
+    _SNAP_THRESHOLD = 15  # 吸附阈值（像素）
 
     def _snap_position(self, moving_rect, exclude_window=None) -> tuple:
         """计算最近的对齐吸附位置
@@ -150,46 +150,85 @@ class TrayManager(QObject):
             (snapped_x, snapped_y, is_snapped_x, is_snapped_y)
             如果某方向未吸附，返回原值
         """
-        x, y = moving_rect.x(), moving_rect.y()
+        x0, y0 = moving_rect.x(), moving_rect.y()
         w, h = moving_rect.width(), moving_rect.height()
+        best_x, best_y = x0, y0
         snapped_x, snapped_y = False, False
+        # 找最近吸附距离
+        min_dist_x = self._SNAP_THRESHOLD + 1
+        min_dist_y = self._SNAP_THRESHOLD + 1
+
+        # 获取当前屏幕号（跳过不同屏幕的窗口）
+        try:
+            from PyQt5.QtWidgets import QDesktopWidget
+            desktop = QDesktopWidget()
+            current_screen_idx = desktop.screenNumber(exclude_window) if exclude_window else -1
+        except Exception:
+            current_screen_idx = -1
 
         for win in self._windows:
             if win is exclude_window:
                 continue
-            if win in self._selected_windows:
-                continue  # 选中窗口一起移动，不对齐
+            # 只有当选中的窗口在批量拖拽时，才跳过其他选中窗口
+            # 非选中窗口拖拽时，选中窗口是有效吸附目标
+            if exclude_window in self._selected_windows and win in self._selected_windows:
+                continue
             try:
-                r = win.geometry()
-                # 水平对齐：左、右、中间
-                if abs(x - r.x()) < self._SNAP_THRESHOLD:
-                    x = r.x()
-                    snapped_x = True
-                elif abs(x + w - r.x()) < self._SNAP_THRESHOLD:
-                    x = r.x() - w
-                    snapped_x = True
-                elif abs(x - (r.x() + r.width())) < self._SNAP_THRESHOLD:
-                    x = r.x() + r.width()
-                    snapped_x = True
-                elif abs(x + w - (r.x() + r.width())) < self._SNAP_THRESHOLD:
-                    x = r.x() + r.width() - w
-                    snapped_x = True
+                # 跳过不可见或最小化的窗口
+                if win.isHidden() or win.isMinimized():
+                    continue
+                # 跳过不同屏幕的窗口
+                if current_screen_idx >= 0:
+                    try:
+                        win_screen = desktop.screenNumber(win)
+                        # -1 表示窗口尚未映射到屏幕（新窗口初始化中），不跳过
+                        if win_screen >= 0 and win_screen != current_screen_idx:
+                            continue
+                    except Exception:
+                        pass
 
-                # 垂直对齐：上、下、中间
-                if abs(y - r.y()) < self._SNAP_THRESHOLD:
-                    y = r.y()
-                    snapped_y = True
-                elif abs(y + h - r.y()) < self._SNAP_THRESHOLD:
-                    y = r.y() - h
-                    snapped_y = True
-                elif abs(y - (r.y() + r.height())) < self._SNAP_THRESHOLD:
-                    y = r.y() + r.height()
-                    snapped_y = True
-                elif abs(y + h - (r.y() + r.height())) < self._SNAP_THRESHOLD:
-                    y = r.y() + r.height() - h
-                    snapped_y = True
+                r = win.geometry()
+                candidates_x = []
+
+                # 水平候选：左边缘、右边缘对齐
+                candidates_x.append((r.x(), abs(x0 - r.x())))          # 移动左 → 目标左
+                candidates_x.append((r.x() - w, abs(x0 + w - r.x())))  # 移动右 → 目标左
+                candidates_x.append((r.x() + r.width(), abs(x0 - r.x() - r.width())))  # 移动左 → 目标右
+                candidates_x.append((r.x() + r.width() - w, abs(x0 + w - r.x() - r.width())))  # 移动右 → 目标右
+
+                # 垂直候选：上边缘、下边缘对齐
+                candidates_y = []
+                candidates_y.append((r.y(), abs(y0 - r.y())))
+                candidates_y.append((r.y() - h, abs(y0 + h - r.y())))
+                candidates_y.append((r.y() + r.height(), abs(y0 - r.y() - r.height())))
+                candidates_y.append((r.y() + r.height() - h, abs(y0 + h - r.y() - r.height())))
+
+                # 取最近的水平吸附
+                for cand_x, dist in candidates_x:
+                    if dist < min_dist_x:
+                        min_dist_x = dist
+                        best_x = cand_x
+                        snapped_x = True
+
+                # 取最近的垂直吸附
+                for cand_y, dist in candidates_y:
+                    if dist < min_dist_y:
+                        min_dist_y = dist
+                        best_y = cand_y
+                        snapped_y = True
+
             except RuntimeError:
                 pass
+
+        # 阈值检查：如果最近距离超出阈值，不吸附
+        if min_dist_x > self._SNAP_THRESHOLD:
+            best_x = x0
+            snapped_x = False
+        if min_dist_y > self._SNAP_THRESHOLD:
+            best_y = y0
+            snapped_y = False
+
+        return best_x, best_y, snapped_x, snapped_y
 
         return x, y, snapped_x, snapped_y
 
@@ -249,8 +288,6 @@ class TrayManager(QObject):
                 w.setGeometry(new_x, new_y, win_w, win_h)
             except RuntimeError:
                 pass
-
-        self.deselect_all()
 
     def register_window(self, window) -> None:
         """注册一个窗口到托盘管理器"""
