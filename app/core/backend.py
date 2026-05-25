@@ -168,8 +168,8 @@ class ChatBackend(QObject):
         self._session_manager = SessionManager()
         logger.info("[ChatBackend] SessionManager 创建完成")
         
-        # 2. 创建 MemoryManager
-        self._memory_manager = MemoryManagerCore()
+        # 2. 创建 MemoryManager（全局单例，跨窗口共享）
+        self._memory_manager = MemoryManagerCore.get_instance()
         logger.info("[ChatBackend] MemoryManager 创建完成")
         
         # 3. 创建 HookManager（必须在 create_session 之前）
@@ -220,13 +220,13 @@ class ChatBackend(QObject):
         # 4. 创建初始会话（不触发 SessionStart hook，避免重复初始化）
         self.create_session(trigger_hook=False)
         
-        # 5. 使用传入的 AgentManager 或创建新的
-        self._agent_manager = AgentManager(str(Path(__file__).parent.parent / "agents"), self._hook_manager)
+        # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
+        self._agent_manager = AgentManager.get_instance(str(Path(__file__).parent.parent / "agents"), self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
         
-        # 加载 .drifox 全局 hooks
+        # 加载 .drifox 全局 hooks（hooks 数据已跨窗口共享，仅首次加载）
         global_hooks_file = get_app_data_dir() / "hooks" / "hooks.json"
-        if global_hooks_file.exists():
+        if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
             try:
                 with open(global_hooks_file, 'r', encoding='utf-8') as f:
                     config = json.loads(f.read())
@@ -288,7 +288,7 @@ class ChatBackend(QObject):
         
         self._get_memory_context_getter = None
 
-        self._history_manager = HistoryManager()
+        self._history_manager = HistoryManager.get_instance()
         
         # 8. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
         self._discover_mcp_servers()

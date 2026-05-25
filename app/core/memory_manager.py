@@ -31,7 +31,16 @@ MEMORY_CATEGORY_LIMITS = {}
 
 
 class MemoryManagerCore:
-    """长期记忆管理器核心类 - 聚合 3 种记忆的访问"""
+    """长期记忆管理器核心类 - 聚合 3 种记忆的访问（全局单例，跨窗口共享）"""
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls) -> "MemoryManagerCore":
+        """获取全局唯一的 MemoryManagerCore 实例"""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     def __init__(self):
         self._session_store: Optional[SessionStore] = None

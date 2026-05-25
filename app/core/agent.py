@@ -218,7 +218,16 @@ class PermissionResolver:
         return fnmatch.fnmatch(text, pattern)
 
 class AgentManager:
-    """Agent/Skill 管理器"""
+    """Agent/Skill 管理器（全局单例，跨窗口共享）"""
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None) -> "AgentManager":
+        """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
+        if cls._instance is None:
+            cls._instance = cls(agents_dir, hook_manager)
+        return cls._instance
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):
         self.agents_dir = (
@@ -544,4 +553,4 @@ def get_available_skills() -> List[Dict]:
 
 
 def create_agent_manager(agents_dir: Optional[str] = None) -> AgentManager:
-    return AgentManager(agents_dir)
+    return AgentManager.get_instance(agents_dir)

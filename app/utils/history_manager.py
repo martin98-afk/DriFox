@@ -37,10 +37,19 @@ def sanitize_filename(name: str) -> str:
 
 class HistoryManager:
     """
-    会话历史管理器
+    会话历史管理器（全局单例，跨窗口共享）
 
     使用 SQLite 进行持久化存储，同时维护内存缓存以提高读取性能。
     """
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls) -> "HistoryManager":
+        """获取全局唯一的 HistoryManager 实例"""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     def __init__(self):
         self.archive_dir = get_app_data_dir() / "archived"
