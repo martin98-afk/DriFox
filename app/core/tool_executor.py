@@ -407,12 +407,15 @@ class ToolExecutor:
                     logger.info(f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}")
                     
                     # 将 hook 输出注入到消息上下文（供 LLM 后续分析）
+                    # 🛡️ 跨线程保护：使用 Qt.callLater 确保在主线程执行
                     if result.output and self._backend:
                         hook_output_msg = f"<hook event=\"PreToolUse\">\n[BLOCKED] Tool '{tool_name}' was blocked by hook.\nHook output:\n{result.output}\n</hook>"
-                        self._backend.message_received.emit({
-                            "role": "assistant",
-                            "content": hook_output_msg
-                        })
+                        from PyQt5.QtCore import QMetaObject, Qt
+                        QMetaObject.invokeMethod(
+                            self._backend, "message_received",
+                            Qt.QueuedConnection,
+                            *({"role": "assistant", "content": hook_output_msg},)
+                        )
                     
                     # 返回 hook 输出作为工具结果
                     return ToolResult(
@@ -620,16 +623,24 @@ class ToolExecutor:
             logger.warning(f"[ToolExecutor] ToolExecutor became invalid before MCP tool: {tool_name}")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
-        mcp_manager = self._builtin_tools._mcp_manager
+        # 获取 MCP Manager（单例，可能在 BuiltinTools 清理后仍存在）
+        try:
+            mcp_manager = self._builtin_tools._mcp_manager
+        except AttributeError:
+            logger.error(f"[ToolExecutor] _mcp_manager not accessible")
+            return ToolResult(False, error="MCP 管理器不可用")
 
         if not mcp_manager.is_connected:
             return ToolResult(False, error="MCP 未连接，请先配置并连接 MCP 服务器")
 
         try:
             result = mcp_manager.call_tool_sync(tool_name, args)
+        except TimeoutError as e:
+            logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
+            return ToolResult(False, error=f"MCP 工具调用超时，请稍后重试")
         except Exception as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' raised exception: {e}")
-            return ToolResult(False, error=f"MCP 工具执行异常: {e}")
+            return ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
 
         # 执行后检查 ToolExecutor 有效性（MCP 调用可能耗时较长）
         if not self.is_valid():

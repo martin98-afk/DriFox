@@ -22,6 +22,7 @@ from app.core.chat_session import SessionManager, ChatSession
 from app.core.memory_manager import MemoryManagerCore
 from app.core.hook_manager import HookManager
 from app.core.tool_executor import ToolExecutor
+from app.core.workers.subagent_worker import SubAgentManager
 from app.utils.history_manager import HistoryManager
 from app.utils.utils import get_app_data_dir
 
@@ -271,11 +272,25 @@ class ChatBackend(QObject):
         )
         logger.info("[ChatBackend] GatewayEngine 创建完成")
         
+        # 创建 SubAgentManager（管理子智能体任务）
+        self._sub_agent_manager = SubAgentManager(
+            agent_manager=self._agent_manager,
+            tool_executor=self._tool_executor,
+            get_llm_config=get_model_config,
+        )
+        self._sub_agent_manager.set_session_store(self._session_store)
+        # 设置给 ToolExecutor，让工具能访问子智能体
+        self._tool_executor.set_sub_agent_manager(self._sub_agent_manager)
+        logger.info("[ChatBackend] SubAgentManager 创建完成")
+        
+        # 提供设置 history getter 的方法（由 main_widget 在初始化时调用）
+        self._sub_agent_history_getter = None
+        
         self._get_memory_context_getter = None
 
         self._history_manager = HistoryManager()
         
-        # 7. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
+        # 8. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
         self._discover_mcp_servers()
 
         # 8. 初始化 MCP 连接
@@ -385,6 +400,11 @@ class ChatBackend(QObject):
         if self._chat_engine:
             return self._chat_engine.cleanup_worker()
 
+    def set_ui_valid(self, valid: bool):
+        """设置 UI 有效性标志（由 MainWidget.closeEvent 调用）"""
+        self._ui_valid = valid
+        logger.debug(f"[ChatBackend] UI valid set to: {valid}")
+
     def get_current_worker(self):
         """获取当前 Worker 实例"""
         if self._chat_engine:
@@ -439,12 +459,6 @@ class ChatBackend(QObject):
         if self._tool_executor:
             self._tool_executor.set_session_context(session_id)
     
-    def set_sub_agent_manager(self, manager):
-        """设置子智能体管理器"""
-        self._sub_agent_manager = manager
-        if self._tool_executor:
-            self._tool_executor.set_sub_agent_manager(manager)
-    
     def reset_session_state(self):
         """重置会话状态"""
         if self._tool_executor:
@@ -473,6 +487,12 @@ class ChatBackend(QObject):
         if self._tool_executor:
             return self._tool_executor.execute_skill(method, params)
         return None
+    
+    def set_sub_agent_history_getter(self, getter: Callable[[], List[Dict]]):
+        """设置子智能体获取历史消息的回调"""
+        self._sub_agent_history_getter = getter
+        if self._sub_agent_manager:
+            self._sub_agent_manager.set_history_getter(getter)
     
     # ========== MemoryManager 代理方法 ==========
     def get_memory_context_string(self, limit: int = 8) -> str:

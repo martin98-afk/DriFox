@@ -5,6 +5,7 @@ import ctypes
 import gc
 import os
 import re
+import uuid
 import subprocess
 import sys
 import time
@@ -186,7 +187,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
-        import uuid
         self._window_id = str(uuid.uuid4())[:8]
         
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
@@ -303,8 +303,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 初始化 UI 相关的回调
         self._setup_engine_callbacks()
 
-        # 初始化子智能体管理器
-        self._init_sub_agent_manager()
+        # 初始化子智能体信号连接
+        self._init_sub_agent_signals()
+        # 设置子智能体获取主智能体历史消息的回调
+        self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
 
         # 初始化历史管理器
         self._project_label.setText(self._current_project)
@@ -361,47 +363,21 @@ class OpenAIChatToolWindow(ToolWindow):
             "stream_finished": self._on_stream_finished,
             "messages_updated": self._on_messages_updated,
             "error": self._on_engine_error,
-            "user_message_added": self._on_user_message_added,
             "skill_requested": self._on_skill_requested,
             "question_asked": self._on_question_asked,
             "agent_switched": self._on_agent_switched,
             "retry_status": self._on_retry_status,
             "retry_resolved": self._on_retry_resolved,
             "permission_approval_requested": self._on_permission_approval_requested,
-            "compaction_updated": self._on_compaction_updated,  # 子智能体压缩完成回调
         }
         self.backend.set_all_callbacks(callbacks)
 
-    def _init_sub_agent_manager(self):
-        """初始化子智能体管理器"""
-        from app.core import SubAgentManager
-
-        self._sub_agent_manager = SubAgentManager(
-            agent_manager=self.backend.agent_manager,
-            tool_executor=self.backend.tool_executor,
-            get_llm_config=self._get_current_model_config,
-        )
-        self._sub_agent_manager.task_started.connect(self._on_sub_agent_task_started)
-        self._sub_agent_manager.task_finished.connect(self._on_sub_agent_task_finished)
-        self._sub_agent_manager.set_history_getter(self._get_current_session_messages_for_tools)
-
-        # 将子智能体管理器设置到 backend，让 ToolExecutor 能访问
-        self.backend.set_sub_agent_manager(self._sub_agent_manager)
-
-        # 初始化子智能体日志存储（在 ChatEngine 之后）
-        self._init_sub_agent_log_store()
-
-    def _init_sub_agent_log_store(self):
-        """初始化子智能体日志存储（委托给 Backend.session_store）"""
-        try:
-            # 直接使用 backend 的 session_store（共享单一数据库连接）
-            session_store = self.backend.session_store
-            
-            # 直接使用 SessionStore 的方法，无需中间的 SubAgentLogStore
-            self._sub_agent_manager.set_session_store(session_store)
-            logger.info(f"[LLMChatter] 子智能体日志存储初始化完成（通过 SessionStore）")
-        except Exception as e:
-            logger.error(f"[LLMChatter] 子智能体日志存储初始化失败: {e}")
+    def _init_sub_agent_signals(self):
+        """连接子智能体信号到 UI 回调"""
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if sub_agent_mgr:
+            sub_agent_mgr.task_started.connect(self._on_sub_agent_task_started)
+            sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
 
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""
@@ -1532,7 +1508,6 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
             return
 
-        import uuid
         task_id = f"compact_{uuid.uuid4().hex[:8]}"
 
         sub_agent_mgr.execute_task(
@@ -1541,41 +1516,11 @@ class OpenAIChatToolWindow(ToolWindow):
             task_description="请压缩当前对话上下文，生成工作摘要",
             parent_context="",
             share_context=True,  # 接入主智能体完整上下文
-            on_finished=lambda result: self._on_compaction_finished(task_id, result),
-            on_error=lambda error: self._on_compaction_error(task_id, error),
+            on_finished=None,
+            on_error=None
         )
 
         InfoBar.info("压缩中", "正在调用子智能体压缩对话上下文...", parent=self, duration=2000, position=InfoBarPosition.BOTTOM)
-
-    def _on_compaction_finished(self, task_id: str, result: str):
-        """压缩任务完成"""
-        if getattr(self, '_is_destroyed', False):
-            return
-
-        # 将压缩结果以系统消息形式写入会话并刷新
-        if result and result.strip():
-            session = self.session_manager.get_current_session()
-            if session:
-                summary_msg = {
-                    "role": "assistant",
-                    "content": f"📋 **上下文压缩摘要**\n\n{result.strip()}",
-                }
-                messages = list(session.messages)
-                messages.append(summary_msg)
-                # 更新会话消息（触发 _on_messages_updated → 刷新上下文指示器）
-                session.set_messages(messages, preserve_compaction=False)
-                self._refresh_context_usage_indicator()
-                # 持久化到历史
-                if self.history_manager:
-                    self._save_current_session_to_history()
-
-        InfoBar.success("压缩完成", "对话上下文已压缩", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
-
-    def _on_compaction_error(self, task_id: str, error: str):
-        """压缩任务出错"""
-        if getattr(self, '_is_destroyed', False):
-            return
-        InfoBar.error("压缩失败", f"上下文压缩出错: {error}", parent=self, position=InfoBarPosition.BOTTOM)
 
     # ========== 命令卡片处理 ==========
 
@@ -5878,7 +5823,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """单个子智能体执行完成"""
         if getattr(self, '_is_destroyed', False):
             return
-        self._sub_agent_manager.task_finished.emit(task_id, result)
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if sub_agent_mgr:
+            sub_agent_mgr.task_finished.emit(task_id, result)
 
     def _on_tool_cancelled(self):
         """工具执行被用户中止 — 连接自 tool_floating_widget.cancelled 信号"""
@@ -6417,58 +6364,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._question_floating_widget.setUpdatesEnabled(True)
 
-    def _on_compaction_updated(self, task_id: str, new_summary: str):
-        if getattr(self, '_is_destroyed', False):
-            return
-        """
-        子智能体压缩完成回调
-        
-        当后台压缩子智能体完成任务时：
-        1. 存储压缩结果供后续查询
-        2. 通知用户压缩已完成
-        
-        主智能体可以在适当时机查询并应用新的压缩结果。
-        """
-        logger.info(f"[MainWidget] 压缩结果已更新，task_id={task_id[:8]}...")
-        
-        # 存储最新的压缩结果
-        self._latest_compaction_result = {
-            "task_id": task_id,
-            "new_summary": new_summary,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        
-        # 检查是否有正在进行的流式对话
-        if not self._is_streaming:
-            # 如果没有正在进行的对话，可以记录但不立即应用
-            logger.info("[MainWidget] 当前无流式对话，压缩结果已存储待用")
-        else:
-            # 如果有对话在进行，通知用户压缩已完成
-            compaction_msg = (
-                f"📋 上下文压缩已完成\n"
-                f"后台子智能体已生成更好的压缩摘要。"
-            )
-            
-            # 如果有日志面板，可以在这里显示
-            if hasattr(self, '_log_floating_widget') and self._log_floating_widget.isVisible():
-                self._log_floating_widget.append_log("system", compaction_msg)
-
-    def _get_pending_compaction_result(self) -> Optional[Dict]:
-        """
-        获取待应用的压缩结果
-        
-        供其他模块查询是否有新的压缩结果需要应用。
-        
-        Returns:
-            Dict: 压缩结果（包含 task_id, new_summary, timestamp）
-            None: 如果没有待应用的压缩结果
-        """
-        return getattr(self, '_latest_compaction_result', None)
-
-    def _clear_pending_compaction_result(self):
-        """清除待应用的压缩结果（在应用后调用）"""
-        self._latest_compaction_result = None
-    
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
         self._topic_summary_cancelled = False

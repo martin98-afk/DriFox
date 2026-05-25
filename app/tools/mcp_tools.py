@@ -117,11 +117,31 @@ class MCPClientManager:
         logger.info("[MCP] 后台事件循环已启动")
 
     def _run_async(self, coro, timeout: float = 60):
-        """在后台事件循环中执行协程，同步等待结果"""
+        """在后台事件循环中执行协程，同步等待结果
+
+        Args:
+            coro: 协程对象
+            timeout: 超时时间（秒），默认 60 秒
+
+        Returns:
+            协程执行结果
+
+        Raises:
+            TimeoutError: 执行超时
+            RuntimeError: 事件循环未运行
+        """
         if not self._loop or self._loop.is_closed():
             raise RuntimeError("MCP 事件循环未运行")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"协程执行超时（{timeout}秒）")
+        except ExceptionGroup as e:
+            # 处理 ExceptionGroup（Python 3.11+）
+            raise _extract_real_error(e)
+        except BaseException as e:
+            raise _extract_real_error(e)
 
     # ── 连接生命周期（持久 Task 模式）──────────────
 
@@ -528,10 +548,19 @@ class MCPClientManager:
 
     # ── 工具调用 ──────────────────────────────────────
 
-    def call_tool_sync(self, prefixed_name: str, arguments: dict) -> ToolResult:
-        """同步调用 MCP 工具（供 ToolExecutor 调用）"""
+    def call_tool_sync(self, prefixed_name: str, arguments: dict, timeout: float = 120) -> ToolResult:
+        """同步调用 MCP 工具（供 ToolExecutor 调用）
+
+        Args:
+            prefixed_name: 带前缀的工具名（如 mcp__server__tool）
+            arguments: 工具参数
+            timeout: 超时时间（秒），默认 120 秒
+        """
         try:
-            return self._run_async(self._call_tool(prefixed_name, arguments))
+            return self._run_async(self._call_tool(prefixed_name, arguments), timeout=timeout)
+        except TimeoutError as e:
+            logger.error(f"[MCP] 调用工具 '{prefixed_name}' 超时（{timeout}s）: {e}")
+            return ToolResult(False, error=f"MCP 工具调用超时（{timeout}秒），请稍后重试")
         except Exception as e:
             logger.error(f"[MCP] 调用工具 '{prefixed_name}' 失败: {e}")
             return ToolResult(False, error=f"MCP 工具调用失败: {e}")
