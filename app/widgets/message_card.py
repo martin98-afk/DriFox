@@ -87,18 +87,15 @@ from app.widgets.render_helpers import (
 # ======== Markdown 实例 ========
 _md_instance = None
 ACTION_COLOR_MAP = {
-    "jump": "#FFA500",
-    "create": "#9370DB",
-    "generate": "#32CD32",
     "ask": "#FF6347",
-    "view": "#4169E1",
+    "file": "#4CAF50",   # 文件引用 - 绿色
 }
 DEFAULT_COLOR = "#888888"
 
 # ======== 预编译的正则表达式（提升到模块级别，避免重复编译）=======
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
-_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask|jump|create|generate|view|session)(?:\|([^)]*))?\)")
+_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask|file)(?:\|([^)]*))?\)")
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -930,7 +927,7 @@ WELCOME_TIPS = [
     # ===== 文件与输入 =====
     "💡 拖拽文件到输入框即可快速分析",
     "💡 Shift+Enter 换行，Enter 发送消息",
-    "💡 按 ↑/↓ 键可浏览历史输入记录",
+    "💡 输入框为空时按 ↑/↓ 键可快速切换历史输入记录",
 
     # ===== 会话管理 =====
     "💡 Ctrl+N 快速新建对话，Ctrl+L 清空当前会话",
@@ -974,7 +971,17 @@ WELCOME_TIPS = [
     # ===== MCP 系统 =====
     "💡 在系统设置中配置 MCP Server，可扩展 AI 的工具能力",
     "💡 MCP 工具自动获取工具信息，连接后即可直接调用",
-    "💡 通过 npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
+    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
+    "💡 常用MCP服务： npx -y @colbymchenry/codegraph serve --mcp 可以构建本地代码知识图谱",
+    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-github 可让 AI 访问github",
+    "💡 常用MCP服务： npx -y @playwright/mcp@latest --isolated 可让 AI 操作浏览器",
+
+    # ===== 内建指令 =====
+    "💡 输入 / 可查看所有内建指令，快速调用常用功能",
+    "💡 /new 新建会话、/new-window 新建窗口、/branch 创建分支",
+    "💡 /init 初始化项目笔记、/review 审查代码改动、/theme 设计主题色",
+    "💡 /compact 手动触发上下文压缩，减少 Token 消耗",
+    "💡 输入 / 还会显示从 agents 目录加载的自定义智能体命令",
 ]
 
 # ======== 欢迎卡片欢迎语 ========
@@ -1031,6 +1038,12 @@ def _inject_context_links(md_text: str) -> str:
                 attrs += f' data-last-time="{escape(last_time)}"'
             return f'<span class="context-tag session-tag" {attrs}>{display_content}</span>'
 
+        if action == "file":
+            # file 格式：[显示名称](file|/path/to/file_or_folder)
+            file_path = extra.strip() if extra else content
+            # 使用 data-type="file" 让 CSS 样式匹配
+            return f'<span class="context-tag" data-type="file" data-path="{escape(file_path)}" data-action="file">{escape(content)}</span>'
+
         return f'<span class="context-tag" data-type="{action}" data-content="{escape(content)}" data-action="{action}">{content}</span>'
 
     return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
@@ -1074,6 +1087,27 @@ class ConsoleMonitorPage(QWebEnginePage):
 
                     QDesktopServices.openUrl(QUrl(url_str))
                 except:
+                    pass
+            elif "open_file:" in msg:
+                # 处理打开文件/文件夹请求
+                try:
+                    file_path = msg.split("open_file:", 1)[1]
+                    
+                    import os
+                    import subprocess
+                    
+                    if os.name == 'nt':
+                        if os.path.isdir(file_path):
+                            # 文件夹：直接在资源管理器中打开
+                            subprocess.Popen(['explorer', file_path])
+                        else:
+                            # 文件：使用系统默认程序打开
+                            os.startfile(file_path)
+                    else:
+                        # macOS/Linux
+                        cmd = 'open' if os.uname().sysname == 'Darwin' else 'xdg-open'
+                        subprocess.Popen([cmd, file_path])
+                except Exception:
                     pass
             elif "tool_diff:" in msg:
                 # 处理工具差异对比请求
@@ -2178,7 +2212,13 @@ class CodeWebViewer(QWebEngineView):
                         var tagContent = sessionId || tag.getAttribute('data-content') || tag.getAttribute('data-title') || '';
                         e.stopPropagation();
                         e.preventDefault();
-                        console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
+                        // file 类型特殊处理：直接发送文件路径
+                        if (tagType === 'file') {{
+                            var filePath = tag.getAttribute('data-path') || tagContent;
+                            console.log('pywebview_action:open_file:' + filePath);
+                        }} else {{
+                            console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
+                        }}
                         return;
                     }}
                     const link = e.target.closest('a');

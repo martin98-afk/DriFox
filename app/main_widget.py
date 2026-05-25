@@ -37,7 +37,7 @@ from qfluentwidgets import (
     setFont,
     FluentIcon,
     SingleDirectionScrollArea,
-    TransparentToolButton, InfoBar, InfoBarPosition, )
+    TransparentToolButton, InfoBar, InfoBarPosition, PushButton, )
 
 from app.constants import (
     FREE_PROVIDERS,
@@ -779,11 +779,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_window_bg_opacity(opacity)
 
     def _update_window_bg_opacity(self, opacity: float):
-        """更新窗口背景透明度"""
-        # 更新背景图片透明度（如果存在）
-        if hasattr(self, '_bg_opacity') and self._bg_opacity is not None:
-            self._bg_opacity.setOpacity(opacity)
-        
+        """更新窗口背景透明度（不影响背景图）"""
         # 更新窗口调色板颜色
         if not hasattr(self, '_window_bg_color'):
             return
@@ -971,49 +967,41 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session_bar_layout = QHBoxLayout()
 
-        # 项目选择标签（跟随主题色）
+        # ===== 项目+分支组合控件（一体感布局） =====
+        self._project_branch_container = QFrame(self)
+        self._project_branch_container.setObjectName("projectBranchContainer")
+        pb_layout = QHBoxLayout(self._project_branch_container)
+        pb_layout.setContentsMargins(0, 0, 0, 0)
+        pb_layout.setSpacing(0)
+
+        # 项目选择标签
         self._project_label = QLabel(self._current_project, self)
-        self._project_label.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_ACCENT};
-                {get_font_family_css()}
-                {font_size_css(13)}
-                font-weight: bold;
-                padding: 2px 6px;
-                border-radius: 4px;
-                background: {Colors.HOVER_BG};
-            }}
-            QLabel:hover {{
-                background: {Colors.SELECTED_BG};
-            }}
-        """)
         self._project_label.setCursor(Qt.PointingHandCursor)
         self._project_label.mousePressEvent = self._on_project_label_clicked
         self._project_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self._project_label.customContextMenuRequested.connect(self._show_context_menu)
         self._project_label.setToolTip("点击切换项目 · 右键更多操作")
+        pb_layout.addWidget(self._project_label)
 
-        # Git 分支标签（从工作目录检测，左键点击打开关键文档卡片）
-        self._branch_widget = QWidget(self)
-        self._branch_widget.setCursor(Qt.PointingHandCursor)
+        # 分支分隔符（三角箭头，面包屑风格）
+        self._pb_separator = QLabel("▸", self)
+        self._pb_separator.setAlignment(Qt.AlignCenter)
+        self._pb_separator.setVisible(False)
+        pb_layout.addWidget(self._pb_separator)
+
+        # Git 分支标签
+        self._branch_widget = PushButton(text="main", parent=self)
         self._branch_widget.setObjectName("_branchWidget")
-        self._branch_widget.setAttribute(Qt.WA_StyledBackground)
-        self._branch_widget.mousePressEvent = self._on_branch_label_clicked
+        self._branch_widget.clicked.connect(self._on_branch_label_clicked)
         self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
         self._branch_widget.setVisible(False)
-        self._branch_layout = QHBoxLayout(self._branch_widget)
-        self._branch_layout.setContentsMargins(3, 0, 3, 0)
-        self._branch_layout.setSpacing(2)
+        self._refresh_branch_widget_style()
+        pb_layout.addWidget(self._branch_widget)
 
-        self._branch_icon = QLabel(self._branch_widget)
-        _pix = QPixmap(":/icons/分支.svg")
-        self._branch_icon.setPixmap(_pix.scaled(12, 12, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self._branch_layout.addWidget(self._branch_icon)
-
-        self._branch_label = QLabel("", self._branch_widget)
-        self._branch_layout.addWidget(self._branch_label)
-
+        self._refresh_project_branch_style()
         self._update_branch()
+
+        # 将组合控件加入布局
         # 标题编辑（行内编辑模式）
         self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
@@ -1049,8 +1037,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.title_edit.returnPressed.connect(self._on_title_edit_finished)
         self.title_edit.editingFinished.connect(self._on_title_edit_finished)
 
-        session_bar_layout.addWidget(self._project_label)
-        session_bar_layout.addWidget(self._branch_widget)
+        session_bar_layout.addWidget(self._project_branch_container)
         session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
         # right_layout 保持简化，显示余额和 context_usage_ring
@@ -1487,11 +1474,12 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.builtin_commands import register_all_commands
         register_all_commands()
 
-    def _execute_command(self, command_name: str):
+    def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
 
         Args:
             command_name: 命令名（不含 /）
+            args: 命令后的参数字符串
         """
         if command_name == "new":
             self._create_new_session()
@@ -1501,6 +1489,54 @@ class OpenAIChatToolWindow(ToolWindow):
             self._duplicate_window(branch=True)
         elif command_name == "compact":
             self._trigger_context_compaction()
+        elif command_name == "remember":
+            self._remember_to_memory(args)
+
+    def _execute_subagent_task(self, agent_name: str, task_description: str):
+        """触发子智能体任务（智能体命令 + --subagent 参数）
+
+        Args:
+            agent_name: 智能体名称（来自 agents 目录）
+            task_description: 子智能体任务描述
+        """
+        if not agent_name or not task_description:
+            InfoBar.warning("参数错误", "缺少智能体名称或任务描述", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        # 清空输入框（和函数型命令一样处理）
+        self.input_area.clear()
+
+        # 检查 AgentManager 中是否存在该智能体
+        agent_mgr = self.backend.agent_manager
+        if not agent_mgr:
+            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        available_agents = [a.name for a in agent_mgr.list_agents()]
+        if agent_name not in available_agents:
+            InfoBar.warning("未知智能体", f"未找到智能体: {agent_name}，可用: {', '.join(available_agents)[:100]}", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if not sub_agent_mgr:
+            InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        # 构建完整任务描述：如果有剩余的 remainder 内容，追加到任务描述
+        # （remainder 已经在 command_manager 中处理过，但保留扩展性）
+        full_task = task_description
+
+        # 触发子智能体任务
+        sub_agent_mgr.execute_task(
+            task_id=f"agent_{uuid.uuid4().hex[:8]}",
+            agent_name=agent_name,
+            task_description=full_task,
+            parent_context="",
+            share_context=True,  # 接入主智能体完整上下文
+            on_finished=None,
+            on_error=None
+        )
+        logger.info(f"[BuiltinCommands] 触发子智能体任务: agent={agent_name}, task={task_description[:50]}...")
 
     def _trigger_context_compaction(self):
         """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
@@ -1513,11 +1549,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not sub_agent_mgr:
             InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
             return
-
-        task_id = f"compact_{uuid.uuid4().hex[:8]}"
-
         sub_agent_mgr.execute_task(
-            task_id=task_id,
+            task_id=f"compact_{uuid.uuid4().hex[:8]}",
             agent_name="compaction",
             task_description="请压缩当前对话上下文，生成工作摘要",
             parent_context="",
@@ -1526,7 +1559,20 @@ class OpenAIChatToolWindow(ToolWindow):
             on_error=None
         )
 
-        InfoBar.info("压缩中", "正在调用子智能体压缩对话上下文...", parent=self, duration=2000, position=InfoBarPosition.BOTTOM)
+    def _remember_to_memory(self, content: str):
+        """将内容存入长期记忆"""
+        content = content.strip()
+        if not content:
+            InfoBar.warning("记忆为空", "请在 /remember 后输入要记忆的内容", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+        
+        from app.core.memory_manager import MemoryManagerCore
+        mm = MemoryManagerCore.get_instance()
+        success = mm.add_entry_memory(content, source="manual")
+        if success:
+            InfoBar.success("已记忆", f'"{content[:30]}{"..." if len(content) > 30 else ""}" 已存入长期记忆', parent=self, position=InfoBarPosition.BOTTOM)
+        else:
+            InfoBar.error("记忆失败", "无法保存到长期记忆", parent=self, position=InfoBarPosition.BOTTOM)
 
     # ========== 命令卡片处理 ==========
 
@@ -1546,6 +1592,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """输入框 / 触发结束 - 隐藏命令卡片"""
         if not hasattr(self, '_command_card'):
             return
+        # 直接调用卡片的 dismiss 方法确保关闭，同时通过 CardManager 通知容器
+        self._command_card.dismiss()
         self._card_manager.hide_card("command", self._window_id)
 
     def _show_model_selector_popup(self):
@@ -1722,6 +1770,13 @@ class OpenAIChatToolWindow(ToolWindow):
         """打开设置卡片"""
         self._card_manager.toggle_card("settings", self._window_id)
         if self._card_manager.is_card_visible("settings", self._window_id):
+            # 确保顶层窗口从最小化恢复并激活
+            top_window = self.window()
+            if top_window:
+                if top_window.isMinimized():
+                    top_window.showNormal()
+                top_window.activateWindow()
+                top_window.raise_()
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
@@ -2072,6 +2127,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 显示时刷新模型配置数据
         if self._card_manager.is_card_visible("model_config", self._window_id):
             self._load_model_config_to_card()
+            # 确保顶层窗口从最小化恢复并激活
+            top_window = self.window()
+            if top_window:
+                if top_window.isMinimized():
+                    top_window.showNormal()
+                top_window.activateWindow()
+                top_window.raise_()
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
@@ -2497,7 +2559,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self.setAutoFillBackground(True)
         
         if hasattr(self, "_project_label"):
-            self._update_project_label_style()
+            self._refresh_project_branch_style()
         if hasattr(self, "title_edit"):
             font_css = get_font_family_css()
             title_style = f"""QLabel {{
@@ -4087,7 +4149,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = session_project
         self.backend._current_project = session_project
         self._project_label.setText(session_project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
         self._update_branch()
 
         self._display_current_session()
@@ -5475,7 +5537,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._switch_to_session_by_id(session_id)
 
     def _switch_to_session_by_id(self, session_id: str):
-        """根据 session_id 切换到对应会话"""
+        """根据 session_id 切换到对应会话（始终从最新源加载，保证跨窗口数据一致）"""
         if not session_id:
             return
 
@@ -5492,15 +5554,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 只重置会话状态，保留 tool_executor
         self.backend.reset_session_state()
 
-        # 先在当前 session_manager 中查找
-        for i, session in enumerate(self.session_manager.get_all_sessions()):
-            if session.session_id == session_id:
-                self.backend.switch_session(i)
-                self._display_current_session()
-                self._hide_welcome_cards()
-                return
-
-        # 再从 history_manager 查找并恢复（通过 session_id 直接获取）
+        # 始终从 history_manager/SQLite 加载最新数据（保证跨窗口一致性）
+        # 即便 session_id 在当前 SessionManager 中存在，其他窗口可能已更新该会话
         session_record = self.history_manager.get_session_by_session_id(session_id)
         if session_record:
             messages = self.history_manager.get_session_messages(session_id)
@@ -5512,11 +5567,18 @@ class OpenAIChatToolWindow(ToolWindow):
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
             self._project_label.setText(session_project)
-            self._update_project_label_style()
+            self._refresh_project_branch_style()
             self._update_branch()
             self._display_current_session()
             self._hide_welcome_cards()
         else:
+            # fallback: session_id 不在 history_manager 中，尝试 SessionManager
+            for i, session in enumerate(self.session_manager.get_all_sessions()):
+                if session.session_id == session_id:
+                    self.backend.switch_session(i)
+                    self._display_current_session()
+                    self._hide_welcome_cards()
+                    return
             logger.warning(f"未找到 session_id: {session_id}")
 
     def _load_input_history(self):
@@ -5568,7 +5630,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if cmd_result.is_function:
                 # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
                 self.input_area.clear()
-                self._execute_command(cmd_result.command_name)
+                # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
+                self.input_area.toggle_send_button(True)
+                self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                return
+            elif cmd_result.is_subagent:
+                # 子智能体命令：触发子智能体任务，不替换提示词
+                # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
+                self.input_area.toggle_send_button(True)
+                self._execute_subagent_task(cmd_result.agent_name, cmd_result.subagent_task)
                 return
             elif cmd_result.is_prompt or cmd_result.is_agent:
                 # 提示词替换命令：替换 + 追加用户命令
@@ -5637,6 +5707,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = True
         self._response_start_time = time.time()
         self._accumulated_content = ""
+        # 当 LLM 实际开始流式响应时切换为停止按钮
+        # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
+        self._toggle_send_stop(True)
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
 
@@ -5903,7 +5976,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_card = assistant_card
         self._response_start_time = time.time()
         self._is_streaming = True
-        self._toggle_send_stop(True)
+        # ❌ 不在这里切换停止按钮！内建函数/子智能体执行后只是准备接收回调响应，
+        # 按钮状态应在 LLM 实际开始流式响应时由 _on_stream_started 切换。
+        # self._toggle_send_stop(True)
 
         # 确保 ToolExecutor 使用正确的 session_id
         session = self.session_manager.get_current_session()
@@ -6049,8 +6124,10 @@ class OpenAIChatToolWindow(ToolWindow):
             QApplication.beep()
 
         # 使用全局 TrayManager 发送通知（避免多窗口多个托盘图标的问题）
+        # 传递顶层窗口引用，确保点击通知时能正确恢复最小化的对话框
         from app.tray_manager import TrayManager
-        TrayManager.get_instance().notify(title, message)
+        top_window = self.window() if callable(self.window) else self
+        TrayManager.get_instance().notify(title, message, window=top_window)
 
     def _should_show_inactive_notification(self) -> bool:
         """Only notify when the app window is not effectively visible to the user."""
@@ -6558,29 +6635,75 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
 
     def _on_project_label_clicked(self, event):
         """项目标签点击 - 显示项目选择 popup"""
         event.accept()
         self._show_project_selector_popup()
 
-    def _update_project_label_style(self):
-        """更新项目标签样式（跟随主题色）"""
+    def _refresh_branch_widget_style(self):
+        """刷新分支按钮的文字样式"""
+        Colors.refresh()
+        self._branch_widget.setStyleSheet(f"""
+            #_branchWidget {{
+                background: transparent;
+                border: none;
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()}
+                {font_size_css(12)};
+                padding: 2px 6px 2px 2px;
+            }}
+            #_branchWidget:hover {{
+                background: {Colors.HOVER_BG};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+
+    def _refresh_project_branch_style(self):
+        """刷新项目+分支组合控件的整体样式（面包屑风格）"""
+        Colors.refresh()
+        # 容器 — 面包屑整体底框
+        self._project_branch_container.setStyleSheet(f"""
+            QFrame#projectBranchContainer {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 6px;
+            }}
+            QFrame#projectBranchContainer:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        # 项目标签 — 面包屑第一级（粗体 + accent 色）
         self._project_label.setStyleSheet(f"""
             QLabel {{
                 color: {Colors.TEXT_ACCENT};
                 {get_font_family_css()}
                 {font_size_css(13)}
                 font-weight: bold;
-                padding: 2px 6px;
+                padding: 0px 2px 0px 2px;
+                background: transparent;
+                border: none;
                 border-radius: 4px;
-                background: {Colors.HOVER_BG};
             }}
             QLabel:hover {{
                 background: {Colors.SELECTED_BG};
             }}
         """)
+        # 分隔符 — 三角箭头（小号 + 次级色）
+        self._pb_separator.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_MUTED};
+                {get_font_family_css()}
+                {font_size_css(16)}
+                background: transparent;
+                border: none;
+                padding: 2px;
+            }}
+        """)
+        # 同步刷新分支按钮样式
+        self._refresh_branch_widget_style()
 
     def _update_branch(self):
         """从工作目录检测 git 分支并更新分支标签"""
@@ -6619,40 +6742,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if branch:
             # 分支名过长时截断显示，悬浮显示全名
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
-            self._branch_label.setText(display)
+            self._branch_widget.setText(display)
             self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
-
-            # 容器样式：背景色 + 边框 + 圆角
-            self._branch_widget.setStyleSheet(f"""
-                #_branchWidget {{
-                    background: {Colors.BRANCH_LABEL_BG};
-                    border: 1px solid {Colors.BRANCH_LABEL_BORDER};
-                    border-radius: 2px;
-                }}
-                #_branchWidget:hover {{
-                    background: {Colors.HOVER_BG};
-                }}
-            """)
-            # 文字标签：纯文字颜色+字体，无背景/边框
-            self._branch_label.setStyleSheet(f"""
-                color: {Colors.TEXT_SECONDARY};
-                {get_font_family_css()}
-                {font_size_css(10)};
-                background: transparent;
-                border: none;
-            """)
-            # 图标标签：透明
-            self._branch_icon.setStyleSheet("background: transparent; border: none;")
-
-            self._branch_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self._branch_widget.setMaximumWidth(160)
             self._branch_widget.setVisible(True)
+            self._pb_separator.setVisible(True)
         else:
-            self._branch_label.setText("")
             self._branch_widget.setVisible(False)
+            self._pb_separator.setVisible(False)
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开关键文档卡片"""
-        event.accept()
         self._toggle_memory_card()
         # 确保切换到关键文档 Tab
         if hasattr(self, '_memory_card_popup') and self._memory_card_popup:
@@ -6684,7 +6782,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
         self._update_branch()
         self.cfg.current_project.value = project
         self.cfg.save()
@@ -6710,7 +6808,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
-        self._update_project_label_style()
+        self._refresh_project_branch_style()
         self._update_branch()
         # 保存到配置
         self.cfg.current_project.value = project
@@ -6745,7 +6843,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_project = default_project
                 self.backend._current_project = default_project
                 self._project_label.setText(default_project)
-                self._update_project_label_style()
+                self._refresh_project_branch_style()
                 self._update_branch()
                 # 保存到配置
                 self.cfg.current_project.value = default_project
@@ -6955,18 +7053,12 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
         
-        # 设置关闭标志，阻止 Settings.save() 写入磁盘（防止覆盖用户粘贴的配置）
+        # 停止所有正在进行的流式输出 + 清理窗口独有资源（不影响其他窗口）
         if hasattr(self, 'backend') and self.backend:
             try:
-                self.backend.set_ui_valid(False)
-                # 清除 ChatEngine 的所有回调，防止异步回调访问已销毁的 widget
-                if self.backend.chat_engine:
-                    self.backend.chat_engine.clear_callbacks()
-                # 停止所有正在进行的流式输出
                 self.backend.stop_streaming()
                 self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
-                # 清理 worker
-                self.backend.cleanup_worker()
+                self.backend.cleanup()
             except Exception:
                 pass
         

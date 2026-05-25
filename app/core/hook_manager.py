@@ -389,32 +389,37 @@ class HookManager:
     # 允许执行 Python 函数的模块白名单
     SAFE_PYTHON_MODULES = {"app.hooks", "app.utils"}
     
+    # 跨窗口共享的 hooks 注册数据（只加载一次，所有窗口复用）
+    _shared_hooks: Dict[str, List[HookMatchRule]] = {}
+    _shared_skill_to_hooks: Dict[str, List[tuple[str, int]]] = {}
+    _shared_config_watchers: Dict[str, float] = {}
+    _shared_registered_functions: Dict[str, Callable] = {}
+    # 共享的 cwd 解析缓存
+    _shared_cwd_resolve_cache: Dict[int, tuple] = {}
+
     def __init__(self, thread_pool: Optional[QThreadPool] = None):
-        # {event_name: [HookMatchRule, ...]}
-        self._hooks: Dict[str, List[HookMatchRule]] = {}
-        
-        # 记住每个 Hook 属于哪个技能，方便卸载时清理
-        self._skill_to_hooks: Dict[str, List[tuple[str, int]]] = {}
+        # hooks 注册数据指向类级别的共享字典（所有窗口共用）
+        self._hooks: Dict[str, List[HookMatchRule]] = HookManager._shared_hooks
+        self._skill_to_hooks: Dict[str, List[tuple[str, int]]] = HookManager._shared_skill_to_hooks
         
         # 线程池
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
         
-        # 完成回调
+        # 完成回调（每个窗口独立）
         self._on_finished_callback: Optional[Callable[[str, str, bool], None]] = None
         
-        # 决策回调 (当 hook 返回 block 决策时调用)
+        # 决策回调（每个窗口独立）
         self._on_decision_callback: Optional[Callable[[str, HookDecision], None]] = None
         
-        # 配置热重载监控
-        self._config_watchers: Dict[str, float] = {}  # file_path: last_modified
+        # 配置热重载监控（类级别共享）
+        self._config_watchers: Dict[str, float] = HookManager._shared_config_watchers
         self._config_file: Optional[str] = None
         
-        # 注册的 Python 函数
-        self._registered_functions: Dict[str, Callable] = {}
+        # 注册的 Python 函数（类级别共享）
+        self._registered_functions: Dict[str, Callable] = HookManager._shared_registered_functions
         
-        # cwd 解析缓存：key=id(hook), value=(resolved_cwd_or_None, timestamp)
-        # 避免每次触发事件都重复扫描磁盘查找脚本文件
-        self._cwd_resolve_cache: Dict[int, tuple] = {}
+        # cwd 解析缓存（类级别共享）
+        self._cwd_resolve_cache: Dict[int, tuple] = HookManager._shared_cwd_resolve_cache
         self._CWD_CACHE_TTL = 30.0  # 30秒缓存
     
     def set_on_finished_callback(self, callback: Callable[[str, str, bool], None]):

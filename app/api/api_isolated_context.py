@@ -129,21 +129,10 @@ class IsolatedChatContext:
         return list(session.messages or [])
 
     def _create_agent_manager(self) -> Any:
-        """创建独立的 AgentManager
-        
-        AgentManager 通常是无状态的配置管理，
-        可以复用 UI 的实例或创建新实例。
-        """
+        """获取全局共享的 AgentManager（单例，跨窗口复用）"""
         from app.core.agent import AgentManager
         
-        # 尝试复用 UI 的 AgentManager（如果可用）
-        ui_agent_manager = getattr(self._main_widget, '_agent_manager', None)
-        if ui_agent_manager:
-            # AgentManager 通常是无状态的，可以复用
-            return ui_agent_manager
-        
-        # 创建新的 AgentManager
-        return AgentManager()
+        return AgentManager.get_instance()
 
     def _get_model_config(self) -> Dict[str, Any]:
         """获取模型配置"""

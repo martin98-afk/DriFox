@@ -118,7 +118,9 @@ class ProjectSelectorPopup(QWidget):
 
         self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        # 注意：不设置 WA_ShowWithoutActivating
+        # 否则窗口不会被激活，中文 IME 的 composition 事件会发送到
+        # 之前活跃的主窗口输入框，导致中文输入跑到其他地方
 
         # 注意：不在 __init__ 安装事件过滤器！
         # 因为当前 mousePressEvent 还在传播中，
@@ -158,10 +160,10 @@ class ProjectSelectorPopup(QWidget):
 
         self._new_project_edit = QLineEdit(self)
         self._new_project_edit.setPlaceholderText("新建项目...")
-        self._new_project_edit.setInputMethodHints(
-            Qt.ImhPreferLatin | Qt.ImhNoAutoUppercase | Qt.ImhSensitiveData |
-            Qt.ImhNoPredictiveText | Qt.ImhMultiLine
-        )
+        # 不设置 InputMethodHints，让中文输入法正常工作
+        # ImhPreferLatin 会阻止中文输入
+        # ImhSensitiveData/ImhNoPredictiveText 会干扰 IME composition
+        self._new_project_edit.setInputMethodHints(Qt.ImhNoAutoUppercase)
         self._apply_new_project_edit_style()
         self._new_project_edit.returnPressed.connect(self._on_create_project)
         new_proj_layout.addWidget(self._new_project_edit, 1)
@@ -361,22 +363,23 @@ class ProjectSelectorPopup(QWidget):
         self.move(x, y)
         self.raise_()
 
+        # 激活窗口并设置焦点到输入框，确保中文 IME 能正确工作
+        self.activateWindow()
+        self._new_project_edit.setFocus()
+
         # 安装事件过滤器，检测外部点击关闭弹窗
         QApplication.instance().installEventFilter(self)
 
     def eventFilter(self, obj, event):
         """检测外部点击，关闭弹窗"""
         if event.type() == event.MouseButtonPress:
-            # 检查点击是否在弹窗内部
             global_pos = event.globalPos()
             popup_geo = self.geometry()
             if not popup_geo.contains(global_pos):
-                # 检查是否点击在输入框上（输入法需要）
-                focus_widget = QApplication.focusWidget()
-                if focus_widget and isinstance(focus_widget, QLineEdit):
-                    edit_geo = focus_widget.rect().translated(focus_widget.mapToGlobal(QPoint(0, 0)))
-                    if edit_geo.contains(global_pos):
-                        return False
+                # 输入框有焦点时，可能是用户在点击 IME 候选词窗口
+                # IME 候选窗口在弹窗外部，此时不应关闭弹窗
+                if self._new_project_edit.hasFocus():
+                    return False
                 self.close()
         return super().eventFilter(obj, event)
 

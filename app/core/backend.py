@@ -168,8 +168,8 @@ class ChatBackend(QObject):
         self._session_manager = SessionManager()
         logger.info("[ChatBackend] SessionManager 创建完成")
         
-        # 2. 创建 MemoryManager
-        self._memory_manager = MemoryManagerCore()
+        # 2. 创建 MemoryManager（全局单例，跨窗口共享）
+        self._memory_manager = MemoryManagerCore.get_instance()
         logger.info("[ChatBackend] MemoryManager 创建完成")
         
         # 3. 创建 HookManager（必须在 create_session 之前）
@@ -220,13 +220,13 @@ class ChatBackend(QObject):
         # 4. 创建初始会话（不触发 SessionStart hook，避免重复初始化）
         self.create_session(trigger_hook=False)
         
-        # 5. 使用传入的 AgentManager 或创建新的
-        self._agent_manager = AgentManager(str(Path(__file__).parent.parent / "agents"), self._hook_manager)
+        # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
+        self._agent_manager = AgentManager.get_instance(str(Path(__file__).parent.parent / "agents"), self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
         
-        # 加载 .drifox 全局 hooks
+        # 加载 .drifox 全局 hooks（hooks 数据已跨窗口共享，仅首次加载）
         global_hooks_file = get_app_data_dir() / "hooks" / "hooks.json"
-        if global_hooks_file.exists():
+        if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
             try:
                 with open(global_hooks_file, 'r', encoding='utf-8') as f:
                     config = json.loads(f.read())
@@ -288,7 +288,7 @@ class ChatBackend(QObject):
         
         self._get_memory_context_getter = None
 
-        self._history_manager = HistoryManager()
+        self._history_manager = HistoryManager.get_instance()
         
         # 8. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
         self._discover_mcp_servers()
@@ -399,6 +399,53 @@ class ChatBackend(QObject):
         """清理 worker"""
         if self._chat_engine:
             return self._chat_engine.cleanup_worker()
+
+    def cleanup(self):
+        """
+        清理窗口独有资源，不影响其他窗口。
+        
+        安全规则：
+        - 不清除任何单例/共享组件（AgentManager/MemoryManagerCore/HistoryManager/BuiltinTools）
+        - 仅释放本窗口创建的实例和引用
+        """
+        self._initialized = False
+
+        # 1. 清理 ChatEngine（停止 worker + 清空回调）
+        if self._chat_engine:
+            try:
+                self._chat_engine.clear_callbacks()
+                self._chat_engine.cleanup_worker()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup chat_engine: {e}")
+            self._chat_engine = None
+
+        # 2. 清理 ToolExecutor 窗口独有状态（共享 BuiltinTools 不碰）
+        if self._tool_executor:
+            try:
+                self._tool_executor.cleanup()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup tool_executor: {e}")
+            self._tool_executor = None
+
+        # 3. 清除 HookManager 回调（闭包引用了本窗口的 ChatBackend）
+        if self._hook_manager:
+            try:
+                self._hook_manager.set_on_finished_callback(None)
+                self._hook_manager.set_on_decision_callback(None)
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup hook_manager: {e}")
+
+        # 4. 清除 SubAgentManager 回调引用
+        if self._sub_agent_manager:
+            self._sub_agent_manager = None
+
+        # 5. 清除 SessionManager（窗口独有的会话）
+        self._session_manager = None
+
+        # 6. 清除 UI 有效性标志
+        self._ui_valid = False
+
+        logger.info("[ChatBackend] 窗口资源清理完成")
 
     def set_ui_valid(self, valid: bool):
         """设置 UI 有效性标志（由 MainWidget.closeEvent 调用）"""

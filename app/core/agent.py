@@ -218,7 +218,16 @@ class PermissionResolver:
         return fnmatch.fnmatch(text, pattern)
 
 class AgentManager:
-    """Agent/Skill 管理器"""
+    """Agent/Skill 管理器（全局单例，跨窗口共享）"""
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None) -> "AgentManager":
+        """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
+        if cls._instance is None:
+            cls._instance = cls(agents_dir, hook_manager)
+        return cls._instance
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):
         self.agents_dir = (
@@ -427,8 +436,18 @@ class AgentManager:
         # 主智能体额外约束
         primary_constraints = """
 ## 主智能体约束
+### 主动提问规范
 - 需要向用户确认的信息，优先使用 `question` 工具。
-- 如果已经有 todo，优先沿用现有执行上下文。
+
+### 推荐问题规范
+- 当你预测到用户接下来可能需要的帮助时，请按以下格式给出追问清单（放在回复末尾）：
+  - [问题描述1](ask)
+  - [问题描述2](ask)
+  
+### 文件引用规范
+- 当你想要引用某个本地存在的文件时，请按以下格式引用：
+  - [文件名](file|文件路径)
+  - [文件夹名](file|文件夹路径)
 """.strip()
 
         # 【核心修复】根据 is_subagent_call 区分调用上下文
@@ -534,4 +553,4 @@ def get_available_skills() -> List[Dict]:
 
 
 def create_agent_manager(agents_dir: Optional[str] = None) -> AgentManager:
-    return AgentManager(agents_dir)
+    return AgentManager.get_instance(agents_dir)

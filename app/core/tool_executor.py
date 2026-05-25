@@ -29,6 +29,9 @@ class ToolExecutor:
         "write", "edit", "multi_edit"
     }
 
+    # 跨窗口共享的 BuiltinTools 实例（纯工具模块，无窗口特定状态）
+    _shared_builtin_tools: Optional["BuiltinTools"] = None
+
     def __init__(self, homepage=None, workdir: str = None, backend=None):
         self._homepage = homepage
         self._backend = backend  # ChatBackend 引用，用于访问 HookManager
@@ -44,7 +47,12 @@ class ToolExecutor:
         self._initialize_builtin_tools()
 
     def _initialize_builtin_tools(self):
-        """初始化内置工具"""
+        """初始化内置工具（跨窗口共享 BuiltinTools 实例）"""
+        # 复用已创建的 BuiltinTools 实例
+        if ToolExecutor._shared_builtin_tools is not None:
+            self._builtin_tools = ToolExecutor._shared_builtin_tools
+            return
+
         import os
 
         workdir = self._workdir
@@ -61,6 +69,7 @@ class ToolExecutor:
 
         logger.info(f"[ToolExecutor] Initialized with workdir: {workdir}")
         self._builtin_tools = BuiltinTools(self._homepage, workdir)
+        ToolExecutor._shared_builtin_tools = self._builtin_tools
 
     @property
     def builtin_tools(self) -> Optional[BuiltinTools]:
@@ -98,24 +107,23 @@ class ToolExecutor:
 
     def cleanup(self):
         """
-        彻底清理 ToolExecutor 的所有缓存，防止内存泄漏。
-        应该在对话结束后或切换会话时调用。
+        清理窗口独有状态，不影响其他窗口。
+        
+        注意：_builtin_tools 是跨窗口共享实例，不清除。
         """
-        # 清理 builtin_tools
-        if self._builtin_tools:
-            try:
-                self._builtin_tools.cleanup()
-            except Exception as e:
-                logger.warning(f"[ToolExecutor] Failed to cleanup builtin_tools: {e}")
-            self._builtin_tools = None
-
         # 清理文件操作记录器
-        if self._file_recorder:
-            self._file_recorder = None
+        self._file_recorder = None
 
         # 清理会话上下文
         self._session_id = None
         self._call_id = None
+
+        # 清理自定义工具
+        self._custom_tools.clear()
+
+        # 释放 backend 引用（打破循环引用链）
+        self._backend = None
+        self._homepage = None
 
     def _init_file_recorder(self):
         """初始化文件操作记录器"""

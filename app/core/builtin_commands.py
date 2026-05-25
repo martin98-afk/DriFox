@@ -251,11 +251,18 @@ background:
 # 注册主入口
 # ============================================================
 
+_registered = False  # 模块级标志，避免多窗口重复注册
+
+
 def register_all_commands():
-    """注册所有内置命令：function 命令 + prompt 命令 + agents 目录智能体"""
+    """注册所有内置命令：function 命令 + prompt 命令 + agents 目录智能体（仅首次生效）"""
+    global _registered
+    if _registered:
+        return
+
     cmd_mgr = CommandManager.get_instance()
 
-    # 先清空，避免重复注册
+    # 首次注册前清空（确保干净状态）
     for name in list(cmd_mgr.get_command_names()):
         cmd_mgr.unregister(name)
 
@@ -265,6 +272,8 @@ def register_all_commands():
     cmd_mgr.register("branch", "function", description="新建分支窗口")
     cmd_mgr.register("compact", "function",
                      description="手动触发上下文压缩（调用子智能体压缩当前对话摘要）")
+    cmd_mgr.register("remember", "function",
+                     description="将输入内容存入长期记忆")
 
     # ---- prompt 命令 ----
     cmd_mgr.register("init", "prompt",
@@ -279,6 +288,8 @@ def register_all_commands():
 
     # ---- agents 目录智能体 ----
     _register_builtin_agents_as_commands(cmd_mgr)
+
+    _registered = True
 
 
 # ============================================================
@@ -314,7 +325,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
 
             cmd_mgr.register(
                 name=md_file.stem,
-                command_type="prompt",
+                command_type="agent",  # 智能体类型，支持 --subagent 参数
                 description=description,
                 prompt_text=body,
             )

@@ -4,7 +4,8 @@
 所有 ToolPopupDialog 共享同一个 QSystemTrayIcon，避免多个托盘图标。
 """
 import platform
-from PyQt5.QtCore import QObject, pyqtSignal
+import uuid
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QApplication
 from loguru import logger
@@ -45,6 +46,7 @@ class TrayManager(QObject):
         TrayManager._instance = self
 
         self._windows: list = []  # 已注册的 ToolPopupDialog 列表
+        self._pending_notification: dict = {}  # 当前待处理的托盘通知 {notification_id: window}
 
         # 创建托盘图标
         self._tray_icon = QSystemTrayIcon(self)
@@ -67,9 +69,225 @@ class TrayManager(QObject):
         if platform.system() == "Windows":
             self._tray_icon.activated.connect(self._on_tray_activated)
         
+        # 监听托盘消息点击（点击通知时显示对应窗口）
+        self._tray_icon.messageClicked.connect(self._on_message_clicked)
+        
         self._tray_icon.show()
 
+        # ========== 多窗口选中管理 ==========
+        self._selected_windows: list = []  # 当前选中的 ToolPopupDialog 列表
+
         logger.info("TrayManager 初始化完成")
+
+    # ========== 多窗口选中管理 ==========
+
+    def _select_window(self, window) -> None:
+        """添加窗口到选中列表"""
+        if window not in self._selected_windows:
+            self._selected_windows.append(window)
+            self._update_selection_visuals()
+
+    def _deselect_window(self, window) -> None:
+        """从选中列表移除窗口"""
+        if window in self._selected_windows:
+            self._selected_windows.remove(window)
+            self._update_selection_visuals()
+
+    def is_window_selected(self, window) -> bool:
+        """检查窗口是否被选中"""
+        return window in self._selected_windows
+
+    def deselect_all(self) -> None:
+        """清除所有窗口的选中状态"""
+        if not self._selected_windows:
+            return
+        self._selected_windows.clear()
+        self._update_selection_visuals()
+
+    def _on_window_shift_clicked(self, window) -> None:
+        """窗口 Shift+点击回调 - 切换选中状态"""
+        if window in self._selected_windows:
+            self._selected_windows.remove(window)
+        else:
+            self._selected_windows.append(window)
+        self._update_selection_visuals()
+
+    def _update_selection_visuals(self) -> None:
+        """刷新所有窗口的选中标记"""
+        for w in self._windows:
+            try:
+                selected = w in self._selected_windows
+                if hasattr(w, 'set_selection_indicator'):
+                    w.set_selection_indicator(selected)
+            except RuntimeError:
+                pass
+
+    def _handle_batch_move(self, source_window, delta) -> None:
+        """批量移动：所有选中窗口同 delta 偏移
+
+        Args:
+            source_window: 发起移动的窗口（已移动完毕，跳过）
+            delta: QPoint 偏移量
+        """
+        for w in self._selected_windows:
+            if w is source_window:
+                continue
+            try:
+                w.move(w.x() + delta.x(), w.y() + delta.y())
+            except RuntimeError:
+                pass
+
+    _SNAP_THRESHOLD = 15  # 吸附阈值（像素）
+
+    def _snap_position(self, moving_rect, exclude_window=None) -> tuple:
+        """计算最近的对齐吸附位置
+
+        Args:
+            moving_rect: QRect 当前移动窗口的几何区域
+            exclude_window: 排除的窗口（自身）
+
+        Returns:
+            (snapped_x, snapped_y, is_snapped_x, is_snapped_y)
+            如果某方向未吸附，返回原值
+        """
+        x0, y0 = moving_rect.x(), moving_rect.y()
+        w, h = moving_rect.width(), moving_rect.height()
+        best_x, best_y = x0, y0
+        snapped_x, snapped_y = False, False
+        # 找最近吸附距离
+        min_dist_x = self._SNAP_THRESHOLD + 1
+        min_dist_y = self._SNAP_THRESHOLD + 1
+
+        # 获取当前屏幕号（跳过不同屏幕的窗口）
+        try:
+            from PyQt5.QtWidgets import QDesktopWidget
+            desktop = QDesktopWidget()
+            current_screen_idx = desktop.screenNumber(exclude_window) if exclude_window else -1
+        except Exception:
+            current_screen_idx = -1
+
+        for win in self._windows:
+            if win is exclude_window:
+                continue
+            # 只有当选中的窗口在批量拖拽时，才跳过其他选中窗口
+            # 非选中窗口拖拽时，选中窗口是有效吸附目标
+            if exclude_window in self._selected_windows and win in self._selected_windows:
+                continue
+            try:
+                # 跳过不可见或最小化的窗口
+                if win.isHidden() or win.isMinimized():
+                    continue
+                # 跳过不同屏幕的窗口
+                if current_screen_idx >= 0:
+                    try:
+                        win_screen = desktop.screenNumber(win)
+                        # -1 表示窗口尚未映射到屏幕（新窗口初始化中），不跳过
+                        if win_screen >= 0 and win_screen != current_screen_idx:
+                            continue
+                    except Exception:
+                        pass
+
+                r = win.geometry()
+                candidates_x = []
+
+                # 水平候选：左边缘、右边缘对齐
+                candidates_x.append((r.x(), abs(x0 - r.x())))          # 移动左 → 目标左
+                candidates_x.append((r.x() - w, abs(x0 + w - r.x())))  # 移动右 → 目标左
+                candidates_x.append((r.x() + r.width(), abs(x0 - r.x() - r.width())))  # 移动左 → 目标右
+                candidates_x.append((r.x() + r.width() - w, abs(x0 + w - r.x() - r.width())))  # 移动右 → 目标右
+
+                # 垂直候选：上边缘、下边缘对齐
+                candidates_y = []
+                candidates_y.append((r.y(), abs(y0 - r.y())))
+                candidates_y.append((r.y() - h, abs(y0 + h - r.y())))
+                candidates_y.append((r.y() + r.height(), abs(y0 - r.y() - r.height())))
+                candidates_y.append((r.y() + r.height() - h, abs(y0 + h - r.y() - r.height())))
+
+                # 取最近的水平吸附
+                for cand_x, dist in candidates_x:
+                    if dist < min_dist_x:
+                        min_dist_x = dist
+                        best_x = cand_x
+                        snapped_x = True
+
+                # 取最近的垂直吸附
+                for cand_y, dist in candidates_y:
+                    if dist < min_dist_y:
+                        min_dist_y = dist
+                        best_y = cand_y
+                        snapped_y = True
+
+            except RuntimeError:
+                pass
+
+        # 阈值检查：如果最近距离超出阈值，不吸附
+        if min_dist_x > self._SNAP_THRESHOLD:
+            best_x = x0
+            snapped_x = False
+        if min_dist_y > self._SNAP_THRESHOLD:
+            best_y = y0
+            snapped_y = False
+
+        return best_x, best_y, snapped_x, snapped_y
+
+        return x, y, snapped_x, snapped_y
+
+    def arrange_selected_windows_grid(self) -> None:
+        """将选中的窗口排列成网格布局"""
+        if len(self._selected_windows) < 1:
+            return
+
+        # 取第一个选中窗口所在屏幕
+        ref = self._selected_windows[0]
+        try:
+            screen = ref.screen()
+            if not screen:
+                return
+            available = screen.availableGeometry()
+        except RuntimeError:
+            return
+
+        n = len(self._selected_windows)
+        # 计算最佳列数（2-4列，根据窗口数量自适应）
+        if n <= 2:
+            cols = n
+        elif n <= 4:
+            cols = 2
+        elif n <= 6:
+            cols = 3
+        else:
+            cols = 4
+
+        rows = (n + cols - 1) // cols
+        margin = 20  # 间距
+
+        # 计算每个窗口的平均大小（按第一个窗口的尺寸）
+        try:
+            win_w = self._selected_windows[0].width()
+            win_h = self._selected_windows[0].height()
+        except RuntimeError:
+            return
+
+        # 总可用空间
+        total_w = available.width() - margin * (cols + 1)
+        total_h = available.height() - margin * (rows + 1)
+
+        # 如果窗口太大放不下，缩小到适配网格
+        cell_w = total_w // cols
+        cell_h = total_h // rows
+        if win_w > cell_w or win_h > cell_h:
+            win_w = min(win_w, cell_w)
+            win_h = min(win_h, cell_h)
+
+        for i, w in enumerate(self._selected_windows):
+            try:
+                col = i % cols
+                row = i // cols
+                new_x = available.x() + margin + col * (win_w + margin)
+                new_y = available.y() + margin + row * (win_h + margin)
+                w.setGeometry(new_x, new_y, win_w, win_h)
+            except RuntimeError:
+                pass
 
     def register_window(self, window) -> None:
         """注册一个窗口到托盘管理器"""
@@ -83,10 +301,23 @@ class TrayManager(QObject):
             self._windows.remove(window)
             logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
 
-    def notify(self, title: str, message: str) -> None:
-        """发送 Windows 通知"""
+    def notify(self, title: str, message: str, window: QObject = None) -> None:
+        """发送 Windows 通知
+        
+        Args:
+            title: 通知标题
+            message: 通知内容
+            window: 触发通知的窗口对象，点击通知时会显示该窗口
+        """
         if self._tray_icon.isVisible():
+            # 生成唯一 ID 关联通知和窗口
+            notification_id = str(uuid.uuid4())
+            self._pending_notification[notification_id] = window or self._get_first_valid_window()
+            # 保存到实例属性，供 messageClicked 信号处理器使用
+            self._last_notification_window = self._pending_notification.get(notification_id)
             self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon(1), 4000)
+            # 4秒后清理（与 showMessage 的显示时长一致）
+            QTimer.singleShot(4500, lambda: self._pending_notification.pop(notification_id, None))
 
     def _show_all_windows(self) -> None:
         """显示所有已注册的窗口"""
@@ -116,6 +347,51 @@ class TrayManager(QObject):
                 w.raise_()
             except RuntimeError:
                 pass
+
+    def _get_first_valid_window(self):
+        """获取第一个有效的窗口"""
+        for w in self._windows:
+            if self._is_window_valid(w):
+                return w
+        return None
+
+    def _show_window(self, window) -> None:
+        """显示指定的窗口（如果已隐藏则显示，如果最小化则还原）
+
+        支持传入嵌入式Widget：自动获取其所属的顶层窗口再操作。
+        """
+        if window is None:
+            logger.warning("[_show_window] 窗口为空")
+            return
+
+        # 如果传入的是嵌入式Widget（如OpenAIChatToolWindow），取其顶层窗口
+        top_window = window.window() if hasattr(window, 'window') and callable(window.window) else window
+        if top_window is None:
+            top_window = window
+
+        try:
+            if top_window.isHidden():
+                logger.info("[_show_window] 显示窗口")
+                top_window.show()
+            if top_window.isMinimized():
+                top_window.showNormal()
+            top_window.activateWindow()
+            top_window.raise_()
+        except RuntimeError as e:
+            logger.error(f"[_show_window] 窗口操作失败: {e}")
+
+    def _on_message_clicked(self) -> None:
+        """处理托盘通知被点击的事件"""
+        logger.debug("[_on_message_clicked] 通知被点击")
+        # 显示最近一次通知关联的窗口
+        window = getattr(self, '_last_notification_window', None)
+        if window:
+            self._show_window(window)
+        else:
+            # 没有记录时，显示任意一个窗口
+            window = self._get_first_valid_window()
+            if window:
+                self._show_window(window)
 
     def _on_tray_activated(self, reason):
         """Windows 托盘图标点击处理"""

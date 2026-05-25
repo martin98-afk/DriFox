@@ -77,7 +77,14 @@ class CardContainer(QWidget):
             self._expand_timer.setSingleShot(True)
             self._expand_timer.setInterval(0)
             self._expand_timer.timeout.connect(self._do_expand)
-        self._expand_timer.start()
+        
+        if has_visible:
+            # ⚡ 有可见卡片：立即展开，不等到 timer 触发
+            # 否则父容器高度为 0 时，卡片虽然 setVisible(True) 但在屏幕上看不见
+            self._do_expand()
+        else:
+            # 无可见卡片：通过 timer 折叠（延迟一点没关系）
+            self._expand_timer.start()
     
     def _do_expand(self):
         """执行展开/折叠"""
