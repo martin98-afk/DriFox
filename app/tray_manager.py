@@ -137,6 +137,121 @@ class TrayManager(QObject):
             except RuntimeError:
                 pass
 
+    _SNAP_THRESHOLD = 12  # 吸附阈值（像素）
+
+    def _snap_position(self, moving_rect, exclude_window=None) -> tuple:
+        """计算最近的对齐吸附位置
+
+        Args:
+            moving_rect: QRect 当前移动窗口的几何区域
+            exclude_window: 排除的窗口（自身）
+
+        Returns:
+            (snapped_x, snapped_y, is_snapped_x, is_snapped_y)
+            如果某方向未吸附，返回原值
+        """
+        x, y = moving_rect.x(), moving_rect.y()
+        w, h = moving_rect.width(), moving_rect.height()
+        snapped_x, snapped_y = False, False
+
+        for win in self._windows:
+            if win is exclude_window:
+                continue
+            if win in self._selected_windows:
+                continue  # 选中窗口一起移动，不对齐
+            try:
+                r = win.geometry()
+                # 水平对齐：左、右、中间
+                if abs(x - r.x()) < self._SNAP_THRESHOLD:
+                    x = r.x()
+                    snapped_x = True
+                elif abs(x + w - r.x()) < self._SNAP_THRESHOLD:
+                    x = r.x() - w
+                    snapped_x = True
+                elif abs(x - (r.x() + r.width())) < self._SNAP_THRESHOLD:
+                    x = r.x() + r.width()
+                    snapped_x = True
+                elif abs(x + w - (r.x() + r.width())) < self._SNAP_THRESHOLD:
+                    x = r.x() + r.width() - w
+                    snapped_x = True
+
+                # 垂直对齐：上、下、中间
+                if abs(y - r.y()) < self._SNAP_THRESHOLD:
+                    y = r.y()
+                    snapped_y = True
+                elif abs(y + h - r.y()) < self._SNAP_THRESHOLD:
+                    y = r.y() - h
+                    snapped_y = True
+                elif abs(y - (r.y() + r.height())) < self._SNAP_THRESHOLD:
+                    y = r.y() + r.height()
+                    snapped_y = True
+                elif abs(y + h - (r.y() + r.height())) < self._SNAP_THRESHOLD:
+                    y = r.y() + r.height() - h
+                    snapped_y = True
+            except RuntimeError:
+                pass
+
+        return x, y, snapped_x, snapped_y
+
+    def arrange_selected_windows_grid(self) -> None:
+        """将选中的窗口排列成网格布局"""
+        if len(self._selected_windows) < 1:
+            return
+
+        # 取第一个选中窗口所在屏幕
+        ref = self._selected_windows[0]
+        try:
+            screen = ref.screen()
+            if not screen:
+                return
+            available = screen.availableGeometry()
+        except RuntimeError:
+            return
+
+        n = len(self._selected_windows)
+        # 计算最佳列数（2-4列，根据窗口数量自适应）
+        if n <= 2:
+            cols = n
+        elif n <= 4:
+            cols = 2
+        elif n <= 6:
+            cols = 3
+        else:
+            cols = 4
+
+        rows = (n + cols - 1) // cols
+        margin = 20  # 间距
+
+        # 计算每个窗口的平均大小（按第一个窗口的尺寸）
+        try:
+            win_w = self._selected_windows[0].width()
+            win_h = self._selected_windows[0].height()
+        except RuntimeError:
+            return
+
+        # 总可用空间
+        total_w = available.width() - margin * (cols + 1)
+        total_h = available.height() - margin * (rows + 1)
+
+        # 如果窗口太大放不下，缩小到适配网格
+        cell_w = total_w // cols
+        cell_h = total_h // rows
+        if win_w > cell_w or win_h > cell_h:
+            win_w = min(win_w, cell_w)
+            win_h = min(win_h, cell_h)
+
+        for i, w in enumerate(self._selected_windows):
+            try:
+                col = i % cols
+                row = i // cols
+                new_x = available.x() + margin + col * (win_w + margin)
+                new_y = available.y() + margin + row * (win_h + margin)
+                w.setGeometry(new_x, new_y, win_w, win_h)
+            except RuntimeError:
+                pass
+
+        self.deselect_all()
+
     def register_window(self, window) -> None:
         """注册一个窗口到托盘管理器"""
         if window not in self._windows:

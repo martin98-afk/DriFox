@@ -495,6 +495,7 @@ class ToolPopupDialog(QDialog):
         self._geometry_save_timer.timeout.connect(self._save_geometry)
         self._resize_edge = ResizeEdge.EDGE_NONE
         self._resize_start_geometry = None
+        self._snap_locked_offset = None  # 吸附迟滞锁（防止抖动）
         self._edge_size = 15  # 边缘检测区域宽度（加大，方便拖拽）
         self.setWindowTitle(tool_instance.name)
         self.setWindowFlags(
@@ -555,16 +556,21 @@ class ToolPopupDialog(QDialog):
             logger.info("[DockRestore] EventFilter installed for macOS Dock restore")
 
         # ========== 多窗口选中标记 ==========
-        self._selection_indicator = QLabel("●", self)
+        title_bar = tool_instance.get_title_bar()
+        self._selection_indicator = QLabel("●", title_bar)
         self._selection_indicator.setStyleSheet("""
             QLabel {
                 color: #4FC3F7;
-                font-size: 16px;
+                font-size: 14px;
                 background: transparent;
             }
         """)
-        self._selection_indicator.setFixedSize(16, 16)
+        self._selection_indicator.setFixedSize(14, 14)
         self._selection_indicator.setVisible(False)
+        # 插入到标题栏布局：图标 → 标题 → ● → 弹性空间 → 内存 → ...
+        title_bar_layout = title_bar.layout()
+        if title_bar_layout:
+            title_bar_layout.insertWidget(2, self._selection_indicator)
 
     def _on_lock_changed(self, locked: bool):
         """处理窗口锁定状态变化"""
@@ -704,6 +710,14 @@ class ToolPopupDialog(QDialog):
             TrayManager.get_instance().deselect_all()
             event.accept()
             return
+
+        # Ctrl+Shift+G: 排列选中窗口为网格
+        if (event.key() == Qt.Key_G
+                and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)):
+            TrayManager.get_instance().arrange_selected_windows_grid()
+            event.accept()
+            return
+
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
@@ -884,18 +898,13 @@ class ToolPopupDialog(QDialog):
 
             title_bar = self.tool_instance.get_title_bar()
             if title_bar and event.y() < title_bar.height():
-                # 非选中窗口：清除选中再开始拖拽
-                if not tray.is_window_selected(self):
-                    tray.deselect_all()
+                # 标题栏拖拽（不影响分组，仅非选中窗口不触发批量移动）
                 self._hide_opacity_slider()
                 self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
                 event.accept()
                 return
 
-            # 非标题栏区域点击 → 清除选中
-            tray.deselect_all()
-
-            # 检查是否在边缘区域开始拖拽
+            # 非标题栏区域点击 → 如果点击的是非选中窗口，开始边缘拖拽
             edge = self._get_edge_at_pos(event.pos())
             if edge != ResizeEdge.EDGE_NONE:
                 self._resize_edge = edge
@@ -940,14 +949,44 @@ class ToolPopupDialog(QDialog):
                 event.accept()
                 return
 
-            # 标题栏拖拽移动（支持批量）
+            # 标题栏拖拽移动（支持批量 + 吸附对齐）
             if self._drag_pos:
                 new_pos = event.globalPos() - self._drag_pos
                 delta = new_pos - self.pos()
                 self.move(new_pos)
-                # 如果当前窗口被选中，触发批量移动
-                if TrayManager.get_instance().is_window_selected(self):
-                    TrayManager.get_instance()._handle_batch_move(self, delta)
+
+                # 吸附对齐（仅拖拽非最大化的窗口时）
+                tray = TrayManager.get_instance()
+                if tray.is_window_selected(self):
+                    tray._handle_batch_move(self, delta)
+
+                # 检查吸附（带迟滞锁，防止抖动）
+                snap_x, snap_y, snapped_x, snapped_y = tray._snap_position(
+                    self.geometry(), self
+                )
+                # 如果已吸附且在锁定范围内，不重复吸附
+                if self._snap_locked_offset:
+                    locked_x = self._snap_locked_offset.x()
+                    locked_y = self._snap_locked_offset.y()
+                    if (abs(self.x() - locked_x) < 2 and abs(self.y() - locked_y) < 2):
+                        # 已锁定在吸附位置，跳过
+                        pass
+                    elif not snapped_x and not snapped_y:
+                        # 离开吸附位置，清除锁定
+                        self._snap_locked_offset = None
+                    else:
+                        # 新的吸附位置
+                        self._snap_locked_offset = None
+                if snapped_x or snapped_y:
+                    snap_delta_x = snap_x - self.x()
+                    snap_delta_y = snap_y - self.y()
+                    self.move(snap_x, snap_y)
+                    self._snap_locked_offset = QPoint(snap_x, snap_y)
+                    # 选中窗口同步吸附偏移
+                    if tray.is_window_selected(self):
+                        snap_delta = QPoint(snap_delta_x, snap_delta_y)
+                        tray._handle_batch_move(self, snap_delta)
+
                 event.accept()
                 return
         else:
@@ -956,6 +995,7 @@ class ToolPopupDialog(QDialog):
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+        self._snap_locked_offset = None
         self._resize_edge = ResizeEdge.EDGE_NONE
         self._resize_start_geometry = None
         # 释放鼠标后彻底清空应用级光标栈（Qt 内部 resize 可能叠了多层覆盖）
@@ -967,13 +1007,6 @@ class ToolPopupDialog(QDialog):
         super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event):
-        # 定位选中标记（标题栏右上角）
-        title_bar = self.tool_instance.get_title_bar()
-        if title_bar:
-            indicator_x = self.width() - title_bar.height() + 4
-            indicator_y = (title_bar.height() - 16) // 2
-            self._selection_indicator.move(indicator_x, indicator_y)
-
         super().resizeEvent(event)
         if not self._is_closing:
             self._geometry_save_timer.start()
