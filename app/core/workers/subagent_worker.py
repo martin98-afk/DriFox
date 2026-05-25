@@ -318,7 +318,7 @@ class SubAgentExecutor(QThread):
             sanitized_context = _TOOL_TAG_PATTERN.sub("", self.parent_context)
             sanitized_context = _THINKING_PATTERN.sub("", sanitized_context)
             messages = [
-                {"role": "system", "content": system_prompt + history_section + F"## 父智能体说明\n{sanitized_context}\n\n"},
+                {"role": "system", "content": history_section + F"## 父智能体说明\n{sanitized_context}\n\n" + system_prompt},
                 {"role": "user", "content": f"## 子任务\n{self.task_description}"}
             ]
 

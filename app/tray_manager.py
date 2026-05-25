@@ -4,7 +4,8 @@
 所有 ToolPopupDialog 共享同一个 QSystemTrayIcon，避免多个托盘图标。
 """
 import platform
-from PyQt5.QtCore import QObject, pyqtSignal
+import uuid
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QApplication
 from loguru import logger
@@ -45,6 +46,7 @@ class TrayManager(QObject):
         TrayManager._instance = self
 
         self._windows: list = []  # 已注册的 ToolPopupDialog 列表
+        self._pending_notification: dict = {}  # 当前待处理的托盘通知 {notification_id: window}
 
         # 创建托盘图标
         self._tray_icon = QSystemTrayIcon(self)
@@ -67,6 +69,9 @@ class TrayManager(QObject):
         if platform.system() == "Windows":
             self._tray_icon.activated.connect(self._on_tray_activated)
         
+        # 监听托盘消息点击（点击通知时显示对应窗口）
+        self._tray_icon.messageClicked.connect(self._on_message_clicked)
+        
         self._tray_icon.show()
 
         logger.info("TrayManager 初始化完成")
@@ -83,10 +88,23 @@ class TrayManager(QObject):
             self._windows.remove(window)
             logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
 
-    def notify(self, title: str, message: str) -> None:
-        """发送 Windows 通知"""
+    def notify(self, title: str, message: str, window: QObject = None) -> None:
+        """发送 Windows 通知
+        
+        Args:
+            title: 通知标题
+            message: 通知内容
+            window: 触发通知的窗口对象，点击通知时会显示该窗口
+        """
         if self._tray_icon.isVisible():
+            # 生成唯一 ID 关联通知和窗口
+            notification_id = str(uuid.uuid4())
+            self._pending_notification[notification_id] = window or self._get_first_valid_window()
+            # 保存到实例属性，供 messageClicked 信号处理器使用
+            self._last_notification_window = self._pending_notification.get(notification_id)
             self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon(1), 4000)
+            # 4秒后清理（与 showMessage 的显示时长一致）
+            QTimer.singleShot(4500, lambda: self._pending_notification.pop(notification_id, None))
 
     def _show_all_windows(self) -> None:
         """显示所有已注册的窗口"""
@@ -116,6 +134,43 @@ class TrayManager(QObject):
                 w.raise_()
             except RuntimeError:
                 pass
+
+    def _get_first_valid_window(self):
+        """获取第一个有效的窗口"""
+        for w in self._windows:
+            if self._is_window_valid(w):
+                return w
+        return None
+
+    def _show_window(self, window) -> None:
+        """显示指定的窗口（如果已隐藏则显示，如果最小化则还原）"""
+        if window is None:
+            logger.warning("[_show_window] 窗口为空")
+            return
+        
+        try:
+            if window.isHidden():
+                logger.info(f"[_show_window] 显示窗口")
+                window.show()
+            if window.isMinimized():
+                window.showNormal()
+            window.activateWindow()
+            window.raise_()
+        except RuntimeError as e:
+            logger.error(f"[_show_window] 窗口操作失败: {e}")
+
+    def _on_message_clicked(self) -> None:
+        """处理托盘通知被点击的事件"""
+        logger.debug("[_on_message_clicked] 通知被点击")
+        # 显示最近一次通知关联的窗口
+        window = getattr(self, '_last_notification_window', None)
+        if window:
+            self._show_window(window)
+        else:
+            # 没有记录时，显示任意一个窗口
+            window = self._get_first_valid_window()
+            if window:
+                self._show_window(window)
 
     def _on_tray_activated(self, reason):
         """Windows 托盘图标点击处理"""

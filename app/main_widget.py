@@ -779,11 +779,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_window_bg_opacity(opacity)
 
     def _update_window_bg_opacity(self, opacity: float):
-        """更新窗口背景透明度"""
-        # 更新背景图片透明度（如果存在）
-        if hasattr(self, '_bg_opacity') and self._bg_opacity is not None:
-            self._bg_opacity.setOpacity(opacity)
-        
+        """更新窗口背景透明度（不影响背景图）"""
         # 更新窗口调色板颜色
         if not hasattr(self, '_window_bg_color'):
             return
@@ -1513,11 +1509,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not sub_agent_mgr:
             InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
             return
-
-        task_id = f"compact_{uuid.uuid4().hex[:8]}"
-
         sub_agent_mgr.execute_task(
-            task_id=task_id,
+            task_id=f"compact_{uuid.uuid4().hex[:8]}",
             agent_name="compaction",
             task_description="请压缩当前对话上下文，生成工作摘要",
             parent_context="",
@@ -1525,8 +1518,6 @@ class OpenAIChatToolWindow(ToolWindow):
             on_finished=None,
             on_error=None
         )
-
-        InfoBar.info("压缩中", "正在调用子智能体压缩对话上下文...", parent=self, duration=2000, position=InfoBarPosition.BOTTOM)
 
     # ========== 命令卡片处理 ==========
 
@@ -6049,8 +6040,9 @@ class OpenAIChatToolWindow(ToolWindow):
             QApplication.beep()
 
         # 使用全局 TrayManager 发送通知（避免多窗口多个托盘图标的问题）
+        # 传递 self 窗口引用，点击通知时会显示该窗口
         from app.tray_manager import TrayManager
-        TrayManager.get_instance().notify(title, message)
+        TrayManager.get_instance().notify(title, message, window=self)
 
     def _should_show_inactive_notification(self) -> bool:
         """Only notify when the app window is not effectively visible to the user."""
