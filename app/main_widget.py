@@ -37,7 +37,7 @@ from qfluentwidgets import (
     setFont,
     FluentIcon,
     SingleDirectionScrollArea,
-    TransparentToolButton, InfoBar, InfoBarPosition, )
+    TransparentToolButton, InfoBar, InfoBarPosition, PushButton, )
 
 from app.constants import (
     FREE_PROVIDERS,
@@ -967,49 +967,42 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session_bar_layout = QHBoxLayout()
 
-        # 项目选择标签（跟随主题色）
+        # ===== 项目+分支组合控件（一体感布局） =====
+        self._project_branch_container = QFrame(self)
+        self._project_branch_container.setObjectName("projectBranchContainer")
+        pb_layout = QHBoxLayout(self._project_branch_container)
+        pb_layout.setContentsMargins(0, 0, 0, 0)
+        pb_layout.setSpacing(0)
+
+        # 项目选择标签
         self._project_label = QLabel(self._current_project, self)
-        self._project_label.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_ACCENT};
-                {get_font_family_css()}
-                {font_size_css(13)}
-                font-weight: bold;
-                padding: 2px 6px;
-                border-radius: 4px;
-                background: {Colors.HOVER_BG};
-            }}
-            QLabel:hover {{
-                background: {Colors.SELECTED_BG};
-            }}
-        """)
         self._project_label.setCursor(Qt.PointingHandCursor)
         self._project_label.mousePressEvent = self._on_project_label_clicked
         self._project_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self._project_label.customContextMenuRequested.connect(self._show_context_menu)
         self._project_label.setToolTip("点击切换项目 · 右键更多操作")
+        pb_layout.addWidget(self._project_label)
 
-        # Git 分支标签（从工作目录检测，左键点击打开关键文档卡片）
-        self._branch_widget = QWidget(self)
-        self._branch_widget.setCursor(Qt.PointingHandCursor)
+        # 分支分隔符（三角箭头，面包屑风格）
+        self._pb_separator = QLabel("▸", self)
+        self._pb_separator.setFixedWidth(16)
+        self._pb_separator.setAlignment(Qt.AlignCenter)
+        self._pb_separator.setVisible(False)
+        pb_layout.addWidget(self._pb_separator)
+
+        # Git 分支标签
+        self._branch_widget = PushButton(icon=get_icon("分支"), text="main", parent=self)
         self._branch_widget.setObjectName("_branchWidget")
-        self._branch_widget.setAttribute(Qt.WA_StyledBackground)
-        self._branch_widget.mousePressEvent = self._on_branch_label_clicked
+        self._branch_widget.clicked.connect(self._on_branch_label_clicked)
         self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
         self._branch_widget.setVisible(False)
-        self._branch_layout = QHBoxLayout(self._branch_widget)
-        self._branch_layout.setContentsMargins(3, 0, 3, 0)
-        self._branch_layout.setSpacing(2)
+        self._refresh_branch_widget_style()
+        pb_layout.addWidget(self._branch_widget)
 
-        self._branch_icon = QLabel(self._branch_widget)
-        _pix = QPixmap(":/icons/分支.svg")
-        self._branch_icon.setPixmap(_pix.scaled(12, 12, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self._branch_layout.addWidget(self._branch_icon)
-
-        self._branch_label = QLabel("", self._branch_widget)
-        self._branch_layout.addWidget(self._branch_label)
-
+        self._refresh_project_branch_style()
         self._update_branch()
+
+        # 将组合控件加入布局
         # 标题编辑（行内编辑模式）
         self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
@@ -1045,8 +1038,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.title_edit.returnPressed.connect(self._on_title_edit_finished)
         self.title_edit.editingFinished.connect(self._on_title_edit_finished)
 
-        session_bar_layout.addWidget(self._project_label)
-        session_bar_layout.addWidget(self._branch_widget)
+        session_bar_layout.addWidget(self._project_branch_container)
         session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
         # right_layout 保持简化，显示余额和 context_usage_ring
@@ -6572,22 +6564,72 @@ class OpenAIChatToolWindow(ToolWindow):
         event.accept()
         self._show_project_selector_popup()
 
-    def _update_project_label_style(self):
-        """更新项目标签样式（跟随主题色）"""
+    def _refresh_branch_widget_style(self):
+        """刷新分支按钮的文字样式"""
+        Colors.refresh()
+        self._branch_widget.setStyleSheet(f"""
+            #_branchWidget {{
+                background: transparent;
+                border: none;
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()}
+                {font_size_css(11)};
+                padding: 2px 6px 2px 2px;
+            }}
+            #_branchWidget:hover {{
+                background: {Colors.HOVER_BG};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+
+    def _refresh_project_branch_style(self):
+        """刷新项目+分支组合控件的整体样式（面包屑风格）"""
+        Colors.refresh()
+        # 容器 — 面包屑整体底框
+        self._project_branch_container.setStyleSheet(f"""
+            QFrame#projectBranchContainer {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 6px;
+            }}
+            QFrame#projectBranchContainer:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        # 项目标签 — 面包屑第一级（粗体 + accent 色）
         self._project_label.setStyleSheet(f"""
             QLabel {{
                 color: {Colors.TEXT_ACCENT};
                 {get_font_family_css()}
                 {font_size_css(13)}
                 font-weight: bold;
-                padding: 2px 6px;
+                padding: 2px 6px 2px 6px;
+                background: transparent;
+                border: none;
                 border-radius: 4px;
-                background: {Colors.HOVER_BG};
             }}
             QLabel:hover {{
                 background: {Colors.SELECTED_BG};
             }}
         """)
+        # 分隔符 — 三角箭头（小号 + 次级色）
+        self._pb_separator.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_MUTED};
+                {get_font_family_css()}
+                {font_size_css(10)}
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }}
+        """)
+        # 同步刷新分支按钮样式
+        self._refresh_branch_widget_style()
+
+    def _update_project_label_style(self):
+        """更新项目标签样式（跟随主题色）—— 委托给组合控件刷新"""
+        self._refresh_project_branch_style()
 
     def _update_branch(self):
         """从工作目录检测 git 分支并更新分支标签"""
@@ -6626,40 +6668,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if branch:
             # 分支名过长时截断显示，悬浮显示全名
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
-            self._branch_label.setText(display)
+            self._branch_widget.setText(display)
             self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
-
-            # 容器样式：背景色 + 边框 + 圆角
-            self._branch_widget.setStyleSheet(f"""
-                #_branchWidget {{
-                    background: {Colors.BRANCH_LABEL_BG};
-                    border: 1px solid {Colors.BRANCH_LABEL_BORDER};
-                    border-radius: 2px;
-                }}
-                #_branchWidget:hover {{
-                    background: {Colors.HOVER_BG};
-                }}
-            """)
-            # 文字标签：纯文字颜色+字体，无背景/边框
-            self._branch_label.setStyleSheet(f"""
-                color: {Colors.TEXT_SECONDARY};
-                {get_font_family_css()}
-                {font_size_css(10)};
-                background: transparent;
-                border: none;
-            """)
-            # 图标标签：透明
-            self._branch_icon.setStyleSheet("background: transparent; border: none;")
-
-            self._branch_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self._branch_widget.setMaximumWidth(160)
             self._branch_widget.setVisible(True)
+            self._pb_separator.setVisible(True)
         else:
-            self._branch_label.setText("")
             self._branch_widget.setVisible(False)
+            self._pb_separator.setVisible(False)
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开关键文档卡片"""
-        event.accept()
         self._toggle_memory_card()
         # 确保切换到关键文档 Tab
         if hasattr(self, '_memory_card_popup') and self._memory_card_popup:
