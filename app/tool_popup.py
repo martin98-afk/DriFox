@@ -685,8 +685,36 @@ class ToolPopupDialog(QDialog):
         if geometry:
             self.restoreGeometry(geometry)
         else:
-            self.resize(600, 450)
-            self._center_on_screen()
+            self._place_bottom_right()
+
+    def _place_bottom_right(self):
+        """窗口默认位置：屏幕右下角，正方形"""
+        from PyQt5.QtWidgets import QApplication
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            self.resize(500, 500)
+            return
+
+        rect = screen.availableGeometry()
+        # 窗口宽度取屏幕宽度的 1/4 ~ 1/3 之间
+        win_w = min(int(rect.width() * 0.28), 540)
+        win_h = win_w  # 1:1 正方形
+        # 如果超出屏幕高度，缩小
+        if win_h > rect.height() * 0.85:
+            win_h = int(rect.height() * 0.85)
+            win_w = win_h
+
+        margin = 30
+        x = rect.x() + rect.width() - win_w - margin
+        y = rect.y() + rect.height() - win_h - margin
+
+        # 多窗口微偏移，避免完全重叠
+        offset = (hash(self._window_id) % 10) * 15
+        x = max(rect.x(), x - offset)
+        y = max(rect.y(), y - offset)
+
+        self.setGeometry(x, y, win_w, win_h)
 
     def _save_geometry(self):
         from PyQt5.QtCore import QSettings
