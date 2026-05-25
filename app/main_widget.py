@@ -1013,18 +1013,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标题编辑（行内编辑模式）
         self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
-        title_style = """QLabel {
+        title_style = f"""QLabel {{
             color: #f3f6fc;
             font-size: 15px;
             font-weight: bold;
             padding: 6px 4px;
             border-radius: 10px;
             background-color: transparent;
-        }
-        QLabel:hover {
+            {font_css}
+        }}
+        QLabel:hover {{
             background-color: rgba(255, 255, 255, 0.06);
-        }
-        QLineEdit {
+        }}
+        QLineEdit {{
             color: #f3f6fc;
             font-size: 15px;
             font-weight: bold;
@@ -1032,11 +1033,12 @@ class OpenAIChatToolWindow(ToolWindow):
             border-radius: 10px;
             background-color: transparent;
             border: none;
-        }
-        QLineEdit:focus {
+            {font_css}
+        }}
+        QLineEdit:focus {{
             background-color: rgba(255, 255, 255, 0.1);
             border: 1px solid rgba(255, 255, 255, 0.3);
-        }
+        }}
     """
         title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
@@ -2493,31 +2495,34 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):
-            title_style = """QLabel {
-                color: %s;
+            font_css = get_font_family_css()
+            title_style = f"""QLabel {{
+                color: {Colors.TEXT_PRIMARY};
                 font-size: 15px;
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
                 background-color: transparent;
-            }
-            QLabel:hover {
+                {font_css}
+            }}
+            QLabel:hover {{
                 background-color: rgba(255, 255, 255, 0.06);
-            }
-            QLineEdit {
-                color: %s;
+            }}
+            QLineEdit {{
+                color: {Colors.TEXT_PRIMARY};
                 font-size: 15px;
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
                 background-color: transparent;
                 border: none;
-            }
-            QLineEdit:focus {
+                {font_css}
+            }}
+            QLineEdit:focus {{
                 background-color: rgba(255, 255, 255, 0.1);
                 border: 1px solid rgba(255, 255, 255, 0.3);
-            }
-            """ % (Colors.TEXT_PRIMARY, Colors.TEXT_PRIMARY)
+            }}
+            """
             self.title_edit.setStyleSheet(title_style)
         # 刷新输入卡片背景
         if hasattr(self, '_input_card'):
@@ -5782,7 +5787,12 @@ class OpenAIChatToolWindow(ToolWindow):
             sub_agent_mgr._batch_completed = 0
 
     def _do_trigger_callback(self, sub_agent_mgr):
-        """执行回调触发 - 支持强制中断当前流式输出"""
+        """执行回调触发 - 支持强制中断当前流式输出
+
+        两种场景：
+        1. 流式中回调（LLM 调用子智能体）：中断当前流式，发送回调消息
+        2. 非流式回调（如 /compact 手动命令）：需要创建 UI 卡片后发送回调消息
+        """
         total = len(sub_agent_mgr._finished_tasks)
         failed = sum(1 for t in sub_agent_mgr._finished_tasks.values() if t.get("error") and t.get("error") != "")
 
@@ -5794,8 +5804,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
 请使用 task_status 工具获取详细结果。"""
 
+        is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
+
         # 检查是否正在流式输出，如果是则强制中断并保存已有内容
-        if self.backend.chat_engine and self.backend.chat_engine.is_streaming:
+        if is_currently_streaming:
             logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming")
 
             # 1. 非阻塞取消流式输出（断开信号、设置取消标志）
@@ -5815,9 +5827,58 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 5. 重置状态并发送回调消息
             self._toggle_send_stop(False)
+        else:
+            # 非流式场景（如 /compact 手动命令）：没有活跃的流式对话
+            # 此时不中断任何东西，但需要准备 UI 以接收回调产生的流式响应
+            self._prepare_ui_for_callback_message(callback_text)
 
-        # 发送回调消息到引擎
-        self.backend.send_message_to_engine(callback_text)
+        # 发送回调消息到引擎（非流式场景下 UI 已在 _prepare_ui_for_callback_message 中准备好）
+        if not self.backend.send_message_to_engine(callback_text):
+            # 发送失败（通常是正在流式或配置无效），回滚 UI 状态
+            logger.warning("[ChatEngine] Sub-agent callback: send_message_to_engine failed, rolling back UI")
+            if not is_currently_streaming:
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                if self._current_assistant_card:
+                    self._current_assistant_card.deleteLater()
+                    self._current_assistant_card = None
+        else:
+            # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
+            if not is_currently_streaming:
+                self._sync_batch_structures()
+                self._fix_new_card_message_index(user_text=callback_text)
+                self._visible_batch_end = len(self._message_batch)
+
+    def _prepare_ui_for_callback_message(self, callback_text: str):
+        """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
+
+        非流式场景（如 /compact 手动命令）下，回调消息发送后引擎会产生流式响应，
+        但 UI 上没有对应的卡片来承载内容，导致消息写入 session 却不可见。
+        此方法复用 _on_send_message 的 UI 准备逻辑，确保流式回调内容能正确渲染。
+
+        注意：只做 UI 准备（创建卡片、设置状态），不做 batch 同步。
+        batch 同步必须在 send_message_to_engine 之后执行（因为 send 会往 session 写消息）。
+        """
+        self._hide_welcome_cards()
+
+        # 创建用户消息卡片（显示回调通知文本）
+        self._append_user_message(callback_text)
+
+        # 创建助手消息卡片（用于接收 LLM 的流式响应）
+        assistant_card = self._append_assistant_message(
+            model_name=self._current_model_name,
+        )
+
+        # 设置当前卡片（必须在 send_message 之前，否则流式回调触发时 _current_assistant_card 为 None）
+        self._current_assistant_card = assistant_card
+        self._response_start_time = time.time()
+        self._is_streaming = True
+        self._toggle_send_stop(True)
+
+        # 确保 ToolExecutor 使用正确的 session_id
+        session = self.session_manager.get_current_session()
+        if session and self.backend.tool_executor:
+            self.backend.set_session_context(session.session_id)
 
     def _on_sub_agent_finished(self, task_id: str, result: str):
         """单个子智能体执行完成"""
@@ -6455,7 +6516,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if idx is not None:
                 self.history_manager.update_topic_summary(idx, clean_summary)
 
-        self._update_title_display(clean_summary)
+        QTimer.singleShot(300, lambda: self._update_title_display(clean_summary))
 
     def _update_title_display(self, title: str):
         self.title_edit.setText(title)
