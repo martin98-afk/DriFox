@@ -594,12 +594,16 @@ class HistoryManager:
         return None
 
     def get_session_by_session_id(self, session_id: str) -> Optional[Dict]:
-        """根据 session_id 获取会话"""
+        """根据 session_id 获取会话（内存优先，SQLite 兜底）"""
         if not session_id:
             return None
+        # 1. 先从内存缓存查找（快速路径）
         for session in self._history_sessions:
             if session.get("session_id") == session_id:
                 return session
+        # 2. 内存没有则直接查 SQLite（跨窗口同步最新数据）
+        if self._session_store and self._session_store.is_initialized:
+            return self._session_store.get_session(session_id)
         return None
 
     def get_session_messages(self, session_id: str) -> Optional[List[Dict]]:

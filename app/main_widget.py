@@ -5471,7 +5471,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._switch_to_session_by_id(session_id)
 
     def _switch_to_session_by_id(self, session_id: str):
-        """根据 session_id 切换到对应会话"""
+        """根据 session_id 切换到对应会话（始终从最新源加载，保证跨窗口数据一致）"""
         if not session_id:
             return
 
@@ -5488,15 +5488,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 只重置会话状态，保留 tool_executor
         self.backend.reset_session_state()
 
-        # 先在当前 session_manager 中查找
-        for i, session in enumerate(self.session_manager.get_all_sessions()):
-            if session.session_id == session_id:
-                self.backend.switch_session(i)
-                self._display_current_session()
-                self._hide_welcome_cards()
-                return
-
-        # 再从 history_manager 查找并恢复（通过 session_id 直接获取）
+        # 始终从 history_manager/SQLite 加载最新数据（保证跨窗口一致性）
+        # 即便 session_id 在当前 SessionManager 中存在，其他窗口可能已更新该会话
         session_record = self.history_manager.get_session_by_session_id(session_id)
         if session_record:
             messages = self.history_manager.get_session_messages(session_id)
@@ -5513,6 +5506,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._display_current_session()
             self._hide_welcome_cards()
         else:
+            # fallback: session_id 不在 history_manager 中，尝试 SessionManager
+            for i, session in enumerate(self.session_manager.get_all_sessions()):
+                if session.session_id == session_id:
+                    self.backend.switch_session(i)
+                    self._display_current_session()
+                    self._hide_welcome_cards()
+                    return
             logger.warning(f"未找到 session_id: {session_id}")
 
     def _load_input_history(self):
