@@ -74,7 +74,68 @@ class TrayManager(QObject):
         
         self._tray_icon.show()
 
+        # ========== 多窗口选中管理 ==========
+        self._selected_windows: list = []  # 当前选中的 ToolPopupDialog 列表
+
         logger.info("TrayManager 初始化完成")
+
+    # ========== 多窗口选中管理 ==========
+
+    def _select_window(self, window) -> None:
+        """添加窗口到选中列表"""
+        if window not in self._selected_windows:
+            self._selected_windows.append(window)
+            self._update_selection_visuals()
+
+    def _deselect_window(self, window) -> None:
+        """从选中列表移除窗口"""
+        if window in self._selected_windows:
+            self._selected_windows.remove(window)
+            self._update_selection_visuals()
+
+    def is_window_selected(self, window) -> bool:
+        """检查窗口是否被选中"""
+        return window in self._selected_windows
+
+    def deselect_all(self) -> None:
+        """清除所有窗口的选中状态"""
+        if not self._selected_windows:
+            return
+        self._selected_windows.clear()
+        self._update_selection_visuals()
+
+    def _on_window_shift_clicked(self, window) -> None:
+        """窗口 Shift+点击回调 - 切换选中状态"""
+        if window in self._selected_windows:
+            self._selected_windows.remove(window)
+        else:
+            self._selected_windows.append(window)
+        self._update_selection_visuals()
+
+    def _update_selection_visuals(self) -> None:
+        """刷新所有窗口的选中标记"""
+        for w in self._windows:
+            try:
+                selected = w in self._selected_windows
+                if hasattr(w, 'set_selection_indicator'):
+                    w.set_selection_indicator(selected)
+            except RuntimeError:
+                pass
+
+    def _handle_batch_move(self, source_window, delta) -> None:
+        """批量移动：所有选中窗口同 delta 偏移
+
+        Args:
+            source_window: 发起移动的窗口（已移动完毕，跳过）
+            delta: QPoint 偏移量
+        """
+        for w in self._selected_windows:
+            if w is source_window:
+                continue
+            try:
+                w.move(w.x() + delta.x(), w.y() + delta.y())
+            except RuntimeError:
+                pass
 
     def register_window(self, window) -> None:
         """注册一个窗口到托盘管理器"""

@@ -554,6 +554,18 @@ class ToolPopupDialog(QDialog):
             QApplication.instance().installEventFilter(self)
             logger.info("[DockRestore] EventFilter installed for macOS Dock restore")
 
+        # ========== 多窗口选中标记 ==========
+        self._selection_indicator = QLabel("●", self)
+        self._selection_indicator.setStyleSheet("""
+            QLabel {
+                color: #4FC3F7;
+                font-size: 16px;
+                background: transparent;
+            }
+        """)
+        self._selection_indicator.setFixedSize(16, 16)
+        self._selection_indicator.setVisible(False)
+
     def _on_lock_changed(self, locked: bool):
         """处理窗口锁定状态变化"""
         self._lock_mode = locked
@@ -687,9 +699,10 @@ class ToolPopupDialog(QDialog):
             self.move(x, y)
 
     def keyPressEvent(self, event):
-        # ESC 不做任何操作，忽略事件
+        # ESC: 清除所有窗口选中状态
         if event.key() == Qt.Key_Escape:
-            event.ignore()
+            TrayManager.get_instance().deselect_all()
+            event.accept()
             return
         super().keyPressEvent(event)
 
@@ -762,6 +775,10 @@ class ToolPopupDialog(QDialog):
                     if self._lock_btn_widget:
                         self._sync_lock_btn_position()
                         self._lock_btn_widget.show()
+
+    def set_selection_indicator(self, visible: bool):
+        """显示/隐藏选中标记"""
+        self._selection_indicator.setVisible(visible)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -857,12 +874,26 @@ class ToolPopupDialog(QDialog):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            tray = TrayManager.get_instance()
+
+            # Shift+点击：切换选中状态（不触发拖拽/缩放）
+            if event.modifiers() & Qt.ShiftModifier:
+                tray._on_window_shift_clicked(self)
+                event.accept()
+                return
+
             title_bar = self.tool_instance.get_title_bar()
             if title_bar and event.y() < title_bar.height():
+                # 非选中窗口：清除选中再开始拖拽
+                if not tray.is_window_selected(self):
+                    tray.deselect_all()
                 self._hide_opacity_slider()
                 self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
                 event.accept()
                 return
+
+            # 非标题栏区域点击 → 清除选中
+            tray.deselect_all()
 
             # 检查是否在边缘区域开始拖拽
             edge = self._get_edge_at_pos(event.pos())
@@ -909,9 +940,14 @@ class ToolPopupDialog(QDialog):
                 event.accept()
                 return
 
-            # 标题栏拖拽移动
+            # 标题栏拖拽移动（支持批量）
             if self._drag_pos:
-                self.move(event.globalPos() - self._drag_pos)
+                new_pos = event.globalPos() - self._drag_pos
+                delta = new_pos - self.pos()
+                self.move(new_pos)
+                # 如果当前窗口被选中，触发批量移动
+                if TrayManager.get_instance().is_window_selected(self):
+                    TrayManager.get_instance()._handle_batch_move(self, delta)
                 event.accept()
                 return
         else:
@@ -931,6 +967,13 @@ class ToolPopupDialog(QDialog):
         super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event):
+        # 定位选中标记（标题栏右上角）
+        title_bar = self.tool_instance.get_title_bar()
+        if title_bar:
+            indicator_x = self.width() - title_bar.height() + 4
+            indicator_y = (title_bar.height() - 16) // 2
+            self._selection_indicator.move(indicator_x, indicator_y)
+
         super().resizeEvent(event)
         if not self._is_closing:
             self._geometry_save_timer.start()
