@@ -25,6 +25,60 @@ _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考
 _TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 
+# ========== 上下文注入预算常量 ==========
+CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
+_CONTEXT_INJECTION_RATIO = 0.6  # 上下文注入最多占 budget 的 60%
+
+
+def _compute_context_budget(llm_config: Dict) -> int:
+    """
+    计算当前模型的上下文 token 预算。
+    逻辑与 HistoryCompactor.get_budget() 保持一致。
+
+    Args:
+        llm_config: 模型配置字典
+
+    Returns:
+        可用于历史的 token 预算
+    """
+    profile = get_provider_profile(llm_config)
+    context_limit = int(profile.get("context_limit", 128000))
+
+    # 支持多种配置字段名
+    for key in ("context_limit", "context_window", "max_context_tokens", "最大Token"):
+        value = llm_config.get(key)
+        if value not in (None, ""):
+            try:
+                context_limit = int(value)
+                break
+            except (ValueError, TypeError):
+                pass
+
+    max_output_tokens = llm_config.get(
+        "最大新Token",
+        llm_config.get(
+            "max_tokens",
+            llm_config.get(
+                "max_output_tokens",
+                profile.get("max_output_tokens", 4096),
+            ),
+        ),
+    )
+    try:
+        max_output_tokens = int(max_output_tokens)
+    except (ValueError, TypeError):
+        max_output_tokens = int(profile.get("max_output_tokens", 4096))
+
+    # O1/O3 模型需要更大的输出预留
+    model_name = str(
+        llm_config.get("模型名称", "") or llm_config.get("model", "")
+    ).lower()
+    reserved = min(800, max_output_tokens)
+    if "o1" in model_name or "o3" in model_name:
+        reserved = min(max_output_tokens, 32000)
+
+    return max(500, context_limit - reserved)
+
 
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
@@ -107,6 +161,88 @@ class SubAgentExecutor(QThread):
     def provide_answer(self, answer: str):
         self._pending_answer = answer
 
+    def _build_inherited_context(self, agent, history_messages: List[Dict]) -> str:
+        """
+        基于 context budget 构建主智能体历史上下文注入。
+
+        策略：
+        1. 获取模型 context budget（token 数）
+        2. 按比例（默认 60%）计算上下文注入的最大字符数
+        3. 从最新消息向前填充，优先保留完整消息
+        4. 总字符数达到上限后停止，最后一条消息可截断
+
+        Args:
+            agent: Agent 配置对象
+            history_messages: 主智能体的历史消息列表
+
+        Returns:
+            格式化后的历史上下文字符串（含标题），无内容时返回空字符串
+        """
+        if not history_messages:
+            return ""
+
+        # 获取预算比例（优先从 agent 配置读取）
+        budget_ratio = getattr(
+            agent, 'inherit_history_budget_ratio', _CONTEXT_INJECTION_RATIO
+        ) or _CONTEXT_INJECTION_RATIO
+        # 确保比例在合理范围内
+        budget_ratio = max(0.1, min(0.8, float(budget_ratio)))
+
+        # 计算可用 token 预算
+        budget_tokens = _compute_context_budget(self.llm_config)
+
+        # 按比例分配字符数（标记语言中 1 token ≈ 4 字符）
+        HEADER_OVERHEAD = 60  # 预留给标题和格式的开销
+        max_context_chars = int(budget_tokens * budget_ratio * CHARS_PER_TOKEN)
+        max_context_chars -= HEADER_OVERHEAD
+        if max_context_chars <= 0:
+            return ""
+
+        # 从最新消息向前填充
+        history_lines = []
+        remaining_chars = max_context_chars
+
+        for msg in reversed(history_messages):
+            role = msg.get("role", "user")
+            # 跳过 tool 角色消息（工具结果很长且与 assistant 消息隐含关联）
+            if role == "tool":
+                continue
+
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    c.get("text", "") for c in content if isinstance(c, dict)
+                )
+            if not content:
+                continue
+
+            line_prefix = f"**{role}**: "
+            line = f"{line_prefix}{content}"
+            line_len = len(line)
+
+            if line_len <= remaining_chars:
+                # 完整消息放得下
+                history_lines.append(line)
+                remaining_chars -= line_len + 1  # +1 换行符
+                continue
+
+            # 完整放不下，尝试截断内容
+            trunc_target = remaining_chars - len(line_prefix) - 3  # -3 给 "..."
+            if trunc_target > 20:
+                history_lines.append(
+                    f"{line_prefix}{content[:trunc_target]}..."
+                )
+            # 无论是否截断，都停止填充更多消息
+            break
+
+        if not history_lines:
+            return ""
+
+        # 翻转回正序
+        history_lines.reverse()
+
+        return "\n\n## 主智能体历史上下文\n" + "\n".join(history_lines)
+
     def _add_log(self, log_type: str, content: str, extra: dict = None):
         """记录日志"""
         import time
@@ -162,7 +298,7 @@ class SubAgentExecutor(QThread):
             )
             tools = self.agent_manager.get_agent_tools_schema(self.agent_name, is_subagent_call=self.is_subagent_call)
 
-            # 【新增】如果 agent 配置了 inherit_history，获取主智能体历史消息
+            # 基于 context budget 构建主智能体历史上下文注入
             history_section = ""
             if agent.inherit_history and getattr(self, '_get_history_messages', None):
                 try:
@@ -172,25 +308,9 @@ class SubAgentExecutor(QThread):
                         if agent.inherit_history_count is not None:
                             history_messages = history_messages[-agent.inherit_history_count:]
 
-                        # 格式化历史消息（每条限制在合理长度内，避免上下文过长）
-                        history_lines = []
-                        max_chars = getattr(agent, 'inherit_history_max_chars', 500) or 500
-                        for msg in history_messages:
-                            role = msg.get("role", "user")
-                            if role == "tool":
-                                continue
-                            content = msg.get("content", "")
-                            if isinstance(content, list):
-                                content = "".join(
-                                    c.get("text", "") for c in content if isinstance(c, dict)
-                                )
-                            if content and role != "user" and role != "assistant":
-                                # 截断过长工具内容
-                                truncated = content[:max_chars] + ("..." if len(content) > max_chars else "")
-                                history_lines.append(f"**{role}**: {truncated}")
-
-                        if history_lines:
-                            history_section = "\n\n## 主智能体历史上下文\n" + "\n".join(history_lines)
+                        history_section = self._build_inherited_context(
+                            agent, history_messages
+                        )
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 获取历史消息失败: {e}")
 

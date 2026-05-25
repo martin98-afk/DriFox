@@ -34,7 +34,8 @@ class Agent:
     tools: Dict[str, bool] = field(default_factory=dict)
     inherit_history: bool = False  # 是否继承主智能体历史消息
     inherit_history_count: Optional[int] = None  # 继承最近 N 条消息，None 表示全部
-    inherit_history_max_chars: Optional[int] = 500  # 每条消息最大字符数
+    inherit_history_max_chars: Optional[int] = 500  # （已弃用）旧版每条消息最大字符数，新版使用 budget 比例
+    inherit_history_budget_ratio: float = 0.6  # 上下文注入最多占 context budget 的比例（0.1~0.8）
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Agent":
@@ -58,6 +59,7 @@ class Agent:
             inherit_history=data.get("inherit_history", False),
             inherit_history_count=data.get("inherit_history_count"),
             inherit_history_max_chars=data.get("inherit_history_max_chars", 500),
+            inherit_history_budget_ratio=float(data.get("inherit_history_budget_ratio", 0.6)),
         )
 
     def to_dict(self) -> Dict:
@@ -91,6 +93,8 @@ class Agent:
             result["inherit_history_count"] = self.inherit_history_count
         if self.inherit_history_max_chars != 500:
             result["inherit_history_max_chars"] = self.inherit_history_max_chars
+        if self.inherit_history_budget_ratio != 0.6:
+            result["inherit_history_budget_ratio"] = self.inherit_history_budget_ratio
         return result
 
     def is_primary(self) -> bool:
