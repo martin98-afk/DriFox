@@ -1633,8 +1633,6 @@ class OpenAIChatWorker(QThread):
                         {"success": False, "content": None, "error": "用户中止"},
                     )(),
                 )
-                if not self._legacy_direct_callbacks:
-                    QApplication.processEvents()
                 # 不设置 _is_cancelled = True，让 worker 继续下次迭代
                 # 返回空列表而非 None，避免进入问答等待逻辑
                 return []
@@ -1712,8 +1710,6 @@ class OpenAIChatWorker(QThread):
                                         tool_call_id, tool_name, preview_args,
                                         error_result
                                     )
-                                    if not self._legacy_direct_callbacks:
-                                        QApplication.processEvents()
                                     results.append({
                                         "role": "tool",
                                         "tool_call_id": tool_call_id,
@@ -1753,8 +1749,6 @@ class OpenAIChatWorker(QThread):
                                     tool_call_id, tool_name, preview_args,
                                     error_result
                                 )
-                                if not self._legacy_direct_callbacks:
-                                    QApplication.processEvents()
                                 results.append({
                                     "role": "tool",
                                     "tool_call_id": tool_call_id,
@@ -1788,8 +1782,6 @@ class OpenAIChatWorker(QThread):
                     tool_call_id, tool_name, arguments,
                     error_result
                 )
-                if not self._legacy_direct_callbacks:
-                    QApplication.processEvents()
                 results.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
@@ -1812,8 +1804,6 @@ class OpenAIChatWorker(QThread):
                     self.tool_call_started,
                     tool_call_id, tool_name, arguments, round_id
                 )
-                if not self._legacy_direct_callbacks:
-                    QApplication.processEvents()
 
             if tool_name == "question":
                 questions = arguments.get("questions", [])
@@ -1910,8 +1900,6 @@ class OpenAIChatWorker(QThread):
                                 },
                             )(),
                         )
-                        if not self._legacy_direct_callbacks:
-                            QApplication.processEvents()
                         self._is_cancelled = True
                         return None
 
@@ -1931,8 +1919,6 @@ class OpenAIChatWorker(QThread):
                                 },
                             )(),
                         )
-                        if not self._legacy_direct_callbacks:
-                            QApplication.processEvents()
                         results.append(
                             {
                                 "role": "tool",
@@ -1974,15 +1960,11 @@ class OpenAIChatWorker(QThread):
                     self.tool_result_received,
                     tool_call_id, tool_name, arguments, cancelled_result
                 )
-                if not self._legacy_direct_callbacks:
-                    QApplication.processEvents()
                 self._is_cancelled = True
                 return None
 
             self._emit_with_callback("tool_result_received", self.tool_result_received, tool_call_id, tool_name,
                                      arguments, result)
-            if not self._legacy_direct_callbacks:
-                QApplication.processEvents()
             results.append(
                 {
                     "role": "tool",
