@@ -407,12 +407,15 @@ class ToolExecutor:
                     logger.info(f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}")
                     
                     # 将 hook 输出注入到消息上下文（供 LLM 后续分析）
+                    # 🛡️ 跨线程保护：使用 Qt.callLater 确保在主线程执行
                     if result.output and self._backend:
                         hook_output_msg = f"<hook event=\"PreToolUse\">\n[BLOCKED] Tool '{tool_name}' was blocked by hook.\nHook output:\n{result.output}\n</hook>"
-                        self._backend.message_received.emit({
-                            "role": "assistant",
-                            "content": hook_output_msg
-                        })
+                        from PyQt5.QtCore import QMetaObject, Qt
+                        QMetaObject.invokeMethod(
+                            self._backend, "message_received",
+                            Qt.QueuedConnection,
+                            *({"role": "assistant", "content": hook_output_msg},)
+                        )
                     
                     # 返回 hook 输出作为工具结果
                     return ToolResult(
@@ -552,10 +555,25 @@ class ToolExecutor:
             ),
         }
 
+        # ========== 工具执行前的有效性检查 ==========
+        # 在 UI 关闭场景下，即使方法开头检查通过，
+        # lambda 执行期间 UI 可能被关闭，导致 BuiltinTools 访问崩溃
+        if not self.is_valid():
+            logger.warning(f"[ToolExecutor] ToolExecutor became invalid during hook phase")
+            return ToolResult(False, error="UI has been closed, tool execution unavailable")
+
         executor = tool_map.get(tool_name)
         if executor:
             try:
                 result = executor()
+                # ========== 工具执行后的有效性检查（防御性）==========
+                # 对于耗时操作（bash、task_batch），执行期间 UI 可能被关闭
+                if not self.is_valid():
+                    logger.warning(f"[ToolExecutor] ToolExecutor became invalid after tool execution: {tool_name}")
+                    # 结果可能已被 UI 关闭中断，标记为不完整
+                    if result and result.success:
+                        result.success = False
+                        result.content = (result.content or "") + "\n[警告: UI 在执行过程中已关闭]"
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
                     self._record_file_operation_after(tool_name, args, file_path_before)
@@ -600,12 +618,36 @@ class ToolExecutor:
 
     def _execute_mcp_tool(self, tool_name: str, args: dict) -> ToolResult:
         """执行 MCP 工具调用"""
-        mcp_manager = self._builtin_tools._mcp_manager
+        # 执行前检查 ToolExecutor 有效性
+        if not self.is_valid():
+            logger.warning(f"[ToolExecutor] ToolExecutor became invalid before MCP tool: {tool_name}")
+            return ToolResult(False, error="UI has been closed, tool execution unavailable")
+
+        # 获取 MCP Manager（单例，可能在 BuiltinTools 清理后仍存在）
+        try:
+            mcp_manager = self._builtin_tools._mcp_manager
+        except AttributeError:
+            logger.error(f"[ToolExecutor] _mcp_manager not accessible")
+            return ToolResult(False, error="MCP 管理器不可用")
 
         if not mcp_manager.is_connected:
             return ToolResult(False, error="MCP 未连接，请先配置并连接 MCP 服务器")
 
-        return mcp_manager.call_tool_sync(tool_name, args)
+        try:
+            result = mcp_manager.call_tool_sync(tool_name, args)
+        except TimeoutError as e:
+            logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
+            return ToolResult(False, error=f"MCP 工具调用超时，请稍后重试")
+        except Exception as e:
+            logger.error(f"[ToolExecutor] MCP tool '{tool_name}' raised exception: {e}")
+            return ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
+
+        # 执行后检查 ToolExecutor 有效性（MCP 调用可能耗时较长）
+        if not self.is_valid():
+            logger.warning(f"[ToolExecutor] ToolExecutor became invalid after MCP tool: {tool_name}")
+            # 不再尝试修改 result，避免访问已删除的 QObject 属性
+
+        return result
 
     def _execute_grep_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
         """

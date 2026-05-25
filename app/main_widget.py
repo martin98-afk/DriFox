@@ -5,6 +5,7 @@ import ctypes
 import gc
 import os
 import re
+import uuid
 import subprocess
 import sys
 import time
@@ -166,6 +167,8 @@ class OpenAIChatToolWindow(ToolWindow):
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
     skillExecutionRequested = pyqtSignal(str, dict)
+    # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
+    _topic_summary_ready = pyqtSignal(object, object)
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
@@ -186,7 +189,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
-        import uuid
         self._window_id = str(uuid.uuid4())[:8]
         
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
@@ -230,6 +232,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._suspend_auto_scroll = False
         self._gen_thread_pool = QThreadPool()
         self._gen_thread_pool.setMaxThreadCount(2)
+        # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
+        self._topic_summary_ready.connect(self._on_topic_summary_generated)
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -303,8 +307,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 初始化 UI 相关的回调
         self._setup_engine_callbacks()
 
-        # 初始化子智能体管理器
-        self._init_sub_agent_manager()
+        # 初始化子智能体信号连接
+        self._init_sub_agent_signals()
+        # 设置子智能体获取主智能体历史消息的回调
+        self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
 
         # 初始化历史管理器
         self._project_label.setText(self._current_project)
@@ -361,47 +367,21 @@ class OpenAIChatToolWindow(ToolWindow):
             "stream_finished": self._on_stream_finished,
             "messages_updated": self._on_messages_updated,
             "error": self._on_engine_error,
-            "user_message_added": self._on_user_message_added,
             "skill_requested": self._on_skill_requested,
             "question_asked": self._on_question_asked,
             "agent_switched": self._on_agent_switched,
             "retry_status": self._on_retry_status,
             "retry_resolved": self._on_retry_resolved,
             "permission_approval_requested": self._on_permission_approval_requested,
-            "compaction_updated": self._on_compaction_updated,  # 子智能体压缩完成回调
         }
         self.backend.set_all_callbacks(callbacks)
 
-    def _init_sub_agent_manager(self):
-        """初始化子智能体管理器"""
-        from app.core import SubAgentManager
-
-        self._sub_agent_manager = SubAgentManager(
-            agent_manager=self.backend.agent_manager,
-            tool_executor=self.backend.tool_executor,
-            get_llm_config=self._get_current_model_config,
-        )
-        self._sub_agent_manager.task_started.connect(self._on_sub_agent_task_started)
-        self._sub_agent_manager.task_finished.connect(self._on_sub_agent_task_finished)
-        self._sub_agent_manager.set_history_getter(self._get_current_session_messages_for_tools)
-
-        # 将子智能体管理器设置到 backend，让 ToolExecutor 能访问
-        self.backend.set_sub_agent_manager(self._sub_agent_manager)
-
-        # 初始化子智能体日志存储（在 ChatEngine 之后）
-        self._init_sub_agent_log_store()
-
-    def _init_sub_agent_log_store(self):
-        """初始化子智能体日志存储（委托给 Backend.session_store）"""
-        try:
-            # 直接使用 backend 的 session_store（共享单一数据库连接）
-            session_store = self.backend.session_store
-            
-            # 直接使用 SessionStore 的方法，无需中间的 SubAgentLogStore
-            self._sub_agent_manager.set_session_store(session_store)
-            logger.info(f"[LLMChatter] 子智能体日志存储初始化完成（通过 SessionStore）")
-        except Exception as e:
-            logger.error(f"[LLMChatter] 子智能体日志存储初始化失败: {e}")
+    def _init_sub_agent_signals(self):
+        """连接子智能体信号到 UI 回调"""
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if sub_agent_mgr:
+            sub_agent_mgr.task_started.connect(self._on_sub_agent_task_started)
+            sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
 
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""
@@ -1037,18 +1017,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标题编辑（行内编辑模式）
         self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
-        title_style = """QLabel {
+        title_style = f"""QLabel {{
             color: #f3f6fc;
             font-size: 15px;
             font-weight: bold;
             padding: 6px 4px;
             border-radius: 10px;
             background-color: transparent;
-        }
-        QLabel:hover {
+            {font_css}
+        }}
+        QLabel:hover {{
             background-color: rgba(255, 255, 255, 0.06);
-        }
-        QLineEdit {
+        }}
+        QLineEdit {{
             color: #f3f6fc;
             font-size: 15px;
             font-weight: bold;
@@ -1056,11 +1037,12 @@ class OpenAIChatToolWindow(ToolWindow):
             border-radius: 10px;
             background-color: transparent;
             border: none;
-        }
-        QLineEdit:focus {
+            {font_css}
+        }}
+        QLineEdit:focus {{
             background-color: rgba(255, 255, 255, 0.1);
             border: 1px solid rgba(255, 255, 255, 0.3);
-        }
+        }}
     """
         title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
@@ -1532,7 +1514,6 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
             return
 
-        import uuid
         task_id = f"compact_{uuid.uuid4().hex[:8]}"
 
         sub_agent_mgr.execute_task(
@@ -1541,41 +1522,11 @@ class OpenAIChatToolWindow(ToolWindow):
             task_description="请压缩当前对话上下文，生成工作摘要",
             parent_context="",
             share_context=True,  # 接入主智能体完整上下文
-            on_finished=lambda result: self._on_compaction_finished(task_id, result),
-            on_error=lambda error: self._on_compaction_error(task_id, error),
+            on_finished=None,
+            on_error=None
         )
 
         InfoBar.info("压缩中", "正在调用子智能体压缩对话上下文...", parent=self, duration=2000, position=InfoBarPosition.BOTTOM)
-
-    def _on_compaction_finished(self, task_id: str, result: str):
-        """压缩任务完成"""
-        if getattr(self, '_is_destroyed', False):
-            return
-
-        # 将压缩结果以系统消息形式写入会话并刷新
-        if result and result.strip():
-            session = self.session_manager.get_current_session()
-            if session:
-                summary_msg = {
-                    "role": "assistant",
-                    "content": f"📋 **上下文压缩摘要**\n\n{result.strip()}",
-                }
-                messages = list(session.messages)
-                messages.append(summary_msg)
-                # 更新会话消息（触发 _on_messages_updated → 刷新上下文指示器）
-                session.set_messages(messages, preserve_compaction=False)
-                self._refresh_context_usage_indicator()
-                # 持久化到历史
-                if self.history_manager:
-                    self._save_current_session_to_history()
-
-        InfoBar.success("压缩完成", "对话上下文已压缩", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
-
-    def _on_compaction_error(self, task_id: str, error: str):
-        """压缩任务出错"""
-        if getattr(self, '_is_destroyed', False):
-            return
-        InfoBar.error("压缩失败", f"上下文压缩出错: {error}", parent=self, position=InfoBarPosition.BOTTOM)
 
     # ========== 命令卡片处理 ==========
 
@@ -2548,31 +2499,34 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_project_label"):
             self._update_project_label_style()
         if hasattr(self, "title_edit"):
-            title_style = """QLabel {
-                color: %s;
+            font_css = get_font_family_css()
+            title_style = f"""QLabel {{
+                color: {Colors.TEXT_PRIMARY};
                 font-size: 15px;
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
                 background-color: transparent;
-            }
-            QLabel:hover {
+                {font_css}
+            }}
+            QLabel:hover {{
                 background-color: rgba(255, 255, 255, 0.06);
-            }
-            QLineEdit {
-                color: %s;
+            }}
+            QLineEdit {{
+                color: {Colors.TEXT_PRIMARY};
                 font-size: 15px;
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
                 background-color: transparent;
                 border: none;
-            }
-            QLineEdit:focus {
+                {font_css}
+            }}
+            QLineEdit:focus {{
                 background-color: rgba(255, 255, 255, 0.1);
                 border: 1px solid rgba(255, 255, 255, 0.3);
-            }
-            """ % (Colors.TEXT_PRIMARY, Colors.TEXT_PRIMARY)
+            }}
+            """
             self.title_edit.setStyleSheet(title_style)
         # 刷新输入卡片背景
         if hasattr(self, '_input_card'):
@@ -5821,36 +5775,69 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从管理器移除并记录结果
         if executor:
             agent_name = getattr(executor, "agent_name", "")
+            task_description = getattr(executor, "task_description", "")
             del sub_agent_mgr._running_tasks[task_id]
         else:
             agent_name = ""
+            task_description = ""
         sub_agent_mgr._finished_tasks[task_id] = {"result": result, "error": execution_error or "",
-                                                  "agent_name": agent_name}
+                                                  "agent_name": agent_name,
+                                                  "task_description": task_description}
 
         # 批次完成检查：只有当所有任务都完成时才触发回调
         sub_agent_mgr._batch_completed += 1
         if sub_agent_mgr._batch_completed >= sub_agent_mgr._batch_total and sub_agent_mgr._batch_total > 0:
             # 全部任务完成，发送回调通知
             self._do_trigger_callback(sub_agent_mgr)
-            # 重置计数器
+            # 重置计数器和批次任务ID集合
             sub_agent_mgr._batch_total = 0
             sub_agent_mgr._batch_completed = 0
+            sub_agent_mgr._batch_task_ids = set()
 
     def _do_trigger_callback(self, sub_agent_mgr):
-        """执行回调触发 - 支持强制中断当前流式输出"""
-        total = len(sub_agent_mgr._finished_tasks)
-        failed = sum(1 for t in sub_agent_mgr._finished_tasks.values() if t.get("error") and t.get("error") != "")
+        """执行回调触发 - 支持强制中断当前流式输出
+
+        两种场景：
+        1. 流式中回调（LLM 调用子智能体）：中断当前流式，发送回调消息
+        2. 非流式回调（如 /compact 手动命令）：需要创建 UI 卡片后发送回调消息
+        """
+        # 只提取本次批次完成的任务信息（不是所有历史任务）
+        batch_ids = sub_agent_mgr._batch_task_ids
+        batch_tasks = []
+        for tid in batch_ids:
+            task_info = sub_agent_mgr._finished_tasks.get(tid, {})
+            is_error = bool(task_info.get("error"))
+            batch_tasks.append({
+                "task_id": tid,
+                "agent_name": task_info.get("agent_name", ""),
+                "task_description": task_info.get("task_description", ""),
+                "success": not is_error,
+            })
+
+        total = len(batch_tasks)
+        failed = sum(1 for t in batch_tasks if not t["success"])
+
+        # 生成任务列表（包含任务名和ID，方便LLM用task_status查询）
+        task_lines = []
+        for t in batch_tasks:
+            status_icon = "✅" if t["success"] else "❌"
+            desc_preview = t["task_description"][:50] + ("..." if len(t["task_description"]) > 50 else "")
+            agent = t["agent_name"]
+            task_lines.append(f"- {status_icon} [{agent}] {desc_preview} (id: {t['task_id']})")
+
+        task_list_text = "\n".join(task_lines) if task_lines else "- (无任务详情)"
 
         callback_text = f"""[后台任务状态]
-所有子智能体任务执行完成。
-- 总任务数: {total}
-- 已完成: {total - failed}
-- 失败: {failed}
+子智能体任务执行完成（共 {total} 个，成功 {total - failed} 个，失败 {failed} 个）。
+本次完成的任务：
+{task_list_text}
 
-请使用 task_status 工具获取详细结果。"""
+请使用 task_status 工具查询以上任务的详细结果。"""
+
+        is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
 
         # 检查是否正在流式输出，如果是则强制中断并保存已有内容
-        if self.backend.chat_engine and self.backend.chat_engine.is_streaming:
+        if is_currently_streaming:
             logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming")
 
             # 1. 非阻塞取消流式输出（断开信号、设置取消标志）
@@ -5870,15 +5857,66 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 5. 重置状态并发送回调消息
             self._toggle_send_stop(False)
+        else:
+            # 非流式场景（如 /compact 手动命令）：没有活跃的流式对话
+            # 此时不中断任何东西，但需要准备 UI 以接收回调产生的流式响应
+            self._prepare_ui_for_callback_message(callback_text)
 
-        # 发送回调消息到引擎
-        self.backend.send_message_to_engine(callback_text)
+        # 发送回调消息到引擎（非流式场景下 UI 已在 _prepare_ui_for_callback_message 中准备好）
+        if not self.backend.send_message_to_engine(callback_text):
+            # 发送失败（通常是正在流式或配置无效），回滚 UI 状态
+            logger.warning("[ChatEngine] Sub-agent callback: send_message_to_engine failed, rolling back UI")
+            if not is_currently_streaming:
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                if self._current_assistant_card:
+                    self._current_assistant_card.deleteLater()
+                    self._current_assistant_card = None
+        else:
+            # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
+            if not is_currently_streaming:
+                self._sync_batch_structures()
+                self._fix_new_card_message_index(user_text=callback_text)
+                self._visible_batch_end = len(self._message_batch)
+
+    def _prepare_ui_for_callback_message(self, callback_text: str):
+        """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
+
+        非流式场景（如 /compact 手动命令）下，回调消息发送后引擎会产生流式响应，
+        但 UI 上没有对应的卡片来承载内容，导致消息写入 session 却不可见。
+        此方法复用 _on_send_message 的 UI 准备逻辑，确保流式回调内容能正确渲染。
+
+        注意：只做 UI 准备（创建卡片、设置状态），不做 batch 同步。
+        batch 同步必须在 send_message_to_engine 之后执行（因为 send 会往 session 写消息）。
+        """
+        self._hide_welcome_cards()
+
+        # 创建用户消息卡片（显示回调通知文本）
+        self._append_user_message(callback_text)
+
+        # 创建助手消息卡片（用于接收 LLM 的流式响应）
+        assistant_card = self._append_assistant_message(
+            model_name=self._current_model_name,
+        )
+
+        # 设置当前卡片（必须在 send_message 之前，否则流式回调触发时 _current_assistant_card 为 None）
+        self._current_assistant_card = assistant_card
+        self._response_start_time = time.time()
+        self._is_streaming = True
+        self._toggle_send_stop(True)
+
+        # 确保 ToolExecutor 使用正确的 session_id
+        session = self.session_manager.get_current_session()
+        if session and self.backend.tool_executor:
+            self.backend.set_session_context(session.session_id)
 
     def _on_sub_agent_finished(self, task_id: str, result: str):
         """单个子智能体执行完成"""
         if getattr(self, '_is_destroyed', False):
             return
-        self._sub_agent_manager.task_finished.emit(task_id, result)
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if sub_agent_mgr:
+            sub_agent_mgr.task_finished.emit(task_id, result)
 
     def _on_tool_cancelled(self):
         """工具执行被用户中止 — 连接自 tool_floating_widget.cancelled 信号"""
@@ -6417,58 +6455,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._question_floating_widget.setUpdatesEnabled(True)
 
-    def _on_compaction_updated(self, task_id: str, new_summary: str):
-        if getattr(self, '_is_destroyed', False):
-            return
-        """
-        子智能体压缩完成回调
-        
-        当后台压缩子智能体完成任务时：
-        1. 存储压缩结果供后续查询
-        2. 通知用户压缩已完成
-        
-        主智能体可以在适当时机查询并应用新的压缩结果。
-        """
-        logger.info(f"[MainWidget] 压缩结果已更新，task_id={task_id[:8]}...")
-        
-        # 存储最新的压缩结果
-        self._latest_compaction_result = {
-            "task_id": task_id,
-            "new_summary": new_summary,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        
-        # 检查是否有正在进行的流式对话
-        if not self._is_streaming:
-            # 如果没有正在进行的对话，可以记录但不立即应用
-            logger.info("[MainWidget] 当前无流式对话，压缩结果已存储待用")
-        else:
-            # 如果有对话在进行，通知用户压缩已完成
-            compaction_msg = (
-                f"📋 上下文压缩已完成\n"
-                f"后台子智能体已生成更好的压缩摘要。"
-            )
-            
-            # 如果有日志面板，可以在这里显示
-            if hasattr(self, '_log_floating_widget') and self._log_floating_widget.isVisible():
-                self._log_floating_widget.append_log("system", compaction_msg)
-
-    def _get_pending_compaction_result(self) -> Optional[Dict]:
-        """
-        获取待应用的压缩结果
-        
-        供其他模块查询是否有新的压缩结果需要应用。
-        
-        Returns:
-            Dict: 压缩结果（包含 task_id, new_summary, timestamp）
-            None: 如果没有待应用的压缩结果
-        """
-        return getattr(self, '_latest_compaction_result', None)
-
-    def _clear_pending_compaction_result(self):
-        """清除待应用的压缩结果（在应用后调用）"""
-        self._latest_compaction_result = None
-    
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
         self._topic_summary_cancelled = False
@@ -6499,10 +6485,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if idx is not None:
                 previous_summary = self.history_manager.get_topic_summary(idx)
 
+        # 线程安全包装：QRunnable 在后台线程直接调用 callback，
+        # 通过 pyqtSignal emit 桥接到主线程，避免 GUI 操作崩溃
+        def _thread_safe_callback(result, error=None):
+            self._topic_summary_ready.emit(result, error)
+
         task = TopicSummaryTask(
             messages=session.messages,
             llm_config=llm_config,
-            callback=self._on_topic_summary_generated,
+            callback=_thread_safe_callback,
             previous_summary=previous_summary if previous_summary else None,
             cancel_check=lambda: self._topic_summary_cancelled,
         )
@@ -6560,10 +6551,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if idx is not None:
                 self.history_manager.update_topic_summary(idx, clean_summary)
 
-        self._update_title_display(clean_summary)
-
-    def _update_title_display(self, title: str):
-        self.title_edit.setText(title)
+        self.title_edit.setText(clean_summary)
 
     def _update_project_display(self, project: str):
         """更新项目名称显示"""

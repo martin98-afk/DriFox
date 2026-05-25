@@ -299,9 +299,6 @@ class UIEngine(BaseEngine):
                     current_message=user_text
                 )
         session.add_user_message(content=user_text)
-
-        self._emit("user_message_added", user_text)
-
         # Trigger PostUserMessage hook
         if hasattr(self._agent_manager, '_hook_manager') and self._agent_manager._hook_manager:
             hook_manager = self._agent_manager._hook_manager
