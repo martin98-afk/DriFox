@@ -1713,6 +1713,13 @@ class OpenAIChatToolWindow(ToolWindow):
         """打开设置卡片"""
         self._card_manager.toggle_card("settings", self._window_id)
         if self._card_manager.is_card_visible("settings", self._window_id):
+            # 确保顶层窗口从最小化恢复并激活
+            top_window = self.window()
+            if top_window:
+                if top_window.isMinimized():
+                    top_window.showNormal()
+                top_window.activateWindow()
+                top_window.raise_()
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
@@ -2063,6 +2070,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 显示时刷新模型配置数据
         if self._card_manager.is_card_visible("model_config", self._window_id):
             self._load_model_config_to_card()
+            # 确保顶层窗口从最小化恢复并激活
+            top_window = self.window()
+            if top_window:
+                if top_window.isMinimized():
+                    top_window.showNormal()
+                top_window.activateWindow()
+                top_window.raise_()
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
@@ -6040,9 +6054,10 @@ class OpenAIChatToolWindow(ToolWindow):
             QApplication.beep()
 
         # 使用全局 TrayManager 发送通知（避免多窗口多个托盘图标的问题）
-        # 传递 self 窗口引用，点击通知时会显示该窗口
+        # 传递顶层窗口引用，确保点击通知时能正确恢复最小化的对话框
         from app.tray_manager import TrayManager
-        TrayManager.get_instance().notify(title, message, window=self)
+        top_window = self.window() if callable(self.window) else self
+        TrayManager.get_instance().notify(title, message, window=top_window)
 
     def _should_show_inactive_notification(self) -> bool:
         """Only notify when the app window is not effectively visible to the user."""

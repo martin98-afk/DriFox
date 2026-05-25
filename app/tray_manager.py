@@ -143,19 +143,27 @@ class TrayManager(QObject):
         return None
 
     def _show_window(self, window) -> None:
-        """显示指定的窗口（如果已隐藏则显示，如果最小化则还原）"""
+        """显示指定的窗口（如果已隐藏则显示，如果最小化则还原）
+
+        支持传入嵌入式Widget：自动获取其所属的顶层窗口再操作。
+        """
         if window is None:
             logger.warning("[_show_window] 窗口为空")
             return
-        
+
+        # 如果传入的是嵌入式Widget（如OpenAIChatToolWindow），取其顶层窗口
+        top_window = window.window() if hasattr(window, 'window') and callable(window.window) else window
+        if top_window is None:
+            top_window = window
+
         try:
-            if window.isHidden():
-                logger.info(f"[_show_window] 显示窗口")
-                window.show()
-            if window.isMinimized():
-                window.showNormal()
-            window.activateWindow()
-            window.raise_()
+            if top_window.isHidden():
+                logger.info("[_show_window] 显示窗口")
+                top_window.show()
+            if top_window.isMinimized():
+                top_window.showNormal()
+            top_window.activateWindow()
+            top_window.raise_()
         except RuntimeError as e:
             logger.error(f"[_show_window] 窗口操作失败: {e}")
 
