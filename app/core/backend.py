@@ -400,6 +400,53 @@ class ChatBackend(QObject):
         if self._chat_engine:
             return self._chat_engine.cleanup_worker()
 
+    def cleanup(self):
+        """
+        清理窗口独有资源，不影响其他窗口。
+        
+        安全规则：
+        - 不清除任何单例/共享组件（AgentManager/MemoryManagerCore/HistoryManager/BuiltinTools）
+        - 仅释放本窗口创建的实例和引用
+        """
+        self._initialized = False
+
+        # 1. 清理 ChatEngine（停止 worker + 清空回调）
+        if self._chat_engine:
+            try:
+                self._chat_engine.clear_callbacks()
+                self._chat_engine.cleanup_worker()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup chat_engine: {e}")
+            self._chat_engine = None
+
+        # 2. 清理 ToolExecutor 窗口独有状态（共享 BuiltinTools 不碰）
+        if self._tool_executor:
+            try:
+                self._tool_executor.cleanup()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup tool_executor: {e}")
+            self._tool_executor = None
+
+        # 3. 清除 HookManager 回调（闭包引用了本窗口的 ChatBackend）
+        if self._hook_manager:
+            try:
+                self._hook_manager.set_on_finished_callback(None)
+                self._hook_manager.set_on_decision_callback(None)
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup hook_manager: {e}")
+
+        # 4. 清除 SubAgentManager 回调引用
+        if self._sub_agent_manager:
+            self._sub_agent_manager = None
+
+        # 5. 清除 SessionManager（窗口独有的会话）
+        self._session_manager = None
+
+        # 6. 清除 UI 有效性标志
+        self._ui_valid = False
+
+        logger.info("[ChatBackend] 窗口资源清理完成")
+
     def set_ui_valid(self, valid: bool):
         """设置 UI 有效性标志（由 MainWidget.closeEvent 调用）"""
         self._ui_valid = valid

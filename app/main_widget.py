@@ -6974,18 +6974,12 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
         
-        # 设置关闭标志，阻止 Settings.save() 写入磁盘（防止覆盖用户粘贴的配置）
+        # 停止所有正在进行的流式输出 + 清理窗口独有资源（不影响其他窗口）
         if hasattr(self, 'backend') and self.backend:
             try:
-                self.backend.set_ui_valid(False)
-                # 清除 ChatEngine 的所有回调，防止异步回调访问已销毁的 widget
-                if self.backend.chat_engine:
-                    self.backend.chat_engine.clear_callbacks()
-                # 停止所有正在进行的流式输出
                 self.backend.stop_streaming()
                 self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
-                # 清理 worker
-                self.backend.cleanup_worker()
+                self.backend.cleanup()
             except Exception:
                 pass
         

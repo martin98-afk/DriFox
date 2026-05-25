@@ -107,19 +107,23 @@ class ToolExecutor:
 
     def cleanup(self):
         """
-        彻底清理 ToolExecutor 的所有缓存，防止内存泄漏。
-        应该在对话结束后或切换会话时调用。
+        清理窗口独有状态，不影响其他窗口。
+        
+        注意：_builtin_tools 是跨窗口共享实例，不清除。
         """
-        # 清理 builtin_tools（共享实例不清除，仅释放实例引用）
-        self._builtin_tools = None
-
         # 清理文件操作记录器
-        if self._file_recorder:
-            self._file_recorder = None
+        self._file_recorder = None
 
         # 清理会话上下文
         self._session_id = None
         self._call_id = None
+
+        # 清理自定义工具
+        self._custom_tools.clear()
+
+        # 释放 backend 引用（打破循环引用链）
+        self._backend = None
+        self._homepage = None
 
     def _init_file_recorder(self):
         """初始化文件操作记录器"""
