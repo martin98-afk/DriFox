@@ -272,6 +272,8 @@ def register_all_commands():
     cmd_mgr.register("branch", "function", description="新建分支窗口")
     cmd_mgr.register("compact", "function",
                      description="手动触发上下文压缩（调用子智能体压缩当前对话摘要）")
+    cmd_mgr.register("remember", "function",
+                     description="将输入内容存入长期记忆")
 
     # ---- prompt 命令 ----
     cmd_mgr.register("init", "prompt",
@@ -323,7 +325,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
 
             cmd_mgr.register(
                 name=md_file.stem,
-                command_type="prompt",
+                command_type="agent",  # 智能体类型，支持 --subagent 参数
                 description=description,
                 prompt_text=body,
             )

@@ -97,7 +97,7 @@ class CommandItemWidget(QWidget):
         self._desc_label.setMinimumWidth(0)
         layout.addWidget(self._desc_label, 1)
 
-        # 类型标签（技能显示【技能】，智能体显示【智能体】）
+        # 类型标签（技能显示【技能】，智能体显示【智能体】，提示词显示【提示词】）
         item_type = self._data["type"]
         if item_type == "skill":
             self._tag_label = QLabel("【技能】")
@@ -106,6 +106,11 @@ class CommandItemWidget(QWidget):
             layout.addWidget(self._tag_label)
         elif item_type == "agent":
             self._tag_label = QLabel("【智能体】")
+            self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            layout.addWidget(self._tag_label)
+        elif item_type == "prompt":
+            self._tag_label = QLabel("【提示词】")
             self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
             layout.addWidget(self._tag_label)
@@ -152,7 +157,7 @@ class CommandItemWidget(QWidget):
             }}
         """)
 
-        # 标签样式：技能蓝色，智能体紫色
+        # 标签样式：技能蓝色，智能体紫色，提示词橙色
         item_type = self._data["type"]
         if item_type == "skill":
             tag_fg = "#66c6ff" if not self._selected else "#aae0ff"
@@ -166,6 +171,16 @@ class CommandItemWidget(QWidget):
             """)
         elif item_type == "agent":
             tag_fg = "#b388ff" if not self._selected else "#d1b3ff"
+            self._tag_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {tag_fg};
+                    {get_font_family_css()} {font_size_css(11)};
+                    font-weight: bold;
+                    background: transparent;
+                }}
+            """)
+        elif item_type == "prompt":
+            tag_fg = "#ffb366" if not self._selected else "#ffc999"
             self._tag_label.setStyleSheet(f"""
                 QLabel {{
                     color: {tag_fg};
@@ -381,10 +396,10 @@ class CommandCard(QWidget):
             except RuntimeError:
                 continue
 
-        # 检查是否需要分隔线
+        # 检查是否需要分隔线（命令/技能 与 智能体/提示词之间）
         has_commands_or_skills = any(item["type"] in ("command", "skill") for item in new_items)
-        has_agents = any(item["type"] == "agent" for item in new_items)
-        insert_divider = has_commands_or_skills and has_agents
+        has_agents_or_prompts = any(item["type"] in ("agent", "prompt") for item in new_items)
+        insert_divider = has_commands_or_skills and has_agents_or_prompts
 
         # 增量模式：需要分隔线但还没有时，退化到全量（简化逻辑）
         if incremental and insert_divider and self._divider is None:
@@ -441,10 +456,10 @@ class CommandCard(QWidget):
         # 添加 widget，按顺序
         divider_inserted = False
         for i, widget in enumerate(self._item_widgets):
-            # 在第一个智能体前插入分隔线（非增量模式）
+            # 在第一个智能体或提示词前插入分隔线（非增量模式）
             if not incremental and insert_divider and not divider_inserted:
                 item = new_items[i]
-                if i > 0 and item["type"] == "agent" and new_items[i - 1]["type"] in ("command", "skill"):
+                if i > 0 and item["type"] in ("agent", "prompt") and new_items[i - 1]["type"] in ("command", "skill"):
                     divider = QFrame()
                     divider.setFrameShape(QFrame.HLine)
                     divider.setFixedHeight(1)

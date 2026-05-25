@@ -261,9 +261,11 @@ class SendableTextEdit(TextEdit):
         """根据当前 history_index 设置输入框文本"""
         if 0 <= self._history_index < len(self._history_list):
             text = self._history_list[self._history_index]
-            self.setPlainText(text)
-            # 如果历史项以 / 开头，临时阻止命令卡片触发
+            # ⚠️ 必须在 setPlainText 之前设置抑制标志！
+            # 否则 textChanged → _on_slash_trigger_check 先执行，标志还没设上
+            # 导致：首次用户按键被错误抑制（标志延后生效），卡片延迟一个按键才出现
             self._suppress_slash_trigger = text.strip().startswith("/")
+            self.setPlainText(text)
             # 选中全部文本，方便继续编辑
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.End)

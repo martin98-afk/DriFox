@@ -1474,11 +1474,12 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.builtin_commands import register_all_commands
         register_all_commands()
 
-    def _execute_command(self, command_name: str):
+    def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
 
         Args:
             command_name: 命令名（不含 /）
+            args: 命令后的参数字符串
         """
         if command_name == "new":
             self._create_new_session()
@@ -1488,6 +1489,54 @@ class OpenAIChatToolWindow(ToolWindow):
             self._duplicate_window(branch=True)
         elif command_name == "compact":
             self._trigger_context_compaction()
+        elif command_name == "remember":
+            self._remember_to_memory(args)
+
+    def _execute_subagent_task(self, agent_name: str, task_description: str):
+        """触发子智能体任务（智能体命令 + --subagent 参数）
+
+        Args:
+            agent_name: 智能体名称（来自 agents 目录）
+            task_description: 子智能体任务描述
+        """
+        if not agent_name or not task_description:
+            InfoBar.warning("参数错误", "缺少智能体名称或任务描述", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        # 清空输入框（和函数型命令一样处理）
+        self.input_area.clear()
+
+        # 检查 AgentManager 中是否存在该智能体
+        agent_mgr = self.backend.agent_manager
+        if not agent_mgr:
+            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        available_agents = [a.name for a in agent_mgr.list_agents()]
+        if agent_name not in available_agents:
+            InfoBar.warning("未知智能体", f"未找到智能体: {agent_name}，可用: {', '.join(available_agents)[:100]}", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if not sub_agent_mgr:
+            InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        # 构建完整任务描述：如果有剩余的 remainder 内容，追加到任务描述
+        # （remainder 已经在 command_manager 中处理过，但保留扩展性）
+        full_task = task_description
+
+        # 触发子智能体任务
+        sub_agent_mgr.execute_task(
+            task_id=f"agent_{uuid.uuid4().hex[:8]}",
+            agent_name=agent_name,
+            task_description=full_task,
+            parent_context="",
+            share_context=True,  # 接入主智能体完整上下文
+            on_finished=None,
+            on_error=None
+        )
+        logger.info(f"[BuiltinCommands] 触发子智能体任务: agent={agent_name}, task={task_description[:50]}...")
 
     def _trigger_context_compaction(self):
         """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
@@ -1510,6 +1559,21 @@ class OpenAIChatToolWindow(ToolWindow):
             on_error=None
         )
 
+    def _remember_to_memory(self, content: str):
+        """将内容存入长期记忆"""
+        content = content.strip()
+        if not content:
+            InfoBar.warning("记忆为空", "请在 /remember 后输入要记忆的内容", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+        
+        from app.core.memory_manager import MemoryManagerCore
+        mm = MemoryManagerCore.get_instance()
+        success = mm.add_entry_memory(content, source="manual")
+        if success:
+            InfoBar.success("已记忆", f'"{content[:30]}{"..." if len(content) > 30 else ""}" 已存入长期记忆', parent=self, position=InfoBarPosition.BOTTOM)
+        else:
+            InfoBar.error("记忆失败", "无法保存到长期记忆", parent=self, position=InfoBarPosition.BOTTOM)
+
     # ========== 命令卡片处理 ==========
 
     def _on_slash_triggered(self, query: str):
@@ -1528,6 +1592,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """输入框 / 触发结束 - 隐藏命令卡片"""
         if not hasattr(self, '_command_card'):
             return
+        # 直接调用卡片的 dismiss 方法确保关闭，同时通过 CardManager 通知容器
+        self._command_card.dismiss()
         self._card_manager.hide_card("command", self._window_id)
 
     def _show_model_selector_popup(self):
@@ -5564,7 +5630,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if cmd_result.is_function:
                 # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
                 self.input_area.clear()
-                self._execute_command(cmd_result.command_name)
+                self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                return
+            elif cmd_result.is_subagent:
+                # 子智能体命令：触发子智能体任务，不替换提示词
+                self._execute_subagent_task(cmd_result.agent_name, cmd_result.subagent_task)
                 return
             elif cmd_result.is_prompt or cmd_result.is_agent:
                 # 提示词替换命令：替换 + 追加用户命令
@@ -5633,6 +5703,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = True
         self._response_start_time = time.time()
         self._accumulated_content = ""
+        # 当 LLM 实际开始流式响应时切换为停止按钮
+        # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
+        self._toggle_send_stop(True)
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
 
@@ -5899,7 +5972,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_card = assistant_card
         self._response_start_time = time.time()
         self._is_streaming = True
-        self._toggle_send_stop(True)
+        # ❌ 不在这里切换停止按钮！内建函数/子智能体执行后只是准备接收回调响应，
+        # 按钮状态应在 LLM 实际开始流式响应时由 _on_stream_started 切换。
+        # self._toggle_send_stop(True)
 
         # 确保 ToolExecutor 使用正确的 session_id
         session = self.session_manager.get_current_session()
