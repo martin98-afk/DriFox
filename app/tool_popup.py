@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import platform
+import uuid
 import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor
@@ -480,6 +481,7 @@ class ToolPopupDialog(QDialog):
     def __init__(self, tool_instance, parent=None, border_color: str = "none"):
         super().__init__(parent)
         self.tool_instance = tool_instance
+        self._window_id = str(uuid.uuid4())[:8]  # 窗口唯一 ID，用于独立记忆位置
         self._border_color = border_color
         self._drag_pos = None
         self._is_maximized = False
@@ -668,7 +670,8 @@ class ToolPopupDialog(QDialog):
         self._lock_btn_widget.show()
 
     def hideEvent(self, event):
-        """窗口隐藏时（包括最小化）同步隐藏锁定按钮"""
+        """窗口隐藏时（包括最小化）保存位置 + 隐藏锁定按钮"""
+        self._save_geometry()
         super().hideEvent(event)
         if self._lock_btn_widget:
             self._lock_btn_widget.hide()
@@ -677,7 +680,7 @@ class ToolPopupDialog(QDialog):
         from PyQt5.QtCore import QSettings
 
         settings = QSettings("DriFox", "ToolPopup")
-        key = f"popup_geometry_{self.tool_instance.name}"
+        key = f"popup_geometry_{self.tool_instance.name}_{self._window_id}"
         geometry = settings.value(key)
         if geometry:
             self.restoreGeometry(geometry)
@@ -691,7 +694,7 @@ class ToolPopupDialog(QDialog):
         if self._is_maximized:
             return
         settings = QSettings("DriFox", "ToolPopup")
-        key = f"popup_geometry_{self.tool_instance.name}"
+        key = f"popup_geometry_{self.tool_instance.name}_{self._window_id}"
         settings.setValue(key, self.saveGeometry())
 
     def _center_on_screen(self):
