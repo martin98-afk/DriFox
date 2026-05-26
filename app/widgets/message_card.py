@@ -1803,101 +1803,184 @@ class CodeWebViewer(QWebEngineView):
                 .tool-expanded-content {{
                     padding: 0;
                 }}
+                .tool-diff-stats {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 3px;
+                    margin-left: 4px;
+                    padding: 1px 6px;
+                    border: 1px solid rgba(139, 148, 158, 0.2);
+                    border-radius: 999px;
+                    background: rgba(139, 148, 158, 0.08);
+                    font-weight: 700;
+                    white-space: nowrap;
+                }}
+                .tool-diff-stats__add {{
+                    color: #3fb950;
+                }}
+                .tool-diff-stats__del {{
+                    color: #ff7b72;
+                }}
+                .tool-diff-stats__sep {{
+                    color: #6e7681;
+                }}
+                .tool-diff-inline {{
+                    margin: 8px 0 2px;
+                    background: linear-gradient(180deg, rgba(22,27,34,0.62), rgba(13,17,23,0.42));
+                    border: 1px solid rgba(139, 148, 158, 0.22);
+                    border-radius: 8px;
+                    overflow: hidden;
+                    box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+                }}
+                .tool-diff-inline__header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    min-width: 0;
+                    padding: 7px 10px;
+                    background: rgba(255,255,255,0.035);
+                    border-bottom: 1px solid rgba(139, 148, 158, 0.16);
+                    color: #8b949e;
+                    font-size: {small_font_size}px;
+                    font-weight: 600;
+                }}
+                .tool-diff-inline__title {{
+                    flex: 0 0 auto;
+                    color: #d0d7de;
+                    letter-spacing: 0;
+                }}
+                .tool-diff-inline__file {{
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    color: #8b949e;
+                    font-weight: 500;
+                }}
+                .tool-diff-inline__summary {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    flex: 0 0 auto;
+                    padding: 2px 7px;
+                    border-radius: 999px;
+                    background: rgba(13,17,23,0.42);
+                    border: 1px solid rgba(139, 148, 158, 0.18);
+                    font-weight: 800;
+                }}
+                .tool-diff-inline__add {{
+                    color: #56d364;
+                }}
+                .tool-diff-inline__del {{
+                    color: #ff7b72;
+                }}
+                .tool-diff-inline__body {{
+                    line-height: 1.55;
+                    overflow-x: auto;
+                }}
                 .tool-diff-inline .diff-line {{
                     display: flex;
                     align-items: stretch;
-                    min-height: 22px;
+                    min-height: 23px;
                     font-size: {tag_font_size}px;
-                    line-height: 1.5;
+                    line-height: 1.55;
                     border-bottom: 1px solid transparent;
                 }}
                 .tool-diff-inline .diff-ctx:hover {{
-                    background: rgba(255,255,255,0.04);
+                    background: rgba(255,255,255,0.035);
                 }}
                 .tool-diff-inline .diff-add:hover {{
-                    background-color: rgba(63, 185, 80, 0.22);
+                    background-color: rgba(63, 185, 80, 0.18);
                 }}
                 .tool-diff-inline .diff-del:hover {{
-                    background-color: rgba(248, 81, 73, 0.22);
+                    background-color: rgba(248, 81, 73, 0.18);
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
-                    min-width: 32px;
-                    padding: 0 4px;
+                    min-width: 34px;
+                    padding: 0 6px;
                     text-align: right;
-                    color: #484f58;
+                    color: #6e7681;
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
+                    background: rgba(13,17,23,0.18);
                 }}
                 .tool-diff-inline .line-num-old {{
-                    border-right: 1px solid rgba(48,54,61,0.6);
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-num-new {{
-                    border-right: 1px solid rgba(48,54,61,0.6);
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-num-empty {{
-                    border-right: 1px solid rgba(48,54,61,0.6);
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-sign {{
                     flex: none;
-                    width: 18px;
+                    width: 20px;
                     text-align: center;
-                    color: #484f58;
+                    color: #6e7681;
                     user-select: none;
+                    font-weight: 700;
                 }}
                 .tool-diff-inline .line-code {{
                     flex: 1;
-                    padding: 0 8px;
+                    padding: 0 10px;
                     white-space: pre-wrap;
                     overflow-x: auto;
+                    min-width: 0;
                 }}
                 .tool-diff-inline .diff-add {{
-                    background-color: rgba(63, 185, 80, 0.12);
+                    background-color: rgba(63, 185, 80, 0.095);
+                    box-shadow: inset 3px 0 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .diff-add .line-sign {{
-                    color: #3fb950;
+                    color: #56d364;
                 }}
                 .tool-diff-inline .diff-add .line-code {{
-                    color: #3fb950;
+                    color: #aff5b4;
                 }}
                 .tool-diff-inline .diff-del {{
-                    background-color: rgba(248, 81, 73, 0.12);
+                    background-color: rgba(248, 81, 73, 0.095);
+                    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.62);
                 }}
                 .tool-diff-inline .diff-del .line-sign {{
-                    color: #f85149;
+                    color: #ff7b72;
                 }}
                 .tool-diff-inline .diff-del .line-code {{
-                    color: #f85149;
+                    color: #ffdcd7;
                 }}
                 .tool-diff-inline .diff-ctx {{
-                    color: #c9d1d9;
+                    color: #adbac7;
                 }}
                 .tool-diff-inline .diff-hunk {{
-                    color: #58a6ff;
+                    color: #79c0ff;
+                    background: rgba(56, 139, 253, 0.075);
                 }}
                 .tool-diff-inline .diff-hunk .line-code {{
-                    color: #58a6ff;
+                    color: #79c0ff;
                 }}
                 .tool-diff-inline .diff-file-header .line-code {{
-                    color: #8b949e;
+                    color: #c9d1d9;
                     font-weight: 600;
                 }}
                 .tool-diff-inline .diff-truncated {{
-                    color: #484f58;
+                    color: #6e7681;
+                    background: rgba(139, 148, 158, 0.055);
                 }}
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
                 .tool-diff-inline .word-add {{
-                    background: rgba(63, 185, 80, 0.18);
-                    border-radius: 2px;
-                    border-bottom: 1px solid rgba(63, 185, 80, 0.4);
+                    background: rgba(63, 185, 80, 0.28);
+                    border-radius: 3px;
+                    box-shadow: inset 0 -1px 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .word-del {{
-                    background: rgba(248, 81, 73, 0.18);
-                    border-radius: 2px;
-                    border-bottom: 1px solid rgba(248, 81, 73, 0.4);
+                    background: rgba(248, 81, 73, 0.28);
+                    border-radius: 3px;
+                    box-shadow: inset 0 -1px 0 rgba(248, 81, 73, 0.65);
                 }}
                 .tool-params-section,
                 .tool-result-section {{

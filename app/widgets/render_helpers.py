@@ -5,6 +5,8 @@ UI 渲染辅助函数
 
 import difflib
 import hashlib
+import os
+
 import orjson as json
 import re
 from html import escape
@@ -258,6 +260,38 @@ def _word_diff_html(old_text: str, new_text: str) -> tuple:
 _HUNK_HEADER_RE = re.compile(r'^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)')
 
 
+def _summarize_diff(diff_text: str) -> dict:
+    """Return lightweight stats for inline diff badges and headers."""
+    added = 0
+    deleted = 0
+    files = []
+    pending_old_path = ""
+
+    def _clean_path(path: str) -> str:
+        path = path.strip()
+        if path.startswith("a/") or path.startswith("b/"):
+            path = path[2:]
+        return path
+
+    for line in diff_text.splitlines():
+        if line.startswith("--- "):
+            pending_old_path = _clean_path(line[4:])
+            continue
+        if line.startswith("+++ "):
+            new_path = _clean_path(line[4:])
+            display = new_path or pending_old_path
+            if display and display != "/dev/null" and display not in files:
+                files.append(display)
+            pending_old_path = ""
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deleted += 1
+
+    return {"added": added, "deleted": deleted, "files": files}
+
+
 def _render_diff_preview(diff_text: str) -> str:
     """
     将 unified diff 文本渲染为带行号、词级差异高亮的 HTML。
@@ -266,7 +300,7 @@ def _render_diff_preview(diff_text: str) -> str:
     连续 -/+ 行对会做字符级 word diff。
     超过 500 行时截断并显示行数。
     """
-    lines = diff_text.split("\n")
+    lines = diff_text.split("\n")[1:]
     MAX_LINES = 500
     truncated = False
     if len(lines) > MAX_LINES:
@@ -488,18 +522,19 @@ def render_tool_block(
     # 文件编辑工具判断
     file_edit_tools = {"write", "edit", "multi_edit"}
     is_file_edit = tool_name in file_edit_tools
+    diff_summary = _summarize_diff(diff or "") if diff else {"added": 0, "deleted": 0, "files": []}
 
     # 差异统计（+N/-N）
     diff_stats_html = ""
     if diff:
-        added = sum(1 for l in diff.split('\n') if l.startswith('+') and not l.startswith('+++'))
-        deleted = sum(1 for l in diff.split('\n') if l.startswith('-') and not l.startswith('---'))
+        added = diff_summary["added"]
+        deleted = diff_summary["deleted"]
         if added or deleted:
             diff_stats_html = f'''
-            <span style="font-size: {scale_font_size(11)}px; margin-left: 4px; font-weight: 600; white-space: nowrap; {get_font_family_css()}">
-                <span style="color: #3fb950;">+{added}</span>
-                <span style="color: #8b949e; margin: 0 2px;">/</span>
-                <span style="color: #f85149;">-{deleted}</span>
+            <span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px; {get_font_family_css()}">
+                <span class="tool-diff-stats__add" style="color: #3fb950;">+{added}</span>
+                <span class="tool-diff-stats__sep">/</span>
+                <span class="tool-diff-stats__del" style="color: #ff7b72;">-{deleted}</span>
             </span>'''
 
     # 差异对比按钮
@@ -541,11 +576,24 @@ def render_tool_block(
     if diff:
         diff_body = _render_diff_preview(diff)
         # 统计 diff 的行数（用于判断折叠阈值）
-        diff_line_count = sum(1 for l in diff.split('\n') if l.startswith('+') or l.startswith('-'))
+        diff_line_count = diff_summary["added"] + diff_summary["deleted"]
+        diff_files = diff_summary["files"]
+        file_label = diff_files[0] if diff_files else "文件变更"
+        file_label = os.path.basename(file_label)
+        if len(diff_files) > 1:
+            file_label = f"{file_label} 等 {len(diff_files)} 个文件"
+        added = diff_summary["added"]
+        deleted = diff_summary["deleted"]
         diff_html = f"""
-        <div class="tool-diff-inline" style="margin-top: 8px; background: rgba(13,17,23,0.35); border: 1px solid rgba(48,54,61,0.5); border-radius: 6px; overflow: hidden;">
-            <div style="padding: 6px 12px; background: rgba(22,27,34,0.4); border-bottom: 1px solid rgba(48,54,61,0.4); color: #8b949e; font-size: {scale_font_size(11)}px; font-weight: 500; {get_font_family_css()}">差异预览</div>
-            <div style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px; line-height: 1.5; overflow-x: auto;">
+        <div class="tool-diff-inline">
+            <div class="tool-diff-inline__header" style="{get_font_family_css()}">
+                <span class="tool-diff-inline__file" title="{escape(file_label)}">{escape(file_label)}</span>
+                <span class="tool-diff-inline__summary">
+                    <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
+                    <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
+                </span>
+            </div>
+            <div class="tool-diff-inline__body" style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
                 {diff_body}
             </div>
         </div>"""
