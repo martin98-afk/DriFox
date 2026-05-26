@@ -96,6 +96,10 @@ class MCPClientManager:
         self._connections: Dict[str, MCPServerConnection] = {}
         self._connected = False
 
+        # 按 name 加锁：同一 server 只允许一个进行中的连接/断开操作
+        self._busy_names: set = set()
+        self._busy_lock = threading.Lock()
+
         # 专用后台线程 + 持久事件循环
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -394,7 +398,22 @@ class MCPClientManager:
             return False
 
     def connect_server_background(self, name: str, config: dict, on_done=None) -> None:
-        """后台连接单个 MCP 服务器（不阻塞 UI）"""
+        """后台连接单个 MCP 服务器（不阻塞 UI）
+
+        同一 name 只允许一个进行中的连接操作，重复请求被丢弃。
+        """
+        # 防重：同名服务器正在连接/断开中，跳过
+        with self._busy_lock:
+            if name in self._busy_names:
+                logger.debug(f"[MCP] '{name}' 正在连接/断开中，跳过重复请求")
+                if on_done:
+                    try:
+                        on_done(name, False, "服务器正在操作中，请稍后重试")
+                    except Exception:
+                        pass
+                return
+            self._busy_names.add(name)
+
         def _worker():
             success = False
             error_msg = ""
@@ -404,6 +423,8 @@ class MCPClientManager:
                 error_msg = str(e)
                 logger.error(f"[MCP] 热添加服务器 '{name}' 失败: {e}")
             finally:
+                with self._busy_lock:
+                    self._busy_names.discard(name)
                 if on_done:
                     try:
                         on_done(name, success, error_msg)
@@ -465,13 +486,29 @@ class MCPClientManager:
             return False
 
     def disconnect_server_background(self, name: str, on_done=None) -> None:
-        """后台断开单个 MCP 服务器（不阻塞 UI）"""
+        """后台断开单个 MCP 服务器（不阻塞 UI）
+
+        与 connect_server_background 共享一个锁，同名请求丢弃。
+        """
+        with self._busy_lock:
+            if name in self._busy_names:
+                logger.debug(f"[MCP] '{name}' 正在连接/断开中，跳过重复请求")
+                if on_done:
+                    try:
+                        on_done(name)
+                    except Exception:
+                        pass
+                return
+            self._busy_names.add(name)
+
         def _worker():
             try:
                 self._run_async(self._disconnect_single(name))
             except Exception as e:
                 logger.error(f"[MCP] 热断开服务器 '{name}' 失败: {e}")
             finally:
+                with self._busy_lock:
+                    self._busy_names.discard(name)
                 if on_done:
                     try:
                         on_done(name)

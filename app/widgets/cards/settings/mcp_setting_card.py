@@ -8,8 +8,9 @@ MCP Server 配置卡片
 """
 
 import json
+from typing import Dict, List, Tuple
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -601,6 +602,18 @@ class MCPListSettingCard(ExpandSettingCard):
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
         super().__init__(icon, title, content, parent)
+        
+        # 防抖节流：300ms 滚动防抖，等待用户停止操作
+        self._switch_debounce_timer = QTimer(self)
+        self._switch_debounce_timer.setSingleShot(True)
+        self._switch_debounce_timer.setInterval(300)
+        self._switch_debounce_timer.timeout.connect(self._do_debounced_switch)
+        self._switch_debounce_timer.timeout.connect(self._do_debounced_global_switch)
+        # 每个 server name 只保留最后一次目标状态
+        self._pending_server_switches: Dict[str, bool] = {}
+        self._pending_global_switch: bool = True
+        self._global_switch_pending = False
+        
         self._setup_ui()
         self._refresh()
 
@@ -723,6 +736,21 @@ class MCPListSettingCard(ExpandSettingCard):
     # ── 全局开关 ──────────────────────────────────────
 
     def _on_global_switch(self, enabled: bool):
+        """全局开关（滚动防抖）
+
+        只保留最后一次状态；300ms 无新操作才执行。
+        """
+        self._pending_global_switch = enabled
+        self._global_switch_pending = True
+        self._switch_debounce_timer.start()
+
+    def _do_debounced_global_switch(self):
+        """防抖到期：执行最终的全局开关状态"""
+        if not self._global_switch_pending:
+            return
+        self._global_switch_pending = False
+
+        enabled = self._pending_global_switch
         self.cfg.set(self.cfg.mcp_enabled, enabled, save=True)
         if enabled:
             servers = self.cfg.mcp_servers.value or []
@@ -807,19 +835,36 @@ class MCPListSettingCard(ExpandSettingCard):
             self.showEditCard.emit(name, server_data)
 
     def _on_enabled_changed(self, name: str, enabled: bool):
+        """单个服务器开关变化（滚动防抖）
+
+        同一 name 只保留最后一次状态；300ms 无新操作才执行。
+        """
+        self._pending_server_switches[name] = enabled
+        # 重启定时器：快速点击会不断重置，直到安静 300ms
+        self._switch_debounce_timer.start()
+
+    def _do_debounced_switch(self):
+        """防抖到期：按最终状态批量执行连接/断开"""
+        if not self._pending_server_switches:
+            return
+        tasks = dict(self._pending_server_switches)
+        self._pending_server_switches.clear()
+
+        # 批量更新配置
         servers = list(self.cfg.mcp_servers.value or [])
         for s in servers:
-            if s.get("name") == name:
-                s["enabled"] = enabled
-                break
+            n = s.get("name")
+            if n in tasks:
+                s["enabled"] = tasks[n]
         self.cfg.set(self.cfg.mcp_servers, servers, save=True)
 
-        # 热连接/断开
-        if enabled and self.cfg.mcp_enabled.value:
-            server_data = next((s for s in servers if s.get("name") == name), {})
-            self._hot_connect(name, server_data)
-        else:
-            self._hot_disconnect(name)
+        # 执行热连接/断开（底层 _hot_connect/_hot_disconnect 会防重）
+        for name, enabled in tasks.items():
+            if enabled and self.cfg.mcp_enabled.value:
+                server_data = next((s for s in servers if s.get("name") == name), {})
+                self._hot_connect(name, server_data)
+            else:
+                self._hot_disconnect(name)
 
         self.serversChanged.emit()
 
