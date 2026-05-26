@@ -366,6 +366,28 @@ class PluginManager:
         """获取所有插件的技能目录路径"""
         return self.get_plugin_dirs("skills")
 
+    def get_skills_with_plugin(self) -> List[dict]:
+        """获取所有已启用插件的技能信息，包含所属插件名称和类型
+
+        Returns:
+            [{"path": Path, "plugin_name": str, "is_system": bool}, ...]
+
+        用于 get_local_skills() 给用户插件技能添加命名空间前缀。
+        """
+        result: List[dict] = []
+        for plugin in self._iter_enabled_plugins():
+            if not plugin.has_component("skills"):
+                continue
+            d = plugin.path / "skills"
+            if not d.exists():
+                continue
+            result.append({
+                "path": d,
+                "plugin_name": plugin.name,
+                "is_system": plugin.is_system,
+            })
+        return result
+
     def get_theme_paths(self) -> List[Path]:
         """获取所有插件的主题目录路径"""
         return self.get_plugin_dirs("themes")

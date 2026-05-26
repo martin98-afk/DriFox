@@ -580,7 +580,8 @@ Use the tools available to you based on your permissions.
         
         for skill in all_skills:
             if skill["name"] in enabled_skills:
-                result_parts.append(f"\n### {skill['name']}\n{skill.get('description', '')}\n")
+                display_name = skill.get("qualified_name", skill["name"])
+                result_parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
         
         return "\n".join(result_parts) if len(result_parts) > 1 else ""
 
