@@ -578,9 +578,10 @@ class PluginManager:
 
         mcp_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        # 重新发现插件（新创建的 user-custom 需要注册）
+        # 重新发现插件（新创建的 user-custom 需要注册并自动启用）
         if not self.has_plugin("user-custom"):
             self._discover_user_plugins(get_app_data_dir())
+            self.enable_plugin("user-custom")
 
         logger.info(f"[PluginManager] Added MCP server '{name}' to user-custom plugin")
 
