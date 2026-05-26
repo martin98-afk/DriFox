@@ -505,6 +505,9 @@ class ChatBackend(QObject):
         """设置会话上下文"""
         if self._tool_executor:
             self._tool_executor.set_session_context(session_id)
+        # 同步会话 ID 到子智能体管理器，确保子智能体任务按会话隔离
+        if self._sub_agent_manager:
+            self._sub_agent_manager.set_current_session_id(session_id)
     
     def reset_session_state(self):
         """重置会话状态"""

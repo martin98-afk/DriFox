@@ -662,17 +662,24 @@ class SubAgentManager(QObject):
         self._tool_executor = tool_executor
         self._get_llm_config = get_llm_config
         self._running_tasks: Dict[str, SubAgentExecutor] = {}
-        self._finished_tasks: Dict[str, Dict] = {}  # task_id -> {"result": str, "error": str}
+        self._finished_tasks: Dict[str, Dict] = {}  # task_id -> {"result": str, "error": str, "session_id": str}
         self._session_store = None  # 使用 SessionStore 替代 SubAgentLogStore
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
         self._batch_completed = 0
         # 当前批次的任务ID集合，用于回调时只通知本批次完成的任务
         self._batch_task_ids: set = set()
-        # 已查询过的任务ID集合，避免重复返回结果浪费上下文
-        self._queried_tasks: set = set()
+        # 已查询过的任务ID集合（按 session 隔离），避免重复返回结果浪费上下文
+        # Dict[session_id, Set[task_id]]
+        self._queried_tasks: Dict[str, set] = {}
         # 获取主智能体历史消息的回调（由外部设置）
         self._get_history_messages: Optional[Callable[[], List[Dict]]] = None
+        # 当前会话 ID（用于隔离不同会话的子智能体任务）
+        self._current_session_id: str = ""
+
+    def set_current_session_id(self, session_id: str):
+        """设置当前会话 ID，用于会话隔离"""
+        self._current_session_id = session_id
 
     def set_history_getter(self, getter: Callable[[], List[Dict]]):
         """设置获取主智能体历史消息的回调"""
@@ -684,8 +691,9 @@ class SubAgentManager(QObject):
 
     def _save_task_to_store(self, task_id: str, agent_name: str, task_description: str,
                             status: str = "running", result: str = None, error: str = None,
-                            logs: List[Dict] = None, summary: Dict = None):
-        """保存任务到数据库（通过 SessionStore）"""
+                            logs: List[Dict] = None, summary: Dict = None,
+                            session_id: str = ""):
+        """保存任务到数据库（通过 SessionStore），携带会话 ID 以实现会话隔离"""
         if not self._session_store:
             return
         try:
@@ -695,8 +703,11 @@ class SubAgentManager(QObject):
                     logs = executor.get_logs()
                 if executor and hasattr(executor, "get_summary"):
                     summary = executor.get_summary()
-            self._session_store.save_subagent_task(task_id, agent_name, task_description, status, result, error, logs or [],
-                                      summary or {})
+            self._session_store.save_subagent_task(
+                task_id, agent_name, task_description, status, result, error,
+                logs or [], summary or {},
+                session_id=session_id or self._current_session_id,
+            )
         except Exception as e:
             logger.error(f"[SubAgentManager] 保存任务到数据库失败: {e}")
 
@@ -711,15 +722,25 @@ class SubAgentManager(QObject):
             on_progress: Callable[[str], None] = None,
             executor_ref: Dict = None,
             share_context: bool = False,  # 是否共享主智能体上下文
+            session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
     ) -> bool:
-        """执行子智能体任务"""
+        """执行子智能体任务
+
+        Args:
+            session_id: 所属会话 ID。任务创建时即锁定该值，
+                        后续回调不再读取全局 _current_session_id，
+                        避免同一窗口内切换会话后异步回调用错 session_id。
+        """
+        # 在任务创建时即锁定 session_id，不依赖后续的全局状态
+        task_session_id = session_id or self._current_session_id
+
         # 验证 agent 是否存在且是有效的子智能体类型
         agent = self._agent_manager.get_agent(agent_name)
         if not agent:
             error_msg = f"Agent not found: {agent_name}"
             logger.error(f"[SubAgentManager] {error_msg}")
             # 立即触发完成信号，让任务不卡在 running 状态
-            self._finished_tasks[task_id] = {"result": "", "error": error_msg, "agent_name": agent_name}
+            self._finished_tasks[task_id] = {"result": "", "error": error_msg, "agent_name": agent_name, "session_id": task_session_id}
             if on_finished:
                 on_finished(error_msg)
             if on_error:
@@ -730,7 +751,7 @@ class SubAgentManager(QObject):
         if not agent.is_subagent():
             error_msg = f"Agent '{agent_name}' cannot be used as subagent (mode: {agent.mode})"
             logger.error(f"[SubAgentManager] {error_msg}")
-            self._finished_tasks[task_id] = {"result": "", "error": error_msg, "agent_name": agent_name}
+            self._finished_tasks[task_id] = {"result": "", "error": error_msg, "agent_name": agent_name, "session_id": task_session_id}
             if on_finished:
                 on_finished(error_msg)
             if on_error:
@@ -787,10 +808,14 @@ class SubAgentManager(QObject):
                 is_subagent_call=True,  # 标记为被主智能体调用
                 max_iterations=max_iterations,  # 传递最大迭代次数限制
             )
+            # 在 executor 上存储 session_id，供后续回调使用
+            executor._task_session_id = task_session_id
 
-            # 设置日志存储回调
+            # 设置日志存储回调（用 lambda 默认参数在定义时锁定 session_id，避免闭包 late-binding）
             if self._session_store:
-                executor.set_log_store_callback(self._save_task_to_store)
+                executor.set_log_store_callback(
+                    lambda *args, _sid=task_session_id: self._save_task_to_store(*args, session_id=_sid)
+                )
 
             # 【新增】设置历史消息获取回调
             if self._get_history_messages:
@@ -813,8 +838,8 @@ class SubAgentManager(QObject):
             self._batch_total += 1
             self._batch_task_ids.add(task_id)
 
-            # 保存到数据库
-            self._save_task_to_store(task_id, agent_name, task_description, "running")
+            # 保存到数据库（传入锁定的 task_session_id）
+            self._save_task_to_store(task_id, agent_name, task_description, "running", session_id=task_session_id)
 
             self.task_started.emit(task_id, agent_name, task_description)
 
@@ -856,18 +881,20 @@ class SubAgentManager(QObject):
                 tool_call_count = executor.tool_call_count
                 elapsed = int(time.time() - executor.start_time) if executor.start_time else 0
 
+                task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
                 self._finished_tasks[task_id] = {
                     "result": result,
                     "error": error,
                     "agent_name": agent_name,
                     "task_description": task_description,
+                    "session_id": task_session_id,
                     "logs": logs,
                     "tool_call_count": tool_call_count,
                     "elapsed_seconds": elapsed,
                 }
 
-                # 更新数据库
-                self._save_task_to_store(task_id, agent_name, task_description, "finished", result, error)
+                # 更新数据库（传入锁定的 session_id）
+                self._save_task_to_store(task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id)
 
                 del self._running_tasks[task_id]
                 finished.append(task_id)
@@ -893,16 +920,18 @@ class SubAgentManager(QObject):
                 agent_name = executor.agent_name
                 task_description = executor.task_description
                 logs = executor.get_logs()
+                task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
                 error_msg = f"Task cancelled due to timeout ({timeout_seconds}s)"
                 self._finished_tasks[task_id] = {
                     "result": "",
                     "error": error_msg,
                     "agent_name": agent_name,
                     "task_description": task_description,
+                    "session_id": task_session_id,
                     "logs": logs,
                 }
-                # 更新数据库
-                self._save_task_to_store(task_id, agent_name, task_description, "timeout", "", error_msg)
+                # 更新数据库（传入锁定的 session_id）
+                self._save_task_to_store(task_id, agent_name, task_description, "timeout", "", error_msg, session_id=task_session_id)
                 del self._running_tasks[task_id]
                 cleaned.append(task_id)
 
@@ -1063,14 +1092,16 @@ class SubAgentManager(QObject):
                 "agent": task_data.get("summary", {}).get("agent_name", task_data.get("agent_name", "")),
             }
 
-            # running 状态可以反复查，完成或失败只能查一次
+            # running 状态可以反复查，完成或失败只能查一次（按 session 隔离）
             if status not in ("running", "unknown"):
-                if tid in self._queried_tasks:
+                session_queried = self._queried_tasks.get(self._current_session_id, set())
+                if tid in session_queried:
                     task_info["_already_queried"] = True
                     task_info["_message"] = "已查询过结果，可通过 id 再次查询"
                     tasks_info.append(task_info)
                     continue
-                self._queried_tasks.add(tid)
+                session_queried.add(tid)
+                self._queried_tasks[self._current_session_id] = session_queried
 
             # 是否包含结果
             if with_result:
@@ -1091,30 +1122,45 @@ class SubAgentManager(QObject):
 
         return ToolResult(True, content={"tasks": tasks_info})
 
-    def get_all_active_tasks_with_details(self, with_log: bool = False, with_result: bool = True) -> ToolResult:
-        """获取所有已完成任务的详细状态（避免重复返回）"""
+    def get_all_active_tasks_with_details(self, with_log: bool = False, with_result: bool = True, session_id: str = None) -> ToolResult:
+        """获取当前会话已完成任务的详细状态（会话隔离）
+
+        Args:
+            with_log: 是否包含执行日志
+            with_result: 是否包含执行结果
+            session_id: 会话 ID，None 时使用 _current_session_id
+        """
+        target_session = session_id or self._current_session_id
         tasks_info = []
 
         for task_id, task_info in self._finished_tasks.items():
+            # 会话隔离：只返回当前会话的任务
+            task_session = task_info.get("session_id", "")
+            if target_session and task_session and task_session != target_session:
+                continue
+
             # 跳过当前正在运行的任务（它们应该由 _running_tasks 处理）
             if task_id in self._running_tasks:
                 continue
 
             task_entry = {
                 "task_id": task_id,
+                "session_id": task_session,
                 "status": "finished",
                 "agent": task_info.get("agent_name", ""),
                 "task_description": task_info.get("task_description", ""),
             }
 
-            # 完成或失败只能查一次
-            if task_id in self._queried_tasks:
+            # 完成或失败只能查一次（按 session 隔离）
+            session_queried = self._queried_tasks.get(target_session, set())
+            if task_id in session_queried:
                 task_entry["_already_queried"] = True
                 task_entry["_message"] = "已查询过结果，可通过 id 再次查询"
                 tasks_info.append(task_entry)
                 continue
 
-            self._queried_tasks.add(task_id)
+            session_queried.add(task_id)
+            self._queried_tasks[target_session] = session_queried
 
             if with_result:
                 result = task_info.get("result", "") or ""
