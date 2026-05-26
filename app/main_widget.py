@@ -7206,7 +7206,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.input_area:
             self.input_area.setFocus()
 
-        # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 保存消息）=====
+        # ⚠️ 立即更新时间线节点（即使后台 finalize 还未完成）
+        self._update_node_preview()
+
+        # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 收集中断消息）=====
         # 使用 QTimer.singleShot 延迟到 UI 事件处理完成后执行，
         # 避免 worker.wait() 等阻塞操作影响界面响应
         QTimer.singleShot(0, self._deferred_stop_handler)
@@ -7225,10 +7228,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 在线程中执行阻塞的 finalize_stop，不阻塞 UI 线程
         if self.backend and self.backend.chat_engine:
             import threading
+            import traceback
             engine_ref = self.backend.chat_engine
 
             def _do_finalize():
-                interrupted_messages = engine_ref.finalize_stop() or []
+                try:
+                    interrupted_messages = engine_ref.finalize_stop() or []
+                except Exception as e:
+                    logger.error(f"[ChatWindow] _do_finalize error: {e}\n{traceback.format_exc()}")
+                    interrupted_messages = []
                 # 回到主线程更新 UI
                 if not getattr(self, '_is_destroyed', False):
                     QTimer.singleShot(0, lambda m=interrupted_messages: self._on_finalize_complete(m))
