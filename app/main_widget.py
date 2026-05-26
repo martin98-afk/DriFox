@@ -1445,7 +1445,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
 
-        self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
+        self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
         self.history_btn.setFixedSize(22, 22)
         self.history_btn.setStyleSheet(btn_capsule_style)
         self.history_btn.setToolTip("历史会话")
