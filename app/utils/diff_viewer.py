@@ -1494,6 +1494,281 @@ class DiffHtmlGenerator:
         return cls.generate_html_report(diff_output or "", session_id)
 
 
+class ToolPayloadHtmlGenerator:
+    """工具调用参数审阅 HTML 生成器，复用 DiffViewerWindow 展示。"""
+
+    @classmethod
+    def _safe_json(cls, value) -> str:
+        try:
+            return json.dumps(value, option=json.OPT_INDENT_2, default=str).decode("utf-8")
+        except Exception:
+            return str(value)
+
+    @classmethod
+    def _field_summary(cls, arguments: Dict) -> str:
+        if not isinstance(arguments, dict) or not arguments:
+            return '<div class="field-empty">无参数</div>'
+
+        high_risk_keys = {
+            "command", "cmd", "path", "file", "files", "content",
+            "oldString", "newString", "edits", "tasks", "url", "query",
+        }
+        rows = []
+        for key, value in arguments.items():
+            value_text = cls._safe_json(value) if isinstance(value, (dict, list)) else str(value)
+            preview = value_text.replace("\n", " ")
+            if len(preview) > 140:
+                preview = preview[:140] + "..."
+            badge = "重点" if key in high_risk_keys else "参数"
+            badge_class = "risk" if key in high_risk_keys else "normal"
+            rows.append(f"""
+                <div class="field-row">
+                    <div class="field-top">
+                        <span class="field-key">{DiffHtmlGenerator.escape_html(str(key))}</span>
+                        <span class="field-badge {badge_class}">{badge}</span>
+                    </div>
+                    <div class="field-preview">{DiffHtmlGenerator.escape_html(preview)}</div>
+                </div>
+            """)
+        return "\n".join(rows)
+
+    @classmethod
+    def generate_html_report(
+            cls,
+            tool_name: str,
+            tool_call_id: str = "",
+            arguments: Dict = None,
+    ) -> str:
+        arguments = arguments or {}
+        pretty_args = cls._safe_json(arguments)
+        escaped_json = DiffHtmlGenerator.escape_html(pretty_args)
+        escaped_tool = DiffHtmlGenerator.escape_html(tool_name or "unknown")
+        escaped_call_id = DiffHtmlGenerator.escape_html(tool_call_id or "")
+        field_rows = cls._field_summary(arguments)
+
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工具调用参数预览</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        :root {{
+            --gh-bg-primary: #0d1117;
+            --gh-bg-secondary: #161b22;
+            --gh-bg-tertiary: #21262d;
+            --gh-border: #30363d;
+            --gh-text-primary: #c9d1d9;
+            --gh-text-secondary: #8b949e;
+            --gh-text-link: #58a6ff;
+            --gh-green-text: #3fb950;
+            --gh-yellow-text: #d29922;
+            --gh-red-text: #f85149;
+            --gh-blue-bg: rgba(31, 111, 235, 0.15);
+            --gh-yellow-bg: rgba(187, 128, 9, 0.18);
+            --gh-font-mono: 'Consolas', 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            --gh-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        }}
+        body {{
+            font-family: var(--gh-font-sans);
+            background: var(--gh-bg-primary);
+            color: var(--gh-text-primary);
+            height: 100vh;
+            overflow: hidden;
+            font-size: 12px;
+        }}
+        .review-app {{
+            display: flex;
+            height: 100vh;
+        }}
+        .sidebar {{
+            width: 320px;
+            min-width: 320px;
+            background: var(--gh-bg-secondary);
+            border-right: 1px solid var(--gh-border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }}
+        .sidebar-header {{
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--gh-border);
+        }}
+        .eyebrow {{
+            color: var(--gh-text-secondary);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }}
+        .tool-name {{
+            color: var(--gh-text-link);
+            font-family: var(--gh-font-mono);
+            font-size: 15px;
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }}
+        .call-id {{
+            margin-top: 8px;
+            color: var(--gh-text-secondary);
+            font-family: var(--gh-font-mono);
+            font-size: 11px;
+            overflow-wrap: anywhere;
+        }}
+        .summary {{
+            padding: 10px 16px;
+            background: var(--gh-bg-tertiary);
+            color: var(--gh-text-secondary);
+            border-bottom: 1px solid var(--gh-border);
+        }}
+        .field-list {{
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 10px 16px;
+        }}
+        .field-row {{
+            padding: 10px;
+            border: 1px solid var(--gh-border);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.02);
+            margin-bottom: 8px;
+        }}
+        .field-top {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+        }}
+        .field-key {{
+            flex: 1;
+            color: var(--gh-text-primary);
+            font-family: var(--gh-font-mono);
+            overflow-wrap: anywhere;
+        }}
+        .field-badge {{
+            padding: 1px 6px;
+            border-radius: 10px;
+            font-size: 11px;
+            flex-shrink: 0;
+        }}
+        .field-badge.risk {{
+            background: var(--gh-yellow-bg);
+            color: var(--gh-yellow-text);
+        }}
+        .field-badge.normal {{
+            background: var(--gh-blue-bg);
+            color: var(--gh-text-link);
+        }}
+        .field-preview {{
+            color: var(--gh-text-secondary);
+            font-family: var(--gh-font-mono);
+            font-size: 11px;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }}
+        .field-empty {{
+            color: var(--gh-text-secondary);
+            padding: 16px;
+        }}
+        .content {{
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }}
+        .content-header {{
+            padding: 10px 16px;
+            background: var(--gh-bg-tertiary);
+            border-bottom: 1px solid var(--gh-border);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .content-title {{
+            flex: 1;
+            color: var(--gh-text-primary);
+            font-weight: 600;
+        }}
+        .copy-btn {{
+            padding: 4px 10px;
+            background: transparent;
+            border: 1px solid var(--gh-border);
+            border-radius: 4px;
+            color: var(--gh-text-secondary);
+            cursor: pointer;
+            font-family: var(--gh-font-sans);
+            font-size: 12px;
+        }}
+        .copy-btn:hover {{
+            border-color: var(--gh-text-link);
+            color: var(--gh-text-link);
+        }}
+        .json-wrap {{
+            flex: 1;
+            overflow: auto;
+            background: var(--gh-bg-primary);
+        }}
+        pre {{
+            padding: 16px;
+            font-family: var(--gh-font-mono);
+            font-size: 12px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            color: var(--gh-text-primary);
+        }}
+        .copied {{
+            color: var(--gh-green-text);
+            margin-left: 8px;
+            display: none;
+        }}
+        ::-webkit-scrollbar {{ width: 8px; height: 8px; }}
+        ::-webkit-scrollbar-track {{ background: var(--gh-bg-secondary); }}
+        ::-webkit-scrollbar-thumb {{ background: var(--gh-border); border-radius: 4px; }}
+        ::-webkit-scrollbar-thumb:hover {{ background: #484f58; }}
+    </style>
+</head>
+<body>
+    <div class="review-app">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="eyebrow">工具调用请求</div>
+                <div class="tool-name">{escaped_tool}</div>
+                <div class="call-id">{escaped_call_id}</div>
+            </div>
+            <div class="summary">请确认参数符合预期后再允许执行。</div>
+            <div class="field-list">{field_rows}</div>
+        </aside>
+        <main class="content">
+            <div class="content-header">
+                <div class="content-title">完整参数 JSON</div>
+                <button class="copy-btn" onclick="copyPayload()">复制</button>
+                <span class="copied" id="copied">已复制</span>
+            </div>
+            <div class="json-wrap">
+                <pre id="payload">{escaped_json}</pre>
+            </div>
+        </main>
+    </div>
+    <script>
+        function copyPayload() {{
+            const text = document.getElementById('payload').innerText;
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            const tip = document.getElementById('copied');
+            tip.style.display = 'inline';
+            setTimeout(() => tip.style.display = 'none', 1400);
+        }}
+    </script>
+</body>
+</html>"""
+
+
 class DiffViewerWindow:
     """PyQt WebEngine 差异查看窗口"""
 
@@ -1509,11 +1784,11 @@ class DiffViewerWindow:
                 pass
         cls._instances.clear()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title: str = "文件差异对比"):
         """初始化窗口"""
         self._window = QDialog(parent)
         self._dialog_class = QDialog
-        self._window.setWindowTitle("文件差异对比")
+        self._window.setWindowTitle(title)
         self._window.resize(1200, 800)
 
         if parent:

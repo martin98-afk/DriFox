@@ -1272,6 +1272,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.setVisible(False)
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
+        self._question_floating_widget.previewRequested.connect(self._on_question_preview_requested)
         self._bottom_card_container.add_card("question", self._question_floating_widget)
 
         # 注册卡片到 CardManager（优先级：数值越小权限越高）
@@ -6491,6 +6492,32 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.input_area:
             self.input_area.setFocus()
 
+    def _on_question_preview_requested(self, payload: object):
+        """显示权限请求的完整工具参数预览。"""
+        if getattr(self, '_is_destroyed', False):
+            return
+        if not isinstance(payload, dict):
+            return
+
+        try:
+            from app.utils.diff_viewer import ToolPayloadHtmlGenerator
+
+            html = ToolPayloadHtmlGenerator.generate_html_report(
+                tool_name=payload.get("tool_name", ""),
+                tool_call_id=payload.get("tool_call_id", ""),
+                arguments=payload.get("arguments") or {},
+            )
+            show_diff_viewer(self, html, title="工具调用参数预览")
+        except Exception as e:
+            logger.error(f"[Permission] Preview error: {e}")
+            InfoBar.error(
+                "预览失败",
+                str(e),
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+
     def _on_agent_switched(self, agent_name: str):
         """TODO: 实现智能体切换时的状态同步"""
         if getattr(self, '_is_destroyed', False):
@@ -6511,8 +6538,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("question", self._window_id)
         self._question_floating_widget.setUpdatesEnabled(False)
         try:
-            arg_str = str(arguments)[:200] if arguments else ""
-            question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数: {arg_str}"
+            arg_str = str(arguments)[:160] if arguments else ""
+            if arguments and len(str(arguments)) > 160:
+                arg_str += "..."
+            question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数摘要: {arg_str}\n\n点击“预览”可查看完整参数。"
             options = [
                 {"label": "允许", "description": ""},
                 {"label": "允许且该轮对话自动允许", "description": ""},
@@ -6522,6 +6551,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget.show_question(
                 [{"question": question_text, "options": options, "multiple": False}],
                 show_custom_input=False,
+                preview_payload={
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "arguments": arguments or {},
+                },
             )
         except Exception as e:
             self._question_floating_widget.setUpdatesEnabled(True)

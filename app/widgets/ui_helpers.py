@@ -1132,20 +1132,21 @@ def truncate_and_remove_round(
     return True, old_count, new_count
 
 
-def show_diff_viewer(parent, html) -> Any:
+def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     """
     显示差异查看器
     
     Args:
         parent: 父控件
         html: HTML 内容
+        title: 窗口标题
         
     Returns:
         DiffViewerWindow 实例
     """
     from app.utils.diff_viewer import DiffViewerWindow
     
-    viewer = DiffViewerWindow(parent=parent)
+    viewer = DiffViewerWindow(parent=parent, title=title)
     viewer.load_html(html)
     viewer.show()
     return viewer

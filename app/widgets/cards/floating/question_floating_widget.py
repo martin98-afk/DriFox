@@ -382,6 +382,7 @@ class QuestionFloatingWidget(QWidget):
     """悬浮提问卡片，支持多问题分页"""
     answered = pyqtSignal(str)
     cancelled = pyqtSignal()
+    previewRequested = pyqtSignal(object)
     heightChanged = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -392,6 +393,7 @@ class QuestionFloatingWidget(QWidget):
         self._option_widgets = []
         self._custom_input_widget = None
         self._show_custom_input = True
+        self._preview_payload = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -495,6 +497,17 @@ class QuestionFloatingWidget(QWidget):
             QPushButton:hover { color: rgba(255,255,255,0.7); }
         """)
 
+        self._preview_btn = QPushButton("预览")
+        self._preview_btn.setFixedHeight(30)
+        self._preview_btn.setCursor(Qt.PointingHandCursor)
+        self._preview_btn.setFont(get_unified_font(10))
+        self._preview_btn.clicked.connect(self._on_preview)
+        self._preview_btn.setVisible(False)
+        self._preview_btn.setStyleSheet("""
+            QPushButton { color: rgba(255,255,255,0.72); background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 0 14px; }
+            QPushButton:hover { color: rgba(255,255,255,0.95); background: rgba(255,255,255,0.15); }
+        """)
+
         self._back_btn = QPushButton("返回")
         self._back_btn.setFixedHeight(30)
         self._back_btn.setCursor(Qt.PointingHandCursor)
@@ -516,6 +529,7 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         footer.addWidget(self._ignore_btn)
+        footer.addWidget(self._preview_btn)
         footer.addStretch()
         footer.addWidget(self._back_btn)
         footer.addWidget(self._next_btn)
@@ -537,11 +551,12 @@ class QuestionFloatingWidget(QWidget):
 
     # ────────────── 公开接口 ──────────────
 
-    def show_question(self, questions: list, show_custom_input: bool = True):
+    def show_question(self, questions: list, show_custom_input: bool = True, preview_payload=None):
         self._questions = questions if isinstance(questions, list) else []
         self._current_index = 0
         self._answers = {}
         self._show_custom_input = show_custom_input
+        self._preview_payload = preview_payload
         self._render_current()
         QTimer.singleShot(0, self.heightChanged.emit)
 
@@ -549,8 +564,14 @@ class QuestionFloatingWidget(QWidget):
         self._questions = []
         self._current_index = 0
         self._answers = {}
+        self._preview_payload = None
+        self._preview_btn.setVisible(False)
         self._full_clear_options()
         self.setVisible(False)
+
+    def _on_preview(self):
+        if self._preview_payload is not None:
+            self.previewRequested.emit(self._preview_payload)
 
     # ────────────── 工具方法 ──────────────
 
@@ -672,6 +693,7 @@ class QuestionFloatingWidget(QWidget):
         is_first = self._current_index == 0
         is_last = self._current_index == total - 1
         self._back_btn.setVisible(not is_first)
+        self._preview_btn.setVisible(self._preview_payload is not None)
         self._next_btn.setText("提交" if is_last else "下一步")
 
     def _on_radio_selected(self, card):
