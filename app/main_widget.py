@@ -1007,7 +1007,7 @@ class OpenAIChatToolWindow(ToolWindow):
         font_css = get_font_family_css()
         title_style = f"""QLabel {{
             color: #f3f6fc;
-            font-size: 15px;
+            {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
             border-radius: 10px;
@@ -1019,7 +1019,7 @@ class OpenAIChatToolWindow(ToolWindow):
         }}
         QLineEdit {{
             color: #f3f6fc;
-            font-size: 15px;
+            {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
             border-radius: 10px;
@@ -2569,7 +2569,7 @@ class OpenAIChatToolWindow(ToolWindow):
             font_css = get_font_family_css()
             title_style = f"""QLabel {{
                 color: {Colors.TEXT_PRIMARY};
-                font-size: 15px;
+                {font_size_css(15)}
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
@@ -2581,7 +2581,7 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
             QLineEdit {{
                 color: {Colors.TEXT_PRIMARY};
-                font-size: 15px;
+                {font_size_css(15)}
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;

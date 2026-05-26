@@ -196,7 +196,7 @@ class Settings(QConfig):
         "UI",
         "FontSize",
         "medium",
-        OptionsValidator(["small", "medium", "large"]),
+        OptionsValidator(["small", "medium", "large", "superlarge"]),
     )
     ui_theme_style = OptionsConfigItem(
         "UI",

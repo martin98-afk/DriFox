@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import TransparentToolButton, FluentIcon
 
 from app.utils.utils import get_font_family_css, get_icon
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 
 
 class ProjectItem(QWidget):
@@ -41,7 +41,7 @@ class ProjectItem(QWidget):
 
         # 项目图标
         icon_label = QLabel("📁", self)
-        icon_label.setStyleSheet("font-size: 14px;")
+        icon_label.setStyleSheet(f"font-size: {scale_font_size(14)}px;")
         layout.addWidget(icon_label)
 
         # 项目名
@@ -52,22 +52,22 @@ class ProjectItem(QWidget):
         # 当前项目指示
         if self._is_current:
             check_label = QLabel("✓", self)
-            check_label.setStyleSheet(f"color: {Colors.BORDER_ACCENT}; font-size: 14px;")
+            check_label.setStyleSheet(f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;")
             layout.addWidget(check_label)
 
         # 归档按钮（默认隐藏）
         self._archive_btn = TransparentToolButton(get_icon("归档"), self)
         self._archive_btn.setFixedSize(24, 24)
-        self._archive_btn.setStyleSheet("""
-            QToolButton {
+        self._archive_btn.setStyleSheet(f"""
+            QToolButton {{
                 background: transparent;
                 border: none;
-                font-size: 12px;
-            }
-            QToolButton:hover {
+                font-size: {scale_font_size(12)}px;
+            }}
+            QToolButton:hover {{
                 background: rgba(255, 255, 255, 50);
                 border-radius: 4px;
-            }
+            }}
         """)
         self._archive_btn.clicked.connect(self._emit_archive)
         self._archive_btn.setToolTip("归档此项目")
