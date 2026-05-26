@@ -129,6 +129,7 @@ class MCPEditCard(QWidget):
         super().__init__(parent)
         self._server_data = server_data or {}
         self._is_edit = bool(server_data)
+        self._original_name = self._server_data.get("name")  # 记录原始名称用于更新定位
         self._json_mode = False
         self._init_ui()
 
@@ -190,7 +191,6 @@ class MCPEditCard(QWidget):
         self.nameEdit.setPlaceholderText("例如: github, filesystem, my-api")
         if self._is_edit:
             self.nameEdit.setText(self._server_data.get("name", ""))
-            self.nameEdit.setReadOnly(True)
         row, _ = _make_row("名称:", self.nameEdit)
         form_layout.addLayout(row)
 

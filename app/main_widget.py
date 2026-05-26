@@ -1996,11 +1996,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("mcp_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
-            name = server_data.get("name", "")
+            new_name = server_data.get("name", "")
+            # 用原始名称（编辑时）或新名称（新增时）定位
+            original_name = getattr(self._mcp_edit_popup, '_original_name', None)
+            lookup_name = original_name if original_name else new_name
+
             servers = list(self._settings_popup.mcpListCard.cfg.mcp_servers.value or [])
-            is_edit = any(s.get("name") == name for s in servers)
+            is_edit = any(s.get("name") == lookup_name for s in servers)
             if is_edit:
-                self._settings_popup.mcpListCard.update_server(name, server_data)
+                self._settings_popup.mcpListCard.update_server(lookup_name, server_data)
             else:
                 self._settings_popup.mcpListCard.add_server(server_data)
             # 确保连接状态同步

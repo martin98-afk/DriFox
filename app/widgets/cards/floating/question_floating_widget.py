@@ -45,7 +45,7 @@ class _OptionRadioCard(QWidget):
         layout.setSpacing(10)
 
         self._icon = QLabel("○")
-        self._icon.setFont(get_unified_font(14))
+        self._icon.setFont(get_unified_font(13))
         self._icon.setFixedWidth(18)
         self._icon.setAlignment(Qt.AlignCenter)
         self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -147,7 +147,7 @@ class _OptionCheckCard(QWidget):
         layout.setSpacing(10)
 
         self._icon = QLabel("□")
-        self._icon.setFont(get_unified_font(14))
+        self._icon.setFont(get_unified_font(13))
         self._icon.setFixedWidth(18)
         self._icon.setAlignment(Qt.AlignCenter)
         self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -264,7 +264,7 @@ class _CustomInputCard(QWidget):
         header.setSpacing(10)
 
         self._icon = QLabel("□" if self._multiple else "○")
-        self._icon.setFont(get_unified_font(14))
+        self._icon.setFont(get_unified_font(13))
         self._icon.setFixedWidth(18)
         self._icon.setAlignment(Qt.AlignCenter)
         self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -400,8 +400,8 @@ class QuestionFloatingWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 12)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(10, 4, 10, 4)
+        main_layout.setSpacing(3)
 
         # ── 顶栏 ──
         header = QHBoxLayout()
@@ -412,17 +412,6 @@ class QuestionFloatingWidget(QWidget):
         self._page_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         header.addWidget(self._page_label)
         header.addStretch()
-
-        self._close_btn = QPushButton("−")
-        self._close_btn.setFixedSize(22, 22)
-        self._close_btn.setCursor(Qt.PointingHandCursor)
-        self._close_btn.setFont(get_unified_font(12, True))
-        self._close_btn.clicked.connect(self._on_ignore)
-        self._close_btn.setStyleSheet("""
-            QPushButton { color: rgba(255,255,255,0.4); background: transparent; border: none; border-radius: 11px; }
-            QPushButton:hover { color: rgba(255,255,255,0.8); background: rgba(255,255,255,0.1); }
-        """)
-        header.addWidget(self._close_btn)
         main_layout.addLayout(header)
 
         # ── 问题标题（超出 160px 高度时滚动） ──
@@ -524,7 +513,7 @@ class QuestionFloatingWidget(QWidget):
         self._next_btn.setFont(get_unified_font(10, True))
         self._next_btn.clicked.connect(self._on_next)
         self._next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {Colors.REALTIME_TAG_BG}; color: #ffffff; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+            QPushButton {{ background-color: {Colors.CARD_BG}; color: #ffffff; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
         """)
 
