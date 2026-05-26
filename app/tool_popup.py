@@ -1021,8 +1021,10 @@ class ToolPopupDialog(QDialog):
                 event.accept()
                 return
         else:
-            self._show_opacity_slider()
-            self._hide_timer_start()
+            # 仅在窗口激活时显示透明度滑块，避免鼠标在其他窗口移动时反复触发
+            if self.isActiveWindow():
+                self._show_opacity_slider()
+                self._hide_timer_start()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None

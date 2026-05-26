@@ -6936,13 +6936,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.toggle_card("memory", self._window_id)
         # 显示时刷新记忆数据
         if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, '_memory_card_popup'):
-            # 强制刷新当前 tab 的内容
-            current_tab = getattr(self._memory_card, '_current_tab', 'entries')
-            # 强制切换 tab（即使相同也触发刷新）
+            # 默认切换到条目记忆标签
+            default_tab = 'entries'
+            # 强制切换 tab
             if hasattr(self._memory_card_popup, '_current_tab'):
-                old_tab = self._memory_card_popup._current_tab
                 self._memory_card_popup._current_tab = None  # 临时改变，确保 switch_tab 执行
-                self._memory_card_popup.switch_tab(current_tab)
+                self._memory_card_popup.switch_tab(default_tab)
+            # 同时更新 BaseSettingsCard 的 tab 状态
+            if hasattr(self._memory_card, 'set_current_tab'):
+                self._memory_card.set_current_tab(default_tab)
 
     def _on_memory_card_saved(self, memories: list):
         """记忆卡片保存后的回调"""

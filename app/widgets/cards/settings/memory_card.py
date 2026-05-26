@@ -8,7 +8,7 @@
 import os
 
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
-from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextDocument
+from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextDocument, QKeyEvent
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -29,6 +29,20 @@ from qfluentwidgets import (
     ListWidget,
     TextEdit,
 )
+
+
+class EntryInputLineEdit(LineEdit):
+    """自定义输入框 - 拦截回车键防止事件冒泡"""
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """拦截回车键，阻止事件冒泡到父组件"""
+        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            # 先让父类处理（触发 returnPressed 信号），然后接受事件防止冒泡
+            super().keyPressEvent(event)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 from app.utils.design_tokens import scale_font_size, font_size_css, Colors
 from app.utils.utils import get_font_family_css, get_icon
@@ -676,29 +690,11 @@ class MemoryCardContent(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # 记忆列表
-        self.entries_list = ListWidget(self)
-        self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.entries_list.setResizeMode(ListWidget.Adjust)
-        self.entries_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
-                {get_font_family_css()}
-            }}
-            QListWidget::item {{
-                padding: 0;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-        """)
-        layout.addWidget(self.entries_list, 1)
-
-        # 添加区域
+        # 添加区域（放在列表上方，方便添加新记忆后立即可见）
         add_layout = QHBoxLayout()
         add_layout.setSpacing(6)
-        self.entry_input = LineEdit(self)
+        # 使用自定义输入框，拦截回车键防止事件冒泡
+        self.entry_input = EntryInputLineEdit(self)
         self.entry_input.setFixedHeight(28)
         self.entry_input.setPlaceholderText("添加新的条目记忆...")
         self.entry_input.setStyleSheet(f"""
@@ -726,10 +722,30 @@ class MemoryCardContent(QWidget):
             }}
         """)
         self.entry_add_btn.clicked.connect(self._add_entry)
+        # 连接自定义输入框的回车信号
         self.entry_input.returnPressed.connect(self._add_entry)
         add_layout.addWidget(self.entry_input, 1)
         add_layout.addWidget(self.entry_add_btn)
         layout.addLayout(add_layout)
+
+        # 记忆列表
+        self.entries_list = ListWidget(self)
+        self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.entries_list.setResizeMode(ListWidget.Adjust)
+        self.entries_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
+                border-radius: 6px;
+                {get_font_family_css()}
+            }}
+            QListWidget::item {{
+                padding: 0;
+                border-bottom: 1px solid {Colors.BORDER};
+            }}
+        """)
+        layout.addWidget(self.entries_list, 1)
 
         return widget
 
@@ -1126,6 +1142,8 @@ class MemoryCardContent(QWidget):
             memory_mgr.add_entry_memory(content)
 
         self.entry_input.clear()
+        # 清空后保持焦点在输入框，防止焦点转移导致卡片意外关闭
+        self.entry_input.setFocus()
         self._load_entries()
 
     def _delete_entry(self, memory_id: str):
