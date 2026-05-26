@@ -461,6 +461,9 @@ class MCPEditCard(QWidget):
                 return
             try:
                 server_data = self._parse_mcp_json(parsed)
+                # 保留来源信息（从原始数据继承，供 PluginManager 更新使用）
+                if self._original_name:
+                    server_data["_source"] = self._original_name
             except (ValueError, KeyError, TypeError) as e:
                 InfoBar.warning("提示", f"配置解析失败: {e}", parent=self.window(),
                                 duration=3000, position=InfoBarPosition.BOTTOM)
@@ -515,6 +518,10 @@ class MCPEditCard(QWidget):
                     InfoBar.warning("提示", f"Headers JSON 格式错误: {e}", parent=self.window(),
                                     duration=3000, position=InfoBarPosition.BOTTOM)
                     return
+
+        # 保留来源信息（供 PluginManager.update_mcp_server 定位文件）
+        if self._original_name:
+            server_data["_source"] = self._original_name
 
         self.saved.emit(server_data)
 

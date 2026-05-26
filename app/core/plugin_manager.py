@@ -387,8 +387,12 @@ class PluginManager:
     def get_mcp_servers(self) -> list:
         """获取所有已启用插件的合并 MCP 服务器列表
 
-        返回格式与 Settings.mcp_servers 兼容：
+        返回格式：
         [{"name": "...", "type": "stdio", "command": "...", "args": [], "env": {}, "enabled": True}, ...]
+
+        支持两种 .mcp.json 格式：
+        1. 新格式：{"mcpServers": {"ServerName": {"command": "...", ...}}}
+        2. 旧格式：{"mcpServers": {"Servers": [{"name": "...", ...}]}}
         """
         servers = []
         seen_names = set()
@@ -397,7 +401,30 @@ class PluginManager:
             try:
                 content = json.loads(mcp_file.read_text(encoding="utf-8"))
                 mcp_servers = content.get("mcpServers", {})
+
+                # 兼容旧格式：{"mcpServers": {"Servers": [...]}}
+                if "Servers" in mcp_servers and isinstance(mcp_servers["Servers"], list):
+                    for server_data in mcp_servers["Servers"]:
+                        name = server_data.get("name", "")
+                        if not name or name in seen_names:
+                            continue
+                        seen_names.add(name)
+                        servers.append({
+                            "name": name,
+                            "type": server_data.get("type", "stdio"),
+                            "enabled": server_data.get("enabled", True),
+                            "command": server_data.get("command", ""),
+                            "args": server_data.get("args", []),
+                            "env": server_data.get("env", {}),
+                            "_source": str(mcp_file),
+                        })
+                    # 跳过非 dict 的顶级键（Discovered、Enabled 等）
+                    continue
+
+                # 新格式：{"mcpServers": {"ServerName": {"command": "...", ...}}}
                 for name, server_cfg in mcp_servers.items():
+                    if not isinstance(server_cfg, dict):
+                        continue
                     if name in seen_names:
                         continue
                     seen_names.add(name)
@@ -421,28 +448,53 @@ class PluginManager:
         Args:
             name: 服务器名
             server_data: 完整的服务器配置 {"command": ..., "args": ..., "enabled": ..., ...}
+
+        _source 可能是：
+        1. 文件路径（如 D:\\work\\DriFoxx\\plugins\\system\\.mcp.json）
+        2. 服务器名称字符串（编辑时传递的旧名称，需要查表找真实来源）
         """
         source = server_data.get("_source", "")
         if not source:
             logger.warning(f"[PluginManager] MCP server '{name}' has no _source, cannot update")
             return
 
-        source_path = Path(source)
+        # 如果 _source 是名称而非路径，查表获取真实文件路径
+        source_path = Path(source) if len(source) > 50 or source.endswith(".json") else None
+        if source_path is None or not source_path.exists():
+            # 查找该服务器的真实来源文件
+            servers = self.get_mcp_servers()
+            match = next((s for s in servers if s.get("name") == name), None)
+            if match and match.get("_source"):
+                source_path = Path(match["_source"])
+            else:
+                logger.warning(f"[PluginManager] MCP server '{name}' has no _source, cannot update")
+                return
+
         if not source_path.exists():
-            logger.warning(f"[PluginManager] MCP source file not found: {source}")
+            logger.warning(f"[PluginManager] MCP source file not found: {source_path}")
             return
 
         try:
             content = json.loads(source_path.read_text(encoding="utf-8"))
             mcp_servers = content.get("mcpServers", {})
 
-            if name in mcp_servers:
-                # 更新已有条目（保留非 UI 字段）
+            # 兼容旧格式：如果顶级是 {"Servers": [...]} 结构
+            if "Servers" in mcp_servers and isinstance(mcp_servers["Servers"], list):
+                for entry in mcp_servers["Servers"]:
+                    if entry.get("name") == name:
+                        entry.update({
+                            k: v for k, v in server_data.items()
+                            if k not in ("name", "_source", "_builtin")
+                        })
+                        break
+            elif name in mcp_servers:
+                # 新格式：{"ServerName": {...}}
                 mcp_servers[name].update({
                     k: v for k, v in server_data.items()
                     if k not in ("name", "_source", "_builtin")
                 })
             else:
+                # 不存在则添加
                 mcp_servers[name] = {
                     k: v for k, v in server_data.items()
                     if k not in ("name", "_source", "_builtin")
@@ -450,7 +502,7 @@ class PluginManager:
 
             content["mcpServers"] = mcp_servers
             source_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
-            logger.info(f"[PluginManager] Updated MCP server '{name}' in {source}")
+            logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")
         except Exception as e:
             logger.error(f"[PluginManager] Failed to update MCP server '{name}': {e}")
 
