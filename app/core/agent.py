@@ -21,12 +21,12 @@ from app.core.hook_manager import HookManager
 class Agent:
     name: str
     description: str
-    mode: str = "all"
+    mode: Optional[str] = None  # None 表示未声明，不显示在 UI；"primary"/"all" 表示可作为主智能体
     permission: Dict[str, Any] = field(default_factory=dict)
     temperature: Optional[float] = None
     steps: Optional[int] = None
     model: Optional[str] = None
-    hidden: bool = False
+    hidden: Optional[bool] = None  # None 表示未声明；True 表示隐藏；False 表示显式显示
     task_permissions: Dict[str, str] = field(default_factory=dict)
     color: Optional[str] = None
     top_p: Optional[float] = None
@@ -45,12 +45,12 @@ class Agent:
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),
-            mode=data.get("mode", "all"),
+            mode=data.get("mode"),
             permission=data.get("permission", {}),
             temperature=data.get("temperature"),
             steps=data.get("steps"),
             model=data.get("model"),
-            hidden=data.get("hidden", False),
+            hidden=data.get("hidden"),
             task_permissions=data.get("task_permissions", {}),
             color=data.get("color"),
             top_p=data.get("top_p"),
@@ -66,16 +66,17 @@ class Agent:
         result = {
             "name": self.name,
             "description": self.description,
-            "mode": self.mode,
             "permission": self.permission,
         }
+        if self.mode is not None:
+            result["mode"] = self.mode
         if self.temperature is not None:
             result["temperature"] = self.temperature
         if self.steps is not None:
             result["steps"] = self.steps
         if self.model:
             result["model"] = self.model
-        if self.hidden:
+        if self.hidden is True:
             result["hidden"] = True
         if self.task_permissions:
             result["task_permissions"] = self.task_permissions
@@ -98,13 +99,18 @@ class Agent:
         return result
 
     def is_primary(self) -> bool:
+        """是否可作为主智能体显示在 UI 中：mode 为 primary/all，且 hidden 不为 True"""
+        if self.hidden is True:
+            return False
         return self.mode in ("primary", "all")
 
     def is_subagent(self) -> bool:
+        """是否可作为子智能体：mode 为 subagent/all"""
         return self.mode in ("subagent", "all")
 
     def is_hidden(self) -> bool:
-        return self.hidden
+        """是否隐藏（显式 hidden=True 或未声明 mode）"""
+        return self.hidden is True or self.mode is None
 
 
 class PermissionResolver:

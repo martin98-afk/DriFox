@@ -2883,8 +2883,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         agent = self.backend.get_agent(agent_name)
         if agent:
-            mode = agent.mode
-            hidden = "hidden" if agent.hidden else "visible"
+            mode = agent.mode or "(未声明)"
+            hidden = "hidden" if agent.hidden is True else "visible"
             tooltip = f"{agent.name}: {agent.description}\nMode: {mode}, {hidden}"
             # 更新按钮组的 tooltip
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:

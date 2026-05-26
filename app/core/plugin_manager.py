@@ -230,13 +230,37 @@ class PluginManager:
             if item.name.startswith(".") or item.name.startswith("_"):
                 continue
 
+            # 支持两种清单格式：.drifox-plugin/plugin.json（优先）和 .claude-plugin/plugin.json
             manifest_path = item / ".drifox-plugin" / "plugin.json"
+            manifest_format = "drifox"
+            if not manifest_path.exists():
+                manifest_path = item / ".claude-plugin" / "plugin.json"
+                manifest_format = "claude"
             if not manifest_path.exists():
                 continue
 
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 plugin_name = manifest.get("name", item.name)
+
+                # .claude-plugin 格式：自动补全缺少的字段（type、components、version）
+                if manifest_format == "claude":
+                    manifest.setdefault("type", plugin_type)
+                    manifest.setdefault("version", manifest.get("version", "0.0.0"))
+                    # 自动检测组件：扫描目录结构
+                    components = {}
+                    for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
+                        if (item / comp_name).exists():
+                            components[comp_name] = True
+                    if (item / ".mcp.json").exists():
+                        components["mcp"] = True
+                    if "components" not in manifest or not manifest["components"]:
+                        manifest["components"] = components
+                    elif isinstance(manifest["components"], dict):
+                        # 补充清单未声明的但实际存在的组件
+                        for k, v in components.items():
+                            manifest["components"].setdefault(k, v)
+
                 discovered.append(PluginInfo(
                     name=plugin_name,
                     manifest=manifest,
@@ -244,7 +268,7 @@ class PluginManager:
                     plugin_type=plugin_type,
                 ))
                 logger.debug(f"[PluginManager] Discovered plugin: {plugin_name} "
-                            f"(type={plugin_type}) at {item}")
+                            f"(type={plugin_type}, format={manifest_format}) at {item}")
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
 
