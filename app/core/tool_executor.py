@@ -544,12 +544,14 @@ class ToolExecutor:
                 lambda tasks_val: self._builtin_tools.task_execute_batch(
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
                     args.get("share_context", False),
+                    session_id=self._session_id,
                 )
             )(args.get("tasks", [])),
             "task_status": lambda: self._builtin_tools.task_status(
                 args.get("task_ids"),
                 args.get("with_log", False),
                 args.get("with_result", True),
+                session_id=self._session_id,
             ),
             "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
             "list_skills": lambda: self._builtin_tools.list_skills(),

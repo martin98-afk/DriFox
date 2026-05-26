@@ -87,7 +87,8 @@ class TaskTools:
             return ToolResult(False, error=f"Todo read error: {str(e)}")
 
     def task_execute_batch(
-            self, tasks: List[Dict], share_context: bool = False
+            self, tasks: List[Dict], share_context: bool = False,
+            session_id: str = ""
     ) -> ToolResult:
         """
         批量执行子智能体任务（并行）。
@@ -98,6 +99,7 @@ class TaskTools:
                 - description: str 任务描述
                 - context: str (可选) 父任务上下文
             share_context: bool 是否共享主智能体上下文给子智能体
+            session_id: 当前会话 ID（由 ToolExecutor 传入，用于会话隔离）
 
         Returns:
             ToolResult: success=True, content={"task_ids": [str], "status": "running"}
@@ -130,6 +132,7 @@ class TaskTools:
                     on_error=None,
                     executor_ref=None,
                     share_context=share_context,
+                    session_id=session_id,
                 )
                 task_ids.append(task_id)
 
@@ -146,7 +149,8 @@ class TaskTools:
             logger.error(f"[Task] task_execute_batch exception: {e}")
             return ToolResult(False, error=f"批量任务启动失败: {str(e)}")
 
-    def task_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True) -> ToolResult:
+    def task_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True,
+                     session_id: str = "") -> ToolResult:
         """
         查询任务状态。
 
@@ -154,6 +158,7 @@ class TaskTools:
             task_ids: 任务ID列表，用逗号分隔。None或空=查询所有活跃任务
             with_log: 是否包含执行日志（默认 False）
             with_result: 是否包含执行结果（默认 True）
+            session_id: 当前会话 ID（由 ToolExecutor 传入，用于会话隔离）
 
         Returns:
             ToolResult: success=True, content={"tasks": [{"task_id": str, "status": str, "agent": str, "result"?: str, "logs"?: [...]}]}
@@ -171,7 +176,7 @@ class TaskTools:
                 id_list = [tid.strip() for tid in str(task_ids).split(",") if tid.strip()]
             return self._sub_agent_manager.get_tasks_status_with_details(id_list, with_log, with_result)
         else:
-            return self._sub_agent_manager.get_all_active_tasks_with_details(with_log, with_result)
+            return self._sub_agent_manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
 
     def load_skill(self, name: str) -> ToolResult:
         """加载指定技能"""

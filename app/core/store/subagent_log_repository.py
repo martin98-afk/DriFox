@@ -43,6 +43,7 @@ class SubAgentLogRepository:
                 {"name": "task_id", "type": "TEXT", "primary_key": True},
                 {"name": "agent_name", "type": "TEXT"},
                 {"name": "task_description", "type": "TEXT"},
+                {"name": "session_id", "type": "TEXT"},  # 所属会话 ID（会话隔离）
                 {"name": "status", "type": "TEXT"},  # running, finished, error
                 {"name": "result", "type": "TEXT"},
                 {"name": "error", "type": "TEXT"},
@@ -51,8 +52,16 @@ class SubAgentLogRepository:
                 {"name": "created_at", "type": "TEXT"},
                 {"name": "updated_at", "type": "TEXT"},
             ])
+            # 兼容旧表：尝试添加 session_id 列（表已存在时，create_table 不会自动加新列）
+            self._db.execute_sql(
+                f'ALTER TABLE "{self.TABLE_NAME}" ADD COLUMN session_id TEXT DEFAULT ""'
+            )
             return True
         except Exception as e:
+            # ALTER TABLE ADD COLUMN 在列已存在时会抛异常，这是正常的
+            err_msg = str(e).lower()
+            if "duplicate column" in err_msg or "already exists" in err_msg:
+                return True
             logger.error(f"[SubAgentLogRepository] _ensure_table 异常: {e}")
             return False
 
@@ -82,6 +91,7 @@ class SubAgentLogRepository:
             "task_id": d.get("task_id", ""),
             "agent_name": d.get("agent_name", ""),
             "task_description": d.get("task_description", ""),
+            "session_id": d.get("session_id", ""),
             "status": d.get("status", ""),
             "result": d.get("result", ""),
             "error": d.get("error", ""),
@@ -93,7 +103,8 @@ class SubAgentLogRepository:
 
     def save_task(self, task_id: str, agent_name: str, task_description: str,
                   status: str = "running", result: str = None, error: str = None,
-                  logs: List[Dict] = None, summary: Dict = None) -> bool:
+                  logs: List[Dict] = None, summary: Dict = None,
+                  session_id: str = "") -> bool:
         """
         保存或更新任务
 
@@ -106,6 +117,7 @@ class SubAgentLogRepository:
             error: 错误信息
             logs: 日志列表
             summary: 摘要信息
+            session_id: 所属会话 ID
 
         Returns:
             bool: 保存是否成功
@@ -135,9 +147,9 @@ class SubAgentLogRepository:
             # 插入
             success, _ = self._execute(f'''
                 INSERT INTO "{self.TABLE_NAME}"
-                (task_id, agent_name, task_description, status, result, error, logs, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (task_id, agent_name or "", task_description or "", status,
+                (task_id, agent_name, task_description, session_id, status, result, error, logs, summary, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (task_id, agent_name or "", task_description or "", session_id or "", status,
                   result or "", error or "", logs_json, summary_json, now, now))
 
         return success
@@ -193,6 +205,19 @@ class SubAgentLogRepository:
         sql = f'SELECT * FROM "{self.TABLE_NAME}" WHERE task_id IN ({placeholders})'
         success, rows = self._execute(sql, tuple(task_ids))
 
+        if success and rows:
+            return [self._row_to_task(row) for row in rows]
+        return []
+
+    def get_tasks_by_session(self, session_id: str, limit: int = 100) -> List[Dict]:
+        """获取指定会话的所有任务（按创建时间倒序）"""
+        if not self._ensure_table():
+            return []
+
+        success, rows = self._execute(
+            f'SELECT * FROM "{self.TABLE_NAME}" WHERE session_id = ? ORDER BY created_at DESC LIMIT ?',
+            (session_id, limit)
+        )
         if success and rows:
             return [self._row_to_task(row) for row in rows]
         return []

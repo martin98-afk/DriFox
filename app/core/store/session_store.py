@@ -503,11 +503,12 @@ class SessionStore:
 
     def save_subagent_task(self, task_id: str, agent_name: str, task_description: str,
                            status: str = "running", result: str = None, error: str = None,
-                           logs: List[Dict] = None, summary: Dict = None) -> bool:
+                           logs: List[Dict] = None, summary: Dict = None,
+                           session_id: str = "") -> bool:
         """保存子智能体任务"""
         if self._subagent_log_repo:
             return self._subagent_log_repo.save_task(
-                task_id, agent_name, task_description, status, result, error, logs, summary
+                task_id, agent_name, task_description, status, result, error, logs, summary, session_id
             )
         return False
 
