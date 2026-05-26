@@ -602,7 +602,6 @@ class MCPListSettingCard(ExpandSettingCard):
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
         super().__init__(icon, title, content, parent)
-        
         # 防抖节流：300ms 滚动防抖，等待用户停止操作
         self._switch_debounce_timer = QTimer(self)
         self._switch_debounce_timer.setSingleShot(True)
@@ -619,6 +618,18 @@ class MCPListSettingCard(ExpandSettingCard):
 
         # 连接信号（主线程处理 UI）
         self._hotConnectResult.connect(self._on_hot_connect_result)
+
+    def _get_pm(self):
+        """获取 PluginManager 实例"""
+        from app.core.plugin_manager import PluginManager
+        return PluginManager.get_instance()
+
+    def _get_servers(self) -> list:
+        """获取 MCP 服务器列表（从 PluginManager）"""
+        pm = self._get_pm()
+        if pm.is_initialized():
+            return pm.get_mcp_servers()
+        return []
 
     def _get_mcp_manager(self):
         from app.tools.mcp_tools import MCPClientManager
@@ -753,7 +764,7 @@ class MCPListSettingCard(ExpandSettingCard):
         enabled = self._pending_global_switch
         self.cfg.set(self.cfg.mcp_enabled, enabled, save=True)
         if enabled:
-            servers = self.cfg.mcp_servers.value or []
+            servers = self._get_servers()
             for s in servers:
                 if s.get("enabled", True):
                     self._hot_connect(s.get("name", ""), s)
@@ -773,7 +784,7 @@ class MCPListSettingCard(ExpandSettingCard):
             if item.widget():
                 item.widget().deleteLater()
 
-        servers = self.cfg.mcp_servers.value
+        servers = self._get_servers()
         if not servers:
             empty_label = QLabel("暂无 MCP 服务器，点击「添加服务器」创建", self.view)
             empty_label.setStyleSheet(f"color: #888; padding: 16px; {get_font_family_css()} font-size: {scale_font_size(12)}px;")
@@ -811,7 +822,9 @@ class MCPListSettingCard(ExpandSettingCard):
             card.contentLabel.setText(text)
 
     def _save_servers(self, servers: list):
-        self.cfg.set(self.cfg.mcp_servers, servers, save=True)
+        """保存服务器列表（底层写入 PluginManager）"""
+        # 不再直接写 Settings.mcp_servers，而是通过 PluginManager 管理
+        # 此方法保留为空，实际增删改走 PluginManager 的方法
         self._refresh()
         self.serversChanged.emit()
 
@@ -824,12 +837,13 @@ class MCPListSettingCard(ExpandSettingCard):
     def _do_remove(self, name: str):
         # 热断开
         self._hot_disconnect(name)
-        servers = list(self.cfg.mcp_servers.value or [])
-        servers = [s for s in servers if s.get("name") != name]
-        self._save_servers(servers)
+        pm = self._get_pm()
+        pm.remove_mcp_server(name)
+        self._refresh()
+        self.serversChanged.emit()
 
     def _show_edit_dialog(self, name: str):
-        servers = list(self.cfg.mcp_servers.value or [])
+        servers = self._get_servers()
         server_data = next((s for s in servers if s.get("name") == name), None)
         if server_data:
             self.showEditCard.emit(name, server_data)
@@ -850,15 +864,16 @@ class MCPListSettingCard(ExpandSettingCard):
         tasks = dict(self._pending_server_switches)
         self._pending_server_switches.clear()
 
-        # 批量更新配置
-        servers = list(self.cfg.mcp_servers.value or [])
-        for s in servers:
-            n = s.get("name")
-            if n in tasks:
-                s["enabled"] = tasks[n]
-        self.cfg.set(self.cfg.mcp_servers, servers, save=True)
+        # 批量更新配置（通过 PluginManager 更新 enabled 状态）
+        servers = self._get_servers()
+        pm = self._get_pm()
+        for name, enabled in tasks.items():
+            server_data = next((s for s in servers if s.get("name") == name), None)
+            if server_data:
+                server_data["enabled"] = enabled
+                pm.update_mcp_server(name, server_data)
 
-        # 执行热连接/断开（底层 _hot_connect/_hot_disconnect 会防重）
+        # 执行热连接/断开
         for name, enabled in tasks.items():
             if enabled and self.cfg.mcp_enabled.value:
                 server_data = next((s for s in servers if s.get("name") == name), {})
@@ -866,14 +881,15 @@ class MCPListSettingCard(ExpandSettingCard):
             else:
                 self._hot_disconnect(name)
 
+        self._refresh()
         self.serversChanged.emit()
 
     # ── 公开刷新方法（供 settings 弹窗 show 时调用） ──
 
     def refresh_connections(self):
-        """重新连接所有已启用但未连接的服务器（修复新配置不生效问题）"""
+        """重新连接所有已启用但未连接的服务器"""
         mgr = self._get_mcp_manager()
-        servers = self.cfg.mcp_servers.value or []
+        servers = self._get_servers()
         if not self.cfg.mcp_enabled.value:
             return
         for s in servers:
@@ -889,26 +905,28 @@ class MCPListSettingCard(ExpandSettingCard):
     # ── 供外部调用的添加/更新方法 ──────────────────────
 
     def add_server(self, server_data: dict):
-        servers = list(self.cfg.mcp_servers.value or [])
+        """添加 MCP 服务器（保留兼容，实际由 PluginManager 管理）"""
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
         name = server_data.get("name", "")
+        servers = self._get_servers()
         if any(s.get("name") == name for s in servers):
             InfoBar.warning(title="名称重复", content=f"MCP Server '{name}' 已存在",
                             position=InfoBarPosition.BOTTOM, duration=3000, parent=self.window())
             return False
-        servers.append(server_data)
-        self._save_servers(servers)
+        pm.add_mcp_server(name, server_data)
+        self._refresh()
         # 热连接
         if server_data.get("enabled", True) and self.cfg.mcp_enabled.value:
             self._hot_connect(name, server_data)
         return True
 
     def update_server(self, name: str, server_data: dict):
-        servers = list(self.cfg.mcp_servers.value or [])
-        for i, s in enumerate(servers):
-            if s.get("name") == name:
-                servers[i] = server_data
-                break
-        self._save_servers(servers)
+        """更新 MCP 服务器配置（实际由 PluginManager 管理）"""
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        pm.update_mcp_server(name, server_data)
+        self._refresh()
         # 先断开旧连接，再重新连接
         self._hot_disconnect(name)
         if server_data.get("enabled", True) and self.cfg.mcp_enabled.value:

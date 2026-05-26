@@ -895,15 +895,18 @@ def _merge_and_deduplicate(existing: List[dict], discovered: List[dict]) -> Tupl
 
 def discover_and_merge() -> Tuple[List[dict], List[dict]]:
     """
-    自动发现所有已知来源的 MCP 服务器，并与现有配置合并去重
+    自动发现所有已知来源的 MCP 服务器
+
+    发现结果由 backend._discover_mcp_servers() 写入 user-mcp 插件，
+    不再直接修改 Settings.mcp_servers。
 
     Returns:
         (all_servers, newly_discovered) — 所有服务器（含已有的）+ 新发现的列表
     """
-    from app.utils.config import Settings
+    from app.core.plugin_manager import PluginManager
 
-    cfg = Settings.get_instance()
-    existing = list(cfg.mcp_servers.value or [])
+    pm = PluginManager.get_instance()
+    existing = pm.get_mcp_servers() if pm.is_initialized() else []
 
     all_discovered = []
     all_discovered.extend(_discover_claude_desktop_servers())
@@ -912,6 +915,6 @@ def discover_and_merge() -> Tuple[List[dict], List[dict]]:
     merged, new_ones = _merge_and_deduplicate(existing, all_discovered)
 
     if new_ones:
-        logger.info(f"[MCP] 自动发现 {len(new_ones)} 个新服务器，已合并到配置")
+        logger.info(f"[MCP] 自动发现 {len(new_ones)} 个新服务器")
 
     return merged, new_ones

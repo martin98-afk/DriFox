@@ -332,9 +332,6 @@ class ChatBackend(QObject):
             app_data_dir = get_app_data_dir()
             pm.initialize(app_data_dir)
 
-            # 加载插件 MCP 配置并合并
-            self._merge_plugin_mcp_configs(pm)
-
             # AgentManager 重新从已启用插件加载智能体
             if self._agent_manager:
                 self._agent_manager.reload_agents()
@@ -345,45 +342,12 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
 
-    def _merge_plugin_mcp_configs(self, pm):
-        """加载所有插件的 .mcp.json 并合并到 MCP 配置"""
-        from app.utils.config import Settings
-        import json
-
-        cfg = Settings.get_instance()
-        existing_servers = cfg.mcp_servers.value or []
-        existing_names = {s.get("name") for s in existing_servers}
-
-        for mcp_file in pm.get_mcp_configs():
-            try:
-                content = json.loads(mcp_file.read_text(encoding="utf-8"))
-                mcp_servers = content.get("mcpServers", {})
-                for name, server_cfg in mcp_servers.items():
-                    if name not in existing_names:
-                        server_entry = {
-                            "name": name,
-                            "type": server_cfg.get("type", "stdio"),
-                            "enabled": server_cfg.get("enabled", True),
-                            "command": server_cfg.get("command", ""),
-                            "args": server_cfg.get("args", []),
-                            "env": server_cfg.get("env", {}),
-                            "_builtin": True,
-                            "_source": str(mcp_file),
-                        }
-                        existing_servers.append(server_entry)
-                        existing_names.add(name)
-                        logger.info(f"[ChatBackend] Added MCP server from plugin: {name}")
-            except Exception as e:
-                logger.error(f"[ChatBackend] Failed to load MCP config from {mcp_file}: {e}")
-
-        if existing_servers:
-            cfg.set(cfg.mcp_servers, existing_servers, save=True)
-
     # ========== MCP 自动发现 ==========
 
     def _discover_mcp_servers(self):
-        """自动发现其他工具的 MCP 配置并合并（仅首次运行生效）"""
+        """自动发现其他工具的 MCP 配置并保存到 user-mcp 插件（仅首次运行生效）"""
         from app.utils.config import Settings
+        from app.core.plugin_manager import PluginManager
 
         cfg = Settings.get_instance()
 
@@ -395,8 +359,14 @@ class ChatBackend(QObject):
 
         merged, new_ones = discover_and_merge()
         if new_ones:
-            cfg.set(cfg.mcp_servers, merged, save=True)
-            logger.info(f"[ChatBackend] MCP 自动发现完成，导入 {len(new_ones)} 个新服务器")
+            # 将发现的服务器写入 user-mcp 插件
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for server_data in new_ones:
+                    name = server_data.get("name", "")
+                    if name:
+                        pm.add_mcp_server(name, server_data)
+                logger.info(f"[ChatBackend] MCP 自动发现完成，导入 {len(new_ones)} 个新服务器")
 
         # 标记已处理
         cfg.set(cfg.mcp_discovered, True, save=True)
@@ -404,8 +374,12 @@ class ChatBackend(QObject):
     # ========== ChatEngine 代理方法 ==========
 
     def _init_mcp_connections(self):
-        """初始化 MCP 服务器连接（后台异步，不阻塞 UI）"""
+        """初始化 MCP 服务器连接（后台异步，不阻塞 UI）
+
+        MCP 配置完全由插件驱动，从 PluginManager 获取。
+        """
         from app.utils.config import Settings
+        from app.core.plugin_manager import PluginManager
 
         mcp_manager = self._tool_executor._builtin_tools._mcp_manager
 
@@ -418,7 +392,9 @@ class ChatBackend(QObject):
             logger.info("[ChatBackend] MCP 全局开关已关闭，跳过连接")
             return
 
-        servers = cfg.mcp_servers.value
+        # 从 PluginManager 获取 MCP 服务器列表
+        pm = PluginManager.get_instance()
+        servers = pm.get_mcp_servers()
         if not servers:
             logger.info("[ChatBackend] 无 MCP 服务器配置，跳过连接")
             return

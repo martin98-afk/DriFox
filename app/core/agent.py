@@ -267,20 +267,29 @@ class AgentManager:
             pass
 
     def reload_agents(self):
-        """重新从已启用插件加载智能体（动态注入/注出后调用）"""
+        """"重新从已启用插件加载智能体（动态注入/注出后调用）
+
+        注意：仅重载 agents，不重载 hooks。hooks 的重新加载由调用方单独处理。
+        """
         self._agents.clear()
         self._hidden_agents.clear()
         self._load_agents()
         logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, {len(self._hidden_agents)} hidden")
 
-    def _load_skills_hooks(self):
-        """加载 skills 目录中的 hooks（插件路径优先）"""
+    def _load_skills_hooks(self, force: bool = False):
+        """加载 skills 目录中的 hooks
+
+        Args:
+            force: 为 True 时强制重新加载（reload_agents 时调用）
+        """
         try:
             from app.core.plugin_manager import PluginManager
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for skill_path in pm.get_skill_paths():
-                    self._hook_manager.load_hooks_from_skills(skill_path)
+                    self._hook_manager.load_hooks_from_skills(skill_path, force=force)
+        except (ImportError, Exception):
+            pass
         except (ImportError, Exception):
             pass
 

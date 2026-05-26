@@ -2017,18 +2017,20 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("mcp_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
             new_name = server_data.get("name", "")
-            # 用原始名称（编辑时）或新名称（新增时）定位
             original_name = getattr(self._mcp_edit_popup, '_original_name', None)
             lookup_name = original_name if original_name else new_name
 
-            servers = list(self._settings_popup.mcpListCard.cfg.mcp_servers.value or [])
+            servers = self._settings_popup.mcpListCard._get_servers()
             is_edit = any(s.get("name") == lookup_name for s in servers)
             if is_edit:
-                self._settings_popup.mcpListCard.update_server(lookup_name, server_data)
+                pm.update_mcp_server(lookup_name, server_data)
             else:
-                self._settings_popup.mcpListCard.add_server(server_data)
-            # 确保连接状态同步
+                pm.add_mcp_server(new_name, server_data)
+
+            self._settings_popup.mcpListCard._refresh()
             QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
 
     def _on_mcp_edit_closed(self):
@@ -5981,6 +5983,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._sync_batch_structures()
                 self._fix_new_card_message_index(user_text=callback_text)
                 self._visible_batch_end = len(self._message_batch)
+                # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
+                self._sync_node_preview_to_last()
 
     def _prepare_ui_for_callback_message(self, callback_text: str):
         """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
@@ -6269,6 +6273,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 对话完成后更新缓存统计显示
         self._refresh_cache_stats()
+
+        # ⚠️ 时间线节点在流式完成时不会更新 - 修复
+        self._update_node_preview()
 
         # 对话完成后刷新余额显示
         self._refresh_balance()
@@ -7235,6 +7242,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._on_messages_updated(interrupted_messages)
             if self.history_manager:
                 self._save_current_session_to_history()
+
+        # ⚠️ 时间线节点在停止流式后不会更新 - 修复
+        self._update_node_preview()
 
     def _create_context_menu(self):
         self._context_menu_actions = {}

@@ -452,6 +452,8 @@ class HookManager:
         
         2. 旧格式 (简化):
            {"EventName": [{"command": "..."}]}
+        
+        注意：相同的 config_file 只注册一次，防止重复注册。
         """
         # 处理字符串路径
         if isinstance(hooks_config, str):
@@ -462,6 +464,11 @@ class HookManager:
             except Exception as e:
                 logger.error(f"[HookManager] Failed to load hooks from {hooks_config}: {e}")
                 return 0
+        
+        # 去重：相同的 config_file 只注册一次
+        if config_file and config_file in self._config_watchers:
+            logger.debug(f"[HookManager] Skipping already loaded config: {config_file}")
+            return 0
         
         # 保存配置文件的监控时间
         if config_file:
@@ -1077,11 +1084,24 @@ class HookManager:
                     logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
         return count
 
-    def load_hooks_from_skills(self, skills_dir: Path) -> int:
-        """从 skills_dir 加载 hooks.json 和 SKILL.md"""
+    def load_hooks_from_skills(self, skills_dir: Path, force: bool = False) -> int:
+        """从 skills_dir 加载 hooks.json 和 SKILL.md
+
+        Args:
+            skills_dir: skills 根目录
+            force: 为 True 时强制重新加载（reload_agents 时调用）
+        """
         count = 0
         if not skills_dir.exists():
             return count
+
+        # reload_agents 时 force=True，全量重新加载
+        if force:
+            # 先注销该 skills 目录下的所有 hooks
+            for skill_dir in skills_dir.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+                self.unregister_skill_hooks(skill_dir.name)
 
         for skill_dir in skills_dir.iterdir():
             if not skill_dir.is_dir():

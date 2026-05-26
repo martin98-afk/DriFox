@@ -9,6 +9,7 @@ from functools import partial
 
 from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
+from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QWidget, QTextEdit,
@@ -289,6 +290,10 @@ class _CustomInputCard(QWidget):
         self._text_edit.setMaximumHeight(80)
         self._text_edit.setVisible(False)
         self._text_edit.textChanged.connect(self._on_text_changed)
+        # 强制白色文字：Qt 样式表 color 对 QTextEdit 经常不生效，需用 QPalette
+        pal = self._text_edit.palette()
+        pal.setColor(QPalette.Text, QColor("#ffffff"))
+        self._text_edit.setPalette(pal)
         self._layout.addWidget(self._text_edit)
 
         self._apply_style()
@@ -358,6 +363,11 @@ class _CustomInputCard(QWidget):
             }}
             QTextEdit:focus {{ border-color: {Colors.REALTIME_ACCENT}; }}
         """)
+        # 样式表 color 对 QTextEdit 不稳定，用 QPalette 兜底
+        pal = self._text_edit.palette()
+        pal.setColor(QPalette.Text, QColor(Colors.REALTIME_TEXT))
+        pal.setColor(QPalette.Base, QColor(Colors.HOVER_BG))
+        self._text_edit.setPalette(pal)
 
     def enterEvent(self, e):
         if not self._active:
