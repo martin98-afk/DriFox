@@ -363,6 +363,34 @@ class LockButtonWidget(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._setup_ui()
         self._update_icon()
+        self._force_always_on_top()
+        # 定时器持续置顶，防止焦点切换时被其他窗口遮挡
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.timeout.connect(self._force_always_on_top)
+        self._topmost_timer.start(200)  # 每 200ms 重新置顶一次
+
+    def _force_always_on_top(self):
+        """使用 Windows API 强制置顶到所有窗口之上，防止被其他窗口遮挡"""
+        import platform
+
+        if platform.system() != "Windows":
+            return
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOACTIVATE = 0x0010
+            HWND_TOPMOST = -1
+
+            hwnd = wintypes.HWND(int(self.winId()))
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            self.raise_()  # 立即提升到最前
+        except Exception:
+            pass  # 忽略可能的异常
 
     def _setup_ui(self):
         from qfluentwidgets import ToolButton
@@ -820,6 +848,13 @@ class ToolPopupDialog(QDialog):
                     if self._lock_btn_widget:
                         self._sync_lock_btn_position()
                         self._lock_btn_widget.show()
+
+    def focusInEvent(self, event):
+        """窗口获得焦点时，确保锁定按钮置顶"""
+        super().focusInEvent(event)
+        if self._lock_btn_widget:
+            self._lock_btn_widget._force_always_on_top()
+            self._sync_lock_btn_position()
 
     def set_selection_indicator(self, visible: bool):
         """显示/隐藏选中标记"""

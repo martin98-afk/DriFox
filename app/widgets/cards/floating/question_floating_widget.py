@@ -497,15 +497,15 @@ class QuestionFloatingWidget(QWidget):
             QPushButton:hover { color: rgba(255,255,255,0.7); }
         """)
 
-        self._preview_btn = QPushButton("预览")
+        self._preview_btn = QPushButton("预览参数")
         self._preview_btn.setFixedHeight(30)
         self._preview_btn.setCursor(Qt.PointingHandCursor)
         self._preview_btn.setFont(get_unified_font(10))
         self._preview_btn.clicked.connect(self._on_preview)
         self._preview_btn.setVisible(False)
-        self._preview_btn.setStyleSheet("""
-            QPushButton { color: rgba(255,255,255,0.72); background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 0 14px; }
-            QPushButton:hover { color: rgba(255,255,255,0.95); background: rgba(255,255,255,0.15); }
+        self._preview_btn.setStyleSheet(f"""
+            QPushButton {{ color: rgba(255,255,255,0.72); background: {Colors.REALTIME_TAG_BG}; border: none; border-radius: 6px; padding: 0 14px; }}
+            QPushButton:hover {{ color: rgba(255,255,255,0.95); background: {Colors.CARD_BG_SOLID}; }}
         """)
 
         self._back_btn = QPushButton("返回")
@@ -524,13 +524,13 @@ class QuestionFloatingWidget(QWidget):
         self._next_btn.setFont(get_unified_font(10, True))
         self._next_btn.clicked.connect(self._on_next)
         self._next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {Colors.REALTIME_ACCENT}; color: #ffffff; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
-            QPushButton:hover {{ background-color: {Colors.REALTIME_BORDER}; }}
+            QPushButton {{ background-color: {Colors.REALTIME_TAG_BG}; color: #ffffff; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
         """)
 
         footer.addWidget(self._ignore_btn)
-        footer.addWidget(self._preview_btn)
         footer.addStretch()
+        footer.addWidget(self._preview_btn)
         footer.addWidget(self._back_btn)
         footer.addWidget(self._next_btn)
 
