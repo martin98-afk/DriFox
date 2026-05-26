@@ -553,6 +553,17 @@ class OpenAIChatWorker(QThread):
                                                  current_session_messages)
                     return
                 if tool_calls_found and tool_args_pending:
+                    # 🛡️ continue 之前检查取消状态，否则 while 循环直接退出绕过保存
+                    if self._is_cancelled:
+                        partial_sequence = self._build_response_message_sequence()
+                        if partial_sequence:
+                            current_messages.extend(partial_sequence)
+                            current_session_messages.extend(partial_sequence)
+                            self._current_session_messages = list(current_session_messages)
+                            self.full_response = ''.join(self._response_chunks)
+                            self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                                     current_session_messages)
+                        return
                     continue
                 if self._is_cancelled:
                     # 🛡️ 同上，保存 partial 响应

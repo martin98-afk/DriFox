@@ -346,6 +346,18 @@ class PluginManager:
         """获取所有插件的主题目录路径"""
         return self.get_plugin_dirs("themes")
 
+    def get_hooks_dirs(self) -> List[Path]:
+        """获取所有已启用插件的 hooks 目录路径"""
+        return self.get_plugin_dirs("hooks")
+
+    def get_global_hooks_file(self) -> Path:
+        """获取全局 hooks 文件路径（user-custom 插件的 hooks/hooks.json）
+
+        用户自定义 hooks 存放位置。如果文件不存在则返回路径但不创建。
+        """
+        from app.utils.utils import get_app_data_dir
+        return get_app_data_dir() / "plugins" / "user-custom" / "hooks" / "hooks.json"
+
     def get_mcp_configs(self) -> List[Path]:
         """获取所有已启用插件的 .mcp.json 文件路径"""
         configs = []
@@ -507,32 +519,52 @@ class PluginManager:
             logger.error(f"[PluginManager] Failed to update MCP server '{name}': {e}")
 
     def add_mcp_server(self, name: str, server_data: dict):
-        """添加 MCP 服务器到用户插件（user-mcp）的 .mcp.json
+        """添加 MCP 服务器到用户自定义插件（user-custom）的 .mcp.json
 
-        如果 user-mcp 插件不存在，自动创建。
+        如果 user-custom 插件不存在，自动创建。
         """
         from app.utils.utils import get_app_data_dir
 
-        user_mcp_dir = get_app_data_dir() / "plugins" / "user-mcp"
-        user_mcp_dir.mkdir(parents=True, exist_ok=True)
+        custom_dir = get_app_data_dir() / "plugins" / "user-custom"
+        custom_dir.mkdir(parents=True, exist_ok=True)
 
-        # 确保 user-mcp 插件有 plugin.json
-        manifest_dir = user_mcp_dir / ".drifox-plugin"
+        # 确保 user-custom 插件有 plugin.json（仅首次创建时添加 hooks 组件声明）
+        manifest_dir = custom_dir / ".drifox-plugin"
         manifest_dir.mkdir(exist_ok=True)
         manifest_path = manifest_dir / "plugin.json"
 
-        if not manifest_path.exists():
+        manifest = {"type": "user", "components": {}}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = {"type": "user", "components": {}}
+        else:
             manifest = {
-                "name": "user-mcp",
-                "description": "用户自定义 MCP 服务器",
+                "name": "user-custom",
+                "description": "用户自定义配置（MCP、Hooks 等）",
                 "version": "1.0.0",
                 "type": "user",
-                "components": {"mcp": True},
             }
-            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        # 合并组件声明（不覆盖已有）
+        components = manifest.get("components", {})
+        components["mcp"] = True
+        components["hooks"] = True
+        manifest["components"] = components
+        if "name" not in manifest:
+            manifest["name"] = "user-custom"
+        if "description" not in manifest:
+            manifest["description"] = "用户自定义配置（MCP、Hooks 等）"
+        if "version" not in manifest:
+            manifest["version"] = "1.0.0"
+        if "type" not in manifest:
+            manifest["type"] = "user"
+
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
         # 更新 .mcp.json
-        mcp_path = user_mcp_dir / ".mcp.json"
+        mcp_path = custom_dir / ".mcp.json"
         content = {"mcpServers": {}}
         if mcp_path.exists():
             try:
@@ -546,12 +578,11 @@ class PluginManager:
 
         mcp_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        # 重新发现插件（新创建的 user-mcp 需要注册）
-        if not self.has_plugin("user-mcp"):
-            self._scan_plugins(get_app_data_dir() / "plugins", "user")  # type: ignore
+        # 重新发现插件（新创建的 user-custom 需要注册）
+        if not self.has_plugin("user-custom"):
             self._discover_user_plugins(get_app_data_dir())
 
-        logger.info(f"[PluginManager] Added MCP server '{name}' to user-mcp plugin")
+        logger.info(f"[PluginManager] Added MCP server '{name}' to user-custom plugin")
 
     def remove_mcp_server(self, name: str):
         """从来源插件的 .mcp.json 中移除指定 MCP 服务器
@@ -581,7 +612,7 @@ class PluginManager:
                     source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
                     logger.info(f"[PluginManager] Disabled system MCP server '{name}'")
             else:
-                # 用户插件：直接删除
+                # 用户插件（user-custom）：直接删除
                 if name in mcp_servers:
                     del mcp_servers[name]
                     source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")

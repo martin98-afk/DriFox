@@ -249,8 +249,10 @@ class AgentManager:
 
         # 3. 加载 hooks
         if self._hook_manager is not None:
-            if self.agents_dir and self.agents_dir.exists():
-                self._hook_manager.load_hooks_from_directory(self.agents_dir)
+            # 3a. 插件 hooks 目录（顶层 hooks/）
+            self._load_plugin_hooks()
+
+            # 3b. 技能中的 hooks（skills/{name}/hooks/hooks.json）
             self._load_skills_hooks()
 
     def _load_agents_from_plugins(self):
@@ -290,6 +292,18 @@ class AgentManager:
                     self._hook_manager.load_hooks_from_skills(skill_path, force=force)
         except (ImportError, Exception):
             pass
+
+    def _load_plugin_hooks(self):
+        """加载插件顶层 hooks/ 目录中的 hooks"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for hooks_dir in pm.get_hooks_dirs():
+                    if not hooks_dir.exists() or not hooks_dir.is_dir():
+                        continue
+                    # plugins/system/hooks/hooks.json — 直接加载
+                    self._hook_manager.load_hooks_from_directory_flat(hooks_dir)
         except (ImportError, Exception):
             pass
 

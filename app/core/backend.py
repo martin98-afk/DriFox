@@ -224,19 +224,24 @@ class ChatBackend(QObject):
         # agents_dir 传 None，智能体从已启用插件动态加载
         self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
-        
-        # 加载 .drifox 全局 hooks（hooks 数据已跨窗口共享，仅首次加载）
-        global_hooks_file = get_app_data_dir() / "hooks" / "hooks.json"
-        if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
-            try:
-                with open(global_hooks_file, 'r', encoding='utf-8') as f:
-                    config = json.loads(f.read())
-                skill_root = str(global_hooks_file.parent)
-                count = self._hook_manager.register_hooks_from_json("__global__", skill_root, config, str(global_hooks_file))
-                if count > 0:
-                    logger.info(f"[ChatBackend] Loaded {count} global hooks from {global_hooks_file}")
-            except Exception as e:
-                logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
+
+        # 加载全局 hooks（从 PluginManager 获取路径）
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            global_hooks_file = pm.get_global_hooks_file()
+            if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
+                try:
+                    with open(global_hooks_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    skill_root = str(global_hooks_file.parent)
+                    count = self._hook_manager.register_hooks_from_json(
+                        "__global__", skill_root, config, str(global_hooks_file)
+                    )
+                    if count > 0:
+                        logger.info(f"[ChatBackend] Loaded {count} global hooks from {global_hooks_file}")
+                except Exception as e:
+                    logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
         
         # 6. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
         self._tool_executor = ToolExecutor(workdir=workdir, backend=self)
@@ -345,7 +350,7 @@ class ChatBackend(QObject):
     # ========== MCP 自动发现 ==========
 
     def _discover_mcp_servers(self):
-        """自动发现其他工具的 MCP 配置并保存到 user-mcp 插件（仅首次运行生效）"""
+        """自动发现其他工具的 MCP 配置并保存到 user-custom 插件（仅首次运行生效）"""
         from app.utils.config import Settings
         from app.core.plugin_manager import PluginManager
 
@@ -359,7 +364,7 @@ class ChatBackend(QObject):
 
         merged, new_ones = discover_and_merge()
         if new_ones:
-            # 将发现的服务器写入 user-mcp 插件
+            # 将发现的服务器写入 user-custom 插件
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for server_data in new_ones:

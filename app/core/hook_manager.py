@@ -1041,24 +1041,31 @@ class HookManager:
 
     def reload_global_hooks(self, config_file: str = None):
         """仅重新加载全局 hooks 配置，不影响 skill/agent hooks"""
-        config_file = config_file or self._config_file
+        if config_file is None:
+            config_file = self._config_file
         if not config_file or not os.path.exists(config_file):
             return
-        
+
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            
-            # 先注销旧的全局 hooks，再重新注册（不碰 skill/agent hooks）
-            skill_root = str(Path(config_file).parent)
+
+            # 先注销旧的全局 hooks
             self.unregister_skill_hooks("__global__")
+
+            # 清除 _config_watchers 中的条目，避免去重检查拦截重新注册
+            if config_file in self._config_watchers:
+                del self._config_watchers[config_file]
+
+            # 重新注册
+            skill_root = str(Path(config_file).parent)
             self.register_hooks_from_json("__global__", skill_root, config, config_file)
             logger.info(f"[HookManager] Reloaded global hooks from {config_file}")
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")
 
     def load_hooks_from_directory(self, agents_dir: Path) -> int:
-        """从 agents_dir 子目录加载 hooks.json"""
+        """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)"""
         count = 0
         if not agents_dir.exists():
             return count
@@ -1082,6 +1089,36 @@ class HookManager:
                         logger.info(f"[HookManager] Loaded {n} hooks from {agent_dir.name}")
                 except Exception as e:
                     logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
+        return count
+
+    def load_hooks_from_directory_flat(self, dir_path: Path) -> int:
+        """从目录直接加载 hooks.json（插件顶层 hooks/ 目录）
+
+        加载 {dir_path}/hooks.json 文件（如果有）。
+        """
+        count = 0
+        if not dir_path.exists() or not dir_path.is_dir():
+            return count
+
+        hooks_file = dir_path / "hooks.json"
+        if not hooks_file.exists():
+            return count
+
+        try:
+            with open(hooks_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            n = self.register_hooks_from_json(
+                dir_path.name,
+                str(dir_path.absolute()),
+                config,
+                str(hooks_file)
+            )
+            count += n
+            if n > 0:
+                logger.info(f"[HookManager] Loaded {n} hooks from {dir_path.name}/hooks.json")
+        except Exception as e:
+            logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
+
         return count
 
     def load_hooks_from_skills(self, skills_dir: Path, force: bool = False) -> int:

@@ -201,9 +201,24 @@ class HookListSettingCard(ExpandSettingCard):
         super().__init__(icon, title, content, parent)
         self.title = title
         self.all_hooks = {}
-        self.hooks_config_file = get_app_data_dir() / "hooks" / "hooks.json"
+        # 从 PluginManager 获取全局 hooks 文件路径
+        self._init_hooks_file()
         self._setup_ui()
         self._refresh()
+
+    def _init_hooks_file(self):
+        """从 PluginManager 获取全局 hooks 文件路径"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                self.hooks_config_file = pm.get_global_hooks_file()
+                return
+        except (ImportError, Exception):
+            pass
+        # 回退
+        from app.utils.utils import get_app_data_dir
+        self.hooks_config_file = get_app_data_dir() / "hooks" / "hooks.json"
     
     def _load_hooks(self):
         """从 HookManager 加载所有 hooks（文件 hooks + 技能 hooks），转为规则格式"""
@@ -488,6 +503,7 @@ class HookListSettingCard(ExpandSettingCard):
                     else:
                         # 全局 hook：保存到全局配置文件
                         self._save_hooks()
+                        self._refresh()
                     
                     self.hooksChanged.emit()
     

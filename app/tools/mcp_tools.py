@@ -897,7 +897,7 @@ def discover_and_merge() -> Tuple[List[dict], List[dict]]:
     """
     自动发现所有已知来源的 MCP 服务器
 
-    发现结果由 backend._discover_mcp_servers() 写入 user-mcp 插件，
+    发现结果由 backend._discover_mcp_servers() 写入 user-custom 插件，
     不再直接修改 Settings.mcp_servers。
 
     Returns:
