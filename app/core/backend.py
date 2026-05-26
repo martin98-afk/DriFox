@@ -221,7 +221,8 @@ class ChatBackend(QObject):
         self.create_session(trigger_hook=False)
         
         # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
-        self._agent_manager = AgentManager.get_instance(str(Path(__file__).parent.parent / "agents"), self._hook_manager)
+        # agents_dir 传 None，智能体从已启用插件动态加载
+        self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
         
         # 加载 .drifox 全局 hooks（hooks 数据已跨窗口共享，仅首次加载）
@@ -289,11 +290,14 @@ class ChatBackend(QObject):
         self._get_memory_context_getter = None
 
         self._history_manager = HistoryManager.get_instance()
-        
-        # 8. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
+
+        # 8. 初始化 PluginManager（系统 + 用户插件发现）
+        self._init_plugin_system()
+
+        # 9. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
         self._discover_mcp_servers()
 
-        # 8. 初始化 MCP 连接
+        # 10. 初始化 MCP 连接
         self._init_mcp_connections()
         
         self._initialized = True
@@ -315,6 +319,65 @@ class ChatBackend(QObject):
         if self._chat_engine:
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
+
+    # ========== 插件系统初始化 ==========
+
+    def _init_plugin_system(self):
+        """初始化 PluginManager，加载所有插件"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            from app.utils.utils import get_app_data_dir
+
+            pm = PluginManager.get_instance()
+            app_data_dir = get_app_data_dir()
+            pm.initialize(app_data_dir)
+
+            # 加载插件 MCP 配置并合并
+            self._merge_plugin_mcp_configs(pm)
+
+            # AgentManager 重新从已启用插件加载智能体
+            if self._agent_manager:
+                self._agent_manager.reload_agents()
+
+            logger.info(f"[ChatBackend] PluginManager 初始化完成，"
+                       f"已加载 {len(pm.list_plugins())} 个插件，"
+                       f"智能体 {len(self._agent_manager.list_agents())} 个")
+        except Exception as e:
+            logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
+
+    def _merge_plugin_mcp_configs(self, pm):
+        """加载所有插件的 .mcp.json 并合并到 MCP 配置"""
+        from app.utils.config import Settings
+        import json
+
+        cfg = Settings.get_instance()
+        existing_servers = cfg.mcp_servers.value or []
+        existing_names = {s.get("name") for s in existing_servers}
+
+        for mcp_file in pm.get_mcp_configs():
+            try:
+                content = json.loads(mcp_file.read_text(encoding="utf-8"))
+                mcp_servers = content.get("mcpServers", {})
+                for name, server_cfg in mcp_servers.items():
+                    if name not in existing_names:
+                        server_entry = {
+                            "name": name,
+                            "type": server_cfg.get("type", "stdio"),
+                            "enabled": server_cfg.get("enabled", True),
+                            "command": server_cfg.get("command", ""),
+                            "args": server_cfg.get("args", []),
+                            "env": server_cfg.get("env", {}),
+                            "_builtin": True,
+                            "_source": str(mcp_file),
+                        }
+                        existing_servers.append(server_entry)
+                        existing_names.add(name)
+                        logger.info(f"[ChatBackend] Added MCP server from plugin: {name}")
+            except Exception as e:
+                logger.error(f"[ChatBackend] Failed to load MCP config from {mcp_file}: {e}")
+
+        if existing_servers:
+            cfg.set(cfg.mcp_servers, existing_servers, save=True)
 
     # ========== MCP 自动发现 ==========
 

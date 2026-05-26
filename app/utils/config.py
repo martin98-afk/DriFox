@@ -217,8 +217,10 @@ class Settings(QConfig):
     # ========== MCP 服务器配置 ==========
     mcp_servers = ConfigItem("MCP", "Servers", [], ListDictValidator())
     mcp_enabled = ConfigItem("MCP", "Enabled", True, BoolValidator())
-    # 标记是否已完成 MCP 自动发现（用于决定下次启动是否再次扫描）
     mcp_discovered = ConfigItem("MCP", "Discovered", False, BoolValidator())
+
+    # ========== 插件系统配置 ==========
+    enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
 
     # ========== 云组件库API ==========
     SERPAPI_KEY = ConfigItem(

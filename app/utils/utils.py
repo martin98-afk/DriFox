@@ -312,9 +312,20 @@ def get_local_skills() -> list:
     - ~/.agents/skills (用户技能)
     - 应用数据目录/skills
     """
-    skills_dirs = [
+    # 插件路径（PluginManager 已初始化时）
+    skills_dirs = []
+    try:
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            skills_dirs = pm.get_skill_paths()
+    except (ImportError, Exception):
+        pass
+
+    # 补充旧路径（兼容 opencode 和用户安装）
+    skills_dirs += [
         Path(__file__).parent.parent / "skills",
-        Path(__file__).parent.parent / ".opencode" / "skills",  # opencode 技能
+        Path(__file__).parent.parent / ".opencode" / "skills",
         get_app_data_dir() / "skills",
         Path.home() / ".agents" / "skills",
     ]
@@ -381,12 +392,28 @@ def load_skill(name: str) -> tuple[bool, str, str]:
     Returns:
         (成功标志, 内容或错误信息, 技能工作目录路径)
     """
+    # 基础搜索路径
     search_paths = [
         Path(__file__).parent.parent / "skills" / name / "SKILL.md",
         Path(__file__).parent.parent / ".opencode" / "skills" / name / "SKILL.md",
         get_app_data_dir() / "skills" / name / "SKILL.md",
         Path.home() / ".agents" / "skills" / name / "SKILL.md",
     ]
+
+    # 插件路径（PluginManager 已初始化时添加为最高优先级）
+    try:
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            plugin_skill_paths = pm.get_skill_paths()
+            plugin_search_paths = [
+                p / name / "SKILL.md"
+                for p in reversed(plugin_skill_paths)
+            ]
+            search_paths = plugin_search_paths + search_paths
+    except (ImportError, Exception):
+        pass
+
     found_path = None
     for path in search_paths:
         if path.exists():

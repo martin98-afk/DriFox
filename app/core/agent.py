@@ -230,9 +230,7 @@ class AgentManager:
         return cls._instance
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):
-        self.agents_dir = (
-            Path(agents_dir) if agents_dir else Path(__file__).parent.parent / "agents"
-        )
+        self.agents_dir = Path(agents_dir) if agents_dir else None
         self._agents: Dict[str, Agent] = {}
         self._hidden_agents: Dict[str, Agent] = {}
         self._hook_manager = hook_manager
@@ -241,13 +239,57 @@ class AgentManager:
         self._load_agents()
 
     def _load_agents(self):
-        if not self.agents_dir.exists():
-            logger.warning(
-                f"[AgentManager] Agents directory not found: {self.agents_dir}"
-            )
+        """加载智能体：插件路径优先，后备路径兜底"""
+        # 1. 从所有已启用插件加载（PluginManager 已初始化时）
+        self._load_agents_from_plugins()
+
+        # 2. 从后备目录加载（兼容旧配置）
+        if self.agents_dir and self.agents_dir.exists():
+            self._load_agents_from_dir(self.agents_dir)
+
+        # 3. 加载 hooks
+        if self._hook_manager is not None:
+            if self.agents_dir and self.agents_dir.exists():
+                self._hook_manager.load_hooks_from_directory(self.agents_dir)
+            self._load_skills_hooks()
+
+    def _load_agents_from_plugins(self):
+        """从所有已启用插件加载智能体"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for plugin in pm.get_enabled_plugins():
+                    agent_dir = plugin.path / "agents"
+                    if agent_dir.exists():
+                        self._load_agents_from_dir(agent_dir)
+        except (ImportError, Exception):
+            pass
+
+    def reload_agents(self):
+        """重新从已启用插件加载智能体（动态注入/注出后调用）"""
+        self._agents.clear()
+        self._hidden_agents.clear()
+        self._load_agents()
+        logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, {len(self._hidden_agents)} hidden")
+
+    def _load_skills_hooks(self):
+        """加载 skills 目录中的 hooks（插件路径优先）"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for skill_path in pm.get_skill_paths():
+                    self._hook_manager.load_hooks_from_skills(skill_path)
+        except (ImportError, Exception):
+            pass
+
+    def _load_agents_from_dir(self, agents_dir: Path):
+        """从指定目录加载所有智能体"""
+        if not agents_dir.exists():
             return
 
-        for md_file in self.agents_dir.glob("*.md"):
+        for md_file in agents_dir.glob("*.md"):
             try:
                 agent = self._parse_markdown_agent(md_file)
                 if agent:
@@ -261,7 +303,7 @@ class AgentManager:
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {md_file}: {e}")
 
-        for yaml_file in self.agents_dir.glob("*.yaml"):
+        for yaml_file in agents_dir.glob("*.yaml"):
             try:
                 agent = self._parse_yaml_agent(yaml_file)
                 if agent:
@@ -273,15 +315,6 @@ class AgentManager:
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {yaml_file}: {e}")
 
-        # 加载 hooks（委托给 HookManager）
-        if self._hook_manager is not None:
-            # 从 agents 子目录加载 hooks
-            self._hook_manager.load_hooks_from_directory(self.agents_dir)
-            # 从 skills 目录加载 hooks
-            skills_dir = self.agents_dir.parent / "skills"
-            if skills_dir.exists():
-                self._hook_manager.load_hooks_from_skills(skills_dir)
-    
     def _parse_markdown_agent(self, file_path: Path) -> Optional[Agent]:
         content = file_path.read_text(encoding="utf-8")
 

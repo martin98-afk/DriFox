@@ -136,19 +136,10 @@ def register_all_commands():
     for name in list(cmd_mgr.get_command_names()):
         cmd_mgr.unregister(name)
 
-    # ---- 加载 app/commands/ 目录命令 ----
-    commands_dir = Path(__file__).parent.parent / "commands"
-    commands = _load_commands_from_dir(commands_dir)
+    # ---- 加载命令：优先从 PluginManager，回退到 app/commands/ ----
+    commands = _load_commands_from_plugins(cmd_mgr)
 
-    for cmd in commands:
-        cmd_mgr.register(
-            name=cmd["name"],
-            command_type=cmd["type"],
-            description=cmd["description"],
-            prompt_text=cmd["prompt_text"],
-        )
-
-    # ---- 加载 agents 目录智能体 ----
+    # ---- 加载智能体命令：优先从 PluginManager，回退到 app/agents/ ----
     _register_builtin_agents_as_commands(cmd_mgr)
 
     logger.info(f"[BuiltinCommands] Registered {len(commands)} commands + agents")
@@ -156,17 +147,62 @@ def register_all_commands():
 
 
 # ============================================================
-# agents 目录加载（保持原逻辑）
+# PluginManager 集成
+# ============================================================
+
+def _get_command_sources() -> list:
+    """获取命令文件源列表"""
+    from app.core.plugin_manager import PluginManager
+    pm = PluginManager.get_instance()
+    if pm.is_initialized():
+        cmd_files = pm.get_command_files()
+        if cmd_files:
+            return cmd_files
+    logger.warning("[BuiltinCommands] PluginManager not available, no commands loaded")
+    return []
+
+
+def _get_agent_files() -> list:
+    """获取智能体文件列表"""
+    from app.core.plugin_manager import PluginManager
+    pm = PluginManager.get_instance()
+    if pm.is_initialized():
+        agent_files = pm.get_agent_files()
+        if agent_files:
+            return agent_files
+    logger.warning("[BuiltinCommands] PluginManager not available, no agents loaded")
+    return []
+
+
+def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
+    """加载所有命令文件到 CommandManager"""
+    cmd_files = _get_command_sources()
+    commands = []
+    for md_file in cmd_files:
+        cmd = _load_command_file(md_file)
+        if cmd:
+            cmd_mgr.register(
+                name=cmd["name"],
+                command_type=cmd["type"],
+                description=cmd["description"],
+                prompt_text=cmd["prompt_text"],
+            )
+            commands.append(cmd)
+    return commands
+
+
+# ============================================================
+# agents 目录加载（通过 PluginManager）
 # ============================================================
 
 def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
-    """从 app/agents 目录加载内置智能体并注册为命令"""
-    agents_dir = Path(__file__).parent.parent / "agents"
-    if not agents_dir.exists():
-        logger.warning(f"[BuiltinCommands] Agents directory not found: {agents_dir}")
+    """加载智能体命令：优先 PluginManager 路径，回退到 app/agents/"""
+    agent_files = _get_agent_files()
+    if not agent_files:
+        logger.warning("[BuiltinCommands] No agent files found from any source")
         return
 
-    for md_file in agents_dir.glob("*.md"):
+    for md_file in agent_files:
         try:
             content = md_file.read_text(encoding="utf-8")
             if not content.startswith("---"):
