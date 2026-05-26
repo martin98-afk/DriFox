@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Optional, List, Any, Tuple, Callable
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, font_size_css
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QLabel, QWidget, QLineEdit, QHBoxLayout
 from loguru import logger
@@ -260,18 +260,18 @@ CHAT_SCROLL_STYLE = """
     }
 """
 
-TITLE_STYLE = """
-    QLabel {
+TITLE_STYLE = f"""
+    QLabel {{
         color: #f3f6fc;
-        font-size: 15px;
+        {font_size_css(15)}
         font-weight: bold;
         padding: 6px 4px;
         border-radius: 10px;
         background-color: transparent;
-    }
-    QLabel:hover {
+    }}
+    QLabel:hover {{
         background-color: rgba(255, 255, 255, 0.06);
-    }
+    }}
 """
 
 MODEL_BTN_STYLE = """
@@ -286,7 +286,7 @@ MODEL_BTN_STYLE = """
     }
 """
 
-MODEL_BTN_TEXT_STYLE = "color: #f3f6fc; font-size: 13px; font-weight: bold; background: transparent;"
+MODEL_BTN_TEXT_STYLE = f"color: #f3f6fc; {font_size_css(13)} font-weight: bold; background: transparent;"
 
 
 # ==================== 预编译正则 ====================

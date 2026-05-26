@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QSizePolicy, QWidget, QTextEdit,
 )
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_unified_font, get_font_family_css
 
 
@@ -354,7 +354,7 @@ class _CustomInputCard(QWidget):
                 border: 1px solid {te_border};
                 border-radius: 6px;
                 padding: 8px 10px;
-                {get_font_family_css()} font-size: 10pt;
+                {get_font_family_css()} font-size: {font_size_css(10)};
             }}
             QTextEdit:focus {{ border-color: {Colors.REALTIME_ACCENT}; }}
         """)

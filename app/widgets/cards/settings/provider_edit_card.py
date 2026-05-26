@@ -28,6 +28,7 @@ from app.constants import (
     FREE_PROVIDERS,
 )
 from app.utils.utils import get_icon, get_font_family_css
+from app.utils.design_tokens import font_size_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 from app.widgets.model_list_edit_dialog import ModelListEditDialog
@@ -142,7 +143,7 @@ class ProviderEditCard(QWidget):
                 border-radius: 4px;
                 padding: 2px 6px;
                 {get_font_family_css()}
-                font-size: 11px;
+                font-size: {font_size_css(11)};
             }}
             QDoubleSpinBox:hover {{
                 border-color: rgba(0, 120, 212, 200);
@@ -159,7 +160,7 @@ class ProviderEditCard(QWidget):
                 border-radius: 4px;
                 padding: 4px 8px;
                 {get_font_family_css()}
-                font-size: 12px;
+                font-size: {font_size_css(12)};
             }}
             QLineEdit:focus {{
                 border-color: rgba(0, 120, 212, 200);

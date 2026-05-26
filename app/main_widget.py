@@ -1388,7 +1388,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_btn_icon.setFixedSize(15, 15)
         btn_layout.addWidget(self._model_btn_icon)
         self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
-        self._model_btn_text.setStyleSheet(MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(11)))
+        self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         btn_layout.addWidget(self._model_btn_text)
         model_layout.addWidget(self.current_model_btn, 1)
         self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
@@ -1700,6 +1700,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
         self._update_balance_display()
+
+    def _get_model_btn_text_style(self) -> str:
+        """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
+        Colors.refresh()
+        return (
+            f"color: {Colors.TEXT_PRIMARY}; "
+            f"{font_size_css(13)} "
+            f"font-weight: bold; background: transparent;"
+        )
 
     def _update_model_selector_btn(self):
         """更新模型选择按钮的图标和文字显示"""
@@ -2613,9 +2622,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 border-radius: 8px;
             """)
         if hasattr(self, "_model_btn_text"):
-            btn_text_style = MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(13))
-            btn_text_style = btn_text_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
-            self._model_btn_text.setStyleSheet(btn_text_style)
+            self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
+        if hasattr(self, "_model_btn_container"):
+            self._model_btn_container.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
+            """)
         if hasattr(self, "_toolbar_capsule"):
             self._toolbar_capsule.setStyleSheet(f"""
                 background: rgba(255,255,255,0.05);

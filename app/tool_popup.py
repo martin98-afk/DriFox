@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-
 import platform
+
+from app.utils.design_tokens import font_size_css
 import uuid
 import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
@@ -588,12 +589,12 @@ class ToolPopupDialog(QDialog):
         # ========== 多窗口选中标记 ==========
         title_bar = tool_instance.get_title_bar()
         self._selection_indicator = QLabel("●", title_bar)
-        self._selection_indicator.setStyleSheet("""
-            QLabel {
+        self._selection_indicator.setStyleSheet(f"""
+            QLabel {{
                 color: #4FC3F7;
-                font-size: 14px;
+                {font_size_css(14)}
                 background: transparent;
-            }
+            }}
         """)
         self._selection_indicator.setFixedSize(14, 14)
         self._selection_indicator.setVisible(False)

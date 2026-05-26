@@ -326,7 +326,7 @@ class _ArchivedItemCard(CardWidget):
 
         # 归档图标
         archive_icon = QLabel("📦", self)
-        archive_icon.setStyleSheet("font-size: 14px;")
+        archive_icon.setStyleSheet(f"font-size: {font_size_css(14)};")
         top_row.addWidget(archive_icon)
 
         self.title_label = BodyLabel(title[:100], self)
