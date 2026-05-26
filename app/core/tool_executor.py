@@ -44,6 +44,9 @@ class ToolExecutor:
         # 文件操作记录器
         self._file_recorder: Optional[FileOperationRecorder] = None
 
+        # 子智能体管理器（实例级，每个窗口独立，不共享给 BuiltinTools）
+        self._sub_agent_manager = None
+
         self._initialize_builtin_tools()
 
     def _initialize_builtin_tools(self):
@@ -545,6 +548,7 @@ class ToolExecutor:
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
                     args.get("share_context", False),
                     session_id=self._session_id,
+                    sub_agent_manager=self._sub_agent_manager,
                 )
             )(args.get("tasks", [])),
             "task_status": lambda: self._builtin_tools.task_status(
@@ -552,6 +556,7 @@ class ToolExecutor:
                 args.get("with_log", False),
                 args.get("with_result", True),
                 session_id=self._session_id,
+                sub_agent_manager=self._sub_agent_manager,
             ),
             "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
             "list_skills": lambda: self._builtin_tools.list_skills(),
@@ -807,10 +812,13 @@ class ToolExecutor:
         return result_holder[0] if result_holder[0] else ToolResult(False, error="WebSearch failed")
 
     def set_sub_agent_manager(self, sub_agent_manager):
-        """设置子智能体管理器"""
+        """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
+        # 实例级引用：task_batch/task_status lambda 使用此引用来路由到正确的窗口
+        self._sub_agent_manager = sub_agent_manager
+        # 共享 BuiltinTools 回退：供旧代码路径兼容
         if self._builtin_tools:
             self._builtin_tools._sub_agent_manager = sub_agent_manager
             self._builtin_tools._task_tools._sub_agent_manager = sub_agent_manager
             logger.info(
-                "[ToolExecutor] SubAgentManager attached to BuiltinTools and TaskTools"
+                "[ToolExecutor] SubAgentManager attached to instance and BuiltinTools"
             )

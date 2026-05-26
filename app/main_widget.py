@@ -6276,6 +6276,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ⚠️ 时间线节点在流式完成时不会更新 - 修复
         self._update_node_preview()
+        self._sync_node_preview_to_last()
 
         # 对话完成后刷新余额显示
         self._refresh_balance()
@@ -6385,6 +6386,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         current_title = self.title_edit.text() if self.title_edit else "对话"
         self._notify_if_inactive(f"{current_title} - 错误", error[:100])
+
+        # ⚠️ 时间线节点在引擎错误时不会更新 - 修复
+        self._update_node_preview()
+        self._sync_node_preview_to_last()
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """API 重试状态通知 - 更新卡片边框和状态栏"""
@@ -7225,11 +7230,14 @@ class OpenAIChatToolWindow(ToolWindow):
             def _do_finalize():
                 interrupted_messages = engine_ref.finalize_stop() or []
                 # 回到主线程更新 UI
-                if interrupted_messages and not getattr(self, '_is_destroyed', False):
+                if not getattr(self, '_is_destroyed', False):
                     QTimer.singleShot(0, lambda m=interrupted_messages: self._on_finalize_complete(m))
 
             t = threading.Thread(target=_do_finalize, daemon=True)
             t.start()
+        else:
+            # 无 chat_engine，仍然需要更新时间线
+            self._update_node_preview()
 
     def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
         """主线程回调：处理 finalize_stop 异步完成后的消息保存
@@ -7245,6 +7253,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()
+        self._sync_node_preview_to_last()
 
     def _create_context_menu(self):
         self._context_menu_actions = {}

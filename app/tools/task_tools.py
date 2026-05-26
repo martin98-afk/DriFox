@@ -88,7 +88,7 @@ class TaskTools:
 
     def task_execute_batch(
             self, tasks: List[Dict], share_context: bool = False,
-            session_id: str = ""
+            session_id: str = "", sub_agent_manager=None
     ) -> ToolResult:
         """
         批量执行子智能体任务（并行）。
@@ -100,12 +100,15 @@ class TaskTools:
                 - context: str (可选) 父任务上下文
             share_context: bool 是否共享主智能体上下文给子智能体
             session_id: 当前会话 ID（由 ToolExecutor 传入，用于会话隔离）
+            sub_agent_manager: 子智能体管理器实例。传入时优先使用，解决多窗口闭包问题。
 
         Returns:
             ToolResult: success=True, content={"task_ids": [str], "status": "running"}
         """
         try:
-            if not hasattr(self, "_sub_agent_manager") or not self._sub_agent_manager:
+            # 优先使用传入的 sub_agent_manager（多窗口隔离），回退到共享实例
+            manager = sub_agent_manager or self._sub_agent_manager
+            if not manager:
                 return ToolResult(False, error="子智能体管理器未初始化")
 
             if not tasks:
@@ -123,7 +126,7 @@ class TaskTools:
                     continue
 
                 task_id = str(uuid.uuid4())
-                self._sub_agent_manager.execute_task(
+                manager.execute_task(
                     task_id=task_id,
                     agent_name=agent,
                     task_description=description,
@@ -150,7 +153,7 @@ class TaskTools:
             return ToolResult(False, error=f"批量任务启动失败: {str(e)}")
 
     def task_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True,
-                     session_id: str = "") -> ToolResult:
+                     session_id: str = "", sub_agent_manager=None) -> ToolResult:
         """
         查询任务状态。
 
@@ -159,11 +162,14 @@ class TaskTools:
             with_log: 是否包含执行日志（默认 False）
             with_result: 是否包含执行结果（默认 True）
             session_id: 当前会话 ID（由 ToolExecutor 传入，用于会话隔离）
+            sub_agent_manager: 子智能体管理器实例。传入时优先使用，解决多窗口闭包问题。
 
         Returns:
             ToolResult: success=True, content={"tasks": [{"task_id": str, "status": str, "agent": str, "result"?: str, "logs"?: [...]}]}
         """
-        if not hasattr(self, "_sub_agent_manager") or not self._sub_agent_manager:
+        # 优先使用传入的 sub_agent_manager（多窗口隔离），回退到共享实例
+        manager = sub_agent_manager or self._sub_agent_manager
+        if not manager:
             return ToolResult(False, error="子智能体管理器未初始化")
 
         # 解析任务ID：支持字符串（逗号分隔）或列表格式
@@ -174,9 +180,9 @@ class TaskTools:
             else:
                 # 字符串格式：逗号分隔
                 id_list = [tid.strip() for tid in str(task_ids).split(",") if tid.strip()]
-            return self._sub_agent_manager.get_tasks_status_with_details(id_list, with_log, with_result)
+            return manager.get_tasks_status_with_details(id_list, with_log, with_result)
         else:
-            return self._sub_agent_manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
+            return manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
 
     def load_skill(self, name: str) -> ToolResult:
         """加载指定技能"""
