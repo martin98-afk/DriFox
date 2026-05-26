@@ -994,6 +994,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._branch_widget.setObjectName("_branchWidget")
         self._branch_widget.clicked.connect(self._on_branch_label_clicked)
         self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
+        self._branch_widget.setAutoDefault(False)  # 防止 QDialog 在 Enter 时误触发
         self._branch_widget.setVisible(False)
         self._refresh_branch_widget_style()
         pb_layout.addWidget(self._branch_widget)
@@ -1403,58 +1404,58 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 智能体切换（无边框）
         self._agent_switch_widget = self._create_agent_switch_buttons()
-        self._agent_switch_widget.setFixedHeight(26)
+        self._agent_switch_widget.setFixedHeight(28)
         toolbar_layout.addWidget(self._agent_switch_widget)
 
         toolbar_layout.addStretch(1)
 
         # 右侧功能按钮组（无边框，间距加宽）
         self._toolbar_capsule = QWidget(toolbar_widget)
-        self._toolbar_capsule.setFixedHeight(26)
+        self._toolbar_capsule.setFixedHeight(28)
         self._toolbar_capsule.setStyleSheet(f"""
             background: rgba(255,255,255,0.05);
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
         """)
         capsule_layout = QHBoxLayout(self._toolbar_capsule)
         capsule_layout.setContentsMargins(6, 2, 6, 2)
-        capsule_layout.setSpacing(6)
+        capsule_layout.setSpacing(4)
 
         btn_capsule_style = """
             TransparentToolButton { background: transparent; border: none; }
-            TransparentToolButton:hover { background: rgba(255,255,255,0.1); border-radius: 4px; }
+            TransparentToolButton:hover { background: rgba(255,255,255,0.12); border-radius: 5px; }
         """
 
         self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
-        self.auto_loop_btn.setFixedSize(26, 26)
+        self.auto_loop_btn.setFixedSize(24, 24)
         self.auto_loop_btn.setToolTip("AutoLoop")
         self.auto_loop_btn.setStyleSheet(btn_capsule_style)
         self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
         capsule_layout.addWidget(self.auto_loop_btn)
 
         self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
-        self.diff_btn.setFixedSize(26, 26)
+        self.diff_btn.setFixedSize(24, 24)
         self.diff_btn.setStyleSheet(btn_capsule_style)
         self.diff_btn.setToolTip("差异对比")
         self.diff_btn.clicked.connect(self._open_diff_viewer)
         capsule_layout.addWidget(self.diff_btn)
 
         self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
-        self.memory_btn.setFixedSize(26, 26)
+        self.memory_btn.setFixedSize(24, 24)
         self.memory_btn.setStyleSheet(btn_capsule_style)
         self.memory_btn.setToolTip("长期记忆")
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
 
         self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
-        self.history_btn.setFixedSize(26, 26)
+        self.history_btn.setFixedSize(24, 24)
         self.history_btn.setStyleSheet(btn_capsule_style)
         self.history_btn.setToolTip("历史会话")
         self.history_btn.clicked.connect(self._toggle_history_card)
         capsule_layout.addWidget(self.history_btn)
 
         self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
-        self.new_session_btn.setFixedSize(26, 26)
+        self.new_session_btn.setFixedSize(24, 24)
         self.new_session_btn.setStyleSheet(btn_capsule_style)
         self.new_session_btn.setToolTip("新建对话")
         self.new_session_btn.clicked.connect(self._create_new_session)
@@ -1478,10 +1479,21 @@ class OpenAIChatToolWindow(ToolWindow):
     def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
 
+        优先从 FunctionCommandHandlers 获取处理器，回退到内置处理器。
+
         Args:
             command_name: 命令名（不含 /）
             args: 命令后的参数字符串
         """
+        from app.core.builtin_commands import FunctionCommandHandlers
+
+        # 优先使用动态注册的处理器
+        handler = FunctionCommandHandlers.get(command_name)
+        if handler:
+            handler(args)
+            return
+
+        # 回退到内置处理器（用于兼容旧命令或未注册的 function 命令）
         if command_name == "new":
             self._create_new_session()
         elif command_name == "new-window":

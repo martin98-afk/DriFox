@@ -1735,7 +1735,6 @@ class TitleEditWidget(QWidget):
         self._label = QLabel(text, self)
         self._label.setCursor(Qt.IBeamCursor)
         self._label.setMinimumWidth(0)  # 允许缩窄以触发省略
-        self._label.mousePressEvent = self._on_label_clicked
         self._layout.addWidget(self._label)
 
         # 编辑输入框 — 编辑模式使用
@@ -1812,29 +1811,37 @@ class TitleEditWidget(QWidget):
 
     # ── 事件处理 ──
 
-    def _on_label_clicked(self, event):
-        """点击标签进入编辑模式"""
-        if self._editing:
-            return
-        self._editing = True
-        self.setReadOnly(False)
+    def mouseDoubleClickEvent(self, event):
+        """双击标签进入编辑模式"""
+        if event.button() == Qt.LeftButton:
+            self._editing = True
+            self.setReadOnly(False)
+        super().mouseDoubleClickEvent(event)
 
     def _on_edit_return(self):
         self._editing = False
-        self._apply_edit()
-        self.returnPressed.emit()
+        changed = self._apply_edit()
+        if changed:
+            self.returnPressed.emit()
 
     def _on_edit_finished(self):
         self._editing = False
-        self._apply_edit()
-        self.editingFinished.emit()
+        changed = self._apply_edit()
+        if changed:
+            self.editingFinished.emit()
 
-    def _apply_edit(self):
+    def _apply_edit(self) -> bool:
+        """应用编辑，返回 True 表示标题有实际变化"""
         new_text = self._edit.text().strip()
-        if new_text:
+        if new_text and new_text != self._full_text:
             self._full_text = new_text
+            self._label.setText(self._full_text)
+            self.setReadOnly(True)
+            return True
+        # 空输入或无变化：恢复原标题，不触发信号
         self._label.setText(self._full_text)
         self.setReadOnly(True)
+        return False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

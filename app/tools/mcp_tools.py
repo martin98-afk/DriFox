@@ -353,6 +353,8 @@ class MCPClientManager:
         if self._connected:
             await self._disconnect_all()
 
+        # 收集需要连接的服务器列表
+        enabled_servers = []
         for server_cfg in servers_config:
             name = server_cfg.get("name", "")
             if not name:
@@ -360,9 +362,21 @@ class MCPClientManager:
             if not server_cfg.get("enabled", True):
                 logger.info(f"[MCP] 跳过已禁用的服务器: {name}")
                 continue
+            enabled_servers.append(server_cfg)
 
+        # 并行启动所有服务器连接（不再串行 await）
+        tasks = {
+            server_cfg["name"]: asyncio.create_task(
+                self._connect_single(server_cfg["name"], server_cfg),
+                name=f"mcp-connect-{server_cfg['name']}",
+            )
+            for server_cfg in enabled_servers
+        }
+
+        # 等待所有连接完成（每个任务内部有 30 秒超时，互不阻塞）
+        for name, task in tasks.items():
             try:
-                await self._connect_single(name, server_cfg)
+                await task
             except Exception as e:
                 logger.error(f"[MCP] 连接服务器 '{name}' 失败: {e}")
 
