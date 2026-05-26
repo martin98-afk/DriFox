@@ -350,14 +350,20 @@ class AgentManager:
         if not content.startswith("---"):
             return None
 
-        parts = content.split("---", 2)
+        parts = content.split("---", 3)
         if len(parts) < 3:
             return None
 
+        # parts[0] = "", parts[1] = frontmatter, parts[2] = body
+        # 多行 description 等复杂字段内容在 body 中，不会污染 frontmatter
         frontmatter = parts[1]
         body = parts[2].strip()
 
-        meta = yaml.safe_load(frontmatter)
+        try:
+            meta = yaml.safe_load(frontmatter)
+        except Exception as e:
+            logger.error(f"[AgentManager] YAML parse failed for {file_path}: {e}")
+            return None
         if not meta:
             return None
 

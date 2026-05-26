@@ -208,14 +208,18 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
             if not content.startswith("---"):
                 continue
 
-            parts = content.split("---", 2)
+            parts = content.split("---", 3)
             if len(parts) < 3:
                 continue
 
             frontmatter = parts[1]
             body = parts[2].strip()
 
-            meta = yaml.safe_load(frontmatter)
+            try:
+                meta = yaml.safe_load(frontmatter)
+            except Exception as e:
+                logger.warning(f"[BuiltinCommands] YAML parse failed for {md_file}: {e}")
+                continue
             if not meta:
                 continue
 

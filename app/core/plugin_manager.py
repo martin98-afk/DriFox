@@ -426,9 +426,10 @@ class PluginManager:
         返回格式：
         [{"name": "...", "type": "stdio", "command": "...", "args": [], "env": {}, "enabled": True}, ...]
 
-        支持两种 .mcp.json 格式：
-        1. 新格式：{"mcpServers": {"ServerName": {"command": "...", ...}}}
+        支持三种 .mcp.json 格式：
+        1. DriFoxx 格式：{"mcpServers": {"ServerName": {"command": "...", ...}}}
         2. 旧格式：{"mcpServers": {"Servers": [{"name": "...", ...}]}}
+        3. .claude-plugin 格式：{"ServerName": {"type": "http", "url": "..."}}
         """
         servers = []
         seen_names = set()
@@ -436,7 +437,16 @@ class PluginManager:
         for mcp_file in self.get_mcp_configs():
             try:
                 content = json.loads(mcp_file.read_text(encoding="utf-8"))
-                mcp_servers = content.get("mcpServers", {})
+
+                # 判断格式：有 mcpServers 键 → DriFoxx 格式；否则 → .claude-plugin 格式
+                if "mcpServers" in content:
+                    mcp_servers = content["mcpServers"]
+                else:
+                    # .claude-plugin 格式：服务器直接放在根级别
+                    mcp_servers = content
+
+                if not isinstance(mcp_servers, dict):
+                    continue
 
                 # 兼容旧格式：{"mcpServers": {"Servers": [...]}}
                 if "Servers" in mcp_servers and isinstance(mcp_servers["Servers"], list):
@@ -445,38 +455,35 @@ class PluginManager:
                         if not name or name in seen_names:
                             continue
                         seen_names.add(name)
-                        servers.append({
-                            "name": name,
-                            "type": server_data.get("type", "stdio"),
-                            "enabled": server_data.get("enabled", True),
-                            "command": server_data.get("command", ""),
-                            "args": server_data.get("args", []),
-                            "env": server_data.get("env", {}),
-                            "_source": str(mcp_file),
-                        })
-                    # 跳过非 dict 的顶级键（Discovered、Enabled 等）
+                        servers.append(self._build_mcp_entry(name, server_data, mcp_file))
                     continue
 
-                # 新格式：{"mcpServers": {"ServerName": {"command": "...", ...}}}
+                # 标准格式：{"ServerName": {...}}
                 for name, server_cfg in mcp_servers.items():
                     if not isinstance(server_cfg, dict):
                         continue
                     if name in seen_names:
                         continue
                     seen_names.add(name)
-                    servers.append({
-                        "name": name,
-                        "type": server_cfg.get("type", "stdio"),
-                        "enabled": server_cfg.get("enabled", True),
-                        "command": server_cfg.get("command", ""),
-                        "args": server_cfg.get("args", []),
-                        "env": server_cfg.get("env", {}),
-                        "_source": str(mcp_file),
-                    })
+                    servers.append(self._build_mcp_entry(name, server_cfg, mcp_file))
+
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load MCP config from {mcp_file}: {e}")
 
         return servers
+
+    def _build_mcp_entry(self, name: str, cfg: dict, source_file: Path) -> dict:
+        """构建统一格式的 MCP 服务器条目"""
+        return {
+            "name": name,
+            "type": cfg.get("type", "stdio"),
+            "enabled": cfg.get("enabled", True),
+            "command": cfg.get("command", ""),
+            "args": cfg.get("args", []),
+            "env": cfg.get("env", {}),
+            "url": cfg.get("url", ""),
+            "_source": str(source_file),
+        }
 
     def update_mcp_server(self, name: str, server_data: dict):
         """更新指定 MCP 服务器配置（写入来源插件的 .mcp.json）
@@ -512,31 +519,59 @@ class PluginManager:
 
         try:
             content = json.loads(source_path.read_text(encoding="utf-8"))
-            mcp_servers = content.get("mcpServers", {})
+
+            # 判断格式：有 mcpServers 键 → DriFoxx 格式；否则 → .claude-plugin 格式
+            if "mcpServers" in content:
+                mcp_servers = content["mcpServers"]
+            else:
+                mcp_servers = content
+
+            if not isinstance(mcp_servers, dict):
+                logger.warning(f"[PluginManager] Invalid MCP config format in {source_path}")
+                return
 
             # 兼容旧格式：如果顶级是 {"Servers": [...]} 结构
             if "Servers" in mcp_servers and isinstance(mcp_servers["Servers"], list):
+                found = False
                 for entry in mcp_servers["Servers"]:
                     if entry.get("name") == name:
                         entry.update({
                             k: v for k, v in server_data.items()
                             if k not in ("name", "_source", "_builtin")
                         })
+                        found = True
                         break
-            elif name in mcp_servers:
-                # 新格式：{"ServerName": {...}}
-                mcp_servers[name].update({
-                    k: v for k, v in server_data.items()
-                    if k not in ("name", "_source", "_builtin")
-                })
+                if not found:
+                    mcp_servers["Servers"].append({
+                        k: v for k, v in server_data.items()
+                        if k not in ("name", "_source", "_builtin")
+                    })
+            elif "mcpServers" in content:
+                # DriFoxx 格式：{"mcpServers": {"ServerName": {...}}}
+                if name in mcp_servers:
+                    mcp_servers[name].update({
+                        k: v for k, v in server_data.items()
+                        if k not in ("name", "_source", "_builtin")
+                    })
+                else:
+                    mcp_servers[name] = {
+                        k: v for k, v in server_data.items()
+                        if k not in ("name", "_source", "_builtin")
+                    }
+                content["mcpServers"] = mcp_servers
             else:
-                # 不存在则添加
-                mcp_servers[name] = {
-                    k: v for k, v in server_data.items()
-                    if k not in ("name", "_source", "_builtin")
-                }
-
-            content["mcpServers"] = mcp_servers
+                # .claude-plugin 格式：{"ServerName": {...}}
+                # 服务器直接在根级，content 本身就是 mcp_servers
+                if name in content:
+                    content[name].update({
+                        k: v for k, v in server_data.items()
+                        if k not in ("name", "_source", "_builtin")
+                    })
+                else:
+                    content[name] = {
+                        k: v for k, v in server_data.items()
+                        if k not in ("name", "_source", "_builtin")
+                    }
             source_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")
         except Exception as e:
@@ -628,7 +663,17 @@ class PluginManager:
 
         try:
             content = json.loads(source.read_text(encoding="utf-8"))
-            mcp_servers = content.get("mcpServers", {})
+
+            # 判断格式：有 mcpServers 键 → DriFoxx 格式；否则 → .claude-plugin 格式
+            if "mcpServers" in content:
+                mcp_servers = content["mcpServers"]
+                is_claude_format = False
+            else:
+                mcp_servers = content
+                is_claude_format = True
+
+            if not isinstance(mcp_servers, dict):
+                return
 
             if source.parent.name == "system":
                 # 系统插件：只禁用，不删除
@@ -637,10 +682,14 @@ class PluginManager:
                     source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
                     logger.info(f"[PluginManager] Disabled system MCP server '{name}'")
             else:
-                # 用户插件（user-custom）：直接删除
+                # 用户插件（user-custom、.claude-plugin 等）：直接删除
                 if name in mcp_servers:
                     del mcp_servers[name]
-                    source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
+                    if is_claude_format and not mcp_servers:
+                        # .claude-plugin 格式：删除后为空，写回空对象
+                        source.write_text("{}", encoding="utf-8")
+                    else:
+                        source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
                     logger.info(f"[PluginManager] Removed MCP server '{name}'")
 
         except Exception as e:
