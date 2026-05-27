@@ -28,7 +28,6 @@ to_remove_common = [
     "PIL",
     "ast_serialize",
     "websockets",
-    "watchfiles",
     "PyQt5/Qt5/translations",
 ]
 # Windows 专用（.dll 文件）

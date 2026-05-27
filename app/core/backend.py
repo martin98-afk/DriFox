@@ -409,8 +409,9 @@ class ChatBackend(QObject):
         # 用户插件目录（开发环境下可能是相对路径，统一 resolve 为绝对路径）
         if pm._app_data_dir:
             user_plugin_dir = pm._app_data_dir / pm._USER_PLUGIN_DIR_NAME
-            if user_plugin_dir.exists():
-                watch_paths.append(str(user_plugin_dir.resolve()))
+            # 确保目录存在，否则 watcher 无法监听（用户后创建目录时热更新不生效）
+            user_plugin_dir.mkdir(parents=True, exist_ok=True)
+            watch_paths.append(str(user_plugin_dir.resolve()))
 
         if not watch_paths:
             logger.warning("[ChatBackend] 无插件目录可监听，跳过热更新")
@@ -439,6 +440,13 @@ class ChatBackend(QObject):
             _dedup_cache[key] = now
             return False
 
+        # 用可变容器包装 plugin_prefixes，闭包内可更新
+        _prefixes_ref = [plugin_prefixes]
+
+        def _rebuild_prefixes():
+            """重建插件路径索引（在 watch 线程中调用）"""
+            _prefixes_ref[0] = self._build_plugin_path_index()
+
         def _watch_loop():
             """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
             logger.debug(f"[ChatBackend] watchfiles 监听线程已启动")
@@ -463,9 +471,11 @@ class ChatBackend(QObject):
                     if not relevant_changes:
                         continue
 
+                    current_prefixes = _prefixes_ref[0]
+
                     # 识别变更所属插件
                     plugin_name = self._identify_plugin_from_changes(
-                        relevant_changes, plugin_prefixes
+                        relevant_changes, current_prefixes
                     )
 
                     if plugin_name == "__ALL__":
@@ -474,10 +484,11 @@ class ChatBackend(QObject):
                             f"请求主线程全量重载..."
                         )
                         self._hot_reload_requested.emit("", "")
+                        _rebuild_prefixes()
                     elif plugin_name:
                         # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/空=根目录）
                         component = self._identify_component_from_changes(
-                            relevant_changes, plugin_prefixes, plugin_name
+                            relevant_changes, current_prefixes, plugin_name
                         )
                         if component:
                             detail = f" ({component})"
@@ -496,11 +507,14 @@ class ChatBackend(QObject):
                         )
                         self._hot_reload_requested.emit(plugin_name, component)
                     else:
-                        # 无法识别所属插件，跳过
-                        logger.debug(
-                            f"[ChatBackend] 文件变更无法识别所属插件，跳过: "
+                        # 无法识别所属插件：可能是新增插件目录
+                        # 触发全量重扫，重建路径索引，下次就能正确识别
+                        logger.info(
+                            f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: "
                             f"{relevant_changes[0][1]}"
                         )
+                        self._hot_reload_requested.emit("", "")
+                        _rebuild_prefixes()
             except Exception as e:
                 logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
 
