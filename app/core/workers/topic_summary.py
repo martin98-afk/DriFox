@@ -156,7 +156,7 @@ class TopicSummaryTask(QRunnable):
                 return client.chat.completions.create(
                     model=self.llm_config.get("模型名称", "gpt-4o"),
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
+                    temperature=0.1,
                     max_tokens=1500,
                 )
 
@@ -166,9 +166,7 @@ class TopicSummaryTask(QRunnable):
                 raw_response = ""
             else:
                 raw_response = resp.choices[0].message.content.strip()
-            print(raw_response)
             result = _extract_json(raw_response)
-            print(result)
             if result:
                 self.callback({"topic_summary": result.get("topic_summary", "")})
             else:

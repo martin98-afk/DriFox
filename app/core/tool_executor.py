@@ -5,6 +5,7 @@
 import os
 import orjson
 import re
+import threading
 from pathlib import Path
 
 from loguru import logger
@@ -46,6 +47,9 @@ class ToolExecutor:
 
         # 子智能体管理器（实例级，每个窗口独立，不共享给 BuiltinTools）
         self._sub_agent_manager = None
+
+        # 线程安全锁：保护文件记录等非线程安全操作
+        self._lock = threading.Lock()
 
         self._initialize_builtin_tools()
 
@@ -154,13 +158,16 @@ class ToolExecutor:
         """获取文件操作记录器"""
         return self._file_recorder
 
-    def _record_file_operation_before(self, tool_name: str, args: dict):
+    def _record_file_operation_before(self, tool_name: str, args: dict,
+                                       session_id: str = None, call_id: str = None):
         """
         在文件操作执行前记录备份信息
 
         Args:
             tool_name: 工具名称
             args: 工具参数
+            session_id: 会话 ID（不传则使用 self._session_id）
+            call_id: 调用 ID（不传则使用 self._call_id）
 
         Returns:
             str: 文件完整路径，用于后续的编辑后备份
@@ -168,10 +175,11 @@ class ToolExecutor:
         if tool_name not in self._FILE_OPS_TO_TRACK:
             return None
 
-        if not self._session_id:
-            return None
+        # 使用传入的值或回退到实例变量
+        sid = session_id or self._session_id
+        cid = call_id or self._call_id
 
-        if not self._call_id:
+        if not sid or not cid:
             return None
 
         if not self._file_recorder:
@@ -198,12 +206,13 @@ class ToolExecutor:
 
         # 记录操作（内部会处理文件不存在的情况）
         try:
-            backup_path = self._file_recorder.record_operation(
-                session_id=self._session_id,
-                call_id=self._call_id,
-                tool_name=tool_name,
-                file_path=str(full_path)
-            )
+            with self._lock:
+                backup_path = self._file_recorder.record_operation(
+                    session_id=sid,
+                    call_id=cid,
+                    tool_name=tool_name,
+                    file_path=str(full_path)
+                )
             if backup_path:
                 logger.info(f"[FileRecorder] 已备份: {full_path} -> {backup_path}")
             else:
@@ -215,7 +224,8 @@ class ToolExecutor:
 
         return str(full_path)
 
-    def _record_file_operation_after(self, tool_name: str, args: dict, file_path_before: str):
+    def _record_file_operation_after(self, tool_name: str, args: dict, file_path_before: str,
+                                      session_id: str = None, call_id: str = None):
         """
         在文件操作执行成功后备份编辑后的文件
 
@@ -223,6 +233,8 @@ class ToolExecutor:
             tool_name: 工具名称
             args: 工具参数
             file_path_before: 执行前的文件路径
+            session_id: 会话 ID（不传则使用 self._session_id）
+            call_id: 调用 ID（不传则使用 self._call_id）
         """
         if not file_path_before:
             return
@@ -230,33 +242,40 @@ class ToolExecutor:
         if tool_name not in self._FILE_OPS_TO_TRACK:
             return
 
-        if not self._session_id or not self._call_id:
+        sid = session_id or self._session_id
+        cid = call_id or self._call_id
+
+        if not sid or not cid:
             return
 
         if not self._file_recorder:
             return
 
         try:
-            self._file_recorder.record_after_operation(
-                session_id=self._session_id,
-                call_id=self._call_id,
-                tool_name=tool_name,
-                file_path=file_path_before
-            )
+            with self._lock:
+                self._file_recorder.record_after_operation(
+                    session_id=sid,
+                    call_id=cid,
+                    tool_name=tool_name,
+                    file_path=file_path_before
+                )
         except Exception as e:
             # 记录失败不阻塞主流程
             logger.warning(f"[ToolExecutor] 编辑后备份失败: {e}")
 
-    def _cleanup_backup_on_failure(self):
+    def _cleanup_backup_on_failure(self, session_id: str = None, call_id: str = None):
         """编辑失败时清理备份文件"""
         if not self._file_recorder:
             return
-        if not self._session_id or not self._call_id:
+        sid = session_id or self._session_id
+        cid = call_id or self._call_id
+        if not sid or not cid:
             return
 
         try:
-            self._file_recorder.cleanup_on_failure(self._session_id, self._call_id)
-            logger.info(f"[ToolExecutor] 已清理失败操作的备份: session={self._session_id}, call={self._call_id}")
+            with self._lock:
+                self._file_recorder.cleanup_on_failure(sid, cid)
+            logger.info(f"[ToolExecutor] 已清理失败操作的备份: session={sid}, call={cid}")
         except Exception as e:
             logger.warning(f"[ToolExecutor] 清理备份失败: {e}")
 
@@ -353,7 +372,7 @@ class ToolExecutor:
         "question": ["questions"]
     }
 
-    def execute(self, tool_name: str, args: dict, cancelled_ref: list = None) -> ToolResult:
+    def execute(self, tool_name: str, args: dict, cancelled_ref: list = None, call_id: str = None) -> ToolResult:
         """
         执行工具调用
 
@@ -361,6 +380,7 @@ class ToolExecutor:
             tool_name: 工具名称
             args: 工具参数
             cancelled_ref: 取消标志引用 [bool]
+            call_id: 工具调用 ID（可选，用于并行执行时隔离上下文；不传则使用 self._call_id）
 
         Returns:
             ToolResult: 执行结果
@@ -369,6 +389,11 @@ class ToolExecutor:
         if not self.is_valid():
             logger.warning(f"[ToolExecutor] ToolExecutor is invalid (UI may be closed)")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
+
+        # 🔒 线程安全：捕获当前 session_id/call_id 到局部变量（后续使用局部变量而非实例变量）
+        with self._lock:
+            local_session_id = self._session_id
+            local_call_id = call_id or self._call_id
 
         logger.info(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
 
@@ -450,7 +475,7 @@ class ToolExecutor:
             return self._execute_websearch_async(args, cancelled_ref)
 
         # 文件操作前记录（用于撤销）
-        file_path_before = self._record_file_operation_before(tool_name, args)
+        file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
 
         if tool_name in self._custom_tools:
             try:
@@ -547,7 +572,7 @@ class ToolExecutor:
                 lambda tasks_val: self._builtin_tools.task_execute_batch(
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
                     args.get("share_context", False),
-                    session_id=self._session_id,
+                    session_id=local_session_id,
                     sub_agent_manager=self._sub_agent_manager,
                 )
             )(args.get("tasks", [])),
@@ -555,7 +580,7 @@ class ToolExecutor:
                 args.get("task_ids"),
                 args.get("with_log", False),
                 args.get("with_result", True),
-                session_id=self._session_id,
+                session_id=local_session_id,
                 sub_agent_manager=self._sub_agent_manager,
             ),
             "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
@@ -591,7 +616,7 @@ class ToolExecutor:
                         result.content = (result.content or "") + "\n[警告: UI 在执行过程中已关闭]"
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
-                    self._record_file_operation_after(tool_name, args, file_path_before)
+                    self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
                 
                 # Trigger PostToolUse hook
                 if self._backend and self._backend.hook_manager:
@@ -626,7 +651,7 @@ class ToolExecutor:
             except Exception as e:
                 # 文件编辑操作失败时清理备份
                 if tool_name in self._FILE_OPS_TO_TRACK:
-                    self._cleanup_backup_on_failure()
+                    self._cleanup_backup_on_failure(local_session_id, local_call_id)
                 return ToolResult(False, error=f"Execution error: {str(e)}")
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
