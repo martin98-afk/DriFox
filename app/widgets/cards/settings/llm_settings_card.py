@@ -48,38 +48,57 @@ class NoWheelComboBox(ComboBox):
 
 
 class RefreshableThemeComboBox(ComboBox):
-    """主题下拉框 - 每次打开时刷新主题列表"""
+    """主题下拉框 - 热重载信号驱动，自动刷新列表"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._themes_changed = False
+        # 注册热重载回调：后端检测到主题文件变更后会触发
+        from app.utils.theme_manager import theme_manager
+        theme_manager.on_reload(self._mark_themes_changed)
+
+    def destroy(self, destroyWindow=True, destroySubWindows=True):
+        from app.utils.theme_manager import theme_manager
+        theme_manager.remove_reload_callback(self._mark_themes_changed)
+        super().destroy(destroyWindow, destroySubWindows)
 
     def wheelEvent(self, event):
         event.ignore()
 
+    def _mark_themes_changed(self):
+        """热重载回调：标记主题已变更，下次打开时刷新列表"""
+        self._themes_changed = True
+
+    def _refresh_items(self):
+        """从当前 theme_manager 重建下拉列表项（不重复 reload）"""
+        from app.utils.theme_manager import theme_manager
+        themes = theme_manager.list_themes()
+        new_options = {tid: {"label": name} for tid, name in themes.items()}
+        card = self.parent()
+        if not card or not hasattr(card, 'config_item'):
+            p = self.parent()
+            while p and not hasattr(p, 'config_item'):
+                p = p.parent()
+            card = p
+        if card and hasattr(card, 'config_item'):
+            current_key = card.config_item.value
+            card.options = new_options
+            card.value_by_label = {data["label"]: key for key, data in new_options.items()}
+            card.label_by_value = {key: data["label"] for key, data in new_options.items()}
+            if current_key not in card.label_by_value:
+                current_key = list(new_options.keys())[0]
+            self.currentTextChanged.disconnect(card._on_changed)
+            self.clear()
+            self.addItems([data["label"] for data in new_options.values()])
+            self.setCurrentText(card.label_by_value.get(current_key, ""))
+            self.currentTextChanged.connect(card._on_changed)
+        self._themes_changed = False
+
     def _toggleComboMenu(self):
-        """打开下拉前先刷新主题列表"""
+        """打开下拉前检查是否需要刷新"""
         try:
-            from app.utils.theme_manager import theme_manager
-            from app.utils.config import Settings, update_theme_options
-            theme_manager.reload()
-            update_theme_options()
-            themes = theme_manager.list_themes()
-            new_options = {tid: {"label": name} for tid, name in themes.items()}
-            card = self.parent()
-            if not card or not hasattr(card, 'config_item'):
-                p = self.parent()
-                while p and not hasattr(p, 'config_item'):
-                    p = p.parent()
-                card = p
-            if card and hasattr(card, 'config_item'):
-                current_key = card.config_item.value
-                card.options = new_options
-                card.value_by_label = {data["label"]: key for key, data in new_options.items()}
-                card.label_by_value = {key: data["label"] for key, data in new_options.items()}
-                if current_key not in card.label_by_value:
-                    current_key = list(new_options.keys())[0]
-                self.currentTextChanged.disconnect(card._on_changed)
-                self.clear()
-                self.addItems([data["label"] for data in new_options.values()])
-                self.setCurrentText(card.label_by_value.get(current_key, ""))
-                self.currentTextChanged.connect(card._on_changed)
+            if self._themes_changed:
+                self._refresh_items()
         except Exception as e:
             logger.warning(f"[ThemeComboBox] refresh error: {e}")
         super()._toggleComboMenu()
@@ -390,24 +409,6 @@ class LLMSettingsCard(SystemCardFrame):
                     if parent and hasattr(parent, "_on_config_changed"):
                         parent._on_config_changed()
 
-            def _refresh_theme_options(self):
-                """点击时刷新主题列表"""
-                from app.utils.config import update_theme_options
-                from app.utils.theme_manager import theme_manager
-                theme_manager.reload()
-                update_theme_options()
-                themes = theme_manager.list_themes()
-                new_options = {tid: {"label": name} for tid, name in themes.items()}
-                current_key = self.config_item.value
-                self.options = new_options
-                self._build_lookup_tables()
-                if current_key not in self.label_by_value:
-                    current_key = list(new_options.keys())[0]
-                self.comboBox.currentTextChanged.disconnect(self._on_changed)
-                self.comboBox.clear()
-                self.comboBox.addItems([data["label"] for data in new_options.values()])
-                self.comboBox.setCurrentText(self.label_by_value.get(current_key, ""))
-                self.comboBox.currentTextChanged.connect(self._on_changed)
         self.uiFontSizeCard = AppearanceComboCard(
             get_icon("字体大小"),
             "界面字号",

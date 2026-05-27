@@ -178,9 +178,27 @@ class ThemeManager:
 
     # ── 主题管理 ──────────────────────────────────────────
 
+    _reload_callbacks: list = []
+
+    def on_reload(self, callback):
+        """注册主题重载完成后的回调（用于 UI 自动刷新等）"""
+        if callback not in self._reload_callbacks:
+            self._reload_callbacks.append(callback)
+
+    def remove_reload_callback(self, callback):
+        """移除已注册的回调"""
+        if callback in self._reload_callbacks:
+            self._reload_callbacks.remove(callback)
+
     def reload(self):
         """重新加载所有主题（修改文件后调用）"""
+        self._themes.clear()
         self._load_themes()
+        for cb in self._reload_callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logger.warning(f"[ThemeManager] reload callback error: {e}")
 
     def get_user_themes_dir(self) -> Path:
         """获取用户主题目录"""

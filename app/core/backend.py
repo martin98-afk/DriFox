@@ -237,8 +237,8 @@ class ChatBackend(QObject):
             global_hooks_file = pm.get_global_hooks_file()
             if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
                 try:
-                    with open(global_hooks_file, 'r', encoding='utf-8') as f:
-                        config = json.load(f)
+                    with open(global_hooks_file, 'rb') as f:
+                        config = json.loads(f.read())
                     skill_root = str(global_hooks_file.parent)
                     count = self._hook_manager.register_hooks_from_json(
                         "__global__", skill_root, config, str(global_hooks_file)
@@ -475,7 +475,7 @@ class ChatBackend(QObject):
                         )
                         self._hot_reload_requested.emit("", "")
                     elif plugin_name:
-                        # 识别变更所属组件（agents/hooks/commands/themes/空=根目录）
+                        # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/空=根目录）
                         component = self._identify_component_from_changes(
                             relevant_changes, plugin_prefixes, plugin_name
                         )
@@ -544,7 +544,7 @@ class ChatBackend(QObject):
             cp = change_path.lower()
             for prefix in sorted_prefixes:
                 # 精确匹配目录本身 或 匹配目录内文件
-                if cp == prefix or cp.startswith(prefix + '\\'):
+                if cp == prefix or cp.startswith(prefix + os.sep):
                     found.add(plugin_prefixes[prefix])
                     break
 
@@ -569,7 +569,7 @@ class ChatBackend(QObject):
             plugin_name: 已识别出的插件名
 
         Returns:
-            "agents" | "hooks" | "commands" | "themes" | "" (根目录/无法确定)
+            "agents" | "hooks" | "commands" | "themes" | "skills" | "mcp" | "" (根目录/无法确定)
         """
         # 找到该插件的路径前缀
         plugin_path = None
@@ -580,15 +580,15 @@ class ChatBackend(QObject):
         if not plugin_path:
             return ""
 
-        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes"}
+        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp"}
 
         for _, change_path in changes:
             cp = change_path.lower()
             if cp == plugin_path:
                 continue  # 插件根目录本身变更，全量
-            if cp.startswith(plugin_path + '\\'):
+            if cp.startswith(plugin_path + os.sep):
                 rel = cp[len(plugin_path) + 1:]  # 去掉 "plugin_path\"
-                first_seg = rel.split('\\')[0] if '\\' in rel else rel
+                first_seg = rel.split(os.sep)[0] if os.sep in rel else rel
                 if first_seg in KNOWN_COMPONENTS:
                     return first_seg
         return ""
@@ -598,7 +598,7 @@ class ChatBackend(QObject):
 
         Args:
             plugin_name: 插件名（空字符串表示全量重载）
-            component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes）
+            component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp）
         """
         try:
             if plugin_name:
@@ -618,16 +618,19 @@ class ChatBackend(QObject):
         - "hooks"    → 仅重载 hooks（不碰智能体）
         - "commands" → 重载命令
         - "themes"   → 重载主题
-        - ""         → 跳过（根目录变更，如 README/LICENSE，不影响运行时）
+        - "skills"   → 重载技能（PluginManager 已更新，UI 下次调用 get_local_skills() 自动生效）
+        - "mcp"      → 重载 MCP 配置（PluginManager 已更新，UI 下次调用 get_mcp_servers() 自动生效）
+        - ""         → 插件根目录/plugin.json 变更，触发该插件的全组件重载
 
         Args:
             plugin_name: 插件名称
             component: 变更的组件名
 
         Returns:
-            {"agents": int, "commands": bool, "themes": bool}
+            {"agents": int, "commands": bool, "themes": bool, "skills": bool, "mcp": bool}
         """
-        result: dict = {"agents": 0, "commands": False, "themes": False}
+        result: dict = {"agents": 0, "commands": False, "themes": False,
+                        "skills": False, "mcp": False}
 
         try:
             from app.core.plugin_manager import PluginManager
@@ -641,8 +644,29 @@ class ChatBackend(QObject):
 
             plugin = pm.get_plugin(plugin_name)
             if not plugin:
-                logger.warning(f"[ChatBackend] Plugin '{plugin_name}' not found after rescan")
+                # 插件已被删除（目录或 manifest 已不存在）
+                # 清理该插件在各子系统中的残留数据
+                logger.info(f"[ChatBackend] Plugin '{plugin_name}' removed, cleaning up artifacts...")
+                if self._agent_manager:
+                    self._agent_manager.cleanup_plugin_artifacts(plugin_name)
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands after plugin removal: {e}")
+                try:
+                    from app.utils.theme_manager import theme_manager
+                    from app.utils.config import update_theme_options
+                    theme_manager.reload()
+                    update_theme_options()
+                    result["themes"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
                 return result
+
+            # 判断是否需要全量重载（空组件 = 根目录变更如 plugin.json）
+            is_full_reload = not component
 
             # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
             if component == "agents" and self._agent_manager:
@@ -653,7 +677,7 @@ class ChatBackend(QObject):
                 self._agent_manager.reload_plugin_hooks(plugin_name)
 
             # 4. 命令：仅变更在 commands 目录才触发
-            if component == "commands":
+            if component == "commands" or (is_full_reload and plugin.has_component("commands")):
                 if plugin.has_component("commands"):
                     try:
                         from app.core.builtin_commands import reload_all_commands
@@ -663,7 +687,7 @@ class ChatBackend(QObject):
                         logger.error(f"[ChatBackend] Failed to reload commands: {e}")
 
             # 5. 主题：仅变更在 themes 目录才触发
-            if component == "themes":
+            if component == "themes" or (is_full_reload and plugin.has_component("themes")):
                 if plugin.has_component("themes"):
                     try:
                         from app.utils.theme_manager import theme_manager
@@ -674,9 +698,22 @@ class ChatBackend(QObject):
                     except (ImportError, Exception) as e:
                         logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
+            # 6. 技能：PluginManager 已在 rescan_plugin 中更新
+            #    UI 通过 get_local_skills() 懒加载，下次打开命令面板时自动生效
+            if component == "skills" or (is_full_reload and plugin.has_component("skills")):
+                result["skills"] = True
+                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' skills reloaded (lazy)")
+
+            # 7. MCP 配置：PluginManager 已在 rescan_plugin 中更新
+            #    MCP 设置面板通过 pm.get_mcp_servers() 读取，下次刷新时自动生效
+            if component == "mcp" or (is_full_reload and plugin.has_component("mcp")):
+                result["mcp"] = True
+                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
+
             logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
                        f"agents={result['agents']}, commands={result['commands']}, "
-                       f"themes={result['themes']}")
+                       f"themes={result['themes']}, skills={result['skills']}, "
+                       f"mcp={result['mcp']}")
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin '{plugin_name}': {e}")
 
@@ -689,10 +726,12 @@ class ChatBackend(QObject):
         由 main_widget 或设置面板中的"应用"操作触发。
 
         Returns:
-            {"agents": int, "commands": bool, "hooks": bool, "themes": bool}
+            {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
+             "skills": bool, "mcp": bool}
             各子系统的重载结果
         """
-        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False}
+        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
+                        "skills": False, "mcp": False}
 
         try:
             from app.core.plugin_manager import PluginManager
@@ -727,8 +766,15 @@ class ChatBackend(QObject):
             except (ImportError, Exception) as e:
                 logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
+            # 5. 技能：PluginManager 已更新，UI 通过 get_local_skills() 懒加载
+            result["skills"] = True
+
+            # 6. MCP 配置：PluginManager 已更新，UI 通过 get_mcp_servers() 懒加载
+            result["mcp"] = True
+
             logger.info(f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
-                       f"commands={result['commands']}, themes={result['themes']}")
+                       f"commands={result['commands']}, themes={result['themes']}, "
+                       f"skills={result['skills']}, mcp={result['mcp']}")
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
 

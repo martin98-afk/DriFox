@@ -354,9 +354,11 @@ class AgentManager:
             return False
         hooks_dir = plugin.path / "hooks"
         hooks_file = hooks_dir / "hooks.json"
-        if hooks_dir.exists() and hooks_dir.is_dir():
+        # 先清理老的 hooks 注册（无论目录是否存在都要清理）
+        self._hook_manager.unregister_skill_hooks(plugin.name)
+        if hooks_file.exists():
             self._hook_manager._clear_config_watcher(str(hooks_file))
-            self._hook_manager.unregister_skill_hooks(plugin.name)
+        if hooks_dir.exists() and hooks_dir.is_dir():
             self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
             return True
         return False
@@ -387,6 +389,24 @@ class AgentManager:
                         self._hook_manager.unregister_skill_hooks(plugin.name)
         except (ImportError, Exception):
             pass
+
+    def cleanup_plugin_artifacts(self, plugin_name: str):
+        """插件被删除时，清理该插件在 AgentManager/HookManager 中的残留数据
+
+        包括：智能体、hidden 智能体、插件来源跟踪、hooks 注册。
+        不碰命令和主题（由 backend._reload_single_plugin 统一处理）。
+        """
+        # 1. 清理智能体
+        for agent_name in self._plugin_agents.get(plugin_name, set()):
+            self._agents.pop(agent_name, None)
+            self._hidden_agents.pop(agent_name, None)
+        self._plugin_agents.pop(plugin_name, None)
+
+        # 2. 清理 hooks
+        if self._hook_manager is not None:
+            self._hook_manager.unregister_skill_hooks(plugin_name)
+
+        logger.info(f"[AgentManager] Cleaned up artifacts for removed plugin: {plugin_name}")
 
     def _load_skills_hooks(self, force: bool = False):
         """加载 skills 目录中的 hooks

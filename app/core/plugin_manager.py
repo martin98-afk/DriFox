@@ -242,17 +242,21 @@ class PluginManager:
         if not old:
             return
 
-        base_dir = old.path.parent
-        scanned = self._scan_plugins(base_dir, old.plugin_type)
-        for p in scanned:
-            if p.name == name:
-                self._plugins[name] = p
-                logger.debug(f"[PluginManager] Rescanned plugin: {name}")
-                return
+        plugin_dir = old.path
+        if not plugin_dir.exists():
+            del self._plugins[name]
+            logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
+            return
 
-        # 插件目录已不存在
-        del self._plugins[name]
-        logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
+        # 只扫描这一个插件目录，不走全量遍历
+        new_info = self._scan_one_plugin_dir(plugin_dir, old.plugin_type)
+        if new_info:
+            self._plugins[name] = new_info
+            logger.debug(f"[PluginManager] Rescanned plugin: {name}")
+        else:
+            # manifest 已不存在
+            del self._plugins[name]
+            logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
 
     # ============================================================
     # 启用/禁用
@@ -370,6 +374,55 @@ class PluginManager:
                 logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
 
         return discovered
+
+    def _scan_one_plugin_dir(self, plugin_dir: Path, plugin_type: str) -> Optional[PluginInfo]:
+        """扫描单个插件目录，返回 PluginInfo
+
+        与 _scan_plugins 的单目录版本，复用相同逻辑但不遍历兄弟目录。
+        """
+        if not plugin_dir.exists() or not plugin_dir.is_dir():
+            return None
+
+        # 支持两种清单格式
+        manifest_path = plugin_dir / ".drifox-plugin" / "plugin.json"
+        manifest_format = "drifox"
+        if not manifest_path.exists():
+            manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
+            manifest_format = "claude"
+        if not manifest_path.exists():
+            return None
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            plugin_name = manifest.get("name", plugin_dir.name)
+
+            if manifest_format == "claude":
+                manifest.setdefault("type", plugin_type)
+                manifest.setdefault("version", manifest.get("version", "0.0.0"))
+                components = {}
+                for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
+                    if (plugin_dir / comp_name).exists():
+                        components[comp_name] = True
+                if (plugin_dir / ".mcp.json").exists():
+                    components["mcp"] = True
+                if "components" not in manifest or not manifest["components"]:
+                    manifest["components"] = components
+                elif isinstance(manifest["components"], dict):
+                    for k, v in components.items():
+                        manifest["components"].setdefault(k, v)
+
+            info = PluginInfo(
+                name=plugin_name,
+                manifest=manifest,
+                path=plugin_dir,
+                plugin_type=plugin_type,
+            )
+            logger.debug(f"[PluginManager] Rescanned plugin: {plugin_name} "
+                        f"(type={plugin_type}, format={manifest_format})")
+            return info
+        except Exception as e:
+            logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
+            return None
 
     def _discover_system_plugins(self):
         """扫描系统插件目录 app/plugins/"""
