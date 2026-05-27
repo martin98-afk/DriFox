@@ -68,6 +68,11 @@ class ChatBackend(QObject):
     
     # Gateway 消息处理（跨线程）
     gateway_input_received = pyqtSignal(object)  # dict: {text, chat_id, user_id, platform, future}
+
+    # 插件热更新信号（watchfiles 检测到变更时触发）
+    plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
+    # 后台线程请求主线程执行插件重载（内部信号）
+    _hot_reload_requested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -328,21 +333,35 @@ class ChatBackend(QObject):
     # ========== 插件系统初始化 ==========
 
     def _init_plugin_system(self):
-        """初始化 PluginManager，加载所有插件"""
+        """初始化 PluginManager，加载所有插件
+
+        首次初始化时全量加载智能体和主题；
+        后续窗口创建时 PluginManager 已初始化，跳过重复刷新。
+        首次初始化后自动启动插件文件变更监听（watchfiles 热更新）。
+        """
         try:
             from app.core.plugin_manager import PluginManager
             from app.utils.utils import get_app_data_dir
 
             pm = PluginManager.get_instance()
             app_data_dir = get_app_data_dir()
+
+            # 记录初始化前的状态，用于判断是否为首次初始化
+            was_initialized = pm.is_initialized()
             pm.initialize(app_data_dir)
 
-            # AgentManager 重新从已启用插件加载智能体
-            if self._agent_manager:
-                self._agent_manager.reload_agents()
+            # 首次初始化时才需要全量重载智能体和主题
+            # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
+            if not was_initialized:
+                # AgentManager 重新从已启用插件加载智能体
+                if self._agent_manager:
+                    self._agent_manager.reload_agents()
 
-            # 插件系统初始化后，必须刷新主题（解决 ThemeManager 先于 PluginManager 加载的问题）
-            self._reload_themes_from_plugins()
+                # 插件系统初始化后，必须刷新主题
+                self._reload_themes_from_plugins()
+
+                # 启动插件文件变更监听（热更新，仅启动一次）
+                self._start_plugin_watcher()
 
             logger.info(f"[ChatBackend] PluginManager 初始化完成，"
                        f"已加载 {len(pm.list_plugins())} 个插件，"
@@ -362,6 +381,88 @@ class ChatBackend(QObject):
                        f"共 {len(theme_manager.list_themes())} 个主题")
         except Exception as e:
             logger.error(f"[ChatBackend] 刷新插件主题失败: {e}")
+
+    # ========== 插件热更新（watchfiles） ==========
+
+    _plugin_watcher_started = False  # 类级别标志，确保全局只启动一次
+
+    def _start_plugin_watcher(self):
+        """启动 watchfiles 插件文件变更监听（仅启动一次）"""
+        if ChatBackend._plugin_watcher_started:
+            return
+        ChatBackend._plugin_watcher_started = True
+
+        try:
+            from watchfiles import watch
+        except ImportError:
+            logger.warning("[ChatBackend] watchfiles 未安装，插件热更新不可用。pip install watchfiles")
+            return
+
+        # 收集需要监听的插件目录
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+
+        watch_paths = []
+        # 系统插件目录
+        if hasattr(pm, '_SYSTEM_PLUGIN_DIR') and pm._SYSTEM_PLUGIN_DIR.exists():
+            watch_paths.append(str(pm._SYSTEM_PLUGIN_DIR))
+        # 用户插件目录
+        if pm._app_data_dir:
+            user_plugin_dir = pm._app_data_dir / pm._USER_PLUGIN_DIR_NAME
+            if user_plugin_dir.exists():
+                watch_paths.append(str(user_plugin_dir))
+
+        if not watch_paths:
+            logger.warning("[ChatBackend] 无插件目录可监听，跳过热更新")
+            return
+
+        logger.info(f"[ChatBackend] 启动插件文件变更监听: {watch_paths}")
+
+        # 连接内部信号到主线程重载方法
+        self._hot_reload_requested.connect(self._on_hot_reload_requested)
+
+        import threading
+
+        def _watch_loop():
+            """后台线程: 监听插件目录文件变更，通过信号请求主线程重载"""
+            logger.debug(f"[ChatBackend] watchfiles 监听线程已启动")
+            try:
+                for changes in watch(
+                    *watch_paths,
+                    recursive=True,
+                    debounce=2000,  # 2秒防抖
+                    yield_on_timeout=False,
+                ):
+                    # changes: set of (Change, Path)
+                    if not changes:
+                        continue
+                    # 过滤掉 .git/ __pycache__/ .pyc 等无关变更
+                    relevant = False
+                    for change_type, change_path in changes:
+                        p = change_path.lower()
+                        if '.git' in p or '__pycache__' in p or p.endswith('.pyc'):
+                            continue
+                        relevant = True
+                        break
+                    if not relevant:
+                        continue
+
+                    logger.info(f"[ChatBackend] 插件文件变更检测到 ({len(changes)} 处)，请求主线程重载...")
+                    # 通过 Qt 信号在主线程执行重载（跨线程安全）
+                    self._hot_reload_requested.emit()
+            except Exception as e:
+                logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
+
+        t = threading.Thread(target=_watch_loop, daemon=True, name="plugin-watcher")
+        t.start()
+
+    def _on_hot_reload_requested(self):
+        """主线程中执行的插件热更新"""
+        try:
+            result = self.reload_plugin_subsystems()
+            self.plugin_changed.emit(result)
+        except Exception as e:
+            logger.error(f"[ChatBackend] 插件热更新失败: {e}")
 
     def reload_plugin_subsystems(self) -> dict:
         """运行时重载所有插件子系统

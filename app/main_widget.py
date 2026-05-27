@@ -199,6 +199,8 @@ class OpenAIChatToolWindow(ToolWindow):
             get_model_config=self._get_current_model_config,
             workdir=str(Path(__file__).parent.parent.parent),
         )
+        # 连接插件热更新信号
+        self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         self.backend._current_project = self._current_project
         # 同步项目到 tool_executor，确保 BuiltinTools.edit_project_note 等工具使用正确项目名
         if self.backend.tool_executor:
@@ -2582,6 +2584,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def _on_plugin_hot_reload(self, result: dict):
+        """插件热更新完成时的回调（watchfiles 自动触发）"""
+        if not hasattr(self, 'backend') or not self.backend:
+            return
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        InfoBar.success(
+            title="插件热更新",
+            content=f"智能体: {result.get('agents', 0)}个, "
+                   f"命令: {'✓' if result.get('commands') else '✗'}, "
+                   f"主题: {'✓' if result.get('themes') else '✗'}",
+            parent=self,
+            duration=3000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
