@@ -79,11 +79,45 @@ class Settings(QConfig):
             cls._instance.file = app_data_dir / "app.config"
             try:
                 # 在加载配置前先扩展主题选项验证器，防止保存的主题被拒绝
-                update_theme_options()
+                # 注意：此时 PluginManager 可能未初始化，只能加载系统主题
+                # 所以要把已保存的主题值也加入验证器，避免被拒绝重置
+                cls._extend_theme_validator_before_load()
                 cls._instance.load()
             except:
                 logger.exception("无法加载配置文件")
         return cls._instance
+
+    @classmethod
+    def _extend_theme_validator_before_load(cls):
+        """加载配置前扩展主题验证器，确保已保存的主题不会被拒绝
+
+        此时 PluginManager 可能未初始化，只能获取系统/内置主题。
+        通过直接读取配置文件中的已保存主题值，将其也加入验证器列表，
+        避免 load() 时验证器拒绝未知的插件主题 ID 并重置为默认值。
+        """
+        try:
+            from app.utils.theme_manager import theme_manager
+            # 获取当前已加载的主题（可能只有系统主题）
+            themes = list(theme_manager.list_themes().keys())
+            if not themes:
+                return
+
+            # 直接在文件中读取已保存的主题值（不触发 load 的验证）
+            if cls._instance.file and cls._instance.file.exists():
+                try:
+                    raw = cls._instance.file.read_text(encoding="utf-8")
+                    import orjson as json
+                    data = json.loads(raw)
+                    saved_theme = data.get("UI", {}).get("ThemeStyle")
+                    if saved_theme and saved_theme not in themes:
+                        themes.append(saved_theme)  # 临时加入，防止 load 时被拒绝
+                except Exception:
+                    pass
+
+            cls._instance.ui_theme_style.validator.__init__(themes)
+        except Exception as e:
+            import logging
+            logging.warning(f"[_extend_theme_validator_before_load] failed: {e}")
 
     @classmethod
     def save_config(cls):

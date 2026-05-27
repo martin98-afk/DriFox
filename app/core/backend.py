@@ -341,11 +341,27 @@ class ChatBackend(QObject):
             if self._agent_manager:
                 self._agent_manager.reload_agents()
 
+            # 插件系统初始化后，必须刷新主题（解决 ThemeManager 先于 PluginManager 加载的问题）
+            self._reload_themes_from_plugins()
+
             logger.info(f"[ChatBackend] PluginManager 初始化完成，"
                        f"已加载 {len(pm.list_plugins())} 个插件，"
                        f"智能体 {len(self._agent_manager.list_agents())} 个")
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
+
+    def _reload_themes_from_plugins(self):
+        """插件系统初始化后，重新加载插件主题"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            theme_manager.reload()
+            # 同时更新 Settings 中的主题选项
+            from app.utils.config import update_theme_options
+            update_theme_options()
+            logger.info(f"[ChatBackend] 插件主题刷新完成，"
+                       f"共 {len(theme_manager.list_themes())} 个主题")
+        except Exception as e:
+            logger.error(f"[ChatBackend] 刷新插件主题失败: {e}")
 
     def reload_plugin_subsystems(self) -> dict:
         """运行时重载所有插件子系统
@@ -385,7 +401,9 @@ class ChatBackend(QObject):
             # 4. 重载主题
             try:
                 from app.utils.theme_manager import theme_manager
+                from app.utils.config import update_theme_options
                 theme_manager.reload()
+                update_theme_options()
                 result["themes"] = True
             except (ImportError, Exception) as e:
                 logger.error(f"[ChatBackend] Failed to reload themes: {e}")
