@@ -56,6 +56,10 @@ class AutoLoopWorker(QThread):
     
     # === 消息日志列表信号（用于保存到会话）===
     messages_logged = pyqtSignal(list)  # 发送完整的消息日志列表
+    
+    # === 工具调用和 LLM 思考的实时日志信号（用于 AutoLoopFullPage）===
+    tool_call_signal = pyqtSignal(dict)   # {"name": str, "args": str, "result": str, "status": str}
+    llm_thought_signal = pyqtSignal(str)  # 思考过程文本片断
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -177,6 +181,16 @@ class AutoLoopWorker(QThread):
         if self._engine:
             self._engine.stop()
 
+    def force_archive(self):
+        """强制结束当前阶段，进入归档阶段"""
+        self._force_archive = True
+        # 取消当前 LLM 对话
+        if self._conversation_executor:
+            self._conversation_executor.cancel_worker()
+        self.log_signal.emit("📦 强制归档中...")
+        self.phase_changed.emit("archiving")
+        self._engine.enter_archiving_phase()
+
     # ================================================================
     #  主循环
     # ================================================================
@@ -192,6 +206,7 @@ class AutoLoopWorker(QThread):
         self._prompt_composer = AutoLoopPromptComposer(self._engine)
         self._engine.start()
         self._last_step = 0
+        self._force_archive = False
         # 清空消息列表
         self._all_messages = []
         self._round_messages = []
@@ -216,6 +231,13 @@ class AutoLoopWorker(QThread):
         for iteration in range(1, self._config.max_iterations + 1):
             if self._is_cancelled:
                 break
+
+            # 检查强制归档请求
+            if self._force_archive and (self._engine.is_planning_phase() or self._engine.is_executing_phase()):
+                self._force_archive = False
+                self._enter_archiving_phase()
+                # 跳过本轮 LLM 对话，直接让下一轮进入归档处理
+                continue
 
             self._engine.iteration = iteration
             self.iteration_started.emit(iteration, self._config.max_iterations)
@@ -270,10 +292,20 @@ class AutoLoopWorker(QThread):
 
                 # 强制更新后再次检查：如果模型输出了 PLANNING_COMPLETE 但忘了写笔记，
                 # 此时笔记已补上，强制过渡到执行阶段
-                if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
+                if self._engine.is_planning_phase():
                     notes = self._engine.read_shared_notes()
-                    if notes and self._engine.check_planning_complete(response, notes):
-                        self._transition_to_execution(notes)
+                    if self._engine.check_planning_complete(response, ""):
+                        if notes and len(notes.strip()) > 30:
+                            self._transition_to_execution(notes)
+                        else:
+                            # 模型输出了 PLANNING_COMPLETE 但笔记仍为空 → 强制过渡
+                            self.log_signal.emit("⚠️ 检测到 PLANNING_COMPLETE 但笔记为空，强制进入执行阶段")
+                            self._engine.enter_execution_phase()
+                    elif self._engine._planning_count >= 2:
+                        # 笔记有基本内容但模型始终不输出 PLANNING_COMPLETE → 强制过渡
+                        if notes and len(notes.strip()) > 30:
+                            self.log_signal.emit("⚠️ 笔记已有内容但无 PLANNING_COMPLETE，强制进入执行阶段")
+                            self._transition_to_execution(notes)
 
             # ===== 三阶段处理 =====
             if self._engine.is_archiving_phase():
@@ -500,12 +532,14 @@ class AutoLoopWorker(QThread):
             f"notes_has_plan={'## 执行计划' in notes or '- [步骤' in notes}"
         )
 
-        # 回退策略：笔记有有效计划但模型没输出 PLANNING_COMPLETE
-        has_plan_in_notes = notes and ("## 执行计划" in notes or "- [步骤" in notes)
-        _, _, total_steps_in_notes = self._engine.parse_current_and_next_step(notes)
-        if has_plan_in_notes and total_steps_in_notes > 0 and self._engine._planning_count >= 2:
+        # 回退策略：笔记有内容但模型没输出 PLANNING_COMPLETE
+        has_content = notes and len(notes.strip()) > 30
+        if has_content and self._engine._planning_count >= 2:
+            # 尝试解析步骤数
+            _, _, total_steps_in_notes = self._engine.parse_current_and_next_step(notes)
+            step_info = f"{total_steps_in_notes}步" if total_steps_in_notes > 0 else "有内容但无法解析步骤数"
             self.log_signal.emit(
-                f"⚠️ 检测到笔记中有有效计划({total_steps_in_notes}步)但未收到PLANNING_COMPLETE，"
+                f"⚠️ 检测到笔记已有内容({step_info})但未收到PLANNING_COMPLETE，"
                 f"已尝试{self._engine._planning_count}次，强制进入执行阶段"
             )
             self._transition_to_execution(notes)
@@ -657,12 +691,20 @@ class AutoLoopWorker(QThread):
         # 以 Adapter 的回调为基础
         callbacks = dict(self._adapter.get_callbacks())
 
-        # 日志转发
+        # 日志转发 + 新信号触发
         callbacks["content_received"] = lambda p: self.log_signal.emit(f"生成内容...")
-        callbacks["reasoning_content_received"] = lambda p: self.log_signal.emit(f"思考中...")
+        callbacks["reasoning_content_received"] = lambda p: (
+            self.llm_thought_signal.emit(p)
+        )
         callbacks["thinking_started"] = lambda: self.log_signal.emit(f"开始推理")
-        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"调用工具: {n}")
-        callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(f"工具完成: {n}")
+        callbacks["tool_call_started"] = lambda i, n, a, r: (
+            self.log_signal.emit(f"调用工具: {n}"),
+            self.tool_call_signal.emit({"name": n, "args": str(a)[:200], "status": "started", "result": ""}),
+        )
+        callbacks["tool_result_received"] = lambda i, n, a, r: (
+            self.log_signal.emit(f"工具完成: {n}"),
+            self.tool_call_signal.emit({"name": n, "args": str(a)[:200], "status": "completed", "result": str(r)[:300]}),
+        )
 
         # Token 追踪 + 预算检查 + 消息收集
         def on_messages_updated(messages: list):

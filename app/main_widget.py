@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QButtonGroup, QFrame, QScrollArea, QSizePolicy, QLineEdit,
+    QStackedWidget,
 )
 from loguru import logger
 from qfluentwidgets import (
@@ -64,6 +65,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_font_family_css
+from app.utils.autoloop_utils import parse_steps_from_notes
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
@@ -1180,10 +1182,8 @@ class OpenAIChatToolWindow(ToolWindow):
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         scroll_bar.valueChanged.connect(self._on_chat_scrolled)
 
-        layout.addWidget(self.chat_scroll_area, 1)
-
-        # 下方卡片容器
-        layout.addWidget(self._bottom_card_container)
+        # 延迟添加到布局：chat_scroll_area / _bottom_card_container / _bottom_input_container
+        # 将被包裹进 QStackedWidget，见 _bottom_input_container 添加处的布局重构
 
         # 历史会话卡片
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
@@ -1261,7 +1261,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # AutoLoop 配置卡片
-        from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
+        from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard, AutoLoopFullPage
         self._auto_loop_config_card = AutoLoopConfigCard()
         self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
         self._auto_loop_config_card.closed.connect(lambda: (self._card_manager.hide_card("auto_loop_config", self._window_id), self._restore_after_system_close()))
@@ -1472,7 +1472,29 @@ class OpenAIChatToolWindow(ToolWindow):
 
         bottom_layout.addWidget(self._input_card)
 
-        layout.addWidget(self._bottom_input_container)
+        # ===== 布局重构：使用 QStackedWidget 包裹聊天区域和 AutoLoop 全屏页 =====
+        # Page 0: 正常聊天视图（chat_scroll_area + 下方卡片容器 + 底部输入区域）
+        self._normal_view = QWidget()
+        normal_layout = QVBoxLayout(self._normal_view)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(0)
+        normal_layout.addWidget(self.chat_scroll_area, 1)
+        normal_layout.addWidget(self._bottom_card_container)
+        normal_layout.addWidget(self._bottom_input_container)
+
+        # Page 1: AutoLoop 全屏运行页
+        self._auto_loop_full_page = AutoLoopFullPage()
+        self._auto_loop_full_page.stopRequested.connect(self._on_auto_loop_stop)
+        self._auto_loop_full_page.forceArchiveRequested.connect(self._on_auto_loop_force_archive)
+
+        # 创建堆栈窗口，默认显示 Page 0
+        self._view_stack = QStackedWidget()
+        self._view_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._view_stack.addWidget(self._normal_view)       # index 0
+        self._view_stack.addWidget(self._auto_loop_full_page)  # index 1
+        self._view_stack.setCurrentIndex(0)
+
+        layout.addWidget(self._view_stack, 1)
 
     # ========== 内置命令初始化 ==========
 
@@ -7460,25 +7482,36 @@ class OpenAIChatToolWindow(ToolWindow):
         # tokens_updated 使用 QueuedConnection 确保 UI 更新在主线程执行（避免 DirectConnection 在 worker 线程执行导致 UI 无法更新）
         self._auto_loop_worker.tokens_updated.connect(self._on_auto_loop_tokens_updated, Qt.QueuedConnection)
 
+        # ===== 连接 AutoLoopFullPage 信号（全屏运行页面，仅新信号直连）=====
+        # progress_updated/tokens_updated/phase_changed/log_signal 通过旧 handler 转发
+        #（见 _on_auto_loop_progress / _on_auto_loop_tokens_updated / 等，避免双倍更新）
+        self._auto_loop_worker.tool_call_signal.connect(
+            self._auto_loop_full_page.append_tool_call, Qt.QueuedConnection
+        )
+        self._auto_loop_worker.llm_thought_signal.connect(
+            self._auto_loop_full_page.append_thinking, Qt.QueuedConnection
+        )
+
         self._is_auto_loop_running = True
         self._auto_loop_worker.start()
 
     def _on_auto_loop_stop(self):
-        """停止 AutoLoop（用户主动停止）
-        
-        不再阻塞 UI 线程！通过 loop_stopped 信号异步处理清理。
-        只在 looper 线程退出后(通过信号)才执行 _finish_auto_loop，
-        避免 UI 卡死和二次清理导致的闪退。
-        """
+        """停止 AutoLoop（用户主动停止）"""
         if self._auto_loop_worker and self._auto_loop_worker.isRunning():
-            # 1. 立即发送取消信号给 worker 线程
             self._auto_loop_worker.cancel()
-            # 2. UI 立即反馈，不阻塞
             if self._auto_loop_running_card:
                 self._auto_loop_running_card.set_status("⏹ 正在停止...")
-            # 3. 安全兜底：5 秒后如果还没停，强制清理（避免永久卡住）
+            if self._auto_loop_full_page:
+                self._auto_loop_full_page.append_sys_log("⏹ 正在停止...")
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(5000, self._force_cleanup_autoloop)
+
+    def _on_auto_loop_force_archive(self):
+        """强制归档"""
+        if self._auto_loop_worker and self._auto_loop_worker.isRunning():
+            self._auto_loop_worker.force_archive()
+            if self._auto_loop_full_page:
+                self._auto_loop_full_page.append_sys_log("📦 强制归档中...")
 
     def _force_cleanup_autoloop(self):
         """兜底清理：如果 worker 线程未正常结束，强制清理"""
@@ -7493,6 +7526,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """AutoLoop 阶段变更"""
         if self._auto_loop_running_card:
             self._auto_loop_running_card.set_phase(phase)
+        if self._auto_loop_full_page:
+            self._auto_loop_full_page.set_phase(phase)
 
     def _on_auto_loop_iteration_started(self, current: int, total: int):
         """迭代开始"""
@@ -7528,11 +7563,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """可视化日志更新"""
         if self._auto_loop_running_card:
             self._auto_loop_running_card.append_log(text)
+        if self._auto_loop_full_page:
+            self._auto_loop_full_page.append_sys_log(text)
 
     def _on_auto_loop_tokens_updated(self, total_tokens: int):
         """Token 实时更新 — 直接使用信号携带的值"""
         if self._auto_loop_running_card:
             self._auto_loop_running_card.update_tokens(total_tokens)
+        if self._auto_loop_full_page:
+            self._auto_loop_full_page.update_tokens(total_tokens)
 
     def _on_auto_loop_progress(self, progress: dict):
         """更新运行卡进度（不更新 token，因为 update_tokens() 会专门处理）
@@ -7542,6 +7581,40 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._auto_loop_running_card:
             self._auto_loop_running_card.update_progress_no_token(progress)
+        
+        # 更新 AutoLoopFullPage
+        if self._auto_loop_full_page:
+            self._auto_loop_full_page.update_stats(progress)
+            # 带缓存的步骤列表更新（仅在步骤数或当前步骤变化时重建）
+            current_step = progress.get("current_step", 0)
+            total_steps = progress.get("total_steps", 0)
+            
+            # 始终尝试从 notes 解析步骤（即使 progress 中 total_steps=0）
+            steps = []
+            if hasattr(self._auto_loop_worker, '_engine') and self._auto_loop_worker._engine:
+                notes = self._auto_loop_worker._engine.read_shared_notes()
+                if notes:
+                    # 先用 notes 解析出的步骤数作为 total_steps
+                    if total_steps <= 0:
+                        _, _, parsed_total = self._auto_loop_worker._engine.parse_current_and_next_step(notes)
+                        total_steps = max(total_steps, parsed_total, len([l for l in notes.split('\n') if '步骤' in l]))
+                    steps = parse_steps_from_notes(notes, max(total_steps, 1))
+            
+            if not steps:
+                steps = [f"步骤 {i}" for i in range(1, max(total_steps, 1) + 1)]
+            
+            # 缓存检查：跳过无变化的重复更新
+            last_total = getattr(self, '_last_step_total', -1)
+            last_current = getattr(self, '_last_step_current', -1)
+            if total_steps != last_total or current_step != last_current:
+                self._last_step_total = total_steps
+                self._last_step_current = current_step
+                self._auto_loop_full_page.update_steps(steps, current_step)
+            elif last_total == -1:
+                # 首次展示（即使 total_steps 没变）
+                self._last_step_total = total_steps
+                self._last_step_current = current_step
+                self._auto_loop_full_page.update_steps(steps, current_step)
 
     def _on_auto_loop_completed(self, message: str):
         """AutoLoop 完成"""
@@ -7609,26 +7682,21 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success("AutoLoop", message, parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
 
     def _lock_ui_for_autoloop(self):
-        """锁定 UI — 禁止发送消息和新建会话"""
-        # 禁用输入框
-        self.input_area.setDisabled(True)
-        self.input_area.setPlaceholderText("AutoLoop 运行中... 点运行卡 [⏹ 停止] 恢复操作")
-
-        # 禁用新建按钮
-        self.new_session_btn.setDisabled(True)
-
-        # 记录原有状态，用于解锁
-        logger.info("[AutoLoop] UI locked")
+        """锁定 UI — 切换到 AutoLoop 全屏页"""
+        # 切换到 AutoLoop 全屏页（隐藏消息列表和输入框）
+        self._view_stack.setCurrentIndex(1)
+        self._auto_loop_full_page.start(
+            task=self._auto_loop_config_card._prompt_edit.toPlainText().strip(),
+            max_tokens=self._auto_loop_config_card._token_spin.value(),
+        )
+        logger.info("[AutoLoop] UI locked - switched to full page")
 
     def _unlock_ui_after_autoloop(self):
-        """解锁 UI"""
-        self.input_area.setDisabled(False)
-        self.input_area.setPlaceholderText("给 DriFox 发送消息，Enter 发送，Shift+Enter 换行")
-        self.new_session_btn.setDisabled(False)
-
-        # 重新聚焦输入框
+        """解锁 UI — 切回聊天视图"""
+        self._auto_loop_full_page.stop()
+        self._view_stack.setCurrentIndex(0)
         self.input_area.setFocus()
-        logger.info("[AutoLoop] UI unlocked")
+        logger.info("[AutoLoop] UI unlocked - restored chat view")
 
     def _save_auto_loop_messages_to_session(self, messages: List[Dict]):
         """将 AutoLoop 执行的消息保存到当前会话"""
