@@ -7372,8 +7372,12 @@ class OpenAIChatToolWindow(ToolWindow):
         import os
         project_path = config.project_path.strip() if config.project_path else ""
         if not project_path:
-            # 如果用户没有填写项目路径，默认使用当前工作目录
-            project_path = os.getcwd()
+            # 优先级：实例缓存（worktree 切换后的目录）→ tool_executor → os.getcwd() 兜底
+            project_path = self._current_workdir.get(self._current_project)
+            if not project_path and self.backend and self.backend.tool_executor:
+                project_path = self.backend.tool_executor.get_workdir()
+            if not project_path:
+                project_path = os.getcwd()
         
         abs_path = os.path.abspath(project_path)
         if os.path.isdir(abs_path):

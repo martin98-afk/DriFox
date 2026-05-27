@@ -166,8 +166,9 @@ class TopicSummaryTask(QRunnable):
                 raw_response = ""
             else:
                 raw_response = resp.choices[0].message.content.strip()
+            print(raw_response)
             result = _extract_json(raw_response)
-            
+            print(result)
             if result:
                 self.callback({"topic_summary": result.get("topic_summary", "")})
             else:
