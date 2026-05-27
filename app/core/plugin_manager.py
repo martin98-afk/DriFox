@@ -229,6 +229,31 @@ class PluginManager:
         logger.info(f"[PluginManager] Rescan done: added={len(added_names)}, removed={len(removed_names)}")
         return result
 
+    def rescan_plugin(self, name: str):
+        """只重新扫描指定插件目录，更新其 PluginInfo
+
+        用于 watchfiles 热更新：已知变更属于某个插件时，
+        只刷新该插件而不扫描全量插件。
+
+        Args:
+            name: 插件名称。如果插件已不存在（目录被删除），则从 _plugins 移除。
+        """
+        old = self._plugins.get(name)
+        if not old:
+            return
+
+        base_dir = old.path.parent
+        scanned = self._scan_plugins(base_dir, old.plugin_type)
+        for p in scanned:
+            if p.name == name:
+                self._plugins[name] = p
+                logger.debug(f"[PluginManager] Rescanned plugin: {name}")
+                return
+
+        # 插件目录已不存在
+        del self._plugins[name]
+        logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
+
     # ============================================================
     # 启用/禁用
     # ============================================================

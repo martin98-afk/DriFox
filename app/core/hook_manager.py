@@ -522,7 +522,17 @@ class HookManager:
         
         del self._skill_to_hooks[skill_name]
         logger.debug(f"[HookManager] Unregistered all hooks for skill {skill_name}")
-    
+
+    def _clear_config_watcher(self, config_file: str):
+        """清除配置去重缓存，允许同一文件用不同 skill_name 重新注册
+
+        用于增量热更新：当 hooks 从旧 key 迁移到新 key 时，
+        需要先清除 _config_watchers 中的条目，否则 register_hooks_from_json
+        会因为去重检查而跳过新 key 的注册。
+        """
+        if config_file in self._config_watchers:
+            del self._config_watchers[config_file]
+
     # ========== 动态生命周期管理 API ==========
     
     def enable_hook(self, skill_name: str, event_name: str, hook_index: int) -> bool:
@@ -1091,10 +1101,14 @@ class HookManager:
                     logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
         return count
 
-    def load_hooks_from_directory_flat(self, dir_path: Path) -> int:
+    def load_hooks_from_directory_flat(self, dir_path: Path, skill_name: str = None) -> int:
         """从目录直接加载 hooks.json（插件顶层 hooks/ 目录）
 
         加载 {dir_path}/hooks.json 文件（如果有）。
+
+        Args:
+            dir_path: hooks 目录路径
+            skill_name: 注册用的 skill 名称。为 None 时使用 dir_path.name（兼容旧调用）
         """
         count = 0
         if not dir_path.exists() or not dir_path.is_dir():
@@ -1108,7 +1122,7 @@ class HookManager:
             with open(hooks_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             n = self.register_hooks_from_json(
-                dir_path.name,
+                skill_name or dir_path.name,
                 str(dir_path.absolute()),
                 config,
                 str(hooks_file)

@@ -1,5 +1,3 @@
-# AutoLoop 智能体 — 两阶段任务执行循环
-
 ---
 description: 自动循环模式智能体 — 规划阶段 → 执行阶段
 mode: subagent

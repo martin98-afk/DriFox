@@ -72,7 +72,7 @@ class ChatBackend(QObject):
     # 插件热更新信号（watchfiles 检测到变更时触发）
     plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
     # 后台线程请求主线程执行插件重载（内部信号）
-    _hot_reload_requested = pyqtSignal()
+    _hot_reload_requested = pyqtSignal(str)  # "" = 全量重载，插件名 = 增量重载
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -405,12 +405,12 @@ class ChatBackend(QObject):
         watch_paths = []
         # 系统插件目录
         if hasattr(pm, '_SYSTEM_PLUGIN_DIR') and pm._SYSTEM_PLUGIN_DIR.exists():
-            watch_paths.append(str(pm._SYSTEM_PLUGIN_DIR))
-        # 用户插件目录
+            watch_paths.append(str(pm._SYSTEM_PLUGIN_DIR.resolve()))
+        # 用户插件目录（开发环境下可能是相对路径，统一 resolve 为绝对路径）
         if pm._app_data_dir:
             user_plugin_dir = pm._app_data_dir / pm._USER_PLUGIN_DIR_NAME
             if user_plugin_dir.exists():
-                watch_paths.append(str(user_plugin_dir))
+                watch_paths.append(str(user_plugin_dir.resolve()))
 
         if not watch_paths:
             logger.warning("[ChatBackend] 无插件目录可监听，跳过热更新")
@@ -421,10 +421,13 @@ class ChatBackend(QObject):
         # 连接内部信号到主线程重载方法
         self._hot_reload_requested.connect(self._on_hot_reload_requested)
 
+        # 预计算插件路径 → 插件名映射（用于快速定位变更文件所属插件）
+        plugin_prefixes = self._build_plugin_path_index()
+
         import threading
 
         def _watch_loop():
-            """后台线程: 监听插件目录文件变更，通过信号请求主线程重载"""
+            """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
             logger.debug(f"[ChatBackend] watchfiles 监听线程已启动")
             try:
                 for changes in watch(
@@ -437,32 +440,173 @@ class ChatBackend(QObject):
                     if not changes:
                         continue
                     # 过滤掉 .git/ __pycache__/ .pyc 等无关变更
-                    relevant = False
+                    relevant_changes = []
                     for change_type, change_path in changes:
                         p = change_path.lower()
                         if '.git' in p or '__pycache__' in p or p.endswith('.pyc'):
                             continue
-                        relevant = True
-                        break
-                    if not relevant:
+                        relevant_changes.append((change_type, change_path))
+
+                    if not relevant_changes:
                         continue
 
-                    logger.info(f"[ChatBackend] 插件文件变更检测到 ({len(changes)} 处)，请求主线程重载...")
-                    # 通过 Qt 信号在主线程执行重载（跨线程安全）
-                    self._hot_reload_requested.emit()
+                    # 识别变更所属插件
+                    plugin_name = self._identify_plugin_from_changes(
+                        relevant_changes, plugin_prefixes
+                    )
+
+                    if plugin_name == "__ALL__":
+                        logger.info(
+                            f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处)，"
+                            f"请求主线程全量重载..."
+                        )
+                        self._hot_reload_requested.emit("")
+                    elif plugin_name:
+                        logger.info(
+                            f"[ChatBackend] 插件 [{plugin_name}] 文件变更 "
+                            f"({len(relevant_changes)} 处)，请求主线程增量重载..."
+                        )
+                        self._hot_reload_requested.emit(plugin_name)
+                    else:
+                        # 无法识别所属插件，跳过
+                        logger.debug(
+                            f"[ChatBackend] 文件变更无法识别所属插件，跳过: "
+                            f"{relevant_changes[0][1]}"
+                        )
             except Exception as e:
                 logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
 
         t = threading.Thread(target=_watch_loop, daemon=True, name="plugin-watcher")
         t.start()
 
-    def _on_hot_reload_requested(self):
-        """主线程中执行的插件热更新"""
+    def _build_plugin_path_index(self) -> Dict[str, str]:
+        """构建插件路径前缀 → 插件名的映射表
+
+        Returns:
+            {小写路径前缀: 插件名}
+            如 {"d:\\work\\drifox\\plugins\\system\\": "system",
+                "d:\\work\\drifox\\.drifox\\plugins\\hookify\\": "hookify"}
+        """
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        prefixes = {}
+        for plugin in pm.list_plugins():
+            # 使用 resolve() 确保绝对路径，开发模式下 plugin.path 可能是相对路径
+            prefix = str(plugin.path.resolve()).lower().rstrip('\\/') + '\\'
+            prefixes[prefix] = plugin.name
+        return prefixes
+
+    def _identify_plugin_from_changes(
+        self, changes: list, plugin_prefixes: Dict[str, str]
+    ) -> Optional[str]:
+        """从变更文件路径识别所属插件名称
+
+        Args:
+            changes: [(Change, path_str), ...]
+            plugin_prefixes: 路径前缀 → 插件名 映射
+
+        Returns:
+            - 插件名: 单一插件变更，可增量重载
+            - "__ALL__": 跨插件变更，需要全量重载
+            - None: 无法识别（不属于任何已知插件），跳过
+        """
+        # 按路径长度降序排列（优先精确匹配）
+        sorted_prefixes = sorted(plugin_prefixes.keys(), key=len, reverse=True)
+
+        found = set()
+        for _, change_path in changes:
+            cp = change_path.lower()
+            for prefix in sorted_prefixes:
+                if cp.startswith(prefix):
+                    found.add(plugin_prefixes[prefix])
+                    break
+
+        if not found:
+            return None
+
+        if len(found) == 1:
+            return next(iter(found))
+
+        # 跨插件变更，需要全量重载
+        logger.debug(f"[ChatBackend] 跨插件变更: {found}，触发全量重载")
+        return "__ALL__"
+
+    def _on_hot_reload_requested(self, plugin_name: str):
+        """主线程中执行的插件热更新
+
+        Args:
+            plugin_name: 插件名（空字符串表示全量重载）
+        """
         try:
-            result = self.reload_plugin_subsystems()
+            if plugin_name:
+                result = self._reload_single_plugin(plugin_name)
+            else:
+                result = self.reload_plugin_subsystems()
             self.plugin_changed.emit(result)
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
+
+    def _reload_single_plugin(self, plugin_name: str) -> dict:
+        """增量重载单个插件（不清除其他插件的数据）
+
+        只重载该插件声明的组件（agents / hooks / commands / themes），
+        避免无关子系统的全量刷新。
+
+        Args:
+            plugin_name: 插件名称
+
+        Returns:
+            {"agents": int, "commands": bool, "themes": bool}
+        """
+        result: dict = {"agents": 0, "commands": False, "themes": False}
+
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
+                return result
+
+            # 1. 只重新扫描该插件目录
+            pm.rescan_plugin(plugin_name)
+
+            plugin = pm.get_plugin(plugin_name)
+            if not plugin:
+                logger.warning(f"[ChatBackend] Plugin '{plugin_name}' not found after rescan")
+                return result
+
+            # 2. 增量重载智能体 + hooks（只影响该插件）
+            if self._agent_manager:
+                result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+
+            # 3. 按组件声明选择性重载
+            # 命令：仅插件有 commands 组件时才重载
+            if plugin.has_component("commands"):
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+            # 主题：仅插件有 themes 组件时才重载
+            if plugin.has_component("themes"):
+                try:
+                    from app.utils.theme_manager import theme_manager
+                    from app.utils.config import update_theme_options
+                    theme_manager.reload()
+                    update_theme_options()
+                    result["themes"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+            logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
+                       f"agents={result['agents']}, commands={result['commands']}, "
+                       f"themes={result['themes']}")
+        except Exception as e:
+            logger.error(f"[ChatBackend] Failed to reload plugin '{plugin_name}': {e}")
+
+        return result
 
     def reload_plugin_subsystems(self) -> dict:
         """运行时重载所有插件子系统

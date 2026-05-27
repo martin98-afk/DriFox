@@ -242,6 +242,8 @@ class AgentManager:
         self._hook_manager = hook_manager
         self._global_permission: Dict[str, Any] = {}
         self._builtin_tools = None  # BuiltinTools 实例，用于获取 MCP schema
+        # 插件来源跟踪：plugin_name -> set of agent_names，用于增量重载
+        self._plugin_agents: Dict[str, Set[str]] = {}
         self._load_agents()
 
     def _load_agents(self, force: bool = False):
@@ -266,7 +268,7 @@ class AgentManager:
             self._load_skills_hooks(force=force)
 
     def _load_agents_from_plugins(self):
-        """从所有已启用插件加载智能体"""
+        """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）"""
         try:
             from app.core.plugin_manager import PluginManager
             pm = PluginManager.get_instance()
@@ -274,7 +276,7 @@ class AgentManager:
                 for plugin in pm.get_enabled_plugins():
                     agent_dir = plugin.path / "agents"
                     if agent_dir.exists():
-                        self._load_agents_from_dir(agent_dir)
+                        self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
         except (ImportError, Exception):
             pass
 
@@ -291,15 +293,71 @@ class AgentManager:
         logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, "
                     f"{len(self._hidden_agents)} hidden")
 
+    def reload_plugin_agents(self, plugin_name: str) -> int:
+        """只重载指定插件的智能体和 hooks（增量重载，不清除其他插件）
+
+        Args:
+            plugin_name: 插件名称
+
+        Returns:
+            加载的智能体数量（0 表示插件无 agents 目录或不存在）
+        """
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+
+        # 跳过未启用的插件
+        if not pm.is_enabled(plugin_name):
+            logger.debug(f"[AgentManager] Plugin '{plugin_name}' is disabled, skip reload")
+            return 0
+
+        plugin = pm.get_plugin(plugin_name)
+        if not plugin or not plugin.path.exists():
+            return 0
+
+        # 1. 移除该插件之前加载的智能体
+        for agent_name in self._plugin_agents.get(plugin_name, set()):
+            self._agents.pop(agent_name, None)
+            self._hidden_agents.pop(agent_name, None)
+        self._plugin_agents[plugin_name] = set()
+
+        # 2. 重载该插件的 hooks
+        if self._hook_manager is not None:
+            self._unload_plugin_hooks_for_plugin(plugin)
+
+        # 3. 重新加载该插件的智能体
+        agent_dir = plugin.path / "agents"
+        if agent_dir.exists():
+            self._load_agents_from_dir(agent_dir, source_plugin=plugin_name)
+
+        count = len(self._plugin_agents.get(plugin_name, set()))
+        logger.info(f"[AgentManager] Reloaded plugin agents: plugin={plugin_name}, "
+                    f"count={count}, total_visible={len(self._agents)}")
+        return count
+
+    def _unload_plugin_hooks_for_plugin(self, plugin):
+        """注销并重新加载指定插件的 hooks（使用插件名作为 skill key）"""
+        if self._hook_manager is None:
+            return
+        hooks_dir = plugin.path / "hooks"
+        hooks_file = hooks_dir / "hooks.json"
+        if hooks_dir.exists() and hooks_dir.is_dir():
+            # 清除配置去重缓存，允许用新 key 重新注册
+            self._hook_manager._clear_config_watcher(str(hooks_file))
+            self._hook_manager.unregister_skill_hooks(plugin.name)
+            self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+
     def _unload_plugin_hooks(self):
         """注销所有插件级 hooks（reload 时调用）"""
         try:
             from app.core.plugin_manager import PluginManager
             pm = PluginManager.get_instance()
             if pm.is_initialized():
-                for hooks_dir in pm.get_hooks_dirs():
+                for plugin in pm.get_enabled_plugins():
+                    hooks_dir = plugin.path / "hooks"
+                    hooks_file = hooks_dir / "hooks.json"
                     if hooks_dir.exists() and hooks_dir.is_dir():
-                        self._hook_manager.unregister_skill_hooks(hooks_dir.name)
+                        self._hook_manager._clear_config_watcher(str(hooks_file))
+                        self._hook_manager.unregister_skill_hooks(plugin.name)
         except (ImportError, Exception):
             pass
 
@@ -319,21 +377,29 @@ class AgentManager:
             pass
 
     def _load_plugin_hooks(self):
-        """加载插件顶层 hooks/ 目录中的 hooks"""
+        """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）"""
         try:
             from app.core.plugin_manager import PluginManager
             pm = PluginManager.get_instance()
             if pm.is_initialized():
-                for hooks_dir in pm.get_hooks_dirs():
+                for plugin in pm.get_enabled_plugins():
+                    hooks_dir = plugin.path / "hooks"
                     if not hooks_dir.exists() or not hooks_dir.is_dir():
                         continue
-                    # plugins/system/hooks/hooks.json — 直接加载
-                    self._hook_manager.load_hooks_from_directory_flat(hooks_dir)
+                    # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
+                    self._hook_manager.load_hooks_from_directory_flat(
+                        hooks_dir, skill_name=plugin.name
+                    )
         except (ImportError, Exception):
             pass
 
-    def _load_agents_from_dir(self, agents_dir: Path):
-        """从指定目录加载所有智能体"""
+    def _load_agents_from_dir(self, agents_dir: Path, source_plugin: str = None):
+        """从指定目录加载所有智能体
+
+        Args:
+            agents_dir: 智能体目录路径
+            source_plugin: 来源插件名称（用于增量重载跟踪）
+        """
         if not agents_dir.exists():
             return
 
@@ -341,6 +407,8 @@ class AgentManager:
             try:
                 agent = self._parse_markdown_agent(md_file)
                 if agent:
+                    if source_plugin:
+                        self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
                     if agent.is_hidden():
                         self._hidden_agents[agent.name] = agent
                     else:
@@ -355,6 +423,8 @@ class AgentManager:
             try:
                 agent = self._parse_yaml_agent(yaml_file)
                 if agent:
+                    if source_plugin:
+                        self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
                     if agent.is_hidden():
                         self._hidden_agents[agent.name] = agent
                     else:
