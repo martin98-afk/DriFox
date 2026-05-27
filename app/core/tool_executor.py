@@ -30,8 +30,9 @@ class ToolExecutor:
         "write", "edit", "multi_edit"
     }
 
-    # 跨窗口共享的 BuiltinTools 实例（纯工具模块，无窗口特定状态）
-    _shared_builtin_tools: Optional["BuiltinTools"] = None
+    # 注意：BuiltinTools 不再跨窗口共享，每个窗口拥有独立实例
+    # 确保工作目录（workdir）完全隔离，多窗口互不影响
+    # MCPClientManager 本身已是全局单例，连接仍跨窗口共享
 
     def __init__(self, homepage=None, workdir: str = None, backend=None):
         self._homepage = homepage
@@ -54,12 +55,7 @@ class ToolExecutor:
         self._initialize_builtin_tools()
 
     def _initialize_builtin_tools(self):
-        """初始化内置工具（跨窗口共享 BuiltinTools 实例）"""
-        # 复用已创建的 BuiltinTools 实例
-        if ToolExecutor._shared_builtin_tools is not None:
-            self._builtin_tools = ToolExecutor._shared_builtin_tools
-            return
-
+        """初始化内置工具（每个窗口独立实例，不复用）"""
         import os
 
         workdir = self._workdir
@@ -76,7 +72,6 @@ class ToolExecutor:
 
         logger.info(f"[ToolExecutor] Initialized with workdir: {workdir}")
         self._builtin_tools = BuiltinTools(self._homepage, workdir)
-        ToolExecutor._shared_builtin_tools = self._builtin_tools
 
     @property
     def builtin_tools(self) -> Optional[BuiltinTools]:
@@ -114,9 +109,10 @@ class ToolExecutor:
 
     def cleanup(self):
         """
-        清理窗口独有状态，不影响其他窗口。
+        清理窗口独有状态。
         
-        注意：_builtin_tools 是跨窗口共享实例，不清除。
+        清理当前窗口的 BuiltinTools（释放 MCP 引用计数），
+        其他窗口不受影响。
         """
         # 清理文件操作记录器
         self._file_recorder = None
@@ -127,6 +123,14 @@ class ToolExecutor:
 
         # 清理自定义工具
         self._custom_tools.clear()
+
+        # 清理当前窗口的 BuiltinTools
+        if self._builtin_tools:
+            try:
+                self._builtin_tools.cleanup()
+            except Exception as e:
+                logger.warning(f"[ToolExecutor] cleanup builtin_tools: {e}")
+            self._builtin_tools = None
 
         # 释放 backend 引用（打破循环引用链）
         self._backend = None
