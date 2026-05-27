@@ -670,6 +670,10 @@ class ChatBackend(QObject):
                     result["themes"] = True
                 except (ImportError, Exception) as e:
                     logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
+                # 技能和 MCP：PluginManager 已移除该插件的目录，
+                # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除
+                result["skills"] = True
+                result["mcp"] = True
                 return result
 
             # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
