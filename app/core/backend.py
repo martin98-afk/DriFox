@@ -581,6 +581,10 @@ class ChatBackend(QObject):
             return ""
 
         KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp"}
+        # 插件根目录的关键文件 → 映射到对应组件
+        ROOT_FILE_COMPONENTS = {
+            ".mcp.json": "mcp",
+        }
 
         for _, change_path in changes:
             cp = change_path.lower()
@@ -591,6 +595,9 @@ class ChatBackend(QObject):
                 first_seg = rel.split(os.sep)[0] if os.sep in rel else rel
                 if first_seg in KNOWN_COMPONENTS:
                     return first_seg
+                # 根目录的关键文件（如 .mcp.json）映射到对应组件
+                if first_seg in ROOT_FILE_COMPONENTS:
+                    return ROOT_FILE_COMPONENTS[first_seg]
         return ""
 
     def _on_hot_reload_requested(self, plugin_name: str, component: str):
@@ -620,7 +627,7 @@ class ChatBackend(QObject):
         - "themes"   → 重载主题
         - "skills"   → 重载技能（PluginManager 已更新，UI 下次调用 get_local_skills() 自动生效）
         - "mcp"      → 重载 MCP 配置（PluginManager 已更新，UI 下次调用 get_mcp_servers() 自动生效）
-        - ""         → 插件根目录/plugin.json 变更，触发该插件的全组件重载
+        - ""         → 跳过（根目录文件变更如 README/LICENSE，不影响运行时）
 
         Args:
             plugin_name: 插件名称
@@ -665,9 +672,6 @@ class ChatBackend(QObject):
                     logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
                 return result
 
-            # 判断是否需要全量重载（空组件 = 根目录变更如 plugin.json）
-            is_full_reload = not component
-
             # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
             if component == "agents" and self._agent_manager:
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
@@ -677,36 +681,34 @@ class ChatBackend(QObject):
                 self._agent_manager.reload_plugin_hooks(plugin_name)
 
             # 4. 命令：仅变更在 commands 目录才触发
-            if component == "commands" or (is_full_reload and plugin.has_component("commands")):
-                if plugin.has_component("commands"):
-                    try:
-                        from app.core.builtin_commands import reload_all_commands
-                        reload_all_commands()
-                        result["commands"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+            if component == "commands" and plugin.has_component("commands"):
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands: {e}")
 
             # 5. 主题：仅变更在 themes 目录才触发
-            if component == "themes" or (is_full_reload and plugin.has_component("themes")):
-                if plugin.has_component("themes"):
-                    try:
-                        from app.utils.theme_manager import theme_manager
-                        from app.utils.config import update_theme_options
-                        theme_manager.reload()
-                        update_theme_options()
-                        result["themes"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+            if component == "themes" and plugin.has_component("themes"):
+                try:
+                    from app.utils.theme_manager import theme_manager
+                    from app.utils.config import update_theme_options
+                    theme_manager.reload()
+                    update_theme_options()
+                    result["themes"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
             # 6. 技能：PluginManager 已在 rescan_plugin 中更新
             #    UI 通过 get_local_skills() 懒加载，下次打开命令面板时自动生效
-            if component == "skills" or (is_full_reload and plugin.has_component("skills")):
+            if component == "skills":
                 result["skills"] = True
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' skills reloaded (lazy)")
 
             # 7. MCP 配置：PluginManager 已在 rescan_plugin 中更新
             #    MCP 设置面板通过 pm.get_mcp_servers() 读取，下次刷新时自动生效
-            if component == "mcp" or (is_full_reload and plugin.has_component("mcp")):
+            if component == "mcp":
                 result["mcp"] = True
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
 
