@@ -372,7 +372,7 @@ class ToolExecutor:
         "question": ["questions"]
     }
 
-    def execute(self, tool_name: str, args: dict, cancelled_ref: list = None, call_id: str = None) -> ToolResult:
+    def execute(self, tool_name: str, args: dict, call_id: str = None) -> ToolResult:
         """
         执行工具调用
 
@@ -465,15 +465,6 @@ class ToolExecutor:
             missing = [p for p in required if not args.get(p)]
             if missing:
                 return ToolResult(False, error=f"Missing required arguments: {missing}")
-
-        # 对于网络/I-O 密集工具，单独处理
-        # 注意：调用方（串行或并行）已在子线程中，此处直接同步执行
-        if tool_name == "grep":
-            return self._execute_grep_async(args, cancelled_ref)
-        elif tool_name == "webfetch":
-            return self._execute_webfetch_async(args, cancelled_ref)
-        elif tool_name == "websearch":
-            return self._execute_websearch_async(args, cancelled_ref)
 
         # 文件操作前记录（用于撤销）
         file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
@@ -690,51 +681,6 @@ class ToolExecutor:
             # 不再尝试修改 result，避免访问已删除的 QObject 属性
 
         return result
-
-    def _execute_grep_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """
-        同步执行 grep（调用方已在子线程中，不再需要异步+阻塞等待模式）
-        """
-        if not self._builtin_tools or not self._builtin_tools._file_tools:
-            return ToolResult(False, error="FileTools not available")
-
-        pattern = args.get("pattern", "")
-        path = args.get("path", "")
-        include = args.get("include")
-
-        # 直接同步调用，不传 callback 就走同步路径
-        return self._builtin_tools._file_tools.grep_files(
-            pattern=pattern,
-            path=path,
-            include=include,
-        )
-
-    def _execute_webfetch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """同步执行网页抓取（调用方已在子线程中）"""
-        if not self._builtin_tools or not self._builtin_tools._web_tools:
-            return ToolResult(False, error="WebTools not available")
-
-        url = args.get("url", "")
-        format = args.get("format", "markdown")
-        max_chars = args.get("max_chars", 26000)
-
-        # 直接同步调用，不传 callback 就走同步路径
-        return self._builtin_tools._web_tools.fetch_web(
-            url=url, format=format, max_chars=max_chars,
-        )
-
-    def _execute_websearch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """同步执行网络搜索（调用方已在子线程中）"""
-        if not self._builtin_tools or not self._builtin_tools._web_tools:
-            return ToolResult(False, error="WebTools not available")
-
-        query = args.get("query", "")
-        num_results = args.get("num_results", 10)
-
-        # 直接同步调用，不传 callback 就走同步路径
-        return self._builtin_tools._web_tools.search_web(
-            query=query, num_results=num_results,
-        )
 
     def set_sub_agent_manager(self, sub_agent_manager):
         """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""

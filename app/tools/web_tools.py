@@ -5,8 +5,6 @@
 支持：
 - fetch_web: 获取网页内容，支持 markdown/html/text 格式
 - search_web: 搜索网页，支持 DuckDuckGo
-
-提供异步和同步两种调用方式。
 """
 import os
 import re
@@ -14,9 +12,8 @@ import httpx
 import html2text
 
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
 from bs4 import BeautifulSoup
 from loguru import logger
 from app.tools.result import ToolResult
@@ -46,226 +43,29 @@ def _fetch_html_content(url: str) -> tuple[httpx.Response, str]:
         return response, response.text
 
 
-class WebFetchTask(QRunnable):
-    """异步网页抓取任务"""
-
-    class Signals(QObject):
-        finished = pyqtSignal(object)  # ToolResult
-
-    def __init__(self, url: str, format: str, max_chars: int, cancelled_ref: list):
-        super().__init__()
-        self.signals = self.Signals()
-        self.url = url
-        self.format = format
-        self.max_chars = max_chars
-        self.cancelled_ref = cancelled_ref
-
-    def run(self):
-        try:
-            result = self._do_fetch()
-            self.signals.finished.emit(result)
-        except Exception as e:
-            self.signals.finished.emit(
-                ToolResult(False, error=f"Fetch error: {str(e)}")
-            )
-
-    def _do_fetch(self) -> ToolResult:
-        """异步获取网页内容（使用共享函数）"""
-        try:
-            response, html_content = _fetch_html_content(self.url)
-
-            if self.format == "html":
-                return ToolResult(True, content=html_content[: self.max_chars])
-
-            soup = BeautifulSoup(html_content, "html.parser")
-            for element in soup(
-                [
-                    "script",
-                    "style",
-                    "nav",
-                    "footer",
-                    "header",
-                    "aside",
-                    "iframe",
-                    "noscript",
-                ]
-            ):
-                element.decompose()
-
-            if self.format == "text":
-                text = soup.get_text(separator="\n")
-                clean_text = _NEWLINE_PATTERN.sub("\n", text).strip()
-                return ToolResult(True, content=clean_text[: self.max_chars])
-
-            # markdown 格式
-            h = html2text.HTML2Text()
-            h.ignore_links = False
-            h.ignore_images = True
-            h.body_width = 0
-            h.ignore_emphasis = False
-            markdown_text = h.handle(str(soup))
-            markdown_text = _MULTI_NEWLINE_PATTERN.sub("\n\n", markdown_text)
-            return ToolResult(True, content=markdown_text[: self.max_chars])
-
-        except httpx.HTTPStatusError as e:
-            return ToolResult(False, error=f"HTTP error: {e.response.status_code}")
-        except Exception as e:
-            return ToolResult(False, error=f"Fetch error: {str(e)}")
-
-
-class WebSearchTask(QRunnable):
-    """异步网络搜索任务"""
-
-    class Signals(QObject):
-        finished = pyqtSignal(object)  # ToolResult
-
-    def __init__(self, query: str, num_results: int, cancelled_ref: list):
-        super().__init__()
-        self.signals = self.Signals()
-        self.query = query
-        self.num_results = num_results
-        self.cancelled_ref = cancelled_ref
-
-    def run(self):
-        try:
-            result = self._do_search()
-            self.signals.finished.emit(result)
-        except Exception as e:
-            self.signals.finished.emit(
-                ToolResult(False, error=f"Search error: {str(e)}")
-            )
-
-    def _do_search(self) -> ToolResult:
-        api_key = (
-            os.environ.get("SERPAPI_KEY") or Settings.get_instance().SERPAPI_KEY.value
-        )
-
-        if api_key == "your-serpapi-key-here" or not api_key:
-            # 回退到 DuckDuckGo 搜索
-            return self._search_duckduckgo()
-
-        try:
-            proxies = None
-            http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-            if http_proxy:
-                proxies = {"http": http_proxy, "https": http_proxy}
-
-            params = {
-                "engine": "duckduckgo",
-                "q": self.query,
-                "kl": "us-en",
-                "api_key": api_key,
-            }
-
-            response = httpx.get(
-                "https://serpapi.com/search",
-                params=params,
-                proxies=proxies,
-                timeout=30,
-                follow_redirects=True,
-            )
-
-            if response.status_code == 401:
-                logger.warning("SerpAPI key invalid, falling back to DuckDuckGo")
-                return self._search_duckduckgo()
-            if response.status_code == 403:
-                logger.warning("SerpAPI quota exceeded, falling back to DuckDuckGo")
-                return self._search_duckduckgo()
-
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-            for item in data.get("organic_results", [])[: self.num_results]:
-                title = item.get("title", "")
-                link = item.get("link", "")
-                snippet = item.get("snippet", "")
-                if title and link:
-                    results.append(f"- {title}\n  {link}\n  {snippet}")
-
-            return ToolResult(
-                True, content="\n\n".join(results) if results else "No results found"
-            )
-
-        except httpx.TimeoutException:
-            logger.warning("SerpAPI timeout, falling back to DuckDuckGo")
-            return self._search_duckduckgo()
-        except httpx.RequestError as e:
-            logger.warning(f"SerpAPI request failed: {e}, falling back to DuckDuckGo")
-            return self._search_duckduckgo()
-        except httpx.HTTPStatusError as e:
-            logger.warning(
-                f"SerpAPI HTTP error: {e.response.status_code}, falling back to DuckDuckGo"
-            )
-            return self._search_duckduckgo()
-        except Exception as e:
-            logger.warning(f"SerpAPI error: {e}, falling back to DuckDuckGo")
-            return self._search_duckduckgo()
-
-    def _search_duckduckgo(self) -> ToolResult:
-        try:
-            url = "https://html.duckduckgo.com/html/"
-            r = httpx.get(
-                url,
-                params={"q": self.query},
-                headers={"User-Agent": "Mozilla/5.0 (compatible)"},
-                timeout=30,
-                follow_redirects=True,
-            )
-            titles = _TITLE_PATTERN.findall(r.text)
-            snippets = _SNIPPET_PATTERN.findall(r.text)
-            results = []
-            for i, (link, title) in enumerate(titles[: self.num_results]):
-                t = _HTML_TAG_PATTERN.sub("", title).strip()
-                s = (
-                    _HTML_TAG_PATTERN.sub("", snippets[i]).strip()
-                    if i < len(snippets)
-                    else ""
-                )
-                results.append(f"**{t}**\n{link}\n{s}")
-            return ToolResult(
-                True, content="\n\n".join(results) if results else "No results found"
-            )
-        except Exception as e:
-            logger.error(f"DuckDuckGo search failed: {e}")
-            return ToolResult(False, error=f"DuckDuckGo search failed: {str(e)}")
-
-
 class WebTools:
     def __init__(self, owner):
         self._owner = owner
-        self._thread_pool: Optional[QThreadPool] = None
-        self._current_fetch_task: Optional[WebFetchTask] = None
-        self._current_search_task: Optional[WebSearchTask] = None
 
     @property
     def workdir(self) -> Path:
         return self._owner.workdir
-
-    def _get_thread_pool(self) -> QThreadPool:
-        if self._thread_pool is None:
-            self._thread_pool = QThreadPool.globalInstance()
-        return self._thread_pool
 
     def fetch_web(
         self,
         url: str,
         format: str = "markdown",
         max_chars: int = 26000,
-        callback: Callable[[ToolResult], None] = None,
-        cancelled_ref: list = None,
-    ) -> Optional[ToolResult]:
+    ) -> ToolResult:
         """
-        获取网页内容
+        获取网页内容，支持 markdown/html/text 格式
 
-        如果提供 callback，则异步执行并返回 None
-        否则同步执行并返回 ToolResult
+        Args:
+            url: 网页 URL
+            format: 返回格式 (markdown/html/text)
+            max_chars: 最大返回字符数
         """
-        if callback is not None:
-            self._run_fetch_async(url, format, max_chars, callback, cancelled_ref)
-            return None
-        else:
-            return self._fetch_sync(url, format, max_chars)
+        return self._fetch_sync(url, format, max_chars)
 
     def _fetch_sync(self, url: str, format: str, max_chars: int) -> ToolResult:
         """同步获取网页（使用共享函数）"""
@@ -309,47 +109,22 @@ class WebTools:
         except Exception as e:
             return ToolResult(False, error=f"Fetch error: {str(e)}")
 
-    def _run_fetch_async(
-        self,
-        url: str,
-        format: str,
-        max_chars: int,
-        callback: Callable[[ToolResult], None],
-        cancelled_ref: list = None,
-    ):
-        """异步获取网页"""
-        task = WebFetchTask(url, format, max_chars, cancelled_ref or [False])
-        self._current_fetch_task = task
-
-        def on_finished(result):
-            self._current_fetch_task = None
-            callback(result)
-
-        task.signals.finished.connect(on_finished)
-        self._get_thread_pool().start(task)
-        logger.info(f"[WebTools] Started async fetch task, url={url[:50]}...")
-
     def search_web(
         self,
         query: str,
         num_results: int = 10,
-        callback: Callable[[ToolResult], None] = None,
-        cancelled_ref: list = None,
-    ) -> Optional[ToolResult]:
+    ) -> ToolResult:
         """
-        搜索网络
+        搜索网络，支持 SerpAPI 或 DuckDuckGo 回退
 
-        如果提供 callback，则异步执行并返回 None
-        否则同步执行并返回 ToolResult
+        Args:
+            query: 搜索关键词
+            num_results: 返回结果数量
         """
-        if callback is not None:
-            self._run_search_async(query, num_results, callback, cancelled_ref)
-            return None
-        else:
-            return self._search_sync(query, num_results)
+        return self._search_sync(query, num_results)
 
     def _search_sync(self, query: str, num_results: int) -> ToolResult:
-        """同步搜索（向后兼容）"""
+        """同步搜索"""
         api_key = (
             os.environ.get("SERPAPI_KEY") or Settings.get_instance().SERPAPI_KEY.value
         )
@@ -443,22 +218,3 @@ class WebTools:
         except Exception as e:
             logger.error(f"DuckDuckGo search failed: {e}")
             return ToolResult(False, error=f"DuckDuckGo search failed: {str(e)}")
-
-    def _run_search_async(
-        self,
-        query: str,
-        num_results: int,
-        callback: Callable[[ToolResult], None],
-        cancelled_ref: list = None,
-    ):
-        """异步搜索"""
-        task = WebSearchTask(query, num_results, cancelled_ref or [False])
-        self._current_search_task = task
-
-        def on_finished(result):
-            self._current_search_task = None
-            callback(result)
-
-        task.signals.finished.connect(on_finished)
-        self._get_thread_pool().start(task)
-        logger.info(f"[WebTools] Started async search task, query={query[:50]}...")

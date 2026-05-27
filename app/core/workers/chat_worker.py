@@ -1987,18 +1987,10 @@ class OpenAIChatWorker(QThread):
         return True  # 允许执行
 
     def _execute_tool(self, tool_name, arguments, tool_call_id):
-        """
-        执行单个工具调用。
-
-        Returns:
-            tuple: (result_obj, result_content, success)
-            如果被取消，result_obj 为 _TOOL_CANCELLED 哨兵
-        """
+        """执行单个工具调用。"""
         try:
-            # 传递取消标志引用
-            cancelled_ref = [self._is_cancelled or self._tool_execution_cancelled]
             result = self.tool_executor.execute(
-                tool_name, arguments, cancelled_ref, call_id=tool_call_id
+                tool_name, arguments, call_id=tool_call_id
             )
         except Exception as e:
             logger.error(f"[Tool] Tool '{tool_name}' execution failed: {e}")
