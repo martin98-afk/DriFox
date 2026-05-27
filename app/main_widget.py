@@ -2589,16 +2589,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """插件热更新完成时的回调（watchfiles 自动触发）"""
         if not hasattr(self, 'backend') or not self.backend:
             return
-        from qfluentwidgets import InfoBar, InfoBarPosition
-        InfoBar.success(
-            title="插件热更新",
-            content=f"智能体: {result.get('agents', 0)}个, "
-                   f"命令: {'✓' if result.get('commands') else '✗'}, "
-                   f"主题: {'✓' if result.get('themes') else '✗'}",
-            parent=self,
-            duration=3000,
-            position=InfoBarPosition.BOTTOM,
-        )
+        # 不弹 InfoBar，仅日志记录
+        logger.debug(f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
+                    f"commands={result.get('commands')}, themes={result.get('themes')}")
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
