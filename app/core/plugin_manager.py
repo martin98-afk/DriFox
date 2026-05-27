@@ -101,6 +101,7 @@ class PluginManager:
     def __init__(self):
         self._plugins: Dict[str, PluginInfo] = {}
         self._initialized = False
+        self._app_data_dir: Optional[Path] = None
 
     @classmethod
     def get_instance(cls) -> "PluginManager":
@@ -120,6 +121,8 @@ class PluginManager:
         """
         if self._initialized:
             return
+
+        self._app_data_dir = app_data_dir
 
         # 1. 扫描系统插件
         self._discover_system_plugins()
@@ -156,6 +159,75 @@ class PluginManager:
 
     def is_initialized(self) -> bool:
         return self._initialized
+
+    # ============================================================
+    # 运行时重扫
+    # ============================================================
+
+    def rescan(self) -> dict:
+        """运行时重新扫描插件目录，检测新增/移除的插件
+
+        仅扫描目录级别变化（新增/删除插件目录），不追踪插件内部文件变更。
+
+        Returns:
+            {"added": [PluginInfo], "removed": [PluginInfo], "changed": [PluginInfo]}
+            - added: 新发现的插件列表
+            - removed: 不再存在的插件列表（已从 _plugins 中移除）
+            - changed: 因用户插件覆盖系统插件而变化的所有插件
+        """
+        if not self._initialized:
+            logger.warning("[PluginManager] PluginManager not initialized, cannot rescan")
+            return {"added": [], "removed": [], "changed": []}
+
+        result: Dict[str, list] = {"added": [], "removed": [], "changed": []}
+        old_names = set(self._plugins.keys())
+
+        # 1. 重新扫描系统插件
+        system_plugins = self._scan_plugins(self._SYSTEM_PLUGIN_DIR, "system")
+        current_system = {p.name: p for p in system_plugins}
+
+        # 2. 重新扫描用户插件
+        user_plugins = []
+        if self._app_data_dir:
+            user_plugin_dir = self._app_data_dir / self._USER_PLUGIN_DIR_NAME
+            user_plugins = self._scan_plugins(user_plugin_dir, "user")
+        current_user = {p.name: p for p in user_plugins}
+
+        # 3. 构建新插件映射（用户插件覆盖系统插件）
+        new_plugins: Dict[str, PluginInfo] = {}
+        # 先加系统插件
+        for name, p in current_system.items():
+            new_plugins[name] = p
+        # 用户插件同名覆盖
+        for name, p in current_user.items():
+            if name in new_plugins:
+                if new_plugins[name].is_system:
+                    logger.info(f"[PluginManager] Rescan: user plugin '{name}' overrides system plugin")
+                    result["changed"].append(p)
+            new_plugins[name] = p
+
+        new_names = set(new_plugins.keys())
+
+        # 4. 检测新增和移除
+        added_names = new_names - old_names
+        removed_names = old_names - new_names
+
+        for name in added_names:
+            result["added"].append(new_plugins[name])
+            self._plugins[name] = new_plugins[name]
+            logger.info(f"[PluginManager] Rescan: new plugin '{name}' detected")
+
+        for name in removed_names:
+            result["removed"].append(self._plugins[name])
+            del self._plugins[name]
+            logger.info(f"[PluginManager] Rescan: plugin '{name}' removed")
+
+        # 5. 确保新增插件自动启用
+        if added_names:
+            self._restore_enabled_from_settings()
+
+        logger.info(f"[PluginManager] Rescan done: added={len(added_names)}, removed={len(removed_names)}")
+        return result
 
     # ============================================================
     # 启用/禁用

@@ -244,8 +244,12 @@ class AgentManager:
         self._builtin_tools = None  # BuiltinTools 实例，用于获取 MCP schema
         self._load_agents()
 
-    def _load_agents(self):
-        """加载智能体：插件路径优先，后备路径兜底"""
+    def _load_agents(self, force: bool = False):
+        """加载智能体：插件路径优先，后备路径兜底
+
+        Args:
+            force: 为 True 时强制重新加载 hooks（reload_agents 时调用）
+        """
         # 1. 从所有已启用插件加载（PluginManager 已初始化时）
         self._load_agents_from_plugins()
 
@@ -259,7 +263,7 @@ class AgentManager:
             self._load_plugin_hooks()
 
             # 3b. 技能中的 hooks（skills/{name}/hooks/hooks.json）
-            self._load_skills_hooks()
+            self._load_skills_hooks(force=force)
 
     def _load_agents_from_plugins(self):
         """从所有已启用插件加载智能体"""
@@ -275,14 +279,29 @@ class AgentManager:
             pass
 
     def reload_agents(self):
-        """"重新从已启用插件加载智能体（动态注入/注出后调用）
-
-        注意：仅重载 agents，不重载 hooks。hooks 的重新加载由调用方单独处理。
-        """
+        """重新从已启用插件加载智能体和 hooks（运行时重载用）"""
         self._agents.clear()
         self._hidden_agents.clear()
-        self._load_agents()
-        logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, {len(self._hidden_agents)} hidden")
+
+        # 先注销所有插件级 hooks，再重新加载（force=True 确保全量刷新）
+        if self._hook_manager is not None:
+            self._unload_plugin_hooks()
+
+        self._load_agents(force=True)
+        logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, "
+                    f"{len(self._hidden_agents)} hidden")
+
+    def _unload_plugin_hooks(self):
+        """注销所有插件级 hooks（reload 时调用）"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for hooks_dir in pm.get_hooks_dirs():
+                    if hooks_dir.exists() and hooks_dir.is_dir():
+                        self._hook_manager.unregister_skill_hooks(hooks_dir.name)
+        except (ImportError, Exception):
+            pass
 
     def _load_skills_hooks(self, force: bool = False):
         """加载 skills 目录中的 hooks

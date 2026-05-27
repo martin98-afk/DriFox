@@ -347,6 +347,56 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
 
+    def reload_plugin_subsystems(self) -> dict:
+        """运行时重载所有插件子系统
+
+        当插件启用/禁用或新增/删除后调用，统一触发所有子系统的重载。
+        由 main_widget 或设置面板中的"应用"操作触发。
+
+        Returns:
+            {"agents": int, "commands": bool, "hooks": bool, "themes": bool}
+            各子系统的重载结果
+        """
+        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False}
+
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
+                return result
+
+            # 1. 重新扫描插件目录（检测新增/移除）
+            pm.rescan()
+
+            # 2. 重载 AgentManager（智能体 + hooks）
+            if self._agent_manager:
+                self._agent_manager.reload_agents()
+                result["agents"] = len(self._agent_manager.list_agents(include_hidden=True))
+
+            # 3. 重载命令
+            try:
+                from app.core.builtin_commands import reload_all_commands
+                reload_all_commands()
+                result["commands"] = True
+            except (ImportError, Exception) as e:
+                logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+            # 4. 重载主题
+            try:
+                from app.utils.theme_manager import theme_manager
+                theme_manager.reload()
+                result["themes"] = True
+            except (ImportError, Exception) as e:
+                logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+            logger.info(f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
+                       f"commands={result['commands']}, themes={result['themes']}")
+        except Exception as e:
+            logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
+
+        return result
+
     # ========== MCP 自动发现 ==========
 
     def _discover_mcp_servers(self):
@@ -430,7 +480,7 @@ class ChatBackend(QObject):
         """完成停止流程（阻塞操作，获取中断消息并清理）
 
         在 cancel_streaming() 调用后执行。
-        此方法是阻塞的，应在 UI 更新后调用。
+        此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
 
         Returns:
             被中断的消息列表

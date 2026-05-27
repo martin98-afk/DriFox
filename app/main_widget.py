@@ -169,6 +169,7 @@ class OpenAIChatToolWindow(ToolWindow):
     skillExecutionRequested = pyqtSignal(str, dict)
     # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
     _topic_summary_ready = pyqtSignal(object, object)
+    _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
@@ -234,6 +235,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._gen_thread_pool.setMaxThreadCount(2)
         # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
+        # 线程安全桥接：中断完成后回到主线程保存会话
+        self._interrupt_complete.connect(self._on_finalize_complete)
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -2564,6 +2567,21 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_settings_config_changed(self):
         self._load_model_configs()
         self._apply_runtime_ui_settings()
+
+    def _reload_plugin_system(self):
+        """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
+        if hasattr(self, 'backend') and self.backend:
+            result = self.backend.reload_plugin_subsystems()
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.success(
+                title="插件已重载",
+                content=f"智能体: {result.get('agents', 0)}个, "
+                       f"命令: {'✓' if result.get('commands') else '✗'}, "
+                       f"主题: {'✓' if result.get('themes') else '✗'}",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
@@ -6246,6 +6264,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.finish_streaming()
         if self.history_manager:
             self._save_current_session_to_history()
+            # 🛡️ 立即落盘，确保数据写入 SQLite
+            self.history_manager.flush()
             # 流式完成后同步 batch 结构，确保 _message_batch 包含完整的 assistant batch
             self._sync_batch_structures()
             # 修复：同步可见范围，避免回收机制误删当前轮次的卡片
@@ -7110,6 +7130,10 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             self._current_session_id = session.session_id
 
+        # 立即落盘，确保退出前数据写入 SQLite
+        if self.history_manager:
+            self.history_manager.flush()
+
         if self._current_session_id:
             idx = self.history_manager.find_index_by_session_id(
                 self._current_session_id
@@ -7237,9 +7261,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e:
                     logger.error(f"[ChatWindow] _do_finalize error: {e}\n{traceback.format_exc()}")
                     interrupted_messages = []
-                # 回到主线程更新 UI
+                # 使用跨线程信号回到主线程，而非 QTimer.singleShot（daemon 线程无事件循环）
                 if not getattr(self, '_is_destroyed', False):
-                    QTimer.singleShot(0, lambda m=interrupted_messages: self._on_finalize_complete(m))
+                    self._interrupt_complete.emit(interrupted_messages)
 
             t = threading.Thread(target=_do_finalize, daemon=True)
             t.start()
@@ -7250,7 +7274,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
         """主线程回调：处理 finalize_stop 异步完成后的消息保存
 
-        由 _deferred_stop_handler 启动的后台线程通过 QTimer.singleShot 调用。
+        由 _interrupt_complete 信号触发。
         """
         if getattr(self, '_is_destroyed', False):
             return
@@ -7258,6 +7282,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._on_messages_updated(interrupted_messages)
             if self.history_manager:
                 self._save_current_session_to_history()
+                # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
+                self.history_manager.flush()
 
         # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()

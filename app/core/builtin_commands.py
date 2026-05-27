@@ -146,6 +146,25 @@ def register_all_commands():
     _registered = True
 
 
+def reload_all_commands():
+    """强制重新加载所有内置命令（重置 _registered 标志，用于运行时重载）"""
+    global _registered
+    _registered = False
+
+    cmd_mgr = CommandManager.get_instance()
+
+    # 清空旧命令
+    for name in list(cmd_mgr.get_command_names()):
+        cmd_mgr.unregister(name)
+
+    # 重新注册
+    commands = _load_commands_from_plugins(cmd_mgr)
+    _register_builtin_agents_as_commands(cmd_mgr)
+
+    logger.info(f"[BuiltinCommands] Reloaded {len(commands)} commands + agents")
+    _registered = True
+
+
 # ============================================================
 # PluginManager 集成
 # ============================================================

@@ -35,7 +35,7 @@ background:
 如果用户想自定义背景图片：
 1. 将图片放入主题文件夹（相对路径引用）：
    ```
-   ~/.drifox/themes/{theme_id}/
+   ~/.drifox/plugins/user-custom/themes/{theme_id}/
    ├── {theme_id}.yaml
    └── user_bg.png        # 你的背景图片
    ```
@@ -143,8 +143,8 @@ background:
 ## 输出要求
 
 1. 生成一个完整的 YAML 主题文件，包含以上所有字段
-2. 保存主题文件：放到用户主题目录，路径为 `~/.drifox/themes/{theme_id}/{theme_id}.yaml`
-   - 先创建目录 `~/.drifox/themes/{theme_id}/`
+2. 保存主题文件：放到用户主题目录，路径为 `~/.drifox/plugins/user-custom/themes/{theme_id}/{theme_id}.yaml`
+   - 先创建目录 `~/.drifox/plugins/user-custom/themes/{theme_id}/`
    - 再写入 YAML 文件
    - 如果目录已存在，覆盖写入
 3. 主题名称要有创意且有意义，围绕一个色彩主题（如"紫罗兰"、"琥珀光"、"极光绿"等）
