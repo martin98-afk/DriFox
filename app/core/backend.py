@@ -614,10 +614,11 @@ class ChatBackend(QObject):
 
         根据变更的组件名精确重载，不触发无关子系统：
 
-        - "agents" / "hooks" → 重载智能体 + hooks
-        - "commands"        → 重载命令
-        - "themes"          → 重载主题
-        - ""                → 跳过（根目录变更，如 README/LICENSE，不影响运行时）
+        - "agents"   → 重载智能体 + hooks
+        - "hooks"    → 仅重载 hooks（不碰智能体）
+        - "commands" → 重载命令
+        - "themes"   → 重载主题
+        - ""         → 跳过（根目录变更，如 README/LICENSE，不影响运行时）
 
         Args:
             plugin_name: 插件名称
@@ -643,11 +644,15 @@ class ChatBackend(QObject):
                 logger.warning(f"[ChatBackend] Plugin '{plugin_name}' not found after rescan")
                 return result
 
-            # 2. 增量重载智能体 + hooks：仅当变更在 agents/ 或 hooks/ 目录
-            if self._agent_manager and component in ("agents", "hooks"):
+            # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
+            if component == "agents" and self._agent_manager:
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
 
-            # 3. 命令：仅变更在 commands 目录才触发
+            # 3. Hooks：仅当变更在 hooks/ 目录（只重载 hooks，不碰 agents）
+            if component == "hooks" and self._agent_manager:
+                self._agent_manager.reload_plugin_hooks(plugin_name)
+
+            # 4. 命令：仅变更在 commands 目录才触发
             if component == "commands":
                 if plugin.has_component("commands"):
                     try:
@@ -657,7 +662,7 @@ class ChatBackend(QObject):
                     except (ImportError, Exception) as e:
                         logger.error(f"[ChatBackend] Failed to reload commands: {e}")
 
-            # 4. 主题：仅变更在 themes 目录才触发
+            # 5. 主题：仅变更在 themes 目录才触发
             if component == "themes":
                 if plugin.has_component("themes"):
                     try:

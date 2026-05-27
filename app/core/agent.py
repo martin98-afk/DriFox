@@ -334,6 +334,33 @@ class AgentManager:
                     f"count={count}, total_visible={len(self._agents)}")
         return count
 
+    def reload_plugin_hooks(self, plugin_name: str) -> bool:
+        """只重载指定插件的 hooks，不涉及智能体（hooks-only 增量重载）
+
+        Args:
+            plugin_name: 插件名称
+
+        Returns:
+            True 表示成功处理（可能有 hooks 文件），False 表示插件不存在/无 hooks 目录
+        """
+        if self._hook_manager is None:
+            return False
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if not pm.is_enabled(plugin_name):
+            return False
+        plugin = pm.get_plugin(plugin_name)
+        if not plugin:
+            return False
+        hooks_dir = plugin.path / "hooks"
+        hooks_file = hooks_dir / "hooks.json"
+        if hooks_dir.exists() and hooks_dir.is_dir():
+            self._hook_manager._clear_config_watcher(str(hooks_file))
+            self._hook_manager.unregister_skill_hooks(plugin.name)
+            self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+            return True
+        return False
+
     def _unload_plugin_hooks_for_plugin(self, plugin):
         """注销并重新加载指定插件的 hooks（使用插件名作为 skill key）"""
         if self._hook_manager is None:
