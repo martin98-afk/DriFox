@@ -466,7 +466,8 @@ class ToolExecutor:
             if missing:
                 return ToolResult(False, error=f"Missing required arguments: {missing}")
 
-        # 对于耗时工具（如 grep, bash, webfetch, websearch），使用异步执行
+        # 对于网络/I-O 密集工具，单独处理
+        # 注意：调用方（串行或并行）已在子线程中，此处直接同步执行
         if tool_name == "grep":
             return self._execute_grep_async(args, cancelled_ref)
         elif tool_name == "webfetch":
@@ -543,7 +544,8 @@ class ToolExecutor:
             ),
             "bg_list": lambda: self._builtin_tools.bg_list(),
             "webfetch": lambda: self._builtin_tools.fetch_web(
-                args.get("url", ""), args.get("format", "markdown")
+                args.get("url", ""), args.get("format", "markdown"),
+                args.get("max_chars", 26000)
             ),
             "websearch": lambda: self._builtin_tools.search_web(
                 args.get("query", ""), args.get("num_results", 10)
@@ -691,14 +693,7 @@ class ToolExecutor:
 
     def _execute_grep_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
         """
-        异步执行 grep，使用子线程，完成后返回结果
-
-        Args:
-            args: 工具参数
-            cancelled_ref: 取消标志引用 [bool]
-
-        Returns:
-            ToolResult: 执行结果
+        同步执行 grep（调用方已在子线程中，不再需要异步+阻塞等待模式）
         """
         if not self._builtin_tools or not self._builtin_tools._file_tools:
             return ToolResult(False, error="FileTools not available")
@@ -707,54 +702,15 @@ class ToolExecutor:
         path = args.get("path", "")
         include = args.get("include")
 
-        # 使用 FileTools 的异步接口
-        result_holder = [None]
-        finished = [False]
-
-        def on_grep_done(result):
-            result_holder[0] = result
-            finished[0] = True
-
-        # 启动异步 grep
-        self._builtin_tools._file_tools.grep_files(
+        # 直接同步调用，不传 callback 就走同步路径
+        return self._builtin_tools._file_tools.grep_files(
             pattern=pattern,
             path=path,
             include=include,
-            callback=on_grep_done
         )
 
-        # 使用定时器循环处理主线程事件，这样取消信号可以被处理
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-
-            if finished[0]:
-                return
-
-            # 检查取消标志
-            if cancelled_ref is not None and cancelled_ref[0]:
-                self._builtin_tools._file_tools.cancel()
-                result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-
-            # 继续等待
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-
-        wait_for_result()
-
-        # 等待完成
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
-            time.sleep(0.05)
-
-        return result_holder[0] if result_holder[0] else ToolResult(False, error="Grep failed")
-
     def _execute_webfetch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """异步执行网页抓取"""
+        """同步执行网页抓取（调用方已在子线程中）"""
         if not self._builtin_tools or not self._builtin_tools._web_tools:
             return ToolResult(False, error="WebTools not available")
 
@@ -762,79 +718,23 @@ class ToolExecutor:
         format = args.get("format", "markdown")
         max_chars = args.get("max_chars", 26000)
 
-        result_holder = [None]
-        finished = [False]
-
-        def on_fetch_done(result):
-            result_holder[0] = result
-            finished[0] = True
-
-        self._builtin_tools._web_tools.fetch_web(
+        # 直接同步调用，不传 callback 就走同步路径
+        return self._builtin_tools._web_tools.fetch_web(
             url=url, format=format, max_chars=max_chars,
-            callback=on_fetch_done, cancelled_ref=cancelled_ref
         )
 
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            if finished[0]: return
-            if cancelled_ref is not None and cancelled_ref[0]:
-                result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-
-        wait_for_result()
-
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
-            time.sleep(0.05)
-
-        return result_holder[0] if result_holder[0] else ToolResult(False, error="WebFetch failed")
-
     def _execute_websearch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """异步执行网络搜索"""
+        """同步执行网络搜索（调用方已在子线程中）"""
         if not self._builtin_tools or not self._builtin_tools._web_tools:
             return ToolResult(False, error="WebTools not available")
 
         query = args.get("query", "")
         num_results = args.get("num_results", 10)
 
-        result_holder = [None]
-        finished = [False]
-
-        def on_search_done(result):
-            result_holder[0] = result
-            finished[0] = True
-
-        self._builtin_tools._web_tools.search_web(
+        # 直接同步调用，不传 callback 就走同步路径
+        return self._builtin_tools._web_tools.search_web(
             query=query, num_results=num_results,
-            callback=on_search_done, cancelled_ref=cancelled_ref
         )
-
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            if finished[0]: return
-            if cancelled_ref is not None and cancelled_ref[0]:
-                result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-
-        wait_for_result()
-
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
-            time.sleep(0.05)
-
-        return result_holder[0] if result_holder[0] else ToolResult(False, error="WebSearch failed")
 
     def set_sub_agent_manager(self, sub_agent_manager):
         """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
