@@ -290,6 +290,21 @@ class AutoLoopWorker(QThread):
                     summary = self._extract_summary(response, iteration)
                     self.iteration_completed.emit(iteration, summary)
                     self._emit_progress()
+                    
+                    # 🔴 修复：强制更新接力文档后，如果仍在规划阶段且原始响应已包含 PLANNING_COMPLETE，
+                    # 必须在此处执行阶段过渡，否则 continue 会跳过后续的 phase handling 逻辑，
+                    # 导致下一轮仍然处于规划阶段，往复循环无法进入执行阶段。
+                    if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
+                        notes = self._engine.read_shared_notes()
+                        if self._engine.check_planning_complete(response, notes):
+                            self._engine.enter_execution_phase()
+                            current_step, max_verified, total = self._engine.parse_current_and_next_step(notes)
+                            self._engine.sync_verified_steps_from_notes(notes)
+                            self._engine.set_step_progress(current_step, total)
+                            self.log_signal.emit(f"✅ 规划完成！共 {total} 个步骤，{max_verified} 已完成")
+                            self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
+                            self.phase_changed.emit("executing")
+                            self._emit_progress()
                     continue
             except Exception as e:
                 logger.error(f"[AutoLoop] Worker error on iteration {iteration}: {e}")

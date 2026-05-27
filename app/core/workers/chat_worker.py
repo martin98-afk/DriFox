@@ -1779,7 +1779,6 @@ class OpenAIChatWorker(QThread):
             return pre_results
 
         # ====== Phase 2: 并行执行 ======
-        logger.info(f"[ToolCall] ⏩ 并行执行 {len(tasks)} 个工具...")
         parallel_results = []
 
         with concurrent.futures.ThreadPoolExecutor(
@@ -1805,7 +1804,6 @@ class OpenAIChatWorker(QThread):
         # 按原始索引排序，保持结果顺序稳定
         parallel_results.sort(key=lambda x: x[0])
         all_results = pre_results + [r[1] for r in parallel_results]
-        logger.info(f"[ToolCall] ⏩ 并行执行完成，共 {len(all_results)} 个结果")
         return all_results
 
     def _parse_tool_arguments(self, arguments_str, tool_name, raw_args, tool_call_id, round_id):
