@@ -159,12 +159,14 @@ class AutoLoopEngine(BaseEngine):
         self.state = LoopState.PLANNING
         self._start_time = time.time()
         self._is_planning_phase = True
+        self._is_archiving_phase = False
         logger.info("[AutoLoop] Engine started in PLANNING phase")
 
     def enter_execution_phase(self):
         """进入执行阶段"""
         self.state = LoopState.EXECUTING
         self._is_planning_phase = False
+        self._is_archiving_phase = False
         self._current_step = 1
         logger.info("[AutoLoop] Entering EXECUTION phase, step 1")
 

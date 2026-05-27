@@ -253,6 +253,28 @@ class AutoLoopWorker(QThread):
             self.iteration_completed.emit(iteration, summary)
             self._write_round_log(response, iteration)
 
+            # ===== 接力文档强制更新检查 =====
+            # 在所有阶段处理之前统一检查，避免模型"作弊"（如输出了 PLANNING_COMPLETE 但没写笔记）
+            if not self._check_relay_doc_updated(iteration):
+                self.log_signal.emit(
+                    f"⚠️【强制】接力文档未更新！iteration={iteration} "
+                    f"phase={'planning' if self._engine.is_planning_phase() else ('executing' if self._engine.is_executing_phase() else 'archiving')}"
+                )
+                # 注入强制更新提示，重新对话
+                force_messages = self._build_messages(task_prompt, iteration, force_update=True)
+                llm_config = self._model_config_getter() if self._model_config_getter else {}
+                if self._execute_force_relay_doc_update(task_prompt, iteration, llm_config, current_tools):
+                    self.log_signal.emit("✅ 接力文档已更新，继续执行...")
+                # 即使仍未更新也继续，避免死循环
+                # 注意：此处不输出 iteration_completed（已在上方输出），也不重新写日志
+
+                # 强制更新后再次检查：如果模型输出了 PLANNING_COMPLETE 但忘了写笔记，
+                # 此时笔记已补上，强制过渡到执行阶段
+                if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
+                    notes = self._engine.read_shared_notes()
+                    if notes and self._engine.check_planning_complete(response, notes):
+                        self._transition_to_execution(notes)
+
             # ===== 三阶段处理 =====
             if self._engine.is_archiving_phase():
                 # --- 归档阶段 ---
@@ -283,7 +305,69 @@ class AutoLoopWorker(QThread):
             self.loop_stopped.emit()
         elif self._engine.state != LoopState.COMPLETED:
             self._engine.state = LoopState.COMPLETED
+            # 兜底归档：如果非正常结束但笔记已存在，执行基本的归档操作
+            if not self._engine.is_archiving_complete and not self._is_cancelled:
+                archive_ok = self._do_fallback_archive()
+                if not archive_ok:
+                    self.loop_completed.emit(f"达到最大迭代次数 ({self._config.max_iterations})，已停止（归档未完成）")
+                    return
             self.loop_completed.emit(f"达到最大迭代次数 ({self._config.max_iterations})，已停止")
+
+    # ================================================================
+    #  兜底归档（max_iterations 耗尽时）
+    # ================================================================
+
+    def _do_fallback_archive(self) -> bool:
+        """执行基本的兜底归档
+
+        当 max_iterations 耗尽但归档未完成时，由 Worker 直接写入归档文件，
+        不依赖 LLM 对话。
+        """
+        if not self._engine or not self._config:
+            return False
+
+        notes = self._engine.read_shared_notes()
+        if not notes:
+            logger.info("[AutoLoop] No notes to archive")
+            return False
+
+        try:
+            from pathlib import Path
+            archive_dir = Path(self._config.project_path or ".") / ".autoloop" / "archive" / "latest"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            # 归档 SHARED_TASK_NOTES.md
+            notes_path = archive_dir / "SHARED_TASK_NOTES.md"
+            notes_path.write_text(notes, encoding="utf-8")
+            self.log_signal.emit(f"📦 兜底归档：笔记已保存至 {notes_path}")
+
+            # 写入 META.md
+            import time
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            total_steps = self._engine.total_steps
+            verified = self._engine.get_verified_steps()
+            meta_content = f"""# AutoLoop 执行归档（兜底）
+
+- 任务: {self._config.task_prompt[:200] if self._config.task_prompt else "未知"}
+- 完成时间: {timestamp}
+- 总步骤数: {total_steps}
+- 已完成步骤: {len(verified)} {sorted(verified) if verified else ""}
+- 状态: 达到最大迭代次数（max_iterations={self._config.max_iterations}），提前结束
+
+> ⚠️ 注意：此归档由系统自动生成，非完整执行结果。
+> 如需完整记录，请查阅 `.autoloop/logs/` 下的轮次日志。
+"""
+            meta_path = archive_dir / "META.md"
+            meta_path.write_text(meta_content, encoding="utf-8")
+            self.log_signal.emit(f"📦 兜底归档：元信息已保存至 {meta_path}")
+
+            # 标记归档完成
+            self._engine._archiving_complete = True
+            return True
+
+        except Exception as e:
+            logger.warning(f"[AutoLoop] Fallback archive failed: {e}")
+            return False
 
     # ================================================================
     #  LLM 对话执行（提取公用方法）
@@ -384,53 +468,6 @@ class AutoLoopWorker(QThread):
         else:
             self.log_signal.emit("⚠️ 接力文档仍未更新，将继续强制要求")
             return False
-
-    def _check_and_force_phase_transition(self, response: str, task_prompt: str,
-                                          iteration: int, llm_config: Dict,
-                                          current_tools: List[Dict]) -> Optional[bool]:
-        """检查接力文档并强制阶段过渡
-
-        统一处理接力文档检查和 planning→executing 阶段过渡。
-        将原先散落在 force_update 分支和 planning handler 中的逻辑统一。
-
-        Returns:
-            True  → 阶段过渡完成（进入执行或继续下一轮），调用方 continue
-            False → 不需要特殊处理，调用方继续后续逻辑
-            None  → 出错
-        """
-        relay_doc_ok = self._check_relay_doc_updated(iteration)
-
-        if relay_doc_ok:
-            return False  # 接力文档正常，不需要处理
-
-        # 接力文档未更新，记录诊断
-        notes_check = self._engine.read_shared_notes()
-        notes_len = len(notes_check) if notes_check else 0
-        has_plan = "## 执行计划" in notes_check or "- [步骤" in notes_check if notes_check else False
-
-        self.log_signal.emit(
-            f"⚠️【强制】接力文档未更新！notes_len={notes_len} has_plan={has_plan} "
-            f"iteration={iteration} phase={'planning' if self._engine.is_planning_phase() else 'executing'}"
-        )
-
-        # 执行强制更新
-        self._execute_force_relay_doc_update(task_prompt, iteration, llm_config, current_tools)
-
-        # 再次检查接力文档
-        relay_doc_ok = self._check_relay_doc_updated(iteration)
-
-        # 规划阶段特殊处理：如果原始响应包含 PLANNING_COMPLETE，强制过渡
-        if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
-            notes = self._engine.read_shared_notes()
-            if notes and self._engine.check_planning_complete(response, notes):
-                self._transition_to_execution(notes)
-                return True  # 调用方 continue
-
-        if not relay_doc_ok:
-            # 仍然未更新，但允许继续（避免死循环）
-            pass
-
-        return True  # 调用方 continue
 
     # ================================================================
     #  阶段处理器
