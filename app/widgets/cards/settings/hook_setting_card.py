@@ -274,21 +274,18 @@ class HookListSettingCard(ExpandSettingCard):
             return str(self.hooks_config_file) not in cf  # fallback: 字符串包含判断
     
     def _save_hooks(self):
-        """保存全局 hooks 到配置文件，并同步到 HookManager"""
+        """保存全局 hooks 到配置文件（watchfiles 热更新自动检测文件变更并重载）"""
         # 过滤掉 _readonly 的 skill hooks
         save_data = {}
         for event_name, rules in self.all_hooks.items():
             filtered_rules = [r for r in rules if not r.get("_readonly", False)]
             if filtered_rules:
                 save_data[event_name] = filtered_rules
-        
+
         self.hooks_config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.hooks_config_file, 'w', encoding='utf-8') as f:
             json.dump({"hooks": save_data}, f, indent=2, ensure_ascii=False)
-        
-        # 同步到 HookManager（热重载）
-        if self._hook_manager:
-            self._hook_manager.reload_global_hooks(str(self.hooks_config_file))
+        # 写文件后 watchfiles 会自动检测到变更，触发热更新重载 hooks
     
     def _setup_ui(self):
         self.viewLayout.setSpacing(0)
