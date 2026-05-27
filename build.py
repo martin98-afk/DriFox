@@ -28,7 +28,6 @@ to_remove_common = [
     "PIL",
     "ast_serialize",
     "websockets",
-    "watchfiles",
     "PyQt5/Qt5/translations",
 ]
 # Windows 专用（.dll 文件）
@@ -138,9 +137,7 @@ params = [
     "--windowed",
     "--name=Drifox",  # 直接指定名称，省去后期改名麻烦
     # 数据文件包含
-    f"--add-data=app/agents{os.pathsep}app/agents",
-    f"--add-data=app/skills{os.pathsep}app/skills",
-    f"--add-data=app/themes{os.pathsep}app/themes",
+    f"--add-data=plugins{os.pathsep}plugins",
 ]
 
 if icon_arg:

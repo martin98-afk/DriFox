@@ -27,6 +27,7 @@ FONT_SIZE_OPTIONS = {
     "small": {"label": "小", "delta": -1, "base": 13},
     "medium": {"label": "中", "delta": 0, "base": 14},
     "large": {"label": "大", "delta": 2, "base": 16},
+    "superlarge": {"label": "超大", "delta": 4, "base": 18},
 }
 
 

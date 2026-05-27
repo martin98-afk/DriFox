@@ -169,6 +169,7 @@ class OpenAIChatToolWindow(ToolWindow):
     skillExecutionRequested = pyqtSignal(str, dict)
     # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
     _topic_summary_ready = pyqtSignal(object, object)
+    _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
@@ -198,6 +199,8 @@ class OpenAIChatToolWindow(ToolWindow):
             get_model_config=self._get_current_model_config,
             workdir=str(Path(__file__).parent.parent.parent),
         )
+        # 连接插件热更新信号
+        self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         self.backend._current_project = self._current_project
         # 同步项目到 tool_executor，确保 BuiltinTools.edit_project_note 等工具使用正确项目名
         if self.backend.tool_executor:
@@ -234,6 +237,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._gen_thread_pool.setMaxThreadCount(2)
         # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
+        # 线程安全桥接：中断完成后回到主线程保存会话
+        self._interrupt_complete.connect(self._on_finalize_complete)
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -994,6 +999,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._branch_widget.setObjectName("_branchWidget")
         self._branch_widget.clicked.connect(self._on_branch_label_clicked)
         self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
+        self._branch_widget.setAutoDefault(False)  # 防止 QDialog 在 Enter 时误触发
         self._branch_widget.setVisible(False)
         self._refresh_branch_widget_style()
         pb_layout.addWidget(self._branch_widget)
@@ -1007,7 +1013,7 @@ class OpenAIChatToolWindow(ToolWindow):
         font_css = get_font_family_css()
         title_style = f"""QLabel {{
             color: #f3f6fc;
-            font-size: 15px;
+            {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
             border-radius: 10px;
@@ -1019,7 +1025,7 @@ class OpenAIChatToolWindow(ToolWindow):
         }}
         QLineEdit {{
             color: #f3f6fc;
-            font-size: 15px;
+            {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
             border-radius: 10px;
@@ -1272,6 +1278,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.setVisible(False)
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
+        self._question_floating_widget.previewRequested.connect(self._on_question_preview_requested)
         self._bottom_card_container.add_card("question", self._question_floating_widget)
 
         # 注册卡片到 CardManager（优先级：数值越小权限越高）
@@ -1387,7 +1394,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_btn_icon.setFixedSize(15, 15)
         btn_layout.addWidget(self._model_btn_icon)
         self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
-        self._model_btn_text.setStyleSheet(MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(11)))
+        self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         btn_layout.addWidget(self._model_btn_text)
         model_layout.addWidget(self.current_model_btn, 1)
         self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
@@ -1402,58 +1409,58 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 智能体切换（无边框）
         self._agent_switch_widget = self._create_agent_switch_buttons()
-        self._agent_switch_widget.setFixedHeight(26)
+        self._agent_switch_widget.setFixedHeight(28)
         toolbar_layout.addWidget(self._agent_switch_widget)
 
         toolbar_layout.addStretch(1)
 
         # 右侧功能按钮组（无边框，间距加宽）
         self._toolbar_capsule = QWidget(toolbar_widget)
-        self._toolbar_capsule.setFixedHeight(26)
+        self._toolbar_capsule.setFixedHeight(28)
         self._toolbar_capsule.setStyleSheet(f"""
             background: rgba(255,255,255,0.05);
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
         """)
         capsule_layout = QHBoxLayout(self._toolbar_capsule)
         capsule_layout.setContentsMargins(6, 2, 6, 2)
-        capsule_layout.setSpacing(6)
+        capsule_layout.setSpacing(4)
 
         btn_capsule_style = """
             TransparentToolButton { background: transparent; border: none; }
-            TransparentToolButton:hover { background: rgba(255,255,255,0.1); border-radius: 4px; }
+            TransparentToolButton:hover { background: rgba(255,255,255,0.12); border-radius: 5px; }
         """
 
         self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
-        self.auto_loop_btn.setFixedSize(22, 22)
+        self.auto_loop_btn.setFixedSize(24, 24)
         self.auto_loop_btn.setToolTip("AutoLoop")
         self.auto_loop_btn.setStyleSheet(btn_capsule_style)
         self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
         capsule_layout.addWidget(self.auto_loop_btn)
 
         self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
-        self.diff_btn.setFixedSize(22, 22)
+        self.diff_btn.setFixedSize(24, 24)
         self.diff_btn.setStyleSheet(btn_capsule_style)
         self.diff_btn.setToolTip("差异对比")
         self.diff_btn.clicked.connect(self._open_diff_viewer)
         capsule_layout.addWidget(self.diff_btn)
 
         self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
-        self.memory_btn.setFixedSize(22, 22)
+        self.memory_btn.setFixedSize(24, 24)
         self.memory_btn.setStyleSheet(btn_capsule_style)
         self.memory_btn.setToolTip("长期记忆")
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
 
-        self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
-        self.history_btn.setFixedSize(22, 22)
+        self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
+        self.history_btn.setFixedSize(24, 24)
         self.history_btn.setStyleSheet(btn_capsule_style)
         self.history_btn.setToolTip("历史会话")
         self.history_btn.clicked.connect(self._toggle_history_card)
         capsule_layout.addWidget(self.history_btn)
 
         self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
-        self.new_session_btn.setFixedSize(22, 22)
+        self.new_session_btn.setFixedSize(24, 24)
         self.new_session_btn.setStyleSheet(btn_capsule_style)
         self.new_session_btn.setToolTip("新建对话")
         self.new_session_btn.clicked.connect(self._create_new_session)
@@ -1477,10 +1484,21 @@ class OpenAIChatToolWindow(ToolWindow):
     def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
 
+        优先从 FunctionCommandHandlers 获取处理器，回退到内置处理器。
+
         Args:
             command_name: 命令名（不含 /）
             args: 命令后的参数字符串
         """
+        from app.core.builtin_commands import FunctionCommandHandlers
+
+        # 优先使用动态注册的处理器
+        handler = FunctionCommandHandlers.get(command_name)
+        if handler:
+            handler(args)
+            return
+
+        # 回退到内置处理器（用于兼容旧命令或未注册的 function 命令）
         if command_name == "new":
             self._create_new_session()
         elif command_name == "new-window":
@@ -1699,6 +1717,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
         self._update_balance_display()
+
+    def _get_model_btn_text_style(self) -> str:
+        """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
+        Colors.refresh()
+        return (
+            f"color: {Colors.TEXT_PRIMARY}; "
+            f"{font_size_css(13)} "
+            f"font-weight: bold; background: transparent;"
+        )
 
     def _update_model_selector_btn(self):
         """更新模型选择按钮的图标和文字显示"""
@@ -1995,14 +2022,20 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("mcp_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, 'mcpListCard'):
-            name = server_data.get("name", "")
-            servers = list(self._settings_popup.mcpListCard.cfg.mcp_servers.value or [])
-            is_edit = any(s.get("name") == name for s in servers)
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            new_name = server_data.get("name", "")
+            original_name = getattr(self._mcp_edit_popup, '_original_name', None)
+            lookup_name = original_name if original_name else new_name
+
+            servers = self._settings_popup.mcpListCard._get_servers()
+            is_edit = any(s.get("name") == lookup_name for s in servers)
             if is_edit:
-                self._settings_popup.mcpListCard.update_server(name, server_data)
+                pm.update_mcp_server(lookup_name, server_data)
             else:
-                self._settings_popup.mcpListCard.add_server(server_data)
-            # 确保连接状态同步
+                pm.add_mcp_server(new_name, server_data)
+
+            self._settings_popup.mcpListCard._refresh()
             QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
 
     def _on_mcp_edit_closed(self):
@@ -2537,6 +2570,41 @@ class OpenAIChatToolWindow(ToolWindow):
         self._load_model_configs()
         self._apply_runtime_ui_settings()
 
+    def _reload_plugin_system(self):
+        """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
+        if hasattr(self, 'backend') and self.backend:
+            result = self.backend.reload_plugin_subsystems()
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.success(
+                title="插件已重载",
+                content=f"智能体: {result.get('agents', 0)}个, "
+                       f"命令: {'✓' if result.get('commands') else '✗'}, "
+                       f"主题: {'✓' if result.get('themes') else '✗'}, "
+                       f"技能: {'✓' if result.get('skills') else '✗'}, "
+                       f"MCP: {'✓' if result.get('mcp') else '✗'}",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    def _on_plugin_hot_reload(self, result: dict):
+        """插件热更新完成时的回调（watchfiles 自动触发）"""
+        if not hasattr(self, 'backend') or not self.backend:
+            return
+        # 不弹 InfoBar，仅日志记录
+        logger.debug(f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
+                    f"commands={result.get('commands')}, themes={result.get('themes')}, "
+                    f"skills={result.get('skills')}, mcp={result.get('mcp')}")
+
+        # 命令卡片缓存失效：任何影响命令/技能列表的变更都需要重建缓存
+        if hasattr(self, '_command_card'):
+            needs_invalidation = (
+                result.get('commands') or result.get('skills') or result.get('agents', 0) > 0
+            )
+            if needs_invalidation:
+                self._command_card.invalidate_cache()
+                logger.debug("[HotReload] command_card cache invalidated")
+
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
         from app.utils.theme_manager import theme_manager
@@ -2564,7 +2632,7 @@ class OpenAIChatToolWindow(ToolWindow):
             font_css = get_font_family_css()
             title_style = f"""QLabel {{
                 color: {Colors.TEXT_PRIMARY};
-                font-size: 15px;
+                {font_size_css(15)}
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
@@ -2576,7 +2644,7 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
             QLineEdit {{
                 color: {Colors.TEXT_PRIMARY};
-                font-size: 15px;
+                {font_size_css(15)}
                 font-weight: bold;
                 padding: 6px 4px;
                 border-radius: 10px;
@@ -2608,9 +2676,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 border-radius: 8px;
             """)
         if hasattr(self, "_model_btn_text"):
-            btn_text_style = MODEL_BTN_TEXT_STYLE.replace("font-size: 13px;", font_size_css(13))
-            btn_text_style = btn_text_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)
-            self._model_btn_text.setStyleSheet(btn_text_style)
+            self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
+        if hasattr(self, "_model_btn_container"):
+            self._model_btn_container.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: none;
+                border-radius: 8px;
+            """)
         if hasattr(self, "_toolbar_capsule"):
             self._toolbar_capsule.setStyleSheet(f"""
                 background: rgba(255,255,255,0.05);
@@ -2851,8 +2923,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         agent = self.backend.get_agent(agent_name)
         if agent:
-            mode = agent.mode
-            hidden = "hidden" if agent.hidden else "visible"
+            mode = agent.mode or "(未声明)"
+            hidden = "hidden" if agent.hidden is True else "visible"
             tooltip = f"{agent.name}: {agent.description}\nMode: {mode}, {hidden}"
             # 更新按钮组的 tooltip
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:
@@ -5951,6 +6023,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._sync_batch_structures()
                 self._fix_new_card_message_index(user_text=callback_text)
                 self._visible_batch_end = len(self._message_batch)
+                # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
+                self._sync_node_preview_to_last()
 
     def _prepare_ui_for_callback_message(self, callback_text: str):
         """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
@@ -6212,6 +6286,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.finish_streaming()
         if self.history_manager:
             self._save_current_session_to_history()
+            # 🛡️ 立即落盘，确保数据写入 SQLite
+            self.history_manager.flush()
             # 流式完成后同步 batch 结构，确保 _message_batch 包含完整的 assistant batch
             self._sync_batch_structures()
             # 修复：同步可见范围，避免回收机制误删当前轮次的卡片
@@ -6239,6 +6315,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 对话完成后更新缓存统计显示
         self._refresh_cache_stats()
+
+        # ⚠️ 时间线节点在流式完成时不会更新 - 修复
+        self._update_node_preview()
+        self._sync_node_preview_to_last()
 
         # 对话完成后刷新余额显示
         self._refresh_balance()
@@ -6348,6 +6428,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         current_title = self.title_edit.text() if self.title_edit else "对话"
         self._notify_if_inactive(f"{current_title} - 错误", error[:100])
+
+        # ⚠️ 时间线节点在引擎错误时不会更新 - 修复
+        self._update_node_preview()
+        self._sync_node_preview_to_last()
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """API 重试状态通知 - 更新卡片边框和状态栏"""
@@ -6491,6 +6575,32 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.input_area:
             self.input_area.setFocus()
 
+    def _on_question_preview_requested(self, payload: object):
+        """显示权限请求的完整工具参数预览。"""
+        if getattr(self, '_is_destroyed', False):
+            return
+        if not isinstance(payload, dict):
+            return
+
+        try:
+            from app.utils.diff_viewer import ToolPayloadHtmlGenerator
+
+            html = ToolPayloadHtmlGenerator.generate_html_report(
+                tool_name=payload.get("tool_name", ""),
+                tool_call_id=payload.get("tool_call_id", ""),
+                arguments=payload.get("arguments") or {},
+            )
+            show_diff_viewer(self, html, title="工具调用参数预览")
+        except Exception as e:
+            logger.error(f"[Permission] Preview error: {e}")
+            InfoBar.error(
+                "预览失败",
+                str(e),
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+
     def _on_agent_switched(self, agent_name: str):
         """TODO: 实现智能体切换时的状态同步"""
         if getattr(self, '_is_destroyed', False):
@@ -6511,8 +6621,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("question", self._window_id)
         self._question_floating_widget.setUpdatesEnabled(False)
         try:
-            arg_str = str(arguments)[:200] if arguments else ""
-            question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数: {arg_str}"
+            arg_str = str(arguments)[:160] if arguments else ""
+            if arguments and len(str(arguments)) > 160:
+                arg_str += "..."
+            question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数摘要: {arg_str}\n\n点击“预览”可查看完整参数。"
             options = [
                 {"label": "允许", "description": ""},
                 {"label": "允许且该轮对话自动允许", "description": ""},
@@ -6522,6 +6634,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget.show_question(
                 [{"question": question_text, "options": options, "multiple": False}],
                 show_custom_input=False,
+                preview_payload={
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "arguments": arguments or {},
+                },
             )
         except Exception as e:
             self._question_floating_widget.setUpdatesEnabled(True)
@@ -6936,13 +7053,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.toggle_card("memory", self._window_id)
         # 显示时刷新记忆数据
         if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, '_memory_card_popup'):
-            # 强制刷新当前 tab 的内容
-            current_tab = getattr(self._memory_card, '_current_tab', 'entries')
-            # 强制切换 tab（即使相同也触发刷新）
+            # 默认切换到条目记忆标签
+            default_tab = 'entries'
+            # 强制切换 tab
             if hasattr(self._memory_card_popup, '_current_tab'):
-                old_tab = self._memory_card_popup._current_tab
                 self._memory_card_popup._current_tab = None  # 临时改变，确保 switch_tab 执行
-                self._memory_card_popup.switch_tab(current_tab)
+                self._memory_card_popup.switch_tab(default_tab)
+            # 同时更新 BaseSettingsCard 的 tab 状态
+            if hasattr(self._memory_card, 'set_current_tab'):
+                self._memory_card.set_current_tab(default_tab)
 
     def _on_memory_card_saved(self, memories: list):
         """记忆卡片保存后的回调"""
@@ -7032,6 +7151,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 system_prompt=system_prompt,
             )
             self._current_session_id = session.session_id
+
+        # 立即落盘，确保退出前数据写入 SQLite
+        if self.history_manager:
+            self.history_manager.flush()
 
         if self._current_session_id:
             idx = self.history_manager.find_index_by_session_id(
@@ -7129,7 +7252,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.input_area:
             self.input_area.setFocus()
 
-        # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 保存消息）=====
+        # ⚠️ 立即更新时间线节点（即使后台 finalize 还未完成）
+        self._update_node_preview()
+
+        # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 收集中断消息）=====
         # 使用 QTimer.singleShot 延迟到 UI 事件处理完成后执行，
         # 避免 worker.wait() 等阻塞操作影响界面响应
         QTimer.singleShot(0, self._deferred_stop_handler)
@@ -7148,21 +7274,29 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 在线程中执行阻塞的 finalize_stop，不阻塞 UI 线程
         if self.backend and self.backend.chat_engine:
             import threading
+            import traceback
             engine_ref = self.backend.chat_engine
 
             def _do_finalize():
-                interrupted_messages = engine_ref.finalize_stop() or []
-                # 回到主线程更新 UI
-                if interrupted_messages and not getattr(self, '_is_destroyed', False):
-                    QTimer.singleShot(0, lambda m=interrupted_messages: self._on_finalize_complete(m))
+                try:
+                    interrupted_messages = engine_ref.finalize_stop() or []
+                except Exception as e:
+                    logger.error(f"[ChatWindow] _do_finalize error: {e}\n{traceback.format_exc()}")
+                    interrupted_messages = []
+                # 使用跨线程信号回到主线程，而非 QTimer.singleShot（daemon 线程无事件循环）
+                if not getattr(self, '_is_destroyed', False):
+                    self._interrupt_complete.emit(interrupted_messages)
 
             t = threading.Thread(target=_do_finalize, daemon=True)
             t.start()
+        else:
+            # 无 chat_engine，仍然需要更新时间线
+            self._update_node_preview()
 
     def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
         """主线程回调：处理 finalize_stop 异步完成后的消息保存
 
-        由 _deferred_stop_handler 启动的后台线程通过 QTimer.singleShot 调用。
+        由 _interrupt_complete 信号触发。
         """
         if getattr(self, '_is_destroyed', False):
             return
@@ -7170,6 +7304,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._on_messages_updated(interrupted_messages)
             if self.history_manager:
                 self._save_current_session_to_history()
+                # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
+                self.history_manager.flush()
+
+        # ⚠️ 时间线节点在停止流式后不会更新 - 修复
+        self._update_node_preview()
+        self._sync_node_preview_to_last()
 
     def _create_context_menu(self):
         self._context_menu_actions = {}
@@ -7232,8 +7372,12 @@ class OpenAIChatToolWindow(ToolWindow):
         import os
         project_path = config.project_path.strip() if config.project_path else ""
         if not project_path:
-            # 如果用户没有填写项目路径，默认使用当前工作目录
-            project_path = os.getcwd()
+            # 优先级：实例缓存（worktree 切换后的目录）→ tool_executor → os.getcwd() 兜底
+            project_path = self._current_workdir.get(self._current_project)
+            if not project_path and self.backend and self.backend.tool_executor:
+                project_path = self.backend.tool_executor.get_workdir()
+            if not project_path:
+                project_path = os.getcwd()
         
         abs_path = os.path.abspath(project_path)
         if os.path.isdir(abs_path):

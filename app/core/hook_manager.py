@@ -452,6 +452,8 @@ class HookManager:
         
         2. 旧格式 (简化):
            {"EventName": [{"command": "..."}]}
+        
+        注意：相同的 config_file 只注册一次，防止重复注册。
         """
         # 处理字符串路径
         if isinstance(hooks_config, str):
@@ -462,6 +464,11 @@ class HookManager:
             except Exception as e:
                 logger.error(f"[HookManager] Failed to load hooks from {hooks_config}: {e}")
                 return 0
+        
+        # 去重：相同的 config_file 只注册一次
+        if config_file and config_file in self._config_watchers:
+            logger.debug(f"[HookManager] Skipping already loaded config: {config_file}")
+            return 0
         
         # 保存配置文件的监控时间
         if config_file:
@@ -515,7 +522,17 @@ class HookManager:
         
         del self._skill_to_hooks[skill_name]
         logger.debug(f"[HookManager] Unregistered all hooks for skill {skill_name}")
-    
+
+    def _clear_config_watcher(self, config_file: str):
+        """清除配置去重缓存，允许同一文件用不同 skill_name 重新注册
+
+        用于增量热更新：当 hooks 从旧 key 迁移到新 key 时，
+        需要先清除 _config_watchers 中的条目，否则 register_hooks_from_json
+        会因为去重检查而跳过新 key 的注册。
+        """
+        if config_file in self._config_watchers:
+            del self._config_watchers[config_file]
+
     # ========== 动态生命周期管理 API ==========
     
     def enable_hook(self, skill_name: str, event_name: str, hook_index: int) -> bool:
@@ -1034,24 +1051,31 @@ class HookManager:
 
     def reload_global_hooks(self, config_file: str = None):
         """仅重新加载全局 hooks 配置，不影响 skill/agent hooks"""
-        config_file = config_file or self._config_file
+        if config_file is None:
+            config_file = self._config_file
         if not config_file or not os.path.exists(config_file):
             return
-        
+
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            
-            # 先注销旧的全局 hooks，再重新注册（不碰 skill/agent hooks）
-            skill_root = str(Path(config_file).parent)
+
+            # 先注销旧的全局 hooks
             self.unregister_skill_hooks("__global__")
+
+            # 清除 _config_watchers 中的条目，避免去重检查拦截重新注册
+            if config_file in self._config_watchers:
+                del self._config_watchers[config_file]
+
+            # 重新注册
+            skill_root = str(Path(config_file).parent)
             self.register_hooks_from_json("__global__", skill_root, config, config_file)
             logger.info(f"[HookManager] Reloaded global hooks from {config_file}")
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")
 
     def load_hooks_from_directory(self, agents_dir: Path) -> int:
-        """从 agents_dir 子目录加载 hooks.json"""
+        """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)"""
         count = 0
         if not agents_dir.exists():
             return count
@@ -1077,11 +1101,58 @@ class HookManager:
                     logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
         return count
 
-    def load_hooks_from_skills(self, skills_dir: Path) -> int:
-        """从 skills_dir 加载 hooks.json 和 SKILL.md"""
+    def load_hooks_from_directory_flat(self, dir_path: Path, skill_name: str = None) -> int:
+        """从目录直接加载 hooks.json（插件顶层 hooks/ 目录）
+
+        加载 {dir_path}/hooks.json 文件（如果有）。
+
+        Args:
+            dir_path: hooks 目录路径
+            skill_name: 注册用的 skill 名称。为 None 时使用 dir_path.name（兼容旧调用）
+        """
+        count = 0
+        if not dir_path.exists() or not dir_path.is_dir():
+            return count
+
+        hooks_file = dir_path / "hooks.json"
+        if not hooks_file.exists():
+            return count
+
+        try:
+            with open(hooks_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            n = self.register_hooks_from_json(
+                skill_name or dir_path.name,
+                str(dir_path.absolute()),
+                config,
+                str(hooks_file)
+            )
+            count += n
+            if n > 0:
+                logger.info(f"[HookManager] Loaded {n} hooks from {dir_path.name}/hooks.json")
+        except Exception as e:
+            logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
+
+        return count
+
+    def load_hooks_from_skills(self, skills_dir: Path, force: bool = False) -> int:
+        """从 skills_dir 加载 hooks.json 和 SKILL.md
+
+        Args:
+            skills_dir: skills 根目录
+            force: 为 True 时强制重新加载（reload_agents 时调用）
+        """
         count = 0
         if not skills_dir.exists():
             return count
+
+        # reload_agents 时 force=True，全量重新加载
+        if force:
+            # 先注销该 skills 目录下的所有 hooks
+            for skill_dir in skills_dir.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+                self.unregister_skill_hooks(skill_dir.name)
 
         for skill_dir in skills_dir.iterdir():
             if not skill_dir.is_dir():

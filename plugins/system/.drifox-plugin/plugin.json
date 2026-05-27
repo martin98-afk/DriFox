@@ -1,0 +1,19 @@
+{
+    "name": "system",
+    "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks 和 MCP 配置",
+    "version": "1.0.0",
+    "author": {
+        "name": "DriFoxx Team"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "commands": true,
+        "agents": true,
+        "skills": true,
+        "themes": true,
+        "hooks": true,
+        "mcp": true
+    }
+}

@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Optional, List, Any, Tuple, Callable
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, font_size_css
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QLabel, QWidget, QLineEdit, QHBoxLayout
 from loguru import logger
@@ -260,18 +260,18 @@ CHAT_SCROLL_STYLE = """
     }
 """
 
-TITLE_STYLE = """
-    QLabel {
+TITLE_STYLE = f"""
+    QLabel {{
         color: #f3f6fc;
-        font-size: 15px;
+        {font_size_css(15)}
         font-weight: bold;
         padding: 6px 4px;
         border-radius: 10px;
         background-color: transparent;
-    }
-    QLabel:hover {
+    }}
+    QLabel:hover {{
         background-color: rgba(255, 255, 255, 0.06);
-    }
+    }}
 """
 
 MODEL_BTN_STYLE = """
@@ -286,7 +286,7 @@ MODEL_BTN_STYLE = """
     }
 """
 
-MODEL_BTN_TEXT_STYLE = "color: #f3f6fc; font-size: 13px; font-weight: bold; background: transparent;"
+MODEL_BTN_TEXT_STYLE = f"color: #f3f6fc; {font_size_css(13)} font-weight: bold; background: transparent;"
 
 
 # ==================== 预编译正则 ====================
@@ -1132,20 +1132,21 @@ def truncate_and_remove_round(
     return True, old_count, new_count
 
 
-def show_diff_viewer(parent, html) -> Any:
+def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     """
     显示差异查看器
     
     Args:
         parent: 父控件
         html: HTML 内容
+        title: 窗口标题
         
     Returns:
         DiffViewerWindow 实例
     """
     from app.utils.diff_viewer import DiffViewerWindow
     
-    viewer = DiffViewerWindow(parent=parent)
+    viewer = DiffViewerWindow(parent=parent, title=title)
     viewer.load_html(html)
     viewer.show()
     return viewer
@@ -1734,7 +1735,6 @@ class TitleEditWidget(QWidget):
         self._label = QLabel(text, self)
         self._label.setCursor(Qt.IBeamCursor)
         self._label.setMinimumWidth(0)  # 允许缩窄以触发省略
-        self._label.mousePressEvent = self._on_label_clicked
         self._layout.addWidget(self._label)
 
         # 编辑输入框 — 编辑模式使用
@@ -1811,29 +1811,37 @@ class TitleEditWidget(QWidget):
 
     # ── 事件处理 ──
 
-    def _on_label_clicked(self, event):
-        """点击标签进入编辑模式"""
-        if self._editing:
-            return
-        self._editing = True
-        self.setReadOnly(False)
+    def mouseDoubleClickEvent(self, event):
+        """双击标签进入编辑模式"""
+        if event.button() == Qt.LeftButton:
+            self._editing = True
+            self.setReadOnly(False)
+        super().mouseDoubleClickEvent(event)
 
     def _on_edit_return(self):
         self._editing = False
-        self._apply_edit()
-        self.returnPressed.emit()
+        changed = self._apply_edit()
+        if changed:
+            self.returnPressed.emit()
 
     def _on_edit_finished(self):
         self._editing = False
-        self._apply_edit()
-        self.editingFinished.emit()
+        changed = self._apply_edit()
+        if changed:
+            self.editingFinished.emit()
 
-    def _apply_edit(self):
+    def _apply_edit(self) -> bool:
+        """应用编辑，返回 True 表示标题有实际变化"""
         new_text = self._edit.text().strip()
-        if new_text:
+        if new_text and new_text != self._full_text:
             self._full_text = new_text
+            self._label.setText(self._full_text)
+            self.setReadOnly(True)
+            return True
+        # 空输入或无变化：恢复原标题，不触发信号
         self._label.setText(self._full_text)
         self.setReadOnly(True)
+        return False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

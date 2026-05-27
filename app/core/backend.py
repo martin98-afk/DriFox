@@ -68,6 +68,11 @@ class ChatBackend(QObject):
     
     # Gateway 消息处理（跨线程）
     gateway_input_received = pyqtSignal(object)  # dict: {text, chat_id, user_id, platform, future}
+
+    # 插件热更新信号（watchfiles 检测到变更时触发）
+    plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
+    # 后台线程请求主线程执行插件重载（内部信号）
+    _hot_reload_requested = pyqtSignal(str, str)  # (插件名, 组件), ""=全量/空组件=全部组件
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -221,21 +226,27 @@ class ChatBackend(QObject):
         self.create_session(trigger_hook=False)
         
         # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
-        self._agent_manager = AgentManager.get_instance(str(Path(__file__).parent.parent / "agents"), self._hook_manager)
+        # agents_dir 传 None，智能体从已启用插件动态加载
+        self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
-        
-        # 加载 .drifox 全局 hooks（hooks 数据已跨窗口共享，仅首次加载）
-        global_hooks_file = get_app_data_dir() / "hooks" / "hooks.json"
-        if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
-            try:
-                with open(global_hooks_file, 'r', encoding='utf-8') as f:
-                    config = json.loads(f.read())
-                skill_root = str(global_hooks_file.parent)
-                count = self._hook_manager.register_hooks_from_json("__global__", skill_root, config, str(global_hooks_file))
-                if count > 0:
-                    logger.info(f"[ChatBackend] Loaded {count} global hooks from {global_hooks_file}")
-            except Exception as e:
-                logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
+
+        # 加载全局 hooks（从 PluginManager 获取路径）
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            global_hooks_file = pm.get_global_hooks_file()
+            if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
+                try:
+                    with open(global_hooks_file, 'rb') as f:
+                        config = json.loads(f.read())
+                    skill_root = str(global_hooks_file.parent)
+                    count = self._hook_manager.register_hooks_from_json(
+                        "__global__", skill_root, config, str(global_hooks_file)
+                    )
+                    if count > 0:
+                        logger.info(f"[ChatBackend] Loaded {count} global hooks from {global_hooks_file}")
+                except Exception as e:
+                    logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
         
         # 6. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
         self._tool_executor = ToolExecutor(workdir=workdir, backend=self)
@@ -289,11 +300,14 @@ class ChatBackend(QObject):
         self._get_memory_context_getter = None
 
         self._history_manager = HistoryManager.get_instance()
-        
-        # 8. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
+
+        # 8. 初始化 PluginManager（系统 + 用户插件发现）
+        self._init_plugin_system()
+
+        # 9. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
         self._discover_mcp_servers()
 
-        # 8. 初始化 MCP 连接
+        # 10. 初始化 MCP 连接
         self._init_mcp_connections()
         
         self._initialized = True
@@ -316,11 +330,482 @@ class ChatBackend(QObject):
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
 
+    # ========== 插件系统初始化 ==========
+
+    def _init_plugin_system(self):
+        """初始化 PluginManager，加载所有插件
+
+        首次初始化时全量加载智能体和主题；
+        后续窗口创建时 PluginManager 已初始化，跳过重复刷新。
+        首次初始化后自动启动插件文件变更监听（watchfiles 热更新）。
+        """
+        try:
+            from app.core.plugin_manager import PluginManager
+            from app.utils.utils import get_app_data_dir
+
+            pm = PluginManager.get_instance()
+            app_data_dir = get_app_data_dir()
+
+            # 记录初始化前的状态，用于判断是否为首次初始化
+            was_initialized = pm.is_initialized()
+            pm.initialize(app_data_dir)
+
+            # 首次初始化时才需要全量重载智能体和主题
+            # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
+            if not was_initialized:
+                # AgentManager 重新从已启用插件加载智能体
+                if self._agent_manager:
+                    self._agent_manager.reload_agents()
+
+                # 插件系统初始化后，必须刷新主题
+                self._reload_themes_from_plugins()
+
+                # 启动插件文件变更监听（热更新，仅启动一次）
+                self._start_plugin_watcher()
+
+            logger.info(f"[ChatBackend] PluginManager 初始化完成，"
+                       f"已加载 {len(pm.list_plugins())} 个插件，"
+                       f"智能体 {len(self._agent_manager.list_agents())} 个")
+        except Exception as e:
+            logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
+
+    def _reload_themes_from_plugins(self):
+        """插件系统初始化后，重新加载插件主题"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            theme_manager.reload()
+            # 同时更新 Settings 中的主题选项
+            from app.utils.config import update_theme_options
+            update_theme_options()
+            logger.info(f"[ChatBackend] 插件主题刷新完成，"
+                       f"共 {len(theme_manager.list_themes())} 个主题")
+        except Exception as e:
+            logger.error(f"[ChatBackend] 刷新插件主题失败: {e}")
+
+    # ========== 插件热更新（watchfiles） ==========
+
+    _plugin_watcher_started = False  # 类级别标志，确保全局只启动一次
+
+    def _start_plugin_watcher(self):
+        """启动 watchfiles 插件文件变更监听（仅启动一次）"""
+        if ChatBackend._plugin_watcher_started:
+            return
+        ChatBackend._plugin_watcher_started = True
+
+        try:
+            from watchfiles import watch
+        except ImportError:
+            logger.warning("[ChatBackend] watchfiles 未安装，插件热更新不可用。pip install watchfiles")
+            return
+
+        # 收集需要监听的插件目录
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+
+        watch_paths = []
+        # 系统插件目录
+        if hasattr(pm, '_SYSTEM_PLUGIN_DIR') and pm._SYSTEM_PLUGIN_DIR.exists():
+            watch_paths.append(str(pm._SYSTEM_PLUGIN_DIR.resolve()))
+        # 用户插件目录（开发环境下可能是相对路径，统一 resolve 为绝对路径）
+        if pm._app_data_dir:
+            user_plugin_dir = pm._app_data_dir / pm._USER_PLUGIN_DIR_NAME
+            # 确保目录存在，否则 watcher 无法监听（用户后创建目录时热更新不生效）
+            user_plugin_dir.mkdir(parents=True, exist_ok=True)
+            watch_paths.append(str(user_plugin_dir.resolve()))
+
+        if not watch_paths:
+            logger.warning("[ChatBackend] 无插件目录可监听，跳过热更新")
+            return
+
+        logger.info(f"[ChatBackend] 启动插件文件变更监听: {watch_paths}")
+
+        # 连接内部信号到主线程重载方法
+        self._hot_reload_requested.connect(self._on_hot_reload_requested)
+
+        # 预计算插件路径 → 插件名映射（用于快速定位变更文件所属插件）
+        plugin_prefixes = self._build_plugin_path_index()
+
+        import threading
+
+        # 去重缓存：(plugin_name, component) → 上次重载时间
+        _dedup_cache: Dict[tuple, float] = {}
+        _DEDUP_INTERVAL = 3.0  # 同一插件+组件 3 秒内重复请求只执行一次
+
+        def _is_duplicate(plugin_name: str, component: str) -> bool:
+            now = time.time()
+            key = (plugin_name, component)
+            last = _dedup_cache.get(key, 0.0)
+            if now - last < _DEDUP_INTERVAL:
+                return True
+            _dedup_cache[key] = now
+            return False
+
+        # 用可变容器包装 plugin_prefixes，闭包内可更新
+        _prefixes_ref = [plugin_prefixes]
+
+        def _rebuild_prefixes():
+            """重建插件路径索引（在 watch 线程中调用）"""
+            _prefixes_ref[0] = self._build_plugin_path_index()
+
+        def _watch_loop():
+            """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
+            logger.debug(f"[ChatBackend] watchfiles 监听线程已启动")
+            try:
+                for changes in watch(
+                    *watch_paths,
+                    recursive=True,
+                    debounce=2000,  # 2秒防抖
+                    yield_on_timeout=False,
+                ):
+                    # changes: set of (Change, Path)
+                    if not changes:
+                        continue
+                    # 过滤掉 .git/ __pycache__/ .pyc 等无关变更
+                    relevant_changes = []
+                    for change_type, change_path in changes:
+                        p = change_path.lower()
+                        if '.git' in p or '__pycache__' in p or p.endswith('.pyc'):
+                            continue
+                        relevant_changes.append((change_type, change_path))
+
+                    if not relevant_changes:
+                        continue
+
+                    current_prefixes = _prefixes_ref[0]
+
+                    # 识别变更所属插件
+                    plugin_name = self._identify_plugin_from_changes(
+                        relevant_changes, current_prefixes
+                    )
+
+                    if plugin_name == "__ALL__":
+                        logger.info(
+                            f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处)，"
+                            f"请求主线程全量重载..."
+                        )
+                        self._hot_reload_requested.emit("", "")
+                        _rebuild_prefixes()
+                    elif plugin_name:
+                        # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/空=根目录）
+                        component = self._identify_component_from_changes(
+                            relevant_changes, current_prefixes, plugin_name
+                        )
+                        if component:
+                            detail = f" ({component})"
+                        else:
+                            detail = " (根目录)"
+                        # 去重：同一插件+组件短时间内重复触发则跳过
+                        if _is_duplicate(plugin_name, component):
+                            logger.debug(
+                                f"[ChatBackend] 插件 [{plugin_name}]{detail} "
+                                f"文件变更 ({len(relevant_changes)} 处)，去重跳过..."
+                            )
+                            continue
+                        logger.info(
+                            f"[ChatBackend] 插件 [{plugin_name}]{detail} "
+                            f"文件变更 ({len(relevant_changes)} 处)，请求主线程增量重载..."
+                        )
+                        self._hot_reload_requested.emit(plugin_name, component)
+                    else:
+                        # 无法识别所属插件：可能是新增插件目录
+                        # 触发全量重扫，重建路径索引，下次就能正确识别
+                        logger.info(
+                            f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: "
+                            f"{relevant_changes[0][1]}"
+                        )
+                        self._hot_reload_requested.emit("", "")
+                        _rebuild_prefixes()
+            except Exception as e:
+                logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
+
+        t = threading.Thread(target=_watch_loop, daemon=True, name="plugin-watcher")
+        t.start()
+
+    def _build_plugin_path_index(self) -> Dict[str, str]:
+        """构建插件路径前缀 → 插件名的映射表
+
+        前缀不带尾部分隔符，匹配时同时支持目录本身和目录内文件。
+        Returns:
+            {小写路径: 插件名}
+        """
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        prefixes = {}
+        for plugin in pm.list_plugins():
+            path = str(plugin.path.resolve()).lower().rstrip('\\/')
+            prefixes[path] = plugin.name
+        return prefixes
+
+    def _identify_plugin_from_changes(
+        self, changes: list, plugin_prefixes: Dict[str, str]
+    ) -> Optional[str]:
+        """从变更文件路径识别所属插件名称
+
+        Args:
+            changes: [(Change, path_str), ...]
+            plugin_prefixes: 插件根路径 → 插件名 映射
+
+        Returns:
+            - 插件名: 单一插件变更，可增量重载
+            - "__ALL__": 跨插件变更，需要全量重载
+            - None: 无法识别（不属于任何已知插件），跳过
+        """
+        # 按路径长度降序排列（优先精确匹配）
+        sorted_prefixes = sorted(plugin_prefixes.keys(), key=len, reverse=True)
+
+        found = set()
+        for _, change_path in changes:
+            cp = change_path.lower()
+            for prefix in sorted_prefixes:
+                # 精确匹配目录本身 或 匹配目录内文件
+                if cp == prefix or cp.startswith(prefix + os.sep):
+                    found.add(plugin_prefixes[prefix])
+                    break
+
+        if not found:
+            return None
+
+        if len(found) == 1:
+            return next(iter(found))
+
+        # 跨插件变更，需要全量重载
+        logger.debug(f"[ChatBackend] 跨插件变更: {found}，触发全量重载")
+        return "__ALL__"
+
+    def _identify_component_from_changes(
+        self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str
+    ) -> str:
+        """从变更文件路径识别所属组件子目录
+
+        Args:
+            changes: [(Change, path_str), ...]
+            plugin_prefixes: 插件路径 → 插件名 映射
+            plugin_name: 已识别出的插件名
+
+        Returns:
+            "agents" | "hooks" | "commands" | "themes" | "skills" | "mcp" | "" (根目录/无法确定)
+        """
+        # 找到该插件的路径前缀
+        plugin_path = None
+        for path, name in plugin_prefixes.items():
+            if name == plugin_name:
+                plugin_path = path
+                break
+        if not plugin_path:
+            return ""
+
+        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp"}
+        # 插件根目录的关键文件 → 映射到对应组件
+        ROOT_FILE_COMPONENTS = {
+            ".mcp.json": "mcp",
+        }
+
+        for _, change_path in changes:
+            cp = change_path.lower()
+            if cp == plugin_path:
+                continue  # 插件根目录本身变更，全量
+            if cp.startswith(plugin_path + os.sep):
+                rel = cp[len(plugin_path) + 1:]  # 去掉 "plugin_path\"
+                first_seg = rel.split(os.sep)[0] if os.sep in rel else rel
+                if first_seg in KNOWN_COMPONENTS:
+                    return first_seg
+                # 根目录的关键文件（如 .mcp.json）映射到对应组件
+                if first_seg in ROOT_FILE_COMPONENTS:
+                    return ROOT_FILE_COMPONENTS[first_seg]
+        return ""
+
+    def _on_hot_reload_requested(self, plugin_name: str, component: str):
+        """主线程中执行的插件热更新
+
+        Args:
+            plugin_name: 插件名（空字符串表示全量重载）
+            component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp）
+        """
+        try:
+            if plugin_name:
+                result = self._reload_single_plugin(plugin_name, component)
+            else:
+                result = self.reload_plugin_subsystems()
+            self.plugin_changed.emit(result)
+        except Exception as e:
+            logger.error(f"[ChatBackend] 插件热更新失败: {e}")
+
+    def _reload_single_plugin(self, plugin_name: str, component: str = "") -> dict:
+        """增量重载单个插件（不清除其他插件的数据）
+
+        根据变更的组件名精确重载，不触发无关子系统：
+
+        - "agents"   → 重载智能体 + hooks
+        - "hooks"    → 仅重载 hooks（不碰智能体）
+        - "commands" → 重载命令
+        - "themes"   → 重载主题
+        - "skills"   → 重载技能（PluginManager 已更新，UI 下次调用 get_local_skills() 自动生效）
+        - "mcp"      → 重载 MCP 配置（PluginManager 已更新，UI 下次调用 get_mcp_servers() 自动生效）
+        - ""         → 跳过（根目录文件变更如 README/LICENSE，不影响运行时）
+
+        Args:
+            plugin_name: 插件名称
+            component: 变更的组件名
+
+        Returns:
+            {"agents": int, "commands": bool, "themes": bool, "skills": bool, "mcp": bool}
+        """
+        result: dict = {"agents": 0, "commands": False, "themes": False,
+                        "skills": False, "mcp": False}
+
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
+                return result
+
+            # 1. 只重新扫描该插件目录
+            pm.rescan_plugin(plugin_name)
+
+            plugin = pm.get_plugin(plugin_name)
+            if not plugin:
+                # 插件已被删除（目录或 manifest 已不存在）
+                # 清理该插件在各子系统中的残留数据
+                logger.info(f"[ChatBackend] Plugin '{plugin_name}' removed, cleaning up artifacts...")
+                if self._agent_manager:
+                    self._agent_manager.cleanup_plugin_artifacts(plugin_name)
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands after plugin removal: {e}")
+                try:
+                    from app.utils.theme_manager import theme_manager
+                    from app.utils.config import update_theme_options
+                    theme_manager.reload()
+                    update_theme_options()
+                    result["themes"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
+                # 技能和 MCP：PluginManager 已移除该插件的目录，
+                # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除
+                result["skills"] = True
+                result["mcp"] = True
+                return result
+
+            # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
+            if component == "agents" and self._agent_manager:
+                result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+
+            # 3. Hooks：仅当变更在 hooks/ 目录（只重载 hooks，不碰 agents）
+            if component == "hooks" and self._agent_manager:
+                self._agent_manager.reload_plugin_hooks(plugin_name)
+
+            # 4. 命令：仅变更在 commands 目录才触发
+            if component == "commands" and plugin.has_component("commands"):
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+            # 5. 主题：仅变更在 themes 目录才触发
+            if component == "themes" and plugin.has_component("themes"):
+                try:
+                    from app.utils.theme_manager import theme_manager
+                    from app.utils.config import update_theme_options
+                    theme_manager.reload()
+                    update_theme_options()
+                    result["themes"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+            # 6. 技能：PluginManager 已在 rescan_plugin 中更新
+            #    UI 通过 get_local_skills() 懒加载，下次打开命令面板时自动生效
+            if component == "skills":
+                result["skills"] = True
+                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' skills reloaded (lazy)")
+
+            # 7. MCP 配置：PluginManager 已在 rescan_plugin 中更新
+            #    MCP 设置面板通过 pm.get_mcp_servers() 读取，下次刷新时自动生效
+            if component == "mcp":
+                result["mcp"] = True
+                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
+
+            logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
+                       f"agents={result['agents']}, commands={result['commands']}, "
+                       f"themes={result['themes']}, skills={result['skills']}, "
+                       f"mcp={result['mcp']}")
+        except Exception as e:
+            logger.error(f"[ChatBackend] Failed to reload plugin '{plugin_name}': {e}")
+
+        return result
+
+    def reload_plugin_subsystems(self) -> dict:
+        """运行时重载所有插件子系统
+
+        当插件启用/禁用或新增/删除后调用，统一触发所有子系统的重载。
+        由 main_widget 或设置面板中的"应用"操作触发。
+
+        Returns:
+            {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
+             "skills": bool, "mcp": bool}
+            各子系统的重载结果
+        """
+        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
+                        "skills": False, "mcp": False}
+
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
+                return result
+
+            # 1. 重新扫描插件目录（检测新增/移除）
+            pm.rescan()
+
+            # 2. 重载 AgentManager（智能体 + hooks）
+            if self._agent_manager:
+                self._agent_manager.reload_agents()
+                result["agents"] = len(self._agent_manager.list_agents(include_hidden=True))
+
+            # 3. 重载命令
+            try:
+                from app.core.builtin_commands import reload_all_commands
+                reload_all_commands()
+                result["commands"] = True
+            except (ImportError, Exception) as e:
+                logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+            # 4. 重载主题
+            try:
+                from app.utils.theme_manager import theme_manager
+                from app.utils.config import update_theme_options
+                theme_manager.reload()
+                update_theme_options()
+                result["themes"] = True
+            except (ImportError, Exception) as e:
+                logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+            # 5. 技能：PluginManager 已更新，UI 通过 get_local_skills() 懒加载
+            result["skills"] = True
+
+            # 6. MCP 配置：PluginManager 已更新，UI 通过 get_mcp_servers() 懒加载
+            result["mcp"] = True
+
+            logger.info(f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
+                       f"commands={result['commands']}, themes={result['themes']}, "
+                       f"skills={result['skills']}, mcp={result['mcp']}")
+        except Exception as e:
+            logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
+
+        return result
+
     # ========== MCP 自动发现 ==========
 
     def _discover_mcp_servers(self):
-        """自动发现其他工具的 MCP 配置并合并（仅首次运行生效）"""
+        """自动发现其他工具的 MCP 配置并保存到 user-custom 插件（仅首次运行生效）"""
         from app.utils.config import Settings
+        from app.core.plugin_manager import PluginManager
 
         cfg = Settings.get_instance()
 
@@ -332,8 +817,14 @@ class ChatBackend(QObject):
 
         merged, new_ones = discover_and_merge()
         if new_ones:
-            cfg.set(cfg.mcp_servers, merged, save=True)
-            logger.info(f"[ChatBackend] MCP 自动发现完成，导入 {len(new_ones)} 个新服务器")
+            # 将发现的服务器写入 user-custom 插件
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for server_data in new_ones:
+                    name = server_data.get("name", "")
+                    if name:
+                        pm.add_mcp_server(name, server_data)
+                logger.info(f"[ChatBackend] MCP 自动发现完成，导入 {len(new_ones)} 个新服务器")
 
         # 标记已处理
         cfg.set(cfg.mcp_discovered, True, save=True)
@@ -341,8 +832,12 @@ class ChatBackend(QObject):
     # ========== ChatEngine 代理方法 ==========
 
     def _init_mcp_connections(self):
-        """初始化 MCP 服务器连接（后台异步，不阻塞 UI）"""
+        """初始化 MCP 服务器连接（后台异步，不阻塞 UI）
+
+        MCP 配置完全由插件驱动，从 PluginManager 获取。
+        """
         from app.utils.config import Settings
+        from app.core.plugin_manager import PluginManager
 
         mcp_manager = self._tool_executor._builtin_tools._mcp_manager
 
@@ -355,7 +850,9 @@ class ChatBackend(QObject):
             logger.info("[ChatBackend] MCP 全局开关已关闭，跳过连接")
             return
 
-        servers = cfg.mcp_servers.value
+        # 从 PluginManager 获取 MCP 服务器列表
+        pm = PluginManager.get_instance()
+        servers = pm.get_mcp_servers()
         if not servers:
             logger.info("[ChatBackend] 无 MCP 服务器配置，跳过连接")
             return
@@ -386,7 +883,7 @@ class ChatBackend(QObject):
         """完成停止流程（阻塞操作，获取中断消息并清理）
 
         在 cancel_streaming() 调用后执行。
-        此方法是阻塞的，应在 UI 更新后调用。
+        此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
 
         Returns:
             被中断的消息列表

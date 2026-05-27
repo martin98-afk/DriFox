@@ -201,9 +201,24 @@ class HookListSettingCard(ExpandSettingCard):
         super().__init__(icon, title, content, parent)
         self.title = title
         self.all_hooks = {}
-        self.hooks_config_file = get_app_data_dir() / "hooks" / "hooks.json"
+        # 从 PluginManager 获取全局 hooks 文件路径
+        self._init_hooks_file()
         self._setup_ui()
         self._refresh()
+
+    def _init_hooks_file(self):
+        """从 PluginManager 获取全局 hooks 文件路径"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                self.hooks_config_file = pm.get_global_hooks_file()
+                return
+        except (ImportError, Exception):
+            pass
+        # 回退
+        from app.utils.utils import get_app_data_dir
+        self.hooks_config_file = get_app_data_dir() / "hooks" / "hooks.json"
     
     def _load_hooks(self):
         """从 HookManager 加载所有 hooks（文件 hooks + 技能 hooks），转为规则格式"""
@@ -259,21 +274,18 @@ class HookListSettingCard(ExpandSettingCard):
             return str(self.hooks_config_file) not in cf  # fallback: 字符串包含判断
     
     def _save_hooks(self):
-        """保存全局 hooks 到配置文件，并同步到 HookManager"""
+        """保存全局 hooks 到配置文件（watchfiles 热更新自动检测文件变更并重载）"""
         # 过滤掉 _readonly 的 skill hooks
         save_data = {}
         for event_name, rules in self.all_hooks.items():
             filtered_rules = [r for r in rules if not r.get("_readonly", False)]
             if filtered_rules:
                 save_data[event_name] = filtered_rules
-        
+
         self.hooks_config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.hooks_config_file, 'w', encoding='utf-8') as f:
             json.dump({"hooks": save_data}, f, indent=2, ensure_ascii=False)
-        
-        # 同步到 HookManager（热重载）
-        if self._hook_manager:
-            self._hook_manager.reload_global_hooks(str(self.hooks_config_file))
+        # 写文件后 watchfiles 会自动检测到变更，触发热更新重载 hooks
     
     def _setup_ui(self):
         self.viewLayout.setSpacing(0)
@@ -488,6 +500,7 @@ class HookListSettingCard(ExpandSettingCard):
                     else:
                         # 全局 hook：保存到全局配置文件
                         self._save_hooks()
+                        self._refresh()
                     
                     self.hooksChanged.emit()
     

@@ -16,7 +16,8 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # 内置主题目录（打包在 exe 中，只读）
-_BUILTIN_THEMES_DIR = Path(__file__).parent.parent / "themes"
+# 指向系统插件 themes 目录，不再依赖 app/themes/
+_BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system" / "themes"
 
 
 class ThemeManager:
@@ -40,12 +41,22 @@ class ThemeManager:
     # ── 扫描加载 ──────────────────────────────────────────
 
     def _load_themes(self):
-        """加载所有主题：内置 + 用户"""
+        """加载所有主题：插件 + 内置 + 用户"""
 
-        # 1. 内置主题（打包在 exe 的 app/themes/，只读）
+        # 1. 插件主题（PluginManager 提供的插件主题路径，优先级最高）
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for theme_path in pm.get_theme_paths():
+                    self._load_from_dir(theme_path, is_builtin=True)
+        except (ImportError, Exception):
+            pass
+
+        # 2. 内置主题（打包在 exe 的 app/themes/，只读）
         self._load_from_dir(_BUILTIN_THEMES_DIR, is_builtin=True)
 
-        # 2. 用户主题（~/.drifox/themes/，可写）
+        # 3. 用户主题（~/.drifox/themes/，可写，优先级最高）
         from app.utils.utils import get_app_data_dir
         user_dir = get_app_data_dir() / "themes"
         self._load_from_dir(user_dir, is_builtin=False)
@@ -167,9 +178,27 @@ class ThemeManager:
 
     # ── 主题管理 ──────────────────────────────────────────
 
+    _reload_callbacks: list = []
+
+    def on_reload(self, callback):
+        """注册主题重载完成后的回调（用于 UI 自动刷新等）"""
+        if callback not in self._reload_callbacks:
+            self._reload_callbacks.append(callback)
+
+    def remove_reload_callback(self, callback):
+        """移除已注册的回调"""
+        if callback in self._reload_callbacks:
+            self._reload_callbacks.remove(callback)
+
     def reload(self):
         """重新加载所有主题（修改文件后调用）"""
+        self._themes.clear()
         self._load_themes()
+        for cb in self._reload_callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logger.warning(f"[ThemeManager] reload callback error: {e}")
 
     def get_user_themes_dir(self) -> Path:
         """获取用户主题目录"""

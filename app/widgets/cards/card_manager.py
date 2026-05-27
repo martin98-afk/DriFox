@@ -165,6 +165,11 @@ class CardManager:
         if win_data["visible_cards"].get(container_type) == card_id:
             return
         
+        # ── Question 最高优先级：如果 question 已显示，其他非 question 卡片不能打断 ──
+        if card_id != "question" and self.is_card_visible("question", window_id):
+            logger.debug(f"[CardManager] question 已显示，跳过显示 {card_id}（question 强制覆盖所有）")
+            return
+        
         # ---- 命令卡片保护：流式对话中，除 question 外不打断 command 卡片 ----
         # command 卡片正在显示时，其他非 question 的卡片不应将其隐藏
         if card_id not in ("command", "question"):
@@ -251,6 +256,15 @@ class CardManager:
             return
         
         win_data["visible_cards"][container_type] = None
+        
+        # 如果隐藏的是系统卡片，检查是否还有系统卡片可见，没有则解除压制
+        if card_id in win_data["system_cards"]:
+            has_visible_system = any(
+                self.is_card_visible(sc_id, window_id)
+                for sc_id in win_data["system_cards"]
+            )
+            if not has_visible_system:
+                win_data["suppressed_by_system"] = False
         
         # 触发回调
         if card_id in win_data["hidden_callbacks"]:

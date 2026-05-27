@@ -306,61 +306,108 @@ def get_icon(icon_name: str) -> QIcon:
 def get_local_skills() -> list:
     """获取本地技能列表，支持多个搜索路径
     
-    搜索路径：
-    - app/skills (内置技能)
-    - .opencode/skills (opencode 技能)
-    - ~/.agents/skills (用户技能)
-    - 应用数据目录/skills
+    搜索路径优先级：
+    - 已启用插件的 skills/ 目录（PluginManager）
+    - 旧路径做回退：app/skills, .opencode/skills, ~/.agents/skills
+
+    返回字段：
+    - name: 技能名称（无前缀，用于 load_skill 内部查找）
+    - qualified_name: 完整名称（用户插件含 plugin: 前缀，用于列表展示）
+    - description: 技能描述
+    - plugin_name: 所属插件名（非插件来源为 None）
+    - is_system: 是否为系统插件技能
     """
-    skills_dirs = [
+    results = []
+    seen = set()
+    seen_qualified = set()
+
+    # ---- Phase 1: PluginManager 路径（带插件上下文） ----
+    try:
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            for item in pm.get_skills_with_plugin():
+                skills_base = item["path"]
+                plugin_name = item["plugin_name"]
+                is_system = item["is_system"]
+
+                if not skills_base.exists():
+                    continue
+                for skill_dir in skills_base.iterdir():
+                    if not skill_dir.is_dir():
+                        continue
+                    if skill_dir.name.startswith("_") or skill_dir.name.startswith("."):
+                        continue
+                    entry = _parse_skill_dir(skill_dir, plugin_name, is_system)
+                    if entry and entry["name"] not in seen:
+                        seen.add(entry["name"])
+                        seen_qualified.add(entry["qualified_name"])
+                        results.append(entry)
+    except (ImportError, Exception):
+        pass
+
+    # ---- Phase 2: 旧路径回退（无插件上下文） ----
+    fallback_dirs = [
         Path(__file__).parent.parent / "skills",
-        Path(__file__).parent.parent / ".opencode" / "skills",  # opencode 技能
+        Path(__file__).parent.parent / ".opencode" / "skills",
         get_app_data_dir() / "skills",
         Path.home() / ".agents" / "skills",
     ]
 
-    results = []
-    seen = set()
-
-    for skills_base in skills_dirs:
+    for skills_base in fallback_dirs:
         if not skills_base.exists():
             continue
-
         for skill_dir in skills_base.iterdir():
             if not skill_dir.is_dir():
                 continue
             if skill_dir.name.startswith("_") or skill_dir.name.startswith("."):
                 continue
-
-            skill_file = skill_dir / "SKILL.md"
-            if not skill_file.exists():
-                skill_file = skill_dir / "skill.md"
-            if not skill_file.exists():
-                continue
-
-            content = skill_file.read_text(encoding="utf-8")
-            name = skill_dir.name
-            description = ""
-
-            # 解析 frontmatter
-            if content.startswith("---"):
-                try:
-                    frontmatter = content.split("---", 2)[1]
-                    meta = yaml.safe_load(frontmatter)
-                    if meta:
-                        name = meta.get("name", skill_dir.name)
-                        description = meta.get("description", "")
-                except Exception:
-                    pass
-
-            if name not in seen:
-                seen.add(name)
-                results.append({
-                    "name": name,
-                    "description": description
-                })
+            entry = _parse_skill_dir(skill_dir, plugin_name=None, is_system=True)
+            if entry and entry["name"] not in seen:
+                seen.add(entry["name"])
+                seen_qualified.add(entry["qualified_name"])
+                results.append(entry)
 
     return results
+
+
+def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
+                     is_system: bool = True) -> dict | None:
+    """解析技能目录，返回技能信息字典"""
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.exists():
+        skill_file = skill_dir / "skill.md"
+    if not skill_file.exists():
+        return None
+
+    content = skill_file.read_text(encoding="utf-8")
+    name = skill_dir.name
+    description = ""
+
+    # 解析 frontmatter
+    if content.startswith("---"):
+        try:
+            frontmatter = content.split("---", 2)[1]
+            meta = yaml.safe_load(frontmatter)
+            if meta:
+                name = meta.get("name", skill_dir.name)
+                description = meta.get("description", "")
+        except Exception:
+            pass
+
+    # 用户插件技能加命名空间前缀
+    if plugin_name and not is_system:
+        qualified_name = f"{plugin_name}:{name}"
+    else:
+        qualified_name = name
+
+    return {
+        "name": name,
+        "qualified_name": qualified_name,
+        "description": description,
+        "plugin_name": plugin_name,
+        "is_system": is_system,
+    }
 
 
 def get_skill_by_name(name: str) -> dict | None:
@@ -374,33 +421,66 @@ def get_skill_by_name(name: str) -> dict | None:
 
 def load_skill(name: str) -> tuple[bool, str, str]:
     """加载指定技能，返回 (成功, 内容, 工作目录)
-    
+
+    支持两种名称格式：
+    - "skillname" — 按名称在所有路径中查找
+    - "plugin:skillname" — 限定到指定插件
+
     Args:
-        name: 技能名称
-        
+        name: 技能名称（可选带 plugin: 前缀）
+
     Returns:
         (成功标志, 内容或错误信息, 技能工作目录路径)
     """
+    # 解析命名空间前缀
+    raw_name = name
+    target_plugin = None
+    if ":" in name:
+        target_plugin, _, skill_name = name.partition(":")
+        name = skill_name
+
+    # 基础搜索路径
     search_paths = [
         Path(__file__).parent.parent / "skills" / name / "SKILL.md",
         Path(__file__).parent.parent / ".opencode" / "skills" / name / "SKILL.md",
         get_app_data_dir() / "skills" / name / "SKILL.md",
         Path.home() / ".agents" / "skills" / name / "SKILL.md",
     ]
+
+    # 插件路径（PluginManager 已初始化时添加为最高优先级）
+    try:
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if target_plugin:
+                # 限定到指定插件
+                for plugin in pm._iter_enabled_plugins():
+                    if plugin.name == target_plugin:
+                        p = plugin.path / "skills" / name / "SKILL.md"
+                        search_paths.insert(0, p)
+                        break
+            else:
+                # 无前缀：按优先级扫描全部
+                for item in pm.get_skills_with_plugin():
+                    p = item["path"] / name / "SKILL.md"
+                    search_paths.insert(0, p)
+    except (ImportError, Exception):
+        pass
+
     found_path = None
     for path in search_paths:
         if path.exists():
             found_path = path
             break
-    
+
     if not found_path:
-        return (False, f"Skill not found: {name}", "")
-    
+        return (False, f"Skill not found: {raw_name}", "")
+
     content = found_path.read_text(encoding="utf-8")
     # 去除 frontmatter
     content = content.split("---", 2)[-1].strip()
     workspace = str(found_path.parent.resolve())
-    
+
     return (True, content, workspace)
 
 
@@ -408,18 +488,33 @@ def list_skills_with_intro() -> str:
     """获取技能列表，包含 SKILLS.md 介绍"""
     skills = get_local_skills()
     
-    # 获取技能介绍
+    # 从插件路径查找 SKILLS.md（优先使用优先级最高的）
     skills_intro = ""
-    main_skills_dir = Path(__file__).parent.parent / "skills"
-    skills_readme = main_skills_dir / "SKILLS.md"
-    if skills_readme.exists():
-        skills_intro = skills_readme.read_text(encoding="utf-8") + "\n\n"
+    try:
+        from app.core.plugin_manager import PluginManager
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            for item in pm.get_skills_with_plugin():
+                readme = item["path"] / "SKILLS.md"
+                if readme.exists():
+                    skills_intro = readme.read_text(encoding="utf-8") + "\n\n"
+                    break
+    except (ImportError, Exception):
+        pass
     
-    # 生成 XML 格式
+    # 回退：旧路径
+    if not skills_intro:
+        main_skills_dir = Path(__file__).parent.parent / "skills"
+        skills_readme = main_skills_dir / "SKILLS.md"
+        if skills_readme.exists():
+            skills_intro = skills_readme.read_text(encoding="utf-8") + "\n\n"
+    
+    # 生成 XML 格式（使用 qualified_name 以示含前缀）
     skills_xml = "<available_skills>\n"
     for skill in skills:
         desc = skill.get("description", "").replace("<", "&lt;").replace(">", "&gt;")
-        skills_xml += f"  <skill>\n    <name>{skill['name']}</name>\n    <description>{desc}</description>\n  </skill>\n"
+        name = skill.get("qualified_name", skill["name"])
+        skills_xml += f"  <skill>\n    <name>{name}</name>\n    <description>{desc}</description>\n  </skill>\n"
     skills_xml += "</available_skills>"
     
     return skills_intro + skills_xml

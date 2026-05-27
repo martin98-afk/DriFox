@@ -137,10 +137,20 @@ class AutoLoopWorker(QThread):
         )
 
     def cancel(self):
-        """取消循环"""
+        """取消循环（非阻塞）
+
+        只设置取消标志 + 非阻塞取消 ChatWorker，不等待线程结束。
+        主循环会在下一轮检测到 _is_cancelled 后自然退出，
+        由 run() 末尾的 `loop_stopped.emit()` 触发最终的清理流程。
+
+        修复前调用 conversation_executor.stop() 会同步等待 ChatWorker
+        线程结束（最长 4 秒），直接阻塞 UI 线程导致严重卡顿。
+        """
         self._is_cancelled = True
         if self._conversation_executor:
-            self._conversation_executor.stop()
+            # 使用非阻塞的 cancel_worker() 替代同步的 stop()
+            # cancel_worker() 设置 ChatWorker 的取消标志并断开 UI 信号连接
+            self._conversation_executor.cancel_worker()
         if self._engine:
             self._engine.stop()
 
@@ -184,6 +194,16 @@ class AutoLoopWorker(QThread):
             self._engine.iteration = iteration
             self.iteration_started.emit(iteration, self._config.max_iterations)
             self._emit_progress()
+            
+            # 诊断日志：每轮开始的引擎状态
+            self.log_signal.emit(
+                f"📋 [诊断] 第{iteration}轮开始 "
+                f"phase={'PLANNING' if self._engine._is_planning_phase else 'EXECUTING'} "
+                f"state={self._engine.state} "
+                f"current_step={self._engine._current_step} "
+                f"display_step={self._engine._display_step} "
+                f"total_steps={self._engine._total_steps}"
+            )
             
             # 本轮独立消息追踪：记录当前消息基数，清空本轮消息列表
             self._prev_message_count = len(self._all_messages)
@@ -251,7 +271,16 @@ class AutoLoopWorker(QThread):
                     continue
                     
                 # 【新增】强制检查接力文档更新
-                if not self._check_relay_doc_updated(iteration):
+                relay_doc_ok = self._check_relay_doc_updated(iteration)
+                if not relay_doc_ok:
+                    # 诊断：记录接力文档检查失败的原因
+                    notes_check = self._engine.read_shared_notes()
+                    notes_len = len(notes_check) if notes_check else 0
+                    has_plan = "## 执行计划" in notes_check or "- [步骤" in notes_check if notes_check else False
+                    self.log_signal.emit(
+                        f"⚠️【强制】接力文档未更新！notes_len={notes_len} has_plan={has_plan} "
+                        f"iteration={iteration} phase={'planning' if self._engine._is_planning_phase else 'executing'}"
+                    )
                     # 未更新接力文档，强制要求更新后才能继续
                     self.log_signal.emit("⚠️【强制】接力文档未更新！正在要求更新...")
                     
@@ -290,6 +319,21 @@ class AutoLoopWorker(QThread):
                     summary = self._extract_summary(response, iteration)
                     self.iteration_completed.emit(iteration, summary)
                     self._emit_progress()
+                    
+                    # 🔴 修复：强制更新接力文档后，如果仍在规划阶段且原始响应已包含 PLANNING_COMPLETE，
+                    # 必须在此处执行阶段过渡，否则 continue 会跳过后续的 phase handling 逻辑，
+                    # 导致下一轮仍然处于规划阶段，往复循环无法进入执行阶段。
+                    if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
+                        notes = self._engine.read_shared_notes()
+                        if self._engine.check_planning_complete(response, notes):
+                            self._engine.enter_execution_phase()
+                            current_step, max_verified, total = self._engine.parse_current_and_next_step(notes)
+                            self._engine.sync_verified_steps_from_notes(notes)
+                            self._engine.set_step_progress(current_step, total)
+                            self.log_signal.emit(f"✅ 规划完成！共 {total} 个步骤，{max_verified} 已完成")
+                            self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
+                            self.phase_changed.emit("executing")
+                            self._emit_progress()
                     continue
             except Exception as e:
                 logger.error(f"[AutoLoop] Worker error on iteration {iteration}: {e}")
@@ -345,6 +389,35 @@ class AutoLoopWorker(QThread):
                 else:
                     # 规划未完成，继续规划
                     self._engine.on_planning_attempt()
+                    
+                    # 诊断日志：记录当前状态，便于排查
+                    notes_preview = notes[:100].replace('\n', ' ') if notes else "(空)"
+                    resp_preview = response[:100].replace('\n', ' ') if response else "(空)"
+                    self.log_signal.emit(
+                        f"📋 [诊断] iteration={iteration} phase=planning "
+                        f"planning_count={self._engine._planning_count} "
+                        f"response_has_PLANNING_COMPLETE={'PLANNING_COMPLETE' in response.upper() if response else False} "
+                        f"notes_has_plan={'## 执行计划' in notes or '- [步骤' in notes}"
+                    )
+                    
+                    # 回退策略：如果笔记中已有有效的执行计划但模型忘记输出 PLANNING_COMPLETE，
+                    # 在尝试多次后强制进入执行阶段，避免无限循环规划。
+                    has_plan_in_notes = notes and ("## 执行计划" in notes or "- [步骤" in notes)
+                    _, _, total_steps_in_notes = self._engine.parse_current_and_next_step(notes)
+                    if has_plan_in_notes and total_steps_in_notes > 0 and self._engine._planning_count >= 2:
+                        self.log_signal.emit(
+                            f"⚠️ 检测到笔记中有有效计划({total_steps_in_notes}步)但未收到PLANNING_COMPLETE，"
+                            f"已尝试{self._engine._planning_count}次，强制进入执行阶段"
+                        )
+                        self._engine.enter_execution_phase()
+                        current_step, max_verified, total = self._engine.parse_current_and_next_step(notes)
+                        self._engine.sync_verified_steps_from_notes(notes)
+                        self._engine.set_step_progress(current_step, total)
+                        self.log_signal.emit(f"✅ 强制过渡到执行阶段！共 {total} 个步骤，{max_verified} 已完成")
+                        self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
+                        self.phase_changed.emit("executing")
+                        self._emit_progress()
+                        continue
                     
                     # 检查：是否写了笔记但没输出 PLANNING_COMPLETE
                     if notes and "## 执行计划" in notes and "PLANNING_COMPLETE" not in response.upper():

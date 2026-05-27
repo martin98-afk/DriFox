@@ -697,6 +697,14 @@ class HistoryManager:
 
         self._pending_save_session_id = None
 
+    def flush(self):
+        """立即持久化所有待保存的会话（同步写入 SQLite）
+
+        在应用退出或关键保存点后调用，确保数据不丢失。
+        """
+        if self._save_timer is not None or self._pending_save_session_id:
+            self._do_save()
+
     def _extract_last_message_time(self, messages: List[Dict]) -> str:
         for msg in reversed(messages or []):
             timestamp = msg.get("timestamp")

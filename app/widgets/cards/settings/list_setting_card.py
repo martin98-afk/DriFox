@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from typing import List
+from pathlib import Path
 
 from PyQt5.QtCore import pyqtSignal, QSize, Qt
 from PyQt5.QtGui import QIcon
@@ -316,15 +317,39 @@ class SkillListSettingCard(ExpandSettingCard):
         import yaml
 
         from app.utils.utils import get_app_data_dir
-        skills_dirs = [
-            Path(__file__).parent.parent
-            / "skills",
-            Path.home() / ".agents" / "skills",
-            get_app_data_dir() / "skills",
-        ]
 
         self.all_skills = []
         seen_names = set()  # 按路径优先级去重，保留首次出现的同名技能
+
+        # ---- Phase 1: PluginManager 路径（带插件上下文，最高优先级） ----
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for item in pm.get_skills_with_plugin():
+                    skills_base = item["path"]
+                    plugin_name = item["plugin_name"]
+                    is_system = item["is_system"]
+                    if not skills_base.exists():
+                        continue
+                    for skill_dir in skills_base.iterdir():
+                        if not skill_dir.is_dir():
+                            continue
+                        if skill_dir.name.startswith("_") or skill_dir.name.startswith("."):
+                            continue
+                        entry = self._parse_skill_dir(skill_dir, plugin_name, is_system)
+                        if entry and entry["name"] not in seen_names:
+                            seen_names.add(entry["name"])
+                            self.all_skills.append(entry)
+        except Exception:
+            pass
+
+        # ---- Phase 2: 旧路径回退（无插件上下文） ----
+        skills_dirs = [
+            Path(__file__).parent.parent / "skills",
+            Path.home() / ".agents" / "skills",
+            get_app_data_dir() / "skills",
+        ]
         for skills_dir in skills_dirs:
             if not skills_dir.exists():
                 continue
@@ -333,36 +358,41 @@ class SkillListSettingCard(ExpandSettingCard):
                     continue
                 if skill_dir.name.startswith("_") or skill_dir.name.startswith("."):
                     continue
+                entry = self._parse_skill_dir(skill_dir, plugin_name=None, is_system=True)
+                if entry and entry["name"] not in seen_names:
+                    seen_names.add(entry["name"])
+                    self.all_skills.append(entry)
 
-                skill_file = skill_dir / "SKILL.md"
-                if not skill_file.exists():
-                    skill_file = skill_dir / "skill.md"
-                if not skill_file.exists():
-                    continue
+    @staticmethod
+    def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
+                         is_system: bool = True) -> dict | None:
+        """解析技能目录，返回技能信息字典（与 utils._parse_skill_dir 逻辑一致）"""
+        import yaml
 
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_file.exists():
+            skill_file = skill_dir / "skill.md"
+        if not skill_file.exists():
+            return None
+
+        try:
+            content = skill_file.read_text(encoding="utf-8")
+            name = skill_dir.name
+            description = ""
+
+            if content.startswith("---"):
                 try:
-                    content = skill_file.read_text(encoding="utf-8")
-                    name = skill_dir.name
-                    description = ""
-
-                    if content.startswith("---"):
-                        try:
-                            frontmatter = content.split("---", 2)[1]
-                            meta = yaml.safe_load(frontmatter)
-                            if meta:
-                                name = meta.get("name", skill_dir.name)
-                                description = meta.get("description", "")
-                        except Exception:
-                            pass
-
-                    # 按优先级去重，保留 index 最小的同名技能
-                    if name in seen_names:
-                        continue
-                    seen_names.add(name)
-
-                    self.all_skills.append({"name": name, "description": description})
+                    frontmatter = content.split("---", 2)[1]
+                    meta = yaml.safe_load(frontmatter)
+                    if meta:
+                        name = meta.get("name", skill_dir.name)
+                        description = meta.get("description", "")
                 except Exception:
-                    continue
+                    pass
+
+            return {"name": name, "description": description, "plugin_name": plugin_name}
+        except Exception:
+            return None
 
     def __initWidget(self):
         self.viewLayout.setSpacing(0)

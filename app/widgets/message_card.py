@@ -114,6 +114,87 @@ _NEXT_FIELD_PATTERN = re.compile(r"\n\w+:")
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
 
+
+# ======== 欢迎卡片随机 Tips ========
+WELCOME_TIPS = [
+    # ===== 文件与输入 =====
+    "💡 拖拽文件到输入框即可快速分析",
+    "💡 Shift+Enter 换行，Enter 发送消息",
+    "💡 输入框为空时按 ↑/↓ 键可快速切换历史输入记录",
+
+    # ===== 会话管理 =====
+    "💡 Ctrl+N 快速新建对话，Ctrl+L 清空当前会话",
+    "💡 历史会话自动保存，关闭窗口也不丢失",
+    "💡 长对话会自动启用「上下文压缩」优化 Token",
+
+    # ===== 项目功能 =====
+    "💡 点击顶部项目名称可切换/新建/归档项目，不同项目数据隔离",
+    "💡 项目笔记自动关联当前项目，切换项目自动切换笔记内容",
+    "💡 关键文档中添加文件夹可作为工具的工作目录，相对路径以此为准",
+
+    # ===== 模型与参数 =====
+    "💡 点击模型名称可快速切换大模型",
+    "💡 模型参数影响回复风格（温度/最大Token），多试试找到你的风格",
+    "💡 不同智能体擅长不同任务：Plan 规划、Build 构建、Explore 探索",
+
+    # ===== 技能系统 =====
+    "💡 输入 @ 可快速选择技能，触发 AI 专项能力",
+    "💡 @brainstorming 集思广益，@writing-plans 制定计划",
+    "💡 @git-commit 自动分析改动生成规范提交信息",
+    "💡 @skill-creator 创建新的自定义技能扩展",
+    "💡 @minimax-image-understanding 分析图片内容",
+
+    # ===== 代码与文件 =====
+    "💡 代码块右上角有复制和保存按钮，点击即可",
+    "💡 工具执行结果可点击「查看差异」对比文件修改",
+    "💡 工具悬浮框会显示正在执行的工具，点击可查看详情",
+    "💡 用户卡片的撤销按钮可以单独撤销单个编辑操作",
+    "💡 用户卡片的撤销按钮会将会话重置到对应卡片之前",
+
+    # ===== 窗口与布局 =====
+    "💡 右上角「新建窗口」按钮可创建并发会话，多任务同时进行",
+    "💡 右上角「分支」按钮可复制当前会话到新窗口",
+    "💡 右下角可展开历史会话卡片，点击继续历史对话",
+    "💡 Shift+点击窗口头添加分组，分组窗口同步移动",
+    "💡 Ctrl+Shift+G 一键重新排列所有分组窗口",
+
+    # ===== 高级功能 =====
+    "💡 记忆管理让 AI 更懂你的偏好和习惯",
+    "💡 点击上下文指示器可查看 Token 使用详情",
+    "💡 子智能体可协助处理复杂任务，观察其工作过程",
+
+    # ===== MCP 系统 =====
+    "💡 在系统设置中配置 MCP Server，可扩展 AI 的工具能力",
+    "💡 MCP 工具自动获取工具信息，连接后即可直接调用",
+    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
+    "💡 常用MCP服务： npx -y @colbymchenry/codegraph serve --mcp 可以构建本地代码知识图谱",
+    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-github 可让 AI 访问github",
+    "💡 常用MCP服务： npx -y @playwright/mcp@latest --isolated 可让 AI 操作浏览器",
+
+    # ===== 内建指令 =====
+    "💡 输入 / 可查看所有内建指令，快速调用常用功能",
+    "💡 /new 新建会话、/new-window 新建窗口、/branch 创建分支",
+    "💡 /init 初始化项目笔记、/review 审查代码改动、/theme 设计主题色",
+    "💡 /compact 手动触发上下文压缩，减少 Token 消耗",
+    "💡 输入 / 还会显示从 agents 目录加载的自定义智能体命令",
+    "💡 智能体命令加 `--subagent + 任务描述` 可在子智能体中执行任务",
+]
+
+# ======== 欢迎卡片欢迎语 ========
+WELCOME_GREETINGS = [
+    "你好！我是 Drifox 飘狐 🦊",
+    "嗨！有什么我可以帮你的吗？",
+    "欢迎回来！今天想聊点什么？",
+    "你好！随时可以问我问题或让我帮忙处理任务",
+    "嗨！准备好一起探索了吗？",
+    "欢迎！需要帮忙分析什么吗？",
+    "你好！可以帮你总结、分析、生成内容哦！",
+    "Drifox 为你准备了最近的会话记录，点击即可继续之前的对话 👇",
+    "欢迎使用 Drifox 飘狐！我是你的智能助手 🚀",
+    "嗨！我是你的 AI 搭档，有问题尽管问 🤖",
+]
+
+
 def get_markdown_instance():
     global _md_instance
     if _md_instance is None:
@@ -922,83 +1003,6 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-# ======== 欢迎卡片随机 Tips ========
-WELCOME_TIPS = [
-    # ===== 文件与输入 =====
-    "💡 拖拽文件到输入框即可快速分析",
-    "💡 Shift+Enter 换行，Enter 发送消息",
-    "💡 输入框为空时按 ↑/↓ 键可快速切换历史输入记录",
-
-    # ===== 会话管理 =====
-    "💡 Ctrl+N 快速新建对话，Ctrl+L 清空当前会话",
-    "💡 历史会话自动保存，关闭窗口也不丢失",
-    "💡 长对话会自动启用「上下文压缩」优化 Token",
-
-    # ===== 项目功能 =====
-    "💡 点击顶部项目名称可切换/新建/归档项目，不同项目数据隔离",
-    "💡 项目笔记自动关联当前项目，切换项目自动切换笔记内容",
-    "💡 关键文档中添加文件夹可作为工具的工作目录，相对路径以此为准",
-
-    # ===== 模型与参数 =====
-    "💡 点击模型名称可快速切换大模型",
-    "💡 模型参数影响回复风格（温度/最大Token），多试试找到你的风格",
-    "💡 不同智能体擅长不同任务：Plan 规划、Build 构建、Explore 探索",
-
-    # ===== 技能系统 =====
-    "💡 输入 @ 可快速选择技能，触发 AI 专项能力",
-    "💡 @brainstorming 集思广益，@writing-plans 制定计划",
-    "💡 @git-commit 自动分析改动生成规范提交信息",
-    "💡 @skill-creator 创建新的自定义技能扩展",
-    "💡 @minimax-image-understanding 分析图片内容",
-
-    # ===== 代码与文件 =====
-    "💡 代码块右上角有复制和保存按钮，点击即可",
-    "💡 工具执行结果可点击「查看差异」对比文件修改",
-    "💡 工具悬浮框会显示正在执行的工具，点击可查看详情",
-    "💡 用户卡片的撤销按钮可以单独撤销单个编辑操作",
-    "💡 用户卡片的撤销按钮会将会话重置到对应卡片之前",
-
-    # ===== 窗口与布局 =====
-    "💡 右上角「新建窗口」按钮可创建并发会话，多任务同时进行",
-    "💡 右上角「分支」按钮可复制当前会话到新窗口",
-    "💡 右下角可展开历史会话卡片，点击继续历史对话",
-
-    # ===== 高级功能 =====
-    "💡 记忆管理让 AI 更懂你的偏好和习惯",
-    "💡 点击上下文指示器可查看 Token 使用详情",
-    "💡 子智能体可协助处理复杂任务，观察其工作过程",
-
-    # ===== MCP 系统 =====
-    "💡 在系统设置中配置 MCP Server，可扩展 AI 的工具能力",
-    "💡 MCP 工具自动获取工具信息，连接后即可直接调用",
-    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
-    "💡 常用MCP服务： npx -y @colbymchenry/codegraph serve --mcp 可以构建本地代码知识图谱",
-    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-github 可让 AI 访问github",
-    "💡 常用MCP服务： npx -y @playwright/mcp@latest --isolated 可让 AI 操作浏览器",
-
-    # ===== 内建指令 =====
-    "💡 输入 / 可查看所有内建指令，快速调用常用功能",
-    "💡 /new 新建会话、/new-window 新建窗口、/branch 创建分支",
-    "💡 /init 初始化项目笔记、/review 审查代码改动、/theme 设计主题色",
-    "💡 /compact 手动触发上下文压缩，减少 Token 消耗",
-    "💡 输入 / 还会显示从 agents 目录加载的自定义智能体命令",
-]
-
-# ======== 欢迎卡片欢迎语 ========
-WELCOME_GREETINGS = [
-    "你好！我是 Drifox 飘狐 🦊",
-    "嗨！有什么我可以帮你的吗？",
-    "欢迎回来！今天想聊点什么？",
-    "你好！随时可以问我问题或让我帮忙处理任务",
-    "嗨！准备好一起探索了吗？",
-    "欢迎！需要帮忙分析什么吗？",
-    "你好！可以帮你总结、分析、生成内容哦！",
-    "Drifox 为你准备了最近的会话记录，点击即可继续之前的对话 👇",
-    "欢迎使用 Drifox 飘狐！我是你的智能助手 🚀",
-    "嗨！我是你的 AI 搭档，有问题尽管问 🤖",
-]
-
-
 def get_random_tip() -> str:
     """获取随机 Tips"""
     return random.choice(WELCOME_TIPS)
@@ -1799,101 +1803,184 @@ class CodeWebViewer(QWebEngineView):
                 .tool-expanded-content {{
                     padding: 0;
                 }}
+                .tool-diff-stats {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 3px;
+                    margin-left: 4px;
+                    padding: 1px 6px;
+                    border: 1px solid rgba(139, 148, 158, 0.2);
+                    border-radius: 999px;
+                    background: rgba(139, 148, 158, 0.08);
+                    font-weight: 700;
+                    white-space: nowrap;
+                }}
+                .tool-diff-stats__add {{
+                    color: #3fb950;
+                }}
+                .tool-diff-stats__del {{
+                    color: #ff7b72;
+                }}
+                .tool-diff-stats__sep {{
+                    color: #6e7681;
+                }}
+                .tool-diff-inline {{
+                    margin: 8px 0 2px;
+                    background: linear-gradient(180deg, rgba(22,27,34,0.62), rgba(13,17,23,0.42));
+                    border: 1px solid rgba(139, 148, 158, 0.22);
+                    border-radius: 8px;
+                    overflow: hidden;
+                    box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+                }}
+                .tool-diff-inline__header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    min-width: 0;
+                    padding: 7px 10px;
+                    background: rgba(255,255,255,0.035);
+                    border-bottom: 1px solid rgba(139, 148, 158, 0.16);
+                    color: #8b949e;
+                    font-size: {small_font_size}px;
+                    font-weight: 600;
+                }}
+                .tool-diff-inline__title {{
+                    flex: 0 0 auto;
+                    color: #d0d7de;
+                    letter-spacing: 0;
+                }}
+                .tool-diff-inline__file {{
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    color: #8b949e;
+                    font-weight: 500;
+                }}
+                .tool-diff-inline__summary {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    flex: 0 0 auto;
+                    padding: 2px 7px;
+                    border-radius: 999px;
+                    background: rgba(13,17,23,0.42);
+                    border: 1px solid rgba(139, 148, 158, 0.18);
+                    font-weight: 800;
+                }}
+                .tool-diff-inline__add {{
+                    color: #56d364;
+                }}
+                .tool-diff-inline__del {{
+                    color: #ff7b72;
+                }}
+                .tool-diff-inline__body {{
+                    line-height: 1.55;
+                    overflow-x: auto;
+                }}
                 .tool-diff-inline .diff-line {{
                     display: flex;
                     align-items: stretch;
-                    min-height: 22px;
+                    min-height: 23px;
                     font-size: {tag_font_size}px;
-                    line-height: 1.5;
+                    line-height: 1.55;
                     border-bottom: 1px solid transparent;
                 }}
                 .tool-diff-inline .diff-ctx:hover {{
-                    background: rgba(255,255,255,0.04);
+                    background: rgba(255,255,255,0.035);
                 }}
                 .tool-diff-inline .diff-add:hover {{
-                    background-color: rgba(63, 185, 80, 0.22);
+                    background-color: rgba(63, 185, 80, 0.18);
                 }}
                 .tool-diff-inline .diff-del:hover {{
-                    background-color: rgba(248, 81, 73, 0.22);
+                    background-color: rgba(248, 81, 73, 0.18);
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
-                    min-width: 32px;
-                    padding: 0 4px;
+                    min-width: 34px;
+                    padding: 0 6px;
                     text-align: right;
-                    color: #484f58;
+                    color: #6e7681;
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
+                    background: rgba(13,17,23,0.18);
                 }}
                 .tool-diff-inline .line-num-old {{
-                    border-right: 1px solid rgba(48,54,61,0.6);
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-num-new {{
-                    border-right: 1px solid rgba(48,54,61,0.6);
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-num-empty {{
-                    border-right: 1px solid rgba(48,54,61,0.6);
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-sign {{
                     flex: none;
-                    width: 18px;
+                    width: 20px;
                     text-align: center;
-                    color: #484f58;
+                    color: #6e7681;
                     user-select: none;
+                    font-weight: 700;
                 }}
                 .tool-diff-inline .line-code {{
                     flex: 1;
-                    padding: 0 8px;
+                    padding: 0 10px;
                     white-space: pre-wrap;
                     overflow-x: auto;
+                    min-width: 0;
                 }}
                 .tool-diff-inline .diff-add {{
-                    background-color: rgba(63, 185, 80, 0.12);
+                    background-color: rgba(63, 185, 80, 0.095);
+                    box-shadow: inset 3px 0 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .diff-add .line-sign {{
-                    color: #3fb950;
+                    color: #56d364;
                 }}
                 .tool-diff-inline .diff-add .line-code {{
-                    color: #3fb950;
+                    color: #aff5b4;
                 }}
                 .tool-diff-inline .diff-del {{
-                    background-color: rgba(248, 81, 73, 0.12);
+                    background-color: rgba(248, 81, 73, 0.095);
+                    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.62);
                 }}
                 .tool-diff-inline .diff-del .line-sign {{
-                    color: #f85149;
+                    color: #ff7b72;
                 }}
                 .tool-diff-inline .diff-del .line-code {{
-                    color: #f85149;
+                    color: #ffdcd7;
                 }}
                 .tool-diff-inline .diff-ctx {{
-                    color: #c9d1d9;
+                    color: #adbac7;
                 }}
                 .tool-diff-inline .diff-hunk {{
-                    color: #58a6ff;
+                    color: #79c0ff;
+                    background: rgba(56, 139, 253, 0.075);
                 }}
                 .tool-diff-inline .diff-hunk .line-code {{
-                    color: #58a6ff;
+                    color: #79c0ff;
                 }}
                 .tool-diff-inline .diff-file-header .line-code {{
-                    color: #8b949e;
+                    color: #c9d1d9;
                     font-weight: 600;
                 }}
                 .tool-diff-inline .diff-truncated {{
-                    color: #484f58;
+                    color: #6e7681;
+                    background: rgba(139, 148, 158, 0.055);
                 }}
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
                 .tool-diff-inline .word-add {{
-                    background: rgba(63, 185, 80, 0.18);
-                    border-radius: 2px;
-                    border-bottom: 1px solid rgba(63, 185, 80, 0.4);
+                    background: rgba(63, 185, 80, 0.28);
+                    border-radius: 3px;
+                    box-shadow: inset 0 -1px 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .word-del {{
-                    background: rgba(248, 81, 73, 0.18);
-                    border-radius: 2px;
-                    border-bottom: 1px solid rgba(248, 81, 73, 0.4);
+                    background: rgba(248, 81, 73, 0.28);
+                    border-radius: 3px;
+                    box-shadow: inset 0 -1px 0 rgba(248, 81, 73, 0.65);
                 }}
                 .tool-params-section,
                 .tool-result-section {{
@@ -4101,7 +4188,7 @@ class MessageCard(SimpleCardWidget):
         option_layout.setSpacing(8)
 
         label = QLabel(f"• {option.get('label', '选项')}", self)
-        label.setStyleSheet(f"color: #4a9eff; {get_font_family_css()} font-size: 13px; cursor: pointer;")
+        label.setStyleSheet(f"color: #4a9eff; {get_font_family_css()} {font_size_css(13)} cursor: pointer;")
         label.setCursor(Qt.PointingHandCursor)
         label.option_data = option
         label.mousePressEvent = lambda e, opt=option: self._on_option_clicked(opt)
@@ -4118,7 +4205,7 @@ class MessageCard(SimpleCardWidget):
             return
 
         title_label = QLabel("👉 请选择：", self)
-        title_label.setStyleSheet(f"color: #888; {get_font_family_css()} font-size: 12px; margin-top: 8px;")
+        title_label.setStyleSheet(f"color: #888; {get_font_family_css()} {font_size_css(12)} margin-top: 8px;")
         self.options_layout.addWidget(title_label)
 
         for option in options:

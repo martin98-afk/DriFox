@@ -254,6 +254,8 @@ class CommandCard(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._all_items: List[Dict[str, str]] = []
+        self._all_items_cache: List[Dict[str, str]] = []  # 缓存，避免每次敲击都读磁盘
+        self._cache_dirty: bool = True                     # 缓存脏标记，热重载后置 True
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
         self._item_widgets: List[CommandItemWidget] = []
@@ -332,11 +334,24 @@ class CommandCard(QWidget):
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
 
-        # 刷新所有数据
-        self._refresh_data()
+        # 不在此处调用 _refresh_data() —— 命令尚未注册，会导致缓存空数据
+        # show_card() 会在首次显示时自动加载
 
     def _refresh_data(self):
-        """刷新完整数据列表（命令 + 技能）"""
+        """刷新完整数据列表（命令 + 技能）
+        
+        使用缓存避免每次敲击都读磁盘。
+        只有在 _cache_dirty=True 时才重建缓存（如插件热重载后）。
+        首次调用时必然重建。
+        """
+        if not self._cache_dirty and self._all_items_cache:
+            # 安全检查：缓存必须包含命令项，防止初始化时序导致缓存了只有技能的脏数据
+            if any(item["type"] == "command" for item in self._all_items_cache):
+                self._all_items = self._all_items_cache
+                return
+            # 缓存不完整，丢弃并重新加载
+            self._cache_dirty = True
+
         cmd_mgr = CommandManager.get_instance()
         commands = cmd_mgr.get_all_commands()
         skills = [
@@ -344,6 +359,8 @@ class CommandCard(QWidget):
             for s in get_local_skills()
         ]
         self._all_items = commands + skills
+        self._all_items_cache = list(self._all_items)
+        self._cache_dirty = False
 
     def load_items(self, query: str = "", incremental: bool = False):
         """根据 query 筛选并渲染列表
@@ -559,6 +576,13 @@ class CommandCard(QWidget):
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)
+
+    def invalidate_cache(self):
+        """使缓存失效，下次 show_card 时自动重建
+        
+        由外部（如 main_widget）在插件热重载后调用。
+        """
+        self._cache_dirty = True
 
     @property
     def is_card_visible(self) -> bool:

@@ -23,7 +23,7 @@ from qfluentwidgets import (
     isDarkTheme, PrimaryPushButton, ToolButton,
 )
 
-from app.utils.design_tokens import scale_font_size
+from app.utils.design_tokens import scale_font_size, font_size_css
 from app.utils.utils import get_icon, get_font_family_css
 
 
@@ -64,7 +64,7 @@ class FileUndoPreviewDialog(QDialog):
 
         # 标题
         title_label = QLabel("确认撤销以下文件操作？", self)
-        title_label.setStyleSheet(f"{get_font_family_css()} font-size: 16px; font-weight: bold; color: {text_color};")
+        title_label.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(16)}px; font-weight: bold; color: {text_color};")
         layout.addWidget(title_label)
 
         # 说明
@@ -73,7 +73,7 @@ class FileUndoPreviewDialog(QDialog):
             "此操作不可撤销。",
             self
         )
-        desc_label.setStyleSheet(f"color: #8c99ad; {get_font_family_css()} font-size: 13px;")
+        desc_label.setStyleSheet(f"color: #8c99ad; {get_font_family_css()} font-size: {scale_font_size(13)}px;")
         layout.addWidget(desc_label)
 
         # 文件列表
@@ -125,7 +125,7 @@ class FileUndoPreviewDialog(QDialog):
             name_label.setStyleSheet(f"color: {text_color}; font-weight: bold;")
 
             path_label = QLabel(file_path)
-            path_label.setStyleSheet(f"color: #8c99ad; {get_font_family_css()} font-size: 12px;")
+            path_label.setStyleSheet(f"color: #8c99ad; {get_font_family_css()} font-size: {scale_font_size(12)}px;")
             path_label.setWordWrap(True)
 
             item_layout.addWidget(cb, 0)

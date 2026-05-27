@@ -199,12 +199,14 @@ class ConversationExecutor:
 
         if worker:
             # 断开所有信号连接，防止已取消的 worker 继续向 UI 发送事件
+            # ⚠️ 重要：不断开 `finished` 信号（QThread.finished），
+            # AutoLoopWorker 的主循环 QEventLoop 依赖此信号退出 wait 状态。
+            # 断开它会导致 QEventLoop 永久挂起，进而触发 worker.terminate() 造成闪退。
             for signal_name in ("retry_status", "error_occurred", "finished_with_content",
                                 "finished_with_messages", "content_received", "reasoning_content_received",
                                  "tool_call_started", "tool_args_updated", "tool_result_received",
                                  "question_asked", "permission_approval_requested", "thinking_started",
-                                 "retry_resolved", "compaction_status_changed",
-                                 "finished"):
+                                 "retry_resolved", "compaction_status_changed"):
                 try:
                     signal = getattr(worker, signal_name, None)
                     if signal is not None:

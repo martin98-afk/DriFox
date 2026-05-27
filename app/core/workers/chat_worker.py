@@ -5,6 +5,8 @@ Chat Worker - OpenAI 对话执行器
 
 import re
 import time
+import concurrent.futures
+import threading
 from datetime import datetime
 from typing import Dict, List, Callable, Optional, Any
 
@@ -553,6 +555,17 @@ class OpenAIChatWorker(QThread):
                                                  current_session_messages)
                     return
                 if tool_calls_found and tool_args_pending:
+                    # 🛡️ continue 之前检查取消状态，否则 while 循环直接退出绕过保存
+                    if self._is_cancelled:
+                        partial_sequence = self._build_response_message_sequence()
+                        if partial_sequence:
+                            current_messages.extend(partial_sequence)
+                            current_session_messages.extend(partial_sequence)
+                            self._current_session_messages = list(current_session_messages)
+                            self.full_response = ''.join(self._response_chunks)
+                            self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                                     current_session_messages)
+                        return
                     continue
                 if self._is_cancelled:
                     # 🛡️ 同上，保存 partial 响应
@@ -1605,36 +1618,68 @@ class OpenAIChatWorker(QThread):
 
         return tool_calls_found, tool_args_pending
 
+    # ========== 并行工具执行 ==========
+    # 用户交互类工具的串行化锁：确保同一时间只有一个工具等待用户响应（权限审批、提问）
+    _permission_serializer = threading.Lock()
+    # 取消哨兵：与普通 None 返回值区分
+    _TOOL_CANCELLED = object()
+
     def _execute_all_tools(self):
+        """
+        调度工具执行：根据调用情况选择串行或并行路径。
+
+        - 如果所有工具都是非交互式的（无 question 工具），⏩ 并行执行
+        - 如果包含 question 工具，需要用户交互，回退到串行执行
+        """
         if not self._current_tool_calls or not self.tool_executor:
             return []
 
         # 重置工具执行取消标志，开始新的执行周期
         self._tool_execution_cancelled = False
 
+        tool_calls = list(self._current_tool_calls.values())
+
+        # 快速取消检查
+        if self._is_cancelled or self._tool_execution_cancelled:
+            for tc in tool_calls:
+                self._emit_cancelled_tool_result(tc)
+            return []
+
+        # 检查是否有 question 工具（需要用户交互，不能并行）
+        for tc in tool_calls:
+            if tc["function"]["name"] == "question":
+                return self._execute_tools_sequential(tool_calls)
+
+        # ⏩ 并行执行
+        return self._execute_tools_parallel(tool_calls)
+
+    def _emit_cancelled_tool_result(self, tc):
+        """发射单个工具被取消的结果信号"""
+        tool_name = tc["function"]["name"]
+        tool_call_id = tc["id"]
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except Exception:
+            args = {}
+        self._emit_with_callback(
+            "tool_result_received",
+            self.tool_result_received,
+            tool_call_id, tool_name, args,
+            type("ToolResult", (),
+                 {"success": False, "content": None, "error": "用户中止"})(),
+        )
+
+    def _execute_tools_sequential(self, tool_calls):
+        """
+        串行执行工具调用（保留原有逻辑，用于包含 question 的场景）
+
+        当工具列表中有 question 工具时使用此路径，
+        因为 question 需要阻塞等待用户输入。
+        """
         results = []
-        for tc in self._current_tool_calls.values():
+        for tc in tool_calls:
             if self._is_cancelled or self._tool_execution_cancelled:
-                cancelled_tc_id = tc["id"]
-                tool_name = tc["function"]["name"]
-                try:
-                    args = json.loads(tc["function"]["arguments"])
-                except:
-                    args = {}
-                self._emit_with_callback(
-                    "tool_result_received",
-                    self.tool_result_received,
-                    cancelled_tc_id,
-                    tool_name,
-                    args,
-                    type(
-                        "ToolResult",
-                        (),
-                        {"success": False, "content": None, "error": "用户中止"},
-                    )(),
-                )
-                # 不设置 _is_cancelled = True，让 worker 继续下次迭代
-                # 返回空列表而非 None，避免进入问答等待逻辑
+                self._emit_cancelled_tool_result(tc)
                 return []
 
             tool_name = tc["function"]["name"]
@@ -1642,344 +1687,386 @@ class OpenAIChatWorker(QThread):
             tool_call_id = tc["id"]
             raw_args = tc["function"]["arguments"]
             round_id = f"round_{id(tc)}"
-            original_args_str = arguments  # 保存原始字符串用于错误诊断
+            original_args_str = arguments
 
+            # ====== JSON 参数解析 ======
             if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError as e:
-                    # JSON 解析失败，尝试智能修复（处理模型生成的不规范 JSON）
-                    fixed_args = smart_parse_arguments(arguments, tool_name)
-                    if fixed_args is not None:
-                        arguments = fixed_args
-                        logger.info(
-                            f"[ToolCall] ✓ JSON 智能修复成功: tool={tool_name}, "
-                            f"args={list(arguments.keys())}"
-                        )
-                    elif not arguments or not arguments.strip():
-                        # 确实是空字符串
-                        arguments = {}
-                    else:
-                        # 【优化】尝试三阶段修复（不再对 10000 字符设硬限制）
-                        # 阶段1: 再次调用 smart_parse_arguments（重试一次）
-                        retry_fixed = smart_parse_arguments(arguments, tool_name)
-                        if retry_fixed is not None:
-                            arguments = retry_fixed
-                            logger.info(
-                                f"[ToolCall] ✓ 二次 JSON 智能修复成功: tool={tool_name}, "
-                                f"args_len={len(arguments)}, args={list(retry_fixed.keys())}"
-                            )
-                        else:
-                            # 阶段2: 对于 write/edit 工具，尝试从原始字符串提取关键参数
-                            if tool_name in ("write", "edit"):
-                                extracted = _extract_tool_args_from_raw(arguments, tool_name)
-                                if extracted:
-                                    arguments = extracted
-                                    logger.info(
-                                        f"[ToolCall] ✓ 原始参数提取成功: tool={tool_name}, "
-                                        f"keys={list(extracted.keys())}"
-                                    )
-                                else:
-                                    # 阶段3: 彻底失败
-                                    logger.warning(
-                                        f"[ToolCall] ⚠️ JSON 解析失败且无法修复，tool={tool_name}, "
-                                        f"error={str(e)}, "
-                                        f"args_len={len(arguments)}, "
-                                        f"preview='{arguments[:200]}...'"
-                                    )
-                                    preview_args = {"_raw_args": raw_args[:500], "_status": "parse_failed"}
-                                    if self.tool_start_callback:
-                                        self.tool_start_callback(tool_call_id, tool_name, preview_args, round_id)
-                                    else:
-                                        self._emit_with_callback(
-                                            "tool_call_started",
-                                            self.tool_call_started,
-                                            tool_call_id, tool_name, preview_args, round_id
-                                        )
-                                    error_result = {
-                                        "success": False,
-                                        "content": None,
-                                        "error": f"[参数错误] JSON 格式无效: {str(e)}\n"
-                                                 f"工具: {tool_name}\n"
-                                                 f"原始内容(前500字): {arguments[:500]}...\n"
-                                                 f"提示: 可尝试分批执行，或使用 patch 工具替代 write。",
-                                    }
-                                    self._emit_with_callback(
-                                        "tool_result_received",
-                                        self.tool_result_received,
-                                        tool_call_id, tool_name, preview_args,
-                                        error_result
-                                    )
-                                    results.append({
-                                        "role": "tool",
-                                        "tool_call_id": tool_call_id,
-                                        "name": tool_name,
-                                        "arguments": {"_raw_args": raw_args[:500]},
-                                        "content": error_result["error"],
-                                        "success": False,
-                                        "round_id": round_id,
-                                    })
-                                    continue
-                            else:
-                                # 非文件工具，无法修复
-                                logger.warning(
-                                    f"[ToolCall] ⚠️ JSON 解析失败且无法修复，tool={tool_name}, "
-                                    f"error={str(e)}, "
-                                    f"preview='{arguments[:200]}...'"
-                                )
-                                preview_args = {"_raw_args": raw_args[:500], "_status": "parse_failed"}
-                                if self.tool_start_callback:
-                                    self.tool_start_callback(tool_call_id, tool_name, preview_args, round_id)
-                                else:
-                                    self._emit_with_callback(
-                                        "tool_call_started",
-                                        self.tool_call_started,
-                                        tool_call_id, tool_name, preview_args, round_id
-                                    )
-                                error_result = {
-                                    "success": False,
-                                    "content": None,
-                                    "error": f"[参数错误] JSON 格式无效: {str(e)}\n"
-                                             f"工具: {tool_name}\n"
-                                             f"原始内容(前500字): {arguments[:500]}...",
-                                }
-                                self._emit_with_callback(
-                                    "tool_result_received",
-                                    self.tool_result_received,
-                                    tool_call_id, tool_name, preview_args,
-                                    error_result
-                                )
-                                results.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call_id,
-                                    "name": tool_name,
-                                    "arguments": {"_raw_args": raw_args[:500]},
-                                    "content": error_result["error"],
-                                    "success": False,
-                                    "round_id": round_id,
-                                })
-                                continue
+                parsed, err_result = self._parse_tool_arguments(arguments, tool_name, raw_args, tool_call_id, round_id)
+                if parsed is None:
+                    if err_result:
+                        results.append(err_result)
+                    continue
+                arguments = parsed
 
-            # 检查必需参数
-            required_args = self.tool_executor.REQUIRED_ARGS.get(tool_name, [])
-            missing_args = [p for p in required_args if p not in arguments]
-            if missing_args:
-                logger.warning(
-                    f"[ToolCall] ⚠️ 缺少必需参数: tool={tool_name}, missing={missing_args}, "
-                    f"raw_args='{original_args_str if isinstance(original_args_str, str) else str(original_args_str)}'"
-                )
-                tool_call_id = tc["id"]
-                round_id = f"round_{id(tc)}"
-                error_result = {
-                    "success": False,
-                    "content": None,
-                    "error": f"[参数缺失] 缺少必需参数: {missing_args}\n"
-                             f"工具: {tool_name}",
-                }
-                self._emit_with_callback(
-                    "tool_result_received",
-                    self.tool_result_received,
-                    tool_call_id, tool_name, arguments,
-                    error_result
-                )
-                results.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": tool_name,
-                    "arguments": arguments,
-                    "content": error_result["error"],
-                    "success": False,
-                    "round_id": round_id,
-                })
+            # ====== 检查必需参数 ======
+            result = self._check_required_args(tool_name, arguments, tool_call_id, round_id, original_args_str)
+            if result is not None:
+                results.append(result)
                 continue
 
-            tool_call_id = tc["id"]
+            # ====== 发射 tool_call_started ======
+            self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
 
-            round_id = f"round_{id(tc)}"
-            if self.tool_start_callback:
-                self.tool_start_callback(tool_call_id, tool_name, arguments, round_id)
-            else:
-                self._emit_with_callback(
-                    "tool_call_started",
-                    self.tool_call_started,
-                    tool_call_id, tool_name, arguments, round_id
-                )
-
+            # ====== 处理 question 工具 ======
             if tool_name == "question":
-                questions = arguments.get("questions", [])
-                # 向后兼容旧格式
-                if not questions and "question" in arguments:
-                    questions = [{
-                        "question": arguments["question"],
-                        "options": arguments.get("options", []),
-                        "multiple": arguments.get("multiple", False),
-                    }]
-                # 规范化 questions 中的选项格式
-                for q in questions:
-                    opts = q.get("options", [])
-                    normalized = []
-                    for opt in opts:
-                        if isinstance(opt, str):
-                            normalized.append({"label": opt, "description": ""})
-                        elif isinstance(opt, dict):
-                            desc = opt.get("description", "")
-                            # 推导 label：label > name > text > value > title > description > 首字符串值 > str(opt)
-                            label = opt.get("label")
-                            if not label:
-                                for key in ("name", "text", "value", "title"):
-                                    label = opt.get(key)
-                                    if label:
-                                        break
-                            if not label:
-                                if desc and len(opt) <= 1:
-                                    # 只有 description 没有 label，用 desc 当 label，清空 desc 避免重复
-                                    label = desc
-                                    desc = ""
-                                else:
-                                    # 尝试找第一个字符串字段值
-                                    for v in opt.values():
-                                        if isinstance(v, str):
-                                            label = v
-                                            break
-                                    if not label:
-                                        label = str(opt)
-                            normalized.append({"label": label, "description": desc})
-                        else:
-                            normalized.append({"label": str(opt), "description": ""})
-                    q["options"] = normalized
-                extra = {"tool_call_id": tool_call_id}
-                self._emit_with_callback("question_asked", self.question_asked, tool_call_id, questions, extra)
-                self._question_pending = {
-                    "tool_call_id": tool_call_id,
-                    "questions": questions,
-                }
-                return None
+                return self._handle_question_tool(tool_call_id, arguments)
 
-            if self.permission_check_callback:
-                # 使用 PermissionCache 检查缓存，缓存命中则直接允许
-                if self._permission_cache.is_allowed(tool_name):
-                    permission_result = "allow"
-                    logger.info(f"[Permission] 使用缓存: tool={tool_name}")
-                else:
-                    permission_result = self.permission_check_callback(
-                        tool_name, arguments
-                    )
-                if permission_result == "ask":
-                    self._emit_with_callback("permission_approval_requested", self.permission_approval_requested,
-                                             tool_call_id, tool_name, arguments)
-                    self._permission_pending = {
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                    }
-                    self._permission_approved = False
-                    while (
-                            self._permission_pending is not None
-                            and not self._is_cancelled
-                            and not self._tool_execution_cancelled
-                    ):
-                        if not self._legacy_direct_callbacks:
-                            QApplication.processEvents()
-                        time.sleep(0.1)
+            # ====== 权限检查 ======
+            should_continue = self._check_permission(tool_name, arguments, tool_call_id, round_id, results)
+            if not should_continue:
+                return None  # 取消
+            if results and results[-1] and results[-1].get("tool_call_id") == tool_call_id:
+                continue  # 权限拒绝，跳过执行
 
-                    if self._is_cancelled or self._tool_execution_cancelled:
-                        cancelled_tc_id = tool_call_id
-                        self._emit_with_callback(
-                            "tool_result_received",
-                            self.tool_result_received,
-                            cancelled_tc_id,
-                            tool_name,
-                            arguments,
-                            type(
-                                "ToolResult",
-                                (),
-                                {
-                                    "success": False,
-                                    "content": None,
-                                    "error": "用户中止",
-                                },
-                            )(),
-                        )
-                        self._is_cancelled = True
-                        return None
-
-                    if not self._permission_approved:
-                        self._emit_with_callback(
-                            "tool_result_received",
-                            self.tool_result_received,
-                            tool_call_id,
-                            tool_name,
-                            arguments,
-                            type(
-                                "ToolResult",
-                                (),
-                                {
-                                    "success": False,
-                                    "error": "Permission denied by user",
-                                },
-                            )(),
-                        )
-                        results.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call_id,
-                                "content": "Error: Permission denied by user",
-                                "round_id": round_id,
-                            }
-                        )
-                        continue
-
-            try:
-                # 设置当前调用的 call_id（用于文件操作记录）
-                if hasattr(self.tool_executor, "set_call_id"):
-                    self.tool_executor.set_call_id(tool_call_id)
-
-                # 传递取消标志引用，以便异步工具可以检测取消
-                cancelled_ref = [self._is_cancelled or self._tool_execution_cancelled]
-                result = self.tool_executor.execute(tool_name, arguments, cancelled_ref)
-                # 更新取消标志引用
-                cancelled_ref[0] = self._is_cancelled or self._tool_execution_cancelled
-            except Exception as e:
-                logger.error(f"[Tool] Tool '{tool_name}' execution failed: {e}")
-                result = None
-                result_content = f"Tool execution error: {str(e)}"
-                success = False
-            else:
-                result_content = str(result) if result else ""
-                success = bool(getattr(result, "success", True)) if result else False
-
-            if self._is_cancelled or self._tool_execution_cancelled:
-                # 创建取消结果对象（直接使用 dict 简化，避免循环导入）
-                cancelled_result = {
-                    "success": False,
-                    "content": None,
-                    "error": "用户中止",
-                }
-                self._emit_with_callback(
-                    "tool_result_received",
-                    self.tool_result_received,
-                    tool_call_id, tool_name, arguments, cancelled_result
-                )
-                self._is_cancelled = True
-                return None
-
-            self._emit_with_callback("tool_result_received", self.tool_result_received, tool_call_id, tool_name,
-                                     arguments, result)
-            results.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": tool_name,
-                    "arguments": arguments or {},
-                    "content": result_content,
-                    "success": success,
-                    "round_id": round_id,
-                    "diff": getattr(result, "diff", None) if result else None,
-                    "anchors": getattr(result, "anchors", None) if result else None,
-                }
+            # ====== 执行工具 ======
+            result_obj, result_content, success = self._execute_tool(
+                tool_name, arguments, tool_call_id
             )
+            if result_obj is self._TOOL_CANCELLED:
+                return None
+
+            # ====== 发射结果 ======
+            self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                     tool_call_id, tool_name, arguments, result_obj)
+            results.append(self._build_result_dict(tool_call_id, tool_name, arguments, result_content,
+                                                   success, round_id, result_obj))
 
         return results
+
+    def _execute_tools_parallel(self, tool_calls):
+        """
+        ⏩ 并行执行所有工具调用（使用线程池）
+
+        分两阶段：
+        1. 预处理：JSON 解析 + 参数校验（串行执行，快速失败）
+        2. 执行：将有效工具提交到 ThreadPoolExecutor 并行执行
+        """
+        # ====== Phase 1: 预处理（串行） ======
+        tasks = []  # [(index, tool_name, call_id, args, round_id), ...]
+        pre_results = []  # 预处理阶段产生的错误结果
+
+        for idx, tc in enumerate(tool_calls):
+            if self._is_cancelled or self._tool_execution_cancelled:
+                self._emit_cancelled_tool_result(tc)
+                return pre_results  # 返回已经收集的错误结果
+
+            tool_name = tc["function"]["name"]
+            arguments_str = tc["function"]["arguments"]
+            tool_call_id = tc["id"]
+            round_id = f"round_{id(tc)}"
+            original_args_str = arguments_str
+
+            # JSON 参数解析
+            if isinstance(arguments_str, str):
+                parsed, err_result = self._parse_tool_arguments(arguments_str, tool_name, arguments_str, tool_call_id, round_id)
+                if parsed is None:
+                    if err_result:
+                        pre_results.append(err_result)
+                    continue
+                arguments = parsed
+            else:
+                arguments = arguments_str
+
+            # 检查必需参数
+            result = self._check_required_args(tool_name, arguments, tool_call_id, round_id, original_args_str)
+            if result is not None:
+                pre_results.append(result)
+                continue
+
+            tasks.append((idx, tool_name, tool_call_id, arguments, round_id))
+
+        if not tasks:
+            return pre_results
+
+        # ====== Phase 2: 并行执行 ======
+        parallel_results = []
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(tasks), 8)
+        ) as executor:
+            future_map = {}
+            for idx, tool_name, tool_call_id, arguments, round_id in tasks:
+                future = executor.submit(
+                    self._execute_one_tool_parallel,
+                    tool_name, tool_call_id, arguments, round_id, idx,
+                )
+                future_map[future] = idx
+
+            for future in concurrent.futures.as_completed(future_map):
+                original_idx = future_map[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        parallel_results.append((original_idx, result))
+                except Exception as e:
+                    logger.error(f"[ToolCall] 并行工具执行异常: {e}")
+
+        # 按原始索引排序，保持结果顺序稳定
+        parallel_results.sort(key=lambda x: x[0])
+        all_results = pre_results + [r[1] for r in parallel_results]
+        return all_results
+
+    def _parse_tool_arguments(self, arguments_str, tool_name, raw_args, tool_call_id, round_id):
+        """
+        解析工具参数的 JSON。
+
+        Returns:
+            Tuple[dict, dict|None]: (parsed_args, error_result)
+            - parsed_args: 解析后的参数字典
+            - error_result: 解析失败时的错误结果字典，成功时为 None
+        """
+        try:
+            return json.loads(arguments_str), None
+        except json.JSONDecodeError as e:
+            # JSON 解析失败，尝试智能修复
+            fixed_args = smart_parse_arguments(arguments_str, tool_name)
+            if fixed_args is not None:
+                logger.info(f"[ToolCall] ✓ JSON 智能修复成功: tool={tool_name}, args={list(fixed_args.keys())}")
+                return fixed_args, None
+            if not arguments_str or not arguments_str.strip():
+                return {}, None
+            # 二次修复尝试
+            retry_fixed = smart_parse_arguments(arguments_str, tool_name)
+            if retry_fixed is not None:
+                logger.info(f"[ToolCall] ✓ 二次 JSON 修复成功: tool={tool_name}, args_len={len(arguments_str)}")
+                return retry_fixed, None
+            # 对于 write/edit 工具尝试原始提取
+            if tool_name in ("write", "edit"):
+                extracted = _extract_tool_args_from_raw(arguments_str, tool_name)
+                if extracted:
+                    logger.info(f"[ToolCall] ✓ 原始参数提取成功: tool={tool_name}, keys={list(extracted.keys())}")
+                    return extracted, None
+            # 彻底失败
+            error_result = self._build_json_parse_error(tool_name, raw_args, tool_call_id, round_id, str(e))
+            return None, error_result
+
+    def _build_json_parse_error(self, tool_name, raw_args, tool_call_id, round_id, error_msg):
+        """构建 JSON 解析失败的错误结果并发射信号"""
+        logger.warning(f"[ToolCall] ⚠️ JSON 解析失败且无法修复，tool={tool_name}, error={error_msg}, "
+                       f"preview='{raw_args[:200]}...'")
+        preview_args = {"_raw_args": raw_args[:500], "_status": "parse_failed"}
+        self._emit_tool_started(tool_call_id, tool_name, preview_args, round_id)
+        error_result = {
+            "success": False, "content": None,
+            "error": f"[参数错误] JSON 格式无效: {error_msg}\n"
+                     f"工具: {tool_name}\n原始内容(前500字): {raw_args[:500]}...",
+        }
+        self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                 tool_call_id, tool_name, preview_args, error_result)
+        return {
+            "role": "tool", "tool_call_id": tool_call_id, "name": tool_name,
+            "arguments": {"_raw_args": raw_args[:500]},
+            "content": error_result["error"], "success": False, "round_id": round_id,
+        }
+
+    def _check_required_args(self, tool_name, arguments, tool_call_id, round_id, original_args_str):
+        """检查必需参数，缺失则返回错误结果，否则返回 None"""
+        required_args = self.tool_executor.REQUIRED_ARGS.get(tool_name, [])
+        missing_args = [p for p in required_args if p not in arguments]
+        if missing_args:
+            logger.warning(f"[ToolCall] ⚠️ 缺少必需参数: tool={tool_name}, missing={missing_args}")
+            error_result = {
+                "success": False, "content": None,
+                "error": f"[参数缺失] 缺少必需参数: {missing_args}\n工具: {tool_name}",
+            }
+            self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                     tool_call_id, tool_name, arguments, error_result)
+            return {
+                "role": "tool", "tool_call_id": tool_call_id,
+                "content": f"Error: Missing required arguments: {missing_args}",
+                "round_id": round_id,
+            }
+        return None
+
+    def _emit_tool_started(self, tool_call_id, tool_name, arguments, round_id):
+        """发射 tool_call_started 信号"""
+        if self.tool_start_callback:
+            self.tool_start_callback(tool_call_id, tool_name, arguments, round_id)
+        else:
+            self._emit_with_callback("tool_call_started", self.tool_call_started,
+                                     tool_call_id, tool_name, arguments, round_id)
+
+    def _handle_question_tool(self, tool_call_id, arguments):
+        """处理 question 工具调用（阻塞等待用户回答）"""
+        questions = arguments.get("questions", [])
+        if not questions and "question" in arguments:
+            questions = [{
+                "question": arguments["question"],
+                "options": arguments.get("options", []),
+                "multiple": arguments.get("multiple", False),
+            }]
+        # 规范化选项格式
+        for q in questions:
+            opts = q.get("options", [])
+            normalized = []
+            for opt in opts:
+                if isinstance(opt, str):
+                    normalized.append({"label": opt, "description": ""})
+                elif isinstance(opt, dict):
+                    desc = opt.get("description", "")
+                    label = opt.get("label")
+                    if not label:
+                        for key in ("name", "text", "value", "title"):
+                            label = opt.get(key)
+                            if label:
+                                break
+                    if not label:
+                        if desc and len(opt) <= 1:
+                            label = desc
+                            desc = ""
+                        else:
+                            for v in opt.values():
+                                if isinstance(v, str):
+                                    label = v
+                                    break
+                            if not label:
+                                label = str(opt)
+                    normalized.append({"label": label, "description": desc})
+                else:
+                    normalized.append({"label": str(opt), "description": ""})
+            q["options"] = normalized
+        extra = {"tool_call_id": tool_call_id}
+        self._emit_with_callback("question_asked", self.question_asked, tool_call_id, questions, extra)
+        self._question_pending = {"tool_call_id": tool_call_id, "questions": questions}
+        return None  # 通知 run() 等待用户回答
+
+    def _check_permission(self, tool_name, arguments, tool_call_id, round_id, results):
+        """
+        权限检查。返回 False 表示取消/已处理（调用方应 return None），
+        True 表示继续执行。
+        当权限被拒绝时，自动追加错误结果到 results。
+        """
+        if not self.permission_check_callback:
+            return True
+
+        # 检查权限缓存
+        if self._permission_cache.is_allowed(tool_name):
+            logger.info(f"[Permission] 使用缓存: tool={tool_name}")
+            return True
+
+        permission_result = self.permission_check_callback(tool_name, arguments)
+
+        if permission_result == "ask":
+            # 串行化用户交互：同一时间只有一个工具需要用户确认
+            with self._permission_serializer:
+                # 再次检查缓存（可能已被其他线程处理）
+                if self._permission_cache.is_allowed(tool_name):
+                    return True
+                self._emit_with_callback("permission_approval_requested",
+                                         self.permission_approval_requested,
+                                         tool_call_id, tool_name, arguments)
+                self._permission_pending = {
+                    "tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": arguments,
+                }
+                self._permission_approved = False
+            # 锁在 while 循环前释放，避免阻塞主线程调用 approve_permission/deny_permission
+            while (self._permission_pending is not None
+                   and not self._is_cancelled
+                   and not self._tool_execution_cancelled):
+                if not self._legacy_direct_callbacks:
+                    QApplication.processEvents()
+                time.sleep(0.1)
+
+            if self._is_cancelled or self._tool_execution_cancelled:
+                self._emit_cancelled_tool_result({"id": tool_call_id, "function": {"name": tool_name, "arguments": "{}"}})
+                return False
+
+            if not self._permission_approved:
+                self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                         tool_call_id, tool_name, arguments,
+                                         type("ToolResult", (),
+                                              {"success": False, "error": "Permission denied by user"})())
+                results.append({
+                    "role": "tool", "tool_call_id": tool_call_id,
+                    "content": "Error: Permission denied by user", "round_id": round_id,
+                })
+                return True  # 已处理，继续（但不会执行工具）
+
+        return True  # 允许执行
+
+    def _execute_tool(self, tool_name, arguments, tool_call_id):
+        """执行单个工具调用。"""
+        try:
+            result = self.tool_executor.execute(
+                tool_name, arguments, call_id=tool_call_id
+            )
+        except Exception as e:
+            logger.error(f"[Tool] Tool '{tool_name}' execution failed: {e}")
+            return None, f"Tool execution error: {str(e)}", False
+
+        if self._is_cancelled or self._tool_execution_cancelled:
+            self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                     tool_call_id, tool_name, arguments,
+                                     {"success": False, "content": None, "error": "用户中止"})
+            return self._TOOL_CANCELLED, None, None
+
+        result_content = str(result) if result else ""
+        success = bool(getattr(result, "success", True)) if result else False
+        return result, result_content, success
+
+    def _build_result_dict(self, tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj):
+        """构建标准的结果字典"""
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "arguments": arguments or {},
+            "content": result_content,
+            "success": success,
+            "round_id": round_id,
+            "diff": getattr(result_obj, "diff", None) if result_obj else None,
+            "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
+        }
+
+    def _execute_one_tool_parallel(self, tool_name, tool_call_id, arguments, round_id, idx):
+        """
+        在 ThreadPoolExecutor 线程中执行单个工具调用（并行路径）。
+
+        Args:
+            tool_name: 工具名称
+            tool_call_id: 工具调用 ID
+            arguments: 已解析的参数 dict
+            round_id: 轮次 ID
+            idx: 原始索引（用于排序）
+
+        Returns:
+            dict: 工具结果，或 None（取消）
+        """
+        try:
+            # ====== 发射 tool_call_started ======
+            self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
+
+            # ====== 权限检查 ======
+            results_placeholder = []
+            should_continue = self._check_permission(
+                tool_name, arguments, tool_call_id, round_id, results_placeholder
+            )
+            if not should_continue:
+                return None  # 取消
+            if results_placeholder:
+                return results_placeholder[0]  # 权限拒绝的结果
+
+            # ====== 执行工具 ======
+            result_obj, result_content, success = self._execute_tool(
+                tool_name, arguments, tool_call_id
+            )
+            if result_obj is self._TOOL_CANCELLED:
+                return None
+
+            # ====== 发射结果信号 ======
+            self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                     tool_call_id, tool_name, arguments, result_obj)
+
+            return self._build_result_dict(
+                tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj
+            )
+
+        except Exception as e:
+            logger.error(f"[ToolCall] 并行工具执行异常: tool={tool_name}, error={e}")
+            return self._build_result_dict(
+                tool_call_id, tool_name, arguments,
+                f"Tool execution error: {str(e)}", False, round_id, None
+            )
 
     def _handle_error(self, error):
         from openai import (

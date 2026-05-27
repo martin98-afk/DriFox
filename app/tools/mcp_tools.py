@@ -96,6 +96,10 @@ class MCPClientManager:
         self._connections: Dict[str, MCPServerConnection] = {}
         self._connected = False
 
+        # 按 name 加锁：同一 server 只允许一个进行中的连接/断开操作
+        self._busy_names: set = set()
+        self._busy_lock = threading.Lock()
+
         # 专用后台线程 + 持久事件循环
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -353,6 +357,8 @@ class MCPClientManager:
         if self._connected:
             await self._disconnect_all()
 
+        # 收集需要连接的服务器列表
+        enabled_servers = []
         for server_cfg in servers_config:
             name = server_cfg.get("name", "")
             if not name:
@@ -360,9 +366,21 @@ class MCPClientManager:
             if not server_cfg.get("enabled", True):
                 logger.info(f"[MCP] 跳过已禁用的服务器: {name}")
                 continue
+            enabled_servers.append(server_cfg)
 
+        # 并行启动所有服务器连接（不再串行 await）
+        tasks = {
+            server_cfg["name"]: asyncio.create_task(
+                self._connect_single(server_cfg["name"], server_cfg),
+                name=f"mcp-connect-{server_cfg['name']}",
+            )
+            for server_cfg in enabled_servers
+        }
+
+        # 等待所有连接完成（每个任务内部有 30 秒超时，互不阻塞）
+        for name, task in tasks.items():
             try:
-                await self._connect_single(name, server_cfg)
+                await task
             except Exception as e:
                 logger.error(f"[MCP] 连接服务器 '{name}' 失败: {e}")
 
@@ -380,7 +398,22 @@ class MCPClientManager:
             return False
 
     def connect_server_background(self, name: str, config: dict, on_done=None) -> None:
-        """后台连接单个 MCP 服务器（不阻塞 UI）"""
+        """后台连接单个 MCP 服务器（不阻塞 UI）
+
+        同一 name 只允许一个进行中的连接操作，重复请求被丢弃。
+        """
+        # 防重：同名服务器正在连接/断开中，跳过
+        with self._busy_lock:
+            if name in self._busy_names:
+                logger.debug(f"[MCP] '{name}' 正在连接/断开中，跳过重复请求")
+                if on_done:
+                    try:
+                        on_done(name, False, "服务器正在操作中，请稍后重试")
+                    except Exception:
+                        pass
+                return
+            self._busy_names.add(name)
+
         def _worker():
             success = False
             error_msg = ""
@@ -390,6 +423,8 @@ class MCPClientManager:
                 error_msg = str(e)
                 logger.error(f"[MCP] 热添加服务器 '{name}' 失败: {e}")
             finally:
+                with self._busy_lock:
+                    self._busy_names.discard(name)
                 if on_done:
                     try:
                         on_done(name, success, error_msg)
@@ -451,13 +486,29 @@ class MCPClientManager:
             return False
 
     def disconnect_server_background(self, name: str, on_done=None) -> None:
-        """后台断开单个 MCP 服务器（不阻塞 UI）"""
+        """后台断开单个 MCP 服务器（不阻塞 UI）
+
+        与 connect_server_background 共享一个锁，同名请求丢弃。
+        """
+        with self._busy_lock:
+            if name in self._busy_names:
+                logger.debug(f"[MCP] '{name}' 正在连接/断开中，跳过重复请求")
+                if on_done:
+                    try:
+                        on_done(name)
+                    except Exception:
+                        pass
+                return
+            self._busy_names.add(name)
+
         def _worker():
             try:
                 self._run_async(self._disconnect_single(name))
             except Exception as e:
                 logger.error(f"[MCP] 热断开服务器 '{name}' 失败: {e}")
             finally:
+                with self._busy_lock:
+                    self._busy_names.discard(name)
                 if on_done:
                     try:
                         on_done(name)
@@ -844,15 +895,18 @@ def _merge_and_deduplicate(existing: List[dict], discovered: List[dict]) -> Tupl
 
 def discover_and_merge() -> Tuple[List[dict], List[dict]]:
     """
-    自动发现所有已知来源的 MCP 服务器，并与现有配置合并去重
+    自动发现所有已知来源的 MCP 服务器
+
+    发现结果由 backend._discover_mcp_servers() 写入 user-custom 插件，
+    不再直接修改 Settings.mcp_servers。
 
     Returns:
         (all_servers, newly_discovered) — 所有服务器（含已有的）+ 新发现的列表
     """
-    from app.utils.config import Settings
+    from app.core.plugin_manager import PluginManager
 
-    cfg = Settings.get_instance()
-    existing = list(cfg.mcp_servers.value or [])
+    pm = PluginManager.get_instance()
+    existing = pm.get_mcp_servers() if pm.is_initialized() else []
 
     all_discovered = []
     all_discovered.extend(_discover_claude_desktop_servers())
@@ -861,6 +915,6 @@ def discover_and_merge() -> Tuple[List[dict], List[dict]]:
     merged, new_ones = _merge_and_deduplicate(existing, all_discovered)
 
     if new_ones:
-        logger.info(f"[MCP] 自动发现 {len(new_ones)} 个新服务器，已合并到配置")
+        logger.info(f"[MCP] 自动发现 {len(new_ones)} 个新服务器")
 
     return merged, new_ones

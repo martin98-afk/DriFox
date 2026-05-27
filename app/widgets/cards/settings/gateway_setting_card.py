@@ -34,7 +34,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import InfoBar, InfoBarPosition
 
-from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes
+from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.floating.command_card import _ElidedLabel
 
@@ -46,7 +46,7 @@ LABEL_STYLE = f"""
 color: #ffffff;
 font-weight: bold;
 {get_font_family_css()}
-font-size: 13px;
+{font_size_css(13)}
 """
 
 GATEWAY_EDIT_STYLE = f"""
@@ -60,7 +60,7 @@ QLineEdit {{
     border-radius: 4px;
     padding: 6px 10px;
     {get_font_family_css()}
-    font-size: 13px;
+    font-size: {scale_font_size(13)}px;
 }}
 QLineEdit:focus {{
     border-color: rgba(0, 120, 212, 200);

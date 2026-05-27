@@ -20,6 +20,9 @@ orjson>=3.8.0
 pypinyin
 mcp>=1.0.0
 
+# 插件热更新
+watchfiles>=1.0.0
+
 # Gateway 通讯平台依赖
 # 钉钉
 dingtalk-stream>=0.20

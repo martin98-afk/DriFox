@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-
 import platform
+
+from app.utils.design_tokens import font_size_css
 import uuid
 import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
@@ -363,6 +364,34 @@ class LockButtonWidget(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._setup_ui()
         self._update_icon()
+        self._force_always_on_top()
+        # 定时器持续置顶，防止焦点切换时被其他窗口遮挡
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.timeout.connect(self._force_always_on_top)
+        self._topmost_timer.start(200)  # 每 200ms 重新置顶一次
+
+    def _force_always_on_top(self):
+        """使用 Windows API 强制置顶到所有窗口之上，防止被其他窗口遮挡"""
+        import platform
+
+        if platform.system() != "Windows":
+            return
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOACTIVATE = 0x0010
+            HWND_TOPMOST = -1
+
+            hwnd = wintypes.HWND(int(self.winId()))
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            self.raise_()  # 立即提升到最前
+        except Exception:
+            pass  # 忽略可能的异常
 
     def _setup_ui(self):
         from qfluentwidgets import ToolButton
@@ -560,12 +589,12 @@ class ToolPopupDialog(QDialog):
         # ========== 多窗口选中标记 ==========
         title_bar = tool_instance.get_title_bar()
         self._selection_indicator = QLabel("●", title_bar)
-        self._selection_indicator.setStyleSheet("""
-            QLabel {
+        self._selection_indicator.setStyleSheet(f"""
+            QLabel {{
                 color: #4FC3F7;
-                font-size: 14px;
+                {font_size_css(14)}
                 background: transparent;
-            }
+            }}
         """)
         self._selection_indicator.setFixedSize(14, 14)
         self._selection_indicator.setVisible(False)
@@ -821,6 +850,13 @@ class ToolPopupDialog(QDialog):
                         self._sync_lock_btn_position()
                         self._lock_btn_widget.show()
 
+    def focusInEvent(self, event):
+        """窗口获得焦点时，确保锁定按钮置顶"""
+        super().focusInEvent(event)
+        if self._lock_btn_widget:
+            self._lock_btn_widget._force_always_on_top()
+            self._sync_lock_btn_position()
+
     def set_selection_indicator(self, visible: bool):
         """显示/隐藏选中标记"""
         self._selection_indicator.setVisible(visible)
@@ -1021,8 +1057,10 @@ class ToolPopupDialog(QDialog):
                 event.accept()
                 return
         else:
-            self._show_opacity_slider()
-            self._hide_timer_start()
+            # 仅在窗口激活时显示透明度滑块，避免鼠标在其他窗口移动时反复触发
+            if self.isActiveWindow():
+                self._show_opacity_slider()
+                self._hide_timer_start()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None

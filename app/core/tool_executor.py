@@ -5,6 +5,7 @@
 import os
 import orjson
 import re
+import threading
 from pathlib import Path
 
 from loguru import logger
@@ -29,8 +30,9 @@ class ToolExecutor:
         "write", "edit", "multi_edit"
     }
 
-    # 跨窗口共享的 BuiltinTools 实例（纯工具模块，无窗口特定状态）
-    _shared_builtin_tools: Optional["BuiltinTools"] = None
+    # 注意：BuiltinTools 不再跨窗口共享，每个窗口拥有独立实例
+    # 确保工作目录（workdir）完全隔离，多窗口互不影响
+    # MCPClientManager 本身已是全局单例，连接仍跨窗口共享
 
     def __init__(self, homepage=None, workdir: str = None, backend=None):
         self._homepage = homepage
@@ -44,15 +46,16 @@ class ToolExecutor:
         # 文件操作记录器
         self._file_recorder: Optional[FileOperationRecorder] = None
 
+        # 子智能体管理器（实例级，每个窗口独立，不共享给 BuiltinTools）
+        self._sub_agent_manager = None
+
+        # 线程安全锁：保护文件记录等非线程安全操作
+        self._lock = threading.Lock()
+
         self._initialize_builtin_tools()
 
     def _initialize_builtin_tools(self):
-        """初始化内置工具（跨窗口共享 BuiltinTools 实例）"""
-        # 复用已创建的 BuiltinTools 实例
-        if ToolExecutor._shared_builtin_tools is not None:
-            self._builtin_tools = ToolExecutor._shared_builtin_tools
-            return
-
+        """初始化内置工具（每个窗口独立实例，不复用）"""
         import os
 
         workdir = self._workdir
@@ -69,7 +72,6 @@ class ToolExecutor:
 
         logger.info(f"[ToolExecutor] Initialized with workdir: {workdir}")
         self._builtin_tools = BuiltinTools(self._homepage, workdir)
-        ToolExecutor._shared_builtin_tools = self._builtin_tools
 
     @property
     def builtin_tools(self) -> Optional[BuiltinTools]:
@@ -107,9 +109,10 @@ class ToolExecutor:
 
     def cleanup(self):
         """
-        清理窗口独有状态，不影响其他窗口。
+        清理窗口独有状态。
         
-        注意：_builtin_tools 是跨窗口共享实例，不清除。
+        清理当前窗口的 BuiltinTools（释放 MCP 引用计数），
+        其他窗口不受影响。
         """
         # 清理文件操作记录器
         self._file_recorder = None
@@ -120,6 +123,14 @@ class ToolExecutor:
 
         # 清理自定义工具
         self._custom_tools.clear()
+
+        # 清理当前窗口的 BuiltinTools
+        if self._builtin_tools:
+            try:
+                self._builtin_tools.cleanup()
+            except Exception as e:
+                logger.warning(f"[ToolExecutor] cleanup builtin_tools: {e}")
+            self._builtin_tools = None
 
         # 释放 backend 引用（打破循环引用链）
         self._backend = None
@@ -151,13 +162,16 @@ class ToolExecutor:
         """获取文件操作记录器"""
         return self._file_recorder
 
-    def _record_file_operation_before(self, tool_name: str, args: dict):
+    def _record_file_operation_before(self, tool_name: str, args: dict,
+                                       session_id: str = None, call_id: str = None):
         """
         在文件操作执行前记录备份信息
 
         Args:
             tool_name: 工具名称
             args: 工具参数
+            session_id: 会话 ID（不传则使用 self._session_id）
+            call_id: 调用 ID（不传则使用 self._call_id）
 
         Returns:
             str: 文件完整路径，用于后续的编辑后备份
@@ -165,10 +179,11 @@ class ToolExecutor:
         if tool_name not in self._FILE_OPS_TO_TRACK:
             return None
 
-        if not self._session_id:
-            return None
+        # 使用传入的值或回退到实例变量
+        sid = session_id or self._session_id
+        cid = call_id or self._call_id
 
-        if not self._call_id:
+        if not sid or not cid:
             return None
 
         if not self._file_recorder:
@@ -195,12 +210,13 @@ class ToolExecutor:
 
         # 记录操作（内部会处理文件不存在的情况）
         try:
-            backup_path = self._file_recorder.record_operation(
-                session_id=self._session_id,
-                call_id=self._call_id,
-                tool_name=tool_name,
-                file_path=str(full_path)
-            )
+            with self._lock:
+                backup_path = self._file_recorder.record_operation(
+                    session_id=sid,
+                    call_id=cid,
+                    tool_name=tool_name,
+                    file_path=str(full_path)
+                )
             if backup_path:
                 logger.info(f"[FileRecorder] 已备份: {full_path} -> {backup_path}")
             else:
@@ -212,7 +228,8 @@ class ToolExecutor:
 
         return str(full_path)
 
-    def _record_file_operation_after(self, tool_name: str, args: dict, file_path_before: str):
+    def _record_file_operation_after(self, tool_name: str, args: dict, file_path_before: str,
+                                      session_id: str = None, call_id: str = None):
         """
         在文件操作执行成功后备份编辑后的文件
 
@@ -220,6 +237,8 @@ class ToolExecutor:
             tool_name: 工具名称
             args: 工具参数
             file_path_before: 执行前的文件路径
+            session_id: 会话 ID（不传则使用 self._session_id）
+            call_id: 调用 ID（不传则使用 self._call_id）
         """
         if not file_path_before:
             return
@@ -227,33 +246,40 @@ class ToolExecutor:
         if tool_name not in self._FILE_OPS_TO_TRACK:
             return
 
-        if not self._session_id or not self._call_id:
+        sid = session_id or self._session_id
+        cid = call_id or self._call_id
+
+        if not sid or not cid:
             return
 
         if not self._file_recorder:
             return
 
         try:
-            self._file_recorder.record_after_operation(
-                session_id=self._session_id,
-                call_id=self._call_id,
-                tool_name=tool_name,
-                file_path=file_path_before
-            )
+            with self._lock:
+                self._file_recorder.record_after_operation(
+                    session_id=sid,
+                    call_id=cid,
+                    tool_name=tool_name,
+                    file_path=file_path_before
+                )
         except Exception as e:
             # 记录失败不阻塞主流程
             logger.warning(f"[ToolExecutor] 编辑后备份失败: {e}")
 
-    def _cleanup_backup_on_failure(self):
+    def _cleanup_backup_on_failure(self, session_id: str = None, call_id: str = None):
         """编辑失败时清理备份文件"""
         if not self._file_recorder:
             return
-        if not self._session_id or not self._call_id:
+        sid = session_id or self._session_id
+        cid = call_id or self._call_id
+        if not sid or not cid:
             return
 
         try:
-            self._file_recorder.cleanup_on_failure(self._session_id, self._call_id)
-            logger.info(f"[ToolExecutor] 已清理失败操作的备份: session={self._session_id}, call={self._call_id}")
+            with self._lock:
+                self._file_recorder.cleanup_on_failure(sid, cid)
+            logger.info(f"[ToolExecutor] 已清理失败操作的备份: session={sid}, call={cid}")
         except Exception as e:
             logger.warning(f"[ToolExecutor] 清理备份失败: {e}")
 
@@ -350,7 +376,7 @@ class ToolExecutor:
         "question": ["questions"]
     }
 
-    def execute(self, tool_name: str, args: dict, cancelled_ref: list = None) -> ToolResult:
+    def execute(self, tool_name: str, args: dict, call_id: str = None) -> ToolResult:
         """
         执行工具调用
 
@@ -358,6 +384,7 @@ class ToolExecutor:
             tool_name: 工具名称
             args: 工具参数
             cancelled_ref: 取消标志引用 [bool]
+            call_id: 工具调用 ID（可选，用于并行执行时隔离上下文；不传则使用 self._call_id）
 
         Returns:
             ToolResult: 执行结果
@@ -366,6 +393,11 @@ class ToolExecutor:
         if not self.is_valid():
             logger.warning(f"[ToolExecutor] ToolExecutor is invalid (UI may be closed)")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
+
+        # 🔒 线程安全：捕获当前 session_id/call_id 到局部变量（后续使用局部变量而非实例变量）
+        with self._lock:
+            local_session_id = self._session_id
+            local_call_id = call_id or self._call_id
 
         logger.info(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
 
@@ -438,16 +470,8 @@ class ToolExecutor:
             if missing:
                 return ToolResult(False, error=f"Missing required arguments: {missing}")
 
-        # 对于耗时工具（如 grep, bash, webfetch, websearch），使用异步执行
-        if tool_name == "grep":
-            return self._execute_grep_async(args, cancelled_ref)
-        elif tool_name == "webfetch":
-            return self._execute_webfetch_async(args, cancelled_ref)
-        elif tool_name == "websearch":
-            return self._execute_websearch_async(args, cancelled_ref)
-
         # 文件操作前记录（用于撤销）
-        file_path_before = self._record_file_operation_before(tool_name, args)
+        file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
 
         if tool_name in self._custom_tools:
             try:
@@ -515,7 +539,8 @@ class ToolExecutor:
             ),
             "bg_list": lambda: self._builtin_tools.bg_list(),
             "webfetch": lambda: self._builtin_tools.fetch_web(
-                args.get("url", ""), args.get("format", "markdown")
+                args.get("url", ""), args.get("format", "markdown"),
+                args.get("max_chars", 26000)
             ),
             "websearch": lambda: self._builtin_tools.search_web(
                 args.get("query", ""), args.get("num_results", 10)
@@ -544,14 +569,16 @@ class ToolExecutor:
                 lambda tasks_val: self._builtin_tools.task_execute_batch(
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
                     args.get("share_context", False),
-                    session_id=self._session_id,
+                    session_id=local_session_id,
+                    sub_agent_manager=self._sub_agent_manager,
                 )
             )(args.get("tasks", [])),
             "task_status": lambda: self._builtin_tools.task_status(
                 args.get("task_ids"),
                 args.get("with_log", False),
                 args.get("with_result", True),
-                session_id=self._session_id,
+                session_id=local_session_id,
+                sub_agent_manager=self._sub_agent_manager,
             ),
             "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
             "list_skills": lambda: self._builtin_tools.list_skills(),
@@ -586,7 +613,7 @@ class ToolExecutor:
                         result.content = (result.content or "") + "\n[警告: UI 在执行过程中已关闭]"
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
-                    self._record_file_operation_after(tool_name, args, file_path_before)
+                    self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
                 
                 # Trigger PostToolUse hook
                 if self._backend and self._backend.hook_manager:
@@ -621,7 +648,7 @@ class ToolExecutor:
             except Exception as e:
                 # 文件编辑操作失败时清理备份
                 if tool_name in self._FILE_OPS_TO_TRACK:
-                    self._cleanup_backup_on_failure()
+                    self._cleanup_backup_on_failure(local_session_id, local_call_id)
                 return ToolResult(False, error=f"Execution error: {str(e)}")
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
@@ -659,158 +686,14 @@ class ToolExecutor:
 
         return result
 
-    def _execute_grep_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """
-        异步执行 grep，使用子线程，完成后返回结果
-
-        Args:
-            args: 工具参数
-            cancelled_ref: 取消标志引用 [bool]
-
-        Returns:
-            ToolResult: 执行结果
-        """
-        if not self._builtin_tools or not self._builtin_tools._file_tools:
-            return ToolResult(False, error="FileTools not available")
-
-        pattern = args.get("pattern", "")
-        path = args.get("path", "")
-        include = args.get("include")
-
-        # 使用 FileTools 的异步接口
-        result_holder = [None]
-        finished = [False]
-
-        def on_grep_done(result):
-            result_holder[0] = result
-            finished[0] = True
-
-        # 启动异步 grep
-        self._builtin_tools._file_tools.grep_files(
-            pattern=pattern,
-            path=path,
-            include=include,
-            callback=on_grep_done
-        )
-
-        # 使用定时器循环处理主线程事件，这样取消信号可以被处理
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-
-            if finished[0]:
-                return
-
-            # 检查取消标志
-            if cancelled_ref is not None and cancelled_ref[0]:
-                self._builtin_tools._file_tools.cancel()
-                result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-
-            # 继续等待
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-
-        wait_for_result()
-
-        # 等待完成
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
-            time.sleep(0.05)
-
-        return result_holder[0] if result_holder[0] else ToolResult(False, error="Grep failed")
-
-    def _execute_webfetch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """异步执行网页抓取"""
-        if not self._builtin_tools or not self._builtin_tools._web_tools:
-            return ToolResult(False, error="WebTools not available")
-
-        url = args.get("url", "")
-        format = args.get("format", "markdown")
-        max_chars = args.get("max_chars", 26000)
-
-        result_holder = [None]
-        finished = [False]
-
-        def on_fetch_done(result):
-            result_holder[0] = result
-            finished[0] = True
-
-        self._builtin_tools._web_tools.fetch_web(
-            url=url, format=format, max_chars=max_chars,
-            callback=on_fetch_done, cancelled_ref=cancelled_ref
-        )
-
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            if finished[0]: return
-            if cancelled_ref is not None and cancelled_ref[0]:
-                result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-
-        wait_for_result()
-
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
-            time.sleep(0.05)
-
-        return result_holder[0] if result_holder[0] else ToolResult(False, error="WebFetch failed")
-
-    def _execute_websearch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """异步执行网络搜索"""
-        if not self._builtin_tools or not self._builtin_tools._web_tools:
-            return ToolResult(False, error="WebTools not available")
-
-        query = args.get("query", "")
-        num_results = args.get("num_results", 10)
-
-        result_holder = [None]
-        finished = [False]
-
-        def on_search_done(result):
-            result_holder[0] = result
-            finished[0] = True
-
-        self._builtin_tools._web_tools.search_web(
-            query=query, num_results=num_results,
-            callback=on_search_done, cancelled_ref=cancelled_ref
-        )
-
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            if finished[0]: return
-            if cancelled_ref is not None and cancelled_ref[0]:
-                result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-
-        wait_for_result()
-
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
-            time.sleep(0.05)
-
-        return result_holder[0] if result_holder[0] else ToolResult(False, error="WebSearch failed")
-
     def set_sub_agent_manager(self, sub_agent_manager):
-        """设置子智能体管理器"""
+        """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
+        # 实例级引用：task_batch/task_status lambda 使用此引用来路由到正确的窗口
+        self._sub_agent_manager = sub_agent_manager
+        # 共享 BuiltinTools 回退：供旧代码路径兼容
         if self._builtin_tools:
             self._builtin_tools._sub_agent_manager = sub_agent_manager
             self._builtin_tools._task_tools._sub_agent_manager = sub_agent_manager
             logger.info(
-                "[ToolExecutor] SubAgentManager attached to BuiltinTools and TaskTools"
+                "[ToolExecutor] SubAgentManager attached to instance and BuiltinTools"
             )
