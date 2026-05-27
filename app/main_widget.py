@@ -2596,6 +2596,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"commands={result.get('commands')}, themes={result.get('themes')}, "
                     f"skills={result.get('skills')}, mcp={result.get('mcp')}")
 
+        # 命令卡片技能列表缓存失效：插件 skills 变更时下次敲 / 自动重建
+        if result.get('skills') and hasattr(self, '_command_card'):
+            self._command_card.invalidate_cache()
+            logger.debug("[HotReload] command_card cache invalidated (skills changed)")
+
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
         from app.utils.theme_manager import theme_manager

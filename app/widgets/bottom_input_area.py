@@ -178,8 +178,8 @@ class SendableTextEdit(TextEdit):
             self._slash_trigger_count += 1
             # 快速输入模式：更新待发送的 query，延长计时器
             self._pending_slash_query = query
-            # 节流延迟：50ms（快速输入时保持低频）
-            throttle_delay = 50
+            # 节流延迟：20ms（数据缓存后渲染仅需 ~1ms，可以降延迟提升响应速度）
+            throttle_delay = 20
             self._slash_throttle_timer.stop()
             self._slash_throttle_timer.start(throttle_delay)
         else:
