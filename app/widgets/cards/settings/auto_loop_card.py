@@ -652,6 +652,7 @@ class AutoLoopRunningCard(QFrame):
         phase_text = {
             "planning": "📋 规划中",
             "executing": "🔨 执行中",
+            "archiving": "📦 归档中",
             "completed": "✅ 已完成",
         }.get(phase, "未知")
         self._phase_label.setText(phase_text)
@@ -660,6 +661,7 @@ class AutoLoopRunningCard(QFrame):
         color_map = {
             "planning": "#7FDBFF",  # 蓝色
             "executing": "#C9A85C",  # 金色
+            "archiving": "#A78BFA",  # 紫色
             "completed": "#10B981",  # 绿色
         }
         color = color_map.get(phase, "#C9A85C")
@@ -670,6 +672,8 @@ class AutoLoopRunningCard(QFrame):
             self._status_label.setText("▶ 拆解任务中...")
         elif phase == "executing":
             self._status_label.setText("▶ 执行中...")
+        elif phase == "archiving":
+            self._status_label.setText("📦 归档清理中...")
         elif phase == "completed":
             self._status_label.setText("✅ 全部完成")
         
@@ -698,6 +702,7 @@ class AutoLoopRunningCard(QFrame):
         phase_text = {
             "planning": "📋 规划中",
             "executing": "⚡ 执行中",
+            "archiving": "📦 归档中",
             "completed": "✅ 已完成",
         }
         if phase in phase_text:

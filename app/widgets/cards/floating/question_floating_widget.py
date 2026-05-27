@@ -8,7 +8,7 @@
 from functools import partial
 
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent, QSize
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_unified_font, get_font_family_css
+from app.utils.utils import get_unified_font, get_font_family_css, get_icon
 
 
 # ═══════════════════════════════════════════════════════════
@@ -404,6 +404,7 @@ class QuestionFloatingWidget(QWidget):
         self._custom_input_widget = None
         self._show_custom_input = True
         self._preview_payload = None
+        self._collapsed = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -417,11 +418,32 @@ class QuestionFloatingWidget(QWidget):
         header = QHBoxLayout()
         header.setSpacing(8)
 
+        self._collapse_btn = QPushButton()
+        self._collapse_btn.setIcon(get_icon("折叠"))
+        self._collapse_btn.setIconSize(QSize(18, 18))
+        self._collapse_btn.setFixedSize(28, 28)
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.setToolTip("折叠问题")
+        self._collapse_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.1);
+            }
+        """)
+        self._collapse_btn.clicked.connect(self._toggle_collapse)
+        header.addWidget(self._collapse_btn)
+
         self._page_label = QLabel("")
         self._page_label.setFont(get_unified_font(10))
         self._page_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         header.addWidget(self._page_label)
         header.addStretch()
+
         main_layout.addLayout(header)
 
         # ── 问题标题（超出 160px 高度时滚动） ──
@@ -484,7 +506,10 @@ class QuestionFloatingWidget(QWidget):
         main_layout.addWidget(self._options_container)
 
         # ── 底栏 ──
-        footer = QHBoxLayout()
+        self._footer_widget = QWidget()
+        self._footer_widget.setStyleSheet("background: transparent;")
+        footer = QHBoxLayout(self._footer_widget)
+        footer.setContentsMargins(0, 0, 0, 0)
         footer.setSpacing(8)
 
         self._ignore_btn = QPushButton("忽略")
@@ -533,7 +558,7 @@ class QuestionFloatingWidget(QWidget):
         footer.addWidget(self._back_btn)
         footer.addWidget(self._next_btn)
 
-        main_layout.addLayout(footer)
+        main_layout.addWidget(self._footer_widget)
         self._apply_card_style()
 
     def _apply_card_style(self):
@@ -548,6 +573,18 @@ class QuestionFloatingWidget(QWidget):
         self._question_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT};background:transparent;")
         self._hint_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
 
+    def _toggle_collapse(self):
+        """折叠/展开提问卡片，仅保留顶栏"""
+        self._collapsed = not self._collapsed
+        visible = not self._collapsed
+        self._question_scroll.setVisible(visible)
+        self._hint_label.setVisible(visible)
+        self._options_container.setVisible(visible)
+        self._footer_widget.setVisible(visible)
+        self._collapse_btn.setIcon(get_icon("展开" if self._collapsed else "折叠"))
+        self._collapse_btn.setToolTip("展开问题" if self._collapsed else "折叠问题")
+        QTimer.singleShot(0, self.heightChanged.emit)
+
     # ────────────── 公开接口 ──────────────
 
     def show_question(self, questions: list, show_custom_input: bool = True, preview_payload=None):
@@ -556,6 +593,9 @@ class QuestionFloatingWidget(QWidget):
         self._answers = {}
         self._show_custom_input = show_custom_input
         self._preview_payload = preview_payload
+        # 新问题进来时自动展开
+        if self._collapsed:
+            self._toggle_collapse()
         self._render_current()
         QTimer.singleShot(0, self.heightChanged.emit)
 

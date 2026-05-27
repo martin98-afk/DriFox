@@ -2,9 +2,10 @@
 """
 AutoLoop 循环引擎 — 管理循环状态、迭代追踪、完成信号检测、预算控制、共享笔记
 
-两阶段设计：
+三阶段设计：
 1. PLANNING 阶段：拆解任务为步骤，写入 SHARED_TASK_NOTES.md
 2. EXECUTING 阶段：按步骤执行，每步必须验证
+3. ARCHIVING 阶段：执行完成后清理文件、归档日志和笔记
 """
 import re
 import time
@@ -22,6 +23,7 @@ class LoopState:
     RUNNING = "running"
     PLANNING = "planning"
     EXECUTING = "executing"
+    ARCHIVING = "archiving"
     COMPLETED = "completed"
     STOPPED = "stopped"
     ERROR = "error"
@@ -30,7 +32,9 @@ class LoopState:
 class AutoLoopEngine(BaseEngine):
     """核心循环引擎，不依赖 Qt，纯逻辑层
 
-    AutoLoopEngine 是一个状态机，管理 AutoLoop 的两阶段执行流程。
+    AutoLoopEngine 是一个状态机，管理 AutoLoop 的三阶段执行流程：
+    1. PLANNING → 2. EXECUTING → 3. ARCHIVING → COMPLETED
+
     它不直接参与 LLM 对话（由 AutoLoopWorker 通过 ConversationCore 驱动），
     而是提供状态追踪、预算控制、完成检测等逻辑能力。
 
@@ -58,6 +62,10 @@ class AutoLoopEngine(BaseEngine):
         self._verified_steps: set[int] = set()
         self._step_verified = False
         self._verification_failures = 0
+
+        # 归档阶段
+        self._is_archiving_phase = False
+        self._archiving_complete = False
 
         # BaseEngine 不持有 ConversationCore，传 None
         super().__init__(conversation_core=None, conversation_executor=None)
@@ -95,6 +103,14 @@ class AutoLoopEngine(BaseEngine):
     @property
     def is_planning(self) -> bool:
         return self._is_planning_phase
+
+    @property
+    def is_archiving(self) -> bool:
+        return self._is_archiving_phase
+
+    @property
+    def is_archiving_complete(self) -> bool:
+        return self._archiving_complete
 
     # ========== 状态写入方法 ==========
 
@@ -136,6 +152,8 @@ class AutoLoopEngine(BaseEngine):
         self._verified_steps = set()
         self._step_verified = False
         self._verification_failures = 0
+        self._is_archiving_phase = False
+        self._archiving_complete = False
 
     def start(self):
         self.state = LoopState.PLANNING
@@ -150,15 +168,25 @@ class AutoLoopEngine(BaseEngine):
         self._current_step = 1
         logger.info("[AutoLoop] Entering EXECUTION phase, step 1")
 
+    def enter_archiving_phase(self):
+        """进入归档阶段"""
+        self.state = LoopState.ARCHIVING
+        self._is_planning_phase = False
+        self._is_archiving_phase = True
+        logger.info("[AutoLoop] Entering ARCHIVING phase")
+
     def stop(self):
         self.state = LoopState.STOPPED
         logger.info("[AutoLoop] Engine stopped by user")
 
     def is_planning_phase(self) -> bool:
-        return self._is_planning_phase
+        return self._is_planning_phase and not self._is_archiving_phase
 
     def is_executing_phase(self) -> bool:
-        return not self._is_planning_phase
+        return not self._is_planning_phase and not self._is_archiving_phase
+
+    def is_archiving_phase(self) -> bool:
+        return self._is_archiving_phase
 
     # ========== 规划阶段管理 ==========
 
@@ -308,21 +336,38 @@ class AutoLoopEngine(BaseEngine):
         
         结束只由 completion_signal 连续出现次数决定，与步骤数无关。
         步骤数可动态变化，不参与结束判断。
+
+        Returns:
+            True 当信号出现次数达到阈值，False 否则
         """
         signal = self.config.completion_signal
         if not signal:
             return False
-        # 规划阶段忽略完成信号，防止偶然匹配导致误判
+        # 规划阶段和归档阶段忽略完成信号，防止偶然匹配导致误判
         if not self.is_executing_phase():
             return False
         if signal in response_text:
             self._completion_count += 1
             if self._completion_count >= self.config.completion_threshold:
-                self.state = LoopState.COMPLETED
                 logger.info(f"[AutoLoop] Completion signal detected ({self._completion_count} times)")
                 return True
         else:
             self._completion_count = 0
+        return False
+
+    def get_completion_count(self) -> int:
+        """获取当前的完成信号计数（用于反馈：还需 X 次确认）"""
+        return self._completion_count
+
+    def check_archive_complete(self, response_text: str) -> bool:
+        """检测归档是否完成（检查 ARCHIVE_COMPLETE 信号）"""
+        if not self._is_archiving_phase:
+            return False
+        if "ARCHIVE_COMPLETE" in response_text:
+            self._archiving_complete = True
+            self.state = LoopState.COMPLETED
+            logger.info("[AutoLoop] Archive complete signal detected")
+            return True
         return False
 
     def check_planning_complete(self, response_text: str, notes: str) -> bool:
@@ -389,6 +434,35 @@ class AutoLoopEngine(BaseEngine):
             logger.warning(f"[AutoLoop] Failed to write round log: {e}")
             return False
 
+    # ========== 归档路径 ==========
+
+    def get_archive_latest_dir(self) -> Optional[Path]:
+        """获取归档最近一次执行的目录路径"""
+        if not self.config.project_path:
+            return None
+        return Path(self.config.project_path) / ".autoloop" / "archive" / "latest"
+
+    def get_archive_meta_path(self) -> Optional[Path]:
+        """获取归档元信息文件路径"""
+        d = self.get_archive_latest_dir()
+        if d:
+            return d / "META.md"
+        return None
+
+    def read_archive_notes(self) -> str:
+        """读取归档笔记（如果存在），用于规划阶段参考"""
+        d = self.get_archive_latest_dir()
+        if not d or not d.exists():
+            return ""
+        notes_path = d / "SHARED_TASK_NOTES.md"
+        if notes_path.exists():
+            try:
+                return notes_path.read_text(encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"[AutoLoop] Failed to read archive notes: {e}")
+                return ""
+        return ""
+
     # ========== 获取进度信息 ==========
 
     def get_progress(self) -> dict:
@@ -402,7 +476,7 @@ class AutoLoopEngine(BaseEngine):
             "total_tokens": self._total_tokens,
             "max_tokens": self.config.max_tokens,
             "state": self.state,
-            "phase": "planning" if self._is_planning_phase else "executing",
+            "phase": "archiving" if self._is_archiving_phase else ("planning" if self._is_planning_phase else "executing"),
             # UI 显示用 _display_step，内部追踪用 _current_step
             "current_step": self._display_step if not self._is_planning_phase else self._current_step,
             "total_steps": self._total_steps,

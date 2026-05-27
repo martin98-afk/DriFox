@@ -302,16 +302,16 @@ class CommandCard(QWidget):
             }}
             QScrollBar:vertical {{
                 background: transparent;
-                width: 4px;
+                width: 12px;
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
-                background: rgba(255, 255, 255, 0.15);
-                border-radius: 2px;
-                min-height: 20px;
+                background: rgba(255, 255, 255, 0.3);
+                border-radius: 6px;
+                min-height: 30px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: rgba(255, 255, 255, 0.25);
+                background: rgba(255, 255, 255, 0.5);
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {{

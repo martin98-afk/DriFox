@@ -1664,9 +1664,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_configure_providers_from_popup(self):
         """从模型选择弹窗点击「配置」按钮 - 显示设置卡片并展开服务商下拉"""
         self._model_selector_popup.close()
-        # 显示设置卡片
-        self._settings_popup.show()
-        self._settings_popup.raise_()
+        # 显示设置卡片（通过 CardManager 保证生命周期一致性，触发容器展开）
+        self._card_manager.show_card("settings", self._window_id)
         # 滚动设置卡片内容到顶部
         QTimer.singleShot(100, self._scroll_settings_to_top)
         # 展开服务商下拉

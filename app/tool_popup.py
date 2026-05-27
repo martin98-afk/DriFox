@@ -371,7 +371,7 @@ class LockButtonWidget(QWidget):
         self._topmost_timer.start(200)  # 每 200ms 重新置顶一次
 
     def _force_always_on_top(self):
-        """使用 Windows API 强制置顶到所有窗口之上，防止被其他窗口遮挡"""
+        """智能置顶：本应用前台时允许对话框位于锁定按钮之上，其他应用前台时强制 TOPMOST 防止被遮挡"""
         import platform
 
         if platform.system() != "Windows":
@@ -382,14 +382,53 @@ class LockButtonWidget(QWidget):
             from ctypes import wintypes
 
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             SWP_NOSIZE = 0x0001
             SWP_NOMOVE = 0x0002
             SWP_NOACTIVATE = 0x0010
-            HWND_TOPMOST = -1
 
+            # 获取当前前台窗口的进程 ID
+            foreground_hwnd = user32.GetForegroundWindow()
+            if not foreground_hwnd:
+                return
+
+            fg_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(foreground_hwnd, ctypes.byref(fg_pid))
+            our_pid = kernel32.GetCurrentProcessId()
+
+            if fg_pid.value != our_pid:
+                # 其他应用在前台 → 强制 TOPMOST 防止被遮挡
+                HWND_TOPMOST = -1
+                hwnd = wintypes.HWND(int(self.winId()))
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                self.raise_()
+                return
+
+            # 本应用在前台 → 检查当前激活窗口是否为对话框
+            # 如果是对话框（如 DiffViewerWindow），锁定按钮应居于其下
+            app = QApplication.instance()
+            if app:
+                active = app.activeWindow()
+                if active and isinstance(active, QDialog):
+                    # 对话框激活中 → 将锁定按钮置于对话框下方
+                    HWND_NOTOPMOST = -2
+                    hwnd = wintypes.HWND(int(self.winId()))
+                    # ① 移除 TOPMOST 状态，使对话框可以浮于锁定按钮之上
+                    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                    # ② 再将锁定按钮放置在对话框下方（SetWindowPos 的 hWndInsertAfter 参数
+                    #    表示窗口将被插入到此 HWND 之后，即下方）
+                    active_hwnd = wintypes.HWND(int(active.winId()))
+                    user32.SetWindowPos(hwnd, active_hwnd, 0, 0, 0, 0,
+                                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                    return
+
+            # 本应用在前台，无对话框 → 正常提升 z-order
             hwnd = wintypes.HWND(int(self.winId()))
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
-            self.raise_()  # 立即提升到最前
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            self.raise_()
         except Exception:
             pass  # 忽略可能的异常
 
@@ -765,9 +804,15 @@ class ToolPopupDialog(QDialog):
             self.move(x, y)
 
     def keyPressEvent(self, event):
-        # ESC: 清除所有窗口选中状态
-        if event.key() == Qt.Key_Escape:
+        # Shift+ESC: 清除所有窗口选中状态（解除分组）
+        if (event.key() == Qt.Key_Escape
+                and event.modifiers() == Qt.ShiftModifier):
             TrayManager.get_instance().deselect_all()
+            event.accept()
+            return
+
+        # 单独 ESC：空消耗，不关闭窗口也不解除分组
+        if event.key() == Qt.Key_Escape:
             event.accept()
             return
 
