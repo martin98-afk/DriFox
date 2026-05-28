@@ -109,6 +109,9 @@ from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
+from app.widgets.cards.floating.sub_agent_compact_widget import (
+    SubAgentCompactFloatingWidget,
+)
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards import CardManager, ContainerType, TopCardContainer, BottomCardContainer
 from app.widgets.cards.floating.todo_floating_widget import (
@@ -467,6 +470,9 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "sub_agent", self._sub_agent_floating_widget)
         self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
         
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "sub_agent_compact", self._sub_agent_compact_widget)
+        self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
+        
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True)
         self._bottom_card_container.add_card("history", self._history_card)
         
@@ -771,6 +777,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新子智能体悬浮框
         if hasattr(self, "_sub_agent_floating_widget") and self._sub_agent_floating_widget:
             self._sub_agent_floating_widget.set_opacity(opacity)
+        # 更新子智能体紧凑悬浮框
+        if hasattr(self, "_sub_agent_compact_widget") and self._sub_agent_compact_widget:
+            self._sub_agent_compact_widget.set_opacity(opacity)
         # 更新工具悬浮框
         if hasattr(self, "_tool_floating_widget") and self._tool_floating_widget:
             self._tool_floating_widget.set_opacity(opacity)
@@ -1134,12 +1143,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_floating_widget = SubAgentFloatingWidget(self)
         self._sub_agent_floating_widget.setVisible(False)
 
+        self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
+        self._sub_agent_compact_widget.setVisible(False)
+        self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
+
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
 
-        # 下方卡片容器 - 添加 Tool 和 SubAgent
+        # 下方卡片容器 - 添加 Tool、SubAgentCompact 和 SubAgent(详细日志)
         self._bottom_card_container.add_card("tool", self._tool_floating_widget)
+        self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
         self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
 
         # 上方卡片容器 - 添加 Todo
@@ -1339,8 +1353,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._command_card.setVisible(False)
         self.input_area.set_command_card(self._command_card)
         mgr = self._card_manager
-        # 命令卡片压制 tool 和 sub_agent
-        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card, suppress_others=["tool", "sub_agent"])
+        # 命令卡片压制 tool、sub_agent 和 sub_agent_compact
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card, suppress_others=["tool", "sub_agent", "sub_agent_compact"])
         self._bottom_card_container.add_card("command", self._command_card)
 
         # 撤销删除卡片
@@ -1978,6 +1992,8 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
+        # 新创建的 MCPEditCard 需要应用当前字体大小
+        apply_font_size_to_widget(self._mcp_edit_popup, 14)
         self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
@@ -1997,6 +2013,8 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
+        # 新创建的 MCPEditCard 需要应用当前字体大小
+        apply_font_size_to_widget(self._mcp_edit_popup, 14)
         self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _setup_mcp_edit_mode_buttons(self):
@@ -2736,9 +2754,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_loop_config_card._refresh_theme_style()
         if self._auto_loop_running_card and hasattr(self._auto_loop_running_card, '_refresh_theme_style'):
             self._auto_loop_running_card._refresh_theme_style()
-        # 刷新实时卡片主题（todo/tool/question/sub_agent）
+        # 刷新实时卡片主题（todo/tool/question/sub_agent/compact）
         for card in (self._todo_floating_widget, self._tool_floating_widget,
-                     self._question_floating_widget, self._sub_agent_floating_widget):
+                     self._question_floating_widget, self._sub_agent_floating_widget,
+                     self._sub_agent_compact_widget):
             if card and hasattr(card, 'refresh_style'):
                 card.refresh_style()
         # 刷新消息卡片主题
@@ -2967,6 +2986,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._sub_agent_floating_widget:
             self._sub_agent_floating_widget.setVisible(False)
+        if self._sub_agent_compact_widget:
+            self._sub_agent_compact_widget.clear()
+            self._sub_agent_compact_widget.setVisible(False)
 
         try:
             self._auto_save_current_session()
@@ -5875,25 +5897,46 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("tool", self._window_id)
         self._tool_floating_widget.start_tool(tool_name, arguments)
 
+    def _on_sub_agent_compact_closed(self):
+        """子智能体紧凑卡片关闭时清理状态"""
+        if hasattr(self, '_sub_agent_compact_widget'):
+            self._sub_agent_compact_widget._batch_started = False
+
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
-        """子智能体任务启动（通过 SubAgentManager 信号触发）"""
+        """子智能体任务启动（通过 SubAgentManager 信号触发）
+
+        策略：
+        - 紧凑卡片（sub_agent_compact_widget）：自动弹出，显示运行状态（旋转图标+agent名+任务描述）
+        - 详细卡片（sub_agent_floating_widget）：后台默默收集日志，仅用户点击"查看日志"按钮时才显示
+        """
         if getattr(self, '_is_destroyed', False):
             return
-        widget = self._sub_agent_floating_widget
 
         # 系统卡片打开时，阻止子智能体卡片显示
         if self._is_system_card_visible:
             return
 
-        # 新批次开始时清空面板（_batch_started 为 False 表示新批次）
-        if not widget._batch_started:
-            widget.clear()
-            widget.setVisible(True)
+        # ── 紧凑卡片：自动弹出 ──
+        compact = self._sub_agent_compact_widget
+        if not hasattr(compact, '_batch_started'):
+            compact._batch_started = False
+        if not compact._batch_started:
+            compact.clear()
+        compact._batch_started = True
+        compact.add_task(task_id, agent_name, task_description)
+        if not compact.isVisible():
+            compact.setVisible(True)
 
-        widget._batch_started = True  # 标记批次已开始
-        widget.add_task(task_id, agent_name, task_description)
+        # ── 详细卡片：后台收集日志，但不自动显示 ──
+        detailed = self._sub_agent_floating_widget
+        if not detailed._batch_started:
+            detailed.clear()
+            detailed.setVisible(False)  # 不自动显示
+        detailed._batch_started = True
+        detailed.add_task(task_id, agent_name, task_description)
+        detailed.setVisible(False)  # 立即隐藏，只保留日志数据
 
-        # 连接 executor 信号
+        # 连接 executor 信号（只连接给详细卡片，紧凑卡片只需 start/finish）
         sub_agent_mgr = self.backend.sub_agent_manager
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
@@ -5920,6 +5963,10 @@ class OpenAIChatToolWindow(ToolWindow):
         success = execution_error is None or execution_error == ""
 
         self._sub_agent_floating_widget.finish_task(task_id, result, success)
+
+        # 更新紧凑卡片
+        if hasattr(self, '_sub_agent_compact_widget'):
+            self._sub_agent_compact_widget.finish_task(task_id, success)
 
         # 从管理器移除并记录结果
         if executor:

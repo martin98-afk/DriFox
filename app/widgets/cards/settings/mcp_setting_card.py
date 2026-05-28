@@ -36,6 +36,7 @@ from qfluentwidgets import (
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, CardStyles, Sizes, ButtonStyles, SwitchStyles, scale_font_size, font_size_css
+from app.utils.design_tokens import apply_font_size_to_widget
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
@@ -791,6 +792,10 @@ class MCPListSettingCard(ExpandSettingCard):
             h = self.viewLayout.sizeHint().height()
             if h > 0:
                 self.setFixedHeight(self.card.height() + h)
+
+        # 重要：新创建的行/标签未应用字体大小，需要重新刷新
+        # 否则会回退到 qfluentwidgets 默认的 14px 硬编码字体
+        apply_font_size_to_widget(self, 14)
 
     def setCount(self, text: str):
         card = self.card
