@@ -603,9 +603,6 @@ class AgentManager:
         filtered_tools = []
         for tool in all_tools:
             tool_name = tool["function"]["name"].lower()
-            # 子智能体模式下禁止交互工具
-            if agent.is_subagent() and tool_name in forbidden_tools:
-                continue
             permission = perm_resolver.resolve(tool_name)
             if permission in ("allow", "ask"):
                 filtered_tools.append(tool)
