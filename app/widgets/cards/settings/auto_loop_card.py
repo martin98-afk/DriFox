@@ -359,6 +359,7 @@ class AutoLoopRunningCard(QFrame):
     """AutoLoop 运行状态卡 — 彩虹渐变边框 + 进度 + 停止按钮"""
 
     stopRequested = pyqtSignal()
+    archiveRequested = pyqtSignal()  # 归档按钮点击
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -417,6 +418,23 @@ class AutoLoopRunningCard(QFrame):
         title.setStyleSheet(f"color: #EAF2FF; {font_size_css(14)} font-weight: bold; {FONT_CSS}")
         title_bar.addWidget(title)
         title_bar.addStretch()
+        self._archive_btn = PushButton("📦 归档")
+        self._archive_btn.setFixedSize(70, 26)
+        self._archive_btn.setStyleSheet(f"""
+            PushButton {{
+                background: rgba(139, 92, 246, 0.8);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                {FONT_CSS} {font_size_css(12)}
+                font-weight: bold;
+            }}
+            PushButton:hover {{
+                background: rgba(139, 92, 246, 1.0);
+            }}
+        """)
+        self._archive_btn.clicked.connect(self.archiveRequested.emit)
+        title_bar.addWidget(self._archive_btn)
         self._stop_btn = PushButton("⏹ 停止")
         self._stop_btn.setFixedSize(70, 26)
         self._stop_btn.setStyleSheet(f"""
@@ -608,9 +626,10 @@ class AutoLoopRunningCard(QFrame):
         self._timer.start()
         # 重置 token 累加（每轮新的循环从零开始）
         self._current_tokens = 0
-        # 确保停止按钮可见（修复完成后重新运行时停止按钮消失的问题）
+        # 确保所有按钮可见
+        self._archive_btn.show()
         self._stop_btn.show()
-        # 强制更新UI，确保按钮显示
+        self._archive_btn.update()
         self._stop_btn.update()
         self.update()
 
@@ -761,10 +780,20 @@ class AutoLoopRunningCard(QFrame):
         """隐藏停止按钮"""
         self._stop_btn.hide()
 
+    def show_archive_button(self):
+        """显示归档按钮"""
+        self._archive_btn.show()
+        self._archive_btn.update()
+
+    def hide_archive_button(self):
+        """隐藏归档按钮"""
+        self._archive_btn.hide()
+
     def show_completed(self, message: str):
         """显示完成状态"""
         self._status_label.setText(f"✅ {message}")
         self.stop_animation()
+        self._archive_btn.hide()
         self._stop_btn.hide()
         self.update()
 

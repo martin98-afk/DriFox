@@ -17,6 +17,7 @@ AutoLoop Worker — 后台循环工作线程
 """
 import re
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 
 from PyQt5.QtCore import QThread, pyqtSignal, QEventLoop
@@ -67,6 +68,7 @@ class AutoLoopWorker(QThread):
         self._agent_system_prompt_getter: Optional[Callable[[str], str]] = None
 
         self._is_cancelled = False
+        self._is_archive_button_click = False  # 用户点击了归档按钮（区别于正常完成进入归档）
         self._engine: Optional[AutoLoopEngine] = None
         self._prompt_composer: Optional[AutoLoopPromptComposer] = None
 
@@ -172,10 +174,28 @@ class AutoLoopWorker(QThread):
         线程结束（最长 4 秒），直接阻塞 UI 线程导致严重卡顿。
         """
         self._is_cancelled = True
+        self._is_archive_button_click = False
         if self._conversation_executor:
             self._conversation_executor.cancel_worker()
         if self._engine:
             self._engine.stop()
+
+    def request_archive(self):
+        """请求直接进入归档阶段（用户主动点击归档按钮）
+
+        将引擎切换到归档阶段，取消当前 LLM 对话（如有），
+        主循环下一轮会以归档阶段构建消息并执行一轮 LLM 归档对话。
+        """
+        if not self._engine:
+            return
+        self._is_archive_button_click = True
+        # 进入归档阶段
+        self._engine.enter_archiving_phase()
+        self.phase_changed.emit("archiving")
+        self.log_signal.emit("📦 用户请求立即归档，正在准备...")
+        # 取消当前正在进行的 LLM 对话（如果有），让循环尽快进入归档轮次
+        if self._conversation_executor:
+            self._conversation_executor.cancel_worker()
 
     # ================================================================
     #  主循环
@@ -289,7 +309,10 @@ class AutoLoopWorker(QThread):
             else:
                 # --- 执行阶段 ---
                 if self._handle_executing_phase(response, iteration):
-                    return  # 任务完成，退出循环进入归档
+                    # 任务完成，引擎已进入归档阶段 → 继续下一轮，让归档阶段自然处理
+                    # 不能 return，否则会跳过归档 LLM 轮次和 loop_completed 发射
+                    self.log_signal.emit("📦 所有步骤完成，进入归档阶段...")
+                    continue
 
             # 检查预算
             budget_reason = self._engine.check_budget()
@@ -317,11 +340,93 @@ class AutoLoopWorker(QThread):
     #  兜底归档（max_iterations 耗尽时）
     # ================================================================
 
-    def _do_fallback_archive(self) -> bool:
-        """执行基本的兜底归档
+    def _get_archive_dir(self) -> Optional[Path]:
+        """获取时间戳归档目录路径
 
-        当 max_iterations 耗尽但归档未完成时，由 Worker 直接写入归档文件，
-        不依赖 LLM 对话。
+        格式: .autoloop/archive/YYYYMMDD_HHMMSS-任务名前30字
+        """
+        if not self._engine or not self._config or not self._config.project_path:
+            return None
+        return self._engine.get_archive_timestamped_dir()
+
+    def _copy_logs_to_archive(self, archive_dir: Path):
+        """将运行日志（.autoloop/logs/）复制到归档目录
+
+        Args:
+            archive_dir: 归档目标目录
+        """
+        if not self._config or not self._config.project_path:
+            return
+        logs_dir = Path(self._config.project_path) / self._config.logs_dir
+        if not logs_dir.exists():
+            self.log_signal.emit("📝 无日志文件需要归档")
+            return
+
+        logs_archive_dir = archive_dir / "logs"
+        logs_archive_dir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for log_file in sorted(logs_dir.iterdir()):
+            if log_file.is_file() and log_file.suffix == ".md":
+                try:
+                    content = log_file.read_text(encoding="utf-8")
+                    dest = logs_archive_dir / log_file.name
+                    dest.write_text(content, encoding="utf-8")
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[AutoLoop] Failed to copy log {log_file.name}: {e}")
+        if count > 0:
+            self.log_signal.emit(f"📝 已归档 {count} 份日志至 {logs_archive_dir}")
+
+    def _archive_latest_to_timestamped(self):
+        """将 latest/ 目录的内容复制到时间戳归档目录
+
+        LLM 归档对话会将文件写入 .autoloop/archive/latest/，
+        此方法在归档对话完成后将这些文件复制到时间戳目录作为永久存档。
+        """
+        if not self._config or not self._config.project_path:
+            return
+        latest_dir = Path(self._config.project_path) / ".autoloop" / "archive" / "latest"
+        if not latest_dir.exists():
+            self.log_signal.emit("📝 latest 归档目录不存在，跳过复制")
+            return
+
+        archive_dir = self._get_archive_dir()
+        if not archive_dir:
+            return
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        count = 0
+        for item in latest_dir.iterdir():
+            if item.is_file():
+                try:
+                    content = item.read_text(encoding="utf-8")
+                    dest = archive_dir / item.name
+                    dest.write_text(content, encoding="utf-8")
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[AutoLoop] Failed to copy {item.name}: {e}")
+            elif item.is_dir() and item.name == "logs":
+                # 递归复制 logs 子目录
+                logs_dest = archive_dir / "logs"
+                logs_dest.mkdir(parents=True, exist_ok=True)
+                for log_file in item.iterdir():
+                    if log_file.is_file():
+                        try:
+                            content = log_file.read_text(encoding="utf-8")
+                            dest = logs_dest / log_file.name
+                            dest.write_text(content, encoding="utf-8")
+                            count += 1
+                        except Exception as e:
+                            logger.warning(f"[AutoLoop] Failed to copy log {log_file.name}: {e}")
+        if count > 0:
+            self.log_signal.emit(f"📦 归档已保存至 {archive_dir}（共 {count} 个文件）")
+        else:
+            self.log_signal.emit(f"📦 归档目录为空，跳过复制")
+
+    def _do_fallback_archive(self) -> bool:
+        """执行兜底归档（max_iterations 耗尽时）
+
+        使用时间戳目录归档，不经过 LLM 对话。
         """
         if not self._engine or not self._config:
             return False
@@ -332,24 +437,32 @@ class AutoLoopWorker(QThread):
             return False
 
         try:
-            from pathlib import Path
-            archive_dir = Path(self._config.project_path or ".") / ".autoloop" / "archive" / "latest"
+            archive_dir = self._get_archive_dir()
+            if not archive_dir:
+                return False
             archive_dir.mkdir(parents=True, exist_ok=True)
+
+            # 同步归档到 latest 目录（方便快速查找最新归档）
+            latest_dir = Path(self._config.project_path) / ".autoloop" / "archive" / "latest"
+            latest_dir.mkdir(parents=True, exist_ok=True)
 
             # 归档 SHARED_TASK_NOTES.md
             notes_path = archive_dir / "SHARED_TASK_NOTES.md"
             notes_path.write_text(notes, encoding="utf-8")
+            # 同步到 latest
+            latest_notes = latest_dir / "SHARED_TASK_NOTES.md"
+            latest_notes.write_text(notes, encoding="utf-8")
             self.log_signal.emit(f"📦 兜底归档：笔记已保存至 {notes_path}")
 
             # 写入 META.md
             import time
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             total_steps = self._engine.total_steps
             verified = self._engine.get_verified_steps()
             meta_content = f"""# AutoLoop 执行归档（兜底）
 
 - 任务: {self._config.task_prompt[:200] if self._config.task_prompt else "未知"}
-- 完成时间: {timestamp}
+- 完成时间: {ts}
 - 总步骤数: {total_steps}
 - 已完成步骤: {len(verified)} {sorted(verified) if verified else ""}
 - 状态: 达到最大迭代次数（max_iterations={self._config.max_iterations}），提前结束
@@ -359,7 +472,13 @@ class AutoLoopWorker(QThread):
 """
             meta_path = archive_dir / "META.md"
             meta_path.write_text(meta_content, encoding="utf-8")
+            # 同步到 latest
+            latest_meta = latest_dir / "META.md"
+            latest_meta.write_text(meta_content, encoding="utf-8")
             self.log_signal.emit(f"📦 兜底归档：元信息已保存至 {meta_path}")
+
+            # 复制运行日志到归档目录
+            self._copy_logs_to_archive(archive_dir)
 
             # 标记归档完成
             self._engine._archiving_complete = True
@@ -558,21 +677,22 @@ class AutoLoopWorker(QThread):
         return False
 
     def _handle_archiving_phase(self, response: str) -> bool:
-        """处理归档阶段逻辑
+        """处理归档阶段逻辑 — LLM 归档对话完成后，将归档结果从 latest/ 复制到时间戳目录
 
-        Returns:
-            True  → 归档完成，退出主循环
-            False → 继续下一轮归档
+        最多执行一轮，无论是否检测到 ARCHIVE_COMPLETE 都强制完成。
         """
+        # 将 latest/ 的内容复制到时间戳归档目录
+        self._archive_latest_to_timestamped()
+
         if self._engine.check_archive_complete(response):
             self.log_signal.emit("✅ 归档完成！")
-            self.phase_changed.emit("completed")
-            self.loop_completed.emit("任务完成 — AutoLoop 全部结束 🎉")
-            return True
-
-        # 归档未完成，继续下一轮
-        self.log_signal.emit("📦 归档进行中...")
-        return False
+        else:
+            self.log_signal.emit("📦 归档轮次结束，强制完成归档")
+        self._engine.state = LoopState.COMPLETED
+        self._engine._archiving_complete = True
+        self.phase_changed.emit("completed")
+        self.loop_completed.emit("任务完成 — AutoLoop 全部结束 🎉")
+        return True
 
     # ================================================================
     #  阶段过渡辅助方法

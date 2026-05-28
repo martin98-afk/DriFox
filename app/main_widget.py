@@ -1271,6 +1271,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # AutoLoop 运行卡片
         self._auto_loop_running_card = AutoLoopRunningCard()
         self._auto_loop_running_card.stopRequested.connect(self._on_auto_loop_stop)
+        self._auto_loop_running_card.archiveRequested.connect(self._on_auto_loop_archive)
         self._auto_loop_running_card.setVisible(False)
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
 
@@ -7388,8 +7389,8 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             logger.warning(f"[AutoLoop] Project path does not exist: {abs_path}")
 
-        # 隐藏配置卡，显示运行卡
-        self._auto_loop_config_card.hide()
+        # 隐藏配置卡（通过 CardManager 确保状态同步），显示运行卡
+        self._card_manager.hide_card("auto_loop_config", self._window_id)
         self._auto_loop_running_card.show()
         # 确保停止按钮可见（彻底修复完成后重新运行时停止按钮消失的问题）
         self._auto_loop_running_card.show_stop_button()
@@ -7462,6 +7463,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._is_auto_loop_running = True
         self._auto_loop_worker.start()
+
+    def _on_auto_loop_archive(self):
+        """用户点击归档按钮 — 直接跳转到归档阶段
+
+        通知 Worker 进入归档阶段，Worker 会在下一轮循环中执行自动归档。
+        """
+        if not self._auto_loop_worker or not self._auto_loop_worker.isRunning():
+            return
+        if self._auto_loop_running_card:
+            self._auto_loop_running_card.set_phase("archiving")
+            self._auto_loop_running_card.set_status("📦 正在归档...")
+            self._auto_loop_running_card.hide_archive_button()
+            self._auto_loop_running_card.hide_stop_button()
+        self._auto_loop_worker.request_archive()
 
     def _on_auto_loop_stop(self):
         """停止 AutoLoop（用户主动停止）
@@ -7609,11 +7624,13 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success("AutoLoop", message, parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
 
     def _lock_ui_for_autoloop(self):
-        """锁定 UI — 禁止发送消息和新建会话"""
-        # 禁用输入框
-        self.input_area.setDisabled(True)
-        self.input_area.setPlaceholderText("AutoLoop 运行中... 点运行卡 [⏹ 停止] 恢复操作")
-
+        """锁定 UI — 隐藏消息列表和输入框，禁止新建会话"""
+        # 清空输入框内容
+        self.input_area.clear()
+        # 隐藏消息列表（保持滚动位置不变）
+        self.chat_scroll_area.setVisible(False)
+        # 隐藏输入容器
+        self._bottom_input_container.setVisible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
 
@@ -7621,13 +7638,17 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info("[AutoLoop] UI locked")
 
     def _unlock_ui_after_autoloop(self):
-        """解锁 UI"""
-        self.input_area.setDisabled(False)
-        self.input_area.setPlaceholderText("给 DriFox 发送消息，Enter 发送，Shift+Enter 换行")
+        """解锁 UI — 恢复消息列表和输入框"""
+        # 恢复消息列表
+        self.chat_scroll_area.setVisible(True)
+        # 恢复输入容器
+        self._bottom_input_container.setVisible(True)
+        # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 
         # 重新聚焦输入框
         self.input_area.setFocus()
+        logger.info("[AutoLoop] UI unlocked")
         logger.info("[AutoLoop] UI unlocked")
 
     def _save_auto_loop_messages_to_session(self, messages: List[Dict]):
