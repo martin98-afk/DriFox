@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+  # -*- coding: utf-8 -*-
 """
 AutoLoop 卡片组件 — 配置卡 + 运行卡
 
@@ -15,7 +15,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QTextEdit, QFrame, QProgressBar, )
+    QTextEdit, QFrame, QProgressBar, QScrollArea, )
 from qfluentwidgets import (
     PrimaryPushButton, PushButton, BodyLabel, StrongBodyLabel, LineEdit,
     SpinBox, FluentIcon, ToolButton, TransparentToolButton, )
@@ -823,3 +823,384 @@ class AutoLoopRunningCard(QFrame):
         self._status_label.setText(f"❌ {message}")
         self.stop_animation()
         self.update()
+
+
+# ============================================================
+#  AutoLoop 全屏运行页面（QStackedWidget 中的 Page 1）
+# ============================================================
+
+class AutoLoopFullPage(QFrame):
+    """AutoLoop 全屏运行页面 — 撑满 chat 区域，替换消息列表+输入框
+
+    布局结构：
+    ┌─ TopBar (标题 + 耗时 + 停止按钮) ───────────────────┐
+    ├─ TaskSummary ───────────────────────────────────────┤
+    ├─ StatsBar (迭代 + Token 进度) ──────────────────────┤
+    ├─ PhaseStepper (规划 → 执行 → 归档) ────────────────┤
+    ├─ StepList (步骤清单) ───────────────────────────────┤
+    ├─ SplitArea (LLM思考 | 工具调用)  (stretch=1) ──────┤
+    └─ SystemLog ─────────────────────────────────────────┘
+    """
+
+    stopRequested = pyqtSignal()
+    forceArchiveRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("autoLoopFullPage")
+        self._refresh_theme_style()
+        self._start_timestamp = 0.0
+        self._current_tokens = 0
+        self._max_tokens = 0
+        self._build_ui()
+
+    def _refresh_theme_style(self):
+        """刷新主题色"""
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            #autoLoopFullPage {{
+                background: {Colors.CARD_BG_SOLID};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 12px;
+                {FONT_CSS}
+            }}
+        """)
+
+    def _build_ui(self):
+        """构建完整 UI 布局"""
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(8)
+
+        # ===== TopBar: 标题 + 耗时 + 停止按钮 =====
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
+
+        icon_label = QLabel("🤖")
+        icon_label.setStyleSheet(font_size_css(20))
+        top_bar.addWidget(icon_label)
+
+        title = StrongBodyLabel("AutoLoop 运行中")
+        title.setStyleSheet(f"color: #EAF2FF; {font_size_css(14)} font-weight: bold; {FONT_CSS}")
+        top_bar.addWidget(title)
+        top_bar.addStretch()
+
+        # 耗时
+        self._elapsed_label = QLabel("00:00:00")
+        self._elapsed_label.setStyleSheet(f"color: #7FDBFF; {font_size_css(13)} {FONT_CSS}")
+        top_bar.addWidget(self._elapsed_label)
+        top_bar.addSpacing(12)
+
+        # 停止按钮
+        self._stop_btn = PushButton("⏹ 停止")
+        self._stop_btn.setFixedSize(80, 30)
+        self._stop_btn.setStyleSheet(f"""
+            PushButton {{
+                background: rgba(255, 80, 80, 0.85);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                {FONT_CSS} {font_size_css(13)}
+                font-weight: bold;
+            }}
+            PushButton:hover {{
+                background: rgba(255, 60, 60, 1.0);
+            }}
+        """)
+        self._stop_btn.clicked.connect(self.stopRequested.emit)
+        top_bar.addWidget(self._stop_btn)
+
+        # 强制归档按钮
+        self._archive_btn = PushButton("📦 归档")
+        self._archive_btn.setFixedSize(80, 30)
+        self._archive_btn.setStyleSheet(f"""
+            PushButton {{
+                background: rgba(245, 158, 11, 0.8);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                {FONT_CSS} {font_size_css(13)}
+                font-weight: bold;
+            }}
+            PushButton:hover {{
+                background: rgba(245, 158, 11, 1.0);
+            }}
+        """)
+        self._archive_btn.clicked.connect(self.forceArchiveRequested.emit)
+        top_bar.addWidget(self._archive_btn)
+
+        main_layout.addLayout(top_bar)
+
+        # ===== 任务描述 =====
+        self._task_label = QLabel("")
+        self._task_label.setWordWrap(True)
+        self._task_label.setStyleSheet(f"""
+            color: #9BB0D3;
+            {font_size_css(12)}
+            {FONT_CSS}
+            padding: 6px 10px;
+            background: rgba(0,0,0,0.15);
+            border-radius: 6px;
+        """)
+        main_layout.addWidget(self._task_label)
+
+        # ===== StatsBar: 迭代 + Token 进度 =====
+        stats_widget = QWidget()
+        stats_widget.setStyleSheet("background: rgba(0,0,0,0.1); border-radius: 8px;")
+        stats_layout = QHBoxLayout(stats_widget)
+        stats_layout.setContentsMargins(12, 8, 12, 8)
+        stats_layout.setSpacing(20)
+
+        # 迭代
+        iter_w = QWidget()
+        iter_l = QHBoxLayout(iter_w)
+        iter_l.setContentsMargins(0, 0, 0, 0)
+        iter_l.setSpacing(6)
+        iter_l.addWidget(QLabel("📚"))
+        self._iter_label = QLabel("0 / 0")
+        self._iter_label.setStyleSheet(f"color: #C9A85C; font-weight: bold; {font_size_css(14)} {FONT_CSS}")
+        iter_l.addWidget(self._iter_label)
+        stats_layout.addWidget(iter_w)
+
+        stats_layout.addStretch()
+
+        # Token
+        token_w = QWidget()
+        token_l = QHBoxLayout(token_w)
+        token_l.setContentsMargins(0, 0, 0, 0)
+        token_l.setSpacing(6)
+        token_l.addWidget(QLabel("🔢"))
+        self._token_label = QLabel("0 / 0")
+        self._token_label.setStyleSheet(f"color: #A7F3D0; font-weight: bold; {font_size_css(14)} {FONT_CSS}")
+        token_l.addWidget(self._token_label)
+
+        self._token_bar = QProgressBar()
+        self._token_bar.setRange(0, 100)
+        self._token_bar.setValue(0)
+        self._token_bar.setTextVisible(False)
+        self._token_bar.setFixedHeight(8)
+        self._token_bar.setFixedWidth(120)
+        self._token_bar.setStyleSheet("""
+            QProgressBar {
+                background: rgba(255,255,255,0.1);
+                border-radius: 4px;
+                border: none;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #10B981, stop:1 #34D399);
+                border-radius: 4px;
+            }
+        """)
+        token_l.addWidget(self._token_bar)
+
+        self._token_pct = QLabel("0%")
+        self._token_pct.setStyleSheet(f"color: #7FDBFF; {font_size_css(12)} {FONT_CSS}")
+        self._token_pct.setFixedWidth(36)
+        token_l.addWidget(self._token_pct)
+        stats_layout.addWidget(token_w)
+
+        main_layout.addWidget(stats_widget)
+
+        # ===== 阶段标签（简洁一行，替换原来的大 PhaseStepper）=====
+        self._phase_label = QLabel("📋 规划阶段")
+        self._phase_label.setStyleSheet(f"""
+            color: #7FDBFF; {font_size_css(11)} font-weight: bold; {FONT_CSS}
+            padding: 2px 10px; background: rgba(127,219,255,0.1);
+            border-radius: 4px; border: 1px solid rgba(127,219,255,0.2);
+        """)
+        main_layout.addWidget(self._phase_label)
+
+        # ===== 步骤清单（全宽，stretch=1）=====
+        step_header = QLabel("📋 步骤清单")
+        step_header.setStyleSheet(f"color: #E5E7EB; {font_size_css(12)} font-weight: bold; {FONT_CSS}")
+        main_layout.addWidget(step_header)
+
+        self._step_scroll = QScrollArea()
+        self._step_scroll.setWidgetResizable(True)
+        self._step_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._step_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._step_container = QWidget()
+        self._step_container.setStyleSheet("background: transparent;")
+        self._step_layout = QVBoxLayout(self._step_container)
+        self._step_layout.setContentsMargins(4, 2, 4, 2)
+        self._step_layout.setSpacing(4)
+        self._step_placeholder = QLabel("⏳ 等待规划阶段解析步骤...")
+        self._step_placeholder.setStyleSheet(f"color: #7A9BBF; {font_size_css(12)} {FONT_CSS}")
+        self._step_layout.addWidget(self._step_placeholder)
+        self._step_layout.addStretch()
+        self._step_scroll.setWidget(self._step_container)
+        main_layout.addWidget(self._step_scroll, 1)
+
+        # ===== 底部系统日志 =====
+        syslog_widget = QWidget()
+        syslog_widget.setStyleSheet("background: rgba(0,0,0,0.08); border-radius: 6px;")
+        syslog_layout = QVBoxLayout(syslog_widget)
+        syslog_layout.setContentsMargins(8, 4, 8, 4)
+        syslog_layout.setSpacing(2)
+        syslog_header = QLabel("📝 系统日志")
+        syslog_header.setStyleSheet(f"color: #7A9BBF; {font_size_css(10)} font-weight: bold; {FONT_CSS}")
+        syslog_layout.addWidget(syslog_header)
+        self._sys_log = QLabel("")
+        self._sys_log.setFixedHeight(24)
+        self._sys_log.setStyleSheet(f"""
+            color: #7A9BBF;
+            {font_size_css(12)}
+            {FONT_CSS}
+            padding: 2px 8px;
+            background: rgba(0,0,0,0.05);
+            border-radius: 4px;
+        """)
+        syslog_layout.addWidget(self._sys_log)
+        main_layout.addWidget(syslog_widget)
+
+    # ========== 生命周期 ==========
+
+    def start(self, task: str = "", max_tokens: int = 0):
+        """启动显示：重置状态、启动计时器"""
+        self._start_timestamp = time.time()
+        self._max_tokens = max_tokens
+        self._current_tokens = 0
+
+        if task:
+            preview = task[:80]
+            if len(task) > 80:
+                preview += "..."
+            self._task_label.setText(f"🎯 {preview}")
+
+        # 启动计时器
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._update_elapsed)
+        self._timer.start()
+
+        # 重置 UI
+        self._iter_label.setText("0 / 0")
+        self._token_label.setText("0 / 0")
+        self._token_bar.setValue(0)
+        self._token_pct.setText("0%")
+        self._sys_log.setText("")
+        self._clear_steps()
+        self._step_placeholder.show()
+
+        # 重置阶段高亮
+        self.set_phase("planning")
+
+    def stop(self):
+        """停止计时器"""
+        if hasattr(self, '_timer') and self._timer:
+            self._timer.stop()
+
+    def _update_elapsed(self):
+        """每秒更新耗时显示"""
+        if self._start_timestamp > 0:
+            elapsed = time.time() - self._start_timestamp
+            h, m = divmod(int(elapsed), 60)
+            h, m = divmod(h, 60) if h >= 60 else (0, h)
+            s = int(elapsed) % 60
+            self._elapsed_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
+
+    # ========== UI 更新方法 ==========
+
+    def update_stats(self, progress: dict):
+        """更新统计信息（迭代数等）"""
+        iteration = progress.get("iteration", 0)
+        max_iter = progress.get("max_iterations", 0)
+        self._iter_label.setText(f"{iteration} / {max_iter}")
+
+    def update_tokens(self, total: int):
+        """更新 Token 显示"""
+        self._current_tokens = total
+
+        def fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}K"
+            return str(n)
+
+        if self._max_tokens > 0:
+            pct = min(100, int(total * 100 / self._max_tokens))
+            self._token_bar.setValue(pct)
+            self._token_pct.setText(f"{pct}%")
+            self._token_label.setText(f"{fmt(total)} / {fmt(self._max_tokens)}")
+        else:
+            self._token_label.setText(fmt(total))
+            self._token_pct.setText("")
+
+    def set_phase(self, phase: str):
+        """设置阶段标签"""
+        phase_icons = {"planning": "📋", "executing": "🔨", "archiving": "📦", "completed": "✅"}
+        phase_names = {"planning": "规划中", "executing": "执行中", "archiving": "归档中", "completed": "已完成"}
+        icon = phase_icons.get(phase, "📋")
+        name = phase_names.get(phase, "规划中")
+        self._phase_label.setText(f"{icon} {name}")
+
+    def update_steps(self, steps: list, current: int):
+        """更新步骤清单
+
+        Args:
+            steps: 步骤名称列表 ["步骤1标题", "步骤2标题", ...]
+            current: 当前步骤序号（从1开始）
+        """
+        self._clear_steps()
+        self._step_placeholder.hide()
+
+        for i, step_name in enumerate(steps, 1):
+            step_num = i
+            is_done = step_num < current
+            is_current = step_num == current
+
+            if is_done:
+                icon = "✅"
+                color = "#10B981"
+                bg = "rgba(16,185,129,0.08)"
+            elif is_current:
+                icon = "▶"
+                color = "#C9A85C"
+                bg = "rgba(201,168,92,0.08)"
+            else:
+                icon = "⬜"
+                color = "rgba(255,255,255,0.3)"
+                bg = "transparent"
+
+            lbl = QLabel(f"{icon}  {step_name}")
+            lbl.setStyleSheet(f"""
+                color: {color};
+                {font_size_css(11)}
+                {FONT_CSS}
+                padding: 3px 8px;
+                background: {bg};
+                border-radius: 4px;
+            """)
+            self._step_layout.addWidget(lbl)
+
+    def _clear_steps(self):
+        """清空步骤列表（保留 placeholder）"""
+        # 从布局中移除 placeholder（保留引用）
+        self._step_layout.removeWidget(self._step_placeholder)
+        self._step_placeholder.setParent(None)
+        
+        # 删除其他所有 widget
+        while self._step_layout.count():
+            item = self._step_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # 重新添加 placeholder
+        self._step_layout.addWidget(self._step_placeholder)
+        self._step_layout.addStretch()
+
+    def append_thinking(self, text: str):
+        """追加 LLM 思考内容（目前不显示，保留方法避免信号连接报错）"""
+        pass
+
+    def append_tool_call(self, info: dict):
+        """追加工具调用日志（目前不显示，保留方法避免信号连接报错）"""
+        pass
+
+    def append_sys_log(self, text: str):
+        """追加系统日志"""
+        ts = time.strftime("%H:%M:%S")
+        self._sys_log.setText(f"[{ts}] {text}")

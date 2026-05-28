@@ -10,7 +10,7 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QFrame, QLineEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QFrame, QLineEdit, QSizePolicy,
 )
 from qfluentwidgets import (
     StrongBodyLabel, TransparentToolButton, FluentIcon, PrimaryToolButton)
@@ -61,6 +61,11 @@ class SystemCardFrame(QFrame):
         self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; padding-left: 2px;")
         self._count_label.setVisible(False)
         self._header_layout.addWidget(self._count_label)
+
+        # 标题栏标签（如吸顶服务商名称，默认隐藏）
+        self._header_sticky_label = QLabel("", self)
+        self._header_sticky_label.setVisible(False)
+        self._header_layout.addWidget(self._header_sticky_label)
 
         # 模式切换按钮容器（如 JSON/表单）
         self._mode_buttons_container = QHBoxLayout()
@@ -128,7 +133,8 @@ class SystemCardFrame(QFrame):
         self._apply_base_style()
         self.title_label.setFont(get_unified_font(12, True))
         self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
-        self.icon_label.setFont(get_unified_font(12))
+        if self.icon_label is not None:
+            self.icon_label.setFont(get_unified_font(12))
         self._count_label.setFont(get_unified_font(10))
         self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; padding-left: 2px;")
         self.scroll_area.setStyleSheet(self._scroll_style())
@@ -170,7 +176,23 @@ class SystemCardFrame(QFrame):
     # ── 公开控制 ───────────────────────────────────────
 
     def set_icon(self, icon: str):
-        self.icon_label.setText(icon)
+        if self.icon_label is not None:
+            self.icon_label.setText(icon)
+
+    def set_icon_widget(self, widget):
+        """用自定义 widget 替换头部文字图标（如 ProviderIconWidget）"""
+        old = getattr(self, '_icon_widget', None)
+        if old is not None:
+            self._header_layout.replaceWidget(old, widget)
+            old.deleteLater()
+        else:
+            idx = self._header_layout.indexOf(self.icon_label)
+            if idx >= 0:
+                self._header_layout.replaceWidget(self.icon_label, widget)
+                self.icon_label.deleteLater()
+                self.icon_label = None
+        self._icon_widget = widget
+        widget.setFixedSize(20, 20)
 
     def set_title_text(self, text: str):
         self.title_label.setText(text)
@@ -218,6 +240,22 @@ class SystemCardFrame(QFrame):
     def set_count_label(self, text: str):
         self._count_label.setText(f"({text})" if text else "")
         self._count_label.setVisible(bool(text))
+
+    def set_header_sticky(self, text: str):
+        """在标题栏显示标签（如吸顶服务商名称），置于标题和搜索框之间"""
+        if text:
+            Colors.refresh()
+            self._header_sticky_label.setText(f"❮{text}❯")
+            self._header_sticky_label.setStyleSheet(f"""
+                color: {Colors.ACCENT_WARM};
+                {font_size_css(11)}
+                padding: 0 2px 0 6px;
+                font-weight: bold;
+            """)
+            self._header_sticky_label.setVisible(True)
+        else:
+            self._header_sticky_label.setVisible(False)
+            self._header_sticky_label.setText("")
 
     def setup_tabs(self, tabs: list, default_tab: str = None):
         while self._tab_buttons_container.count():
@@ -270,6 +308,24 @@ class SystemCardFrame(QFrame):
         btn.setToolTip("导入会话")
         btn.clicked.connect(handler)
         self._extra_buttons_container.addWidget(btn)
+
+    def add_header_button(self, icon, tooltip: str, callback) -> TransparentToolButton:
+        """向标题栏右侧添加自定义操作按钮
+
+        Args:
+            icon: FluentIcon 或 QIcon 图标
+            tooltip: 按钮悬浮提示
+            callback: 点击回调函数
+
+        Returns:
+            TransparentToolButton: 创建的按钮对象
+        """
+        btn = TransparentToolButton(icon, self)
+        btn.setFixedSize(28, 28)
+        btn.setToolTip(tooltip)
+        btn.clicked.connect(callback)
+        self._extra_buttons_container.addWidget(btn)
+        return btn
 
     def set_mode_buttons(self, buttons: list):
         """

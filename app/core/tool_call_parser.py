@@ -234,7 +234,7 @@ def _try_standard_parse(raw: str) -> Optional[Dict]:
 def _try_parse_with_unescape(raw: str) -> Optional[Dict]:
     """
     尝试修复常见的 JSON 转义问题后解析。
-    模型常见错误：字符串内的 " 没有转义、\ 没有转义。
+    模型常见错误：字符串内的 " 没有转义、反斜杠没有转义。
     """
     if not raw:
         return None

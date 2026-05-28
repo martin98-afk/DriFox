@@ -263,8 +263,12 @@ class CommandCard(QWidget):
         self._visible = False
         self._current_query = ""
 
+        # Detail mode：匹配到完整命令 + 空格后显示参数提示
+        self._detail_mode = False
+        self._detail_cmd_name = ""
         self.setVisible(False)
         self._setup_ui()
+        self._setup_detail_widget()
 
     def _setup_ui(self):
         # 自身填充父容器宽度
@@ -336,6 +340,148 @@ class CommandCard(QWidget):
 
         # 不在此处调用 _refresh_data() —— 命令尚未注册，会导致缓存空数据
         # show_card() 会在首次显示时自动加载
+
+        # Detail 容器（初始隐藏）
+        self._detail_container = QWidget()
+        self._detail_container.setVisible(False)
+        self._detail_container.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(self._detail_container)
+
+    def _setup_detail_widget(self):
+        """构建 detail 模式下的参数提示 UI"""
+        detail_layout = QVBoxLayout(self._detail_container)
+        detail_layout.setContentsMargins(12, 1, 12, 2)
+        detail_layout.setSpacing(2)
+
+        # 第一行：命令说明（可换行，显示全部内容）
+        self._detail_desc_label = QLabel()
+        self._detail_desc_label.setStyleSheet(f"""
+            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+        """)
+        self._detail_desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._detail_desc_label.setWordWrap(True)
+        detail_layout.addWidget(self._detail_desc_label)
+
+        # 第二行：参数提示
+        self._detail_hint_label = QLabel()
+        self._detail_hint_label.setStyleSheet(f"""
+            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+        """)
+        self._detail_hint_label.setWordWrap(True)
+        detail_layout.addWidget(self._detail_hint_label)
+
+        # 点击整块等同于选中当前命令并发送
+        self._detail_container.setCursor(Qt.PointingHandCursor)
+
+    # ---- Detail 模式 ----
+
+    @property
+    def is_detail_mode(self) -> bool:
+        """是否处于 detail 模式（显示参数提示）"""
+        return self._detail_mode
+
+    @property
+    def detail_cmd_name(self) -> str:
+        """detail 模式匹配的命令名"""
+        return self._detail_cmd_name
+
+    def show_command_detail(self, cmd_name: str):
+        """切换到 detail 模式：显示指定命令/技能的参数提示
+
+        Args:
+            cmd_name: 已匹配的命令名或技能名
+        """
+        from app.core.command_manager import CommandManager
+        from app.utils.utils import get_skill_by_name
+
+        cmd_mgr = CommandManager.get_instance()
+        cmd = cmd_mgr.get_command(cmd_name)
+        skill = get_skill_by_name(cmd_name) if not cmd else None
+
+        if not cmd and not skill:
+            return
+
+        # 已在此命令的 detail 模式，无需刷新
+        if self._detail_mode and self._detail_cmd_name == cmd_name:
+            return
+
+        self._detail_mode = True
+        self._detail_cmd_name = cmd_name
+
+        # 更新 UI：只显示描述（截断过长文本），不显示命令名
+        if cmd:
+            desc = cmd.description
+            # 参数提示：智能体始终显示 --subagent，其他命令显示 argument_hint
+            if cmd.type == "agent":
+                hint_text = "--subagent &lt;task-desc&gt;"
+            else:
+                hint_text = cmd.argument_hint or ""
+        else:
+            desc = skill.get("description", "")
+            hint_text = ""  # 技能没有参数提示
+        max_chars = 200
+        if len(desc) > max_chars:
+            desc = desc[:max_chars].rstrip() + "…"
+        self._detail_desc_label.setText(desc)
+        self._detail_hint_label.setText(hint_text)
+
+        # 隐藏列表，显示 detail
+        self._scroll_area.setVisible(False)
+        self._detail_container.setVisible(True)
+        self._visible = True
+        self.setVisible(True)
+
+        # 动态计算高度：根据描述和提示文本的行数
+        QTimer.singleShot(0, self._adjust_detail_height)
+
+    def _adjust_detail_height(self):
+        """根据内容动态调整 detail 容器高度"""
+        margins = self._detail_container.layout().contentsMargins()
+        v_margin = margins.top() + margins.bottom()
+        spacing = self._detail_container.layout().spacing()
+
+        # 计算描述文本高度（使用 fontMetrics 精确计算）
+        fm = self._detail_desc_label.fontMetrics()
+        line_height = fm.lineSpacing()
+        desc_text = self._detail_desc_label.text()
+        if desc_text.strip():
+            # 估算行数：文本宽度 / label 可用宽度
+            label_width = self._detail_desc_label.width() or 1
+            if label_width <= 0:
+                label_width = self.width() - 24  # 减去左右 margins
+            text_width = fm.horizontalAdvance(desc_text)
+            line_count = max(1, (text_width + label_width - 1) // label_width)
+            desc_height = line_height * line_count
+        else:
+            desc_height = line_height
+
+        # 计算提示文本高度：没有内容时隐藏
+        hint_text = self._detail_hint_label.text()
+        if hint_text.strip():
+            fm_hint = self._detail_hint_label.fontMetrics()
+            hint_line_height = fm_hint.lineSpacing()
+            hint_width = fm_hint.horizontalAdvance(hint_text)
+            label_width = self._detail_hint_label.width() or 1
+            if label_width <= 0:
+                label_width = self.width() - 24
+            hint_line_count = max(1, (hint_width + label_width - 1) // label_width)
+            hint_height = hint_line_height * hint_line_count
+            self._detail_hint_label.setVisible(True)
+        else:
+            hint_height = 0
+            self._detail_hint_label.setVisible(False)
+
+        total_height = v_margin + desc_height + spacing + hint_height
+        self.setFixedHeight(total_height)
+
+    def _reset_detail_mode(self):
+        """退出 detail 模式，回到列表模式"""
+        if not self._detail_mode:
+            return
+        self._detail_mode = False
+        self._detail_cmd_name = ""
+        self._detail_container.setVisible(False)
+        self._scroll_area.setVisible(True)
 
     def _refresh_data(self):
         """刷新完整数据列表（命令 + 技能）
@@ -552,13 +698,22 @@ class CommandCard(QWidget):
 
     def select_current(self):
         """确认选中当前项"""
+        if self._detail_mode:
+            # detail 模式下选中 = 插入命令名
+            self.commandSelected.emit(self._detail_cmd_name)
+            self.dismiss()
+            return
         if 0 <= self._selected_index < len(self._filtered_items):
             item = self._filtered_items[self._selected_index]
             self.commandSelected.emit(item["name"])
-            self.dismiss()
+            # 如果 emit 触发了 textChanged → _on_slash_trigger_check → detail 模式，
+            # 则不再 dismiss（卡片切换到 detail 模式继续可见）
+            if not self._detail_mode:
+                self.dismiss()
 
     def dismiss(self):
         """关闭卡片（清理状态并隐藏自身）"""
+        self._reset_detail_mode()
         self._visible = False
         self.setVisible(False)
         self.dismissed.emit()
@@ -570,6 +725,7 @@ class CommandCard(QWidget):
             query: 搜索查询
             incremental: 是否增量更新（默认开启，可提升流畅性）
         """
+        self._reset_detail_mode()  # 回到列表模式（如果之前在 detail 模式）
         self._current_query = query
         self._refresh_data()
         self.load_items(query, incremental=incremental)

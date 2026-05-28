@@ -51,6 +51,7 @@ class CommandDefinition:
     name: str
     type: str                      # "function", "prompt", "agent"
     description: str = ""
+    argument_hint: str = ""        # 参数提示（显示在命令卡片 detail 模式）
     prompt_text: str = ""          # prompt/agent 命令使用
 
     def to_display_dict(self) -> Dict[str, str]:
@@ -100,6 +101,7 @@ class CommandManager:
         name: str,
         command_type: str,
         description: str = "",
+        argument_hint: str = "",
         prompt_text: str = "",
     ):
         """注册一个内置命令
@@ -108,12 +110,14 @@ class CommandManager:
             name: 命令名（不含 /）
             command_type: "function", "prompt" 或 "agent"
             description: 描述文本（显示在命令卡片中）
+            argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
             prompt_text: prompt/agent 命令使用，替换后的提示词文本
         """
         self._commands[name] = CommandDefinition(
             name=name,
             type=command_type,
             description=description,
+            argument_hint=argument_hint,
             prompt_text=prompt_text,
         )
 
@@ -212,11 +216,13 @@ class CommandManager:
 
             # 检查是否有 --subagent 参数（仅智能体命令支持）
             # 规则：--subagent 之后到下一个 -- 参数之前的所有内容作为子智能体任务描述
+            has_subagent = False
             subagent_task = ""
             remainder_after_subagent = ""
             if cmd.type == "agent" and remainder:
                 subagent_match = remainder.find("--subagent")
                 if subagent_match >= 0:
+                    has_subagent = True
                     # 分割内容：subagent 之前 + subagent 及之后
                     before_subagent = remainder[:subagent_match].rstrip()
                     after_subagent = remainder[subagent_match + len("--subagent"):].lstrip()
@@ -246,8 +252,8 @@ class CommandManager:
                     else:
                         remainder = ""
 
-            if subagent_task:
-                # 触发子智能体任务
+            if has_subagent:
+                # 触发子智能体任务（允许空任务描述，子智能体将按自身指令执行）
                 return CommandResult(
                     handled=True,
                     is_subagent=True,

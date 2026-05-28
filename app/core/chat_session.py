@@ -1,3 +1,17 @@
+"""
+ChatSession & SessionManager - 会话管理模块
+
+负责 DriFox 聊天会话的创建、存储、压缩和生命周期管理。
+
+主要组件：
+- ChatSession: 单个会话的数据模型，包含消息历史、元数据和压缩状态
+- SessionManager: 会话集合管理器，提供会话的增删改查、SQLite 持久化和自动压缩功能
+
+设计要点：
+- 内存缓存：SessionManager 在内存中缓存最近活跃的会话（默认最多 15 个）
+- 持久化：会话通过 SQLite 数据库长期存储，加载时采用懒加载策略
+- 压缩合并：支持多轮对话的历史压缩合并（保留摘要或固定尾部）
+"""
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any

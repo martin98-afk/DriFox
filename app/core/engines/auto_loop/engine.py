@@ -195,8 +195,8 @@ class AutoLoopEngine(BaseEngine):
     def on_planning_attempt(self):
         """每次规划尝试调用"""
         self._planning_count += 1
-        if self._planning_count > 5:
-            logger.warning("[AutoLoop] Too many planning attempts, forcing execution")
+        if self._planning_count > 3:
+            logger.warning(f"[AutoLoop] Too many planning attempts ({self._planning_count}), forcing execution")
             if self._total_steps == 0:
                 self._total_steps = 1
             self.enter_execution_phase()
@@ -204,8 +204,8 @@ class AutoLoopEngine(BaseEngine):
     def parse_steps_from_notes(self, notes: str) -> tuple[int, int]:
         """从笔记中解析当前步骤和总步骤数"""
         patterns = [
-            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
-            r'- \[.*?\]\s*步骤\s*(\d+)',
+            r'[-*]\s*\[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'[-*]\s*\[.*?\]\s*步骤\s*(\d+)',
         ]
         steps = []
         for pattern in patterns:
@@ -227,8 +227,8 @@ class AutoLoopEngine(BaseEngine):
         # 2. - [x] 步骤 1   (直接)
         # 3. - [步骤 1]     (无复选框)
         patterns = [
-            r'- \[.*?\]\s*\[步骤\s*(\d+)\]',
-            r'- \[.*?\]\s*步骤\s*(\d+)',
+            r'[-*]\s*\[.*?\]\s*\[步骤\s*(\d+)\]',
+            r'[-*]\s*\[.*?\]\s*步骤\s*(\d+)',
         ]
         all_steps = []
         for pattern in patterns:
@@ -253,10 +253,10 @@ class AutoLoopEngine(BaseEngine):
         支持 [x] 和 [X] 两种写法。
         """
         patterns = [
-            r'- \[x\]\s*\[步骤\s*(\d+)\]',
-            r'- \[X\]\s*\[步骤\s*(\d+)\]',
-            r'- \[x\]\s*步骤\s*(\d+)',
-            r'- \[X\]\s*步骤\s*(\d+)',
+            r'[-*]\s*\[x\]\s*\[步骤\s*(\d+)\]',
+            r'[-*]\s*\[X\]\s*\[步骤\s*(\d+)\]',
+            r'[-*]\s*\[x\]\s*步骤\s*(\d+)',
+            r'[-*]\s*\[X\]\s*步骤\s*(\d+)',
         ]
         checked = set()
         for pattern in patterns:
