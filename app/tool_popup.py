@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 import platform
-
-from app.utils.design_tokens import font_size_css
 import uuid
 import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
@@ -28,6 +26,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import get_font_family_css
 from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_icon
+from app.utils.design_tokens import font_size_css, Colors
 
 
 class ToolWindowTitleBar(QWidget):
@@ -68,8 +67,9 @@ class ToolWindowTitleBar(QWidget):
         self._memory_label = QLabel(self)
         self._memory_label.setObjectName("memoryLabel")
         self._memory_label.setFixedHeight(22)
+        from app.utils.design_tokens import Colors
         self._memory_label.setStyleSheet(
-            f"color: #ffffff; {get_font_family_css()} font-size: {scale_font_size(12)}px; "
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(12)}px; "
             f"padding: 2px 6px; background-color: transparent; border: none; border-radius: 4px;"
         )
         self._memory_label.hide()  # 默认隐藏，子类可以控制显示
@@ -279,7 +279,7 @@ class OpacitySlider(QWidget):
         painter.drawRoundedRect(track_x, track_y, track_width, track_height, 2, 2)
 
         fill_height = int(track_height * self._opacity / 100)
-        fill_color = QColor("#0078d4")
+        fill_color = QColor(Colors.SYSTEM_ACCENT)
         painter.setBrush(fill_color)
         painter.drawRoundedRect(
             track_x,
@@ -449,32 +449,35 @@ class LockButtonWidget(QWidget):
         if self._is_locked:
             self._btn.setIcon(get_icon("锁定"))
             self._btn.setToolTip("取消锁定（恢复交互）")
-            self._btn.setStyleSheet("""
-                QToolButton {
-                    background-color: rgba(0, 120, 212, 200);
+            # 将 Colors.SYSTEM_ACCENT 转为 rgba 格式用于按钮背景
+            _accent_qc = QColor(Colors.SYSTEM_ACCENT)
+            _accent_r, _accent_g, _accent_b = _accent_qc.red(), _accent_qc.green(), _accent_qc.blue()
+            self._btn.setStyleSheet(f"""
+                QToolButton {{
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 200);
                     border-radius: 4px;
-                    color: #e0e0e0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(0, 120, 212, 240);
-                }
-                QToolButton:pressed {
-                    background-color: rgba(0, 120, 212, 180);
-                }
+                    color: {Colors.TEXT_SECONDARY};
+                }}
+                QToolButton:hover {{
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 240);
+                }}
+                QToolButton:pressed {{
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 180);
+                }}
             """)
         else:
             self._btn.setIcon(get_icon("解锁"))
             self._btn.setToolTip("锁定窗口（鼠标穿透）")
-            self._btn.setStyleSheet("""
-                QToolButton {
+            self._btn.setStyleSheet(f"""
+                QToolButton {{
                     background-color: transparent;
                     border-radius: 4px;
-                    color: #c0c0c0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(255, 255, 255, 15);
-                    color: #ffffff;
-                }
+                    color: {Colors.TEXT_MUTED};
+                }}
+                QToolButton:hover {{
+                    background-color: {Colors.TOOLBAR_BG};
+                    color: {Colors.TEXT_PRIMARY};
+                }}
             """)
 
     def setLocked(self, locked: bool):
@@ -630,7 +633,7 @@ class ToolPopupDialog(QDialog):
         self._selection_indicator = QLabel("●", title_bar)
         self._selection_indicator.setStyleSheet(f"""
             QLabel {{
-                color: #4FC3F7;
+                color: {Colors.REALTIME_ACCENT};
                 {font_size_css(14)}
                 background: transparent;
             }}

@@ -152,12 +152,12 @@ class SystemCardFrame(QFrame):
                 margin: 4px 2px 4px 2px;
             }
             QScrollBar::handle:vertical {
-                background: rgba(255,255,255,0.18);
+                background: %s;
                 border-radius: 5px;
                 min-height: 30px;
             }
             QScrollBar::handle:vertical:hover {
-                background: rgba(255,255,255,0.3);
+                background: %s;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
@@ -165,7 +165,7 @@ class SystemCardFrame(QFrame):
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
                 background: none;
             }
-        """
+        """ % (Colors.SCROLLBAR_HANDLE_BG, Colors.SCROLLBAR_HANDLE_HOVER_BG)
 
     # ── 公开控制 ───────────────────────────────────────
 
@@ -209,7 +209,7 @@ class SystemCardFrame(QFrame):
                 border: 1px solid {Colors.TEXT_ACCENT};
             }}
             QLineEdit::placeholder {{
-                color: rgba(255,255,255,0.35);
+                color: {Colors.INPUT_PLACEHOLDER};
             }}
         """)
         self._search_input.textChanged.connect(callback)

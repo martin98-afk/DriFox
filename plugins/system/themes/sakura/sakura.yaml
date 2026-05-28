@@ -23,6 +23,38 @@ colors:
   selected_bg: rgba(232, 90, 122, 0.32)
   capsule_bg: rgba(48, 25, 36, 185)
   capsule_border: rgba(95, 55, 70, 205)
+
+  # ── 全局 UI 基底 ──────────────────────────────────
+  toolbar_bg: rgba(255, 255, 255, 0.05)
+  divider_color: rgba(255, 255, 255, 0.06)
+  hover_bg_strong: rgba(255, 255, 255, 0.10)
+  scrollbar_handle_bg: rgba(255, 255, 255, 0.20)
+  scrollbar_handle_hover_bg: rgba(255, 255, 255, 0.30)
+  card_placeholder_text: '#b0a0b8'
+
+  # ── 卡片级语义色 ──────────────────────────────────
+  button_text_on_accent: '#1A1F2B'
+  status_info: '#7FDBFF'
+  status_danger_bg: rgba(220, 60, 80, 0.8)
+  status_archive_bg: rgba(180, 100, 200, 0.8)
+  card_bg_dim: rgba(255, 255, 255, 0.04)
+  archived_card_bg: rgba(255, 180, 100, 0.08)
+  archived_card_border: rgba(255, 150, 80, 0.2)
+
+  # ── 语法高亮色 ────────────────────────────────────
+  syntax_step: '#4EC9B0'
+  syntax_tool: '#DCDCAA'
+  syntax_success: '#6A9955'
+  syntax_error: '#F14C4C'
+  syntax_result: '#CE9178'
+
+  # ── 标签色 ────────────────────────────────────────
+  tag_accent: '#66c6ff'
+  tag_accent_text: '#aae0ff'
+  tag_purple: '#b388ff'
+  tag_purple_text: '#d1b3ff'
+  tag_orange: '#ffb366'
+  tag_orange_text: '#ffc999'
   user_card_bg: rgba(65, 28, 48, 170)
   user_card_accent: '#f0a0b0'
   user_card_text: '#fceff2'

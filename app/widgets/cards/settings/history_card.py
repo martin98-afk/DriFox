@@ -132,33 +132,32 @@ class _HistoryItemCard(SimpleCardWidget):
         self._is_editing = False
         self.setCursor(Qt.PointingHandCursor)
 
+        Colors.refresh()
         if is_current:
-            self.setStyleSheet(
-                """
-                CardWidget {
-                    background-color: rgba(102, 198, 255, 0.12);
-                    border: 2px solid rgba(102, 198, 255, 0.6);
+            self.setStyleSheet(f"""
+                CardWidget {{
+                    background-color: {Colors.SELECTED_BG};
+                    border: 2px solid {Colors.BORDER_ACCENT};
                     border-radius: 10px;
-                }
-                CardWidget:hover {
-                    background-color: rgba(102, 198, 255, 0.18);
-                    border: 2px solid rgba(102, 198, 255, 0.8);
-                }
-                """
+                }}
+                CardWidget:hover {{
+                    background-color: {Colors.TAB_ACTIVE_BG};
+                    border: 2px solid {Colors.TEXT_ACCENT};
+                }}
+            """
             )
         else:
-            self.setStyleSheet(
-                """
-                CardWidget {
-                    background-color: rgba(255, 255, 255, 0.04);
-                    border: 1px solid rgba(255, 255, 255, 0.08);
+            self.setStyleSheet(f"""
+                CardWidget {{
+                    background-color: {Colors.CARD_BG_DIM};
+                    border: 1px solid {Colors.BORDER};
                     border-radius: 10px;
-                }
-                CardWidget:hover {
-                    background-color: rgba(255, 255, 255, 0.08);
-                    border: 1px solid rgba(102, 198, 255, 0.45);
-                }
-                """
+                }}
+                CardWidget:hover {{
+                    background-color: {Colors.HOVER_BG};
+                    border: 1px solid {Colors.BORDER_ACCENT};
+                }}
+            """
             )
 
         layout = QVBoxLayout(self)
@@ -171,19 +170,21 @@ class _HistoryItemCard(SimpleCardWidget):
         self.title_label = BodyLabel(title[:100], self)
         self.title_label.setWordWrap(True)
         font_size = scale_font_size(14)
+        Colors.refresh()
         self.title_label.setStyleSheet(
-            f"color: white; font-weight: bold; font-size: {font_size}px; {get_font_family_css()}" if is_current else f"color: white; font-size: {font_size}px; {get_font_family_css()}"
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {font_size}px; {get_font_family_css()}" if is_current else f"color: {Colors.TEXT_PRIMARY}; font-size: {font_size}px; {get_font_family_css()}"
         )
         top_row.addWidget(self.title_label, 1)
 
         self.title_edit = QLineEdit(title[:100], self)
+        Colors.refresh()
         self.title_edit.setStyleSheet(
             f"""
             QLineEdit {{
                 background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid rgba(102, 198, 255, 0.5);
+                border: 1px solid {Colors.BORDER_ACCENT};
                 border-radius: 4px;
-                color: white;
+                color: {Colors.TEXT_PRIMARY};
                 padding: 2px 6px;
                 {get_font_family_css()}
             }}
@@ -229,8 +230,9 @@ class _HistoryItemCard(SimpleCardWidget):
         meta_text = f"{rel_time} · {message_count} 轮对话 · "
         self.meta_label = CaptionLabel(meta_text, self)
         caption_size = scale_font_size(12)
+        Colors.refresh()
         self.meta_label.setStyleSheet(
-            f"color: #ffb65c; font-size: {caption_size}px; {get_font_family_css()}" if is_current else f"color: rgba(255, 255, 255, 0.5); font-size: {caption_size}px; {get_font_family_css()}"
+            f"color: {Colors.ACCENT_WARM}; font-size: {caption_size}px; {get_font_family_css()}" if is_current else f"color: {Colors.TEXT_SECONDARY}; font-size: {caption_size}px; {get_font_family_css()}"
         )
         bottom_row.addWidget(self.meta_label)
 
@@ -397,7 +399,8 @@ class _ArchivedItemCard(CardWidget):
             meta_text += f" · {message_count} 轮对话"
         self.meta_label = CaptionLabel(meta_text, self)
         caption_size = scale_font_size(12)
-        self.meta_label.setStyleSheet(f"color: rgba(255, 255, 255, 0.5); font-size: {caption_size}px; {get_font_family_css()}")
+        Colors.refresh()
+        self.meta_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: {caption_size}px; {get_font_family_css()}")
         bottom_row.addWidget(self.meta_label)
 
         bottom_row.addStretch()

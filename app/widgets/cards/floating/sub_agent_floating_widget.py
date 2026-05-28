@@ -88,14 +88,14 @@ class SubTaskLogWidget(QFrame):
         # 日志内容
         self.log_text = QTextEdit(self)
         self.log_text.setFont(get_unified_font(8))
-        self.log_text.setStyleSheet("""
-            QTextEdit {
+        self.log_text.setStyleSheet(f"""
+            QTextEdit {{
                 background-color: transparent;
-                color: #d4d4d4;
+                color: {Colors.TEXT_PRIMARY};
                 border: none;
                 border-radius: 3px;
                 padding: 4px;
-            }
+            }}
         """)
         self.log_text.setReadOnly(True)
         self.log_text.setMinimumHeight(100)
@@ -108,26 +108,26 @@ class SubTaskLogWidget(QFrame):
     def _init_log_format(self):
         """初始化日志文本格式"""
         self._normal_fmt = QTextCharFormat()
-        self._normal_fmt.setForeground(QColor("#d4d4d4"))
+        self._normal_fmt.setForeground(QColor(Colors.TEXT_PRIMARY))
 
         self._step_fmt = QTextCharFormat()
-        self._step_fmt.setForeground(QColor("#4EC9B0"))
+        self._step_fmt.setForeground(QColor(Colors.SYNTAX_STEP))
         self._step_fmt.setFontWeight(QFont.Bold)
 
         self._tool_fmt = QTextCharFormat()
-        self._tool_fmt.setForeground(QColor("#DCDCAA"))
+        self._tool_fmt.setForeground(QColor(Colors.SYNTAX_TOOL))
 
         self._tool_success_fmt = QTextCharFormat()
-        self._tool_success_fmt.setForeground(QColor("#6A9955"))
+        self._tool_success_fmt.setForeground(QColor(Colors.SYNTAX_SUCCESS))
 
         self._tool_error_fmt = QTextCharFormat()
-        self._tool_error_fmt.setForeground(QColor("#F14C4C"))
+        self._tool_error_fmt.setForeground(QColor(Colors.SYNTAX_ERROR))
 
         self._result_fmt = QTextCharFormat()
-        self._result_fmt.setForeground(QColor("#CE9178"))
+        self._result_fmt.setForeground(QColor(Colors.SYNTAX_RESULT))
 
         self._error_fmt = QTextCharFormat()
-        self._error_fmt.setForeground(QColor("#F14C4C"))
+        self._error_fmt.setForeground(QColor(Colors.SYNTAX_ERROR))
         self._error_fmt.setFontWeight(QFont.Bold)
 
     def _append_log(self, text: str, fmt: QTextCharFormat = None):
@@ -265,14 +265,14 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         close_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent;
-                color: #757575;
+                color: {Colors.TEXT_MUTED};
                 border: none;
                 {get_font_family_css()}
                 font-size: {scale_font_size(12)}px;
             }}
             QPushButton:hover {{
-                color: #ffffff;
-                background-color: #404040;
+                color: {Colors.TEXT_PRIMARY};
+                background-color: {Colors.CONTENT_BG};
                 border-radius: 3px;
             }}
         """)
@@ -298,7 +298,7 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         # 空状态提示
         self.empty_label = BodyLabel("暂无运行中的子智能体任务", self)
         self.empty_label.setFont(get_unified_font(10))
-        self.empty_label.setStyleSheet("color: #666; padding: 20px;")
+        self.empty_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 20px;")
         self.empty_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.empty_label)
 

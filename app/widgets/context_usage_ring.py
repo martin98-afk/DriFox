@@ -174,7 +174,7 @@ class ContextUsageRing(QWidget):
             tooltip_css = f"""
                 QToolTip {{
                     background-color: {card_bg};
-                    border: 1px solid rgba(80, 90, 120, 0.6);
+                    border: 1px solid {Colors.BORDER};
                     border-radius: 6px;
                     padding: 8px 12px;
                     color: {Colors.TEXT_PRIMARY};
@@ -185,8 +185,8 @@ class ContextUsageRing(QWidget):
             font_style = ""
             tooltip_css = f"""
                 QToolTip {{
-                    background-color: rgba(30, 35, 48, 240);
-                    border: 1px solid rgba(80, 90, 120, 0.6);
+                    background-color: {Colors.CARD_BG_SOLID};
+                    border: 1px solid {Colors.BORDER};
                     border-radius: 6px;
                     padding: 8px 12px;
                     color: #e0e4ef;

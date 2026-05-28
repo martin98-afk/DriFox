@@ -35,47 +35,16 @@ from qfluentwidgets import (
 )
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, Sizes, ButtonStyles, SwitchStyles, scale_font_size, font_size_css
+from app.utils.design_tokens import Colors, CardStyles, Sizes, ButtonStyles, SwitchStyles, scale_font_size, font_size_css
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
 
 # ═══════════════════════════════════════════════════════════
-# 共用表单样式
+# 共用表单样式（统一来自 design_tokens）
 # ═══════════════════════════════════════════════════════════
 
-EDIT_CARD_STYLE = f"""
-QWidget {{
-    background: transparent;
-}}
-QLineEdit {{
-    background-color: rgba(61, 61, 61, 180);
-    color: #ffffff;
-    border: 1px solid rgba(85, 85, 85, 150);
-    border-radius: 4px;
-    padding: 4px 8px;
-    {get_font_family_css()}
-    {font_size_css(12)}
-}}
-QLineEdit:focus {{
-    border-color: rgba(0, 120, 212, 200);
-}}
-QLineEdit::placeholder {{
-    color: rgba(255, 255, 255, 0.35);
-}}
-QPlainTextEdit {{
-    background-color: rgba(61, 61, 61, 180);
-    color: #ffffff;
-    border: 1px solid rgba(85, 85, 85, 150);
-    border-radius: 4px;
-    padding: 4px 8px;
-    {get_font_family_css()}
-    {font_size_css(12)}
-}}
-QPlainTextEdit:focus {{
-    border-color: rgba(0, 120, 212, 200);
-}}
-"""
+EDIT_CARD_STYLE = CardStyles.edit_card_style()
 
 
 def _make_row(label_text: str, widget: QWidget, label_width: int = 70) -> QHBoxLayout:

@@ -1011,8 +1011,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标题编辑（行内编辑模式）
         self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
+        Colors.refresh()
         title_style = f"""QLabel {{
-            color: #f3f6fc;
+            color: {Colors.TEXT_PRIMARY};
             {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
@@ -1021,10 +1022,10 @@ class OpenAIChatToolWindow(ToolWindow):
             {font_css}
         }}
         QLabel:hover {{
-            background-color: rgba(255, 255, 255, 0.06);
+            background-color: {Colors.HOVER_BG};
         }}
         QLineEdit {{
-            color: #f3f6fc;
+            color: {Colors.TEXT_PRIMARY};
             {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
@@ -1034,11 +1035,10 @@ class OpenAIChatToolWindow(ToolWindow):
             {font_css}
         }}
         QLineEdit:focus {{
-            background-color: rgba(255, 255, 255, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            background-color: {Colors.TOOLBAR_BG};
+            border: 1px solid {Colors.BORDER};
         }}
     """
-        title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
         self.title_edit.returnPressed.connect(self._on_title_edit_finished)
         self.title_edit.editingFinished.connect(self._on_title_edit_finished)
@@ -1361,7 +1361,8 @@ class OpenAIChatToolWindow(ToolWindow):
         separator = QFrame(self._input_card)
         separator.setFrameShape(QFrame.HLine)
         separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background: rgba(255,255,255,0.06); border: none;")
+        Colors.refresh()
+        separator.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
         card_layout.addWidget(separator)
 
         # ===== 工具栏（卡片内部，分隔线下方）=====
@@ -1375,8 +1376,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型选择（无边框，只保留背景）
         self._model_btn_container = QWidget(toolbar_widget)
         self._model_btn_container.setFixedHeight(26)
+        Colors.refresh()
         self._model_btn_container.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
+            background: {Colors.TOOLBAR_BG};
             border: none;
             border-radius: 8px;
         """)
@@ -1418,8 +1420,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 右侧功能按钮组（无边框，间距加宽）
         self._toolbar_capsule = QWidget(toolbar_widget)
         self._toolbar_capsule.setFixedHeight(28)
+        Colors.refresh()
         self._toolbar_capsule.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
+            background: {Colors.TOOLBAR_BG};
             border: none;
             border-radius: 10px;
         """)
@@ -1427,9 +1430,10 @@ class OpenAIChatToolWindow(ToolWindow):
         capsule_layout.setContentsMargins(6, 2, 6, 2)
         capsule_layout.setSpacing(4)
 
-        btn_capsule_style = """
-            TransparentToolButton { background: transparent; border: none; }
-            TransparentToolButton:hover { background: rgba(255,255,255,0.12); border-radius: 5px; }
+        Colors.refresh()
+        btn_capsule_style = f"""
+            TransparentToolButton {{ background: transparent; border: none; }}
+            TransparentToolButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border-radius: 5px; }}
         """
 
         self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
@@ -2196,7 +2200,7 @@ class OpenAIChatToolWindow(ToolWindow):
         container = QWidget()
         container.setFixedHeight(26)
         container.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
+            background: {Colors.TOOLBAR_BG};
             border: none;
             border-radius: 8px;
         """)
@@ -2212,7 +2216,7 @@ class OpenAIChatToolWindow(ToolWindow):
             placeholder = QLabel("无可用智能体")
             placeholder.setStyleSheet(f"""
                 QLabel {{
-                    color: #8FA4C2;
+                    color: {Colors.CARD_PLACEHOLDER_TEXT};
                     font-size: 12px;
                     padding: 0 12px;
                     {get_font_family_css()}
@@ -2671,7 +2675,7 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         if hasattr(self, "_model_btn_container"):
             self._model_btn_container.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
@@ -2679,13 +2683,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         if hasattr(self, "_model_btn_container"):
             self._model_btn_container.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
         if hasattr(self, "_toolbar_capsule"):
             self._toolbar_capsule.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
@@ -2716,7 +2720,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_agent_switch_widget"):
             Colors.refresh()
             self._agent_switch_widget.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
