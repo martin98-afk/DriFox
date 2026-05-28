@@ -51,6 +51,7 @@ class CommandDefinition:
     name: str
     type: str                      # "function", "prompt", "agent"
     description: str = ""
+    argument_hint: str = ""        # 参数提示（显示在命令卡片 detail 模式）
     prompt_text: str = ""          # prompt/agent 命令使用
 
     def to_display_dict(self) -> Dict[str, str]:
@@ -100,6 +101,7 @@ class CommandManager:
         name: str,
         command_type: str,
         description: str = "",
+        argument_hint: str = "",
         prompt_text: str = "",
     ):
         """注册一个内置命令
@@ -108,12 +110,14 @@ class CommandManager:
             name: 命令名（不含 /）
             command_type: "function", "prompt" 或 "agent"
             description: 描述文本（显示在命令卡片中）
+            argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
             prompt_text: prompt/agent 命令使用，替换后的提示词文本
         """
         self._commands[name] = CommandDefinition(
             name=name,
             type=command_type,
             description=description,
+            argument_hint=argument_hint,
             prompt_text=prompt_text,
         )
 

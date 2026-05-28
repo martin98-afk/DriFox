@@ -26,6 +26,7 @@ class SendableTextEdit(TextEdit):
     agentChanged = pyqtSignal(str)
     slashTriggered = pyqtSignal(str)     # 检测到 / 触发，携带查询文本
     slashDismissed = pyqtSignal()        # / 触发结束
+    slashShowHint = pyqtSignal(str)      # 完整命令 + 空格 → 显示参数提示
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,7 +119,13 @@ class SendableTextEdit(TextEdit):
         return self._command_card_ref
 
     def _on_slash_trigger_check(self):
-        """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流"""
+        """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流
+
+        扩展逻辑：
+        - `/cmd`（无空格）→ 列表模式（原行为）
+        - `/cmd `（有空格，且 cmd 是已知命令）→ detail 模式（显示参数提示）
+        - `/xxx `（有空格，但 xxx 不是已知命令）→ 关闭卡片
+        """
         # 历史浏览模式下，如果当前历史项以 / 开头，阻止命令卡片触发
         if self._suppress_slash_trigger:
             self._suppress_slash_trigger = False
@@ -139,27 +146,47 @@ class SendableTextEdit(TextEdit):
 
             # 仅当 / 在文本开头（位置0）时触发
             text_before_cursor = text[:cursor_pos]
-            
-            # 检查开头是否有 /
-            if text.startswith("/"):
-                query = text[1:cursor_pos] if cursor_pos > 1 else ""
-                # 如果有空格或换行，说明 / 触发已结束
-                if " " in query or "\n" in query:
-                    self._cancel_slash_throttle()
-                    if card and card.is_card_visible:
-                        self.slashDismissed.emit()
-                    self._slash_trigger_pos = -1
-                    return
 
-                # 在开头触发 - 使用节流
-                self._slash_trigger_pos = 0
-                self._apply_slash_throttle(query)
-            else:
+            if not text.startswith("/"):
                 # 没有在开头
                 self._cancel_slash_throttle()
                 if card and card.is_card_visible:
+                    card.dismiss()
                     self.slashDismissed.emit()
                 self._slash_trigger_pos = -1
+                return
+
+            query = text[1:cursor_pos] if cursor_pos > 1 else ""
+
+            # 换行符 → 关闭
+            if "\n" in query:
+                self._cancel_slash_throttle()
+                if card and card.is_card_visible:
+                    card.dismiss()
+                    self.slashDismissed.emit()
+                self._slash_trigger_pos = -1
+                return
+
+            # 空格 → 检查是否是已知命令后跟参数
+            if " " in query:
+                self._cancel_slash_throttle()
+                cmd_name = query.split(" ", 1)[0]
+                from app.core.command_manager import CommandManager
+                if CommandManager.get_instance().is_known_command_name(cmd_name):
+                    # 已知命令 + 参数 → 切换到 detail 模式
+                    self._slash_trigger_pos = 0
+                    self.slashShowHint.emit(cmd_name)
+                else:
+                    # 未知命令 + 参数 → 关闭
+                    if card and card.is_card_visible:
+                        card.dismiss()
+                        self.slashDismissed.emit()
+                    self._slash_trigger_pos = -1
+                return
+
+            # 无空格 → 列表模式（使用节流）
+            self._slash_trigger_pos = 0
+            self._apply_slash_throttle(query)
         except Exception:
             pass
 
@@ -230,8 +257,12 @@ class SendableTextEdit(TextEdit):
         card = self._get_card()
         self.insert_command_text(item_name)
         if card:
-            card.dismiss()
-        self.slashDismissed.emit()
+            # insert_command_text 可能触发 textChanged → detail 模式，
+            # 此时卡片应保持可见，不 dismiss
+            if not card.is_detail_mode:
+                card.dismiss()
+        if not (card and card.is_detail_mode):
+            self.slashDismissed.emit()
 
     def _on_card_dismissed(self):
         """卡片被关闭时的清理"""
@@ -421,19 +452,21 @@ class SendableTextEdit(TextEdit):
                 event.accept()
                 return
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
-                card.select_current()
-                event.accept()
-                return
+                # detail 模式：不拦截 Enter/Tab，让走正常行为（发送/输入）
+                if not card.is_detail_mode:
+                    card.select_current()
+                    event.accept()
+                    return
             elif event.key() == Qt.Key_Escape:
                 card.dismiss()
                 self.slashDismissed.emit()
                 event.accept()
                 return
 
-        # Tab 键：开头有 / 时触发补全
+        # Tab 键：开头有 / 时触发补全（detail 模式不触发）
         if event.key() == Qt.Key_Tab:
             text = self.toPlainText()
-            if text.startswith("/"):
+            if text.startswith("/") and not (card and card.is_detail_mode):
                 # 模拟 / 触发，然后选择当前项
                 self._slash_trigger_pos = 0
                 self.slashTriggered.emit(text[1:] if len(text) > 1 else "")

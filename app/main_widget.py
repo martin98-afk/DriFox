@@ -1337,6 +1337,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注册卡片到 CardManager（优先级：数值越小权限越高）
         self._register_cards_to_manager()
 
+        # 系统卡片打开时隐藏文本输入框（保留按钮栏），关闭时恢复
+        for _cid in ("model_selector", "model_config", "memory", "history"):
+            self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
+            self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
+
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(
             self._on_scroll_changed
         )
@@ -1381,6 +1386,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.textChanged.connect(self._on_input_area_height_changed)
         self.input_area.slashTriggered.connect(self._on_slash_triggered)
         self.input_area.slashDismissed.connect(self._on_slash_dismissed)
+        self.input_area.slashShowHint.connect(self._on_slash_show_hint)
         card_layout.addWidget(self.input_area)
 
         # 加载输入历史
@@ -1670,6 +1676,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # 直接调用卡片的 dismiss 方法确保关闭，同时通过 CardManager 通知容器
         self._command_card.dismiss()
         self._card_manager.hide_card("command", self._window_id)
+
+    def _on_slash_show_hint(self, cmd_name: str):
+        """输入框 完整命令 + 空格 - 显示参数提示
+
+        将命令卡片切换到 detail 模式，显示该命令的参数提示信息。
+        如果卡片尚未显示，先让 CardManager 展开容器。
+        """
+        if not hasattr(self, '_command_card'):
+            return
+        card = self._command_card
+        # 如果卡片还没显示（首次进入 detail 模式），展开容器
+        if not card.is_card_visible:
+            self._card_manager.show_card("command", self._window_id)
+        # 切换到 detail 模式
+        card.show_command_detail(cmd_name)
+        # 把焦点还给输入框
+        self.input_area.setFocus(Qt.OtherFocusReason)
 
     def _toggle_model_selector_card(self):
         """切换模型选择卡片的显示"""
@@ -2161,6 +2184,19 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.hide_card(card_id, self._window_id)
         if not self._is_auto_loop_running:
             self._card_manager.hide_card("auto_loop_running", self._window_id)
+
+    def _on_system_card_opened(self, card_id: str):
+        """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间"""
+        if hasattr(self, 'input_area'):
+            self.input_area.setVisible(False)
+
+    def _on_system_card_closed(self, card_id: str):
+        """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
+        for cid in ("model_selector", "model_config", "memory", "history"):
+            if self._card_manager.is_card_visible(cid, self._window_id):
+                return
+        if hasattr(self, 'input_area'):
+            self.input_area.setVisible(True)
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""

@@ -93,6 +93,7 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         return {
             "name": file_path.stem,  # 文件名作为命令名
             "description": meta.get("description", ""),
+            "argument_hint": meta.get("argument-hint", ""),
             "type": meta.get("type", "prompt"),
             "prompt_text": body,  # prompt/agent 类型使用文件内容作为提示词
         }
@@ -204,6 +205,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
                 name=cmd["name"],
                 command_type=cmd["type"],
                 description=cmd["description"],
+                argument_hint=cmd["argument_hint"],
                 prompt_text=cmd["prompt_text"],
             )
             commands.append(cmd)
