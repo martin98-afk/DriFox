@@ -22,7 +22,6 @@ from app.widgets.message_card import MessageCard, create_welcome_card
 from app.widgets.bottom_input_area import SendableTextEdit
 from app.widgets.context_usage_ring import ContextUsageRing
 from app.widgets.conversation_node_preview import ConversationNodePreview
-from app.widgets.model_selector_popup import ModelSelectorPopup
 
 # 对话框
 from app.widgets.file_undo_dialog import FileUndoPreviewDialog
@@ -39,7 +38,6 @@ __all__ = [
     "MessageCard",
     "create_welcome_card",
     "ModelConfigCard",
-    "ModelSelectorPopup",
     # 悬浮组件
     "ToolFloatingWidget",
     "SubAgentFloatingWidget",

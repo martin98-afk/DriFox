@@ -5,16 +5,17 @@ import ctypes
 import gc
 import os
 import re
-import uuid
 import subprocess
 import sys
 import time
+import uuid
+import orjson as json
+import sip
+
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-import orjson as json
-import sip
 from PyQt5.QtCore import (
     QTimer,
     pyqtSignal,
@@ -30,8 +31,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsOpacityEffect,
     QLabel,
     QPushButton,
-    QButtonGroup, QFrame, QScrollArea, QSizePolicy, QLineEdit,
-)
+    QButtonGroup, QFrame, QScrollArea, QSizePolicy, )
 from loguru import logger
 from qfluentwidgets import (
     setFont,
@@ -53,7 +53,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.command_manager import CommandManager, CommandResult
+from app.core.command_manager import CommandManager
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -65,20 +65,29 @@ from app.utils.design_tokens import (
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
-from app.widgets.cards.settings.base_settings_card import (
-    BaseSettingsCard,
-)
 from app.widgets.bottom_input_area import (
     SendableTextEdit,
 )
-from app.widgets.context_usage_ring import (
-    ContextUsageRing,
+from app.widgets.cards import CardManager, ContainerType, TopCardContainer, BottomCardContainer
+from app.widgets.cards.floating.command_card import CommandCard
+from app.widgets.cards.floating.question_floating_widget import (
+    QuestionFloatingWidget,
 )
-from app.widgets.conversation_node_preview import (
-    ConversationNodePreview,
+from app.widgets.cards.floating.sub_agent_compact_widget import (
+    SubAgentCompactFloatingWidget,
 )
-from app.widgets.file_undo_dialog import (
-    FileUndoPreviewDialog,
+from app.widgets.cards.floating.sub_agent_floating_widget import (
+    SubAgentFloatingWidget,
+)
+from app.widgets.cards.floating.todo_floating_widget import (
+    TodoFloatingWidget,
+)
+from app.widgets.cards.floating.tool_floating_widget import (
+    ToolFloatingWidget,
+)
+from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+from app.widgets.cards.settings.base_settings_card import (
+    BaseSettingsCard,
 )
 from app.widgets.cards.settings.history_card import (
     HistoryCard,
@@ -94,34 +103,28 @@ from app.widgets.cards.settings.mcp_setting_card import (
 from app.widgets.cards.settings.memory_card import (
     MemoryCardContent, TAB_PROJECT_NOTES,
 )
+from app.widgets.cards.settings.model_config_card import (
+    ModelConfigCard,
+)
+from app.widgets.cards.settings.model_selector_card import (
+    ModelSelectorCardContent,
+)
+from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
+from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.context_usage_ring import (
+    ContextUsageRing,
+)
+from app.widgets.conversation_node_preview import (
+    ConversationNodePreview,
+)
+from app.widgets.file_undo_dialog import (
+    FileUndoPreviewDialog,
+)
 from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
 )
-from app.widgets.cards.settings.model_config_card import (
-    ModelConfigCard,
-)
 from app.widgets.project_selector_popup import ProjectSelectorPopup
-from app.widgets.cards.floating.question_floating_widget import (
-    QuestionFloatingWidget,
-)
-from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
-from app.widgets.cards.floating.sub_agent_floating_widget import (
-    SubAgentFloatingWidget,
-)
-from app.widgets.cards.floating.sub_agent_compact_widget import (
-    SubAgentCompactFloatingWidget,
-)
-from app.widgets.cards.settings.system_card_frame import SystemCardFrame
-from app.widgets.cards import CardManager, ContainerType, TopCardContainer, BottomCardContainer
-from app.widgets.cards.floating.todo_floating_widget import (
-    TodoFloatingWidget,
-)
-from app.widgets.cards.floating.tool_floating_widget import (
-    ToolFloatingWidget,
-)
-from app.widgets.cards.floating.command_card import CommandCard
-from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import add_message_to_layout, refresh_history_card_if_visible, \
     init_new_session_after_archive, clear_and_show_welcome, refresh_session_view, save_or_archive_session, \
@@ -487,6 +490,10 @@ class OpenAIChatToolWindow(ToolWindow):
         
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True)
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
+
+        # 模型选择卡片
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "model_selector", self._model_selector_card, system_card=True)
+        # self._bottom_card_container.add_card 已在卡片创建时调用，避免重复
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1116,7 +1123,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 服务商编辑卡片
         self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
-        self._provider_edit_card.setFixedHeight(380)
+        self._provider_edit_card.setFixedHeight(300)
         self._provider_edit_popup = ProviderEditCard(parent=self)
         self._provider_edit_popup.saved.connect(self._on_provider_edit_saved)
         self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
@@ -1274,6 +1281,22 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_card.closed.connect(lambda: (self._card_manager.hide_card("model_config", self._window_id), self._restore_after_system_close()))
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
+        # 模型选择卡片（底部卡片形式）
+        self._model_selector_card = BaseSettingsCard("模型选择", "🤖", self)
+        self._model_selector_card.setFixedHeight(350)
+        self._model_selector_card_content = ModelSelectorCardContent()
+        self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
+        self._model_selector_card_content.addProviderClicked.connect(
+            lambda: self._on_add_provider_from_card()
+        )
+        self._model_selector_card_content.configureProviderClicked.connect(
+            lambda: self._on_configure_providers_from_card()
+        )
+        self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+        self._model_selector_card.setVisible(False)
+        self._model_selector_card.closed.connect(lambda: (self._card_manager.hide_card("model_selector", self._window_id), self._restore_after_system_close()))
+        self._bottom_card_container.add_card("model_selector", self._model_selector_card)
+
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
         self._auto_loop_config_card = AutoLoopConfigCard()
@@ -1402,7 +1425,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.current_model_btn = QWidget(self._model_btn_container)
         self.current_model_btn.setCursor(Qt.PointingHandCursor)
         self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
-        self.current_model_btn.mousePressEvent = lambda e: self._show_model_selector_popup()
+        self.current_model_btn.mousePressEvent = lambda e: self._toggle_model_selector_card()
         btn_layout = QHBoxLayout(self.current_model_btn)
         btn_layout.setContentsMargins(2, 2, 0, 2)
         btn_layout.setSpacing(4)
@@ -1633,8 +1656,21 @@ class OpenAIChatToolWindow(ToolWindow):
         self._command_card.dismiss()
         self._card_manager.hide_card("command", self._window_id)
 
-    def _show_model_selector_popup(self):
-        """显示扁平式模型选择上拉框"""
+    def _toggle_model_selector_card(self):
+        """切换模型选择卡片的显示"""
+        self._card_manager.toggle_card("model_selector", self._window_id)
+        if self._card_manager.is_card_visible("model_selector", self._window_id):
+            self._load_model_selector_to_card()
+            # 确保顶层窗口从最小化恢复并激活
+            top_window = self.window()
+            if top_window:
+                if top_window.isMinimized():
+                    top_window.showNormal()
+                top_window.activateWindow()
+                top_window.raise_()
+
+    def _load_model_selector_to_card(self):
+        """加载模型数据到模型选择卡片"""
         provider_models_data = []
         for provider_name, config in self._valid_configs.items():
             model_list = []
@@ -1658,31 +1694,19 @@ class OpenAIChatToolWindow(ToolWindow):
             is_current = provider_name == self._current_provider_name
             provider_models_data.append((provider_name, model_list, is_current))
 
-        if not hasattr(self, "_model_selector_popup") or not self._model_selector_popup:
-            from app.widgets.model_selector_popup import (
-                ModelSelectorPopup, )
-            self._model_selector_popup = ModelSelectorPopup(self)
-            self._model_selector_popup.modelSelected.connect(self._on_model_selected_from_popup)
-            self._model_selector_popup.addProviderClicked.connect(
-                lambda: self._on_add_provider_from_popup()
-            )
-            self._model_selector_popup.configureProviderClicked.connect(
-                lambda: self._on_configure_providers_from_popup()
-            )
-
-        self._model_selector_popup.set_providers_data(
+        self._model_selector_card_content.set_providers_data(
             provider_models_data, self._current_provider_name or "", self._current_model_name or "",
         )
-        self._model_selector_popup.show_at(self.current_model_btn)
 
-    def _on_add_provider_from_popup(self):
-        """从模型选择弹窗点击「添加」按钮 - 显示添加服务商卡片"""
-        self._model_selector_popup.close()
+    def _on_add_provider_from_card(self):
+        """从模型选择卡片点击「添加」按钮 - 显示添加服务商卡片"""
+        self._card_manager.hide_card("model_selector", self._window_id)
         self._show_provider_add_card()
 
-    def _on_configure_providers_from_popup(self):
-        """从模型选择弹窗点击「配置」按钮 - 显示设置卡片并展开服务商下拉"""
-        self._model_selector_popup.close()
+    def _on_configure_providers_from_card(self):
+        """从模型选择卡片点击「配置」按钮 - 显示设置卡片并展开服务商下拉"""
+        # 隐藏模型选择卡片
+        self._card_manager.hide_card("model_selector", self._window_id)
         # 显示设置卡片（通过 CardManager 保证生命周期一致性，触发容器展开）
         self._card_manager.show_card("settings", self._window_id)
         # 滚动设置卡片内容到顶部
@@ -1709,7 +1733,7 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
     def _on_model_selected_from_popup(self, provider_name: str, model_name: str):
-        """从弹窗选中模型后切换
+        """从弹窗/卡片选中模型后切换
         
         多窗口隔离：全局配置保存最后使用的服务高（作为新窗口默认值），
         但窗口实例的 _current_provider_name/_current_model_name 不受其他窗口影响。
@@ -1735,6 +1759,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
         self._update_balance_display()
+
+        # 隐藏模型选择卡片（如果已打开）
+        if hasattr(self, '_card_manager'):
+            self._card_manager.hide_card("model_selector", self._window_id)
 
     def _get_model_btn_text_style(self) -> str:
         """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
@@ -1835,10 +1863,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("provider_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
 
-        # 关闭模型选择器popup，下次打开会重新加载数据
-        if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
-            self._model_selector_popup.close()
-
+        # 模型选择卡片数据将在下次打开时自动刷新
         # 刷新配置
         self._load_model_configs()
         InfoBar.success("已保存", f"服务商 '{provider_name}' 已保存", parent=self, duration=2000,
@@ -1849,9 +1874,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏服务商编辑卡片，显示设置卡片
         self._card_manager.hide_card("provider_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
-        # 关闭模型选择器popup，确保下次打开重新加载数据
-        if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
-            self._model_selector_popup.close()
         self._restore_after_system_close()
 
     def _show_provider_add_card(self):
@@ -2773,9 +2795,9 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.widgets.worktree_section import WorktreeSectionWidget
         for wt_widget in self.findChildren(WorktreeSectionWidget):
             wt_widget.refresh_style()
-        # 刷新模型选择弹窗和项目弹窗主题
-        if hasattr(self, '_model_selector_popup') and self._model_selector_popup:
-            self._model_selector_popup.refresh_style()
+        # 刷新模型选择卡片和项目弹窗主题
+        if hasattr(self, '_model_selector_card_content') and self._model_selector_card_content:
+            self._model_selector_card_content.refresh_style()
         if hasattr(self, '_project_selector_popup') and self._project_selector_popup:
             self._project_selector_popup.refresh_style()
         # 刷新记忆卡片主题
@@ -4773,7 +4795,6 @@ class OpenAIChatToolWindow(ToolWindow):
         UI 删除策略：基于 card widget 对象在 chat_layout 中的位置精准删除，
         不依赖 round_index 遍历（解决懒加载时卡片序号对不上的问题）
         """
-        from loguru import logger
 
         session = self.session_manager.get_current_session()
         if not session:
