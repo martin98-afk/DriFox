@@ -322,11 +322,25 @@ class SubAgentExecutor(QThread):
                 {"role": "user", "content": f"## 子任务\n{self.task_description}"}
             ]
 
+            # 获取 LLM 配置（支持模型继承）
+            effective_llm_config = self.llm_config
+            if agent.is_model_inherit():
+                # 继承主智能体模型配置（保留 agent 特定的 temperature 等参数覆盖）
+                effective_llm_config = {**self.llm_config}
+                # agent 特定的参数优先级更高
+                if agent.temperature is not None:
+                    effective_llm_config["temperature"] = agent.temperature
+                if agent.top_p is not None:
+                    effective_llm_config["top_p"] = agent.top_p
+            else:
+                # 使用 agent 指定的模型（覆盖主智能体配置）
+                effective_llm_config = {**self.llm_config, "模型名称": agent.model}
+
             self._add_log("progress", f"开始执行子任务: {self.agent_name}")
             self.progress_updated.emit(self.task_id, f"开始执行子任务: {self.agent_name}")
 
             try:
-                result = self._execute_agent_loop(messages, tools)
+                result = self._execute_agent_loop(messages, tools, effective_llm_config)
             except Exception as e:
                 logger.error(f"[SubAgentExecutor] _execute_agent_loop error: {e}")
                 result = f"执行出错: {str(e)}"
@@ -359,7 +373,7 @@ class SubAgentExecutor(QThread):
                     logger.warning(f"[SubAgentExecutor] 保存错误状态失败: {e}")
             self.error_occurred.emit(self.task_id, f"SubAgent execution error: {str(e)}")
 
-    def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict]) -> str:
+    def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
         current_messages = messages.copy()
         response_content = ""
@@ -376,11 +390,11 @@ class SubAgentExecutor(QThread):
                 self._add_log("progress", f"已达到最大迭代次数 ({self.max_iterations})，强制结束并总结")
                 final_summary_prompt = self._build_final_summary_prompt()
                 current_messages.append({"role": "user", "content": final_summary_prompt})
-                response_content, _, _ = self._make_api_call(current_messages, None)
+                response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
                 return self._filter_thinking_content(response_content)
 
             response_content, tool_calls, reasoning_content = self._make_api_call(
-                current_messages, tools
+                current_messages, tools, llm_config
             )
             current_reasoning = reasoning_content
 
@@ -464,11 +478,13 @@ class SubAgentExecutor(QThread):
 
         return parsed, ""
 
-    def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None) -> tuple:
+    def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（非流式，子智能体后台执行无需流式输出）"""
-        api_key = self.llm_config.get("API_KEY", "").strip()
-        base_url = self.llm_config.get("API_URL") or None
-        model = str(self.llm_config.get("模型名称", "gpt-4o"))
+        # 使用传入的 llm_config 或回退到 self.llm_config
+        config = llm_config if llm_config is not None else self.llm_config
+        api_key = config.get("API_KEY", "").strip()
+        base_url = config.get("API_URL") or None
+        model = str(config.get("模型名称", "gpt-4o"))
 
         req_kwargs = {
             "model": model,
@@ -478,7 +494,7 @@ class SubAgentExecutor(QThread):
 
         extra_body = {}
 
-        for cn_key, value in self.llm_config.items():
+        for cn_key, value in config.items():
             if cn_key in ["API_KEY", "API_URL", "模型名称", "系统提示", "启用技能"]:
                 continue
 
@@ -495,7 +511,7 @@ class SubAgentExecutor(QThread):
 
         if "max_tokens" in req_kwargs:
             req_kwargs["max_tokens"] = self._cap_max_output_tokens(
-                model, req_kwargs["max_tokens"]
+                model, req_kwargs["max_tokens"], config
             )
 
         if extra_body:
@@ -542,7 +558,7 @@ class SubAgentExecutor(QThread):
 
         return response_content, tool_calls_found, reasoning_content
 
-    def _cap_max_output_tokens(self, model: str, requested: int) -> int:
+    def _cap_max_output_tokens(self, model: str, requested: int, llm_config: Dict = None) -> int:
         """
         计算 max_tokens 的合理上限。
 
@@ -555,6 +571,7 @@ class SubAgentExecutor(QThread):
         Args:
             model: 模型名称
             requested: 用户配置中请求的 max_tokens
+            llm_config: LLM 配置字典（优先使用）
 
         Returns:
             合理的 max_tokens 值
@@ -564,7 +581,8 @@ class SubAgentExecutor(QThread):
         except Exception:
             return requested
 
-        profile = get_provider_profile(self.llm_config)
+        config = llm_config if llm_config is not None else self.llm_config
+        profile = get_provider_profile(config)
 
         # 1. 如果用户没有设置或设置值 <= 0，使用 provider 默认值
         if requested_int <= 0:

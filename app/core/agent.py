@@ -25,7 +25,7 @@ class Agent:
     permission: Dict[str, Any] = field(default_factory=dict)
     temperature: Optional[float] = None
     steps: Optional[int] = None
-    model: Optional[str] = None
+    model: Optional[str] = None  # None/"inherit" 表示继承主智能体模型；具体值表示使用指定模型
     hidden: Optional[bool] = None  # None 表示未声明；True 表示隐藏；False 表示显式显示
     task_permissions: Dict[str, str] = field(default_factory=dict)
     color: Optional[str] = None
@@ -36,6 +36,10 @@ class Agent:
     inherit_history_count: Optional[int] = None  # 继承最近 N 条消息，None 表示全部
     inherit_history_max_chars: Optional[int] = 500  # （已弃用）旧版每条消息最大字符数，新版使用 budget 比例
     inherit_history_budget_ratio: float = 0.6  # 上下文注入最多占 context budget 的比例（0.1~0.8）
+
+    def is_model_inherit(self) -> bool:
+        """是否继承主智能体模型配置"""
+        return self.model is None or str(self.model).lower() == "inherit"
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Agent":
@@ -105,8 +109,15 @@ class Agent:
         return self.mode in ("primary", "all")
 
     def is_subagent(self) -> bool:
-        """是否可作为子智能体：mode 为 subagent/all"""
-        return self.mode in ("subagent", "all")
+        """是否可作为子智能体：mode 为 subagent/all，或未声明 mode（外部导入智能体默认可作为子智能体）"""
+        # primary 模式下明确不可作为子智能体
+        if self.mode == "primary":
+            return False
+        # subagent/all 模式可作为子智能体
+        if self.mode in ("subagent", "all"):
+            return True
+        # mode=None 或其他情况（外部导入智能体默认可作为子智能体）
+        return True
 
     def is_hidden(self) -> bool:
         """是否隐藏（显式 hidden=True 或未声明 mode）"""
@@ -582,6 +593,7 @@ class AgentManager:
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
         forbidden_tools = {"question", "task_batch", "task_status"}
         if is_subagent_call:
+            # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
 
         perm_resolver = PermissionResolver(
@@ -591,6 +603,9 @@ class AgentManager:
         filtered_tools = []
         for tool in all_tools:
             tool_name = tool["function"]["name"].lower()
+            # 子智能体模式下禁止交互工具
+            if agent.is_subagent() and tool_name in forbidden_tools:
+                continue
             permission = perm_resolver.resolve(tool_name)
             if permission in ("allow", "ask"):
                 filtered_tools.append(tool)

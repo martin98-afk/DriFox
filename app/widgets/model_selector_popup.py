@@ -480,30 +480,32 @@ class ModelSelectorPopup(QWidget):
         self._reference_widget = reference_widget
         # 安装事件过滤器（每次显示时确保存在，防止 close 后丢失）
         QApplication.instance().installEventFilter(self)
-        # 先显示以激活布局计算
-        self.show()
-        QApplication.processEvents()
-
-        # 获取内容实际需要的尺寸
-        content_size = self.content_widget.sizeHint()
-        content_width = max(content_size.width(), 350)  # 最小宽度确保能显示完整名称
-        scroll_area_height = content_size.height() + 20  # 搜索框+边距
 
         # 设置合理的最大尺寸
         screen = reference_widget.screen() or QApplication.primaryScreen()
         if screen:
             screen_geom = screen.availableGeometry()
-            max_width = max(min(450, screen_geom.width() - 40), content_width)
+            max_width = min(450, screen_geom.width() - 40)
             max_height = min(500, screen_geom.height() - 120)
         else:
-            max_width = max(450, content_width)
+            max_width = 450
             max_height = 500
 
         self.setMaximumSize(max_width, max_height)
 
-        # 使用内容尺寸 resize（宽高各缩小1/3）
-        new_width = max_width * 2 // 3
-        new_height = min(scroll_area_height, 500) * 2 // 3
+        # 首次先 resize 到合理尺寸，让布局完成计算
+        self.resize(max_width, max_height)
+        self.show()
+        self.raise_()
+        QApplication.processEvents()
+
+        # 激活布局获取准确的尺寸
+        self.main_frame.layout().activate()
+
+        # 获取弹窗实际需要的尺寸
+        content_size = self.main_frame.sizeHint()
+        new_width = min(content_size.width(), max_width)
+        new_height = min(content_size.height(), max_height)
         self.resize(new_width, new_height)
 
         btn_rect = reference_widget.rect()
