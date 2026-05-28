@@ -125,6 +125,22 @@ class Agent:
 
 
 class PermissionResolver:
+    """
+    工具权限解析器
+
+    根据配置解析工具调用的权限判定（allow/ask/deny）。
+
+    解析优先级（从高到低）：
+    1. agent-specific permission_config 中的工具名
+    2. agent-specific permission_config 中的通配符 `*`
+    3. DEFAULT_PERMISSIONS 中定义的默认规则
+
+    设计：
+    - 用于智能体级别的权限解析（仅限 agent.yaml 中配置了 permission_config 的智能体）
+    - 全局级别的权限解析直接由 AuthService 处理（不在此类）
+    - 内部使用缓存避免重复解析同名工具
+    """
+
     DEFAULT_PERMISSIONS = {
         "*": "allow",
         "read": "allow",

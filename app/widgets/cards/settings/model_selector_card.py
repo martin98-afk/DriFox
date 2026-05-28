@@ -6,12 +6,11 @@ from typing import List, Tuple, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QScrollArea, QSizePolicy, QFrame, QApplication,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QScrollArea, QSizePolicy, QApplication,
 )
-from qfluentwidgets import FluentIcon, TransparentToolButton
 
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
@@ -131,8 +130,7 @@ class ModelSelectorCardContent(QWidget):
     """模型选择卡片内容"""
 
     modelSelected = pyqtSignal(str, str)  # provider_name, model_name
-    addProviderClicked = pyqtSignal()
-    configureProviderClicked = pyqtSignal()
+    stickyProviderChanged = pyqtSignal(str)  # 滚动时正在吸顶的服务商名（空字符串=无）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -143,6 +141,7 @@ class ModelSelectorCardContent(QWidget):
         self._all_model_items: List[Tuple[ModelItem, str, str]] = []
         self._active_model_item: Optional[ModelItem] = None
         self._provider_headers: List[Tuple[QWidget, str]] = []  # (header_widget, provider_name)
+        self._search_text = ""  # 搜索过滤文本，由标题栏搜索框设置
         self._setup_ui()
 
     def _setup_ui(self):
@@ -150,67 +149,6 @@ class ModelSelectorCardContent(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
-        # 搜索框 + 操作按钮区域
-        search_layout = QHBoxLayout()
-        search_layout.setContentsMargins(4, 0, 4, 0)
-        search_layout.setSpacing(4)
-
-        self.search_edit = QLineEdit(self)
-        self.search_edit.setPlaceholderText("搜索模型...")
-        self.search_edit.setClearButtonEnabled(True)
-        self._apply_search_style()
-        self.search_edit.textChanged.connect(self._on_search_changed)
-        search_layout.addWidget(self.search_edit, 1)
-
-        # 添加服务商按钮
-        self.add_provider_btn = TransparentToolButton(FluentIcon.ADD, self)
-        self.add_provider_btn.setFixedSize(28, 28)
-        self.add_provider_btn.setToolTip("添加服务商")
-        self.add_provider_btn.clicked.connect(lambda: self.addProviderClicked.emit())
-        search_layout.addWidget(self.add_provider_btn)
-
-        # 配置服务商按钮
-        self.config_provider_btn = TransparentToolButton(get_icon("配置管理"), self)
-        self.config_provider_btn.setFixedSize(28, 28)
-        self.config_provider_btn.setToolTip("配置服务商")
-        self.config_provider_btn.clicked.connect(lambda: self.configureProviderClicked.emit())
-        search_layout.addWidget(self.config_provider_btn)
-
-        layout.addLayout(search_layout)
-
-        # 分隔线
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet(f"background-color: {Colors.BORDER}; max-height: 1px; margin: 4px 0;")
-        layout.addWidget(separator)
-
-        # 吸顶服务商标签（初始隐藏，滚动时在顶部显示当前服务商）
-        self._sticky_header = QFrame(self)
-        self._sticky_header.setFixedHeight(36)
-        self._sticky_header.setVisible(False)
-        self._sticky_header.setStyleSheet(f"""
-            QFrame {{
-                background: {Colors.CONTENT_BG};
-                border: none;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-        """)
-        sticky_layout = QHBoxLayout(self._sticky_header)
-        sticky_layout.setContentsMargins(10, 0, 8, 0)
-        sticky_layout.setSpacing(8)
-        self._sticky_icon = QLabel("", self._sticky_header)
-        self._sticky_icon.setFixedSize(20, 20)
-        self._sticky_icon.setStyleSheet("background: transparent; border: none;")
-        self._sticky_icon.setAlignment(Qt.AlignCenter)
-        sticky_layout.addWidget(self._sticky_icon)
-        self._sticky_label = QLabel("", self._sticky_header)
-        self._sticky_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold; background: transparent;"
-        )
-        sticky_layout.addWidget(self._sticky_label)
-        sticky_layout.addStretch(1)
-        layout.addWidget(self._sticky_header)
 
         # 滚动区域
         self.scroll_area = QScrollArea(self)
@@ -264,6 +202,10 @@ class ModelSelectorCardContent(QWidget):
 
     # ── 公有方法 ──────────────────────────────────────
 
+    def set_search_filter(self, text: str):
+        """外部设置搜索过滤文本（由标题栏搜索框调用）"""
+        self._on_search_changed(text)
+
     def set_providers_data(
         self,
         provider_models: List[Tuple[str, List[str], bool]],  # (provider, [models], is_current_provider)
@@ -289,7 +231,7 @@ class ModelSelectorCardContent(QWidget):
             elif item.layout():
                 self._clear_layout(item.layout())
 
-        search_text = self.search_edit.text().strip().lower()
+        search_text = self._search_text
 
         for provider_name, models, is_current_provider in provider_models:
             # 过滤
@@ -341,18 +283,10 @@ class ModelSelectorCardContent(QWidget):
     def refresh_style(self):
         """刷新主题样式"""
         Colors.refresh()
-        self._apply_search_style()
         self.content_widget.setStyleSheet("background: transparent;")
-        self._sticky_header.setStyleSheet(f"""
-            QFrame {{
-                background: {Colors.CONTENT_BG};
-                border: none;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-        """)
-        self._sticky_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold; background: transparent;"
-        )
+        # 重新触发射信号，让标题栏标签更新颜色
+        scroll_pos = self.scroll_area.verticalScrollBar().value()
+        self._on_scroll(scroll_pos)
 
     # ── 内部方法 ──────────────────────────────────────
 
@@ -379,9 +313,9 @@ class ModelSelectorCardContent(QWidget):
         self._update_sticky_header()
 
     def _update_sticky_header(self):
-        """根据当前滚动位置，更新吸顶服务商显示"""
+        """根据当前滚动位置，发射当前吸顶服务商名称"""
         if not self._provider_headers:
-            self._sticky_header.setVisible(False)
+            self.stickyProviderChanged.emit("")
             return
 
         scroll_pos = self.scroll_area.verticalScrollBar().value()
@@ -394,64 +328,11 @@ class ModelSelectorCardContent(QWidget):
             else:
                 break
 
-        if sticky_name:
-            self._sticky_header.setVisible(True)
-            self._sticky_label.setText(sticky_name)
-            # 更新图标 - 从这里直接获取 ProviderIconWidget 方式显示
-            from app.constants import PROVIDER_ICONS
-            icon_name = PROVIDER_ICONS.get(sticky_name, "大模型")
-            from app.utils.utils import get_icon
-            icon = get_icon(icon_name)
-            if icon:
-                pixmap = icon.pixmap(20, 20)
-                self._sticky_icon.setPixmap(pixmap)
-            else:
-                # 取首字作为文字图标
-                text = sticky_name[0] if sticky_name else "?"
-                self._sticky_icon.setText(text)
-                Colors.refresh()
-                self._sticky_icon.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; font-weight: bold; {font_size_css(14)};")
-            self._sticky_icon.setToolTip(sticky_name)
-        else:
-            self._sticky_header.setVisible(False)
-
-    def _apply_search_style(self):
-        """应用搜索框样式（动态从 Colors 读取）"""
-        Colors.refresh()
-        self.search_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {Colors.CONTENT_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 6px;
-                padding: 6px 10px;
-                selection-background-color: {Colors.BORDER_ACCENT};
-                selection-color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(13)};
-            }}
-            QLineEdit:focus {{
-                border-color: {Colors.BORDER_ACCENT};
-                background-color: {Colors.CONTENT_BG};
-            }}
-            QLineEdit::placeholder {{
-                color: {Colors.TEXT_MUTED};
-            }}
-            QLineEdit::text {{
-                background-color: transparent;
-            }}
-            QLineEdit QToolButton {{
-                background-color: transparent;
-                border: none;
-                padding: 2px;
-            }}
-            QLineEdit QToolButton:hover {{
-                background-color: {Colors.HOVER_BG};
-                border-radius: 3px;
-            }}
-        """)
+        self.stickyProviderChanged.emit(sticky_name or "")
 
     def _on_search_changed(self, text: str):
         """搜索文本变化时刷新列表"""
+        self._search_text = text.strip().lower()
         provider_models_with_flag = []
         for prov, models in self._provider_models:
             is_cur = prov == self._current_provider

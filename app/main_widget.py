@@ -110,6 +110,7 @@ from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
 )
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
+from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.context_usage_ring import (
     ContextUsageRing,
@@ -283,7 +284,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._handle_tool_start_ui_sync, type=Qt.BlockingQueuedConnection
         )
         self._is_streaming = False
-        self._topic_summary_cancelled = False  # 🛡️ 标题生成取消标记
+        self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
         # 使用 try-except 保护 homepage 操作，防止 C++ 对象已删除错误
         try:
@@ -295,7 +296,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._window_active = False
         except Exception:
             self._window_active = False
-        # 问题修复：初始化未定义的属性
+        # 初始化属性
         self._pending_permission_tool_call_id: Optional[str] = None
         self._question_tool_call_id: Optional[str] = None
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
@@ -1282,16 +1283,30 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
         # 模型选择卡片（底部卡片形式）
-        self._model_selector_card = BaseSettingsCard("模型选择", "🤖", self)
+        self._model_selector_card = BaseSettingsCard("", "", self)
         self._model_selector_card.setFixedHeight(350)
         self._model_selector_card_content = ModelSelectorCardContent()
         self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
-        self._model_selector_card_content.addProviderClicked.connect(
-            lambda: self._on_add_provider_from_card()
+        # 吸顶服务商名称：滚动到哪个服务商区域，标题就显示那个服务商名
+        self._model_selector_card_content.stickyProviderChanged.connect(
+            self._on_sticky_provider_changed
         )
-        self._model_selector_card_content.configureProviderClicked.connect(
-            lambda: self._on_configure_providers_from_card()
+
+        # 搜索框移到标题栏
+        self._model_selector_card.set_search_handler(
+            "搜索模型...",
+            self._model_selector_card_content.set_search_filter,
         )
+        # 操作按钮移到标题栏
+        from qfluentwidgets import FluentIcon
+        from app.utils.utils import get_icon
+        self._model_selector_card.add_header_button(
+            FluentIcon.ADD, "添加服务商", self._on_add_provider_from_card,
+        )
+        self._model_selector_card.add_header_button(
+            get_icon("配置管理"), "配置服务商", self._on_configure_providers_from_card,
+        )
+
         self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
         self._model_selector_card.setVisible(False)
         self._model_selector_card.closed.connect(lambda: (self._card_manager.hide_card("model_selector", self._window_id), self._restore_after_system_close()))
@@ -1697,6 +1712,33 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_selector_card_content.set_providers_data(
             provider_models_data, self._current_provider_name or "", self._current_model_name or "",
         )
+
+        # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"
+        self._update_model_selector_header()
+
+    def _update_model_selector_header(self):
+        """根据当前服务商/模型状态，更新模型选择卡片的头部（图标 + 初始标题）"""
+        if self._current_provider_name:
+            # 有服务商：显示服务商图标 + 当前服务商名（吸顶滚动时会被 _on_sticky_provider_changed 覆盖）
+            icon_widget = ProviderIconWidget(self._current_provider_name, 20)
+            self._model_selector_card.set_icon_widget(icon_widget)
+            self._model_selector_card.set_title_text(self._current_provider_name)
+        else:
+            # 无服务商：显示默认图标 + "模型选择"
+            self._model_selector_card.set_icon("🤖")
+            self._model_selector_card.set_title_text("模型选择")
+
+    def _on_sticky_provider_changed(self, provider_name: str):
+        """滚动时吸顶服务商变化，更新标题栏显示当前服务商名和图标"""
+        if provider_name:
+            self._model_selector_card.set_title_text(provider_name)
+            icon_widget = ProviderIconWidget(provider_name, 20)
+            self._model_selector_card.set_icon_widget(icon_widget)
+        elif self._current_provider_name:
+            # 滚到顶部时恢复显示当前选中的服务商
+            self._model_selector_card.set_title_text(self._current_provider_name)
+            icon_widget = ProviderIconWidget(self._current_provider_name, 20)
+            self._model_selector_card.set_icon_widget(icon_widget)
 
     def _on_add_provider_from_card(self):
         """从模型选择卡片点击「添加」按钮 - 显示添加服务商卡片"""
@@ -2798,6 +2840,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新模型选择卡片和项目弹窗主题
         if hasattr(self, '_model_selector_card_content') and self._model_selector_card_content:
             self._model_selector_card_content.refresh_style()
+        if hasattr(self, '_model_selector_card'):
+            self._model_selector_card.refresh_style()
+            self._update_model_selector_header()
         if hasattr(self, '_project_selector_popup') and self._project_selector_popup:
             self._project_selector_popup.refresh_style()
         # 刷新记忆卡片主题
