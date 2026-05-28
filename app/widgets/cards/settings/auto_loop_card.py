@@ -24,7 +24,7 @@ from qfluentwidgets.components.widgets.flyout import IconWidget
 
 from app.core.engines.auto_loop import AutoLoopConfig
 from app.utils.utils import get_font_family_css, get_icon
-from app.utils.design_tokens import font_size_css, scale_font_size
+from app.utils.design_tokens import font_size_css, scale_font_size, Colors
 
 FONT_CSS = get_font_family_css()
 
@@ -53,15 +53,16 @@ class AutoLoopConfigCard(QFrame):
 
     def _refresh_component_styles(self):
         """刷新内部组件样式"""
+        Colors.refresh()
         # 刷新 BodyLabel 字体大小
         for label in self.findChildren(BodyLabel):
-            label.setStyleSheet(f"color: #B4C2D9; {FONT_CSS} font-size: {scale_font_size(14)}px;")
+            label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {FONT_CSS} font-size: {scale_font_size(14)}px;")
         # 刷新按钮
         self._start_btn.setStyleSheet(f"""
             PrimaryPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #C9A85C, stop:1 #B8956A);
-                color: #1A1F2B;
+                    stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
+                color: {Colors.BUTTON_TEXT_ON_ACCENT};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 14px;
@@ -70,7 +71,7 @@ class AutoLoopConfigCard(QFrame):
             }}
             PrimaryPushButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #D4B878, stop:1 #C9A060);
+                    stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
             }}
         """)
         self._iteration_spin.setStyleSheet(self._spin_style())
@@ -88,12 +89,13 @@ class AutoLoopConfigCard(QFrame):
                 {FONT_CSS} font-size: {scale_font_size(13)}px;
             }}
             QTextEdit:focus {{
-                border: 1px solid #C9A85C;
+                border: 1px solid {Colors.INPUT_FOCUS_BORDER};
             }}
         """)
         # 刷新标题
+        Colors.refresh()
         for label in self.findChildren(StrongBodyLabel):
-            label.setStyleSheet(f"color: #EAF2FF; font-size: {scale_font_size(14)}px; {FONT_CSS}")
+            label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(14)}px; {FONT_CSS}")
 
     def _refresh_theme_style(self):
         """刷新主题色，响应全局主题切换"""
@@ -122,8 +124,9 @@ class AutoLoopConfigCard(QFrame):
         icon_label.setFixedSize(28, 28)
         title_layout.addWidget(icon_label)
         title_layout.addSpacing(6)
+        Colors.refresh()
         title = StrongBodyLabel("AutoLoop 自动循环")
-        title.setStyleSheet(f"color: #EAF2FF; {font_size_css(14)} {FONT_CSS}")
+        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(14)} {FONT_CSS}")
         title_layout.addWidget(title)
         title_layout.addStretch()
 
@@ -131,8 +134,8 @@ class AutoLoopConfigCard(QFrame):
         self._start_btn.setStyleSheet(f"""
             PrimaryPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #C9A85C, stop:1 #B8956A);
-                color: #1A1F2B;
+                    stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
+                color: {Colors.BUTTON_TEXT_ON_ACCENT};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 14px;
@@ -141,7 +144,7 @@ class AutoLoopConfigCard(QFrame):
             }}
             PrimaryPushButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #D4B878, stop:1 #C9A060);
+                    stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
             }}
         """)
         self._start_btn.clicked.connect(self._on_start)
@@ -226,17 +229,18 @@ class AutoLoopConfigCard(QFrame):
         self._prompt_edit = QTextEdit()
         self._prompt_edit.setPlaceholderText("📝 描述 AutoLoop 要完成的任务...")
         self._prompt_edit.setMinimumHeight(40)
+        Colors.refresh()
         self._prompt_edit.setStyleSheet(f"""
             QTextEdit {{
-                background: rgba(255, 255, 255, 0.05);
-                color: #EAF2FF;
-                border: 1px solid rgba(255, 255, 255, 0.12);
+                background: {Colors.TOOLBAR_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 padding: 6px 10px;
                 {FONT_CSS} {font_size_css(13)}
             }}
             QTextEdit:focus {{
-                border: 1px solid #C9A85C;
+                border: 1px solid {Colors.INPUT_FOCUS_BORDER};
             }}
         """)
         layout.addWidget(self._prompt_edit)
@@ -263,32 +267,34 @@ class AutoLoopConfigCard(QFrame):
             self._path_edit.setText(folder)
 
     def _spin_style(self) -> str:
+        Colors.refresh()
         return f"""
             SpinBox {{
-                background: rgba(255, 255, 255, 0.05);
-                color: #EAF2FF;
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: {Colors.TOOLBAR_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px 8px;
                 {FONT_CSS} {font_size_css(13)}
             }}
             SpinBox:focus {{
-                border-color: #C9A85C;
+                border-color: {Colors.INPUT_FOCUS_BORDER};
             }}
         """
 
     def _line_style(self) -> str:
+        Colors.refresh()
         return f"""
             LineEdit {{
-                background: rgba(255, 255, 255, 0.05);
-                color: #EAF2FF;
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: {Colors.TOOLBAR_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 6px 8px;
                 {FONT_CSS} {font_size_css(13)}
             }}
             LineEdit:focus {{
-                border-color: #C9A85C;
+                border-color: {Colors.INPUT_FOCUS_BORDER};
             }}
         """
 
@@ -318,13 +324,14 @@ class AutoLoopConfigCard(QFrame):
                 font-weight: bold;
             }}
             PushButton:hover {{
-                background: rgba(255, 60, 60, 1.0);
+                background: {Colors.ERROR};
             }}
         """)
+        Colors.refresh()
         # 刷新任务标签
         if hasattr(self, '_task_label'):
             self._task_label.setStyleSheet(f"""
-                color: #9BB0D3;
+                color: {Colors.TEXT_MUTED};
                 font-size: {scale_font_size(12)}px;
                 {FONT_CSS}
                 padding: 4px 8px;
@@ -337,12 +344,14 @@ class AutoLoopConfigCard(QFrame):
             if hasattr(self, label.property('objectName')) or hasattr(label, 'setStyleSheet'):
                 label.setStyleSheet(f"font-size: {scale_font_size(13)}px; {FONT_CSS}")
         # 刷新 Token 百分比标签
+        Colors.refresh()
         if self._token_percent_label:
-            self._token_percent_label.setStyleSheet(f"color: #7FDBFF; font-size: {scale_font_size(12)}px; {FONT_CSS}")
+            self._token_percent_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; font-size: {scale_font_size(12)}px; {FONT_CSS}")
         # 刷新日志标签
+        Colors.refresh()
         if hasattr(self, '_log_label'):
             self._log_label.setStyleSheet(f"""
-                color: #7A9BBF;
+                color: {Colors.TEXT_MUTED};
                 font-size: {scale_font_size(11)}px;
                 {FONT_CSS}
                 padding: 3px 6px;
@@ -359,6 +368,7 @@ class AutoLoopRunningCard(QFrame):
     """AutoLoop 运行状态卡 — 彩虹渐变边框 + 进度 + 停止按钮"""
 
     stopRequested = pyqtSignal()
+    archiveRequested = pyqtSignal()  # 归档按钮点击
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -413,15 +423,17 @@ class AutoLoopRunningCard(QFrame):
         icon_label = QLabel("🤖")
         icon_label.setStyleSheet(font_size_css(18))
         title_bar.addWidget(icon_label)
+        Colors.refresh()
         title = QLabel("AutoLoop 运行中")
-        title.setStyleSheet(f"color: #EAF2FF; {font_size_css(14)} font-weight: bold; {FONT_CSS}")
+        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(14)} font-weight: bold; {FONT_CSS}")
         title_bar.addWidget(title)
         title_bar.addStretch()
-        self._stop_btn = PushButton("⏹ 停止")
-        self._stop_btn.setFixedSize(70, 26)
-        self._stop_btn.setStyleSheet(f"""
+        self._archive_btn = PushButton("📦 归档")
+        self._archive_btn.setFixedSize(70, 26)
+        Colors.refresh()
+        self._archive_btn.setStyleSheet(f"""
             PushButton {{
-                background: rgba(255, 80, 80, 0.8);
+                background: {Colors.STATUS_ARCHIVE_BG};
                 color: white;
                 border: none;
                 border-radius: 6px;
@@ -429,7 +441,25 @@ class AutoLoopRunningCard(QFrame):
                 font-weight: bold;
             }}
             PushButton:hover {{
-                background: rgba(255, 60, 60, 1.0);
+                background: {Colors.STATUS_ARCHIVE_BG};
+            }}
+        """)
+        self._archive_btn.clicked.connect(self.archiveRequested.emit)
+        title_bar.addWidget(self._archive_btn)
+        self._stop_btn = PushButton("⏹ 停止")
+        self._stop_btn.setFixedSize(70, 26)
+        Colors.refresh()
+        self._stop_btn.setStyleSheet(f"""
+            PushButton {{
+                background: {Colors.STATUS_DANGER_BG};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                {FONT_CSS} {font_size_css(12)}
+                font-weight: bold;
+            }}
+            PushButton:hover {{
+                background: {Colors.ERROR};
             }}
         """)
         self._stop_btn.clicked.connect(self.stopRequested.emit)
@@ -438,8 +468,9 @@ class AutoLoopRunningCard(QFrame):
 
         # ---- 任务目标（显示任务描述前60字）----
         self._task_label = QLabel("")
+        Colors.refresh()
         self._task_label.setStyleSheet(f"""
-            color: #9BB0D3;
+            color: {Colors.TEXT_MUTED};
             {font_size_css(12)}
             {FONT_CSS}
             padding: 4px 8px;
@@ -451,7 +482,7 @@ class AutoLoopRunningCard(QFrame):
 
         # ---- 信息区（两行布局）----
         self._status_widget = QWidget()
-        self._status_widget.setStyleSheet("background: rgba(0,0,0,0.1); border-radius: 6px;")
+        self._status_widget.setStyleSheet("background: rgba(0,0,0,0.1); border-radius: 6px;")  # fallback kept
         status_layout = QVBoxLayout(self._status_widget)
         status_layout.setContentsMargins(12, 10, 12, 10)
         status_layout.setSpacing(8)
@@ -467,7 +498,8 @@ class AutoLoopRunningCard(QFrame):
         iter_layout.setSpacing(6)
         iter_layout.addWidget(QLabel("📚"))
         self._iter_label = QLabel("0 / 0")
-        self._iter_label.setStyleSheet(f"color: #C9A85C; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        Colors.refresh()
+        self._iter_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
         iter_layout.addWidget(self._iter_label)
         row1.addWidget(iter_w)
 
@@ -478,7 +510,8 @@ class AutoLoopRunningCard(QFrame):
         time_layout.setSpacing(6)
         time_layout.addWidget(QLabel("⏱"))
         self._time_label = QLabel("0秒")
-        self._time_label.setStyleSheet(f"color: #7FDBFF; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        Colors.refresh()
+        self._time_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
         time_layout.addWidget(self._time_label)
         row1.addWidget(time_w)
 
@@ -489,7 +522,8 @@ class AutoLoopRunningCard(QFrame):
         token_layout.setSpacing(8)
         token_layout.addWidget(QLabel("🔢"))
         self._token_label = QLabel("0 / 500K")
-        self._token_label.setStyleSheet(f"color: #A7F3D0; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        Colors.refresh()
+        self._token_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
         token_layout.addWidget(self._token_label)
         self._token_progress = QProgressBar()
         self._token_progress.setRange(0, 100)
@@ -497,17 +531,18 @@ class AutoLoopRunningCard(QFrame):
         self._token_progress.setTextVisible(False)
         self._token_progress.setFixedHeight(8)
         self._token_progress.setMinimumWidth(100)
-        self._token_progress.setStyleSheet("""
-            QProgressBar {
+        Colors.refresh()
+        self._token_progress.setStyleSheet(f"""
+            QProgressBar {{
                 background: rgba(255, 255, 255, 0.1);
                 border-radius: 4px;
                 border: none;
-            }
-            QProgressBar::chunk {
+            }}
+            QProgressBar::chunk {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #10B981, stop:1 #34D399);
+                    stop:0 {Colors.REALTIME_SUCCESS}, stop:1 {Colors.REALTIME_SUCCESS});
                 border-radius: 4px;
-            }
+            }}
         """)
         token_layout.addWidget(self._token_progress)
         self._token_percent_label = QLabel("0%")
@@ -528,7 +563,8 @@ class AutoLoopRunningCard(QFrame):
         status_layout2.setSpacing(6)
         status_layout2.addWidget(QLabel("📊"))
         self._status_label = QLabel("▶ 准备中...")
-        self._status_label.setStyleSheet(f"color: #E5E7EB; {font_size_css(13)} {FONT_CSS}")
+        Colors.refresh()
+        self._status_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} {FONT_CSS}")
         status_layout2.addWidget(self._status_label)
         row2.addWidget(status_w)
 
@@ -538,7 +574,8 @@ class AutoLoopRunningCard(QFrame):
         phase_layout.setSpacing(6)
         phase_layout.addWidget(QLabel("🎯"))
         self._phase_label = QLabel("待开始")
-        self._phase_label.setStyleSheet(f"color: #C9A85C; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        Colors.refresh()
+        self._phase_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
         phase_layout.addWidget(self._phase_label)
         row2.addWidget(phase_w)
 
@@ -549,7 +586,8 @@ class AutoLoopRunningCard(QFrame):
         step_layout.setSpacing(6)
         step_layout.addWidget(QLabel("🔹"))
         self._step_label = QLabel("步骤 - / -")
-        self._step_label.setStyleSheet(f"color: #A7F3D0; {font_size_css(13)} {FONT_CSS}")
+        Colors.refresh()
+        self._step_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; {font_size_css(13)} {FONT_CSS}")
         step_layout.addWidget(self._step_label)
         row2.addWidget(step_w)
 
@@ -608,9 +646,10 @@ class AutoLoopRunningCard(QFrame):
         self._timer.start()
         # 重置 token 累加（每轮新的循环从零开始）
         self._current_tokens = 0
-        # 确保停止按钮可见（修复完成后重新运行时停止按钮消失的问题）
+        # 确保所有按钮可见
+        self._archive_btn.show()
         self._stop_btn.show()
-        # 强制更新UI，确保按钮显示
+        self._archive_btn.update()
         self._stop_btn.update()
         self.update()
 
@@ -652,17 +691,20 @@ class AutoLoopRunningCard(QFrame):
         phase_text = {
             "planning": "📋 规划中",
             "executing": "🔨 执行中",
+            "archiving": "📦 归档中",
             "completed": "✅ 已完成",
         }.get(phase, "未知")
         self._phase_label.setText(phase_text)
         
         # 根据阶段调整颜色
+        Colors.refresh()
         color_map = {
-            "planning": "#7FDBFF",  # 蓝色
-            "executing": "#C9A85C",  # 金色
-            "completed": "#10B981",  # 绿色
+            "planning": Colors.STATUS_INFO,
+            "executing": Colors.SEND_BTN_START,
+            "archiving": Colors.STATUS_ARCHIVE_BG,
+            "completed": Colors.REALTIME_SUCCESS,
         }
-        color = color_map.get(phase, "#C9A85C")
+        color = color_map.get(phase, Colors.SEND_BTN_START)
         self._phase_label.setStyleSheet(f"color: {color}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
         
         # 阶段变更时更新状态文本
@@ -670,6 +712,8 @@ class AutoLoopRunningCard(QFrame):
             self._status_label.setText("▶ 拆解任务中...")
         elif phase == "executing":
             self._status_label.setText("▶ 执行中...")
+        elif phase == "archiving":
+            self._status_label.setText("📦 归档清理中...")
         elif phase == "completed":
             self._status_label.setText("✅ 全部完成")
         
@@ -698,6 +742,7 @@ class AutoLoopRunningCard(QFrame):
         phase_text = {
             "planning": "📋 规划中",
             "executing": "⚡ 执行中",
+            "archiving": "📦 归档中",
             "completed": "✅ 已完成",
         }
         if phase in phase_text:
@@ -756,10 +801,20 @@ class AutoLoopRunningCard(QFrame):
         """隐藏停止按钮"""
         self._stop_btn.hide()
 
+    def show_archive_button(self):
+        """显示归档按钮"""
+        self._archive_btn.show()
+        self._archive_btn.update()
+
+    def hide_archive_button(self):
+        """隐藏归档按钮"""
+        self._archive_btn.hide()
+
     def show_completed(self, message: str):
         """显示完成状态"""
         self._status_label.setText(f"✅ {message}")
         self.stop_animation()
+        self._archive_btn.hide()
         self._stop_btn.hide()
         self.update()
 

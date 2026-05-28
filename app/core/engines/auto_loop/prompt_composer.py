@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 AutoLoop Prompt 组合器 — 集中管理所有 prompt 模板
+
+三阶段：Planning → Executing → Archiving
 """
 import re
 import time
@@ -48,7 +50,58 @@ EXECUTING_CONSTRAINT = """
 6. 在文档末尾**追加**本轮操作记录（包括改动文件、验证命令、验证结果）
 7. STOP！到此为止，等待下一轮
 
+⚠️ **完成信号重要规则**：
+输出 `{completion_signal}` 表示**所有步骤都完成**。但注意：
+- 必须**连续 3 次都输出 `{completion_signal}`**，循环才会真正结束
+- 只输出一次不会结束，下一轮会收到「还需 X 次确认」的提示
+- 如果尚未完成所有步骤，不要输出 `{completion_signal}`
+
 约束来源：两阶段强制约束设计 (2026-05-16)
+"""
+
+ARCHIVING_CONSTRAINT = """
+🕒 当前系统时间：{current_time}
+
+🔒 【当前阶段强制约束 - 归档阶段】
+
+任务执行已经完成！你现在进入**归档阶段**，职责是：
+
+1. **清理垃圾文件**：删除临时文件、缓存文件等不需要保留的内容
+2. **归档笔记**：
+   - 将 `SHARED_TASK_NOTES.md` 复制到 `.autoloop/archive/latest/SHARED_TASK_NOTES.md`
+   - 创建 `.autoloop/archive/latest/` 目录（如果不存在）
+3. **归档运行日志**：
+   - 将 `.autoloop/logs/` 下的所有 `round_*.md` 文件复制到 `.autoloop/archive/latest/logs/`
+   - 创建 `.autoloop/archive/latest/logs/` 目录（如果不存在）
+4. **创建归档索引**：写入 `.autoloop/archive/latest/META.md`，格式：
+   ```markdown
+   # AutoLoop 执行归档
+   - 任务: <原始任务描述前100字>
+   - 完成时间: <当前时间>
+   - 总步骤数: <N>
+   - 已完成步骤: <N>
+   - 轮次数: <总轮次数>
+   ```
+5. 在响应末尾输出 `ARCHIVE_COMPLETE`（独占一行）
+
+注意：归档阶段**不允许**修改项目代码文件。只做清理和归档操作。
+""".strip()
+
+# 规划阶段 - 归档参考上下文
+ARCHIVE_REFERENCE_CONTEXT = """
+📂 **发现之前有 AutoLoop 归档记录**
+以下是上次执行的计划作为参考，请阅读后结合当前任务进行规划：
+
+---
+
+{archive_notes}
+
+---
+
+请参考以上历史执行记录来规划当前任务。你可以：
+- 复用合理的内容
+- 基于之前的经验优化步骤
+- 如果与当前任务无关，忽略即可
 """
 
 
@@ -68,7 +121,9 @@ class AutoLoopPromptComposer:
         """获取当前阶段的强制约束提示"""
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-        if self._engine.is_planning_phase():
+        if self._engine.is_archiving_phase():
+            return ARCHIVING_CONSTRAINT.format(current_time=current_time)
+        elif self._engine.is_planning_phase():
             return PLANNING_CONSTRAINT.format(current_time=current_time)
         else:
             # 使用 display_step（笔记推导值），不直接用 _current_step（内部追踪值）
@@ -77,6 +132,7 @@ class AutoLoopPromptComposer:
                 current_time=current_time,
                 current=step,
                 total=self._engine.total_steps,
+                completion_signal=self._engine.config.completion_signal,
             )
 
     # ========== 工作流上下文 ==========
@@ -85,8 +141,11 @@ class AutoLoopPromptComposer:
                                force_update: bool = False) -> str:
         """根据当前阶段构建工作流上下文"""
         is_planning = self._engine.is_planning_phase()
+        is_archiving = self._engine.is_archiving_phase()
 
-        if is_planning:
+        if is_archiving:
+            lines = self._archiving_context()
+        elif is_planning:
             lines = self._planning_context()
         else:
             lines = self._executing_context()
@@ -110,7 +169,7 @@ class AutoLoopPromptComposer:
                 f"  - read(path='src/main.py')    → 读取 {project_path}/src/main.py",
             ])
 
-        if not is_planning:
+        if not is_planning and not is_archiving:
             notes = self._engine.read_shared_notes()
             if notes:
                 lines.extend([
@@ -182,19 +241,54 @@ class AutoLoopPromptComposer:
         if stage_constraint:
             workflow_context = stage_constraint + "\n\n" + workflow_context
 
-        incremental_summary = self._engine.get_incremental_summary()
-        if incremental_summary:
-            workflow_context = workflow_context + incremental_summary
+        # 归档阶段不需要增量摘要
+        if not self._engine.is_archiving_phase():
+            incremental_summary = self._engine.get_incremental_summary()
+            if incremental_summary:
+                workflow_context = workflow_context + incremental_summary
+
+        # 完成信号反馈（执行阶段）
+        completion_feedback = self.get_completion_feedback()
+        if completion_feedback:
+            workflow_context = workflow_context + completion_feedback
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.append({"role": "user", "content": task_prompt + "\n\n" + workflow_context})
         return messages
 
+    # ========== 完成信号反馈 ==========
+
+    def get_completion_feedback(self) -> str:
+        """获取完成信号反馈文本
+
+        当模型输出了 MISSION_COMPLETE 但尚未达到阈值时，
+        注入反馈告诉模型还差几次。
+        """
+        if not self._engine.is_executing_phase():
+            return ""
+
+        count = self._engine.get_completion_count()
+        threshold = self._engine.config.completion_threshold
+
+        if 0 < count < threshold:
+            remaining = threshold - count
+            return f"""
+
+## ⚠️ 完成信号确认进度
+
+你之前输出了 `{self._engine.config.completion_signal}`（已确认 {count}/{threshold} 次）。
+还需要**连续 {remaining} 次**都输出 `{self._engine.config.completion_signal}` 才会真正结束。
+
+如果确实所有步骤都完成了，请继续输出 `{self._engine.config.completion_signal}`（独占一行）。
+如果还有步骤没完成，继续执行即可。
+"""
+        return ""
+
     # ========== 私有：阶段上下文模板 ==========
 
     def _planning_context(self) -> list:
         """规划阶段上下文模板"""
-        return [
+        lines = [
             "## 🚀 PHASE 1: TASK PLANNING",
             "",
             "你正处于**任务规划阶段**。你的职责是将复杂任务拆解为可验证的步骤。",
@@ -246,6 +340,16 @@ class AutoLoopPromptComposer:
             "- `## 任务概述` 和 `## 执行计划` 一旦写入，进入执行阶段后将被锁定保护，**禁止修改**，执行阶段只能更新 `## 当前状态` 和追加步骤结果",
         ]
 
+        # 检查是否有归档文件，有则作为参考注入
+        archive_notes = self._engine.read_archive_notes()
+        if archive_notes:
+            lines.extend([
+                "",
+                ARCHIVE_REFERENCE_CONTEXT.format(archive_notes=archive_notes[:2000]),
+            ])
+
+        return lines
+
     def _executing_context(self) -> list:
         """执行阶段上下文模板"""
         # 使用 display_step（笔记推导值），不直接用 _current_step（内部追踪值）
@@ -283,7 +387,9 @@ class AutoLoopPromptComposer:
             "",
             "### 完成信号",
             f"- **当前步骤完成** → 输出 `STEP_X/Y_COMPLETE`（X=当前步骤序号, Y=总步骤数，数字可任意调整）",
-            f"- **全部步骤完成** → 输出 `{self._engine.config.completion_signal}`（独占一行，连续出现 {self._engine.config.completion_threshold} 次后自动结束）",
+            f"- **全部步骤完成** → 输出 `{self._engine.config.completion_signal}`（独占一行）",
+            f"  ⚠️ **重要**：`{self._engine.config.completion_signal}` 必须**连续 {self._engine.config.completion_threshold} 次**都输出，",
+            f"    循环才会真正结束。只输出一次不会结束，系统会提示「还需确认次数」。",
             "",
             "### 当前步骤详情",
         ]
@@ -310,5 +416,42 @@ class AutoLoopPromptComposer:
                 lines.append(f"(未找到步骤 {current_step} 信息)")
         else:
             lines.append("(暂无笔记信息，请先读取 SHARED_TASK_NOTES.md)")
+
+        return lines
+
+    def _archiving_context(self) -> list:
+        """归档阶段上下文模板"""
+        iteration = self._engine.iteration
+        notes = self._engine.read_shared_notes()[:1500]
+
+        lines = [
+            "## 📦 PHASE 3: ARCHIVING",
+            "",
+            "所有任务步骤已执行完成！现在进入归档阶段。",
+            "",
+            "### 归档任务",
+            "",
+            "1. **清理垃圾文件**：删除临时文件、缓存等不需要的内容",
+            "2. **归档笔记**：",
+            f"   - 将 `SHARED_TASK_NOTES.md` 复制到 `.autoloop/archive/latest/SHARED_TASK_NOTES.md`",
+            f"   - 使用 `write` 工具创建该文件",
+            "3. **归档运行日志**：",
+            f"   - 将 `.autoloop/logs/` 下的所有 `round_*.md` 文件复制到 `.autoloop/archive/latest/logs/`",
+            f"   - 创建 `.autoloop/archive/latest/logs/` 目录（如果不存在）",
+            "4. **创建归档索引**：",
+            f"   - 写入 `.autoloop/archive/latest/META.md`，包含任务概述和时间",
+            "",
+            "### 当前 SHARED_TASK_NOTES.md 内容参考",
+            "```",
+            notes[:1000],
+            "```" if len(notes) <= 1000 else "...[已截断]",
+            "",
+            "### 完成信号",
+            "",
+            "归档完成后，在响应末尾输出（独占一行）：",
+            "```",
+            "ARCHIVE_COMPLETE",
+            "```",
+        ]
 
         return lines

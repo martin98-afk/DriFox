@@ -34,7 +34,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import InfoBar, InfoBarPosition
 
-from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes, font_size_css, scale_font_size
+from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes, CardStyles, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.floating.command_card import _ElidedLabel
 
@@ -42,36 +42,27 @@ from app.widgets.cards.floating.command_card import _ElidedLabel
 # 共用表单样式（白色标签 + 深色输入框）
 # ═══════════════════════════════════════════════════════════
 
-LABEL_STYLE = f"""
-color: #ffffff;
+def get_label_style() -> str:
+    """获取标签样式（响应主题）"""
+    Colors.refresh()
+    return f"""
+color: {Colors.TEXT_PRIMARY};
 font-weight: bold;
 {get_font_family_css()}
 {font_size_css(13)}
 """
 
-GATEWAY_EDIT_STYLE = f"""
-QWidget {{
-    background: transparent;
-}}
-QLineEdit {{
-    background-color: rgba(61, 61, 61, 180);
-    color: #ffffff;
-    border: 1px solid rgba(85, 85, 85, 150);
-    border-radius: 4px;
-    padding: 6px 10px;
-    {get_font_family_css()}
-    font-size: {scale_font_size(13)}px;
-}}
-QLineEdit:focus {{
-    border-color: rgba(0, 120, 212, 200);
-}}
-QLineEdit::placeholder {{
-    color: rgba(255, 255, 255, 0.35);
-}}
+def get_gateway_edit_style() -> str:
+    """获取网关输入框样式（响应主题，复用统一编辑样式）"""
+    return CardStyles.edit_card_style() + f"""
 QLabel {{
-    color: #ffffff;
+    color: {Colors.TEXT_PRIMARY};
 }}
 """
+
+# 兼容旧引用
+LABEL_STYLE = get_label_style()
+GATEWAY_EDIT_STYLE = get_gateway_edit_style()
 
 
 

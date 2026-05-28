@@ -109,6 +109,9 @@ from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
+from app.widgets.cards.floating.sub_agent_compact_widget import (
+    SubAgentCompactFloatingWidget,
+)
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards import CardManager, ContainerType, TopCardContainer, BottomCardContainer
 from app.widgets.cards.floating.todo_floating_widget import (
@@ -467,6 +470,9 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "sub_agent", self._sub_agent_floating_widget)
         self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
         
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "sub_agent_compact", self._sub_agent_compact_widget)
+        self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
+        
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True)
         self._bottom_card_container.add_card("history", self._history_card)
         
@@ -771,6 +777,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新子智能体悬浮框
         if hasattr(self, "_sub_agent_floating_widget") and self._sub_agent_floating_widget:
             self._sub_agent_floating_widget.set_opacity(opacity)
+        # 更新子智能体紧凑悬浮框
+        if hasattr(self, "_sub_agent_compact_widget") and self._sub_agent_compact_widget:
+            self._sub_agent_compact_widget.set_opacity(opacity)
         # 更新工具悬浮框
         if hasattr(self, "_tool_floating_widget") and self._tool_floating_widget:
             self._tool_floating_widget.set_opacity(opacity)
@@ -1011,8 +1020,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标题编辑（行内编辑模式）
         self.title_edit = TitleEditWidget("新对话", self)
         font_css = get_font_family_css()
+        Colors.refresh()
         title_style = f"""QLabel {{
-            color: #f3f6fc;
+            color: {Colors.TEXT_PRIMARY};
             {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
@@ -1021,10 +1031,10 @@ class OpenAIChatToolWindow(ToolWindow):
             {font_css}
         }}
         QLabel:hover {{
-            background-color: rgba(255, 255, 255, 0.06);
+            background-color: {Colors.HOVER_BG};
         }}
         QLineEdit {{
-            color: #f3f6fc;
+            color: {Colors.TEXT_PRIMARY};
             {font_size_css(15)}
             font-weight: bold;
             padding: 6px 4px;
@@ -1034,11 +1044,10 @@ class OpenAIChatToolWindow(ToolWindow):
             {font_css}
         }}
         QLineEdit:focus {{
-            background-color: rgba(255, 255, 255, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            background-color: {Colors.TOOLBAR_BG};
+            border: 1px solid {Colors.BORDER};
         }}
     """
-        title_style = title_style.replace("#f3f6fc", Colors.TEXT_PRIMARY)  # 跟随主题色
         self.title_edit.setStyleSheet(title_style)
         self.title_edit.returnPressed.connect(self._on_title_edit_finished)
         self.title_edit.editingFinished.connect(self._on_title_edit_finished)
@@ -1134,12 +1143,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_floating_widget = SubAgentFloatingWidget(self)
         self._sub_agent_floating_widget.setVisible(False)
 
+        self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
+        self._sub_agent_compact_widget.setVisible(False)
+        self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
+
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
 
-        # 下方卡片容器 - 添加 Tool 和 SubAgent
+        # 下方卡片容器 - 添加 Tool、SubAgentCompact 和 SubAgent(详细日志)
         self._bottom_card_container.add_card("tool", self._tool_floating_widget)
+        self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
         self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
 
         # 上方卡片容器 - 添加 Todo
@@ -1271,6 +1285,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # AutoLoop 运行卡片
         self._auto_loop_running_card = AutoLoopRunningCard()
         self._auto_loop_running_card.stopRequested.connect(self._on_auto_loop_stop)
+        self._auto_loop_running_card.archiveRequested.connect(self._on_auto_loop_archive)
         self._auto_loop_running_card.setVisible(False)
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
 
@@ -1338,8 +1353,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._command_card.setVisible(False)
         self.input_area.set_command_card(self._command_card)
         mgr = self._card_manager
-        # 命令卡片压制 tool 和 sub_agent
-        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card, suppress_others=["tool", "sub_agent"])
+        # 命令卡片压制 tool、sub_agent 和 sub_agent_compact
+        mgr.register_card(self._window_id, ContainerType.BOTTOM, "command", self._command_card, suppress_others=["tool", "sub_agent", "sub_agent_compact"])
         self._bottom_card_container.add_card("command", self._command_card)
 
         # 撤销删除卡片
@@ -1360,7 +1375,8 @@ class OpenAIChatToolWindow(ToolWindow):
         separator = QFrame(self._input_card)
         separator.setFrameShape(QFrame.HLine)
         separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background: rgba(255,255,255,0.06); border: none;")
+        Colors.refresh()
+        separator.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
         card_layout.addWidget(separator)
 
         # ===== 工具栏（卡片内部，分隔线下方）=====
@@ -1374,8 +1390,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型选择（无边框，只保留背景）
         self._model_btn_container = QWidget(toolbar_widget)
         self._model_btn_container.setFixedHeight(26)
+        Colors.refresh()
         self._model_btn_container.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
+            background: {Colors.TOOLBAR_BG};
             border: none;
             border-radius: 8px;
         """)
@@ -1417,8 +1434,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 右侧功能按钮组（无边框，间距加宽）
         self._toolbar_capsule = QWidget(toolbar_widget)
         self._toolbar_capsule.setFixedHeight(28)
+        Colors.refresh()
         self._toolbar_capsule.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
+            background: {Colors.TOOLBAR_BG};
             border: none;
             border-radius: 10px;
         """)
@@ -1426,9 +1444,10 @@ class OpenAIChatToolWindow(ToolWindow):
         capsule_layout.setContentsMargins(6, 2, 6, 2)
         capsule_layout.setSpacing(4)
 
-        btn_capsule_style = """
-            TransparentToolButton { background: transparent; border: none; }
-            TransparentToolButton:hover { background: rgba(255,255,255,0.12); border-radius: 5px; }
+        Colors.refresh()
+        btn_capsule_style = f"""
+            TransparentToolButton {{ background: transparent; border: none; }}
+            TransparentToolButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border-radius: 5px; }}
         """
 
         self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
@@ -1664,9 +1683,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_configure_providers_from_popup(self):
         """从模型选择弹窗点击「配置」按钮 - 显示设置卡片并展开服务商下拉"""
         self._model_selector_popup.close()
-        # 显示设置卡片
-        self._settings_popup.show()
-        self._settings_popup.raise_()
+        # 显示设置卡片（通过 CardManager 保证生命周期一致性，触发容器展开）
+        self._card_manager.show_card("settings", self._window_id)
         # 滚动设置卡片内容到顶部
         QTimer.singleShot(100, self._scroll_settings_to_top)
         # 展开服务商下拉
@@ -1974,6 +1992,8 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
+        # 新创建的 MCPEditCard 需要应用当前字体大小
+        apply_font_size_to_widget(self._mcp_edit_popup, 14)
         self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
@@ -1993,6 +2013,8 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda: self._mcp_edit_popup._on_save()
         )
         self._setup_mcp_edit_mode_buttons()
+        # 新创建的 MCPEditCard 需要应用当前字体大小
+        apply_font_size_to_widget(self._mcp_edit_popup, 14)
         self._card_manager.show_card("mcp_edit", self._window_id)
 
     def _setup_mcp_edit_mode_buttons(self):
@@ -2196,7 +2218,7 @@ class OpenAIChatToolWindow(ToolWindow):
         container = QWidget()
         container.setFixedHeight(26)
         container.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
+            background: {Colors.TOOLBAR_BG};
             border: none;
             border-radius: 8px;
         """)
@@ -2212,7 +2234,7 @@ class OpenAIChatToolWindow(ToolWindow):
             placeholder = QLabel("无可用智能体")
             placeholder.setStyleSheet(f"""
                 QLabel {{
-                    color: #8FA4C2;
+                    color: {Colors.CARD_PLACEHOLDER_TEXT};
                     font-size: 12px;
                     padding: 0 12px;
                     {get_font_family_css()}
@@ -2671,7 +2693,7 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         if hasattr(self, "_model_btn_container"):
             self._model_btn_container.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
@@ -2679,13 +2701,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         if hasattr(self, "_model_btn_container"):
             self._model_btn_container.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
         if hasattr(self, "_toolbar_capsule"):
             self._toolbar_capsule.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
@@ -2716,7 +2738,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_agent_switch_widget"):
             Colors.refresh()
             self._agent_switch_widget.setStyleSheet(f"""
-                background: rgba(255,255,255,0.05);
+                background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
@@ -2732,9 +2754,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_loop_config_card._refresh_theme_style()
         if self._auto_loop_running_card and hasattr(self._auto_loop_running_card, '_refresh_theme_style'):
             self._auto_loop_running_card._refresh_theme_style()
-        # 刷新实时卡片主题（todo/tool/question/sub_agent）
+        # 刷新实时卡片主题（todo/tool/question/sub_agent/compact）
         for card in (self._todo_floating_widget, self._tool_floating_widget,
-                     self._question_floating_widget, self._sub_agent_floating_widget):
+                     self._question_floating_widget, self._sub_agent_floating_widget,
+                     self._sub_agent_compact_widget):
             if card and hasattr(card, 'refresh_style'):
                 card.refresh_style()
         # 刷新消息卡片主题
@@ -2963,6 +2986,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._sub_agent_floating_widget:
             self._sub_agent_floating_widget.setVisible(False)
+        if self._sub_agent_compact_widget:
+            self._sub_agent_compact_widget.clear()
+            self._sub_agent_compact_widget.setVisible(False)
 
         try:
             self._auto_save_current_session()
@@ -5871,25 +5897,46 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("tool", self._window_id)
         self._tool_floating_widget.start_tool(tool_name, arguments)
 
+    def _on_sub_agent_compact_closed(self):
+        """子智能体紧凑卡片关闭时清理状态"""
+        if hasattr(self, '_sub_agent_compact_widget'):
+            self._sub_agent_compact_widget._batch_started = False
+
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
-        """子智能体任务启动（通过 SubAgentManager 信号触发）"""
+        """子智能体任务启动（通过 SubAgentManager 信号触发）
+
+        策略：
+        - 紧凑卡片（sub_agent_compact_widget）：自动弹出，显示运行状态（旋转图标+agent名+任务描述）
+        - 详细卡片（sub_agent_floating_widget）：后台默默收集日志，仅用户点击"查看日志"按钮时才显示
+        """
         if getattr(self, '_is_destroyed', False):
             return
-        widget = self._sub_agent_floating_widget
 
         # 系统卡片打开时，阻止子智能体卡片显示
         if self._is_system_card_visible:
             return
 
-        # 新批次开始时清空面板（_batch_started 为 False 表示新批次）
-        if not widget._batch_started:
-            widget.clear()
-            widget.setVisible(True)
+        # ── 紧凑卡片：自动弹出 ──
+        compact = self._sub_agent_compact_widget
+        if not hasattr(compact, '_batch_started'):
+            compact._batch_started = False
+        if not compact._batch_started:
+            compact.clear()
+        compact._batch_started = True
+        compact.add_task(task_id, agent_name, task_description)
+        if not compact.isVisible():
+            compact.setVisible(True)
 
-        widget._batch_started = True  # 标记批次已开始
-        widget.add_task(task_id, agent_name, task_description)
+        # ── 详细卡片：后台收集日志，但不自动显示 ──
+        detailed = self._sub_agent_floating_widget
+        if not detailed._batch_started:
+            detailed.clear()
+            detailed.setVisible(False)  # 不自动显示
+        detailed._batch_started = True
+        detailed.add_task(task_id, agent_name, task_description)
+        detailed.setVisible(False)  # 立即隐藏，只保留日志数据
 
-        # 连接 executor 信号
+        # 连接 executor 信号（只连接给详细卡片，紧凑卡片只需 start/finish）
         sub_agent_mgr = self.backend.sub_agent_manager
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
@@ -5916,6 +5963,10 @@ class OpenAIChatToolWindow(ToolWindow):
         success = execution_error is None or execution_error == ""
 
         self._sub_agent_floating_widget.finish_task(task_id, result, success)
+
+        # 更新紧凑卡片
+        if hasattr(self, '_sub_agent_compact_widget'):
+            self._sub_agent_compact_widget.finish_task(task_id, success)
 
         # 从管理器移除并记录结果
         if executor:
@@ -7389,8 +7440,8 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             logger.warning(f"[AutoLoop] Project path does not exist: {abs_path}")
 
-        # 隐藏配置卡，显示运行卡
-        self._auto_loop_config_card.hide()
+        # 隐藏配置卡（通过 CardManager 确保状态同步），显示运行卡
+        self._card_manager.hide_card("auto_loop_config", self._window_id)
         self._auto_loop_running_card.show()
         # 确保停止按钮可见（彻底修复完成后重新运行时停止按钮消失的问题）
         self._auto_loop_running_card.show_stop_button()
@@ -7463,6 +7514,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._is_auto_loop_running = True
         self._auto_loop_worker.start()
+
+    def _on_auto_loop_archive(self):
+        """用户点击归档按钮 — 直接跳转到归档阶段
+
+        通知 Worker 进入归档阶段，Worker 会在下一轮循环中执行自动归档。
+        """
+        if not self._auto_loop_worker or not self._auto_loop_worker.isRunning():
+            return
+        if self._auto_loop_running_card:
+            self._auto_loop_running_card.set_phase("archiving")
+            self._auto_loop_running_card.set_status("📦 正在归档...")
+            self._auto_loop_running_card.hide_archive_button()
+            self._auto_loop_running_card.hide_stop_button()
+        self._auto_loop_worker.request_archive()
 
     def _on_auto_loop_stop(self):
         """停止 AutoLoop（用户主动停止）
@@ -7610,11 +7675,13 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success("AutoLoop", message, parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
 
     def _lock_ui_for_autoloop(self):
-        """锁定 UI — 禁止发送消息和新建会话"""
-        # 禁用输入框
-        self.input_area.setDisabled(True)
-        self.input_area.setPlaceholderText("AutoLoop 运行中... 点运行卡 [⏹ 停止] 恢复操作")
-
+        """锁定 UI — 隐藏消息列表和输入框，禁止新建会话"""
+        # 清空输入框内容
+        self.input_area.clear()
+        # 隐藏消息列表（保持滚动位置不变）
+        self.chat_scroll_area.setVisible(False)
+        # 隐藏输入容器
+        self._bottom_input_container.setVisible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
 
@@ -7622,13 +7689,17 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info("[AutoLoop] UI locked")
 
     def _unlock_ui_after_autoloop(self):
-        """解锁 UI"""
-        self.input_area.setDisabled(False)
-        self.input_area.setPlaceholderText("给 DriFox 发送消息，Enter 发送，Shift+Enter 换行")
+        """解锁 UI — 恢复消息列表和输入框"""
+        # 恢复消息列表
+        self.chat_scroll_area.setVisible(True)
+        # 恢复输入容器
+        self._bottom_input_container.setVisible(True)
+        # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 
         # 重新聚焦输入框
         self.input_area.setFocus()
+        logger.info("[AutoLoop] UI unlocked")
         logger.info("[AutoLoop] UI unlocked")
 
     def _save_auto_loop_messages_to_session(self, messages: List[Dict]):

@@ -2,9 +2,10 @@
 """
 AutoLoop Worker — 后台循环工作线程
 
-两阶段任务执行循环：
+三阶段任务执行循环：
 1. 规划阶段：拆解任务为 N 个步骤，写入 SHARED_TASK_NOTES.md
 2. 执行阶段：按步骤执行，每步必须验证
+3. 归档阶段：执行完成后清理文件、归档日志和笔记
 
 每个迭代创建一个 OpenAIChatWorker，等待其完成后检测完成信号，
 更新共享笔记，继续下一轮或停止。
@@ -12,12 +13,14 @@ AutoLoop Worker — 后台循环工作线程
 阶段强制机制：
 - 规划阶段：tools 仅允许 scan_repo/glob/grep 和写笔记（限制写代码）
 - 执行阶段：允许所有工具，但每步必须验证通过才能前进
+- 归档阶段：仅允许 read/write 用于清理和归档
 """
 import re
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QEventLoop
 from loguru import logger
 
 from app.core.engines.auto_loop import (
@@ -44,7 +47,7 @@ class AutoLoopWorker(QThread):
     loop_stopped = pyqtSignal()  # 用户手动停止
     
     # === 阶段变更信号（用于运行卡 UI）===
-    phase_changed = pyqtSignal(str)  # "planning" / "executing" / "completed"
+    phase_changed = pyqtSignal(str)  # "planning" / "executing" / "archiving" / "completed"
 
     # === 迭代过程中的消息转发（用于日志显示）===
     log_signal = pyqtSignal(str)  # 日志消息
@@ -65,6 +68,7 @@ class AutoLoopWorker(QThread):
         self._agent_system_prompt_getter: Optional[Callable[[str], str]] = None
 
         self._is_cancelled = False
+        self._is_archive_button_click = False  # 用户点击了归档按钮（区别于正常完成进入归档）
         self._engine: Optional[AutoLoopEngine] = None
         self._prompt_composer: Optional[AutoLoopPromptComposer] = None
 
@@ -89,8 +93,31 @@ class AutoLoopWorker(QThread):
         """根据当前阶段和权限策略配置工具集
 
         AutoLoop 使用 AUTO_ALLOW 策略，交互类工具必须被过滤。
+        - 规划阶段：限制为 read/scan/glob/grep/list/write（写笔记）
+        - 归档阶段：限制为 read/write/glob/list（仅清理和归档）
+        - 执行阶段：允许所有非交互工具
         """
         raw = self._all_tools_schema or tools_schema
+
+        if not self._engine:
+            return filter_interactive_tools(raw, PermissionStrategy.AUTO_ALLOW)
+
+        # 归档阶段：仅允许 read/write/glob/list
+        if self._engine.is_archiving_phase():
+            allowed = {"read", "write", "glob", "list", "grep"}
+            return [
+                t for t in raw
+                if t.get("function", {}).get("name", "") in allowed
+            ]
+
+        # 规划阶段：仅允许读操作和写笔记
+        if self._engine and self._engine.is_planning_phase():
+            allowed = {"read", "write", "scan_repo", "glob", "grep", "list"}
+            return [
+                t for t in raw
+                if t.get("function", {}).get("name", "") in allowed
+            ]
+
         return filter_interactive_tools(raw, PermissionStrategy.AUTO_ALLOW)
 
     def configure(
@@ -147,15 +174,35 @@ class AutoLoopWorker(QThread):
         线程结束（最长 4 秒），直接阻塞 UI 线程导致严重卡顿。
         """
         self._is_cancelled = True
+        self._is_archive_button_click = False
         if self._conversation_executor:
-            # 使用非阻塞的 cancel_worker() 替代同步的 stop()
-            # cancel_worker() 设置 ChatWorker 的取消标志并断开 UI 信号连接
             self._conversation_executor.cancel_worker()
         if self._engine:
             self._engine.stop()
 
+    def request_archive(self):
+        """请求直接进入归档阶段（用户主动点击归档按钮）
+
+        将引擎切换到归档阶段，取消当前 LLM 对话（如有），
+        主循环下一轮会以归档阶段构建消息并执行一轮 LLM 归档对话。
+        """
+        if not self._engine:
+            return
+        self._is_archive_button_click = True
+        # 进入归档阶段
+        self._engine.enter_archiving_phase()
+        self.phase_changed.emit("archiving")
+        self.log_signal.emit("📦 用户请求立即归档，正在准备...")
+        # 取消当前正在进行的 LLM 对话（如果有），让循环尽快进入归档轮次
+        if self._conversation_executor:
+            self._conversation_executor.cancel_worker()
+
+    # ================================================================
+    #  主循环
+    # ================================================================
+
     def run(self):
-        """主循环 — 两阶段：规划 → 执行"""
+        """主循环 — 三阶段：规划 → 执行 → 归档"""
         if not self._config or not self._config.task_prompt:
             self.loop_error.emit("未设置任务描述")
             return
@@ -172,7 +219,6 @@ class AutoLoopWorker(QThread):
         self._last_message_token_count = 0
 
         # 确保 ConversationCore 的 SessionManager 有当前会话
-        # 这样 ConversationExecutor.execute() 才能正确获取 session → session_messages 不为空
         sm = self._conversation_core.session_manager
         if not sm.get_current_session():
             from app.core.chat_session import ChatSession
@@ -195,17 +241,7 @@ class AutoLoopWorker(QThread):
             self.iteration_started.emit(iteration, self._config.max_iterations)
             self._emit_progress()
             
-            # 诊断日志：每轮开始的引擎状态
-            self.log_signal.emit(
-                f"📋 [诊断] 第{iteration}轮开始 "
-                f"phase={'PLANNING' if self._engine._is_planning_phase else 'EXECUTING'} "
-                f"state={self._engine.state} "
-                f"current_step={self._engine._current_step} "
-                f"display_step={self._engine._display_step} "
-                f"total_steps={self._engine._total_steps}"
-            )
-            
-            # 本轮独立消息追踪：记录当前消息基数，清空本轮消息列表
+            # 本轮独立消息追踪
             self._prev_message_count = len(self._all_messages)
             self._round_messages = []
             
@@ -215,12 +251,9 @@ class AutoLoopWorker(QThread):
             # 构建本轮消息
             messages = self._build_messages(task_prompt, iteration)
 
-            # 同步到 AutoLoop 的 session，确保 ConversationExecutor.execute()
-            # 能通过 session.get_context_messages() 获取 session_messages，
-            # 从而 Worker 的 finished_with_messages 信号携带完整消息（含 user）
+            # 同步到 AutoLoop 的 session
             auto_loop_session = self._conversation_core.session_manager.get_current_session()
             if auto_loop_session:
-                # 只在首次迭代时同步 user 消息（后续由 on_messages_updated 维护）
                 if iteration == 1 and not auto_loop_session.messages:
                     for msg in messages:
                         if msg.get("role") == "user":
@@ -229,239 +262,57 @@ class AutoLoopWorker(QThread):
             # 根据阶段获取对应的工具集
             current_tools = self._configure_tools_for_phase(self._all_tools_schema or self._tools_schema)
 
-            # 创建并运行 worker（通过统一 Executor）
-            try:
-                self._adapter.reset()
-
-                # 构建包装回调
-                wrapped_callbacks = self._make_autoloop_callbacks()
-
-                # 获取模型配置
-                llm_config = self._model_config_getter() if self._model_config_getter else {}
-
-                success = self._conversation_executor.execute(
-                    messages=messages,
-                    llm_config=llm_config,
-                    tools=current_tools,
-                    callbacks=wrapped_callbacks,
-                )
-                if not success:
-                    self.log_signal.emit("⚠️ Worker 启动失败，重试...")
-                    continue
-
-                # 使用 QEventLoop 等待 Worker 完成（Qt 信号需要事件循环才能跨线程投递）
-                from PyQt5.QtCore import QEventLoop
-                worker = self._conversation_executor.get_current_worker()
-                if worker:
-                    loop = QEventLoop()
-                    worker.finished.connect(loop.quit)
-                    # 防止竞态：如果 worker 在 connect 之前已完成，立即退出 loop
-                    if not worker.isRunning():
-                        loop.quit()
-                    loop.exec_()  # 阻塞直到 worker 线程结束
-                else:
-                    # fallback: 等待 adapter 的事件
-                    self._adapter.wait_for_completion(timeout=300)
-
-                response = self._adapter.get_response() or ""
-                self._emit_progress()
-                
-                # ⚡ 关键：每次 LLM 对话结束后立即检查取消信号，避免走后续流程
-                if self._is_cancelled:
-                    continue
-                    
-                # 【新增】强制检查接力文档更新
-                relay_doc_ok = self._check_relay_doc_updated(iteration)
-                if not relay_doc_ok:
-                    # 诊断：记录接力文档检查失败的原因
-                    notes_check = self._engine.read_shared_notes()
-                    notes_len = len(notes_check) if notes_check else 0
-                    has_plan = "## 执行计划" in notes_check or "- [步骤" in notes_check if notes_check else False
-                    self.log_signal.emit(
-                        f"⚠️【强制】接力文档未更新！notes_len={notes_len} has_plan={has_plan} "
-                        f"iteration={iteration} phase={'planning' if self._engine._is_planning_phase else 'executing'}"
-                    )
-                    # 未更新接力文档，强制要求更新后才能继续
-                    self.log_signal.emit("⚠️【强制】接力文档未更新！正在要求更新...")
-                    
-                    # 重新构建消息，注入强制更新提示
-                    force_messages = self._build_messages(task_prompt, iteration, force_update=True)
-                    
-                    try:
-                        # 使用统一 Executor 执行强制更新
-                        self._adapter.reset()
-                        self._conversation_executor.execute(
-                            messages=force_messages,
-                            llm_config=llm_config,
-                            tools=current_tools,
-                            callbacks=self._make_autoloop_callbacks(),
-                        )
-                        from PyQt5.QtCore import QEventLoop
-                        worker = self._conversation_executor.get_current_worker()
-                        if worker:
-                            loop = QEventLoop()
-                            worker.finished.connect(loop.quit)
-                            # 防止竞态：如果 worker 在 connect 之前已完成，立即退出 loop
-                            if not worker.isRunning():
-                                loop.quit()
-                            loop.exec_()
-                    except Exception as e:
-                        self.log_signal.emit(f"⚠️ 强制更新失败: {e}")
-                    
-                    # 再次检查接力文档
-                    if self._check_relay_doc_updated(iteration):
-                        self.log_signal.emit("✅ 接力文档已更新，继续执行...")
-                    else:
-                        self.log_signal.emit("⚠️ 接力文档仍未更新，将继续强制要求")
-                        # 允许继续（避免死循环），但会在下一轮继续检查
-                    
-                    # 补充迭代完成信号，确保 UI 进度更新
-                    summary = self._extract_summary(response, iteration)
-                    self.iteration_completed.emit(iteration, summary)
-                    self._emit_progress()
-                    
-                    # 🔴 修复：强制更新接力文档后，如果仍在规划阶段且原始响应已包含 PLANNING_COMPLETE，
-                    # 必须在此处执行阶段过渡，否则 continue 会跳过后续的 phase handling 逻辑，
-                    # 导致下一轮仍然处于规划阶段，往复循环无法进入执行阶段。
-                    if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
-                        notes = self._engine.read_shared_notes()
-                        if self._engine.check_planning_complete(response, notes):
-                            self._engine.enter_execution_phase()
-                            current_step, max_verified, total = self._engine.parse_current_and_next_step(notes)
-                            self._engine.sync_verified_steps_from_notes(notes)
-                            self._engine.set_step_progress(current_step, total)
-                            self.log_signal.emit(f"✅ 规划完成！共 {total} 个步骤，{max_verified} 已完成")
-                            self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
-                            self.phase_changed.emit("executing")
-                            self._emit_progress()
-                    continue
-            except Exception as e:
-                logger.error(f"[AutoLoop] Worker error on iteration {iteration}: {e}")
-                self.loop_error.emit(f"第{iteration}轮出错: {str(e)}")
-                self._engine.increment_consecutive_failures()
-                if self._engine.consecutive_failures >= 3:
-                    self.loop_error.emit("连续失败 3 次，已停止")
-                    return
-                self._emit_progress()
+            # --- 执行 LLM 对话 ---
+            response = self._execute_llm_conversation(messages, current_tools)
+            if response is None:
+                # _execute_llm_conversation 内部已处理错误/取消
                 continue
 
-            # 生成摘要
+            # 生成摘要 & 写日志
             summary = self._extract_summary(response, iteration)
             self.iteration_completed.emit(iteration, summary)
+            self._write_round_log(response, iteration)
 
-            # 写入本轮完整日志到独立文件（仅含本轮对话，不包含历史轮次）
-            timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            messages_section = self._format_messages_for_log(self._round_messages) if self._round_messages else response
-            log_content = f"""# AutoLoop 轮次 {iteration} 日志
+            # ===== 接力文档强制更新检查 =====
+            # 在所有阶段处理之前统一检查，避免模型"作弊"（如输出了 PLANNING_COMPLETE 但没写笔记）
+            if not self._check_relay_doc_updated(iteration):
+                self.log_signal.emit(
+                    f"⚠️【强制】接力文档未更新！iteration={iteration} "
+                    f"phase={'planning' if self._engine.is_planning_phase() else ('executing' if self._engine.is_executing_phase() else 'archiving')}"
+                )
+                # 注入强制更新提示，重新对话
+                force_messages = self._build_messages(task_prompt, iteration, force_update=True)
+                llm_config = self._model_config_getter() if self._model_config_getter else {}
+                if self._execute_force_relay_doc_update(task_prompt, iteration, llm_config, current_tools):
+                    self.log_signal.emit("✅ 接力文档已更新，继续执行...")
+                # 即使仍未更新也继续，避免死循环
+                # 注意：此处不输出 iteration_completed（已在上方输出），也不重新写日志
 
-- 时间: {timestamp_str}
-- 阶段: {'PLANNING' if self._engine.is_planning_phase() else 'EXECUTING'}
-- 当前步骤: {self._engine.display_step if not self._engine.is_planning_phase() else self._engine.current_step} / {self._engine.total_steps}
+                # 强制更新后再次检查：如果模型输出了 PLANNING_COMPLETE 但忘了写笔记，
+                # 此时笔记已补上，强制过渡到执行阶段
+                if self._engine.is_planning_phase() and self._engine.check_planning_complete(response, ""):
+                    notes = self._engine.read_shared_notes()
+                    if notes and self._engine.check_planning_complete(response, notes):
+                        self._transition_to_execution(notes)
 
-## 完整对话
+            # ===== 三阶段处理 =====
+            if self._engine.is_archiving_phase():
+                # --- 归档阶段 ---
+                if self._handle_archiving_phase(response):
+                    return  # 归档完成，退出循环
 
-{messages_section}
-"""
-            self._engine.write_round_log(iteration, log_content)
-
-            # ===== 阶段处理 =====
-            
-            if self._engine.is_planning_phase():
+            elif self._engine.is_planning_phase():
                 # --- 规划阶段 ---
-                notes = self._engine.read_shared_notes()
-                
-                # 检测规划是否完成
-                planning_done = self._engine.check_planning_complete(response, notes)
-                
-                if planning_done:
-                    self._engine.enter_execution_phase()
-                    current, max_verified, total = self._engine.parse_current_and_next_step(notes)
-                    # 从笔记同步已勾选完成的步骤到缓存
-                    self._engine.sync_verified_steps_from_notes(notes)
-                    self._engine.set_step_progress(current, total)
-                    self.log_signal.emit(f"✅ 规划完成！共 {total} 个步骤，{max_verified} 已完成")
-                    self.log_signal.emit(f"📋 开始执行步骤 {current}/{total}: {self._get_next_step_preview(notes, current)}")
-                    
-                    # 发送阶段信号：执行中
-                    self.phase_changed.emit("executing")
-                    self._emit_progress()
-                    continue
-                else:
-                    # 规划未完成，继续规划
-                    self._engine.on_planning_attempt()
-                    
-                    # 诊断日志：记录当前状态，便于排查
-                    notes_preview = notes[:100].replace('\n', ' ') if notes else "(空)"
-                    resp_preview = response[:100].replace('\n', ' ') if response else "(空)"
-                    self.log_signal.emit(
-                        f"📋 [诊断] iteration={iteration} phase=planning "
-                        f"planning_count={self._engine._planning_count} "
-                        f"response_has_PLANNING_COMPLETE={'PLANNING_COMPLETE' in response.upper() if response else False} "
-                        f"notes_has_plan={'## 执行计划' in notes or '- [步骤' in notes}"
-                    )
-                    
-                    # 回退策略：如果笔记中已有有效的执行计划但模型忘记输出 PLANNING_COMPLETE，
-                    # 在尝试多次后强制进入执行阶段，避免无限循环规划。
-                    has_plan_in_notes = notes and ("## 执行计划" in notes or "- [步骤" in notes)
-                    _, _, total_steps_in_notes = self._engine.parse_current_and_next_step(notes)
-                    if has_plan_in_notes and total_steps_in_notes > 0 and self._engine._planning_count >= 2:
-                        self.log_signal.emit(
-                            f"⚠️ 检测到笔记中有有效计划({total_steps_in_notes}步)但未收到PLANNING_COMPLETE，"
-                            f"已尝试{self._engine._planning_count}次，强制进入执行阶段"
-                        )
-                        self._engine.enter_execution_phase()
-                        current_step, max_verified, total = self._engine.parse_current_and_next_step(notes)
-                        self._engine.sync_verified_steps_from_notes(notes)
-                        self._engine.set_step_progress(current_step, total)
-                        self.log_signal.emit(f"✅ 强制过渡到执行阶段！共 {total} 个步骤，{max_verified} 已完成")
-                        self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
-                        self.phase_changed.emit("executing")
-                        self._emit_progress()
-                        continue
-                    
-                    # 检查：是否写了笔记但没输出 PLANNING_COMPLETE
-                    if notes and "## 执行计划" in notes and "PLANNING_COMPLETE" not in response.upper():
-                        # 模型写了计划但忘记输出信号，提醒它
-                        self.log_signal.emit("📋 检测到已写入计划，请在回复末尾添加 PLANNING_COMPLETE")
-                    
-                    self.log_signal.emit("📋 继续规划...")
-                    self._emit_progress()
-                    continue
-                    
+                if self._handle_planning_phase(response):
+                    continue  # 阶段已处理，进入下一轮
+
             else:
                 # --- 执行阶段 ---
-                notes = self._engine.read_shared_notes()
-                
-                # 每次执行前从笔记同步已验证步骤
-                self._engine.sync_verified_steps_from_notes(notes)
-                
-                # 解析当前步骤：下一个要执行的、已完成的、总步骤数
-                current_step, max_verified, total_steps = self._engine.parse_current_and_next_step(notes)
-                
-                if total_steps > 0:
-                    # 更新步骤进度（仅用于 UI 显示，不影响结束）
-                    display_step = current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step
-                    self._engine.set_step_progress(display_step, total_steps)
-                    
-                    # 检测当前步骤是否已完成（仅用于前进到下一步显示，不决定结束）
-                    step_completed = self._check_step_completed(response, notes, self._engine.current_step)
-                    
-                    if step_completed:
-                        self._last_step = self._engine.current_step
-                        self.log_signal.emit(f"✓ 步骤 {self._engine.current_step}/{total_steps} 完成")
-                        # 前进到下一步（仅用于 UI 进度显示）
-                        self._engine.advance_to_step(self._engine.current_step + 1)
-                        self.log_signal.emit(f"📋 执行步骤 {self._engine.current_step}/{total_steps}: {self._get_next_step_preview(notes, self._engine.current_step)}")
-                    else:
-                        # 步骤未完成，可能需要继续执行或验证
-                        if "验证失败" in response or "failed" in response.lower():
-                            self.log_signal.emit("⚠️ 检测到验证失败，模型应修复后重试")
-                
-                # 检查完成信号（可能在响应中直接输出 MISSION_COMPLETE）
-                if self._engine.check_completion(response):
-                    self.phase_changed.emit("completed")
-                    self.loop_completed.emit("任务完成 — 检测到完成信号！🎉")
-                    return
+                if self._handle_executing_phase(response, iteration):
+                    # 任务完成，引擎已进入归档阶段 → 继续下一轮，让归档阶段自然处理
+                    # 不能 return，否则会跳过归档 LLM 轮次和 loop_completed 发射
+                    self.log_signal.emit("📦 所有步骤完成，进入归档阶段...")
+                    continue
 
             # 检查预算
             budget_reason = self._engine.check_budget()
@@ -471,14 +322,399 @@ class AutoLoopWorker(QThread):
 
             self._emit_progress()
 
-        # 循环终止处理：区分取消 vs 正常完成
+        # 循环终止处理
         if self._is_cancelled:
             self._engine.state = LoopState.STOPPED
             self.loop_stopped.emit()
         elif self._engine.state != LoopState.COMPLETED:
-            # 未手动取消也未收到完成信号 → 达到最大迭代次数自然结束
             self._engine.state = LoopState.COMPLETED
+            # 兜底归档：如果非正常结束但笔记已存在，执行基本的归档操作
+            if not self._engine.is_archiving_complete and not self._is_cancelled:
+                archive_ok = self._do_fallback_archive()
+                if not archive_ok:
+                    self.loop_completed.emit(f"达到最大迭代次数 ({self._config.max_iterations})，已停止（归档未完成）")
+                    return
             self.loop_completed.emit(f"达到最大迭代次数 ({self._config.max_iterations})，已停止")
+
+    # ================================================================
+    #  兜底归档（max_iterations 耗尽时）
+    # ================================================================
+
+    def _get_archive_dir(self) -> Optional[Path]:
+        """获取时间戳归档目录路径
+
+        格式: .autoloop/archive/YYYYMMDD_HHMMSS-任务名前30字
+        """
+        if not self._engine or not self._config or not self._config.project_path:
+            return None
+        return self._engine.get_archive_timestamped_dir()
+
+    def _copy_logs_to_archive(self, archive_dir: Path):
+        """将运行日志（.autoloop/logs/）复制到归档目录
+
+        Args:
+            archive_dir: 归档目标目录
+        """
+        if not self._config or not self._config.project_path:
+            return
+        logs_dir = Path(self._config.project_path) / self._config.logs_dir
+        if not logs_dir.exists():
+            self.log_signal.emit("📝 无日志文件需要归档")
+            return
+
+        logs_archive_dir = archive_dir / "logs"
+        logs_archive_dir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for log_file in sorted(logs_dir.iterdir()):
+            if log_file.is_file() and log_file.suffix == ".md":
+                try:
+                    content = log_file.read_text(encoding="utf-8")
+                    dest = logs_archive_dir / log_file.name
+                    dest.write_text(content, encoding="utf-8")
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[AutoLoop] Failed to copy log {log_file.name}: {e}")
+        if count > 0:
+            self.log_signal.emit(f"📝 已归档 {count} 份日志至 {logs_archive_dir}")
+
+    def _archive_latest_to_timestamped(self):
+        """将 latest/ 目录的内容复制到时间戳归档目录
+
+        LLM 归档对话会将文件写入 .autoloop/archive/latest/，
+        此方法在归档对话完成后将这些文件复制到时间戳目录作为永久存档。
+        """
+        if not self._config or not self._config.project_path:
+            return
+        latest_dir = Path(self._config.project_path) / ".autoloop" / "archive" / "latest"
+        if not latest_dir.exists():
+            self.log_signal.emit("📝 latest 归档目录不存在，跳过复制")
+            return
+
+        archive_dir = self._get_archive_dir()
+        if not archive_dir:
+            return
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        count = 0
+        for item in latest_dir.iterdir():
+            if item.is_file():
+                try:
+                    content = item.read_text(encoding="utf-8")
+                    dest = archive_dir / item.name
+                    dest.write_text(content, encoding="utf-8")
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[AutoLoop] Failed to copy {item.name}: {e}")
+            elif item.is_dir() and item.name == "logs":
+                # 递归复制 logs 子目录
+                logs_dest = archive_dir / "logs"
+                logs_dest.mkdir(parents=True, exist_ok=True)
+                for log_file in item.iterdir():
+                    if log_file.is_file():
+                        try:
+                            content = log_file.read_text(encoding="utf-8")
+                            dest = logs_dest / log_file.name
+                            dest.write_text(content, encoding="utf-8")
+                            count += 1
+                        except Exception as e:
+                            logger.warning(f"[AutoLoop] Failed to copy log {log_file.name}: {e}")
+        if count > 0:
+            self.log_signal.emit(f"📦 归档已保存至 {archive_dir}（共 {count} 个文件）")
+        else:
+            self.log_signal.emit(f"📦 归档目录为空，跳过复制")
+
+    def _do_fallback_archive(self) -> bool:
+        """执行兜底归档（max_iterations 耗尽时）
+
+        使用时间戳目录归档，不经过 LLM 对话。
+        """
+        if not self._engine or not self._config:
+            return False
+
+        notes = self._engine.read_shared_notes()
+        if not notes:
+            logger.info("[AutoLoop] No notes to archive")
+            return False
+
+        try:
+            archive_dir = self._get_archive_dir()
+            if not archive_dir:
+                return False
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            # 同步归档到 latest 目录（方便快速查找最新归档）
+            latest_dir = Path(self._config.project_path) / ".autoloop" / "archive" / "latest"
+            latest_dir.mkdir(parents=True, exist_ok=True)
+
+            # 归档 SHARED_TASK_NOTES.md
+            notes_path = archive_dir / "SHARED_TASK_NOTES.md"
+            notes_path.write_text(notes, encoding="utf-8")
+            # 同步到 latest
+            latest_notes = latest_dir / "SHARED_TASK_NOTES.md"
+            latest_notes.write_text(notes, encoding="utf-8")
+            self.log_signal.emit(f"📦 兜底归档：笔记已保存至 {notes_path}")
+
+            # 写入 META.md
+            import time
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            total_steps = self._engine.total_steps
+            verified = self._engine.get_verified_steps()
+            meta_content = f"""# AutoLoop 执行归档（兜底）
+
+- 任务: {self._config.task_prompt[:200] if self._config.task_prompt else "未知"}
+- 完成时间: {ts}
+- 总步骤数: {total_steps}
+- 已完成步骤: {len(verified)} {sorted(verified) if verified else ""}
+- 状态: 达到最大迭代次数（max_iterations={self._config.max_iterations}），提前结束
+
+> ⚠️ 注意：此归档由系统自动生成，非完整执行结果。
+> 如需完整记录，请查阅 `.autoloop/logs/` 下的轮次日志。
+"""
+            meta_path = archive_dir / "META.md"
+            meta_path.write_text(meta_content, encoding="utf-8")
+            # 同步到 latest
+            latest_meta = latest_dir / "META.md"
+            latest_meta.write_text(meta_content, encoding="utf-8")
+            self.log_signal.emit(f"📦 兜底归档：元信息已保存至 {meta_path}")
+
+            # 复制运行日志到归档目录
+            self._copy_logs_to_archive(archive_dir)
+
+            # 标记归档完成
+            self._engine._archiving_complete = True
+            return True
+
+        except Exception as e:
+            logger.warning(f"[AutoLoop] Fallback archive failed: {e}")
+            return False
+
+    # ================================================================
+    #  LLM 对话执行（提取公用方法）
+    # ================================================================
+
+    def _execute_llm_conversation(self, messages: List[Dict], current_tools: List[Dict]) -> Optional[str]:
+        """执行一轮 LLM 对话，返回响应文本
+
+        Returns:
+            str: 响应文本
+            None: 出错或已取消
+        """
+        try:
+            self._adapter.reset()
+
+            wrapped_callbacks = self._make_autoloop_callbacks()
+            llm_config = self._model_config_getter() if self._model_config_getter else {}
+
+            success = self._conversation_executor.execute(
+                messages=messages,
+                llm_config=llm_config,
+                tools=current_tools,
+                callbacks=wrapped_callbacks,
+            )
+            if not success:
+                self.log_signal.emit("⚠️ Worker 启动失败，重试...")
+                return None
+
+            # 使用 QEventLoop 等待 Worker 完成
+            worker = self._conversation_executor.get_current_worker()
+            if worker:
+                loop = QEventLoop()
+                worker.finished.connect(loop.quit)
+                if not worker.isRunning():
+                    loop.quit()
+                loop.exec_()
+            else:
+                self._adapter.wait_for_completion(timeout=300)
+
+            response = self._adapter.get_response() or ""
+            self._emit_progress()
+
+            # 检查取消
+            if self._is_cancelled:
+                return None
+
+            return response
+
+        except Exception as e:
+            logger.error(f"[AutoLoop] Worker error: {e}")
+            self.loop_error.emit(f"出错: {str(e)}")
+            self._engine.increment_consecutive_failures()
+            if self._engine.consecutive_failures >= 3:
+                self.loop_error.emit("连续失败 3 次，已停止")
+                return None
+            self._emit_progress()
+            return None
+
+    # ================================================================
+    #  强制接力文档更新（提取公用方法）
+    # ================================================================
+
+    def _execute_force_relay_doc_update(self, task_prompt: str, iteration: int,
+                                        llm_config: Dict, current_tools: List[Dict]) -> bool:
+        """执行强制接力文档更新
+
+        当检测到接力文档未更新时，注入强制更新提示并再次调用 LLM。
+
+        Returns:
+            True if relay doc updated successfully
+        """
+        self.log_signal.emit("⚠️【强制】接力文档未更新！正在要求更新...")
+
+        force_messages = self._build_messages(task_prompt, iteration, force_update=True)
+
+        try:
+            self._adapter.reset()
+            self._conversation_executor.execute(
+                messages=force_messages,
+                llm_config=llm_config,
+                tools=current_tools,
+                callbacks=self._make_autoloop_callbacks(),
+            )
+            worker = self._conversation_executor.get_current_worker()
+            if worker:
+                loop = QEventLoop()
+                worker.finished.connect(loop.quit)
+                if not worker.isRunning():
+                    loop.quit()
+                loop.exec_()
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 强制更新失败: {e}")
+            return False
+
+        if self._check_relay_doc_updated(iteration):
+            self.log_signal.emit("✅ 接力文档已更新，继续执行...")
+            return True
+        else:
+            self.log_signal.emit("⚠️ 接力文档仍未更新，将继续强制要求")
+            return False
+
+    # ================================================================
+    #  阶段处理器
+    # ================================================================
+
+    def _handle_planning_phase(self, response: str) -> bool:
+        """处理规划阶段逻辑
+
+        Returns:
+            True → 调用方 continue，进入下一轮
+        """
+        notes = self._engine.read_shared_notes()
+
+        # 检测规划是否完成
+        planning_done = self._engine.check_planning_complete(response, notes)
+
+        if planning_done:
+            self._transition_to_execution(notes)
+            return True
+
+        # 规划未完成
+        self._engine.on_planning_attempt()
+
+        # 诊断日志
+        notes_preview = notes[:100].replace('\n', ' ') if notes else "(空)"
+        self.log_signal.emit(
+            f"📋 [诊断] iteration={self._engine.iteration} phase=planning "
+            f"planning_count={self._engine._planning_count} "
+            f"response_has_PLANNING_COMPLETE={'PLANNING_COMPLETE' in response.upper() if response else False} "
+            f"notes_has_plan={'## 执行计划' in notes or '- [步骤' in notes}"
+        )
+
+        # 回退策略：笔记有有效计划但模型没输出 PLANNING_COMPLETE
+        has_plan_in_notes = notes and ("## 执行计划" in notes or "- [步骤" in notes)
+        _, _, total_steps_in_notes = self._engine.parse_current_and_next_step(notes)
+        if has_plan_in_notes and total_steps_in_notes > 0 and self._engine._planning_count >= 2:
+            self.log_signal.emit(
+                f"⚠️ 检测到笔记中有有效计划({total_steps_in_notes}步)但未收到PLANNING_COMPLETE，"
+                f"已尝试{self._engine._planning_count}次，强制进入执行阶段"
+            )
+            self._transition_to_execution(notes)
+            return True
+
+        # 提醒模型输出信号
+        if notes and "## 执行计划" in notes and "PLANNING_COMPLETE" not in response.upper():
+            self.log_signal.emit("📋 检测到已写入计划，请在回复末尾添加 PLANNING_COMPLETE")
+
+        self.log_signal.emit("📋 继续规划...")
+        self._emit_progress()
+        return True
+
+    def _handle_executing_phase(self, response: str, iteration: int) -> bool:
+        """处理执行阶段逻辑
+
+        Returns:
+            True  → 任务完成（触发归档），调用方 return
+            False → 继续下一轮
+        """
+        notes = self._engine.read_shared_notes()
+
+        # 每次执行前从笔记同步已验证步骤
+        self._engine.sync_verified_steps_from_notes(notes)
+
+        # 解析当前步骤
+        current_step, max_verified, total_steps = self._engine.parse_current_and_next_step(notes)
+
+        if total_steps > 0:
+            display_step = current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step
+            self._engine.set_step_progress(display_step, total_steps)
+
+            # 检测当前步骤是否已完成
+            step_completed = self._check_step_completed(response, notes, self._engine.current_step)
+
+            if step_completed:
+                self._last_step = self._engine.current_step
+                self.log_signal.emit(f"✓ 步骤 {self._engine.current_step}/{total_steps} 完成")
+                self._engine.advance_to_step(self._engine.current_step + 1)
+                self.log_signal.emit(f"📋 执行步骤 {self._engine.current_step}/{total_steps}: {self._get_next_step_preview(notes, self._engine.current_step)}")
+            else:
+                if "验证失败" in response or "failed" in response.lower():
+                    self.log_signal.emit("⚠️ 检测到验证失败，模型应修复后重试")
+
+        # 检查完成信号 → 触发归档阶段
+        if self._engine.check_completion(response):
+            self._enter_archiving_phase()
+            return True  # 让主循环的下一轮进入归档处理
+
+        return False
+
+    def _handle_archiving_phase(self, response: str) -> bool:
+        """处理归档阶段逻辑 — LLM 归档对话完成后，将归档结果从 latest/ 复制到时间戳目录
+
+        最多执行一轮，无论是否检测到 ARCHIVE_COMPLETE 都强制完成。
+        """
+        # 将 latest/ 的内容复制到时间戳归档目录
+        self._archive_latest_to_timestamped()
+
+        if self._engine.check_archive_complete(response):
+            self.log_signal.emit("✅ 归档完成！")
+        else:
+            self.log_signal.emit("📦 归档轮次结束，强制完成归档")
+        self._engine.state = LoopState.COMPLETED
+        self._engine._archiving_complete = True
+        self.phase_changed.emit("completed")
+        self.loop_completed.emit("任务完成 — AutoLoop 全部结束 🎉")
+        return True
+
+    # ================================================================
+    #  阶段过渡辅助方法
+    # ================================================================
+
+    def _transition_to_execution(self, notes: str):
+        """从规划阶段过渡到执行阶段"""
+        self._engine.enter_execution_phase()
+        current_step, max_verified, total = self._engine.parse_current_and_next_step(notes)
+        self._engine.sync_verified_steps_from_notes(notes)
+        self._engine.set_step_progress(current_step, total)
+        self.log_signal.emit(f"✅ 规划完成！共 {total} 个步骤，{max_verified} 已完成")
+        self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
+        self.phase_changed.emit("executing")
+        self._emit_progress()
+
+    def _enter_archiving_phase(self):
+        """从执行阶段进入归档阶段"""
+        self.log_signal.emit("📦 执行完成，进入归档阶段...")
+        self.phase_changed.emit("archiving")
+        self._engine.enter_archiving_phase()
+        self._emit_progress()
 
     # ========== 内部辅助方法（委托给 Engine）==========
 
@@ -493,6 +729,25 @@ class AutoLoopWorker(QThread):
     def _check_relay_doc_updated(self, iteration: int) -> bool:
         """检查接力文档是否已更新（委托给 Engine）"""
         return self._engine.check_relay_doc_updated(iteration) if self._engine else False
+
+    # ========== 日志写入 ==========
+
+    def _write_round_log(self, response: str, iteration: int):
+        """写入本轮日志到独立文件"""
+        timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        phase = "ARCHIVING" if self._engine.is_archiving_phase() else ("PLANNING" if self._engine.is_planning_phase() else "EXECUTING")
+        messages_section = self._format_messages_for_log(self._round_messages) if self._round_messages else response
+        log_content = f"""# AutoLoop 轮次 {iteration} 日志
+
+- 时间: {timestamp_str}
+- 阶段: {phase}
+- 当前步骤: {self._engine.display_step if not self._engine.is_planning_phase() and not self._engine.is_archiving_phase() else self._engine.current_step} / {self._engine.total_steps}
+
+## 完整对话
+
+{messages_section}
+"""
+        self._engine.write_round_log(iteration, log_content)
 
     # ========== 消息构建（委托给 PromptComposer）==========
 
@@ -519,30 +774,24 @@ class AutoLoopWorker(QThread):
         """构建 AutoLoop 的回调包装（日志转发 + 预算检查 + token 追踪）"""
         from app.core.token_estimator import count_messages_tokens
 
-        # 以 Adapter 的回调为基础（包含 finished → 设置 _worker_done_event，作为 QEventLoop 的 fallback）
+        # 以 Adapter 的回调为基础
         callbacks = dict(self._adapter.get_callbacks())
 
-        # 日志转发（覆盖 adapter 的 content_received no-op）
+        # 日志转发
         callbacks["content_received"] = lambda p: self.log_signal.emit(f"生成内容...")
         callbacks["reasoning_content_received"] = lambda p: self.log_signal.emit(f"思考中...")
         callbacks["thinking_started"] = lambda: self.log_signal.emit(f"开始推理")
         callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"调用工具: {n}")
         callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(f"工具完成: {n}")
 
-        # Token 追踪 + 预算检查 + 消息收集（在 messages_updated 回调中）
+        # Token 追踪 + 预算检查 + 消息收集
         def on_messages_updated(messages: list):
-            # 收集每轮 Worker 的完整消息（含 assistant + tool_calls）
-            # 每轮覆盖而非追加，因为 messages_updated 发送的是累积的会话消息
             if messages:
                 self._all_messages = list(messages)
-                # 提取本轮新增的消息（从 prev_message_count 开始截取）
                 self._round_messages = list(messages[self._prev_message_count:])
-                # 同步到 ConversationCore 的 session，确保后续迭代时
-                # session_messages 有内容（含历史 user + assistant + tool）
                 session = self._conversation_core.session_manager.get_current_session()
                 if session:
                     session.set_messages(messages, preserve_compaction=True)
-            # Token 增量追踪（只加新增部分，避免重复累加）
             if self._engine and messages:
                 current_count = count_messages_tokens(messages)
                 delta = max(0, current_count - self._last_message_token_count)
@@ -550,7 +799,6 @@ class AutoLoopWorker(QThread):
                     self._engine.add_tokens(delta)
                     self.tokens_updated.emit(self._engine.total_tokens)
                     self._last_message_token_count = current_count
-                    # 预算检查
                     reason = self._engine.check_budget()
                     if reason:
                         self.log_signal.emit(f"⚠️ {reason}，正在停止...")
@@ -572,7 +820,6 @@ class AutoLoopWorker(QThread):
     def _extract_summary(self, response: str, iteration: int) -> str:
         """从响应中提取摘要"""
         lines = response.strip().split("\n")
-        # 取前 3 行作为摘要
         summary_lines = [l for l in lines if l.strip() and not l.startswith("```")][:3]
         return " | ".join(summary_lines) if summary_lines else f"第{iteration}轮完成"
 
@@ -582,17 +829,11 @@ class AutoLoopWorker(QThread):
             self.progress_updated.emit(self._engine.get_progress())
 
     def get_all_messages(self) -> List[Dict]:
-        """获取所有消息（用于保存到会话）
-
-        优先从 ConversationCore 的 SessionManager 读取（由 on_messages_updated 维护），
-        其次使用 _all_messages（每轮 on_messages_updated 覆盖更新）。
-        """
-        # 优先从 ConversationCore 的 SessionManager 读取
+        """获取所有消息"""
         if self._conversation_core:
             session = self._conversation_core.session_manager.get_current_session()
             if session and session.messages:
                 return list(session.messages)
-        # fallback
         return self._all_messages.copy()
 
     @staticmethod
@@ -635,21 +876,15 @@ class AutoLoopWorker(QThread):
     # ========== 公共接口（供 main_widget 等外部调用）==========
 
     def get_current_progress(self) -> dict:
-        """获取当前进度信息（替代外部穿透访问 _engine 私有属性）
-        
-        Returns:
-            dict with keys: iteration, max_iterations, current_step, total_steps,
-                            total_tokens, phase, state
-        """
+        """获取当前进度信息"""
         if not self._engine:
             return {
                 "iteration": 0, "max_iterations": 0,
                 "current_step": 0, "total_steps": 0,
                 "total_tokens": 0, "phase": "idle", "state": "idle",
             }
-        progress = self._engine.get_progress()
-        return progress
+        return self._engine.get_progress()
 
     def get_task_prompt(self) -> str:
-        """获取任务提示（替代外部穿透访问 _config）"""
+        """获取任务提示"""
         return self._config.task_prompt if self._config else ""

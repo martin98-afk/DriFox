@@ -260,33 +260,47 @@ CHAT_SCROLL_STYLE = """
     }
 """
 
-TITLE_STYLE = f"""
-    QLabel {{
-        color: #f3f6fc;
-        {font_size_css(15)}
-        font-weight: bold;
-        padding: 6px 4px;
-        border-radius: 10px;
-        background-color: transparent;
-    }}
-    QLabel:hover {{
-        background-color: rgba(255, 255, 255, 0.06);
-    }}
-"""
+def _get_title_style():
+    """获取标题样式（响应主题）"""
+    Colors.refresh()
+    return f"""
+        QLabel {{
+            color: {Colors.TEXT_PRIMARY};
+            {font_size_css(15)}
+            font-weight: bold;
+            padding: 6px 4px;
+            border-radius: 10px;
+            background-color: transparent;
+        }}
+        QLabel:hover {{
+            background-color: {Colors.HOVER_BG};
+        }}
+    """
 
-MODEL_BTN_STYLE = """
-    QWidget {
-        background-color: transparent;
-        border: none;
-        border-radius: 8px;
-        padding: 0px;
-    }
-    QWidget:hover {
-        background-color: rgba(255, 255, 255, 0.10);
-    }
-"""
+def _get_model_btn_style():
+    """获取模型按钮样式（响应主题）"""
+    Colors.refresh()
+    return f"""
+        QWidget {{
+            background-color: transparent;
+            border: none;
+            border-radius: 8px;
+            padding: 0px;
+        }}
+        QWidget:hover {{
+            background-color: {Colors.HOVER_BG_STRONG};
+        }}
+    """
 
-MODEL_BTN_TEXT_STYLE = f"color: #f3f6fc; {font_size_css(13)} font-weight: bold; background: transparent;"
+def _get_model_btn_text_style():
+    """获取模型按钮文字样式（响应主题）"""
+    Colors.refresh()
+    return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
+
+# 兼容旧引用
+TITLE_STYLE = _get_title_style()
+MODEL_BTN_STYLE = _get_model_btn_style()
+MODEL_BTN_TEXT_STYLE = _get_model_btn_text_style()
 
 
 # ==================== 预编译正则 ====================

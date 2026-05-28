@@ -3,7 +3,7 @@
 AutoLoop 循环引擎 — 自动任务执行循环
 
 包含：
-- AutoLoopEngine：核心状态机（规划/执行两阶段）
+- AutoLoopEngine：核心状态机（规划/执行/归档三阶段）
 - AutoLoopConfig：配置数据类
 - AutoLoopPromptComposer：Prompt 模板管理器
 """

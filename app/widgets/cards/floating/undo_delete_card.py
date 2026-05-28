@@ -74,7 +74,7 @@ class UndoDeleteCard(QWidget):
         self._restore_btn.setCursor(Qt.PointingHandCursor)
         self._restore_btn.setStyleSheet(f"""
             QLabel {{
-                color: #66c6ff;
+                color: {Colors.TAG_ACCENT};
                 {get_font_family_css()} {font_size_css(13)};
                 font-weight: bold;
                 background: transparent;
@@ -82,8 +82,8 @@ class UndoDeleteCard(QWidget):
                 border-radius: 4px;
             }}
             QLabel:hover {{
-                color: #aae0ff;
-                background: rgba(102, 198, 255, 0.1);
+                color: {Colors.TAG_ACCENT_TEXT};
+                background: {Colors.HOVER_BG};
             }}
         """)
         self._restore_btn.mousePressEvent = self._on_restore_clicked

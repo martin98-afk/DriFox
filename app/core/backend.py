@@ -693,6 +693,15 @@ class ChatBackend(QObject):
             # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
             if component == "agents" and self._agent_manager:
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+                # 智能体变更后同步重载命令注册（agent 文件同时也是 /agent_name 命令源）
+                # 确保 CommandManager 中的 agent 命令同步更新，否则 /silent-failure-hunter 等命令无法识别
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                    logger.debug(f"[ChatBackend] Commands reloaded after agent change for plugin: {plugin_name}")
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
 
             # 3. Hooks：仅当变更在 hooks/ 目录（只重载 hooks，不碰 agents）
             if component == "hooks" and self._agent_manager:

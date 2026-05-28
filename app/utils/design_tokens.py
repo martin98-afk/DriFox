@@ -221,7 +221,42 @@ class Colors:
     
     # 窗口淡背景色
     WINDOW_BG = "rgba(102, 198, 255, 0.04)"
-    
+
+    # ── 全局 UI 基底 ──────────────────────────────────
+    TOOLBAR_BG = "rgba(255, 255, 255, 0.05)"
+    DIVIDER_COLOR = "rgba(255, 255, 255, 0.06)"
+    HOVER_BG_STRONG = "rgba(255, 255, 255, 0.10)"
+    SCROLLBAR_HANDLE_BG = "rgba(255, 255, 255, 0.20)"
+    SCROLLBAR_HANDLE_HOVER_BG = "rgba(255, 255, 255, 0.30)"
+    CARD_PLACEHOLDER_TEXT = "#8FA4C2"
+
+    # ── 卡片级语义色 ──────────────────────────────────
+    BUTTON_TEXT_ON_ACCENT = "#1A1F2B"
+    STATUS_INFO = "#7FDBFF"
+    STATUS_DANGER_BG = "rgba(255, 80, 80, 0.8)"
+    STATUS_ARCHIVE_BG = "rgba(139, 92, 246, 0.8)"
+    CARD_BG_DIM = "rgba(255, 255, 255, 0.04)"
+    ARCHIVED_CARD_BG = "rgba(255, 180, 100, 0.08)"
+    ARCHIVED_CARD_BORDER = "rgba(255, 150, 80, 0.2)"
+
+    # ── 语法高亮色 ────────────────────────────────────
+    SYNTAX_STEP = "#4EC9B0"
+    SYNTAX_TOOL = "#DCDCAA"
+    SYNTAX_SUCCESS = "#6A9955"
+    SYNTAX_ERROR = "#F14C4C"
+    SYNTAX_RESULT = "#CE9178"
+
+    # ── 标签色 ────────────────────────────────────────
+    TAG_ACCENT = "#66c6ff"
+    TAG_ACCENT_TEXT = "#aae0ff"
+    TAG_PURPLE = "#b388ff"
+    TAG_PURPLE_TEXT = "#d1b3ff"
+    TAG_ORANGE = "#ffb366"
+    TAG_ORANGE_TEXT = "#ffc999"
+
+    # accent_warm 的 Colors 映射（主题已有该值，但 Colors 未暴露）
+    ACCENT_WARM = "#f59e0b"
+
     # 语义色
     SUCCESS = "#22c55e"
     WARNING = "#f59e0b"
@@ -320,6 +355,40 @@ class Colors:
         cls.BRANCH_LABEL_BORDER = theme.get("branch_label_border", cls.BRANCH_LABEL_BORDER)
         cls.WINDOW_BG = theme.get("window_bg", cls.WINDOW_BG)
 
+        cls.ACCENT_WARM = theme.get("accent_warm", cls.ACCENT_WARM)
+
+        # 全局 UI 基底
+        cls.TOOLBAR_BG = theme.get("toolbar_bg", cls.TOOLBAR_BG)
+        cls.DIVIDER_COLOR = theme.get("divider_color", cls.DIVIDER_COLOR)
+        cls.HOVER_BG_STRONG = theme.get("hover_bg_strong", cls.HOVER_BG_STRONG)
+        cls.SCROLLBAR_HANDLE_BG = theme.get("scrollbar_handle_bg", cls.SCROLLBAR_HANDLE_BG)
+        cls.SCROLLBAR_HANDLE_HOVER_BG = theme.get("scrollbar_handle_hover_bg", cls.SCROLLBAR_HANDLE_HOVER_BG)
+        cls.CARD_PLACEHOLDER_TEXT = theme.get("card_placeholder_text", cls.CARD_PLACEHOLDER_TEXT)
+
+        # 卡片级语义色
+        cls.BUTTON_TEXT_ON_ACCENT = theme.get("button_text_on_accent", cls.BUTTON_TEXT_ON_ACCENT)
+        cls.STATUS_INFO = theme.get("status_info", cls.STATUS_INFO)
+        cls.STATUS_DANGER_BG = theme.get("status_danger_bg", cls.STATUS_DANGER_BG)
+        cls.STATUS_ARCHIVE_BG = theme.get("status_archive_bg", cls.STATUS_ARCHIVE_BG)
+        cls.CARD_BG_DIM = theme.get("card_bg_dim", cls.CARD_BG_DIM)
+        cls.ARCHIVED_CARD_BG = theme.get("archived_card_bg", cls.ARCHIVED_CARD_BG)
+        cls.ARCHIVED_CARD_BORDER = theme.get("archived_card_border", cls.ARCHIVED_CARD_BORDER)
+
+        # 语法高亮色
+        cls.SYNTAX_STEP = theme.get("syntax_step", cls.SYNTAX_STEP)
+        cls.SYNTAX_TOOL = theme.get("syntax_tool", cls.SYNTAX_TOOL)
+        cls.SYNTAX_SUCCESS = theme.get("syntax_success", cls.SYNTAX_SUCCESS)
+        cls.SYNTAX_ERROR = theme.get("syntax_error", cls.SYNTAX_ERROR)
+        cls.SYNTAX_RESULT = theme.get("syntax_result", cls.SYNTAX_RESULT)
+
+        # 标签色
+        cls.TAG_ACCENT = theme.get("tag_accent", cls.TAG_ACCENT)
+        cls.TAG_ACCENT_TEXT = theme.get("tag_accent_text", cls.TAG_ACCENT_TEXT)
+        cls.TAG_PURPLE = theme.get("tag_purple", cls.TAG_PURPLE)
+        cls.TAG_PURPLE_TEXT = theme.get("tag_purple_text", cls.TAG_PURPLE_TEXT)
+        cls.TAG_ORANGE = theme.get("tag_orange", cls.TAG_ORANGE)
+        cls.TAG_ORANGE_TEXT = theme.get("tag_orange_text", cls.TAG_ORANGE_TEXT)
+
 
 # 初始化 Colors
 Colors.refresh()
@@ -406,33 +475,73 @@ class CardStyles:
     @staticmethod
     def scroll_area() -> str:
         """滚动区域样式"""
-        return """
-            QScrollArea {
+        Colors.refresh()
+        return f"""
+            QScrollArea {{
                 border: none;
                 background: transparent;
-            }
-            QScrollArea > QWidget > QWidget {
+            }}
+            QScrollArea > QWidget > QWidget {{
                 background: transparent;
-            }
-            QScrollBar:vertical {
+            }}
+            QScrollBar:vertical {{
                 background: transparent;
                 width: 8px;
                 margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(255, 255, 255, 0.2);
+            }}
+            QScrollBar::handle:vertical {{
+                background: {Colors.SCROLLBAR_HANDLE_BG};
                 border-radius: 4px;
                 min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(255, 255, 255, 0.3);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
                 background: none;
-            }
+            }}
+        """
+    
+    @staticmethod
+    def edit_card_style() -> str:
+        """统一表单输入框样式（供 mcp/hook/provider_edit/gateway 等设置卡片复用）"""
+        Colors.refresh()
+        from app.utils.utils import get_font_family_css
+        from app.utils.design_tokens import font_size_css
+        return f"""
+        QWidget {{
+            background: transparent;
+        }}
+        QLineEdit {{
+            background-color: {Colors.CONTENT_BG};
+            color: {Colors.TEXT_PRIMARY};
+            border: 1px solid {Colors.BORDER};
+            border-radius: 4px;
+            padding: 4px 8px;
+            {get_font_family_css()}
+            {font_size_css(12)}
+        }}
+        QLineEdit:focus {{
+            border-color: {Colors.INPUT_FOCUS_BORDER};
+        }}
+        QLineEdit::placeholder {{
+            color: {Colors.INPUT_PLACEHOLDER};
+        }}
+        QPlainTextEdit {{
+            background-color: {Colors.CONTENT_BG};
+            color: {Colors.TEXT_PRIMARY};
+            border: 1px solid {Colors.BORDER};
+            border-radius: 4px;
+            padding: 4px 8px;
+            {get_font_family_css()}
+            {font_size_css(12)}
+        }}
+        QPlainTextEdit:focus {{
+            border-color: {Colors.INPUT_FOCUS_BORDER};
+        }}
         """
     
     @staticmethod

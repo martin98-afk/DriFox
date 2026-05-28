@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 import platform
-
-from app.utils.design_tokens import font_size_css
 import uuid
 import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
@@ -28,6 +26,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import get_font_family_css
 from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_icon
+from app.utils.design_tokens import font_size_css, Colors
 
 
 class ToolWindowTitleBar(QWidget):
@@ -68,8 +67,9 @@ class ToolWindowTitleBar(QWidget):
         self._memory_label = QLabel(self)
         self._memory_label.setObjectName("memoryLabel")
         self._memory_label.setFixedHeight(22)
+        from app.utils.design_tokens import Colors
         self._memory_label.setStyleSheet(
-            f"color: #ffffff; {get_font_family_css()} font-size: {scale_font_size(12)}px; "
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(12)}px; "
             f"padding: 2px 6px; background-color: transparent; border: none; border-radius: 4px;"
         )
         self._memory_label.hide()  # 默认隐藏，子类可以控制显示
@@ -279,7 +279,7 @@ class OpacitySlider(QWidget):
         painter.drawRoundedRect(track_x, track_y, track_width, track_height, 2, 2)
 
         fill_height = int(track_height * self._opacity / 100)
-        fill_color = QColor("#0078d4")
+        fill_color = QColor(Colors.SYSTEM_ACCENT)
         painter.setBrush(fill_color)
         painter.drawRoundedRect(
             track_x,
@@ -371,7 +371,7 @@ class LockButtonWidget(QWidget):
         self._topmost_timer.start(200)  # 每 200ms 重新置顶一次
 
     def _force_always_on_top(self):
-        """使用 Windows API 强制置顶到所有窗口之上，防止被其他窗口遮挡"""
+        """智能置顶：本应用前台时允许对话框位于锁定按钮之上，其他应用前台时强制 TOPMOST 防止被遮挡"""
         import platform
 
         if platform.system() != "Windows":
@@ -382,14 +382,53 @@ class LockButtonWidget(QWidget):
             from ctypes import wintypes
 
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             SWP_NOSIZE = 0x0001
             SWP_NOMOVE = 0x0002
             SWP_NOACTIVATE = 0x0010
-            HWND_TOPMOST = -1
 
+            # 获取当前前台窗口的进程 ID
+            foreground_hwnd = user32.GetForegroundWindow()
+            if not foreground_hwnd:
+                return
+
+            fg_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(foreground_hwnd, ctypes.byref(fg_pid))
+            our_pid = kernel32.GetCurrentProcessId()
+
+            if fg_pid.value != our_pid:
+                # 其他应用在前台 → 强制 TOPMOST 防止被遮挡
+                HWND_TOPMOST = -1
+                hwnd = wintypes.HWND(int(self.winId()))
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                self.raise_()
+                return
+
+            # 本应用在前台 → 检查当前激活窗口是否为对话框
+            # 如果是对话框（如 DiffViewerWindow），锁定按钮应居于其下
+            app = QApplication.instance()
+            if app:
+                active = app.activeWindow()
+                if active and isinstance(active, QDialog):
+                    # 对话框激活中 → 将锁定按钮置于对话框下方
+                    HWND_NOTOPMOST = -2
+                    hwnd = wintypes.HWND(int(self.winId()))
+                    # ① 移除 TOPMOST 状态，使对话框可以浮于锁定按钮之上
+                    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                    # ② 再将锁定按钮放置在对话框下方（SetWindowPos 的 hWndInsertAfter 参数
+                    #    表示窗口将被插入到此 HWND 之后，即下方）
+                    active_hwnd = wintypes.HWND(int(active.winId()))
+                    user32.SetWindowPos(hwnd, active_hwnd, 0, 0, 0, 0,
+                                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                    return
+
+            # 本应用在前台，无对话框 → 正常提升 z-order
             hwnd = wintypes.HWND(int(self.winId()))
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
-            self.raise_()  # 立即提升到最前
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            self.raise_()
         except Exception:
             pass  # 忽略可能的异常
 
@@ -410,32 +449,35 @@ class LockButtonWidget(QWidget):
         if self._is_locked:
             self._btn.setIcon(get_icon("锁定"))
             self._btn.setToolTip("取消锁定（恢复交互）")
-            self._btn.setStyleSheet("""
-                QToolButton {
-                    background-color: rgba(0, 120, 212, 200);
+            # 将 Colors.SYSTEM_ACCENT 转为 rgba 格式用于按钮背景
+            _accent_qc = QColor(Colors.SYSTEM_ACCENT)
+            _accent_r, _accent_g, _accent_b = _accent_qc.red(), _accent_qc.green(), _accent_qc.blue()
+            self._btn.setStyleSheet(f"""
+                QToolButton {{
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 200);
                     border-radius: 4px;
-                    color: #e0e0e0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(0, 120, 212, 240);
-                }
-                QToolButton:pressed {
-                    background-color: rgba(0, 120, 212, 180);
-                }
+                    color: {Colors.TEXT_SECONDARY};
+                }}
+                QToolButton:hover {{
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 240);
+                }}
+                QToolButton:pressed {{
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 180);
+                }}
             """)
         else:
             self._btn.setIcon(get_icon("解锁"))
             self._btn.setToolTip("锁定窗口（鼠标穿透）")
-            self._btn.setStyleSheet("""
-                QToolButton {
+            self._btn.setStyleSheet(f"""
+                QToolButton {{
                     background-color: transparent;
                     border-radius: 4px;
-                    color: #c0c0c0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(255, 255, 255, 15);
-                    color: #ffffff;
-                }
+                    color: {Colors.TEXT_MUTED};
+                }}
+                QToolButton:hover {{
+                    background-color: {Colors.TOOLBAR_BG};
+                    color: {Colors.TEXT_PRIMARY};
+                }}
             """)
 
     def setLocked(self, locked: bool):
@@ -591,7 +633,7 @@ class ToolPopupDialog(QDialog):
         self._selection_indicator = QLabel("●", title_bar)
         self._selection_indicator.setStyleSheet(f"""
             QLabel {{
-                color: #4FC3F7;
+                color: {Colors.REALTIME_ACCENT};
                 {font_size_css(14)}
                 background: transparent;
             }}
@@ -765,9 +807,15 @@ class ToolPopupDialog(QDialog):
             self.move(x, y)
 
     def keyPressEvent(self, event):
-        # ESC: 清除所有窗口选中状态
-        if event.key() == Qt.Key_Escape:
+        # Shift+ESC: 清除所有窗口选中状态（解除分组）
+        if (event.key() == Qt.Key_Escape
+                and event.modifiers() == Qt.ShiftModifier):
             TrayManager.get_instance().deselect_all()
+            event.accept()
+            return
+
+        # 单独 ESC：空消耗，不关闭窗口也不解除分组
+        if event.key() == Qt.Key_Escape:
             event.accept()
             return
 

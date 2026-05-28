@@ -11,7 +11,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
-    QDoubleSpinBox,
 )
 from qfluentwidgets import (
     BodyLabel,
@@ -28,7 +27,7 @@ from app.constants import (
     FREE_PROVIDERS,
 )
 from app.utils.utils import get_icon, get_font_family_css
-from app.utils.design_tokens import font_size_css
+from app.utils.design_tokens import Colors, font_size_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 from app.widgets.model_list_edit_dialog import ModelListEditDialog
@@ -132,38 +131,22 @@ class ProviderEditCard(QWidget):
         self.fetchFailed.connect(self._on_fetch_failed)
 
     def _init_ui(self):
+        Colors.refresh()
         self.setStyleSheet(f"""
             QWidget {{
                 background: transparent;
             }}
-            QDoubleSpinBox {{
-                background-color: rgba(61, 61, 61, 180);
-                color: #ffffff;
-                border: 1px solid rgba(85, 85, 85, 150);
-                border-radius: 4px;
-                padding: 2px 6px;
-                {get_font_family_css()}
-                font-size: {font_size_css(11)};
-            }}
-            QDoubleSpinBox:hover {{
-                border-color: rgba(0, 120, 212, 200);
-            }}
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
-                background-color: transparent;
-                border: none;
-                width: 16px;
-            }}
             QLineEdit {{
-                background-color: rgba(61, 61, 61, 180);
-                color: #ffffff;
-                border: 1px solid rgba(85, 85, 85, 150);
+                background-color: {Colors.CONTENT_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 border-radius: 4px;
                 padding: 4px 8px;
                 {get_font_family_css()}
                 font-size: {font_size_css(12)};
             }}
             QLineEdit:focus {{
-                border-color: rgba(0, 120, 212, 200);
+                border-color: {Colors.INPUT_FOCUS_BORDER};
             }}
         """)
 
@@ -301,34 +284,6 @@ class ProviderEditCard(QWidget):
 
         main_layout.addLayout(model_row)
 
-        temp_row = QHBoxLayout()
-        temp_label = BodyLabel("模型温度:")
-        temp_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        temp_row.addWidget(temp_label)
-        self.tempSpin = QDoubleSpinBox()
-        self.tempSpin.setRange(0, 2)
-        self.tempSpin.setSingleStep(0.1)
-        self.tempSpin.setDecimals(2)
-        self.tempSpin.setFixedHeight(26)
-        self.tempSpin.setValue(self._original_info.get("温度", template.get("温度", 0.7)))
-        temp_row.addWidget(self.tempSpin, 1)
-        main_layout.addLayout(temp_row)
-
-        context_row = QHBoxLayout()
-        context_label = BodyLabel("最大上下文:")
-        context_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        context_row.addWidget(context_label)
-        self.contextLengthSpin = QDoubleSpinBox()
-        self.contextLengthSpin.setRange(1, 99999999)
-        self.contextLengthSpin.setSingleStep(1000)
-        self.contextLengthSpin.setDecimals(0)
-        self.contextLengthSpin.setFixedHeight(26)
-        self.contextLengthSpin.setValue(
-            self._original_info.get("最大Token", template.get("最大Token", 4096))
-        )
-        context_row.addWidget(self.contextLengthSpin, 1)
-        main_layout.addLayout(context_row)
-
         # 保存按钮已移到 BaseSettingsCard 标题栏，信号由外部连接
 
         # 新建时调用一次初始化
@@ -422,8 +377,6 @@ class ProviderEditCard(QWidget):
                 self.modelCombo.setCurrentIndex(0)
             self.modelCombo.blockSignals(False)
 
-            self.contextLengthSpin.setValue(template.get("最大Token", 4096))
-
     def _open_help_url(self, name: str):
         """打开帮助链接"""
         if name in FREE_PROVIDERS:
@@ -508,8 +461,6 @@ class ProviderEditCard(QWidget):
             "API_URL": self.apiUrlCombo.currentText().strip(),
             "API_KEY": self.apiKeyEdit.text().strip(),
             "模型名称": self.modelCombo.currentText().strip(),
-            "温度": self.tempSpin.value(),
-            "最大Token": int(self.contextLengthSpin.value()),
             "认证方式": "bearer",
         }
         if current_models:

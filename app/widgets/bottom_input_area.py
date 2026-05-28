@@ -99,8 +99,8 @@ class SendableTextEdit(TextEdit):
                     stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
             }}
             TransparentToolButton:disabled {{
-                background: rgba(255, 255, 255, 0.10);
-                color: rgba(255, 255, 255, 0.45);
+                background: {Colors.TOOLBAR_BG};
+                color: {Colors.TEXT_SECONDARY};
             }}
         """)
 
@@ -591,7 +591,7 @@ class SendableTextEdit(TextEdit):
                 border: none;
                 border-radius: 16px 16px 0 0;
                 padding: 12px 52px 12px 20px;
-                selection-background-color: rgba(201, 168, 92, 0.28);
+                selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}
             QTextEdit:focus {{
@@ -604,12 +604,12 @@ class SendableTextEdit(TextEdit):
                 margin: 0;
             }}
             QTextEdit QScrollBar::handle:vertical {{
-                background: rgba(255, 255, 255, 0.15);
+                background: {Colors.SCROLLBAR_HANDLE_BG};
                 border-radius: 3px;
                 min-height: 20px;
             }}
             QTextEdit QScrollBar::handle:vertical:hover {{
-                background: rgba(255, 255, 255, 0.25);
+                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
             }}
             QTextEdit QScrollBar::add-line:vertical,
             QTextEdit QScrollBar::sub-line:vertical {{
@@ -626,7 +626,7 @@ class SendableTextEdit(TextEdit):
         Colors.refresh()
         return f"""
             ComboBox {{
-                background-color: rgba(255, 255, 255, 0.05);
+                background-color: {Colors.TOOLBAR_BG};
                 color: {Colors.INPUT_TEXT};
                 border: 1px solid {Colors.INPUT_BORDER};
                 border-radius: 10px;
@@ -634,7 +634,7 @@ class SendableTextEdit(TextEdit):
                 {get_font_family_css()} {font_size_css(12)};
             }}
             ComboBox:hover {{
-                background-color: rgba(255, 255, 255, 0.08);
+                background-color: {Colors.HOVER_BG};
                 border-color: {Colors.INPUT_FOCUS_BORDER};
             }}
             ComboBox::drop-down {{

@@ -159,8 +159,9 @@ class ModelSelectorPopup(QWidget):
         self._all_model_items: List[Tuple[ModelItem, str, str]] = []  # (widget, provider, model)
         self._active_model_item: Optional[ModelItem] = None  # 当前选中模型的 item 引用
 
-        # 安装事件过滤器，用于点击外部关闭弹窗（在 _setup_ui 之前）
-        QApplication.instance().installEventFilter(self)
+        # 注意：事件过滤器不在 __init__ 安装，而是在 show_at() 中安装。
+        # 因为 close() 移除了过滤器后，若在 __init__ 安装则无法恢复。
+        # 改为在 show_at() 中动态安装，确保每次显示时都有事件过滤器。
 
         self._setup_ui()
 
@@ -471,13 +472,14 @@ class ModelSelectorPopup(QWidget):
         return super().eventFilter(obj, event)
 
     def close(self):
-        """关闭弹窗时移除事件过滤器"""
-        QApplication.instance().removeEventFilter(self)
+        """关闭弹窗（不移除事件过滤器，由 show_at 统一管理）"""
         super().close()
 
     def show_at(self, reference_widget: QWidget):
         """在参考控件上方显示弹窗（向上展开）"""
         self._reference_widget = reference_widget
+        # 安装事件过滤器（每次显示时确保存在，防止 close 后丢失）
+        QApplication.instance().installEventFilter(self)
         # 先显示以激活布局计算
         self.show()
         QApplication.processEvents()

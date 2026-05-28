@@ -138,7 +138,7 @@ class CommandItemWidget(QWidget):
         """)
 
         # 名称样式
-        fg = "#ffffff" if self._selected else Colors.TEXT_PRIMARY
+        fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_PRIMARY
         self._name_label.setStyleSheet(f"""
             QLabel {{
                 color: {fg};
@@ -148,7 +148,7 @@ class CommandItemWidget(QWidget):
         """)
 
         # 描述样式
-        desc_fg = "#ffffff" if self._selected else "rgba(255,255,255,0.45)"
+        desc_fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_SECONDARY
         self._desc_label.setStyleSheet(f"""
             QLabel {{
                 color: {desc_fg};
@@ -160,7 +160,7 @@ class CommandItemWidget(QWidget):
         # 标签样式：技能蓝色，智能体紫色，提示词橙色
         item_type = self._data["type"]
         if item_type == "skill":
-            tag_fg = "#66c6ff" if not self._selected else "#aae0ff"
+            tag_fg = Colors.TAG_ACCENT if not self._selected else Colors.TAG_ACCENT_TEXT
             self._tag_label.setStyleSheet(f"""
                 QLabel {{
                     color: {tag_fg};
@@ -170,7 +170,7 @@ class CommandItemWidget(QWidget):
                 }}
             """)
         elif item_type == "agent":
-            tag_fg = "#b388ff" if not self._selected else "#d1b3ff"
+            tag_fg = Colors.TAG_PURPLE if not self._selected else Colors.TAG_PURPLE_TEXT
             self._tag_label.setStyleSheet(f"""
                 QLabel {{
                     color: {tag_fg};
@@ -180,7 +180,7 @@ class CommandItemWidget(QWidget):
                 }}
             """)
         elif item_type == "prompt":
-            tag_fg = "#ffb366" if not self._selected else "#ffc999"
+            tag_fg = Colors.TAG_ORANGE if not self._selected else Colors.TAG_ORANGE_TEXT
             self._tag_label.setStyleSheet(f"""
                 QLabel {{
                     color: {tag_fg};
@@ -207,7 +207,7 @@ class CommandItemWidget(QWidget):
                 idx = lower_name.find(ch, last_end)
                 if idx >= 0:
                     html += display_name[last_end:idx]
-                    html += f'<span style="color: #C9A85C; font-weight: bold;">{display_name[idx]}</span>'
+                    html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_name[idx]}</span>'
                     last_end = idx + 1
                 else:
                     break
@@ -302,16 +302,16 @@ class CommandCard(QWidget):
             }}
             QScrollBar:vertical {{
                 background: transparent;
-                width: 4px;
+                width: 12px;
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
-                background: rgba(255, 255, 255, 0.15);
-                border-radius: 2px;
-                min-height: 20px;
+                background: {Colors.SCROLLBAR_HANDLE_BG};
+                border-radius: 6px;
+                min-height: 30px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: rgba(255, 255, 255, 0.25);
+                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {{
@@ -480,7 +480,7 @@ class CommandCard(QWidget):
                     divider = QFrame()
                     divider.setFrameShape(QFrame.HLine)
                     divider.setFixedHeight(1)
-                    divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
+                    divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
                     divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                     self._scroll_layout.addWidget(divider)
                     self._divider = divider
@@ -492,7 +492,7 @@ class CommandCard(QWidget):
             divider = QFrame()
             divider.setFrameShape(QFrame.HLine)
             divider.setFixedHeight(1)
-            divider.setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none;")
+            divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
             divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self._scroll_layout.addWidget(divider)
             self._divider = divider
