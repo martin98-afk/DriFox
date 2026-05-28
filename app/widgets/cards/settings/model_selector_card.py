@@ -271,6 +271,8 @@ class ModelSelectorCardContent(QWidget):
         current_model: str,
     ):
         """设置服务商和模型数据"""
+        # 重置滚动位置，避免重建后旧滚动位置导致吸顶服务商计算错误
+        self.scroll_area.verticalScrollBar().setValue(0)
         self._current_provider = current_provider
         self._current_model = current_model
         self._provider_models = [(p, m) for p, m, _ in provider_models]
