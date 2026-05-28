@@ -2189,6 +2189,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间"""
         if hasattr(self, 'input_area'):
             self.input_area.setVisible(False)
+            # 收起卡片高度到仅按钮栏 + 分隔线
+            self._input_card.setFixedHeight(34 + 1 + 4)  # toolbar + separator + padding
 
     def _on_system_card_closed(self, card_id: str):
         """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
@@ -2197,6 +2199,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
         if hasattr(self, 'input_area'):
             self.input_area.setVisible(True)
+            # 重新触发高度计算，恢复输入框高度
+            self._on_input_area_height_changed()
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
