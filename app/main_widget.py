@@ -1580,8 +1580,8 @@ class OpenAIChatToolWindow(ToolWindow):
             agent_name: 智能体名称（来自 agents 目录）
             task_description: 子智能体任务描述
         """
-        if not agent_name or not task_description:
-            InfoBar.warning("参数错误", "缺少智能体名称或任务描述", parent=self, position=InfoBarPosition.BOTTOM)
+        if not agent_name:
+            InfoBar.warning("参数错误", "缺少智能体名称", parent=self, position=InfoBarPosition.BOTTOM)
             return
 
         # 清空输入框（和函数型命令一样处理）
