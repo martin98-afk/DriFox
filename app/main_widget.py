@@ -5848,6 +5848,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
 
+        # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
+        if not cmd_result.handled and user_text.startswith("/"):
+            from app.utils.utils import get_skill_by_name
+            parts = user_text[1:].split(maxsplit=1)
+            if parts and get_skill_by_name(parts[0]):
+                skill_name = parts[0]
+                remainder = parts[1] if len(parts) > 1 else ""
+                if remainder:
+                    user_text = f"加载这个智能体技能：@{skill_name}\n{remainder}"
+                else:
+                    user_text = f"加载这个智能体技能：@{skill_name}"
+        # ---- 技能替换结束 ----
+
         # 非函数命令：检查是否正在流式输出
         if self._is_streaming:
             self._on_stop_clicked()

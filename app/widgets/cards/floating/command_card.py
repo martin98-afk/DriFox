@@ -350,13 +350,13 @@ class CommandCard(QWidget):
     def _setup_detail_widget(self):
         """构建 detail 模式下的参数提示 UI"""
         detail_layout = QVBoxLayout(self._detail_container)
-        detail_layout.setContentsMargins(12, 2, 12, 2)
-        detail_layout.setSpacing(1)
+        detail_layout.setContentsMargins(12, 1, 12, 2)
+        detail_layout.setSpacing(2)
 
         # 第一行：命令说明（可换行，显示全部内容）
         self._detail_desc_label = QLabel()
         self._detail_desc_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)}; background: transparent; }}
+            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
         """)
         self._detail_desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._detail_desc_label.setWordWrap(True)
@@ -365,7 +365,7 @@ class CommandCard(QWidget):
         # 第二行：参数提示
         self._detail_hint_label = QLabel()
         self._detail_hint_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; padding: 0; }}
+            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
         """)
         self._detail_hint_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_hint_label)
@@ -386,15 +386,19 @@ class CommandCard(QWidget):
         return self._detail_cmd_name
 
     def show_command_detail(self, cmd_name: str):
-        """切换到 detail 模式：显示指定命令的参数提示
+        """切换到 detail 模式：显示指定命令/技能的参数提示
 
         Args:
-            cmd_name: 已匹配的命令名
+            cmd_name: 已匹配的命令名或技能名
         """
         from app.core.command_manager import CommandManager
+        from app.utils.utils import get_skill_by_name
+
         cmd_mgr = CommandManager.get_instance()
         cmd = cmd_mgr.get_command(cmd_name)
-        if not cmd:
+        skill = get_skill_by_name(cmd_name) if not cmd else None
+
+        if not cmd and not skill:
             return
 
         # 已在此命令的 detail 模式，无需刷新
@@ -405,17 +409,20 @@ class CommandCard(QWidget):
         self._detail_cmd_name = cmd_name
 
         # 更新 UI：只显示描述（截断过长文本），不显示命令名
-        desc = cmd.description
-        max_chars = 120
+        if cmd:
+            desc = cmd.description
+            # 参数提示：智能体始终显示 --subagent，其他命令显示 argument_hint
+            if cmd.type == "agent":
+                hint_text = "--subagent &lt;task-desc&gt;"
+            else:
+                hint_text = cmd.argument_hint or ""
+        else:
+            desc = skill.get("description", "")
+            hint_text = ""  # 技能没有参数提示
+        max_chars = 200
         if len(desc) > max_chars:
             desc = desc[:max_chars].rstrip() + "…"
         self._detail_desc_label.setText(desc)
-
-        # 参数提示：智能体始终显示 --subagent，其他命令显示 argument_hint
-        if cmd.type == "agent":
-            hint_text = "--subagent &lt;task-desc&gt;"
-        else:
-            hint_text = cmd.argument_hint or ""  # 没有参数提示就留空
         self._detail_hint_label.setText(hint_text)
 
         # 隐藏列表，显示 detail
@@ -433,23 +440,38 @@ class CommandCard(QWidget):
         v_margin = margins.top() + margins.bottom()
         spacing = self._detail_container.layout().spacing()
 
-        # 计算描述文本高度
-        desc_height = self._detail_desc_label.sizeHint().height()
-        if desc_height < 20:
-            desc_height = 20  # 至少一行高度
+        # 计算描述文本高度（使用 fontMetrics 精确计算）
+        fm = self._detail_desc_label.fontMetrics()
+        line_height = fm.lineSpacing()
+        desc_text = self._detail_desc_label.text()
+        if desc_text.strip():
+            # 估算行数：文本宽度 / label 可用宽度
+            label_width = self._detail_desc_label.width() or 1
+            if label_width <= 0:
+                label_width = self.width() - 24  # 减去左右 margins
+            text_width = fm.horizontalAdvance(desc_text)
+            line_count = max(1, (text_width + label_width - 1) // label_width)
+            desc_height = line_height * line_count
+        else:
+            desc_height = line_height
 
         # 计算提示文本高度：没有内容时隐藏
         hint_text = self._detail_hint_label.text()
         if hint_text.strip():
-            hint_height = self._detail_hint_label.sizeHint().height()
-            if hint_height < 20:
-                hint_height = 20
+            fm_hint = self._detail_hint_label.fontMetrics()
+            hint_line_height = fm_hint.lineSpacing()
+            hint_width = fm_hint.horizontalAdvance(hint_text)
+            label_width = self._detail_hint_label.width() or 1
+            if label_width <= 0:
+                label_width = self.width() - 24
+            hint_line_count = max(1, (hint_width + label_width - 1) // label_width)
+            hint_height = hint_line_height * hint_line_count
             self._detail_hint_label.setVisible(True)
         else:
             hint_height = 0
             self._detail_hint_label.setVisible(False)
 
-        total_height = v_margin + desc_height + spacing + hint_height + 2
+        total_height = v_margin + desc_height + spacing + hint_height
         self.setFixedHeight(total_height)
 
     def _reset_detail_mode(self):

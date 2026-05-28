@@ -167,17 +167,18 @@ class SendableTextEdit(TextEdit):
                 self._slash_trigger_pos = -1
                 return
 
-            # 空格 → 检查是否是已知命令后跟参数
+            # 空格 → 检查是否是已知命令或技能后跟参数
             if " " in query:
                 self._cancel_slash_throttle()
                 cmd_name = query.split(" ", 1)[0]
                 from app.core.command_manager import CommandManager
-                if CommandManager.get_instance().is_known_command_name(cmd_name):
-                    # 已知命令 + 参数 → 切换到 detail 模式
+                from app.utils.utils import get_skill_by_name
+                if CommandManager.get_instance().is_known_command_name(cmd_name) or get_skill_by_name(cmd_name):
+                    # 已知命令/技能 + 参数 → 切换到 detail 模式
                     self._slash_trigger_pos = 0
                     self.slashShowHint.emit(cmd_name)
                 else:
-                    # 未知命令 + 参数 → 关闭
+                    # 未知命令/技能 + 参数 → 关闭
                     if card and card.is_card_visible:
                         card.dismiss()
                         self.slashDismissed.emit()
@@ -238,12 +239,8 @@ class SendableTextEdit(TextEdit):
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
 
-            # 确定插入格式：命令用 /xxx，技能用 @xxx
-            from app.core.command_manager import CommandManager
-            is_command = CommandManager.get_instance().is_known_command_name(item_name)
-            insert_prefix = "/" if is_command else "@"
-
-            insert_text = f"{insert_prefix}{item_name} "
+            # 统一使用 / 前缀（命令、技能、智能体都用 /）
+            insert_text = f"/{item_name} "
             cursor.insertText(insert_text)
 
             cursor.setPosition(trigger_pos + len(insert_text))
