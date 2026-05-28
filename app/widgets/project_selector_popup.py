@@ -321,9 +321,6 @@ class ProjectSelectorPopup(QWidget):
 
     def show_at(self, reference_widget: QWidget):
         """在参考控件下方显示"""
-        self.show()
-        QApplication.processEvents()
-
         self.main_frame.layout().activate()
         content_size = self.main_frame.sizeHint()
 
@@ -337,14 +334,12 @@ class ProjectSelectorPopup(QWidget):
             max_height = 400
 
         self.setMaximumSize(max_width, max_height)
-        self.resize(min(content_size.width(), max_width),
-                    min(content_size.height(), max_height))
 
         ref_rect = reference_widget.rect()
         ref_global = reference_widget.mapToGlobal(ref_rect.topLeft())
 
-        popup_w = min(self.width(), self.maximumWidth())
-        popup_h = min(self.height(), self.maximumHeight())
+        popup_w = min(content_size.width(), max_width)
+        popup_h = min(content_size.height(), max_height)
 
         # 左边对齐到参考控件
         x = ref_global.x()
@@ -360,7 +355,9 @@ class ProjectSelectorPopup(QWidget):
             if y + popup_h > screen_geom.bottom():
                 y = ref_global.y() - popup_h - 4
 
+        self.resize(popup_w, popup_h)
         self.move(x, y)
+        self.show()
         self.raise_()
 
         # 激活窗口并设置焦点到输入框，确保中文 IME 能正确工作
