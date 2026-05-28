@@ -13,7 +13,118 @@ from qfluentwidgets import FluentIcon, TransparentToolButton
 
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css
-from app.widgets.model_selector_popup import ProviderHeader, ModelItem, _calculate_scroll_height
+from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
+
+# item 高度常量
+_ITEM_HEIGHT = 34  # ModelItem 高度
+_HEADER_HEIGHT = 36  # ProviderHeader 高度
+_MIN_ITEMS = 3  # 最少显示 item 数
+_MAX_ITEMS = 10  # 最多显示 item 数
+
+# 滚动区域高度计算
+_MIN_SCROLL_HEIGHT = _MIN_ITEMS * _ITEM_HEIGHT  # 最小高度：约 102px
+_MAX_SCROLL_HEIGHT = _MAX_ITEMS * _ITEM_HEIGHT + _HEADER_HEIGHT  # 最大高度：约 274px
+
+
+def _calculate_scroll_height(total_items: int) -> int:
+    """根据 item 总数计算滚动区域高度"""
+    if total_items <= _MIN_ITEMS:
+        return _MIN_SCROLL_HEIGHT
+    elif total_items >= _MAX_ITEMS:
+        return _MAX_SCROLL_HEIGHT
+    else:
+        ratio = (total_items - _MIN_ITEMS) / (_MAX_ITEMS - _MIN_ITEMS)
+        return int(_MIN_SCROLL_HEIGHT + ratio * (_MAX_SCROLL_HEIGHT - _MIN_SCROLL_HEIGHT))
+
+
+class ProviderHeader(QWidget):
+    """服务商标题行"""
+
+    def __init__(self, provider_name: str, parent=None):
+        super().__init__(parent)
+        self.provider_name = provider_name
+        self.setFixedHeight(36)
+        self.setStyleSheet("background: transparent;")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 8, 0)
+        layout.setSpacing(8)
+
+        # 服务商图标
+        self.icon_widget = ProviderIconWidget(provider_name, 20)
+        layout.addWidget(self.icon_widget)
+
+        # 服务商名称
+        self.name_label = QLabel(provider_name, self)
+        self._apply_name_style()
+        layout.addWidget(self.name_label)
+
+        layout.addStretch(1)
+
+    def _apply_name_style(self):
+        Colors.refresh()
+        self.name_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;")
+
+
+class ModelItem(QWidget):
+    """单个模型项 - 可点击"""
+    clicked = pyqtSignal(str, str)  # provider_name, model_name
+
+    def __init__(self, provider_name: str, model_name: str, is_active: bool = False, parent=None):
+        super().__init__(parent)
+        self.provider_name = provider_name
+        self.model_name = model_name
+        self.is_active = is_active
+        self.setFixedHeight(34)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(30, 0, 12, 0)
+        layout.setSpacing(8)
+
+        # 选中状态指示点
+        self.dot = QLabel("●", self)
+        self.dot.setStyleSheet(
+            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};" if self.is_active else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
+        self.dot.setFixedWidth(14)
+        layout.addWidget(self.dot)
+
+        # 模型名
+        self.name_label = QLabel(self.model_name, self)
+        self._apply_name_style()
+        layout.addWidget(self.name_label, 1)
+
+    def _apply_name_style(self):
+        Colors.refresh()
+        if self.is_active:
+            self.name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};")
+        else:
+            self.name_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(13)};")
+
+    def set_active(self, active: bool):
+        self.is_active = active
+        self.dot.setStyleSheet(
+            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};" if active else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
+        self._apply_name_style()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.provider_name, self.model_name)
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        if not self.is_active:
+            self.name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)};")
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._apply_name_style()
+        super().leaveEvent(event)
 
 
 class ModelSelectorCardContent(QWidget):
@@ -31,6 +142,7 @@ class ModelSelectorCardContent(QWidget):
         self._model_widgets: List[ModelItem] = []
         self._all_model_items: List[Tuple[ModelItem, str, str]] = []
         self._active_model_item: Optional[ModelItem] = None
+        self._provider_headers: List[Tuple[QWidget, str]] = []  # (header_widget, provider_name)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -72,6 +184,33 @@ class ModelSelectorCardContent(QWidget):
         separator.setFrameShape(QFrame.HLine)
         separator.setStyleSheet(f"background-color: {Colors.BORDER}; max-height: 1px; margin: 4px 0;")
         layout.addWidget(separator)
+
+        # 吸顶服务商标签（初始隐藏，滚动时在顶部显示当前服务商）
+        self._sticky_header = QFrame(self)
+        self._sticky_header.setFixedHeight(36)
+        self._sticky_header.setVisible(False)
+        self._sticky_header.setStyleSheet(f"""
+            QFrame {{
+                background: {Colors.CONTENT_BG};
+                border: none;
+                border-bottom: 1px solid {Colors.BORDER};
+            }}
+        """)
+        sticky_layout = QHBoxLayout(self._sticky_header)
+        sticky_layout.setContentsMargins(10, 0, 8, 0)
+        sticky_layout.setSpacing(8)
+        self._sticky_icon = QLabel("", self._sticky_header)
+        self._sticky_icon.setFixedSize(20, 20)
+        self._sticky_icon.setStyleSheet("background: transparent; border: none;")
+        self._sticky_icon.setAlignment(Qt.AlignCenter)
+        sticky_layout.addWidget(self._sticky_icon)
+        self._sticky_label = QLabel("", self._sticky_header)
+        self._sticky_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold; background: transparent;"
+        )
+        sticky_layout.addWidget(self._sticky_label)
+        sticky_layout.addStretch(1)
+        layout.addWidget(self._sticky_header)
 
         # 滚动区域
         self.scroll_area = QScrollArea(self)
@@ -117,6 +256,10 @@ class ModelSelectorCardContent(QWidget):
         self.content_layout.addStretch(1)
 
         self.scroll_area.setWidget(self.content_widget)
+
+        # 连接滚动事件，更新吸顶服务商
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
+
         layout.addWidget(self.scroll_area, 1)
 
     # ── 公有方法 ──────────────────────────────────────
@@ -133,6 +276,7 @@ class ModelSelectorCardContent(QWidget):
         self._provider_models = [(p, m) for p, m, _ in provider_models]
         self._model_widgets.clear()
         self._all_model_items.clear()
+        self._provider_headers.clear()
         self._active_model_item = None
 
         # 清空内容区域（保留最后的 stretch）
@@ -155,15 +299,16 @@ class ModelSelectorCardContent(QWidget):
                 filtered_models = models
 
             # 服务商标题
-            header = ProviderHeader(provider_name, self)
+            header = ProviderHeader(provider_name, self.content_widget)
             self.content_layout.addWidget(header)
+            self._provider_headers.append((header, provider_name))
 
             # 模型列表
             for model_name in filtered_models:
                 is_active = (
                     provider_name == current_provider and model_name == current_model
                 )
-                item = ModelItem(provider_name, model_name, is_active, self)
+                item = ModelItem(provider_name, model_name, is_active, self.content_widget)
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)
@@ -173,7 +318,7 @@ class ModelSelectorCardContent(QWidget):
 
         # 如果没有匹配的模型
         if not self._all_model_items and search_text:
-            no_result = QLabel(f"未找到匹配 \"{search_text}\" 的模型", self)
+            no_result = QLabel(f"未找到匹配 \"{search_text}\" 的模型", self.content_widget)
             no_result.setAlignment(Qt.AlignCenter)
             no_result.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)}; padding: 20px;"
@@ -182,6 +327,9 @@ class ModelSelectorCardContent(QWidget):
 
         # 底部弹性空间
         self.content_layout.addStretch(1)
+
+        # 更新吸顶服务商显示
+        self._update_sticky_header()
 
         # 滚动到当前选中模型
         if self._active_model_item is not None:
@@ -193,6 +341,16 @@ class ModelSelectorCardContent(QWidget):
         Colors.refresh()
         self._apply_search_style()
         self.content_widget.setStyleSheet("background: transparent;")
+        self._sticky_header.setStyleSheet(f"""
+            QFrame {{
+                background: {Colors.CONTENT_BG};
+                border: none;
+                border-bottom: 1px solid {Colors.BORDER};
+            }}
+        """)
+        self._sticky_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold; background: transparent;"
+        )
 
     # ── 内部方法 ──────────────────────────────────────
 
@@ -213,6 +371,47 @@ class ModelSelectorCardContent(QWidget):
         target_scroll = item_y + item_half - view_half
         target_scroll = max(0, min(target_scroll, scrollbar.maximum()))
         scrollbar.setValue(target_scroll)
+
+    def _on_scroll(self, value):
+        """滚动条变化时更新吸顶服务商"""
+        self._update_sticky_header()
+
+    def _update_sticky_header(self):
+        """根据当前滚动位置，更新吸顶服务商显示"""
+        if not self._provider_headers:
+            self._sticky_header.setVisible(False)
+            return
+
+        scroll_pos = self.scroll_area.verticalScrollBar().value()
+
+        # 找到最后一个被滚过顶部的服务商
+        sticky_name = None
+        for header_widget, provider_name in self._provider_headers:
+            if header_widget.y() - scroll_pos <= 0:
+                sticky_name = provider_name
+            else:
+                break
+
+        if sticky_name:
+            self._sticky_header.setVisible(True)
+            self._sticky_label.setText(sticky_name)
+            # 更新图标 - 从这里直接获取 ProviderIconWidget 方式显示
+            from app.constants import PROVIDER_ICONS
+            icon_name = PROVIDER_ICONS.get(sticky_name, "大模型")
+            from app.utils.utils import get_icon
+            icon = get_icon(icon_name)
+            if icon:
+                pixmap = icon.pixmap(20, 20)
+                self._sticky_icon.setPixmap(pixmap)
+            else:
+                # 取首字作为文字图标
+                text = sticky_name[0] if sticky_name else "?"
+                self._sticky_icon.setText(text)
+                Colors.refresh()
+                self._sticky_icon.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; font-weight: bold; {font_size_css(14)};")
+            self._sticky_icon.setToolTip(sticky_name)
+        else:
+            self._sticky_header.setVisible(False)
 
     def _apply_search_style(self):
         """应用搜索框样式（动态从 Colors 读取）"""
