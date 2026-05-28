@@ -322,25 +322,11 @@ class SubAgentExecutor(QThread):
                 {"role": "user", "content": f"## 子任务\n{self.task_description}"}
             ]
 
-            # 获取 LLM 配置（支持模型继承）
-            effective_llm_config = self.llm_config
-            if agent.is_model_inherit():
-                # 继承主智能体模型配置（保留 agent 特定的 temperature 等参数覆盖）
-                effective_llm_config = {**self.llm_config}
-                # agent 特定的参数优先级更高
-                if agent.temperature is not None:
-                    effective_llm_config["temperature"] = agent.temperature
-                if agent.top_p is not None:
-                    effective_llm_config["top_p"] = agent.top_p
-            else:
-                # 使用 agent 指定的模型（覆盖主智能体配置）
-                effective_llm_config = {**self.llm_config, "模型名称": agent.model}
-
             self._add_log("progress", f"开始执行子任务: {self.agent_name}")
             self.progress_updated.emit(self.task_id, f"开始执行子任务: {self.agent_name}")
 
             try:
-                result = self._execute_agent_loop(messages, tools, effective_llm_config)
+                result = self._execute_agent_loop(messages, tools, self.llm_config)
             except Exception as e:
                 logger.error(f"[SubAgentExecutor] _execute_agent_loop error: {e}")
                 result = f"执行出错: {str(e)}"

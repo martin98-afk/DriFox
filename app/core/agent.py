@@ -38,8 +38,8 @@ class Agent:
     inherit_history_budget_ratio: float = 0.6  # 上下文注入最多占 context budget 的比例（0.1~0.8）
 
     def is_model_inherit(self) -> bool:
-        """是否继承主智能体模型配置"""
-        return self.model is None or str(self.model).lower() == "inherit"
+        """是否继承主智能体模型配置（已弃用：子智能体统一继承主智能体模型）"""
+        return True
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Agent":
@@ -537,18 +537,18 @@ class AgentManager:
     def list_primary_agents(self) -> List[Agent]:
         return [a for a in self._agents.values() if a.is_primary()]
 
-    def list_subagents(self, include_hidden: bool = False) -> List[Agent]:
+    def list_subagents(self, include_hidden: bool = True) -> List[Agent]:
         agents = self._agents.values()
         if include_hidden:
             agents = list(agents) + list(self._hidden_agents.values())
         return [a for a in agents if a.is_subagent()]
 
-    def list_subagent_names(self, include_hidden: bool = False) -> List[str]:
+    def list_subagent_names(self, include_hidden: bool = True) -> List[str]:
         """获取所有子智能体的名称列表（用于工具 schema enum）"""
         agents = self.list_subagents(include_hidden=include_hidden)
         return [a.name for a in agents]
 
-    def get_available_subagents_for_prompt(self, include_hidden: bool = False) -> str:
+    def get_available_subagents_for_prompt(self, include_hidden: bool = True) -> str:
         """
         获取可用于主智能体提示词中的子智能体列表（格式化文本）。
 

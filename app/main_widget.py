@@ -1549,7 +1549,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
             return
 
-        available_agents = [a.name for a in agent_mgr.list_agents()]
+        available_agents = [a.name for a in agent_mgr.list_agents(include_hidden=True)]
         if agent_name not in available_agents:
             InfoBar.warning("未知智能体", f"未找到智能体: {agent_name}，可用: {', '.join(available_agents)[:100]}", parent=self, position=InfoBarPosition.BOTTOM)
             return
