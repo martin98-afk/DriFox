@@ -444,25 +444,52 @@ class AutoLoopEngine(BaseEngine):
             return None
         return Path(self.config.project_path) / ".autoloop" / "archive" / "latest"
 
+    def get_archive_timestamped_dir(self) -> Optional[Path]:
+        """获取时间戳归档路径：.autoloop/archive/YYYYMMDD_HHMMSS-任务名
+
+        每次归档创建一个独立的时间戳子目录，避免覆盖历史记录。
+        """
+        if not self.config.project_path:
+            return None
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        task_name = (self.config.task_prompt or "untitled")[:30]
+        # 清理文件名非法字符
+        import re
+        safe_name = re.sub(r'[^\w\-\u4e00-\u9fff]', '_', task_name)
+        return Path(self.config.project_path) / ".autoloop" / "archive" / f"{timestamp}-{safe_name}"
+
     def get_archive_meta_path(self) -> Optional[Path]:
-        """获取归档元信息文件路径"""
+        """获取归档元信息文件路径（latest）"""
         d = self.get_archive_latest_dir()
         if d:
             return d / "META.md"
         return None
 
     def read_archive_notes(self) -> str:
-        """读取归档笔记（如果存在），用于规划阶段参考"""
+        """读取最近的归档笔记（从 latest 或时间戳目录），用于规划阶段参考"""
+        # 优先读 latest，再找最新的时间戳目录
         d = self.get_archive_latest_dir()
-        if not d or not d.exists():
-            return ""
-        notes_path = d / "SHARED_TASK_NOTES.md"
-        if notes_path.exists():
-            try:
-                return notes_path.read_text(encoding="utf-8")
-            except Exception as e:
-                logger.warning(f"[AutoLoop] Failed to read archive notes: {e}")
-                return ""
+        if d and d.exists():
+            notes_path = d / "SHARED_TASK_NOTES.md"
+            if notes_path.exists():
+                try:
+                    return notes_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+        
+        # 兜底：找最新的时间戳目录
+        if self.config.project_path:
+            archive_root = Path(self.config.project_path) / ".autoloop" / "archive"
+            if archive_root.exists():
+                dirs = sorted(archive_root.iterdir(), key=lambda p: p.name, reverse=True)
+                for d in dirs:
+                    if d.is_dir() and d.name != "latest":
+                        notes_path = d / "SHARED_TASK_NOTES.md"
+                        if notes_path.exists():
+                            try:
+                                return notes_path.read_text(encoding="utf-8")
+                            except Exception:
+                                continue
         return ""
 
     # ========== 获取进度信息 ==========
@@ -554,14 +581,16 @@ class AutoLoopEngine(BaseEngine):
                 return False
             return True
 
-        current_step = self._current_step
         total_steps = self._total_steps
 
         if total_steps > 0:
-            result_pattern = rf'步骤\s*{current_step}\s+结果|## 步骤\s*{current_step}\s+结果'
+            # 使用最后已验证的步骤号，而不是 _current_step（它已在 advance_to_step 后前进到下一步）
+            last_verified = max(self._verified_steps) if self._verified_steps else 0
+            check_step = last_verified if last_verified > 0 else self._current_step
+            result_pattern = rf'步骤\s*{check_step}\s+结果|## 步骤\s*{check_step}\s+结果'
             if not re.search(result_pattern, notes, re.IGNORECASE):
                 if "## 当前状态" not in notes and "当前状态" not in notes:
-                    logger.warning(f"[AutoLoop] Iteration {iteration}: no step {current_step} result recorded")
+                    logger.warning(f"[AutoLoop] Iteration {iteration}: no step {check_step} result recorded (current_step={self._current_step}, verified={self._verified_steps})")
                     return False
 
         return True

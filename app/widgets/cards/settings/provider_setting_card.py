@@ -224,19 +224,19 @@ class ProviderItem(QWidget):
         self.radioButton.setCheckable(True)
         self.radioButton.setChecked(self.is_default)
         self.radioButton.setCursor(Qt.PointingHandCursor)
-        self.radioButton.setStyleSheet("""
-            QPushButton {
+        self.radioButton.setStyleSheet(f"""
+            QPushButton {{
                 background-color: transparent;
-                border: 2px solid #555555;
+                border: 2px solid {Colors.TEXT_MUTED};
                 border-radius: 10px;
-            }
-            QPushButton:checked {
-                border: 2px solid #0078d4;
-                background-color: #0078d4;
-            }
-            QPushButton:hover {
-                border-color: #0078d4;
-            }
+            }}
+            QPushButton:checked {{
+                border: 2px solid {Colors.SYSTEM_ACCENT};
+                background-color: {Colors.SYSTEM_ACCENT};
+            }}
+            QPushButton:hover {{
+                border-color: {Colors.SYSTEM_ACCENT};
+            }}
         """)
 
         self.iconWidget = ProviderIconWidget(self.provider_name, 32)

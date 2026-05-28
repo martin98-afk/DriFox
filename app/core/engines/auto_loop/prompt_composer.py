@@ -67,10 +67,12 @@ ARCHIVING_CONSTRAINT = """
 任务执行已经完成！你现在进入**归档阶段**，职责是：
 
 1. **清理垃圾文件**：删除临时文件、缓存文件等不需要保留的内容
-2. **整理日志**：确认 `.autoloop/logs/` 下有完整的轮次日志
-3. **归档笔记**：
+2. **归档笔记**：
    - 将 `SHARED_TASK_NOTES.md` 复制到 `.autoloop/archive/latest/SHARED_TASK_NOTES.md`
    - 创建 `.autoloop/archive/latest/` 目录（如果不存在）
+3. **归档运行日志**：
+   - 将 `.autoloop/logs/` 下的所有 `round_*.md` 文件复制到 `.autoloop/archive/latest/logs/`
+   - 创建 `.autoloop/archive/latest/logs/` 目录（如果不存在）
 4. **创建归档索引**：写入 `.autoloop/archive/latest/META.md`，格式：
    ```markdown
    # AutoLoop 执行归档
@@ -433,7 +435,10 @@ class AutoLoopPromptComposer:
             "2. **归档笔记**：",
             f"   - 将 `SHARED_TASK_NOTES.md` 复制到 `.autoloop/archive/latest/SHARED_TASK_NOTES.md`",
             f"   - 使用 `write` 工具创建该文件",
-            "3. **创建归档索引**：",
+            "3. **归档运行日志**：",
+            f"   - 将 `.autoloop/logs/` 下的所有 `round_*.md` 文件复制到 `.autoloop/archive/latest/logs/`",
+            f"   - 创建 `.autoloop/archive/latest/logs/` 目录（如果不存在）",
+            "4. **创建归档索引**：",
             f"   - 写入 `.autoloop/archive/latest/META.md`，包含任务概述和时间",
             "",
             "### 当前 SHARED_TASK_NOTES.md 内容参考",
