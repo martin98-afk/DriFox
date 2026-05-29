@@ -283,6 +283,59 @@ class ToolExecutor:
         except Exception as e:
             logger.warning(f"[ToolExecutor] 清理备份失败: {e}")
 
+    # ========== PostToolUse hook 统一触发 ==========
+
+    def _trigger_post_tool_use(self, tool_name: str, args: dict, result=None) -> None:
+        """触发 PostToolUse hook（统一方法，减少重复代码）
+
+        Args:
+            tool_name: 工具名
+            args: 工具参数
+            result: 工具执行结果（ToolResult 或 None），用于回填结果信息
+        """
+        if not (self._backend and self._backend.hook_manager):
+            return
+
+        context = {
+            "project_root": self._workdir or os.getcwd(),
+            "tool_name": tool_name,
+            "args": args,
+        }
+
+        # 注入工具结果信息（PostToolUse 最核心的增强）
+        if result is not None:
+            context["result_success"] = result.success
+            # 确保 content 为字符串，防止 dict/list 等非字符串类型切片报错
+            # 例如 task_batch 返回的 content 是 dict
+            content = result.content
+            if not isinstance(content, str):
+                if content is not None:
+                    content = orjson.dumps(content).decode("utf-8", errors="replace")
+                else:
+                    content = ""
+            context["result_content"] = (content or result.error or "")[:1000]
+
+        # 注入文件路径
+        file_path = args.get("path") or args.get("file")
+        if file_path:
+            context["file"] = file_path
+
+        # 获取最后一条用户消息（用于 hook matcher 匹配上下文）
+        current_message_text = ""
+        if self._backend.session_manager:
+            session = self._backend.get_current_session()
+            if session and hasattr(session, 'messages'):
+                for msg in reversed(session.messages):
+                    if msg.get('role') == 'user':
+                        current_message_text = msg.get('content', '')
+                        break
+
+        self._backend.hook_manager.trigger_event(
+            "PostToolUse",
+            context=context,
+            current_message=current_message_text,
+        )
+
     def set_memory_manager(self, memory_manager):
         if self._builtin_tools:
             self._builtin_tools.set_memory_manager(memory_manager)
@@ -403,7 +456,6 @@ class ToolExecutor:
 
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         if self._backend and self._backend.hook_manager:
-            import os
             context = {
                 "project_root": self._workdir or os.getcwd(),
                 "tool_name": tool_name,
@@ -475,10 +527,14 @@ class ToolExecutor:
 
         if tool_name in self._custom_tools:
             try:
-                result = self._custom_tools[tool_name](args)
-                return ToolResult(True, content=result)
+                result_data = self._custom_tools[tool_name](args)
+                my_result = ToolResult(True, content=result_data)
+                self._trigger_post_tool_use(tool_name, args, my_result)
+                return my_result
             except Exception as e:
-                return ToolResult(False, error=f"Custom tool error: {str(e)}")
+                my_result = ToolResult(False, error=f"Custom tool error: {str(e)}")
+                self._trigger_post_tool_use(tool_name, args, my_result)
+                return my_result
 
         # MCP 工具调用：工具名以 "mcp__" 开头
         if tool_name.startswith("mcp__") and self._builtin_tools:
@@ -615,41 +671,17 @@ class ToolExecutor:
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
                     self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
                 
-                # Trigger PostToolUse hook
-                if self._backend and self._backend.hook_manager:
-                    import os
-                    context = {
-                        "project_root": self._workdir or os.getcwd(),
-                        "tool_name": tool_name,
-                    }
-                    # Extract file path if available
-                    file_path = args.get("path") or args.get("file")
-                    if file_path:
-                        context["file"] = file_path
-                    
-                    # Get last user message for matching
-                    current_message_text = ""
-                    if self._backend.session_manager:
-                        session = self._backend.get_current_session()
-                        if session and hasattr(session, 'messages'):
-                            # Find last user message
-                            for msg in reversed(session.messages):
-                                if msg.get('role') == 'user':
-                                    current_message_text = msg.get('content', '')
-                                    break
-                    
-                    self._backend.hook_manager.trigger_event(
-                        "PostToolUse",
-                        context=context,
-                        current_message=current_message_text
-                    )
-                
+                # Trigger PostToolUse hook（统一方法，含结果回填）
+                self._trigger_post_tool_use(tool_name, args, result)
+
                 return result
             except Exception as e:
                 # 文件编辑操作失败时清理备份
                 if tool_name in self._FILE_OPS_TO_TRACK:
                     self._cleanup_backup_on_failure(local_session_id, local_call_id)
-                return ToolResult(False, error=f"Execution error: {str(e)}")
+                err_result = ToolResult(False, error=f"Execution error: {str(e)}")
+                self._trigger_post_tool_use(tool_name, args, err_result)
+                return err_result
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
 
@@ -674,15 +706,22 @@ class ToolExecutor:
             result = mcp_manager.call_tool_sync(tool_name, args)
         except TimeoutError as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
-            return ToolResult(False, error=f"MCP 工具调用超时，请稍后重试")
+            err_result = ToolResult(False, error=f"MCP 工具调用超时，请稍后重试")
+            self._trigger_post_tool_use(tool_name, args, err_result)
+            return err_result
         except Exception as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' raised exception: {e}")
-            return ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
+            err_result = ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
+            self._trigger_post_tool_use(tool_name, args, err_result)
+            return err_result
 
         # 执行后检查 ToolExecutor 有效性（MCP 调用可能耗时较长）
         if not self.is_valid():
             logger.warning(f"[ToolExecutor] ToolExecutor became invalid after MCP tool: {tool_name}")
             # 不再尝试修改 result，避免访问已删除的 QObject 属性
+
+        # Trigger PostToolUse hook for MCP tools
+        self._trigger_post_tool_use(tool_name, args, result)
 
         return result
 

@@ -1,3 +1,41 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "MiniMax": {
+      "command": "uvx",
+      "args": [
+        "minimax-coding-plan-mcp",
+        "-y"
+      ],
+      "env": {
+        "MINIMAX_API_KEY": "your api key",
+        "MINIMAX_API_HOST": "https://api.minimaxi.com"
+      },
+      "enabled": false,
+      "type": "stdio",
+      "url": "",
+      "headers": {}
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "github key"
+      },
+      "enabled": false,
+      "command": "",
+      "args": [],
+      "env": {}
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "type": "stdio",
+      "enabled": false,
+      "env": {},
+      "url": "",
+      "headers": {}
+    }
+  }
 }

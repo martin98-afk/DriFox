@@ -5,6 +5,7 @@ UI 对话引擎 — 处理桌面 LLM 对话的核心逻辑
 从 app/core/chat_engine.py 迁移而来，类名改为 UIEngine。
 保留 ChatEngine 别名在 __init__.py 中提供向后兼容。
 """
+import os
 from typing import Dict, List, Optional, Callable, Any
 
 from loguru import logger
@@ -288,56 +289,36 @@ class UIEngine(BaseEngine):
             self._emit("error", "配置无效，请检查模型设置")
             return False
 
-        # Trigger PreUserMessage hook
-        if hasattr(self._agent_manager, '_hook_manager') and self._agent_manager._hook_manager:
-            hook_manager = self._agent_manager._hook_manager
-            if hook_manager:
-                import os
-                context = {
-                    "project_root": os.getcwd(),
-                    "message": user_text,
-                }
-                hook_manager.trigger_event(
-                    "PreUserMessage",
-                    context=context,
-                    current_message=user_text
-                )
-        session.add_user_message(content=user_text)
-        # Trigger PostUserMessage hook
-        if hasattr(self._agent_manager, '_hook_manager') and self._agent_manager._hook_manager:
-            hook_manager = self._agent_manager._hook_manager
-            if hook_manager:
-                import os
-                context = {
-                    "project_root": os.getcwd(),
-                    "message": user_text,
-                }
-                hook_manager.trigger_event(
-                    "PostUserMessage",
-                    context=context,
-                    current_message=user_text
-                )
+        # 公共辅助方法：触发 hook
+        def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
+            if extra_context is None:
+                extra_context = {}
+            ctx = {"project_root": os.getcwd()}
+            ctx.update(extra_context)
+            hook_mgr.trigger_event(
+                event_name,
+                context=ctx,
+                current_message=msg_text or user_text,
+            )
 
-        # Trigger PreAssistantMessage hook
-        if hasattr(self._agent_manager, '_hook_manager') and self._agent_manager._hook_manager:
-            hook_manager = self._agent_manager._hook_manager
-            if hook_manager:
-                import os
-                session_for_hook = self._session_manager.get_current_session()
-                current_message_text = ""
-                if session_for_hook and hasattr(session_for_hook, 'messages'):
-                    for msg in reversed(session_for_hook.messages):
-                        if msg.get('role') == 'user':
-                            current_message_text = msg.get('content', '')
-                            break
-                context = {
-                    "project_root": os.getcwd(),
-                }
-                hook_manager.trigger_event(
-                    "PreAssistantMessage",
-                    context=context,
-                    current_message=current_message_text
-                )
+        hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
+
+        if hook_mgr:
+            _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
+        session.add_user_message(content=user_text)
+        if hook_mgr:
+            _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})
+
+        # PreAssistantMessage
+        if hook_mgr:
+            last_user_msg = ""
+            session_for_hook = self._session_manager.get_current_session()
+            if session_for_hook and hasattr(session_for_hook, 'messages'):
+                for msg in reversed(session_for_hook.messages):
+                    if msg.get('role') == 'user':
+                        last_user_msg = msg.get('content', '')
+                        break
+            _do_trigger(hook_mgr, "PreAssistantMessage", msg_text=last_user_msg)
 
         messages = self._adapter.build_messages(
             self._session_manager.get_current_session(),
@@ -458,27 +439,8 @@ class UIEngine(BaseEngine):
 
         self._emit("stream_finished", response)
 
-        # Trigger PostAssistantMessage hook
-        if self._agent_manager and hasattr(self._agent_manager, '_hook_manager'):
-            hook_manager = self._agent_manager._hook_manager
-            if hook_manager:
-                session = self._session_manager.get_current_session()
-                current_message_text = ""
-                if session and hasattr(session, 'messages'):
-                    for msg in reversed(session.messages):
-                        if msg.get('role') == 'user':
-                            current_message_text = msg.get('content', '')
-                            break
-                import os
-                context = {
-                    "project_root": os.getcwd(),
-                    "response": response,
-                }
-                hook_manager.trigger_event(
-                    "PostAssistantMessage",
-                    context=context,
-                    current_message=current_message_text
-                )
+        # Trigger PostAssistantMessage hook（成功路径）
+        self._trigger_post_assistant_message(response, is_error=False)
 
         # 保存缓存统计（在 worker 被清理前）
         self._save_cache_stats()
@@ -512,7 +474,37 @@ class UIEngine(BaseEngine):
         except Exception as e:
             logger.debug(f"[_save_cache_stats] Error: {e}")
 
+    def _trigger_post_assistant_message(self, response_or_error: str, is_error: bool = False):
+        """统一触发 PostAssistantMessage hook"""
+        hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
+        if not hook_mgr:
+            return
+
+        session = self._session_manager.get_current_session()
+        last_user_msg = ""
+        if session and hasattr(session, 'messages'):
+            for msg in reversed(session.messages):
+                if msg.get('role') == 'user':
+                    last_user_msg = msg.get('content', '')
+                    break
+
+        context = {
+            "project_root": os.getcwd(),
+        }
+        if is_error:
+            context["error"] = response_or_error
+        else:
+            context["response"] = response_or_error
+
+        hook_mgr.trigger_event(
+            "PostAssistantMessage",
+            context=context,
+            current_message=last_user_msg,
+        )
+
     def _on_error(self, error: str):
+        # 错误路径也触发 PostAssistantMessage（让 hook 能感知失败）
+        self._trigger_post_assistant_message(error, is_error=True)
         self._emit("error", error)
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):

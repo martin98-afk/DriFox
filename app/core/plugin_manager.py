@@ -608,9 +608,10 @@ class PluginManager:
         1. DriFoxx 格式：{"mcpServers": {"ServerName": {"command": "...", ...}}}
         2. 旧格式：{"mcpServers": {"Servers": [{"name": "...", ...}]}}
         3. .claude-plugin 格式：{"ServerName": {"type": "http", "url": "..."}}
+
+        同名策略：后加载的覆盖先加载的（user plugin 覆盖 system plugin）
         """
-        servers = []
-        seen_names = set()
+        servers: dict = {}  # name → entry dict（同名时后加载的覆盖先加载的）
 
         for mcp_file in self.get_mcp_configs():
             try:
@@ -630,25 +631,21 @@ class PluginManager:
                 if "Servers" in mcp_servers and isinstance(mcp_servers["Servers"], list):
                     for server_data in mcp_servers["Servers"]:
                         name = server_data.get("name", "")
-                        if not name or name in seen_names:
+                        if not name:
                             continue
-                        seen_names.add(name)
-                        servers.append(self._build_mcp_entry(name, server_data, mcp_file))
+                        servers[name] = self._build_mcp_entry(name, server_data, mcp_file)
                     continue
 
                 # 标准格式：{"ServerName": {...}}
                 for name, server_cfg in mcp_servers.items():
                     if not isinstance(server_cfg, dict):
                         continue
-                    if name in seen_names:
-                        continue
-                    seen_names.add(name)
-                    servers.append(self._build_mcp_entry(name, server_cfg, mcp_file))
+                    servers[name] = self._build_mcp_entry(name, server_cfg, mcp_file)
 
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load MCP config from {mcp_file}: {e}")
 
-        return servers
+        return list(servers.values())
 
     def _build_mcp_entry(self, name: str, cfg: dict, source_file: Path) -> dict:
         """构建统一格式的 MCP 服务器条目"""

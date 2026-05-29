@@ -89,10 +89,11 @@ colors:
   realtime_tag_border: rgba(224, 112, 96, 0.3)
   system_border: '#5a3530'
   system_accent: '#c0392b'
-  send_btn_start: '#c0392b'
-  send_btn_end: '#a03020'
-  send_btn_hover_start: '#d05040'
-  send_btn_hover_end: '#b04030'
+  send_btn_start: '#F5A21E'
+  send_btn_end: '#E74C3C'
+  send_btn_hover_start: '#F5A21E'
+  send_btn_hover_end: '#E74C3C'
+  send_btn_radius: 8
   timeline_node: '#5A5A5A'
   timeline_node_hover: '#e07060'
   timeline_node_visible: '#e88a80'

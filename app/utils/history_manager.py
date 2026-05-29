@@ -22,12 +22,89 @@ from app.core.message_content import consolidate_messages, content_to_text
 from app.core.store import SessionStore
 from app.utils.utils import get_app_data_dir, serialize_for_json, deserialize_from_json
 
+
+def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
+    """清理消息列表中的孤立 tool_calls（没有对应 tool 结果的 tool_call）
+
+    这是持久化前的守门员：无论内部数据流经过多少层变换，
+    在落地前统一移除 orphan，保证下一轮加载时消息天然干净。
+
+    逻辑同 chat_worker._fix_tool_result_order，但作为独立函数
+    放在持久化层，不依赖 worker 上下文。
+    """
+    # 收集所有有效的 tool_call_id（来自 tool 消息）
+    valid_ids = {
+        msg.get("tool_call_id", "")
+        for msg in messages
+        if msg.get("role") == "tool" and msg.get("tool_call_id")
+    }
+
+    if not valid_ids:
+        # 没有任何 tool 消息时，检查是否存在带 tool_calls 的 assistant 消息
+        has_orphan = any(
+            msg.get("role") == "assistant" and msg.get("tool_calls")
+            for msg in messages
+        )
+        if has_orphan:
+            cleaned = []
+            for msg in messages:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    msg = dict(msg)
+                    msg.pop("tool_calls", None)
+                    if msg.get("content") is None:
+                        msg["content"] = ""
+                cleaned.append(msg)
+            return cleaned
+        return messages
+
+    # 清理每个 assistant 消息中的孤立 tool_calls
+    cleaned = []
+    for msg in messages:
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            cleaned.append(msg)
+            continue
+
+        tool_calls = msg["tool_calls"]
+        # 只保留有对应结果的 tool_call
+        kept = [tc for tc in tool_calls if tc.get("id") in valid_ids]
+
+        if not kept:
+            # 全被移除了，去掉 tool_calls 字段
+            msg = dict(msg)
+            msg.pop("tool_calls", None)
+            if msg.get("content") is None:
+                msg["content"] = ""
+        else:
+            # 部分保留：只保留有对应结果的 tool_call
+            msg = dict(msg)
+            msg["tool_calls"] = kept
+
+        cleaned.append(msg)
+
+    return cleaned
+
+
 # 预编译文件名清理正则
 _SANITIZE_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*]')
 
 
 def merge_session_messages(messages: List[Dict]) -> List[Dict]:
     return consolidate_messages(messages or [])
+
+
+def extract_message_preview(messages: List[Dict], max_len: int = 50) -> str:
+    """从消息列表中提取预览文本（用于历史列表展示，避免遍历完整消息）"""
+    if not messages:
+        return ""
+    for msg in reversed(messages):
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user" and content:
+            if isinstance(content, list):
+                from app.core.message_content import content_to_text
+                content = content_to_text(content)
+            return content[:max_len].strip() + ("..." if len(content) > max_len else "")
+    return ""
 
 
 def sanitize_filename(name: str) -> str:
@@ -245,6 +322,7 @@ class HistoryManager:
             "last_time": last_msg_time,
             "messages": merged_messages,
             "message_count": self._count_conversation_pairs(merged_messages),
+            "preview": extract_message_preview(merged_messages),
             "compaction_state": dict(compaction_state or {}),
             "compaction_cache": dict(compaction_cache or {}),
             "system_prompt": system_prompt or "",
@@ -316,8 +394,13 @@ class HistoryManager:
                 most_recent = session
         return most_recent
 
-    def get_history_list(self, project: str = None) -> List[Dict]:
-        """获取历史会话列表，可选按项目过滤，按最后对话时间排序"""
+    def get_history_list(self, project: str = None, with_messages: bool = False) -> List[Dict]:
+        """获取历史会话列表，可选按项目过滤，按最后对话时间排序
+
+        Args:
+            project: 项目名过滤
+            with_messages: 是否包含完整消息数组（为 False 时返回轻量列表）
+        """
         # 先去重
         self._deduplicate_history_sessions()
         
@@ -325,7 +408,29 @@ class HistoryManager:
         if project:
             sessions = [s for s in sessions if s.get("project", "默认项目") == project]
         # 按最后对话时间 last_time 降序排序
-        return sorted(sessions, key=lambda x: x.get("last_time", ""), reverse=True)
+        sessions = sorted(sessions, key=lambda x: x.get("last_time", ""), reverse=True)
+
+        if not with_messages:
+            # 轻量模式：仅保留列表展示所需字段，剔除重量级字段
+            # 同时确保 preview 字段存在（兼容旧数据）
+            result = []
+            for s in sessions:
+                preview = s.get("preview")
+                if not preview:
+                    preview = extract_message_preview(s.get("messages", []), 50)
+                result.append({
+                    "session_id": s.get("session_id", ""),
+                    "saved_at": s.get("saved_at", ""),
+                    "title": s.get("title", ""),
+                    "project": s.get("project", "默认项目"),
+                    "last_time": s.get("last_time", ""),
+                    "message_count": s.get("message_count", 0),
+                    "preview": preview,
+                    "user_edited_title": s.get("user_edited_title", False),
+                })
+            return result
+
+        return sessions
 
     def get_projects(self) -> List[str]:
         """获取所有不重复的项目名"""
@@ -625,6 +730,8 @@ class HistoryManager:
         """更新会话"""
         if 0 <= index < len(self._history_sessions):
             merged_messages = merge_session_messages(messages)
+            # 🛡️ 落地前清理孤立 tool_calls，保证下一轮加载时消息天然干净
+            merged_messages = _clean_orphan_tool_calls(merged_messages)
             existing = self._history_sessions[index]
             updated = self._build_session_record(
                 merged_messages,

@@ -76,8 +76,15 @@ def get_message_preview(messages: List[Dict], max_len: int = 50) -> str:
     return ""
 
 
-def _matches_search(session: Dict, search_text: str) -> bool:
-    """检查会话是否匹配搜索文本（支持拼音搜索）"""
+def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) -> bool:
+    """检查会话是否匹配搜索文本（支持拼音搜索）
+
+    Args:
+        session: 会话数据
+        search_text: 搜索文本
+        pinyin_cache: 拼音缓存字典 {session_id: {"pinyin": str, "initials": str}}，
+                      传入后可避免重复计算
+    """
     if not search_text:
         return True
     search_lower = search_text.lower().replace(" ", "")
@@ -87,20 +94,39 @@ def _matches_search(session: Dict, search_text: str) -> bool:
     title = (session.get("title", "") or "")
     preview = (session.get("preview", "") or "")
 
-    # 1. 直接子串匹配
+    # 1. 直接子串匹配（快速路径，不走拼音）
     if search_lower in title.lower() or search_lower in preview.lower():
         return True
 
-    # 2. 拼音匹配（标题和预览转拼音）
+    # 2. 拼音匹配（尝试从缓存读取，避免重复计算）
+    session_id = session.get("session_id", "")
     try:
-        title_pinyin = "".join(lazy_pinyin(title)).lower()
-        preview_pinyin = "".join(lazy_pinyin(preview)).lower()
+        if pinyin_cache is not None and session_id:
+            cached = pinyin_cache.get(session_id)
+            if cached:
+                title_pinyin = cached.get("title_pinyin", "")
+                preview_pinyin = cached.get("preview_pinyin", "")
+                title_initials = cached.get("title_initials", "")
+                preview_initials = cached.get("preview_initials", "")
+            else:
+                title_pinyin = "".join(lazy_pinyin(title)).lower()
+                preview_pinyin = "".join(lazy_pinyin(preview)).lower()
+                title_initials = "".join(p[0] for p in lazy_pinyin(title) if p).lower()
+                preview_initials = "".join(p[0] for p in lazy_pinyin(preview) if p).lower()
+                pinyin_cache[session_id] = {
+                    "title_pinyin": title_pinyin,
+                    "preview_pinyin": preview_pinyin,
+                    "title_initials": title_initials,
+                    "preview_initials": preview_initials,
+                }
+        else:
+            title_pinyin = "".join(lazy_pinyin(title)).lower()
+            preview_pinyin = "".join(lazy_pinyin(preview)).lower()
+            title_initials = "".join(p[0] for p in lazy_pinyin(title) if p).lower()
+            preview_initials = "".join(p[0] for p in lazy_pinyin(preview) if p).lower()
+
         if search_lower in title_pinyin or search_lower in preview_pinyin:
             return True
-
-        # 3. 拼音首字母匹配
-        title_initials = "".join(p[0] for p in lazy_pinyin(title) if p).lower()
-        preview_initials = "".join(p[0] for p in lazy_pinyin(preview) if p).lower()
         if search_lower in title_initials or search_lower in preview_initials:
             return True
     except Exception:
@@ -133,30 +159,48 @@ class _HistoryItemCard(SimpleCardWidget):
         self._session_id = None  # 用于缓存匹配
         self.setCursor(Qt.PointingHandCursor)
 
+        # 批量读取颜色 token 和字体尺寸（避免多次 refresh/scale_font_size 的累积开销）
         Colors.refresh()
+        self._font_family = get_font_family_css()
+        self._font_size = scale_font_size(14)
+        self._caption_size = scale_font_size(12)
+        _font_family = self._font_family
+        _font_size = self._font_size
+        _caption_size = self._caption_size
+        _selected_bg = Colors.SELECTED_BG
+        _border_accent = Colors.BORDER_ACCENT
+        _tab_active_bg = Colors.TAB_ACTIVE_BG
+        _text_accent = Colors.TEXT_ACCENT
+        _card_bg_dim = Colors.CARD_BG_DIM
+        _border = Colors.BORDER
+        _hover_bg = Colors.HOVER_BG
+        _text_primary = Colors.TEXT_PRIMARY
+        _accent_warm = Colors.ACCENT_WARM
+        _text_secondary = Colors.TEXT_SECONDARY
+
         if is_current:
             self.setStyleSheet(f"""
                 CardWidget {{
-                    background-color: {Colors.SELECTED_BG};
-                    border: 2px solid {Colors.BORDER_ACCENT};
+                    background-color: {_selected_bg};
+                    border: 2px solid {_border_accent};
                     border-radius: 10px;
                 }}
                 CardWidget:hover {{
-                    background-color: {Colors.TAB_ACTIVE_BG};
-                    border: 2px solid {Colors.TEXT_ACCENT};
+                    background-color: {_tab_active_bg};
+                    border: 2px solid {_text_accent};
                 }}
             """
             )
         else:
             self.setStyleSheet(f"""
                 CardWidget {{
-                    background-color: {Colors.CARD_BG_DIM};
-                    border: 1px solid {Colors.BORDER};
+                    background-color: {_card_bg_dim};
+                    border: 1px solid {_border};
                     border-radius: 10px;
                 }}
                 CardWidget:hover {{
-                    background-color: {Colors.HOVER_BG};
-                    border: 1px solid {Colors.BORDER_ACCENT};
+                    background-color: {_hover_bg};
+                    border: 1px solid {_border_accent};
                 }}
             """
             )
@@ -170,24 +214,21 @@ class _HistoryItemCard(SimpleCardWidget):
 
         self.title_label = BodyLabel(title[:100], self)
         self.title_label.setWordWrap(True)
-        font_size = scale_font_size(14)
-        Colors.refresh()
         self.title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {font_size}px; {get_font_family_css()}" if is_current else f"color: {Colors.TEXT_PRIMARY}; font-size: {font_size}px; {get_font_family_css()}"
+            f"color: {_text_primary}; font-weight: bold; font-size: {_font_size}px; {_font_family}" if is_current else f"color: {_text_primary}; font-size: {_font_size}px; {_font_family}"
         )
         top_row.addWidget(self.title_label, 1)
 
         self.title_edit = QLineEdit(title[:100], self)
-        Colors.refresh()
         self.title_edit.setStyleSheet(
             f"""
             QLineEdit {{
                 background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid {Colors.BORDER_ACCENT};
+                border: 1px solid {_border_accent};
                 border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
+                color: {_text_primary};
                 padding: 2px 6px;
-                {get_font_family_css()}
+                {_font_family}
             }}
             """
         )
@@ -198,9 +239,8 @@ class _HistoryItemCard(SimpleCardWidget):
         top_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
 
         self.current_indicator = CaptionLabel("🔥 活跃中", self)
-        caption_size = scale_font_size(12)
         self.current_indicator.setStyleSheet(
-            f"font-size: {caption_size}px; " + ItemStyles.tag() + get_font_family_css()
+            f"font-size: {_caption_size}px; " + ItemStyles.tag() + _font_family
         )
         self.current_indicator.setVisible(is_current)
         top_row.addWidget(self.current_indicator, 0, Qt.AlignTop)
@@ -230,10 +270,8 @@ class _HistoryItemCard(SimpleCardWidget):
         rel_time = format_relative_time(last_time)
         meta_text = f"{rel_time} · {message_count} 轮对话 · "
         self.meta_label = CaptionLabel(meta_text, self)
-        caption_size = scale_font_size(12)
-        Colors.refresh()
         self.meta_label.setStyleSheet(
-            f"color: {Colors.ACCENT_WARM}; font-size: {caption_size}px; {get_font_family_css()}" if is_current else f"color: {Colors.TEXT_SECONDARY}; font-size: {caption_size}px; {get_font_family_css()}"
+            f"color: {_accent_warm}; font-size: {_caption_size}px; {_font_family}" if is_current else f"color: {_text_secondary}; font-size: {_caption_size}px; {_font_family}"
         )
         bottom_row.addWidget(self.meta_label)
 
@@ -251,10 +289,9 @@ class _HistoryItemCard(SimpleCardWidget):
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签"""
         if self._preview_label is None:
-            caption_size = scale_font_size(12)
             self._preview_label = CaptionLabel("", self)
             self._preview_label.setStyleSheet(
-                f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
+                f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
             )
             self._preview_label.setWordWrap(True)
         self._preview_label.setText(text)
@@ -290,10 +327,10 @@ class _HistoryItemCard(SimpleCardWidget):
                     }}
                 """)
                 self.title_label.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {scale_font_size(14)}px; {get_font_family_css()}"
+                    f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {self._font_size}px; {self._font_family}"
                 )
                 self.meta_label.setStyleSheet(
-                    f"color: {Colors.ACCENT_WARM}; font-size: {scale_font_size(12)}px; {get_font_family_css()}"
+                    f"color: {Colors.ACCENT_WARM}; font-size: {self._caption_size}px; {self._font_family}"
                 )
             else:
                 self.setStyleSheet(f"""
@@ -308,10 +345,10 @@ class _HistoryItemCard(SimpleCardWidget):
                     }}
                 """)
                 self.title_label.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(14)}px; {get_font_family_css()}"
+                    f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; {self._font_family}"
                 )
                 self.meta_label.setStyleSheet(
-                    f"color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(12)}px; {get_font_family_css()}"
+                    f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
                 )
 
         # 元信息变化
@@ -611,7 +648,6 @@ class HistoryCard(QWidget):
         self._all_history: List[Dict] = []
         self._current_index: Optional[int] = None
         self._archived_sessions: List[Dict] = []
-        self._item_cards = []
         self._current_tab = "history"  # "history" or "archived"
         self._current_project: Optional[str] = None  # 当前过滤的项目
         self._search_filter: str = ""  # 搜索过滤文本
@@ -624,12 +660,34 @@ class HistoryCard(QWidget):
         # 最近一次显示的历史会话 ID 集合（用于检测变化）
         self._last_displayed_ids: set = set()
 
+        # 拼音缓存：session_id → {"pinyin": str, "initials": str}
+        self._pinyin_cache: Dict[str, Dict[str, str]] = {}
+
+        # === 搜索防抖 ===
+        from PyQt5.QtCore import QTimer
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.setInterval(200)  # 200ms 防抖
+        self._search_debounce_timer.timeout.connect(self._do_search)
+
+        # === 分批渲染 ===
+        self._render_queue: List[tuple] = []
+        self._render_batch_index = 0
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(0)  # 下一个事件循环立即执行
+        self._render_timer.timeout.connect(self._process_render_batch)
+        self._batch_size = 12  # 每批渲染 12 个 widget
+
+        # 分组标题 + 间隔线缓存（避免重复创建/销毁）
+        self._cached_headers: Dict[str, _SectionHeader] = {}
+        self._cached_spacers: List[QWidget] = []
+
         self._setup_ui()
         # 启用拖放支持
         self.setAcceptDrops(True)
         
         # 初始化时应用配置中的字体大小
-        from PyQt5.QtCore import QTimer
         QTimer.singleShot(0, self._refresh_font_size)
 
     def _refresh_font_size(self):
@@ -652,8 +710,16 @@ class HistoryCard(QWidget):
         self._current_project = project
 
     def set_search_filter(self, text: str):
-        """设置搜索过滤文本（同时支持历史会话和归档）"""
+        """设置搜索过滤文本（带防抖 200ms）"""
         self._search_filter = text.strip()
+        # 防抖：每次输入重启定时器，停止输入 200ms 后才触发刷新
+        self._search_debounce_timer.stop()
+        self._search_debounce_timer.start()
+
+    def _do_search(self):
+        """防抖超时后执行实际搜索刷新"""
+        # 搜索时清空拼音缓存，数据可能已变化
+        self._pinyin_cache.clear()
         self._update_display()
 
     def get_content_layout(self) -> QVBoxLayout:
@@ -704,20 +770,21 @@ class HistoryCard(QWidget):
             return "更早"
 
     def _clear_content(self):
-        """清理内容区域（保留缓存的会话卡片）"""
+        """清理内容区域（保留所有缓存的 widget，包括分组标题和间隔线）"""
         layout = self.get_content_layout()
+        # 收集所有需要保留下来的 widget
         cached_set = set(id(w) for w in self._cached_cards.values())
         cached_set.update(id(w) for w in self._cached_archived.values())
+        cached_set.update(id(w) for w in self._cached_headers.values())
+        cached_set.update(id(w) for w in self._cached_spacers)
 
         while layout.count():
             item = layout.takeAt(0)
             if item.widget() and item.widget() != self:
-                # 缓存卡片只从布局移除，不删除
                 if id(item.widget()) in cached_set:
                     item.widget().setParent(None)
                 else:
                     item.widget().deleteLater()
-        self._item_cards.clear()
 
     def set_history(self, history_list: List[Dict], current_index=None):
         """设置历史会话列表"""
@@ -739,21 +806,22 @@ class HistoryCard(QWidget):
             self._update_display()
 
     def _update_display(self):
-        """更新显示内容（增量更新，复用已缓存的卡片 widget）"""
-        layout = self.get_content_layout()
+        """逐步渲染：先准备数据队列，再分批创建 widget（避免一次创建全部导致 UI 冻结）"""
+        self._render_timer.stop()
+        self._render_queue.clear()
 
-        # 性能优化：批量更新，避免每加一个 widget 就重绘一次
+        layout = self.get_content_layout()
         content_widget = layout.parentWidget() if layout else None
         if content_widget:
             content_widget.setUpdatesEnabled(False)
 
-        # 先从布局中移除所有缓存卡片（不删除，后续按新顺序重新添加）
         self._clear_content()
 
+        # 快速阶段：只做数据分组/过滤，不创建任何 widget
         if self._current_tab == "history":
-            self._update_history_display(layout)
+            self._prepare_history_render_queue()
         else:
-            self._update_archived_display(layout)
+            self._prepare_archived_render_queue()
 
         layout.addStretch(1)
 
@@ -761,8 +829,78 @@ class HistoryCard(QWidget):
             content_widget.setUpdatesEnabled(True)
             content_widget.repaint()
 
-        # 刷新字体大小（会话卡片创建后应用）
-        self._refresh_font_size()
+        # 分批渲染 widget
+        self._render_batch_index = 0
+        self._process_render_batch()
+
+    def _process_render_batch(self):
+        """处理下一批渲染任务"""
+        layout = self.get_content_layout()
+        if layout is None:
+            return
+
+        queue = self._render_queue
+        start = self._render_batch_index
+        end = min(start + self._batch_size, len(queue))
+
+        # content_widget 是 layout 的 parent（即 BaseSettingsCard 的 content_widget）
+        parent_widget = layout.parentWidget() if layout else None
+        suspend_repaint = bool(parent_widget) and (end - start) > 1
+
+        if suspend_repaint:
+            parent_widget.setUpdatesEnabled(False)
+
+        for i in range(start, end):
+            item = queue[i]
+            item_type = item[0]
+
+            if item_type == 'header':
+                section_name, count = item[1], item[2]
+                # 复用或创建分组标题
+                header = self._cached_headers.get(section_name)
+                if header is None:
+                    header = _SectionHeader(section_name, count, self)
+                    self._cached_headers[section_name] = header
+                else:
+                    header.setText(f"{section_name} ({count})")
+                layout.insertWidget(layout.count() - 1, header)
+
+            elif item_type == 'spacer':
+                # 从缓存池复用间隔线
+                spacer = self._cached_spacers.pop() if self._cached_spacers else QWidget()
+                spacer.setFixedHeight(8)
+                layout.insertWidget(layout.count() - 1, spacer)
+
+            elif item_type == 'session':
+                session, original_index, is_current = item[1], item[2], item[3]
+                preview = session.get("preview", "")
+                card = self._get_or_create_history_card(session, original_index, is_current, preview)
+                layout.insertWidget(layout.count() - 1, card)
+
+            elif item_type == 'archived':
+                session = item[1]
+                card = self._get_or_create_archived_card(session)
+                layout.insertWidget(layout.count() - 1, card)
+
+            elif item_type == 'empty':
+                text = item[1]
+                empty_label = QLabel(text)
+                empty_label.setAlignment(Qt.AlignCenter)
+                empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
+                layout.insertWidget(layout.count() - 1, empty_label)
+
+        if suspend_repaint:
+            parent_widget.setUpdatesEnabled(True)
+            parent_widget.repaint()
+
+        self._render_batch_index = end
+
+        if self._render_batch_index < len(queue):
+            self._render_timer.start()
+        else:
+            # 全部渲染完成
+            self._prune_cached_spacers()
+            self._refresh_font_size()
 
     def _get_or_create_history_card(
         self, session: Dict, index: int, is_current: bool, preview: str
@@ -867,38 +1005,36 @@ class HistoryCard(QWidget):
 
         return card
 
-    def _update_history_display(self, layout: QVBoxLayout):
-        """更新历史会话显示（增量更新，复用缓存的卡片）"""
+    def _prepare_history_render_queue(self):
+        """准备历史会话渲染队列（只做数据分组，不创建 widget）"""
+        queue = self._render_queue
+
         if not self._all_history:
-            empty_label = QLabel("暂无历史对话记录")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
-            layout.addWidget(empty_label)
+            if self._search_filter:
+                queue.append(('empty', f"没有找到匹配「{self._search_filter}」的会话"))
+            else:
+                queue.append(('empty', '暂无历史对话记录'))
             self._cleanup_orphan_history_cards(set())
             return
 
-        # 收集当前显示的会话ID
         visible_ids = set()
-
-        # 先显示当前会话
-        current_session_widget = None
+        current_session_widget = False
         current_matches_search = True
+
         if self._current_index is not None and 0 <= self._current_index < len(self._all_history):
             current_session = self._all_history[self._current_index]
-            current_matches_search = not self._search_filter or _matches_search(current_session, self._search_filter)
+            current_matches_search = not self._search_filter or _matches_search(current_session, self._search_filter, self._pinyin_cache)
             if current_matches_search:
-                sid = current_session.get("session_id", "")
-                visible_ids.add(sid)
-                current_preview = get_message_preview(current_session.get("messages", []))
-                current_session_widget = self._get_or_create_history_card(
-                    current_session, self._current_index, True, current_preview
-                )
+                visible_ids.add(current_session.get("session_id", ""))
+                current_session_widget = True
+                queue.append(('header', '当前会话', 0))
+                queue.append(('session', current_session, self._current_index, True))
+                queue.append(('spacer',))
 
-        # 分离当前会话和其他会话（保存原始索引，避免后续O(n²)查找）
         other_sessions = [(i, s) for i, s in enumerate(self._all_history) if i != self._current_index]
-        # 搜索过滤
         if self._search_filter:
-            other_sessions = [(i, s) for i, s in other_sessions if _matches_search(s, self._search_filter)]
+            other_sessions = [(i, s) for i, s in other_sessions if _matches_search(s, self._search_filter, self._pinyin_cache)]
+
         grouped = {}
         for original_index, session in other_sessions:
             category = self._get_date_category(session.get("last_time", ""))
@@ -910,18 +1046,11 @@ class HistoryCard(QWidget):
         month_names = ["一月", "二月", "三月", "四月", "五月", "六月",
                        "七月", "八月", "九月", "十月", "十一月", "十二月"]
 
-        extra_sections = []
-        for key in grouped.keys():
-            if key not in order and key != "更早":
-                extra_sections.append((key, grouped[key]))
-
+        extra_sections = [k for k in grouped if k not in order and k != "更早"]
         year_groups = {}
         month_groups = []
-        for key, sessions in extra_sections:
-            if key.endswith("年"):
-                year_groups[key] = sessions
-            else:
-                month_groups.append((key, sessions))
+        for key in extra_sections:
+            (year_groups if key.endswith("年") else month_groups).append((key, grouped[key]))
 
         final_order = []
         for section in order:
@@ -932,53 +1061,24 @@ class HistoryCard(QWidget):
         for year in sorted(year_groups.keys(), reverse=True):
             final_order.append((year, year_groups[year]))
 
-        has_items = False
-
-        # 渲染当前会话
-        if current_session_widget:
-            has_items = True
-            current_header = _SectionHeader("当前会话", 0)
-            layout.addWidget(current_header)
-            layout.addWidget(current_session_widget)
-            self._item_cards.append(current_session_widget)
-
-            spacer = QWidget()
-            spacer.setFixedHeight(8)
-            layout.addWidget(spacer)
-
-        # 渲染其他历史会话
+        has_items = current_session_widget
         for section, sessions in final_order:
             if not sessions:
                 continue
             has_items = True
-
-            header = _SectionHeader(section, len(sessions))
-            layout.addWidget(header)
-
+            queue.append(('header', section, len(sessions)))
             for original_index, session in sessions:
                 sid = session.get("session_id", "")
                 visible_ids.add(sid)
-                preview = get_message_preview(session.get("messages", []))
-                card = self._get_or_create_history_card(
-                    session, original_index, False, preview
-                )
-                layout.addWidget(card)
-                self._item_cards.append(card)
-
-            spacer = QWidget()
-            spacer.setFixedHeight(8)
-            layout.addWidget(spacer)
+                queue.append(('session', session, original_index, False))
+            queue.append(('spacer',))
 
         if not has_items:
             if self._search_filter:
-                empty_label = QLabel(f"没有找到匹配「{self._search_filter}」的会话")
+                queue.append(('empty', f"没有找到匹配「{self._search_filter}」的会话"))
             else:
-                empty_label = QLabel("暂无历史对话记录")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
-            layout.addWidget(empty_label)
+                queue.append(('empty', '暂无历史对话记录'))
 
-        # 清理孤儿缓存（不再显示的会话卡片）
         self._cleanup_orphan_history_cards(visible_ids)
 
     def _cleanup_orphan_history_cards(self, active_ids: set):
@@ -993,33 +1093,27 @@ class HistoryCard(QWidget):
             if card:
                 card.deleteLater()
 
-    def _update_archived_display(self, layout: QVBoxLayout):
-        """更新归档会话显示（增量更新，复用缓存的卡片）"""
+    def _prepare_archived_render_queue(self):
+        """准备归档会话渲染队列（只做数据分组，不创建 widget）"""
+        queue = self._render_queue
+
         if not self._archived_sessions:
-            empty_label = QLabel("暂无归档会话")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
-            layout.addWidget(empty_label)
+            queue.append(('empty', '暂无归档会话'))
             self._cleanup_orphan_archived_cards(set())
             return
 
-        # 搜索过滤
         sessions_to_show = self._archived_sessions
         if self._search_filter:
             sessions_to_show = [
                 s for s in self._archived_sessions
-                if _matches_search(s, self._search_filter)
+                if _matches_search(s, self._search_filter, self._pinyin_cache)
             ]
 
         if not sessions_to_show:
-            empty_label = QLabel(f"没有找到匹配「{self._search_filter}」的会话")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
-            layout.addWidget(empty_label)
+            queue.append(('empty', f"没有找到匹配「{self._search_filter}」的会话"))
             self._cleanup_orphan_archived_cards(set())
             return
 
-        # 按日期分组
         grouped = {}
         for session in sessions_to_show:
             last_time = session.get("last_time", session.get("saved_at", ""))
@@ -1029,48 +1123,38 @@ class HistoryCard(QWidget):
             grouped[category].append(session)
 
         order = ["今天", "昨天", "本周", "上周", "本月"]
-
         final_order = []
         for section in order:
             if section in grouped:
                 final_order.append((section, grouped[section]))
-
-        # 添加其他分组
         for category, sessions in grouped.items():
             if category not in order:
                 final_order.append((category, sessions))
 
         has_items = False
         active_paths = set()
-
         for section, sessions in final_order:
             if not sessions:
                 continue
             has_items = True
-
-            header = _SectionHeader(section, len(sessions))
-            layout.addWidget(header)
-
+            queue.append(('header', section, len(sessions)))
             for session in sessions:
                 file_path = session.get("path", "")
                 active_paths.add(file_path)
-
-                card = self._get_or_create_archived_card(session)
-                layout.addWidget(card)
-                self._item_cards.append(card)
-
-            spacer = QWidget()
-            spacer.setFixedHeight(8)
-            layout.addWidget(spacer)
+                queue.append(('archived', session))
+            queue.append(('spacer',))
 
         if not has_items:
-            empty_label = QLabel("暂无归档会话")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
-            layout.addWidget(empty_label)
+            queue.append(('empty', '暂无归档会话'))
 
-        # 清理孤儿归档缓存
         self._cleanup_orphan_archived_cards(active_paths)
+
+    def _prune_cached_spacers(self):
+        """回收多余的间隔线缓存"""
+        max_spacers = 20
+        while len(self._cached_spacers) > max_spacers:
+            spacer = self._cached_spacers.pop()
+            spacer.deleteLater()
 
     def _cleanup_orphan_archived_cards(self, active_paths: set):
         """清理不再显示的归档缓存卡片（搜索过滤时不清理）"""

@@ -218,7 +218,12 @@ class ContextBudgetAllocator:
             # 正常情况：至少保留 MIN_HISTORY_BUDGET_RATIO
             history_budget = int(total_budget * MIN_HISTORY_BUDGET_RATIO)
 
-        return max(500, history_budget)
+        # 预留动态上下文（build_messages 末尾注入的系统时间 + 记忆上下文）
+        # 这部分 token 不在系统提示中，需从历史预算中扣除
+        DYNAMIC_CONTEXT_RESERVE = 300  # 保守估算：时间戳(~15) + 8条记忆(~250)
+        history_budget = max(500, history_budget - DYNAMIC_CONTEXT_RESERVE)
+
+        return history_budget
 
     def get_context_budget(self, llm_config: Dict) -> int:
         """

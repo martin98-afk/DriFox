@@ -495,7 +495,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型选择卡片
         mgr.register_card(self._window_id, ContainerType.BOTTOM, "model_selector", self._model_selector_card, system_card=True)
-        # self._bottom_card_container.add_card 已在卡片创建时调用，避免重复
+        # 重新 add_card 注册 _on_card_shown/_on_card_hidden 回调
+        # 初始化时 add_card 先执行（L1318），但当时 _card_manager 尚未绑定，回调未生效
+        self._bottom_card_container.add_card("model_selector", self._model_selector_card)
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1343,7 +1345,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._register_cards_to_manager()
 
         # 系统卡片打开时隐藏文本输入框（保留按钮栏），关闭时恢复
-        for _cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running"):
+        for _cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running",
+                     "settings", "provider_edit", "mcp_edit", "hook_edit"):
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
@@ -2195,19 +2198,41 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_system_card_opened(self, card_id: str):
         """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间"""
         if hasattr(self, 'input_area'):
-            self.input_area.setVisible(False)
-            # 收起卡片高度到仅按钮栏 + 分隔线
+            # 暂停重绘，先设置卡片高度为工具栏高度
+            self._input_card.setUpdatesEnabled(False)
             self._input_card.setFixedHeight(34 + 1 + 4)  # toolbar + separator + padding
+            
+            # 恢复重绘，让卡片先显示出来
+            self._input_card.setUpdatesEnabled(True)
+            self._input_card.update()
+            
+            # 延迟隐藏输入框，等卡片显示完成后再执行（避免闪烁：先显示卡片再隐藏区域）
+            QTimer.singleShot(0, lambda: self._do_hide_input_area())
+
+    def _do_hide_input_area(self):
+        """延迟隐藏输入框，由 _on_system_card_opened 调用"""
+        if hasattr(self, 'input_area'):
+            self.input_area.setVisible(False)
 
     def _on_system_card_closed(self, card_id: str):
         """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
-        for cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running"):
+        for cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running",
+                   "settings", "provider_edit", "mcp_edit", "hook_edit"):
             if self._card_manager.is_card_visible(cid, self._window_id):
                 return
         if hasattr(self, 'input_area'):
+            # 暂停重绘，先恢复高度再恢复可见性，避免布局中间态
+            self._input_card.setUpdatesEnabled(False)
+            self.input_area.setUpdatesEnabled(False)
+
+            # 先恢复输入框可见性
             self.input_area.setVisible(True)
-            # 重新触发高度计算，恢复输入框高度
+            # 再重新计算卡片高度
             self._on_input_area_height_changed()
+
+            self.input_area.setUpdatesEnabled(True)
+            self._input_card.setUpdatesEnabled(True)
+            self._input_card.update()
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
@@ -3079,7 +3104,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_agent_status(agent_name)
 
     def _on_input_area_height_changed(self):
-        """根据输入框内容自动调整卡片高度"""
+        """输入框高度变化时同步调整卡片高度
+
+        大部分情况由 input_area._adjust_height_to_content() 内部
+        一次性设置输入框和卡片高度，此处作为备用：
+        - textChanged 信号：卡片高度已在 _adjust_height_to_content 中设置，此处为 no-op
+        - 系统卡片关闭恢复：直接调用以重新计算并恢复卡片高度
+        """
         if not hasattr(self, '_input_card'):
             return
         if getattr(self, '_is_destroyed', False):
@@ -3680,21 +3711,25 @@ class OpenAIChatToolWindow(ToolWindow):
     def _refresh_all_cards_round_index(self):
         """
         删除/撤销操作后，重新同步所有存活 user 卡片的 _round_index。
-        因为删除前面的 round 会导致后面卡片的 round_index 偏移。
+        
+        ⚠️ 不能只遍历 chat_layout，因为懒加载/回收的卡片不在布局中。
+        必须基于 _batch_cards 遍历，使用 _message_batch 计算正确的 round_index。
         """
-        user_count = 0
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
+        for batch_idx, cards in enumerate(self._batch_cards):
+            if not cards:
                 continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
+            # 防止 _batch_cards 比 _message_batch 长（删除操作后未同步）
+            if batch_idx >= len(self._message_batch):
                 continue
-            if getattr(widget, '_is_welcome', False):
-                continue
-            if widget.role == "user":
-                widget._round_index = user_count
-                user_count += 1
+            for widget in cards:
+                if not isinstance(widget, MessageCard):
+                    continue
+                if getattr(widget, '_is_welcome', False):
+                    continue
+                if widget.role == "user":
+                    widget._round_index = self._get_user_round_index_for_batch_index(
+                        batch_idx
+                    )
 
     # ==================== Batch 结构同步 ====================
 
@@ -3935,7 +3970,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         通过遍历布局找到 user card 对应的 round_index
         """
-        # 直接通过布局遍历确定位置（更可靠）
+        # 优先通过 _batch_cards 查找（避免懒加载/回收导致布局遍历计数错误）
+        for batch_idx, cards in enumerate(self._batch_cards):
+            if not cards:
+                continue
+            if batch_idx >= len(self._message_batch):
+                continue
+            for widget in cards:
+                if widget is card:
+                    return self._get_user_round_index_for_batch_index(batch_idx)
+
+        # 降级：通过布局遍历（可能因懒加载/回收导致计数错误）
         user_card_idx = 0
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)

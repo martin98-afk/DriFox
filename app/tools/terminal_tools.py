@@ -30,7 +30,7 @@ class BackgroundTask:
     output_buffer: list = field(default_factory=list)
     status: str = "running"  # running, stopped, completed
     pid: int = 0
-    
+
     def append_output(self, text: str):
         """追加输出到缓冲区"""
         self.output_buffer.append(text)
@@ -41,10 +41,10 @@ class BackgroundTask:
 
 class BackgroundTaskManager:
     """全局后台任务管理器（单例）"""
-    
+
     _instance = None
     _lock = threading.Lock()
-    
+
     def __new__(cls, owner_getter: Callable = None):
         if cls._instance is None:
             with cls._lock:
@@ -57,12 +57,12 @@ class BackgroundTaskManager:
         if owner_getter:
             cls._instance._get_workdir = owner_getter
         return cls._instance
-    
+
     @classmethod
     def reset_instance(cls):
         """重置单例（仅用于测试）"""
         cls._instance = None
-    
+
     def set_workdir(self, workdir: Path):
         """设置工作目录"""
         self._workdir = workdir
@@ -75,19 +75,19 @@ class BackgroundTaskManager:
             except Exception:
                 pass
         return self._workdir
-    
+
     def start(self, command: str, cwd: str = None) -> tuple[str, str]:
         """启动后台任务，返回 (task_id, message)"""
         task_id = f"bg_{uuid.uuid4().hex[:8]}"
         workdir = Path(cwd) if cwd else self._effective_workdir()
-        
+
         try:
             # Windows: 设置代码页避免编码问题
             if sys.platform == "win32":
                 cmd = f"chcp 65001 >nul 2>&1 && {command}"
             else:
                 cmd = command
-            
+
             process = subprocess.Popen(
                 cmd,
                 shell=True,
@@ -99,7 +99,7 @@ class BackgroundTaskManager:
                 errors="replace",
                 cwd=str(workdir),
             )
-            
+
             task = BackgroundTask(
                 task_id=task_id,
                 command=command,
@@ -107,19 +107,19 @@ class BackgroundTaskManager:
                 start_time=time.time(),
                 pid=process.pid,
             )
-            
+
             with self._manager_lock:
                 self._tasks[task_id] = task
-            
+
             # 启动输出捕获线程
             thread = threading.Thread(target=self._capture_output, args=(task,), daemon=True)
             thread.start()
-            
+
             return task_id, f"✅ 后台任务已启动\n- 任务ID: {task_id}\n- PID: {process.pid}\n- 命令: {command}"
-            
+
         except Exception as e:
             return task_id, f"❌ 启动失败: {str(e)}"
-    
+
     def _capture_output(self, task: BackgroundTask):
         """捕获进程输出"""
         try:
@@ -134,21 +134,21 @@ class BackgroundTaskManager:
         finally:
             # 进程结束后更新状态
             task.status = "completed"
-    
+
     def stop(self, task_id: str) -> tuple[bool, str]:
         """停止指定任务"""
         with self._manager_lock:
             task = self._tasks.get(task_id)
-        
+
         if not task:
             return False, f"❌ 任务不存在: {task_id}"
-        
+
         if task.status != "running":
             return False, f"❌ 任务已结束 (状态: {task.status})"
-        
+
         try:
             task.status = "stopped"
-            
+
             # Windows: 使用 taskkill /T 杀死进程树（包括子进程）
             if sys.platform == "win32":
                 import subprocess as sp
@@ -178,25 +178,25 @@ class BackgroundTaskManager:
                 except subprocess.TimeoutExpired:
                     task.process.kill()
                 return True, f"✅ 已终止任务: {task_id}"
-                
+
         except Exception as e:
             return False, f"❌ 终止失败: {str(e)}"
-    
+
     def get_logs(self, task_id: str, lines: int = 100) -> str:
         """获取任务日志"""
         with self._manager_lock:
             task = self._tasks.get(task_id)
-        
+
         if not task:
             return f"❌ 任务不存在: {task_id}"
-        
+
         output = task.output_buffer[-lines:] if task.output_buffer else []
         output_text = '\n'.join(output) if output else "(暂无输出)"
-        
+
         status_icon = "🟢" if task.status == "running" else ("⏹️ " if task.status == "stopped" else "✅")
         elapsed = time.time() - task.start_time
         elapsed_str = f"{int(elapsed)}s"
-        
+
         header = f"""📋 任务: {task_id} {status_icon}
 状态: {task.status}
 PID: {task.pid}
@@ -207,21 +207,21 @@ PID: {task.pid}
 ---
 {output_text}
 ---"""
-        
+
         return header
-    
+
     def list_tasks(self) -> str:
         """列出所有任务"""
         with self._manager_lock:
             tasks = list(self._tasks.values())
-        
+
         if not tasks:
             return "📭 暂无后台任务"
-        
+
         lines = ["📋 后台任务列表:\n"]
         lines.append(f"{'任务ID':<14} {'状态':<10} {'PID':<8} {'运行时长':<10} {'命令'}")
         lines.append("-" * 80)
-        
+
         for task in sorted(tasks, key=lambda t: t.start_time, reverse=True):
             elapsed = time.time() - task.start_time
             elapsed_str = f"{int(elapsed)}s"
@@ -229,9 +229,9 @@ PID: {task.pid}
             status = f"{status_icon}{task.status}"
             cmd_preview = task.command[:50] + "..." if len(task.command) > 50 else task.command
             lines.append(f"{task.task_id:<14} {status:<10} {task.pid:<8} {elapsed_str:<10} {cmd_preview}")
-        
+
         return '\n'.join(lines)
-    
+
     def cleanup_completed(self):
         """清理已结束且超过 1 小时的僵尸任务"""
         with self._manager_lock:
@@ -255,7 +255,7 @@ class TerminalTools:
 
     def execute_bash(self, command: str, timeout: int = 120) -> ToolResult:
         """执行 shell 命令，支持可靠的 timeout
-        
+
         使用 communicate(timeout) 避免管道死锁，同时在超时时杀死进程。
         """
         import platform
@@ -281,7 +281,7 @@ class TerminalTools:
 
             # 使用子线程执行 communicate，避免阻塞主线程
             result_holder = {"stdout": None, "stderr": None, "error": None}
-            
+
             def communicate_in_thread():
                 """在子线程中执行 communicate，同时读取 stdout 和 stderr"""
                 try:
@@ -316,23 +316,23 @@ class TerminalTools:
             # 进程正常完成
             stdout = result_holder["stdout"] or ""
             stderr = result_holder["stderr"] or ""
-            
+
             output = stdout.strip() if stdout else ""
             error_out = stderr.strip() if stderr else ""
             combined = "\n".join(filter(None, [output, error_out]))
-            
+
             # Shell 输出压缩（减少 token 消耗）
             from app.tools.shell_compressor import compress
             compressed = compress(command, combined if combined else "(command completed with no output)")
 
             return ToolResult(True, content=compressed)
-        
+
         except Exception as e:
             return ToolResult(False, error=f"Execution error: {str(e)}")
 
     def bg_start(self, command: str, cwd: str = None) -> ToolResult:
         """启动后台命令
-        
+
         参数:
             command: 要执行的 shell 命令
             cwd: 工作目录（可选）
@@ -342,10 +342,10 @@ class TerminalTools:
         manager = BackgroundTaskManager()
         task_id, message = manager.start(command, cwd)
         return ToolResult(True, content=message)
-    
+
     def bg_stop(self, task_id: str) -> ToolResult:
         """停止后台任务
-        
+
         参数:
             task_id: 任务 ID
         返回:
@@ -354,10 +354,10 @@ class TerminalTools:
         manager = BackgroundTaskManager()
         success, message = manager.stop(task_id)
         return ToolResult(success, content=message)
-    
+
     def bg_logs(self, task_id: str, lines: int = 100) -> ToolResult:
         """获取后台任务日志
-        
+
         参数:
             task_id: 任务 ID
             lines: 返回最近 N 行（默认 100）
@@ -367,10 +367,10 @@ class TerminalTools:
         manager = BackgroundTaskManager()
         content = manager.get_logs(task_id, lines)
         return ToolResult(True, content=content)
-    
+
     def bg_list(self) -> ToolResult:
         """列出所有后台任务
-        
+
         返回:
             ToolResult
         """

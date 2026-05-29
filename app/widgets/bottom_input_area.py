@@ -87,12 +87,13 @@ class SendableTextEdit(TextEdit):
         """从 Colors 应用发送按钮样式"""
         from app.utils.design_tokens import Colors
         Colors.refresh()
+        radius = Colors.SEND_BTN_RADIUS
         self.send_btn.setStyleSheet(f"""
             TransparentToolButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
                 border: none;
-                border-radius: 17px;
+                border-radius: {radius}px;
                 color: white;
             }}
             TransparentToolButton:hover {{
@@ -371,7 +372,12 @@ class SendableTextEdit(TextEdit):
             self._adjust_height_to_content()
 
     def _adjust_height_to_content(self):
-        """根据内容自动调整高度"""
+        """根据内容自动调整高度
+
+        一次性更新输入框和父卡片高度，通过暂停重绘确保中间态不被渲染。
+        setFixedHeight 内部会立即触发 resize，如果两个高度分步设置
+        会导致两次独立布局重算，下方按钮栏就会抖动。
+        """
         if getattr(self, '_initializing', False):
             return
         
@@ -380,10 +386,26 @@ class SendableTextEdit(TextEdit):
         new_height = max(44, min(160, content_height))
 
         if self.height() != new_height:
+            parent = self.parent()
+            # 暂停重绘，避免两次 setFixedHeight 触发的中间布局被渲染
+            if parent:
+                parent.setUpdatesEnabled(False)
+            self.setUpdatesEnabled(False)
+
+            # 先设卡片高度（父），再设输入框高度（子）
+            # 确保当子 resize 触发布局级联时，父已有正确的约束
+            if parent:
+                toolbar_height = 34
+                separator_height = 1
+                card_padding = 4
+                parent.setFixedHeight(new_height + separator_height + toolbar_height + card_padding)
             self.setFixedHeight(new_height)
-            if self.parent():
-                self.parent().updateGeometry()
-                self.updateGeometry()
+
+            self.setUpdatesEnabled(True)
+            if parent:
+                parent.setUpdatesEnabled(True)
+                parent.update()
+            self.update()
 
     def _rebind_send_btn(self, handler):
         try:
@@ -401,7 +423,7 @@ class SendableTextEdit(TextEdit):
             self._rebind_send_btn(self._on_send_click)
             self._on_text_changed()
             # 发送完成后，确保输入框高度重置（即使在停止模式下也可能需要调整高度）
-            self._adjust_height_to_content()
+            # _on_text_changed 内部已调用 _adjust_height_to_content，无需重复
         else:
             self._is_stop_mode = True
             self.send_btn.setIcon(FluentIcon.PAUSE)

@@ -410,7 +410,7 @@ class APISessionHandler:
                         "title": s.get("title", "未命名"),
                         "created_at": s.get("created_at", ""),
                         "updated_at": s.get("last_updated", ""),
-                        "message_count": len(s.get("messages", [])),
+                        "message_count": s.get("message_count", 0),
                     }
                     for s in sessions
                 ]

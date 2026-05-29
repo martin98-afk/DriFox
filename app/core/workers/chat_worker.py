@@ -135,10 +135,8 @@ class OpenAIChatWorker(QThread):
         self._mem_diag_iter_count = 0     # 诊断计数器（工具迭代轮次）
         self._mem_last_rss = 0.0          # 上一步 RSS 基线（MB）
         self._mem_total_chunks_logged = 0 # 累计记录的流式 chunk 数
-        # 环境变量控制：MEM_DIAG=0 禁用内存诊断
-        self._mem_diag_enabled = True
-        if os.environ.get('MEM_DIAG') == '0':
-            self._mem_diag_enabled = False
+        # 环境变量控制：MEM_DIAG=1 启用内存诊断（默认关闭）
+        self._mem_diag_enabled = os.environ.get('MEM_DIAG') == '1'
         # tracemalloc 深度追踪（MEM_TRACE=1 时启用，用于定位单步大分配）
         self._mem_trace_enabled = os.environ.get('MEM_TRACE') == '1'
         self._mem_trace_snapshot = None
@@ -857,6 +855,8 @@ class OpenAIChatWorker(QThread):
                     current_messages.insert(0, system_message)
                     # 修复：始终更新 API 缓存以匹配 current_messages（含 system）
                     # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
+                    # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
+                    current_messages, _ = self._fix_tool_result_order(current_messages)
                     self._api_messages_cache = messages_to_api(current_messages)
                     # 注意：current_session_messages 故意不做同步压缩。
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
@@ -1347,7 +1347,12 @@ class OpenAIChatWorker(QThread):
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
                             self._api_messages_cache = fixed_sanitized
-                        logger.warning(f"[API] 已修复消息顺序，已更新缓存，重试 (attempt {attempt + 1}/{max_retries})")
+                        # 🛡️ 同步修复源头 current_messages（in-place），彻底固化修复结果
+                        # _fix_tool_result_order 只读 role/tool_call_id/tool_calls，内外格式兼容
+                        fixed_source, _ = self._fix_tool_result_order(messages)
+                        if fixed_source is not messages:
+                            messages[:] = fixed_source
+                        logger.warning(f"[API] 已修复消息顺序，已同步源头，重试 (attempt {attempt + 1}/{max_retries})")
                         continue
                     else:
                         logger.error(f"[API] 无法自动修复 tool call result 顺序问题 - 可能需要查看上面的消息结构")

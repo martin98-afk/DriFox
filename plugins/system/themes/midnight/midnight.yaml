@@ -92,10 +92,11 @@ colors:
   realtime_tag_border: rgba(125, 211, 252, 0.3)
   system_border: '#3d4a60'
   system_accent: '#66c6ff'
-  send_btn_start: '#C9A85C'
-  send_btn_end: '#B8956A'
-  send_btn_hover_start: '#D4B878'
-  send_btn_hover_end: '#C9A060'
+  send_btn_start: "#F5E621"                    # 赛博黄
+  send_btn_end: "#FF007F"                      # 霓虹粉
+  send_btn_hover_start: "#FFD700"              # 亮金黄
+  send_btn_hover_end: "#FF3399"                # 亮粉
+  send_btn_radius: 17
   timeline_node: '#5A5A5A'
   timeline_node_hover: '#6BA3FF'
   timeline_node_visible: '#00FF7F'

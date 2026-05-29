@@ -398,10 +398,9 @@ class HookListSettingCard(ExpandSettingCard):
         
         self.all_hooks[event].append(new_rule)
         
-        # 先保存到文件，再同步到 HookManager
+        # 先保存到文件
         self._save_hooks()
-        
-        self._refresh()
+        self._refresh(reload=False)
         self.hooksChanged.emit()
 
     def _update_hook(self, original_event: str, original_command: str, original_matcher: str, new_values: dict):
@@ -445,7 +444,7 @@ class HookListSettingCard(ExpandSettingCard):
                 break
 
         self._save_hooks()
-        self._refresh()
+        self._refresh(reload=False)
         self.hooksChanged.emit()
 
     def _edit_hook(self, event: str, rule_index: int, hook_index: int, hook: dict, rule: dict):
@@ -476,10 +475,9 @@ class HookListSettingCard(ExpandSettingCard):
                     if not rules:
                         del self.all_hooks[event]
                     
-                    # 先保存到文件，再同步到 HookManager
+                    # 先保存到文件
                     self._save_hooks()
-                    
-                    self._refresh()
+                    self._refresh(reload=False)
                     self.hooksChanged.emit()
     
     def _toggle_hook(self, event: str, rule_index: int, hook_index: int, enabled: bool):
@@ -499,16 +497,23 @@ class HookListSettingCard(ExpandSettingCard):
                             self._hook_manager.set_hook_enabled(event, hook_event_index, enabled)
                     else:
                         # 全局 hook：保存到全局配置文件
+                        # 不调 _refresh()：_load_hooks 从 HookManager 读数据，
+                        # 但 _save_hooks 没有更新 HookManager 内存，读到的仍是旧状态，
+                        # 导致刚刚修改的 enabled 被覆盖回旧值，开关弹回原位。
                         self._save_hooks()
-                        self._refresh()
                     
                     self.hooksChanged.emit()
     
-    def _refresh(self):
-        """刷新 hook 列表（保留添加/刷新按钮和展开状态）"""
+    def _refresh(self, reload=True):
+        """刷新 hook 列表（保留添加/刷新按钮和展开状态）
+
+        Args:
+            reload: True 时从 HookManager 重新加载数据；
+                    False 时保留当前 self.all_hooks 直接重新渲染（用于操作后刷新）
+        """
         was_expanded = self.isExpand
-        
-        self._load_hooks()
+        if reload:
+            self._load_hooks()
         # 稳妥方式清空 viewLayout：takeAt + 删除 widget
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
