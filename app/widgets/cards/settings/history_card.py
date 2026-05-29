@@ -450,10 +450,15 @@ class _SectionHeader(QLabel):
         super().__init__(parent)
         display_text = text if count == 0 else f"{text} ({count})"
         self.setText(display_text)
+        self._apply_style()
+
+    def _apply_style(self):
+        """应用/刷新样式（支持主题切换时重刷）"""
+        Colors.refresh()
         caption_size = scale_font_size(12)
         self.setStyleSheet(
             f"""
-            color: rgba(255, 255, 255, 0.45);
+            color: {Colors.TEXT_SECONDARY};
             {get_font_family_css()} font-size: {caption_size}px;
             font-weight: bold;
             padding: 4px 2px;
@@ -494,6 +499,12 @@ class HistoryCard(QWidget):
         """刷新字体大小"""
         actual_size = get_ui_font_size()
         apply_font_size_to_widget(self, actual_size)
+
+    def refresh_style(self):
+        """刷新主题样式：更新所有分组标题的颜色"""
+        Colors.refresh()
+        for header in self.findChildren(_SectionHeader):
+            header._apply_style()
 
     def _setup_ui(self):
         """不需要创建自己的布局，直接使用父控件的 scroll_area"""

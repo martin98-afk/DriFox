@@ -140,6 +140,47 @@ class SystemCardFrame(QFrame):
         self.scroll_area.setStyleSheet(self._scroll_style())
         if hasattr(self, "_tab_buttons"):
             self._update_tab_styles()
+        # 刷新搜索框样式（如果存在）
+        if hasattr(self, '_search_input') and self._search_input is not None:
+            self._search_input.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {Colors.HOVER_BG};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 4px;
+                    color: {Colors.TEXT_PRIMARY};
+                    padding: 2px 8px;
+                    {font_size_css(11)}
+                    {get_font_family_css()}
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid {Colors.TEXT_ACCENT};
+                }}
+                QLineEdit::placeholder {{
+                    color: {Colors.INPUT_PLACEHOLDER};
+                }}
+            """)
+        # 刷新头部粘性标签样式（如果存在）
+        if hasattr(self, '_header_sticky_label') and self._header_sticky_label.isVisible():
+            self._header_sticky_label.setStyleSheet(f"""
+                color: {Colors.ACCENT_WARM};
+                {font_size_css(11)}
+                padding: 0 2px 0 6px;
+                font-weight: bold;
+            """)
+        # 内容区子控件递归刷新（如 HistoryCard/MemoryCardContent 等）
+        self._refresh_content_children()
+
+    def _refresh_content_children(self):
+        """递归刷新内容区子控件的主题样式"""
+        for i in range(self._content_layout.count()):
+            item = self._content_layout.itemAt(i)
+            if item and item.widget():
+                w = item.widget()
+                if hasattr(w, 'refresh_style'):
+                    try:
+                        w.refresh_style()
+                    except Exception:
+                        pass
 
     @staticmethod
     def _scroll_style() -> str:
