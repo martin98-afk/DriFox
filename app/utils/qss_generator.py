@@ -18,7 +18,56 @@ logger = logging.getLogger(__name__)
 # ── 组件映射注册表 ──────────────────────────────────
 # 每个组件定义：(QSS 选择器, {属性名→CSS属性}, {状态名→伪类})
 
-COMPONENT_MAP: Dict[str, dict] = {}
+COMPONENT_MAP: Dict[str, dict] = {
+    "user_message": {
+        "selector": "#chatDisplay .user-message",
+        "props": {
+            "bg": "background",
+            "text": "color",
+            "border_radius": "border-radius",
+            "padding": "padding",
+            "shadow": "box-shadow",
+        },
+        "states": {
+            "hover": ":hover",
+        },
+    },
+    "assistant_message": {
+        "selector": "#chatDisplay .assistant-message",
+        "props": {
+            "bg": "background",
+            "text": "color",
+            "border_radius": "border-radius",
+            "shadow": "box-shadow",
+        },
+        "states": {},
+    },
+    "input_area": {
+        "selector": "#inputEdit",
+        "props": {
+            "bg": "background",
+            "text": "color",
+            "border_color": "border-color",
+            "border_width": "border-width",
+            "border_radius": "border-radius",
+        },
+        "states": {
+            "focus": ":focus",
+            "disabled": ":disabled",
+        },
+    },
+    "send_button": {
+        "selector": "#sendButton",
+        "props": {
+            "bg": "background",
+            "text": "color",
+            "border_radius": "border-radius",
+        },
+        "states": {
+            "hover": ":hover",
+        },
+    },
+}
 
 # ── 全局默认值 ──────────────────────────────────────
 
