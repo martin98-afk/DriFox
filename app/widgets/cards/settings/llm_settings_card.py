@@ -557,6 +557,24 @@ class LLMSettingsCard(SystemCardFrame):
         for card in self.findChildren(BaseSettingsCard):
             if hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 刷新分隔标签
+        self._refresh_sep_labels()
+
+    def _refresh_sep_labels(self):
+        """刷新所有分隔标签的样式"""
+        Colors.refresh()
+        sep_labels = [
+            getattr(self, '_sep_llm_label', None),
+            getattr(self, '_sep_common_label', None),
+            getattr(self, '_sep_appearance_label', None),
+            getattr(self, '_sep_update_label', None),
+        ]
+        for label in sep_labels:
+            if label is not None:
+                label.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; padding: 4px 0;"
+                    f"{get_font_family_css()} font-weight: bold;"
+                )
 
     def refresh_theme_options(self):
         """热更新后刷新主题下拉列表（外部由 _on_plugin_hot_reload 调用）"""

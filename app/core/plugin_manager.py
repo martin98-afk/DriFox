@@ -660,6 +660,7 @@ class PluginManager:
             "args": cfg.get("args", []),
             "env": cfg.get("env", {}),
             "url": cfg.get("url", ""),
+            "headers": cfg.get("headers", {}),
             "_source": str(source_file),
         }
 
