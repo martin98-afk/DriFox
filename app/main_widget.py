@@ -2789,6 +2789,16 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[HotReload] 刷新主题下拉失败: {e}")
 
+        # MCP 配置变更：刷新设置面板中的 MCP 服务器列表并重新连接
+        if result.get('mcp') and hasattr(self, '_settings_popup') and self._settings_popup:
+            try:
+                if hasattr(self._settings_popup, 'mcpListCard'):
+                    self._settings_popup.mcpListCard._refresh()
+                    QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
+                    logger.debug("[HotReload] MCP server list refreshed")
+            except Exception as e:
+                logger.warning(f"[HotReload] 刷新 MCP 列表失败: {e}")
+
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
         from app.utils.theme_manager import theme_manager

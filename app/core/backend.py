@@ -442,10 +442,45 @@ class ChatBackend(QObject):
 
         # 用可变容器包装 plugin_prefixes，闭包内可更新
         _prefixes_ref = [plugin_prefixes]
+        # 保存引用给主线程的 _on_hot_reload_requested，在重载完成后重建索引
+        self._watcher_prefixes_ref = _prefixes_ref
 
         def _rebuild_prefixes():
             """重建插件路径索引（在 watch 线程中调用）"""
             _prefixes_ref[0] = self._build_plugin_path_index()
+
+        def _try_identify_new_plugin(changes) -> Optional[str]:
+            """直接扫描变更路径的父目录链，检测是否为新增插件的首次变更
+
+            当 _identify_plugin_from_changes 返回 None 时调用此方法，
+            作为 fallback 直接从文件系统查找插件清单。
+            """
+            import json as _json
+            from pathlib import Path as _Path
+
+            for _, change_path in changes:
+                p = _Path(change_path)
+                # 遍历变更路径及其所有父目录
+                for parent in [p] + list(p.parents):
+                    if not parent.exists() or not parent.is_dir():
+                        continue
+                    # 检查 .drifox-plugin 格式
+                    manifest = parent / ".drifox-plugin" / "plugin.json"
+                    if manifest.exists():
+                        try:
+                            data = _json.loads(manifest.read_text(encoding="utf-8"))
+                            return data.get("name", parent.name)
+                        except Exception:
+                            return parent.name
+                    # 检查 .claude-plugin 格式
+                    manifest = parent / ".claude-plugin" / "plugin.json"
+                    if manifest.exists():
+                        try:
+                            data = _json.loads(manifest.read_text(encoding="utf-8"))
+                            return data.get("name", parent.name)
+                        except Exception:
+                            return parent.name
+            return None
 
         def _watch_loop():
             """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
@@ -483,8 +518,8 @@ class ChatBackend(QObject):
                             f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处)，"
                             f"请求主线程全量重载..."
                         )
+                        # 不提前 _rebuild_prefixes()，改在 _on_hot_reload_requested 重载完成后重建
                         self._hot_reload_requested.emit("", "")
-                        _rebuild_prefixes()
                     elif plugin_name:
                         # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/空=根目录）
                         component = self._identify_component_from_changes(
@@ -507,14 +542,21 @@ class ChatBackend(QObject):
                         )
                         self._hot_reload_requested.emit(plugin_name, component)
                     else:
-                        # 无法识别所属插件：可能是新增插件目录
-                        # 触发全量重扫，重建路径索引，下次就能正确识别
-                        logger.info(
-                            f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: "
-                            f"{relevant_changes[0][1]}"
-                        )
+                        # 无法通过路径索引识别：尝试直接从文件系统检测新插件
+                        new_name = _try_identify_new_plugin(relevant_changes)
+                        if new_name:
+                            logger.info(
+                                f"[ChatBackend] 检测到新插件「{new_name}」文件变更，"
+                                f"请求增量重载..."
+                            )
+                        else:
+                            logger.info(
+                                f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: "
+                                f"{relevant_changes[0][1]}"
+                            )
+                        # 注意：此处不调用 _rebuild_prefixes()，因为 pm.rescan() 还没执行
+                        # 路径重建改在 _on_hot_reload_requested 重载完成后进行
                         self._hot_reload_requested.emit("", "")
-                        _rebuild_prefixes()
             except Exception as e:
                 logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
 
@@ -627,8 +669,18 @@ class ChatBackend(QObject):
             else:
                 result = self.reload_plugin_subsystems()
             self.plugin_changed.emit(result)
+
+            # 重载完成后重建 watchfiles 路径索引，确保新注册的插件路径可被后续变更识别
+            # 注意：不能提前重建（在 _watch_loop 的 else 分支），因为那时 pm.rescan() 还没执行
+            self._rebuild_watcher_prefixes()
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
+
+    def _rebuild_watcher_prefixes(self):
+        """重建 watchfiles 线程的插件路径索引（主线程调用）"""
+        prefixes_ref = getattr(self, '_watcher_prefixes_ref', None)
+        if prefixes_ref is not None:
+            prefixes_ref[0] = self._build_plugin_path_index()
 
     def _reload_single_plugin(self, plugin_name: str, component: str = "") -> dict:
         """增量重载单个插件（不清除其他插件的数据）
@@ -773,9 +825,72 @@ class ChatBackend(QObject):
                 logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
                 return result
 
-            # 1. 重新扫描插件目录（检测新增/移除）
-            pm.rescan()
+            # 1. 重新扫描插件目录，获取变更详情
+            diff = pm.rescan()
+            added = diff.get("added", [])
+            removed = diff.get("removed", [])
+            changed = diff.get("changed", [])
 
+            # 2. 判断是否为"单一新增"——只有新增一个插件，无移除/变更
+            #    watchfiles 检测到新插件目录时，路径索引尚未包含它，
+            #    会触发全量重扫，但实际只需加载这一个新插件
+            is_single_addition = len(added) == 1 and not removed and not changed
+
+            if is_single_addition:
+                # ── 增量重载：只加载新增插件的组件 ──
+                plugin = added[0]
+                name = plugin.name
+                comps = plugin.components  # {"agents": True, "commands": True, ...}
+
+                logger.info(f"[ChatBackend] 检测到新插件「{name}」，执行增量重载")
+
+                # 智能体 + hooks（agents 组件同时处理 hooks）
+                if comps.get("agents") and self._agent_manager:
+                    result["agents"] = self._agent_manager.reload_plugin_agents(name)
+                    # 智能体文件同时也是命令源（/agent_name）
+                    try:
+                        from app.core.builtin_commands import reload_all_commands
+                        reload_all_commands()
+                        result["commands"] = True
+                    except (ImportError, Exception) as e:
+                        logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
+
+                # hooks-only（没有 agents 但有 hooks）
+                if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
+                    self._agent_manager.reload_plugin_hooks(name)
+
+                # 命令（非 agents 触发的独立命令目录）
+                if comps.get("commands") and not result["commands"]:
+                    try:
+                        from app.core.builtin_commands import reload_all_commands
+                        reload_all_commands()
+                        result["commands"] = True
+                    except (ImportError, Exception) as e:
+                        logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+                # 主题
+                if comps.get("themes"):
+                    try:
+                        from app.utils.theme_manager import theme_manager
+                        from app.utils.config import update_theme_options
+                        theme_manager.reload()
+                        update_theme_options()
+                        result["themes"] = True
+                    except (ImportError, Exception) as e:
+                        logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+                # 技能：PluginManager 已更新，UI 懒加载
+                result["skills"] = bool(comps.get("skills"))
+
+                # MCP：PluginManager 已更新，UI 懒加载
+                result["mcp"] = bool(comps.get("mcp"))
+
+                logger.info(f"[ChatBackend] 增量重载「{name}」完成: "
+                           f"agents={result['agents']}, commands={result['commands']}, "
+                           f"themes={result['themes']}, skills={result['skills']}, mcp={result['mcp']}")
+                return result
+
+            # ── 全量重载（多插件变更/移除/覆盖，或非 watchfiles 触发） ──
             # 2. 重载 AgentManager（智能体 + hooks）
             if self._agent_manager:
                 self._agent_manager.reload_agents()

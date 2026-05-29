@@ -656,18 +656,25 @@ class MCPListSettingCard(ExpandSettingCard):
 
     # ── 热更新操作（全部后台，不阻塞 UI）────────────
 
-    def _hot_connect(self, name: str, config: dict):
-        """后台连接单个服务器（不阻塞 UI）"""
+    def _hot_connect(self, name: str, config: dict, force: bool = False):
+        """后台连接单个服务器（不阻塞 UI）
+
+        Args:
+            name: 服务器名称
+            config: 服务器配置
+            force: 是否强制重连（跳过已连接检查，用于开关切换时同步状态）
+        """
         mgr = self._get_mcp_manager()
         if not self.cfg.mcp_enabled.value:
             return
 
-        # 防重复：已连接的不再触发
-        status_list = mgr.get_status()
-        already = any(st["name"] == name and st["connected"] for st in status_list)
-        if already:
-            logger.debug(f"[MCP] '{name}' 已连接，跳过热连接")
-            return
+        # 防重复：已连接的不再触发（除非 force=True）
+        if not force:
+            status_list = mgr.get_status()
+            already = any(st["name"] == name and st["connected"] for st in status_list)
+            if already:
+                logger.debug(f"[MCP] '{name}' 已连接，跳过热连接")
+                return
 
         def on_done(n, success, error_msg=""):
             self._hotConnectResult.emit(n, success, error_msg)
@@ -861,8 +868,10 @@ class MCPListSettingCard(ExpandSettingCard):
         # 执行热连接/断开
         for name, enabled in tasks.items():
             if enabled and self.cfg.mcp_enabled.value:
+                # 跳过防重复检查，强制重新连接（connect_server_background 内部会先断后连）
+                # 确保新的 MCPServerConnection 使用最新的 enabled 配置
                 server_data = next((s for s in servers if s.get("name") == name), {})
-                self._hot_connect(name, server_data)
+                self._hot_connect(name, server_data, force=True)
             else:
                 self._hot_disconnect(name)
 
