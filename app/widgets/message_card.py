@@ -80,7 +80,6 @@ from app.core import (
 from app.core.message_content import make_tool_result_block
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import current_theme, scale_font_size, Colors, font_size_css, _get_global_font
-from app.utils.qss_generator import get_component_qss
 from app.widgets.render_helpers import (
     render_tool_block,
 )
@@ -3384,23 +3383,12 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _apply_card_style(self, border: str = None, bg: str = None):
-        """应用卡片样式 - QSSGenerator 提供结构属性，Colors 提供背景色"""
-        # 从 QSSGenerator 获取结构属性（border-radius, shadow, padding）
-        role_map = {"user": "user_message", "assistant": "assistant_message", "welcome": "assistant_message"}
-        comp_id = role_map.get(self.role, "assistant_message")
-        gen_qss = get_component_qss(comp_id)
-        gen_radius = "border-radius: 16px;"  # 默认值
-        if gen_qss:
-            for line in gen_qss.split("\n"):
-                stripped = line.strip()
-                if stripped.startswith("border-radius"):
-                    gen_radius = stripped
         self.setStyleSheet(
             f"""
             CardWidget {{
                 background-color: {bg or self._base_bg};
                 border: 1px solid {border or self._base_border};
-                {gen_radius}
+                border-radius: 16px;
             }}
             """
         )

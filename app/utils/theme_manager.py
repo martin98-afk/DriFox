@@ -199,12 +199,6 @@ class ThemeManager:
                 cb()
             except Exception as e:
                 logger.warning(f"[ThemeManager] reload callback error: {e}")
-        # 重建 QSS 缓存
-        try:
-            from app.utils.qss_generator import rebuild_all
-            rebuild_all()
-        except ImportError:
-            pass
 
     def get_user_themes_dir(self) -> Path:
         """获取用户主题目录"""
@@ -214,11 +208,3 @@ class ThemeManager:
 
 # 全局单例
 theme_manager = ThemeManager()
-
-# 初始化时注册 QSS 重建回调
-try:
-    from app.utils.qss_generator import rebuild_all
-    theme_manager.on_reload(rebuild_all)
-    rebuild_all()
-except ImportError:
-    pass

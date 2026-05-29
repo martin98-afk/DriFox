@@ -51,6 +51,8 @@ class WorktreeInfo:
     is_main: bool      # 是否是主仓库
     is_current: bool   # 是否当前所在 worktree
     is_bare: bool = False  # 是否是 bare 仓库
+    behind_main: int = 0   # 落后主仓库的提交数
+    ahead_main: int = 0    # 超前主仓库的提交数
 
 
 @dataclass
@@ -224,6 +226,33 @@ class GitWorktreeDetector:
                     is_current=is_current,
                     is_bare=is_prunable,  # 复用 is_bare 表示可清理状态
                 ))
+            
+            # 计算每个 worktree 相对主仓库的落后/超前提交数
+            main_branch = None
+            for wt in worktrees:
+                if wt.is_main:
+                    main_branch = wt.branch
+                    break
+            if main_branch and main_branch != "(detached)":
+                for wt in worktrees:
+                    if wt.is_main or wt.branch == "(detached)":
+                        continue
+                    try:
+                        rev_result = _run_git(
+                            ["rev-list", "--left-right", "--count",
+                             f"{main_branch}...{wt.branch}"],
+                            cwd=git_root,
+                        )
+                        if rev_result.returncode == 0:
+                            parts = rev_result.stdout.strip().split("\t")
+                            if len(parts) == 2:
+                                # left=main_branch, right=worktree_branch
+                                # behind = main 有而 worktree 没有
+                                # ahead  = worktree 有而 main 没有
+                                wt.behind_main = int(parts[0])
+                                wt.ahead_main = int(parts[1])
+                    except Exception:
+                        pass
             
             return worktrees
             
