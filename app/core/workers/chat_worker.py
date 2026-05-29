@@ -135,10 +135,8 @@ class OpenAIChatWorker(QThread):
         self._mem_diag_iter_count = 0     # 诊断计数器（工具迭代轮次）
         self._mem_last_rss = 0.0          # 上一步 RSS 基线（MB）
         self._mem_total_chunks_logged = 0 # 累计记录的流式 chunk 数
-        # 环境变量控制：MEM_DIAG=0 禁用内存诊断
-        self._mem_diag_enabled = True
-        if os.environ.get('MEM_DIAG') == '0':
-            self._mem_diag_enabled = False
+        # 环境变量控制：MEM_DIAG=1 启用内存诊断（默认关闭）
+        self._mem_diag_enabled = os.environ.get('MEM_DIAG') == '1'
         # tracemalloc 深度追踪（MEM_TRACE=1 时启用，用于定位单步大分配）
         self._mem_trace_enabled = os.environ.get('MEM_TRACE') == '1'
         self._mem_trace_snapshot = None

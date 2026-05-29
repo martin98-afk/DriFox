@@ -18,11 +18,8 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 MEM_DIAG_ENABLED = False
 
 # 同步给 Worker（Worker 读取 MEM_DIAG 环境变量）
-if not MEM_DIAG_ENABLED:
-    os.environ["MEM_DIAG"] = "0"
-elif os.environ.get("MEM_DIAG") == "0":
-    # 如果用户通过命令行显式设了 MEM_DIAG=0，尊重命令行
-    pass
+if MEM_DIAG_ENABLED:
+    os.environ["MEM_DIAG"] = "1"
 else:
     os.environ.pop("MEM_DIAG", None)  # 不设任何值，Worker 默认启用
 
