@@ -4,7 +4,7 @@
 """
 from typing import List, Tuple, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QSizePolicy, QApplication,
@@ -275,10 +275,15 @@ class ModelSelectorCardContent(QWidget):
         # 更新吸顶服务商显示
         self._update_sticky_header()
 
-        # 滚动到当前选中模型
+        # 延迟滚动到当前选中模型（等待布局稳定后再计算位置）
         if self._active_model_item is not None:
-            QApplication.processEvents()
-            self._scroll_to_item_center(self._active_model_item)
+            scroll_target_provider = self._current_provider
+            scroll_target_model = self._current_model
+            # 使用短名保存避免闭包捕获 self._current_xxx 引用变化
+            # 第一次尝试：0延迟，利用下一轮事件循环
+            QTimer.singleShot(0, lambda p=scroll_target_provider, m=scroll_target_model: self._deferred_scroll(p, m))
+            # 第二次尝试：50ms后，确保布局已完全稳定（首次打开卡片时需要更长时间）
+            QTimer.singleShot(50, lambda p=scroll_target_provider, m=scroll_target_model: self._deferred_scroll(p, m))
 
     def refresh_style(self):
         """刷新主题样式"""
@@ -307,6 +312,21 @@ class ModelSelectorCardContent(QWidget):
         target_scroll = item_y + item_half - view_half
         target_scroll = max(0, min(target_scroll, scrollbar.maximum()))
         scrollbar.setValue(target_scroll)
+
+    def _deferred_scroll(self, provider_name: str, model_name: str):
+        """延迟滚动：先处理事件确保布局稳定，再计算位置滚动"""
+        # 先处理所有待处理的布局事件
+        QApplication.processEvents()
+        self._scroll_to_model(provider_name, model_name)
+
+    def _scroll_to_model(self, provider_name: str, model_name: str):
+        """根据服务商名和模型名找到对应 widget 并滚动居中"""
+        for item, prov, model in self._all_model_items:
+            if prov == provider_name and model == model_name:
+                # 确保 item 已经有效布局（pos().y() 可能为 0，此时滚动无意义）
+                if self.scroll_area.verticalScrollBar().maximum() > 0:
+                    self._scroll_to_item_center(item)
+                return
 
     def _on_scroll(self, value):
         """滚动条变化时更新吸顶服务商"""

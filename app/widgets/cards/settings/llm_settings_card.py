@@ -158,6 +158,7 @@ class ManualUpdateCard(SettingCard):
 class LLMSettingsCard(SystemCardFrame):
     """大模型设置卡片 - 固定边框 + 垂直列表布局"""
 
+    _autostart_toggling = False  # 类级防重入标志
     closed = pyqtSignal()
     configChanged = pyqtSignal()
 
@@ -557,6 +558,17 @@ class LLMSettingsCard(SystemCardFrame):
             if hasattr(card, "refresh_style"):
                 card.refresh_style()
 
+    def refresh_theme_options(self):
+        """热更新后刷新主题下拉列表（外部由 _on_plugin_hot_reload 调用）"""
+        if hasattr(self, 'uiThemeStyleCard') and hasattr(self.uiThemeStyleCard, 'comboBox'):
+            try:
+                combo = self.uiThemeStyleCard.comboBox
+                if hasattr(combo, '_refresh_items'):
+                    combo._refresh_items()
+                    logger.debug("[ThemeComboBox] 主题下拉已主动刷新")
+            except Exception as e:
+                logger.warning(f"[ThemeComboBox] 主动刷新失败: {e}")
+
     def _perform_save(self):
         try:
             self.cfg.save_config()
@@ -565,37 +577,47 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_toggled(self, enabled: bool):
         """开机自启开关切换时：检查平台支持 + 更新注册表"""
-        if enabled:
-            # 开启前检查平台支持
-            import os
-            if os.name != "nt":
-                self.autoStartCard.switchButton.setChecked(False)
+        # 防重入：防止信号递归/连锁导致多次写入
+        if LLMSettingsCard._autostart_toggling:
+            logger.debug(f"[AutoStart] 跳过重入调用: enabled={enabled}")
+            return
+        LLMSettingsCard._autostart_toggling = True
+        try:
+            if enabled:
+                # 开启前检查平台支持
+                import os
+                if os.name != "nt":
+                    self.autoStartCard.switchButton.setChecked(False)
+                    from qfluentwidgets import InfoBar, InfoBarPosition
+                    InfoBar.error(
+                        title="开机自启",
+                        content="当前平台不支持开机自启配置。",
+                        position=InfoBarPosition.BOTTOM,
+                        duration=3000,
+                        parent=self,
+                    ).show()
+                    return
+
+            try:
+                set_auto_start(enabled)
+                # 确保配置持久化到 Settings 文件（.drifox/app.config）
+                self.cfg.save()
+            except Exception as exc:
+                # 失败时回退开关状态和 ConfigItem 值
+                # 注意：setChecked 可能触发 checkedChanged 信号导致重入，
+                # 防重入标志已在上层设置，防止递归
+                self.autoStartCard.switchButton.setChecked(not enabled)
+                self.cfg.set(self.cfg.auto_start, not enabled, save=True)
                 from qfluentwidgets import InfoBar, InfoBarPosition
                 InfoBar.error(
-                    title="开机自启",
-                    content="当前平台不支持开机自启配置。",
+                    title="开机自启设置失败",
+                    content=str(exc),
                     position=InfoBarPosition.BOTTOM,
                     duration=3000,
                     parent=self,
                 ).show()
-                return
-
-        try:
-            set_auto_start(enabled)
-            # 确保配置持久化到 Settings 文件（.drifox/app.config）
-            self.cfg.save()
-        except Exception as exc:
-            # 失败时回退开关状态和 ConfigItem 值
-            self.autoStartCard.switchButton.setChecked(not enabled)
-            self.cfg.set(self.cfg.auto_start, not enabled, save=True)
-            from qfluentwidgets import InfoBar, InfoBarPosition
-            InfoBar.error(
-                title="开机自启设置失败",
-                content=str(exc),
-                position=InfoBarPosition.BOTTOM,
-                duration=3000,
-                parent=self,
-            ).show()
+        finally:
+            LLMSettingsCard._autostart_toggling = False
 
     def _on_llm_api_enabled_changed(self, enabled):
         from app.api import (

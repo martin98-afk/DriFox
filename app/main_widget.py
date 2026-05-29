@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import copy
 import ctypes
 import gc
 import os
@@ -1098,6 +1099,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup.configChanged.connect(self._on_settings_config_changed)
         self._settings_popup.closed.connect(lambda: (self._card_manager.hide_card("settings", self._window_id), self._restore_after_system_close()))
 
+        # 监听服务商配置变更，确保多窗口同步
+        # 当任意窗口添加/修改/删除服务商时，所有窗口的模型列表都会自动刷新
+        self.cfg.llm_saved_providers.valueChanged.connect(self._on_providers_config_changed)
+
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
         self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
@@ -1809,7 +1814,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg.set(self.cfg.llm_selected_model, provider_name, save=True)
 
         # 更新 saved_providers 中的模型名称
-        saved_providers = self.cfg.llm_saved_providers.value or {}
+        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
+        saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
         if provider_name in saved_providers:
             saved_providers[provider_name]["模型名称"] = model_name
             self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
@@ -1920,7 +1926,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict):
         """服务商编辑保存后的回调"""
-        saved_providers = self.cfg.llm_saved_providers.value or {}
+        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
+        saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
         saved_providers[provider_name] = provider_info
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
 
@@ -2683,7 +2690,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not current_name:
             return
         # 只更新参数，保留连接信息
-        saved_providers = self.cfg.llm_saved_providers.value or {}
+        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
+        saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
         old_config = saved_providers.get(current_name, self._valid_configs.get(current_name, {}))
         old_config.update(new_config)
         self._valid_configs[current_name] = old_config
@@ -2695,6 +2703,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_settings_config_changed(self):
         self._load_model_configs()
         self._apply_runtime_ui_settings()
+
+    def _on_providers_config_changed(self):
+        """服务商配置变更时的回调（多窗口同步）
+        
+        当一个窗口添加/修改/删除了服务商，所有窗口都会收到此通知。
+        刷新本地 _valid_configs 并更新 UI。
+        """
+        self._load_model_configs()
+        # 如果模型选择卡片当前可见，刷新内容
+        if hasattr(self, '_card_manager') and self._card_manager.is_card_visible("model_selector", self._window_id):
+            self._load_model_selector_to_card()
 
     def _reload_plugin_system(self):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
@@ -2730,6 +2749,14 @@ class OpenAIChatToolWindow(ToolWindow):
             if needs_invalidation:
                 self._command_card.invalidate_cache()
                 logger.debug("[HotReload] command_card cache invalidated")
+
+        # 主题变更：主动刷新设置面板中的主题下拉列表
+        if result.get('themes') and hasattr(self, '_settings_popup') and self._settings_popup:
+            try:
+                self._settings_popup.refresh_theme_options()
+                logger.debug("[HotReload] settings theme dropdown refreshed")
+            except Exception as e:
+                logger.warning(f"[HotReload] 刷新主题下拉失败: {e}")
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
