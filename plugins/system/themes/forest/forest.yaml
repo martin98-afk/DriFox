@@ -91,7 +91,8 @@ colors:
   send_btn_start: '#57d29a'
   send_btn_end: '#3da87a'
   send_btn_hover_start: '#6ee8b0'
-  send_btn_hover_end: '#4db888'
+  send_btn_hover_end: '#3da87a'
+  send_btn_radius: 8
   timeline_node: '#5A5A5A'
   timeline_node_hover: '#57d29a'
   timeline_node_visible: '#5eead4'

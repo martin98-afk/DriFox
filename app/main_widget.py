@@ -3680,21 +3680,25 @@ class OpenAIChatToolWindow(ToolWindow):
     def _refresh_all_cards_round_index(self):
         """
         删除/撤销操作后，重新同步所有存活 user 卡片的 _round_index。
-        因为删除前面的 round 会导致后面卡片的 round_index 偏移。
+        
+        ⚠️ 不能只遍历 chat_layout，因为懒加载/回收的卡片不在布局中。
+        必须基于 _batch_cards 遍历，使用 _message_batch 计算正确的 round_index。
         """
-        user_count = 0
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
+        for batch_idx, cards in enumerate(self._batch_cards):
+            if not cards:
                 continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
+            # 防止 _batch_cards 比 _message_batch 长（删除操作后未同步）
+            if batch_idx >= len(self._message_batch):
                 continue
-            if getattr(widget, '_is_welcome', False):
-                continue
-            if widget.role == "user":
-                widget._round_index = user_count
-                user_count += 1
+            for widget in cards:
+                if not isinstance(widget, MessageCard):
+                    continue
+                if getattr(widget, '_is_welcome', False):
+                    continue
+                if widget.role == "user":
+                    widget._round_index = self._get_user_round_index_for_batch_index(
+                        batch_idx
+                    )
 
     # ==================== Batch 结构同步 ====================
 
@@ -3935,7 +3939,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         通过遍历布局找到 user card 对应的 round_index
         """
-        # 直接通过布局遍历确定位置（更可靠）
+        # 优先通过 _batch_cards 查找（避免懒加载/回收导致布局遍历计数错误）
+        for batch_idx, cards in enumerate(self._batch_cards):
+            if not cards:
+                continue
+            if batch_idx >= len(self._message_batch):
+                continue
+            for widget in cards:
+                if widget is card:
+                    return self._get_user_round_index_for_batch_index(batch_idx)
+
+        # 降级：通过布局遍历（可能因懒加载/回收导致计数错误）
         user_card_idx = 0
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)

@@ -200,6 +200,7 @@ class Colors:
     SEND_BTN_END = "#B8956A"
     SEND_BTN_HOVER_START = "#D4B878"
     SEND_BTN_HOVER_END = "#C9A060"
+    SEND_BTN_RADIUS = 17  # 按钮圆角半径
     
     # 时间线
     TIMELINE_NODE = "#5A5A5A"
@@ -335,6 +336,7 @@ class Colors:
         cls.SEND_BTN_END = theme.get("send_btn_end", cls.SEND_BTN_END)
         cls.SEND_BTN_HOVER_START = theme.get("send_btn_hover_start", cls.SEND_BTN_HOVER_START)
         cls.SEND_BTN_HOVER_END = theme.get("send_btn_hover_end", cls.SEND_BTN_HOVER_END)
+        cls.SEND_BTN_RADIUS = theme.get("send_btn_radius", cls.SEND_BTN_RADIUS)
         
         # 时间线
         cls.TIMELINE_NODE = theme.get("timeline_node", cls.TIMELINE_NODE)

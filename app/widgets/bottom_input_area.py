@@ -87,12 +87,13 @@ class SendableTextEdit(TextEdit):
         """从 Colors 应用发送按钮样式"""
         from app.utils.design_tokens import Colors
         Colors.refresh()
+        radius = Colors.SEND_BTN_RADIUS
         self.send_btn.setStyleSheet(f"""
             TransparentToolButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
                 border: none;
-                border-radius: 17px;
+                border-radius: {radius}px;
                 color: white;
             }}
             TransparentToolButton:hover {{

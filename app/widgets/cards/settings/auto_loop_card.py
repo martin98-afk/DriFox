@@ -58,13 +58,14 @@ class AutoLoopConfigCard(QFrame):
         for label in self.findChildren(BodyLabel):
             label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {FONT_CSS} font-size: {scale_font_size(14)}px;")
         # 刷新按钮
+        radius = Colors.SEND_BTN_RADIUS
         self._start_btn.setStyleSheet(f"""
             PrimaryPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
                 color: {Colors.BUTTON_TEXT_ON_ACCENT};
                 border: none;
-                border-radius: 8px;
+                border-radius: {radius}px;
                 padding: 4px 14px;
                 {FONT_CSS} font-size: {scale_font_size(12)}px;
                 font-weight: bold;
