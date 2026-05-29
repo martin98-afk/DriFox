@@ -2,14 +2,17 @@
 """
 内置命令管理器
 
-管理两类内置命令：
-1. 函数型命令（function）- 选中/发送时执行指定函数
-2. 提示词替换命令（prompt）- 选中/发送时将命令替换为指定提示词文本，然后继续发送
+管理三类内置命令：
+1. 函数型命令（FUNCTION）- 选中/发送时执行指定函数
+2. 提示词替换命令（PROMPT）- 选中/发送时将命令替换为指定提示词文本，然后继续发送
+3. 智能体命令（AGENT/SUBAGENT）- 选中/发送时替换为智能体提示词，或通过 --subagent 启动子智能体
 
 使用方式：
+    from app.core.command_manager import CommandManager, CommandType
+    
     manager = CommandManager.get_instance()
-    manager.register("new", "function", description="新建会话")
-    manager.register("init", "prompt", description="项目笔记初始化",
+    manager.register("new", CommandType.FUNCTION, description="新建会话")
+    manager.register("init", CommandType.PROMPT, description="项目笔记初始化",
                      prompt_text="请分析此代码库...")
 
 # 获取所有命令（供 CommandCard 显示）
@@ -17,50 +20,54 @@
 
 # 在发送前拦截
     result = manager.execute(text)
-    if result.handled:
-        if result.is_function:
-            # 调用对应的处理函数
-            handler_map[result.command_name]()
-            return  # 已处理，不发送给 AI
-        elif result.is_prompt:
-            # 用替换文本继续发送
-            text = result.replacement
+    if result is not None:
+        match result.type:
+            case CommandType.FUNCTION:
+                handler_map[result.command_name]()
+                return  # 已处理，不发送给 AI
+            case CommandType.PROMPT | CommandType.AGENT:
+                # 用替换文本继续发送
+                text = result.replacement
 """
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Dict, List, Optional
+
+
+class CommandType(Enum):
+    """命令类型枚举"""
+    FUNCTION = auto()   # 函数型命令：执行指定函数
+    PROMPT = auto()     # 提示词替换命令：替换为提示词后继续发送
+    AGENT = auto()      # 智能体命令：替换为智能体提示词后继续发送
+    SUBAGENT = auto()   # 子智能体命令：智能体命令 + --subagent 参数，启动子智能体任务
 
 
 @dataclass
 class CommandResult:
     """命令执行结果"""
-    handled: bool = False          # 是否匹配到了命令
-    is_function: bool = False      # 是否为函数型命令
-    is_prompt: bool = False        # 是否为提示词替换命令
-    is_agent: bool = False         # 是否为智能体命令
-    is_subagent: bool = False      # 是否触发子智能体任务（智能体命令 + --subagent）
-    command_name: str = ""         # 匹配到的命令名
-    agent_name: str = ""           # 智能体名称（agent 命令使用）
-    subagent_task: str = ""        # 子智能体任务描述（is_subagent=True 时使用）
-    replacement: str = ""          # 提示词替换文本（仅 prompt/agent 命令）
-    remainder: str = ""            # 命令后的用户输入（保留部分）
+    type: CommandType            # 命令类型
+    command_name: str = ""       # 匹配到的命令名
+    replacement: str = ""        # 提示词替换文本（仅 PROMPT/AGENT 命令）
+    subagent_task: str = ""      # 子智能体任务描述（仅 SUBAGENT 命令）
+    remainder: str = ""          # 命令后的用户输入（保留部分）
 
 
 @dataclass
 class CommandDefinition:
     """单个命令的定义"""
     name: str
-    type: str                      # "function", "prompt", "agent"
+    type: CommandType            # 命令类型枚举
     description: str = ""
-    argument_hint: str = ""        # 参数提示（显示在命令卡片 detail 模式）
-    prompt_text: str = ""          # prompt/agent 命令使用
+    argument_hint: str = ""      # 参数提示（显示在命令卡片 detail 模式）
+    prompt_text: str = ""        # PROMPT/AGENT 命令使用
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
-        # 根据 command_type 映射显示类型
         type_map = {
-            "function": "command",   # 普通命令
-            "prompt": "prompt",      # 提示词命令（init/review/theme等）
-            "agent": "agent",        # 智能体（agents 目录加载）
+            CommandType.FUNCTION: "command",
+            CommandType.PROMPT: "prompt",
+            CommandType.AGENT: "agent",
+            CommandType.SUBAGENT: "agent",
         }
         display_type = type_map.get(self.type, "command")
         return {
@@ -99,7 +106,7 @@ class CommandManager:
     def register(
         self,
         name: str,
-        command_type: str,
+        command_type: CommandType,
         description: str = "",
         argument_hint: str = "",
         prompt_text: str = "",
@@ -108,10 +115,10 @@ class CommandManager:
 
         Args:
             name: 命令名（不含 /）
-            command_type: "function", "prompt" 或 "agent"
+            command_type: CommandType 枚举
             description: 描述文本（显示在命令卡片中）
             argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
-            prompt_text: prompt/agent 命令使用，替换后的提示词文本
+            prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
         """
         self._commands[name] = CommandDefinition(
             name=name,
@@ -170,108 +177,83 @@ class CommandManager:
 
     # ---- 执行 ----
 
-    def execute(self, text: str) -> CommandResult:
+    def execute(self, text: str) -> Optional[CommandResult]:
         """解析并执行命令
 
         Args:
             text: 用户输入的完整文本
 
         Returns:
-            CommandResult:
-            - handled=False: 不是内置命令
-            - handled=True, is_function=True: 函数命令，调用方需执行对应 handler
-            - handled=True, is_prompt=True: 提示词替换命令，使用 replacement 作为发送文本
-            - handled=True, is_subagent=True: 智能体命令 + --subagent，触发子智能体任务
+            Optional[CommandResult]:
+            - None: 不是内置命令
+            - CommandResult(type=FUNCTION): 函数命令，调用方需执行对应 handler
+            - CommandResult(type=PROMPT): 提示词替换命令，使用 replacement 作为发送文本
+            - CommandResult(type=AGENT): 智能体命令，使用 replacement 作为发送文本
+            - CommandResult(type=SUBAGENT): 智能体命令 + --subagent，触发子智能体任务
         """
         cmd_name = self.parse_command_name(text)
         if not cmd_name or cmd_name not in self._commands:
-            return CommandResult(handled=False)
+            return None
 
         cmd = self._commands[cmd_name]
 
-        if cmd.type == "function":
-            # 提取命令后的用户输入（保留部分）
-            remainder = ""
-            text_stripped = text.strip()
-            if text_stripped.startswith("/"):
-                # 找到 /cmd 后的部分
-                first_space = text_stripped.find(" ")
-                if first_space > 0:
-                    remainder = text_stripped[first_space + 1:]
+        # 提取命令后的用户输入（保留部分）
+        remainder = ""
+        text_stripped = text.strip()
+        if text_stripped.startswith("/"):
+            first_space = text_stripped.find(" ")
+            if first_space > 0:
+                remainder = text_stripped[first_space + 1:]
 
+        if cmd.type == CommandType.FUNCTION:
             return CommandResult(
-                handled=True,
-                is_function=True,
+                type=CommandType.FUNCTION,
                 command_name=cmd_name,
                 remainder=remainder,
             )
-        elif cmd.type in ("prompt", "agent"):
-            # 提取命令后的用户输入（保留部分）
-            remainder = ""
-            text_stripped = text.strip()
-            if text_stripped.startswith("/"):
-                first_space = text_stripped.find(" ")
-                if first_space > 0:
-                    remainder = text_stripped[first_space + 1:]
 
-            # 检查是否有 --subagent 参数（仅智能体命令支持）
-            # 规则：--subagent 之后到下一个 -- 参数之前的所有内容作为子智能体任务描述
-            has_subagent = False
-            subagent_task = ""
-            remainder_after_subagent = ""
-            if cmd.type == "agent" and remainder:
-                subagent_match = remainder.find("--subagent")
-                if subagent_match >= 0:
-                    has_subagent = True
-                    # 分割内容：subagent 之前 + subagent 及之后
-                    before_subagent = remainder[:subagent_match].rstrip()
-                    after_subagent = remainder[subagent_match + len("--subagent"):].lstrip()
-                    
-                    # 从 subagent 内容中提取任务和剩余参数
-                    # 找到下一个 -- 参数的位置
-                    next_flag_pos = -1
-                    for i in range(len(after_subagent)):
-                        if after_subagent[i] == '-' and (i == 0 or after_subagent[i-1] == ' '):
-                            # 检查是否是 -- 开头的参数（跳过开头的 -）
-                            if after_subagent[i:].startswith("--"):
-                                next_flag_pos = i
-                                break
-                    
-                    if next_flag_pos >= 0:
-                        subagent_task = after_subagent[:next_flag_pos].strip()
-                        remainder_after_subagent = after_subagent[next_flag_pos:].strip()
-                    else:
-                        subagent_task = after_subagent.strip()
-                        remainder_after_subagent = ""
-                    
-                    # 重新组装 remainder：subagent 之前 + subagent 之后的参数
-                    if before_subagent or remainder_after_subagent:
-                        remainder = before_subagent
-                        if remainder_after_subagent:
-                            remainder = f"{remainder} {remainder_after_subagent}" if remainder else remainder_after_subagent
-                    else:
-                        remainder = ""
+        # PROMPT / AGENT：检查 --subagent 参数（仅 AGENT 支持）
+        if cmd.type == CommandType.AGENT and remainder:
+            subagent_match = remainder.find("--subagent")
+            if subagent_match >= 0:
+                # 解析 --subagent 参数
+                before_subagent = remainder[:subagent_match].rstrip()
+                after_subagent = remainder[subagent_match + len("--subagent"):].lstrip()
 
-            if has_subagent:
-                # 触发子智能体任务（允许空任务描述，子智能体将按自身指令执行）
+                # 找到下一个 -- 参数的位置
+                next_flag_pos = -1
+                for i in range(len(after_subagent)):
+                    if after_subagent[i] == '-' and (i == 0 or after_subagent[i-1] == ' '):
+                        if after_subagent[i:].startswith("--"):
+                            next_flag_pos = i
+                            break
+
+                if next_flag_pos >= 0:
+                    subagent_task = after_subagent[:next_flag_pos].strip()
+                    remainder_after_subagent = after_subagent[next_flag_pos:].strip()
+                else:
+                    subagent_task = after_subagent.strip()
+                    remainder_after_subagent = ""
+
+                # 重新组装 remainder
+                if before_subagent or remainder_after_subagent:
+                    remainder = before_subagent
+                    if remainder_after_subagent:
+                        remainder = f"{remainder} {remainder_after_subagent}" if remainder else remainder_after_subagent
+                else:
+                    remainder = ""
+
                 return CommandResult(
-                    handled=True,
-                    is_subagent=True,
-                    is_agent=True,
+                    type=CommandType.SUBAGENT,
                     command_name=cmd_name,
-                    agent_name=cmd_name,
                     subagent_task=subagent_task,
                     remainder=remainder,
                 )
-            
-            # 正常的提示词替换
-            return CommandResult(
-                handled=True,
-                is_prompt=(cmd.type == "prompt"),
-                is_agent=(cmd.type == "agent"),
-                command_name=cmd_name,
-                replacement=cmd.prompt_text,
-                remainder=remainder,
-            )
 
-        return CommandResult(handled=False)
+        # 正常的 PROMPT / AGENT 提示词替换
+        return CommandResult(
+            type=cmd.type,  # PROMPT or AGENT
+            command_name=cmd_name,
+            replacement=cmd.prompt_text,
+            remainder=remainder,
+        )

@@ -182,7 +182,10 @@ class ChatWorkerState:
     def reset_pending_response_state(self):
         """
         重置单轮对话结束后的中间状态。
-        在每次 API 调用前和工具执行完成后调用。
+        在每次 API 调用前和工具执行完成后调用，释放内存。
+        
+        注意：必须同时清除 response_chunks，否则流式文本 chunk 
+        会跨迭代累积，导致 _response_chunks deque 的内存泄漏。
         """
         # 工具调用状态
         self.tool_call.current_calls = {}
@@ -194,6 +197,9 @@ class ChatWorkerState:
         self.response.content_blocks = []
         self.response.reasoning_content = ""
         self.response.reasoning_chunks = deque()
+        # 🔧 修复：清除流式文本 chunks，防止跨迭代累积
+        self.response.response_chunks = deque()
+        self.response.last_progress_len = {}
     
     def full_cleanup(self):
         """
@@ -221,6 +227,14 @@ class ChatWorkerState:
         
         # 清空会话消息
         self.session = SessionState()
+        
+        # 🔧 修复：清空 EventBus 订阅者，防止 handler 闭包引用残留
+        if self.event_bus is not None:
+            try:
+                self.event_bus.clear()
+            except Exception:
+                pass
+            self.event_bus = None
         
         # 清空工具列表引用
         self.tools = []

@@ -54,7 +54,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.command_manager import CommandManager
+from app.core.command_manager import CommandManager, CommandType
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -3433,8 +3433,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _cache_current_session_cards(self):
         """
-        切换会话时彻底清理当前会话的卡片，不再缓存。
-        直接删除卡片，释放内存。
+        切换会话时彻底清理当前会话的卡片，释放内存。
+
+        使用 deleteLater() + processEvents() 替代 sip.delete() 即时销毁，
+        避免 Qt 信号-槽连接在销毁过程中被触发导致 access violation。
         """
         # 从布局中取出所有 widgets
         widgets = self._take_chat_widgets()
@@ -3463,6 +3465,12 @@ class OpenAIChatToolWindow(ToolWindow):
                             card.deleteLater()
                         except Exception:
                             pass
+
+        # 立即处理所有 deleteLater 事件，确保旧卡片在新卡片创建前被销毁
+        QApplication.processEvents()
+
+        # 卡片清理后压缩进程堆，释放空闲 arena
+        _compact_process_heap_after_cleanup()
 
     def _cleanup_session_card_cache(self):
         from app.constants import (
@@ -5857,30 +5865,31 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
         cmd_result = cmd_mgr.execute(user_text)
-        if cmd_result.handled:
-            if cmd_result.is_function:
-                # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
-                self.input_area.clear()
-                # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
-                self.input_area.toggle_send_button(True)
-                self._execute_command(cmd_result.command_name, cmd_result.remainder)
-                return
-            elif cmd_result.is_subagent:
-                # 子智能体命令：触发子智能体任务，不替换提示词
-                # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
-                self.input_area.toggle_send_button(True)
-                self._execute_subagent_task(cmd_result.agent_name, cmd_result.subagent_task)
-                return
-            elif cmd_result.is_prompt or cmd_result.is_agent:
-                # 提示词替换命令：替换 + 追加用户命令
-                user_text = cmd_result.replacement
-                if cmd_result.remainder:
-                    user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
-                # 提示词命令需要发送消息，按现有逻辑处理
+        if cmd_result is not None:
+            match cmd_result.type:
+                case CommandType.FUNCTION:
+                    # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
+                    self.input_area.clear()
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
+                    self.input_area.toggle_send_button(True)
+                    self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                    return
+                case CommandType.SUBAGENT:
+                    # 子智能体命令：触发子智能体任务，不替换提示词
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
+                    self.input_area.toggle_send_button(True)
+                    self._execute_subagent_task(cmd_result.command_name, cmd_result.subagent_task)
+                    return
+                case CommandType.PROMPT | CommandType.AGENT:
+                    # 提示词替换命令：替换 + 追加用户命令
+                    user_text = cmd_result.replacement
+                    if cmd_result.remainder:
+                        user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
+                    # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
 
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
-        if not cmd_result.handled and user_text.startswith("/"):
+        if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
             parts = user_text[1:].split(maxsplit=1)
             if parts and get_skill_by_name(parts[0]):
@@ -7883,3 +7892,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
+
+
+def _compact_process_heap_after_cleanup():
+    """卡片清理后主动压缩进程堆，归还空闲内存给 OS。"""
+    gc.collect()
+    try:
+        if sys.platform == 'win32':
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            heap = kernel32.GetProcessHeap()
+            if heap:
+                kernel32.HeapCompact(heap, 0)
+        elif sys.platform == 'linux':
+            libc = ctypes.CDLL('libc.so.6', use_last_error=True)
+            libc.malloc_trim(0)
+    except Exception:
+        pass

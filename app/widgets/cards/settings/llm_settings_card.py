@@ -579,7 +579,7 @@ class LLMSettingsCard(SystemCardFrame):
         """开机自启开关切换时：检查平台支持 + 更新注册表"""
         # 防重入：防止信号递归/连锁导致多次写入
         if LLMSettingsCard._autostart_toggling:
-            logger.debug(f"[AutoStart] 跳过重入调用: enabled={enabled}")
+            logger.info(f"[AutoStart] 防重入拦截: enabled={enabled}")
             return
         LLMSettingsCard._autostart_toggling = True
         try:

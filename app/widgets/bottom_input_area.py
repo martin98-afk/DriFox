@@ -171,6 +171,13 @@ class SendableTextEdit(TextEdit):
             if " " in query:
                 self._cancel_slash_throttle()
                 cmd_name = query.split(" ", 1)[0]
+
+                # 🚀 性能优化：已处于同一命令的 detail 模式时跳过
+                # 避免每次敲键都触发 get_skill_by_name（扫描文件系统）和 signal 发射
+                card = self._get_card()
+                if card and card.is_detail_mode and card.detail_cmd_name == cmd_name:
+                    return
+
                 from app.core.command_manager import CommandManager
                 from app.utils.utils import get_skill_by_name
                 if CommandManager.get_instance().is_known_command_name(cmd_name) or get_skill_by_name(cmd_name):

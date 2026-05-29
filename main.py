@@ -12,6 +12,30 @@ from qfluentwidgets import setFontFamilies
 warnings.filterwarnings("ignore")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+# ========== 内存诊断开关 ==========
+# 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
+# 关闭后 Worker 内也不再执行内存快照和自适应 GC 日志
+MEM_DIAG_ENABLED = False
+
+# 同步给 Worker（Worker 读取 MEM_DIAG 环境变量）
+if not MEM_DIAG_ENABLED:
+    os.environ["MEM_DIAG"] = "0"
+elif os.environ.get("MEM_DIAG") == "0":
+    # 如果用户通过命令行显式设了 MEM_DIAG=0，尊重命令行
+    pass
+else:
+    os.environ.pop("MEM_DIAG", None)  # 不设任何值，Worker 默认启用
+
+# ========== tracemalloc 深度追踪 ==========
+# 当 MEM_DIAG_ENABLED=True 且需要定位具体内存分配热点时，设为 True
+# 会增加运行时开销，仅在排查时开启
+# 可通过命令行 MEM_TRACE=1 python main.py 临时覆盖
+MEM_TRACE_ENABLED = False
+if MEM_TRACE_ENABLED:
+    os.environ["MEM_TRACE"] = "1"
+else:
+    os.environ.pop("MEM_TRACE", None)
+
 # 添加项目根目录到 Python 路径
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
@@ -57,8 +81,20 @@ def main():
         log_dir / "llm_chatter.log",
         rotation="10 MB",
         level="DEBUG",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
     )
+
+    # 单独的内存诊断日志文件（仅含 [MEM] / [MEM-LEAK] 标签的日志）
+    # 用于排查工具迭代中的内存泄漏，与业务日志分离便于查看
+    # 由 main.py 顶部的 MEM_DIAG_ENABLED 控制总开关
+    if MEM_DIAG_ENABLED:
+        logger.add(
+            log_dir / "mem_diag.log",
+            rotation="10 MB",
+            level="DEBUG",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+            filter=lambda r: "[MEM]" in r["message"],
+        )
 
     # 创建应用
     app = QApplication(sys.argv)
