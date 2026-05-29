@@ -63,14 +63,15 @@ class ShellContextManager:
         for process in contexts:
             self._close_process(process)
 
-    def _create_process(self) -> subprocess.Popen:
-        """创建新的 shell 子进程（跨平台）"""
+    def _create_process(self, cwd: str | None = None) -> subprocess.Popen:
+        """创建新的 shell 子进程（跨平台）
+
+        参数:
+            cwd: 工作目录，None 则用 BASE_DIR
+        """
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            kwargs["startupinfo"] = startupinfo
+            # 防止弹出黑色控制台窗口
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         return subprocess.Popen(
             self._shell_cmd,
@@ -81,7 +82,7 @@ class ShellContextManager:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            cwd=str(BASE_DIR),
+            cwd=cwd or str(BASE_DIR),
             **kwargs,
         )
 
@@ -208,15 +209,19 @@ class ShellContextManager:
             output = "\n".join(raw_lines).strip()
         return output, False, exit_code
 
-    def run_once(self, command: str, timeout_seconds: int | None = None) -> tuple[str, bool, int | None]:
+    def run_once(self, command: str, timeout_seconds: int | None = None, cwd: str | None = None) -> tuple[str, bool, int | None]:
         """执行一次性命令（无持久上下文）
 
+        参数:
+            command: 要执行的命令
+            timeout_seconds: 超时秒数
+            cwd: 工作目录（None 用 BASE_DIR）
         返回:
             (output, timed_out, exit_code)
         """
         effective_timeout = timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT
         marker = self._create_marker()
-        process = self._create_process()
+        process = self._create_process(cwd=cwd)
         try:
             assert process.stdin is not None
             process.stdin.write(self._build_capture_script(command, marker) + "\n")
@@ -239,9 +244,15 @@ class ShellContextManager:
         command: str,
         context_id: str | None,
         timeout_seconds: int | None = None,
+        cwd: str | None = None,
     ) -> tuple[str, str, bool, bool, int | None]:
         """在持久化上下文中执行命令
 
+        参数:
+            command: 要执行的命令
+            context_id: 上下文 ID（None 自动创建）
+            timeout_seconds: 超时秒数
+            cwd: 工作目录（None 用 BASE_DIR）
         返回:
             (context_id, output, created, timed_out, exit_code)
         """
@@ -256,7 +267,7 @@ class ShellContextManager:
                 created = False
 
             if created:
-                self._contexts[context_id] = self._create_process()
+                self._contexts[context_id] = self._create_process(cwd=cwd)
                 self._context_io_locks[context_id] = threading.Lock()
 
             process = self._contexts[context_id]
@@ -274,7 +285,7 @@ class ShellContextManager:
                 with self._lock:
                     self._contexts.pop(context_id, None)
                 self._close_process(process)
-                process = self._create_process()
+                process = self._create_process(cwd=cwd)
                 with self._lock:
                     self._contexts[context_id] = process
                 assert process.stdin is not None
@@ -298,13 +309,18 @@ class ShellContextManager:
 
         return context_id, output, created, False, exit_code
 
-    def run(self, command: str, context_id: str | None, timeout_seconds: int | None = None) -> tuple[str, str, bool, bool]:
+    def run(self, command: str, context_id: str | None, timeout_seconds: int | None = None, cwd: str | None = None) -> tuple[str, str, bool, bool]:
         """简化版：不返回 exit_code
         
+        参数:
+            command: 要执行的命令
+            context_id: 上下文 ID
+            timeout_seconds: 超时秒数
+            cwd: 工作目录（None 用 BASE_DIR）
         返回:
             (context_id, output, created, timed_out)
         """
-        ctx_id, output, created, timed_out, _ = self.run_detailed(command, context_id, timeout_seconds)
+        ctx_id, output, created, timed_out, _ = self.run_detailed(command, context_id, timeout_seconds, cwd=cwd)
         return ctx_id, output, created, timed_out
 
     def close_context(self, context_id: str):

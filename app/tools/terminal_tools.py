@@ -88,13 +88,9 @@ class BackgroundTaskManager:
             else:
                 cmd = command
 
-            # 使用 ShellContextManager 的平台适配参数
+            # 防止弹出黑色控制台窗口
             kwargs = {}
             if sys.platform == "win32":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-                kwargs["startupinfo"] = startupinfo
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             
             process = subprocess.Popen(
@@ -281,10 +277,12 @@ class TerminalTools:
         try:
             mgr = self._shell_mgr
 
+            wd = str(self.workdir)
+
             if context:
                 # 持久化上下文模式
                 ctx_id, output, created, timed_out, exit_code = mgr.run_detailed(
-                    command, context, timeout
+                    command, context, timeout, cwd=wd
                 )
                 if timed_out:
                     return ToolResult(False, error=output)
@@ -298,7 +296,7 @@ class TerminalTools:
                 return ToolResult(True, content=compressed)
             else:
                 # 一次性执行（原有行为）
-                output, timed_out, exit_code = mgr.run_once(command, timeout)
+                output, timed_out, exit_code = mgr.run_once(command, timeout, cwd=wd)
                 if timed_out:
                     return ToolResult(False, error=output)
 
