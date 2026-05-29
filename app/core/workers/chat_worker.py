@@ -879,13 +879,15 @@ class OpenAIChatWorker(QThread):
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                     compacted="yes" if _was_compacted else "no")
                 # 每 3 轮触发一次 GC，帮助回收循环引用
-                if self._mem_diag_iter_count % 3 == 0 and self._mem_diag_enabled:
-                    before_gc = len(gc.get_objects())
+                if self._mem_diag_iter_count % 3 == 0:
+                    if self._mem_diag_enabled:
+                        before_gc = len(gc.get_objects())
                     gc.collect()
-                    after_gc = len(gc.get_objects())
-                    freed = before_gc - after_gc
-                    if freed > 1000:
-                        logger.debug(f"[MEM] GC后释放 {freed} 个对象")
+                    if self._mem_diag_enabled:
+                        after_gc = len(gc.get_objects())
+                        freed = before_gc - after_gc
+                        if freed > 1000:
+                            logger.debug(f"[MEM] GC后释放 {freed} 个对象")
 
                 QCoreApplication.processEvents()
                 time.sleep(0.01)

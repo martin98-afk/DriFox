@@ -36,13 +36,16 @@ class _WorktreeRow(QWidget):
     deleted = pyqtSignal(str)    # worktree_path
 
     def __init__(self, branch: str, wt_path: str, is_main: bool,
-                 is_current: bool, is_prunable: bool, parent=None):
+                 is_current: bool, is_prunable: bool, parent=None,
+                 behind_main: int = 0, ahead_main: int = 0):
         super().__init__(parent)
         self._branch = branch
         self._wt_path = wt_path
         self._is_main = is_main
         self._is_current = is_current
         self._is_prunable = is_prunable
+        self._behind_main = behind_main
+        self._ahead_main = ahead_main
         self._confirming_delete = False
         self._delete_timer: QTimer = None
         self._del_btn: QLabel = None
@@ -95,6 +98,23 @@ class _WorktreeRow(QWidget):
                 f"padding: 0 4px; border-radius: 2px;"
             )
             layout.addWidget(tag)
+
+        # 落后/超前提交数显示（仅非主 worktree）
+        if not self._is_main and (self._behind_main > 0 or self._ahead_main > 0):
+            parts = []
+            color = "#8b949e"  # 默认灰
+            if self._behind_main > 0:
+                parts.append(f"-{self._behind_main}")
+                color = "#d29922"  # 黄色-落后警告
+            if self._ahead_main > 0:
+                parts.append(f"+{self._ahead_main}")
+                color = "#7ee787"  # 绿色-超前
+            diff_label = QLabel(" ".join(parts), self)
+            diff_label.setStyleSheet(
+                f"color: {color}; {get_font_family_css()} {font_size_css(10)}"
+                f"padding: 0 2px;"
+            )
+            layout.addWidget(diff_label)
 
         layout.addStretch()
 
@@ -396,6 +416,8 @@ class WorktreeSectionWidget(QWidget):
                 is_current=is_current,
                 is_prunable=wt.is_bare,
                 parent=self,
+                behind_main=wt.behind_main,
+                ahead_main=wt.ahead_main,
             )
             row.switched.connect(self._on_switch)
             row.deleted.connect(self._on_deleted)

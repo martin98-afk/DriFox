@@ -1343,7 +1343,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._register_cards_to_manager()
 
         # 系统卡片打开时隐藏文本输入框（保留按钮栏），关闭时恢复
-        for _cid in ("model_selector", "model_config", "memory", "history"):
+        for _cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running"):
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
@@ -2201,7 +2201,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_system_card_closed(self, card_id: str):
         """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
-        for cid in ("model_selector", "model_config", "memory", "history"):
+        for cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running"):
             if self._card_manager.is_card_visible(cid, self._window_id):
                 return
         if hasattr(self, 'input_area'):
@@ -2548,26 +2548,57 @@ class OpenAIChatToolWindow(ToolWindow):
                                     position=InfoBarPosition.BOTTOM)
 
     def _refresh_archived_sessions(self):
-        """刷新归档会话列表"""
+        """刷新归档会话列表（带文件修改时间缓存，避免重复读取）"""
         if not self.history_manager:
             return
 
         archived_list = self.history_manager.get_archived_sessions()
-        # 为每个归档会话添加预览信息
-        for session in archived_list:
-            try:
-                with open(session["path"], "r", encoding="utf-8") as f:
-                    content = f.read()
-                    data = json.loads(content)
-                    messages = data.get("messages", [])
-                    session["message_count"] = data.get("message_count",
-                                                        len([m for m in messages if m.get("role") == "user"]))
-                    session["last_time"] = data.get("last_time", data.get("saved_at", ""))
-                    session["preview"] = get_message_preview(messages) if messages else ""
-            except Exception:
-                pass
 
-        self._history_popup_card.set_archived_sessions(archived_list)
+        # 缓存归档文件预览数据（以文件路径+修改时间为键）
+        if not hasattr(self, '_archived_cache'):
+            self._archived_cache = {}  # path → (mtime, data_dict)
+
+        enriched_list = []
+        need_reparse = False
+
+        for session in archived_list:
+            fp = session["path"]
+            cached = self._archived_cache.get(fp)
+
+            try:
+                current_mtime = os.path.getmtime(fp)
+            except OSError:
+                current_mtime = 0
+
+            if cached and cached[0] == current_mtime:
+                # 缓存有效，直接复用
+                session["message_count"] = cached[1].get("message_count", 0)
+                session["last_time"] = cached[1].get("last_time", "")
+                session["preview"] = cached[1].get("preview", "")
+            else:
+                # 缓存过期或不存在，读取文件
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        data = json.loads(f.read())
+                    messages = data.get("messages", [])
+                    msg_count = data.get("message_count", len([m for m in messages if m.get("role") == "user"]))
+                    last_time = data.get("last_time", data.get("saved_at", ""))
+                    preview = get_message_preview(messages) if messages else ""
+                    session["message_count"] = msg_count
+                    session["last_time"] = last_time
+                    session["preview"] = preview
+                    self._archived_cache[fp] = (current_mtime, {
+                        "message_count": msg_count,
+                        "last_time": last_time,
+                        "preview": preview,
+                    })
+                    need_reparse = True
+                except Exception:
+                    pass
+
+            enriched_list.append(session)
+
+        self._history_popup_card.set_archived_sessions(enriched_list)
 
     def _on_history_tab_changed(self, tab_id: str):
         """处理历史/归档标签切换"""
@@ -2757,6 +2788,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.debug("[HotReload] settings theme dropdown refreshed")
             except Exception as e:
                 logger.warning(f"[HotReload] 刷新主题下拉失败: {e}")
+
+        # MCP 配置变更：刷新设置面板中的 MCP 服务器列表并重新连接
+        if result.get('mcp') and hasattr(self, '_settings_popup') and self._settings_popup:
+            try:
+                if hasattr(self._settings_popup, 'mcpListCard'):
+                    self._settings_popup.mcpListCard._refresh()
+                    QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
+                    logger.debug("[HotReload] MCP server list refreshed")
+            except Exception as e:
+                logger.warning(f"[HotReload] 刷新 MCP 列表失败: {e}")
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
