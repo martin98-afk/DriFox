@@ -3433,8 +3433,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _cache_current_session_cards(self):
         """
-        切换会话时彻底清理当前会话的卡片，不再缓存。
-        直接删除卡片，释放内存。
+        切换会话时彻底清理当前会话的卡片，释放内存。
+
+        使用 deleteLater() + processEvents() 替代 sip.delete() 即时销毁，
+        避免 Qt 信号-槽连接在销毁过程中被触发导致 access violation。
         """
         # 从布局中取出所有 widgets
         widgets = self._take_chat_widgets()
@@ -3463,6 +3465,12 @@ class OpenAIChatToolWindow(ToolWindow):
                             card.deleteLater()
                         except Exception:
                             pass
+
+        # 立即处理所有 deleteLater 事件，确保旧卡片在新卡片创建前被销毁
+        QApplication.processEvents()
+
+        # 卡片清理后压缩进程堆，释放空闲 arena
+        _compact_process_heap_after_cleanup()
 
     def _cleanup_session_card_cache(self):
         from app.constants import (
@@ -7883,3 +7891,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
+
+
+def _compact_process_heap_after_cleanup():
+    """卡片清理后主动压缩进程堆，归还空闲内存给 OS。"""
+    gc.collect()
+    try:
+        if sys.platform == 'win32':
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            heap = kernel32.GetProcessHeap()
+            if heap:
+                kernel32.HeapCompact(heap, 0)
+        elif sys.platform == 'linux':
+            libc = ctypes.CDLL('libc.so.6', use_last_error=True)
+            libc.malloc_trim(0)
+    except Exception:
+        pass

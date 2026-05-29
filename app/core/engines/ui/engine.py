@@ -154,6 +154,10 @@ class UIEngine(BaseEngine):
     def set_session_manager(self, session_manager):
         """Update the session manager reference (used when session is archived)."""
         self._session_manager = session_manager
+        # 🔧 修复：同步 ConversationCore 的 session_manager 引用
+        # 否则 ConversationExecutor.execute() 会通过 ConversationCore 读到旧的 session_manager
+        if hasattr(self, '_conversation_core'):
+            self._conversation_core.session_manager = session_manager
 
     # ========== 权限检查 ==========
 

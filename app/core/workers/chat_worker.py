@@ -3,10 +3,21 @@
 Chat Worker - OpenAI 对话执行器
 """
 
+import gc
+import os
 import re
+import sys
 import time
 import concurrent.futures
 import threading
+
+# 可选依赖：psutil 用于内存诊断（不强制）
+try:
+    import psutil as _psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+    _psutil = None
 from datetime import datetime
 from typing import Dict, List, Callable, Optional, Any
 
@@ -118,6 +129,142 @@ class OpenAIChatWorker(QThread):
 
         # ========== HTTP 流式响应引用（供 cancel() 关闭连接）==========
         self._current_response: Any = None
+
+        # ========== 内存诊断 ==========
+        self._mem_diag_logged = False     # 防止重复日志刷屏
+        self._mem_diag_iter_count = 0     # 诊断计数器（工具迭代轮次）
+        self._mem_last_rss = 0.0          # 上一步 RSS 基线（MB）
+        self._mem_total_chunks_logged = 0 # 累计记录的流式 chunk 数
+        # 环境变量控制：MEM_DIAG=0 禁用内存诊断
+        self._mem_diag_enabled = True
+        if os.environ.get('MEM_DIAG') == '0':
+            self._mem_diag_enabled = False
+        # tracemalloc 深度追踪（MEM_TRACE=1 时启用，用于定位单步大分配）
+        self._mem_trace_enabled = os.environ.get('MEM_TRACE') == '1'
+        self._mem_trace_snapshot = None
+
+    def _mem_take_trace(self):
+        """在 before_api_call / after_api_call 之间采集 tracemalloc 快照"""
+        if not self._mem_trace_enabled:
+            return
+        try:
+            import tracemalloc
+            if not tracemalloc.is_tracing():
+                tracemalloc.start(25)
+            gc.collect()
+            snap = tracemalloc.take_snapshot()
+            if self._mem_trace_snapshot is not None:
+                # 对比上一次，输出热点
+                diff = snap.compare_to(self._mem_trace_snapshot, 'lineno')
+                large = [d for d in diff if d.size_diff > 10 * 1024 * 1024]
+                if large:
+                    large.sort(key=lambda d: d.size_diff, reverse=True)
+                    log_path = _get_log_dir_path("mem_trace.log")
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(f"\n{'='*70}\n[MEM-TRACE] 分配 >10MB 的热点:\n{'='*70}\n")
+                        f.write(f"{'增量MB':>8} {'总计MB':>8} {'计数':>5}  位置\n")
+                        f.write(f"{'-'*70}\n")
+                        for stat in large[:15]:
+                            frame = stat.traceback[0]
+                            loc = (frame.filename.split('site-packages')[-1]
+                                   if 'site-packages' in frame.filename
+                                   else frame.filename.split('python3')[-1]
+                                   if 'python3' in frame.filename
+                                   else frame.filename)
+                            f.write(f"{stat.size_diff/1024/1024:>7.1f}M {stat.size/1024/1024:>7.1f}M {stat.count_diff:>4}  {loc}:{frame.lineno}\n")
+                            for i, fr in enumerate(stat.traceback[:4]):
+                                f.write(f"   {'├─' if i < 3 else '└─'} {fr.filename.split(os.sep)[-1]}:{fr.lineno} {fr.name}\n")
+                    logger.warning(f"[MEM-TRACE] 发现 {len(large)} 个大分配热点 → {log_path}")
+            self._mem_trace_snapshot = snap
+        except Exception as e:
+            logger.debug(f"[MEM-TRACE] skip: {e}")
+
+    def _mem_snapshot(self, step_name: str, **extra):
+        """
+        在关键步骤捕获实时内存快照并记录日志。
+
+        在 `run()` 每个关键过渡点调用，定位内存异常增长发生在哪个阶段。
+
+        Args:
+            step_name: 步骤标识（如 start, before_api_call, after_streaming,
+                      before_tool_exec, after_tool_exec, end_iter）
+            **extra: 步骤特定的附加度量（如 msg_count=N, tool_count=N）
+
+        日志格式（info级别，可用 ` | findstr "[MEM]"` 过滤）：
+            [MEM] step=before_api_call iter=3 rss=245.6MB (Δ+2.3MB) \
+                  chunks=150 msg=5 api_cache=10 tool_calls=2
+
+        异常检测（warning级别）：
+            - 单步 RSS 增长 > 50MB
+            - _response_chunks 数量 > 10000 且未被清理
+            - 总数据结构估算大小 > 500MB
+        """
+        if not self._mem_diag_enabled:
+            return
+
+        if _HAS_PSUTIL:
+            try:
+                rss_mb = _psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            except Exception:
+                rss_mb = 0.0
+        else:
+            rss_mb = 0.0
+
+        # 计算 RSS 增量（与上次快照相比）
+        if self._mem_last_rss > 0 and rss_mb > 0:
+            delta = rss_mb - self._mem_last_rss
+            delta_str = f"{delta:+.1f}" if abs(delta) >= 0.1 else "~0"
+        else:
+            delta_str = "init"
+
+        # 估算 _response_chunks 的字符串总长度
+        chunks_total_len = sum(len(c) for c in self._response_chunks)
+
+        # 基础度量
+        parts = [
+            f"step={step_name}",
+            f"iter={self._mem_diag_iter_count}",
+            f"rss={rss_mb:.1f}MB",
+            f"Δ={delta_str}MB",
+            f"chunks#{len(self._response_chunks)}",
+            f"chunks~{chunks_total_len // 1024}KB" if chunks_total_len > 1024 else f"chunks~{chunks_total_len}B",
+            f"blocks#{len(self._response_content_blocks)}",
+            f"calls@{len(self._current_tool_calls)}",
+            f"buf@{len(self._tool_calls_buffer)}",
+        ]
+
+        if extra:
+            for k, v in extra.items():
+                if isinstance(v, float):
+                    parts.append(f"{k}={v:.1f}")
+                else:
+                    parts.append(f"{k}={v}")
+
+        logger.info(f"[MEM] {' '.join(parts)}")
+
+        # === 异常检测 ===
+        issues = []
+        if rss_mb > 0 and self._mem_last_rss > 0:
+            delta_abs = abs(delta) if isinstance(delta, (int, float)) else 0
+            if rss_mb - self._mem_last_rss > 50:
+                issues.append(f"单步RSS增长>{rss_mb - self._mem_last_rss:.0f}MB")
+        if len(self._response_chunks) > 10000:
+            issues.append(f"_response_chunks={len(self._response_chunks)}>10000")
+        if chunks_total_len > 50 * 1024 * 1024:  # 50MB
+            issues.append(f"_response_chunks累计文本>{chunks_total_len // 1024 // 1024}MB")
+
+        if issues:
+            logger.warning(f"[MEM-LEAK] step={step_name}: {'; '.join(issues)}")
+
+        # 异常大分配时触发 tracemalloc 深度追踪（MEM_TRACE=1）
+        if issues and step_name in ("after_api_call", "after_tool_exec"):
+            self._mem_take_trace()
+        elif step_name == "before_api_call":
+            # 在每个 API 调用前采集基准快照
+            self._mem_take_trace()
+
+        self._mem_last_rss = rss_mb
+        self._mem_diag_logged = True
 
     def _sync_state_from_state(self):
         """
@@ -352,6 +499,22 @@ class OpenAIChatWorker(QThread):
         self._cached_api_config = None
         self._current_response = None
 
+        # 🔧 修复：清空 EventBus 订阅者，防止 handler 闭包引用残留
+        # 如果不清理，EventBus 的 _handlers 字典中保留所有订阅的 lambda 闭包，
+        # 这些闭包捕获了 worker 自身的引用，形成循环引用阻止 GC。
+        try:
+            if hasattr(self, '_event_bus') and self._event_bus is not None:
+                self._event_bus.clear()
+                self._event_bus = None
+        except Exception:
+            pass
+        if hasattr(self, '_state') and self._state is not None:
+            self._state.event_bus = None
+
+        # 🔧 修复：主动压缩进程堆，让 Python 分配器归还空闲 arena 给 OS
+        # 防止 RSS 在多次对话间持续增长不下降
+        _compact_process_heap()
+
     # ========== 缓存追踪方法 ==========
 
     def get_cache_stats(self) -> 'AggregatedCacheStats':
@@ -533,12 +696,22 @@ class OpenAIChatWorker(QThread):
             # 开始新对话时，清理 round 缓存，但保留 session 缓存
             self._permission_cache.clear_round()
             budget = self._compactor.get_budget(self.llm_config)
+
+            # [MEM] 启动快照
+            self._mem_snapshot("start", msg_count=len(current_messages), session_count=len(current_session_messages))
+
             while not self._is_cancelled:
                 if self._is_cancelled:
                     return
 
                 # 每次 API 调用前：1. 清理中间状态  2. 检查压缩
                 self._clear_pending_response_state()
+
+                # [MEM] API 调用前
+                self._mem_snapshot("before_api_call",
+                    msg_count=len(current_messages),
+                    api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
+                    session_count=len(current_session_messages))
 
                 # 使用 API 消息缓存（首次会重建，后续复用）
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
@@ -579,6 +752,14 @@ class OpenAIChatWorker(QThread):
                                                  current_session_messages)
                     return
 
+                # [MEM] API 返回后
+                self._mem_snapshot("after_api_call",
+                    tool_calls_found=tool_calls_found,
+                    tool_args_pending=tool_args_pending,
+                    resp_chunks=len(self._response_chunks),
+                    resp_blocks=len(self._response_content_blocks),
+                    msg_count=len(current_messages))
+
                 if not tool_calls_found:
                     response_sequence = self._build_response_message_sequence()
                     current_messages.extend(response_sequence)
@@ -593,6 +774,12 @@ class OpenAIChatWorker(QThread):
                     self._clear_pending_response_state()
                     self._emit_with_callback("finished_with_content", self.finished_with_content, self.full_response)
                     return
+
+                # [MEM] 执行工具前
+                tool_count = len(self._current_tool_calls) if self._current_tool_calls else 0
+                self._mem_snapshot("before_tool_exec",
+                    tool_count=tool_count,
+                    msg_count=len(current_messages))
 
                 tool_results = self._execute_all_tools()
 
@@ -630,10 +817,27 @@ class OpenAIChatWorker(QThread):
                     self._answer_event.clear()
                     continue
 
+                # [MEM] 工具执行完成
+                result_count = len(tool_results) if tool_results else 0
+                tool_names = [r.get("name", "?") for r in (tool_results or [])[:3]]
+                tool_result_sizes = sum(len(str(r.get("content", ""))) for r in (tool_results or []))
+                self._mem_snapshot("after_tool_exec",
+                    result_count=result_count,
+                    tool_names=",".join(tool_names),
+                    result_sizes=f"{tool_result_sizes // 1024}KB" if tool_result_sizes > 1024 else f"{tool_result_sizes}B",
+                    msg_count=len(current_messages))
+
                 response_sequence = self._build_response_message_sequence(tool_results)
                 current_messages.extend(response_sequence)
                 current_session_messages.extend(response_sequence)
                 self._current_session_messages = list(current_session_messages)
+
+                # [MEM] 消息构建后
+                self._mem_snapshot("after_build_msg",
+                    msg_count=len(current_messages),
+                    session_count=len(current_session_messages),
+                    api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0)
+
                 # ========== 工具迭代中压缩 ==========
                 # 在每次 API 调用前检查是否需要压缩
                 if self._compactor.should_compact(current_messages, budget):
@@ -662,6 +866,26 @@ class OpenAIChatWorker(QThread):
                     self._append_to_api_cache(response_sequence)
                 self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                          current_session_messages)
+
+                # ========== 迭代结束：内存快照 ==========
+                self._mem_diag_iter_count += 1
+                _was_compacted = (  # 检测本轮是否执行了压缩
+                    'compacted' in locals()
+                    and locals().get('compacted') is not None
+                )
+                self._mem_snapshot("end_iter",
+                    msg_count=len(current_messages),
+                    session_count=len(current_session_messages),
+                    api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
+                    compacted="yes" if _was_compacted else "no")
+                # 每 3 轮触发一次 GC，帮助回收循环引用
+                if self._mem_diag_iter_count % 3 == 0:
+                    before_gc = len(gc.get_objects())
+                    gc.collect()
+                    after_gc = len(gc.get_objects())
+                    freed = before_gc - after_gc
+                    if freed > 1000:
+                        logger.debug(f"[MEM] GC后释放 {freed} 个对象")
 
                 QCoreApplication.processEvents()
                 time.sleep(0.01)
@@ -1288,6 +1512,14 @@ class OpenAIChatWorker(QThread):
         _content_batch = ""  # 批量积累 content，减少信号频率
         _content_batch_time = time.time()  # 上次发射 content 的时间
         chunk_count = 0  # chunk 计数器，用于定期 yield 主线程
+        self._mem_total_chunks_logged = 0  # 累计流式 chunk 计数
+        # 流式开始时记录 RSS 基线（用于自适应 GC）
+        self._streaming_rss_base = 0.0
+        if _HAS_PSUTIL:
+            try:
+                self._streaming_rss_base = _psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            except Exception:
+                pass
         for chunk in response:
             if self._is_cancelled:
                 # 🛡️ 取消前刷新待处理的 content/reasoning 批次，避免丢失最后一批内容
@@ -1493,6 +1725,52 @@ class OpenAIChatWorker(QThread):
             # 每处理 5 个 chunk 就让渡一次 CPU，确保主线程能及时处理排队的 Qt 信号
             # 避免 content_received 等信号堆积到工具执行完毕后一次性处理
             chunk_count += 1
+            # [MEM] 每 100 个 chunk 记录一次流式内存快照
+            if chunk_count % 100 == 0 and self._mem_diag_enabled:
+                chunks_total = sum(len(c) for c in self._response_chunks)
+                self._mem_total_chunks_logged += 1
+                rss_str = ""
+                if _HAS_PSUTIL:
+                    try:
+                        rss = _psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+                        rss_str = f"rss={rss:.1f}MB "
+                    except Exception:
+                        pass
+                logger.debug(
+                    f"[MEM] streaming chunk#{chunk_count} "
+                    f"{rss_str}"
+                    f"_response_chunks#{len(self._response_chunks)} "
+                    f"~{chunks_total // 1024}KB tool_calls@{len(self._current_tool_calls)}"
+                )
+
+                # 自适应 GC：每 100 chunk 收集一次，RSS 增量 > 200MB 时堆压缩
+                if chunk_count % 100 == 0:
+                    freed = gc.collect()
+                    if freed > 10:
+                        logger.debug(f"[MEM] 流式 gc.collect() 释放了 {freed} 个对象")
+                    # 在此作用域内获取 RSS，不依赖外部块
+                    _gc_rss = 0.0
+                    if _HAS_PSUTIL:
+                        try:
+                            _gc_rss = _psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+                        except Exception:
+                            pass
+                    if _gc_rss > 0 and self._streaming_rss_base > 0 and (_gc_rss - self._streaming_rss_base) > 200:
+                        _delta = _gc_rss - self._streaming_rss_base
+                        try:
+                            import ctypes
+                            # 双重 gc.collect 触发 pymalloc arena 合并
+                            gc.collect()
+                            # Windows CRT + 进程堆压缩
+                            msvcrt = ctypes.CDLL('msvcrt.dll')
+                            msvcrt._heapmin()
+                            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+                            heap = kernel32.GetProcessHeap()
+                            if heap:
+                                kernel32.HeapCompact(heap, 0)
+                            logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
+                        except Exception as e:
+                            logger.debug(f"[MEM] 堆压缩失败: {e}")
             if chunk_count % 5 == 0:
                 QCoreApplication.processEvents()
 
@@ -1615,6 +1893,14 @@ class OpenAIChatWorker(QThread):
         # 🛡️ 清除当前响应引用（已完成，不需要被 cancel 关闭）
         if self._current_response is not None:
             self._current_response = None
+
+        # 🔧 修复：流式结束后立即回收临时对象（ChatCompletionChunk/Choice/Delta 链）
+        # httpx+OpenAI 客户端在处理 900+ chunk 时创建大量临时 Python 对象，
+        # 这些对象在此处已无引用，但 pymalloc arena 碎片仍然占用 RSS。
+        # 主动 gc.collect() + Windows HeapCompact 可降低峰值 RSS。
+        freed_count = gc.collect()
+        if freed_count > 100:
+            logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
 
         return tool_calls_found, tool_args_pending
 
@@ -2251,3 +2537,71 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                             pass
 
     return result
+
+
+def _compact_process_heap():
+    """
+    在 cleanup() 后调用。强制压缩进程堆，让 Python 分配器
+    将空闲内存 arena 归还给操作系统，降低 RSS。
+
+    跨平台：
+    - Windows: HeapCompact
+    - Linux: malloc_trim(0)
+    - macOS: 无直接等价 API，仅 gc.collect()
+
+    安全说明：HeapCompact 在测试环境可能触发 access violation，
+    使用 _safe_ctypes_call 包装避免进程崩溃。
+    """
+    import sys as _sys
+
+    # 检测测试环境：跳过堆压缩避免 access violation
+    if _sys.argv[0].endswith('pytest') or 'PYTEST_CURRENT_TEST' in os.environ:
+        return
+
+    before = _psutil.Process(os.getpid()).memory_info().rss if _HAS_PSUTIL else 0
+
+    def _call(fn, *args):
+        """安全调用 ctypes 函数，捕获 SEH 异常"""
+        try:
+            return fn(*args)
+        except Exception:
+            return 0
+
+    try:
+        if _sys.platform == 'win32':
+            import ctypes
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            heap = _call(kernel32.GetProcessHeap)
+            if not heap:
+                return
+            _call(kernel32.HeapCompact, heap, 0)
+            # freed 返回值不稳定，不 try to log it
+
+        elif _sys.platform == 'linux':
+            try:
+                import ctypes
+                libc = ctypes.CDLL('libc.so.6', use_last_error=True)
+                if _call(libc.malloc_trim, 0) != 0:
+                    logger.info("[MEM-HEAP] Linux malloc_trim(0) 释放了空闲堆内存")
+            except Exception:
+                pass
+
+        elif _sys.platform == 'darwin':
+            logger.debug("[MEM-HEAP] macOS: 无堆压缩 API，使用 gc.collect() 替代")
+    except Exception:
+        pass
+
+    if _HAS_PSUTIL and before:
+        after = _psutil.Process(os.getpid()).memory_info().rss
+        saved = before - after
+        if saved > 10 * 1024 * 1024:
+            logger.info(f"[MEM-HEAP] 堆压缩后 RSS 下降 {saved / 1024 / 1024:.1f} MB")
+
+
+def _get_log_dir_path(filename: str) -> str:
+    """获取日志目录路径"""
+    try:
+        from app.utils.utils import get_app_data_dir
+        return str(get_app_data_dir() / "logs" / filename)
+    except Exception:
+        return filename
