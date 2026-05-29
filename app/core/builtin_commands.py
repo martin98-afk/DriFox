@@ -28,7 +28,7 @@ from typing import Callable, Dict, Any, Optional
 import yaml
 from loguru import logger
 
-from app.core.command_manager import CommandManager
+from app.core.command_manager import CommandManager, CommandType
 
 
 # ============================================================
@@ -100,6 +100,16 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"[BuiltinCommands] Failed to load command {file_path}: {e}")
         return None
+
+
+def _parse_command_type(type_str: str) -> CommandType:
+    """将 YAML/配置中的字符串类型映射为 CommandType 枚举"""
+    mapping = {
+        "function": CommandType.FUNCTION,
+        "prompt": CommandType.PROMPT,
+        "agent": CommandType.AGENT,
+    }
+    return mapping.get(type_str, CommandType.PROMPT)
 
 
 def _load_commands_from_dir(commands_dir: Path) -> list:
@@ -203,7 +213,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
         if cmd:
             cmd_mgr.register(
                 name=cmd["name"],
-                command_type=cmd["type"],
+                command_type=_parse_command_type(cmd["type"]),
                 description=cmd["description"],
                 argument_hint=cmd["argument_hint"],
                 prompt_text=cmd["prompt_text"],
@@ -248,7 +258,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
 
             cmd_mgr.register(
                 name=md_file.stem,
-                command_type="agent",  # 智能体类型，支持 --subagent 参数
+                command_type=CommandType.AGENT,
                 description=description,
                 prompt_text=body,
             )

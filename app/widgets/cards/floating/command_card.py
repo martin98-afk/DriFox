@@ -391,7 +391,7 @@ class CommandCard(QWidget):
         Args:
             cmd_name: 已匹配的命令名或技能名
         """
-        from app.core.command_manager import CommandManager
+        from app.core.command_manager import CommandManager, CommandType
         from app.utils.utils import get_skill_by_name
 
         cmd_mgr = CommandManager.get_instance()
@@ -412,7 +412,7 @@ class CommandCard(QWidget):
         if cmd:
             desc = cmd.description
             # 参数提示：智能体始终显示 --subagent，其他命令显示 argument_hint
-            if cmd.type == "agent":
+            if cmd.type == CommandType.AGENT:
                 hint_text = "--subagent &lt;task-desc&gt;"
             else:
                 hint_text = cmd.argument_hint or ""

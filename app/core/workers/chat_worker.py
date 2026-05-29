@@ -879,7 +879,7 @@ class OpenAIChatWorker(QThread):
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                     compacted="yes" if _was_compacted else "no")
                 # 每 3 轮触发一次 GC，帮助回收循环引用
-                if self._mem_diag_iter_count % 3 == 0:
+                if self._mem_diag_iter_count % 3 == 0 and self._mem_diag_enabled:
                     before_gc = len(gc.get_objects())
                     gc.collect()
                     after_gc = len(gc.get_objects())
@@ -1746,7 +1746,7 @@ class OpenAIChatWorker(QThread):
                 # 自适应 GC：每 100 chunk 收集一次，RSS 增量 > 200MB 时堆压缩
                 if chunk_count % 100 == 0:
                     freed = gc.collect()
-                    if freed > 10:
+                    if freed > 10 and self._mem_diag_enabled:
                         logger.debug(f"[MEM] 流式 gc.collect() 释放了 {freed} 个对象")
                     # 在此作用域内获取 RSS，不依赖外部块
                     _gc_rss = 0.0
@@ -1759,18 +1759,18 @@ class OpenAIChatWorker(QThread):
                         _delta = _gc_rss - self._streaming_rss_base
                         try:
                             import ctypes
-                            # 双重 gc.collect 触发 pymalloc arena 合并
-                            gc.collect()
-                            # Windows CRT + 进程堆压缩
+                            gc.collect()  # 双重 gc.collect 触发 pymalloc arena 合并
                             msvcrt = ctypes.CDLL('msvcrt.dll')
                             msvcrt._heapmin()
                             kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
                             heap = kernel32.GetProcessHeap()
                             if heap:
                                 kernel32.HeapCompact(heap, 0)
-                            logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
+                            if self._mem_diag_enabled:
+                                logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
                         except Exception as e:
-                            logger.debug(f"[MEM] 堆压缩失败: {e}")
+                            if self._mem_diag_enabled:
+                                logger.debug(f"[MEM] 堆压缩失败: {e}")
             if chunk_count % 5 == 0:
                 QCoreApplication.processEvents()
 
@@ -1899,7 +1899,7 @@ class OpenAIChatWorker(QThread):
         # 这些对象在此处已无引用，但 pymalloc arena 碎片仍然占用 RSS。
         # 主动 gc.collect() + Windows HeapCompact 可降低峰值 RSS。
         freed_count = gc.collect()
-        if freed_count > 100:
+        if freed_count > 100 and self._mem_diag_enabled:
             logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
 
         return tool_calls_found, tool_args_pending

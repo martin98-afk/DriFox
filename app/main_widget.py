@@ -54,7 +54,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.command_manager import CommandManager
+from app.core.command_manager import CommandManager, CommandType
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -5865,30 +5865,31 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
         cmd_result = cmd_mgr.execute(user_text)
-        if cmd_result.handled:
-            if cmd_result.is_function:
-                # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
-                self.input_area.clear()
-                # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
-                self.input_area.toggle_send_button(True)
-                self._execute_command(cmd_result.command_name, cmd_result.remainder)
-                return
-            elif cmd_result.is_subagent:
-                # 子智能体命令：触发子智能体任务，不替换提示词
-                # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
-                self.input_area.toggle_send_button(True)
-                self._execute_subagent_task(cmd_result.agent_name, cmd_result.subagent_task)
-                return
-            elif cmd_result.is_prompt or cmd_result.is_agent:
-                # 提示词替换命令：替换 + 追加用户命令
-                user_text = cmd_result.replacement
-                if cmd_result.remainder:
-                    user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
-                # 提示词命令需要发送消息，按现有逻辑处理
+        if cmd_result is not None:
+            match cmd_result.type:
+                case CommandType.FUNCTION:
+                    # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
+                    self.input_area.clear()
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
+                    self.input_area.toggle_send_button(True)
+                    self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                    return
+                case CommandType.SUBAGENT:
+                    # 子智能体命令：触发子智能体任务，不替换提示词
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
+                    self.input_area.toggle_send_button(True)
+                    self._execute_subagent_task(cmd_result.command_name, cmd_result.subagent_task)
+                    return
+                case CommandType.PROMPT | CommandType.AGENT:
+                    # 提示词替换命令：替换 + 追加用户命令
+                    user_text = cmd_result.replacement
+                    if cmd_result.remainder:
+                        user_text = f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
+                    # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
 
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
-        if not cmd_result.handled and user_text.startswith("/"):
+        if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
             parts = user_text[1:].split(maxsplit=1)
             if parts and get_skill_by_name(parts[0]):
