@@ -254,6 +254,28 @@ class Colors:
     TAG_ORANGE = "#ffb366"
     TAG_ORANGE_TEXT = "#ffc999"
 
+    # ── 层级色板 ──
+    BG_BASE = "#0f172a"
+    BG_SURFACE = "#1e293b"
+    BG_ELEVATED = "#334155"
+    BG_INPUT = "rgba(18, 24, 34, 150)"
+
+    # ── 通用状态色 ──
+    STATE_HOVER = "rgba(255, 255, 255, 0.08)"
+    STATE_ACTIVE = "rgba(255, 255, 255, 0.12)"
+    STATE_DISABLED = "rgba(255, 255, 255, 0.04)"
+    STATE_FOCUS = "rgba(102, 198, 255, 0.5)"
+
+    # ── 边框层级 ──
+    BORDER_DEFAULT = "#334155"
+    BORDER_LIGHT = "rgba(255, 255, 255, 0.06)"
+    BORDER_FOCUS = "#60a5fa"
+
+    # ── 功能色 ──
+    SCROLLBAR_BG = "rgba(255, 255, 255, 0.05)"
+    SCROLLBAR_THUMB = "rgba(255, 255, 255, 0.20)"
+    OVERLAY_MASK = "rgba(0, 0, 0, 0.5)"
+
     # accent_warm 的 Colors 映射（主题已有该值，但 Colors 未暴露）
     ACCENT_WARM = "#f59e0b"
 
@@ -388,6 +410,28 @@ class Colors:
         cls.TAG_PURPLE_TEXT = theme.get("tag_purple_text", cls.TAG_PURPLE_TEXT)
         cls.TAG_ORANGE = theme.get("tag_orange", cls.TAG_ORANGE)
         cls.TAG_ORANGE_TEXT = theme.get("tag_orange_text", cls.TAG_ORANGE_TEXT)
+
+        # 层级色板
+        cls.BG_BASE = theme.get("bg_base", cls.BG_BASE)
+        cls.BG_SURFACE = theme.get("bg_surface", cls.BG_SURFACE)
+        cls.BG_ELEVATED = theme.get("bg_elevated", cls.BG_ELEVATED)
+        cls.BG_INPUT = theme.get("bg_input", cls.BG_INPUT)
+
+        # 通用状态色
+        cls.STATE_HOVER = theme.get("state_hover", cls.STATE_HOVER)
+        cls.STATE_ACTIVE = theme.get("state_active", cls.STATE_ACTIVE)
+        cls.STATE_DISABLED = theme.get("state_disabled", cls.STATE_DISABLED)
+        cls.STATE_FOCUS = theme.get("state_focus", cls.STATE_FOCUS)
+
+        # 边框层级
+        cls.BORDER_DEFAULT = theme.get("border_default", cls.BORDER_DEFAULT)
+        cls.BORDER_LIGHT = theme.get("border_light", cls.BORDER_LIGHT)
+        cls.BORDER_FOCUS = theme.get("border_focus", cls.BORDER_FOCUS)
+
+        # 功能色
+        cls.SCROLLBAR_BG = theme.get("scrollbar_bg", cls.SCROLLBAR_BG)
+        cls.SCROLLBAR_THUMB = theme.get("scrollbar_thumb", cls.SCROLLBAR_THUMB)
+        cls.OVERLAY_MASK = theme.get("overlay_mask", cls.OVERLAY_MASK)
 
 
 # 初始化 Colors
