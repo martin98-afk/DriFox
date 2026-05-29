@@ -344,23 +344,24 @@ class PluginManager:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 plugin_name = manifest.get("name", item.name)
 
-                # .claude-plugin 格式：自动补全缺少的字段（type、components、version）
+                # .claude-plugin 格式：自动补全缺少的字段
                 if manifest_format == "claude":
                     manifest.setdefault("type", plugin_type)
                     manifest.setdefault("version", manifest.get("version", "0.0.0"))
-                    # 自动检测组件：扫描目录结构
-                    components = {}
-                    for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
-                        if (item / comp_name).exists():
-                            components[comp_name] = True
-                    if (item / ".mcp.json").exists():
-                        components["mcp"] = True
-                    if "components" not in manifest or not manifest["components"]:
-                        manifest["components"] = components
-                    elif isinstance(manifest["components"], dict):
-                        # 补充清单未声明的但实际存在的组件
-                        for k, v in components.items():
-                            manifest["components"].setdefault(k, v)
+
+                # 自动检测组件：扫描目录结构（两种格式都做，保证新增目录能被识别）
+                components = {}
+                for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
+                    if (item / comp_name).exists():
+                        components[comp_name] = True
+                if (item / ".mcp.json").exists():
+                    components["mcp"] = True
+                if "components" not in manifest or not manifest["components"]:
+                    manifest["components"] = components
+                elif isinstance(manifest["components"], dict):
+                    # 补充清单未声明的但实际存在的组件
+                    for k, v in components.items():
+                        manifest["components"].setdefault(k, v)
 
                 discovered.append(PluginInfo(
                     name=plugin_name,
@@ -399,17 +400,22 @@ class PluginManager:
             if manifest_format == "claude":
                 manifest.setdefault("type", plugin_type)
                 manifest.setdefault("version", manifest.get("version", "0.0.0"))
-                components = {}
-                for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
-                    if (plugin_dir / comp_name).exists():
-                        components[comp_name] = True
-                if (plugin_dir / ".mcp.json").exists():
-                    components["mcp"] = True
-                if "components" not in manifest or not manifest["components"]:
-                    manifest["components"] = components
-                elif isinstance(manifest["components"], dict):
-                    for k, v in components.items():
-                        manifest["components"].setdefault(k, v)
+
+            # 自动检测插件目录中实际存在的组件子目录，补充到 manifest 的 components 中
+            # 两种格式都做 auto-detect，确保新增目录（如 themes/）能被热更新识别
+            detected_components = {}
+            for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
+                if (plugin_dir / comp_name).exists():
+                    detected_components[comp_name] = True
+            if (plugin_dir / ".mcp.json").exists():
+                detected_components["mcp"] = True
+
+            if "components" not in manifest or not manifest["components"]:
+                manifest["components"] = detected_components
+            elif isinstance(manifest["components"], dict):
+                # 补充清单未声明的但实际存在的组件（setdefault 不覆盖已有值）
+                for k, v in detected_components.items():
+                    manifest["components"].setdefault(k, v)
 
             info = PluginInfo(
                 name=plugin_name,

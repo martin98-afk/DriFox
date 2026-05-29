@@ -716,14 +716,18 @@ class ChatBackend(QObject):
                 except (ImportError, Exception) as e:
                     logger.error(f"[ChatBackend] Failed to reload commands: {e}")
 
-            # 5. 主题：仅变更在 themes 目录才触发
-            if component == "themes" and plugin.has_component("themes"):
+            # 5. 主题：watchfiles 已通过路径识别为 themes 组件变更
+            #    不依赖 plugin.has_component("themes")，因为：
+            #    - .drifox-plugin 格式 rescan 不会自动检测新增的 themes 目录
+            #    - 实际文件在 themes/ 下变更，theme_manager 必须 reload 才能反映新主题
+            if component == "themes":
                 try:
                     from app.utils.theme_manager import theme_manager
                     from app.utils.config import update_theme_options
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
+                    logger.debug(f"[ChatBackend] Themes reloaded for plugin: {plugin_name}")
                 except (ImportError, Exception) as e:
                     logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 

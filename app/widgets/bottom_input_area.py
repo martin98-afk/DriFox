@@ -3,7 +3,7 @@ import os
 import re
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QKeyEvent, QKeySequence, QTextCursor, QColor, QTextCharFormat
+from PyQt5.QtGui import QInputMethodEvent, QKeyEvent, QKeySequence, QTextCursor, QColor, QTextCharFormat
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
 from qfluentwidgets import FluentIcon, ComboBox
@@ -434,6 +434,15 @@ class SendableTextEdit(TextEdit):
             self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
+        # 强制 / 键直接输入 /，不受中文输入法影响（防止变成、）
+        # 仅在光标在输入框第一个字符位置时生效，中间位置仍交给输入法处理
+        if event.key() == Qt.Key_Slash and not event.modifiers():
+            cursor = self.textCursor()
+            if cursor.position() == 0:
+                cursor.insertText("/")
+                event.accept()
+                return
+
         # 历史浏览模式下，↑↓ 始终导航历史，不受命令卡片影响
         in_history_mode = self._history_index >= 0
 
@@ -500,6 +509,18 @@ class SendableTextEdit(TextEdit):
                 super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def inputMethodEvent(self, event: QInputMethodEvent):
+        """拦截输入法事件：光标在开头时输入法提交、→ 替换为/
+
+        中文输入法在输入 / 时会提交 、，这绕过了 keyPressEvent 的拦截。
+        通过重写 inputMethodEvent 在 IME 提交阶段拦截、并替换为 /。
+        """
+        if self.textCursor().position() == 0 and event.commitString() == "、":
+            cursor = self.textCursor()
+            cursor.insertText("/")
+            return  # 不调用 super，阻止 IME 提交 、
+        super().inputMethodEvent(event)
 
     def insertFromMimeData(self, source):
         """重写以处理拖放的文本格式化和高亮"""

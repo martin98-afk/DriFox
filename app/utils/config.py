@@ -55,6 +55,8 @@ class Settings(QConfig):
     _instance = None
     # 类级别关闭标志 — 一旦设置，任何实例的 save() 都会跳过
     _closing_down = False
+    # 配置是否成功从文件加载（用于外部判断默认值与实际值的区别）
+    _config_loaded = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -83,8 +85,10 @@ class Settings(QConfig):
                 # 所以要把已保存的主题值也加入验证器，避免被拒绝重置
                 cls._extend_theme_validator_before_load()
                 cls._instance.load()
+                cls._config_loaded = True  # 标记配置成功加载
             except:
                 logger.exception("无法加载配置文件")
+                cls._config_loaded = False
         return cls._instance
 
     @classmethod

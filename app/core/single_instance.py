@@ -45,14 +45,34 @@ class SingleInstanceGuard(QObject):
         self._shared_memory = QSharedMemory(key)
 
         if self._shared_memory.attach():
-            # 共享内存已存在 → 已有实例在运行
-            logger.info("检测到已有实例在运行")
-            self._is_first_instance = False
-            return False
+            # 共享内存已存在 → 可能已有实例在运行
+            # 但需要验证该实例是否还活着（进程崩溃后共享内存不会自动清理）
+            if self._is_server_alive():
+                logger.info("检测到已有实例在运行")
+                self._is_first_instance = False
+                return False
+            else:
+                # 共享内存残留：前一个实例已崩溃或异常退出
+                logger.warning(
+                    "检测到残留的单实例锁（前一个实例可能已崩溃），"
+                    "将自动清理并重新获取"
+                )
+                self._shared_memory.detach()
 
         # 创建共享内存（标记自己是第一个实例）
         if self._shared_memory.create(1):
             logger.info("单实例锁已获取，作为第一个实例启动")
+            self._is_first_instance = True
+            self._start_local_server()
+            return True
+
+        # 创建失败：在 POSIX 系统（macOS/Linux）上，QSharedMemory::detach()
+        # 不会调用 shm_unlink()，命名共享内存段仍然存在。
+        # 此时尝试 attach 并"接管"这个残留锁。
+        if self._shared_memory.attach():
+            logger.info(
+                "单实例锁已接管（残留共享内存），作为第一个实例启动"
+            )
             self._is_first_instance = True
             self._start_local_server()
             return True
@@ -78,6 +98,21 @@ class SingleInstanceGuard(QObject):
                 f"无法连接到运行中的实例: {socket.errorString()}，"
                 f"将忽略本次启动"
             )
+
+    def _is_server_alive(self) -> bool:
+        """
+        验证之前实例的 IPC 服务器是否还活着。
+
+        尝试连接 QLocalServer，如果连接成功说明进程确实在运行。
+        如果连接失败（超时或拒绝），说明是残留锁。
+        """
+        server_name = f"{self._app_name}_SingleInstanceServer"
+        socket = QLocalSocket()
+        socket.connectToServer(server_name)
+        alive = socket.waitForConnected(1000)  # 1 秒超时
+        if alive:
+            socket.disconnectFromServer()
+        return alive
 
     def _start_local_server(self) -> None:
         """启动本地服务器，监听其他实例的显示请求"""

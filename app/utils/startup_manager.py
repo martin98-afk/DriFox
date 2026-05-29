@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from loguru import logger
+
 
 def _is_windows() -> bool:
     return os.name == "nt"
@@ -69,6 +71,10 @@ def set_auto_start(enabled: bool):
 
     Args:
         enabled: True 启用自启，False 禁用
+
+    Raises:
+        RuntimeError: 非 Windows 平台
+        Exception: 注册表写入失败（由调用方决定是否处理）
     """
     if not _is_windows():
         raise RuntimeError("当前平台不支持开机自启配置。")
@@ -80,14 +86,17 @@ def set_auto_start(enabled: bool):
     )
     try:
         if enabled:
+            cmd = build_startup_command()
+            logger.info(f"[AutoStart] 写入注册表: {_reg_path()}\\{_reg_value_name()} = {cmd}")
             winreg.SetValueEx(
-                key, _reg_value_name(), 0, winreg.REG_SZ, build_startup_command()
+                key, _reg_value_name(), 0, winreg.REG_SZ, cmd
             )
         else:
+            logger.info(f"[AutoStart] 删除注册表项: {_reg_value_name()}")
             try:
                 winreg.DeleteValue(key, _reg_value_name())
             except FileNotFoundError:
-                pass
+                logger.info("[AutoStart] 注册表项不存在，无需删除")
     finally:
         winreg.CloseKey(key)
 
@@ -119,6 +128,9 @@ def sync_auto_start_from_config():
     启动时同步：根据配置文件中的 auto_start 设置，确保注册表状态一致。
     
     用于 app 启动入口，防止注册表项被意外删除后自启失效。
+    
+    注意：只有在配置成功从文件加载后才执行同步（_config_loaded=True），
+    避免因配置加载失败时使用默认值（False）而误删注册表项。
     """
     if not _is_windows():
         return
@@ -126,8 +138,12 @@ def sync_auto_start_from_config():
     try:
         from app.utils.config import Settings
         cfg = Settings.get_instance()
+        if not Settings._config_loaded:
+            logger.warning("[AutoStart] 配置未成功加载，跳过注册表同步，保留现有状态")
+            return
         enabled = bool(cfg.auto_start.value)
+        logger.info(f"[AutoStart] 配置值: {enabled}，正在同步注册表...")
         set_auto_start(enabled)
+        logger.info(f"[AutoStart] 同步完成，注册表状态: {is_auto_start_enabled()}")
     except Exception:
-        # 静默失败，不影响启动流程
-        pass
+        logger.exception("[AutoStart] 同步开机自启状态失败")

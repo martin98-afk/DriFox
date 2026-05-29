@@ -98,7 +98,7 @@ def main():
         from app.utils.startup_manager import sync_auto_start_from_config
         sync_auto_start_from_config()
     except Exception:
-        pass
+        logger.exception("[AutoStart] main.py 中调用 sync_auto_start_from_config 失败")
 
     try:
         from app.utils.design_tokens import scale_font_size
