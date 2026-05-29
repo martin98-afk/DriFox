@@ -321,6 +321,8 @@ class MCPEditCard(QWidget):
                     data["headers"] = json.loads(headers_text)
                 except json.JSONDecodeError:
                     return None
+            else:
+                data["headers"] = {}
         return data
 
     def _parse_mcp_json(self, parsed: dict) -> dict:
@@ -488,6 +490,8 @@ class MCPEditCard(QWidget):
                     InfoBar.warning("提示", f"Headers JSON 格式错误: {e}", parent=self.window(),
                                     duration=3000, position=InfoBarPosition.BOTTOM)
                     return
+            else:
+                server_data["headers"] = {}
 
         # 保留来源信息（供 PluginManager.update_mcp_server 定位文件）
         if self._original_name:
