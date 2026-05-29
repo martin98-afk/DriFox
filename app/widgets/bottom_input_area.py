@@ -11,7 +11,6 @@ from qfluentwidgets import TextEdit, TransparentToolButton
 
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.qss_generator import get_component_qss
 
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
@@ -85,12 +84,10 @@ class SendableTextEdit(TextEdit):
         QTimer.singleShot(0, self._finish_initialization)
 
     def _apply_send_btn_style(self):
-        """从 Colors 应用发送按钮样式 + QSSGenerator 覆盖"""
+        """从 Colors 应用发送按钮样式"""
         from app.utils.design_tokens import Colors
         Colors.refresh()
-        gen_qss = get_component_qss("send_button")
-        if not gen_qss:
-            gen_qss = f"""
+        self.send_btn.setStyleSheet(f"""
             TransparentToolButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.SEND_BTN_START}, stop:1 {Colors.SEND_BTN_END});
@@ -106,8 +103,7 @@ class SendableTextEdit(TextEdit):
                 background: {Colors.TOOLBAR_BG};
                 color: {Colors.TEXT_SECONDARY};
             }}
-            """
-        self.send_btn.setStyleSheet(gen_qss)
+        """)
 
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
@@ -644,12 +640,9 @@ class SendableTextEdit(TextEdit):
         self._glow_target = None
 
     def _apply_input_style(self):
-        """应用输入框样式 - QSSGenerator + Colors 覆盖"""
+        """应用输入框样式 - 融入卡片，无边框"""
         Colors.refresh()
-        gen_qss = get_component_qss("input_area")
-        # QSSGenerator 输出结构属性，Colors 动态色值作为 fallback
-        if not gen_qss:
-            gen_qss = f"""
+        self.setStyleSheet(f"""
             QTextEdit {{
                 background: transparent;
                 color: {Colors.INPUT_TEXT};
@@ -663,8 +656,6 @@ class SendableTextEdit(TextEdit):
                 border: none;
                 color: {Colors.INPUT_FOCUS_TEXT};
             }}
-            """
-        scroll_qss = f"""
             QTextEdit QScrollBar:vertical {{
                 background: transparent;
                 width: 0px;
@@ -686,8 +677,7 @@ class SendableTextEdit(TextEdit):
             QTextEdit QScrollBar::sub-page:vertical {{
                 background: none;
             }}
-        """
-        self.setStyleSheet(gen_qss + "\n" + scroll_qss)
+        """)
 
     def _build_combo_style(self) -> str:
         """构建智能体下拉框样式"""
