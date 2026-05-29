@@ -1345,7 +1345,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._register_cards_to_manager()
 
         # 系统卡片打开时隐藏文本输入框（保留按钮栏），关闭时恢复
-        for _cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running"):
+        for _cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running",
+                     "settings", "provider_edit", "mcp_edit", "hook_edit"):
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
@@ -2197,21 +2198,26 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_system_card_opened(self, card_id: str):
         """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间"""
         if hasattr(self, 'input_area'):
-            # 暂停重绘，统一设置高度和可见性后再恢复
+            # 暂停重绘，先设置卡片高度为工具栏高度
             self._input_card.setUpdatesEnabled(False)
-            self.input_area.setUpdatesEnabled(False)
-
-            # 先设卡片高度约束，再隐藏输入框，避免布局中间态
             self._input_card.setFixedHeight(34 + 1 + 4)  # toolbar + separator + padding
-            self.input_area.setVisible(False)
-
-            self.input_area.setUpdatesEnabled(True)
+            
+            # 恢复重绘，让卡片先显示出来
             self._input_card.setUpdatesEnabled(True)
             self._input_card.update()
+            
+            # 延迟隐藏输入框，等卡片显示完成后再执行（避免闪烁：先显示卡片再隐藏区域）
+            QTimer.singleShot(0, lambda: self._do_hide_input_area())
+
+    def _do_hide_input_area(self):
+        """延迟隐藏输入框，由 _on_system_card_opened 调用"""
+        if hasattr(self, 'input_area'):
+            self.input_area.setVisible(False)
 
     def _on_system_card_closed(self, card_id: str):
         """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
-        for cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running"):
+        for cid in ("model_selector", "model_config", "memory", "history", "auto_loop_config", "auto_loop_running",
+                   "settings", "provider_edit", "mcp_edit", "hook_edit"):
             if self._card_manager.is_card_visible(cid, self._window_id):
                 return
         if hasattr(self, 'input_area'):

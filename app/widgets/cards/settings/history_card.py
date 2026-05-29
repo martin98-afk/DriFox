@@ -76,8 +76,15 @@ def get_message_preview(messages: List[Dict], max_len: int = 50) -> str:
     return ""
 
 
-def _matches_search(session: Dict, search_text: str) -> bool:
-    """检查会话是否匹配搜索文本（支持拼音搜索）"""
+def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) -> bool:
+    """检查会话是否匹配搜索文本（支持拼音搜索）
+
+    Args:
+        session: 会话数据
+        search_text: 搜索文本
+        pinyin_cache: 拼音缓存字典 {session_id: {"pinyin": str, "initials": str}}，
+                      传入后可避免重复计算
+    """
     if not search_text:
         return True
     search_lower = search_text.lower().replace(" ", "")
@@ -87,20 +94,39 @@ def _matches_search(session: Dict, search_text: str) -> bool:
     title = (session.get("title", "") or "")
     preview = (session.get("preview", "") or "")
 
-    # 1. 直接子串匹配
+    # 1. 直接子串匹配（快速路径，不走拼音）
     if search_lower in title.lower() or search_lower in preview.lower():
         return True
 
-    # 2. 拼音匹配（标题和预览转拼音）
+    # 2. 拼音匹配（尝试从缓存读取，避免重复计算）
+    session_id = session.get("session_id", "")
     try:
-        title_pinyin = "".join(lazy_pinyin(title)).lower()
-        preview_pinyin = "".join(lazy_pinyin(preview)).lower()
+        if pinyin_cache is not None and session_id:
+            cached = pinyin_cache.get(session_id)
+            if cached:
+                title_pinyin = cached.get("title_pinyin", "")
+                preview_pinyin = cached.get("preview_pinyin", "")
+                title_initials = cached.get("title_initials", "")
+                preview_initials = cached.get("preview_initials", "")
+            else:
+                title_pinyin = "".join(lazy_pinyin(title)).lower()
+                preview_pinyin = "".join(lazy_pinyin(preview)).lower()
+                title_initials = "".join(p[0] for p in lazy_pinyin(title) if p).lower()
+                preview_initials = "".join(p[0] for p in lazy_pinyin(preview) if p).lower()
+                pinyin_cache[session_id] = {
+                    "title_pinyin": title_pinyin,
+                    "preview_pinyin": preview_pinyin,
+                    "title_initials": title_initials,
+                    "preview_initials": preview_initials,
+                }
+        else:
+            title_pinyin = "".join(lazy_pinyin(title)).lower()
+            preview_pinyin = "".join(lazy_pinyin(preview)).lower()
+            title_initials = "".join(p[0] for p in lazy_pinyin(title) if p).lower()
+            preview_initials = "".join(p[0] for p in lazy_pinyin(preview) if p).lower()
+
         if search_lower in title_pinyin or search_lower in preview_pinyin:
             return True
-
-        # 3. 拼音首字母匹配
-        title_initials = "".join(p[0] for p in lazy_pinyin(title) if p).lower()
-        preview_initials = "".join(p[0] for p in lazy_pinyin(preview) if p).lower()
         if search_lower in title_initials or search_lower in preview_initials:
             return True
     except Exception:
@@ -133,30 +159,48 @@ class _HistoryItemCard(SimpleCardWidget):
         self._session_id = None  # 用于缓存匹配
         self.setCursor(Qt.PointingHandCursor)
 
+        # 批量读取颜色 token 和字体尺寸（避免多次 refresh/scale_font_size 的累积开销）
         Colors.refresh()
+        self._font_family = get_font_family_css()
+        self._font_size = scale_font_size(14)
+        self._caption_size = scale_font_size(12)
+        _font_family = self._font_family
+        _font_size = self._font_size
+        _caption_size = self._caption_size
+        _selected_bg = Colors.SELECTED_BG
+        _border_accent = Colors.BORDER_ACCENT
+        _tab_active_bg = Colors.TAB_ACTIVE_BG
+        _text_accent = Colors.TEXT_ACCENT
+        _card_bg_dim = Colors.CARD_BG_DIM
+        _border = Colors.BORDER
+        _hover_bg = Colors.HOVER_BG
+        _text_primary = Colors.TEXT_PRIMARY
+        _accent_warm = Colors.ACCENT_WARM
+        _text_secondary = Colors.TEXT_SECONDARY
+
         if is_current:
             self.setStyleSheet(f"""
                 CardWidget {{
-                    background-color: {Colors.SELECTED_BG};
-                    border: 2px solid {Colors.BORDER_ACCENT};
+                    background-color: {_selected_bg};
+                    border: 2px solid {_border_accent};
                     border-radius: 10px;
                 }}
                 CardWidget:hover {{
-                    background-color: {Colors.TAB_ACTIVE_BG};
-                    border: 2px solid {Colors.TEXT_ACCENT};
+                    background-color: {_tab_active_bg};
+                    border: 2px solid {_text_accent};
                 }}
             """
             )
         else:
             self.setStyleSheet(f"""
                 CardWidget {{
-                    background-color: {Colors.CARD_BG_DIM};
-                    border: 1px solid {Colors.BORDER};
+                    background-color: {_card_bg_dim};
+                    border: 1px solid {_border};
                     border-radius: 10px;
                 }}
                 CardWidget:hover {{
-                    background-color: {Colors.HOVER_BG};
-                    border: 1px solid {Colors.BORDER_ACCENT};
+                    background-color: {_hover_bg};
+                    border: 1px solid {_border_accent};
                 }}
             """
             )
@@ -170,24 +214,21 @@ class _HistoryItemCard(SimpleCardWidget):
 
         self.title_label = BodyLabel(title[:100], self)
         self.title_label.setWordWrap(True)
-        font_size = scale_font_size(14)
-        Colors.refresh()
         self.title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {font_size}px; {get_font_family_css()}" if is_current else f"color: {Colors.TEXT_PRIMARY}; font-size: {font_size}px; {get_font_family_css()}"
+            f"color: {_text_primary}; font-weight: bold; font-size: {_font_size}px; {_font_family}" if is_current else f"color: {_text_primary}; font-size: {_font_size}px; {_font_family}"
         )
         top_row.addWidget(self.title_label, 1)
 
         self.title_edit = QLineEdit(title[:100], self)
-        Colors.refresh()
         self.title_edit.setStyleSheet(
             f"""
             QLineEdit {{
                 background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid {Colors.BORDER_ACCENT};
+                border: 1px solid {_border_accent};
                 border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
+                color: {_text_primary};
                 padding: 2px 6px;
-                {get_font_family_css()}
+                {_font_family}
             }}
             """
         )
@@ -198,9 +239,8 @@ class _HistoryItemCard(SimpleCardWidget):
         top_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
 
         self.current_indicator = CaptionLabel("🔥 活跃中", self)
-        caption_size = scale_font_size(12)
         self.current_indicator.setStyleSheet(
-            f"font-size: {caption_size}px; " + ItemStyles.tag() + get_font_family_css()
+            f"font-size: {_caption_size}px; " + ItemStyles.tag() + _font_family
         )
         self.current_indicator.setVisible(is_current)
         top_row.addWidget(self.current_indicator, 0, Qt.AlignTop)
@@ -230,10 +270,8 @@ class _HistoryItemCard(SimpleCardWidget):
         rel_time = format_relative_time(last_time)
         meta_text = f"{rel_time} · {message_count} 轮对话 · "
         self.meta_label = CaptionLabel(meta_text, self)
-        caption_size = scale_font_size(12)
-        Colors.refresh()
         self.meta_label.setStyleSheet(
-            f"color: {Colors.ACCENT_WARM}; font-size: {caption_size}px; {get_font_family_css()}" if is_current else f"color: {Colors.TEXT_SECONDARY}; font-size: {caption_size}px; {get_font_family_css()}"
+            f"color: {_accent_warm}; font-size: {_caption_size}px; {_font_family}" if is_current else f"color: {_text_secondary}; font-size: {_caption_size}px; {_font_family}"
         )
         bottom_row.addWidget(self.meta_label)
 
@@ -251,10 +289,9 @@ class _HistoryItemCard(SimpleCardWidget):
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签"""
         if self._preview_label is None:
-            caption_size = scale_font_size(12)
             self._preview_label = CaptionLabel("", self)
             self._preview_label.setStyleSheet(
-                f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
+                f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
             )
             self._preview_label.setWordWrap(True)
         self._preview_label.setText(text)
@@ -290,10 +327,10 @@ class _HistoryItemCard(SimpleCardWidget):
                     }}
                 """)
                 self.title_label.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {scale_font_size(14)}px; {get_font_family_css()}"
+                    f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {self._font_size}px; {self._font_family}"
                 )
                 self.meta_label.setStyleSheet(
-                    f"color: {Colors.ACCENT_WARM}; font-size: {scale_font_size(12)}px; {get_font_family_css()}"
+                    f"color: {Colors.ACCENT_WARM}; font-size: {self._caption_size}px; {self._font_family}"
                 )
             else:
                 self.setStyleSheet(f"""
@@ -308,10 +345,10 @@ class _HistoryItemCard(SimpleCardWidget):
                     }}
                 """)
                 self.title_label.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(14)}px; {get_font_family_css()}"
+                    f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; {self._font_family}"
                 )
                 self.meta_label.setStyleSheet(
-                    f"color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(12)}px; {get_font_family_css()}"
+                    f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
                 )
 
         # 元信息变化
@@ -624,12 +661,21 @@ class HistoryCard(QWidget):
         # 最近一次显示的历史会话 ID 集合（用于检测变化）
         self._last_displayed_ids: set = set()
 
+        # 拼音缓存：session_id → {"pinyin": str, "initials": str}
+        self._pinyin_cache: Dict[str, Dict[str, str]] = {}
+
+        # === 搜索防抖 ===
+        from PyQt5.QtCore import QTimer
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.setInterval(200)  # 200ms 防抖
+        self._search_debounce_timer.timeout.connect(self._do_search)
+
         self._setup_ui()
         # 启用拖放支持
         self.setAcceptDrops(True)
         
         # 初始化时应用配置中的字体大小
-        from PyQt5.QtCore import QTimer
         QTimer.singleShot(0, self._refresh_font_size)
 
     def _refresh_font_size(self):
@@ -652,8 +698,16 @@ class HistoryCard(QWidget):
         self._current_project = project
 
     def set_search_filter(self, text: str):
-        """设置搜索过滤文本（同时支持历史会话和归档）"""
+        """设置搜索过滤文本（带防抖 200ms）"""
         self._search_filter = text.strip()
+        # 防抖：每次输入重启定时器，停止输入 200ms 后才触发刷新
+        self._search_debounce_timer.stop()
+        self._search_debounce_timer.start()
+
+    def _do_search(self):
+        """防抖超时后执行实际搜索刷新"""
+        # 搜索时清空拼音缓存，数据可能已变化
+        self._pinyin_cache.clear()
         self._update_display()
 
     def get_content_layout(self) -> QVBoxLayout:
@@ -885,11 +939,11 @@ class HistoryCard(QWidget):
         current_matches_search = True
         if self._current_index is not None and 0 <= self._current_index < len(self._all_history):
             current_session = self._all_history[self._current_index]
-            current_matches_search = not self._search_filter or _matches_search(current_session, self._search_filter)
+            current_matches_search = not self._search_filter or _matches_search(current_session, self._search_filter, self._pinyin_cache)
             if current_matches_search:
                 sid = current_session.get("session_id", "")
                 visible_ids.add(sid)
-                current_preview = get_message_preview(current_session.get("messages", []))
+                current_preview = current_session.get("preview", "")
                 current_session_widget = self._get_or_create_history_card(
                     current_session, self._current_index, True, current_preview
                 )
@@ -898,7 +952,7 @@ class HistoryCard(QWidget):
         other_sessions = [(i, s) for i, s in enumerate(self._all_history) if i != self._current_index]
         # 搜索过滤
         if self._search_filter:
-            other_sessions = [(i, s) for i, s in other_sessions if _matches_search(s, self._search_filter)]
+            other_sessions = [(i, s) for i, s in other_sessions if _matches_search(s, self._search_filter, self._pinyin_cache)]
         grouped = {}
         for original_index, session in other_sessions:
             category = self._get_date_category(session.get("last_time", ""))
@@ -958,7 +1012,7 @@ class HistoryCard(QWidget):
             for original_index, session in sessions:
                 sid = session.get("session_id", "")
                 visible_ids.add(sid)
-                preview = get_message_preview(session.get("messages", []))
+                preview = session.get("preview", "")
                 card = self._get_or_create_history_card(
                     session, original_index, False, preview
                 )
@@ -1008,7 +1062,7 @@ class HistoryCard(QWidget):
         if self._search_filter:
             sessions_to_show = [
                 s for s in self._archived_sessions
-                if _matches_search(s, self._search_filter)
+                if _matches_search(s, self._search_filter, self._pinyin_cache)
             ]
 
         if not sessions_to_show:

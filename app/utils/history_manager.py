@@ -92,6 +92,21 @@ def merge_session_messages(messages: List[Dict]) -> List[Dict]:
     return consolidate_messages(messages or [])
 
 
+def extract_message_preview(messages: List[Dict], max_len: int = 50) -> str:
+    """从消息列表中提取预览文本（用于历史列表展示，避免遍历完整消息）"""
+    if not messages:
+        return ""
+    for msg in reversed(messages):
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user" and content:
+            if isinstance(content, list):
+                from app.core.message_content import content_to_text
+                content = content_to_text(content)
+            return content[:max_len].strip() + ("..." if len(content) > max_len else "")
+    return ""
+
+
 def sanitize_filename(name: str) -> str:
     """移除文件名中不合法的字符"""
     return _SANITIZE_FILENAME_PATTERN.sub("_", name)
@@ -307,6 +322,7 @@ class HistoryManager:
             "last_time": last_msg_time,
             "messages": merged_messages,
             "message_count": self._count_conversation_pairs(merged_messages),
+            "preview": extract_message_preview(merged_messages),
             "compaction_state": dict(compaction_state or {}),
             "compaction_cache": dict(compaction_cache or {}),
             "system_prompt": system_prompt or "",
@@ -378,8 +394,13 @@ class HistoryManager:
                 most_recent = session
         return most_recent
 
-    def get_history_list(self, project: str = None) -> List[Dict]:
-        """获取历史会话列表，可选按项目过滤，按最后对话时间排序"""
+    def get_history_list(self, project: str = None, with_messages: bool = False) -> List[Dict]:
+        """获取历史会话列表，可选按项目过滤，按最后对话时间排序
+
+        Args:
+            project: 项目名过滤
+            with_messages: 是否包含完整消息数组（为 False 时返回轻量列表）
+        """
         # 先去重
         self._deduplicate_history_sessions()
         
@@ -387,7 +408,29 @@ class HistoryManager:
         if project:
             sessions = [s for s in sessions if s.get("project", "默认项目") == project]
         # 按最后对话时间 last_time 降序排序
-        return sorted(sessions, key=lambda x: x.get("last_time", ""), reverse=True)
+        sessions = sorted(sessions, key=lambda x: x.get("last_time", ""), reverse=True)
+
+        if not with_messages:
+            # 轻量模式：仅保留列表展示所需字段，剔除重量级字段
+            # 同时确保 preview 字段存在（兼容旧数据）
+            result = []
+            for s in sessions:
+                preview = s.get("preview")
+                if not preview:
+                    preview = extract_message_preview(s.get("messages", []), 50)
+                result.append({
+                    "session_id": s.get("session_id", ""),
+                    "saved_at": s.get("saved_at", ""),
+                    "title": s.get("title", ""),
+                    "project": s.get("project", "默认项目"),
+                    "last_time": s.get("last_time", ""),
+                    "message_count": s.get("message_count", 0),
+                    "preview": preview,
+                    "user_edited_title": s.get("user_edited_title", False),
+                })
+            return result
+
+        return sessions
 
     def get_projects(self) -> List[str]:
         """获取所有不重复的项目名"""
