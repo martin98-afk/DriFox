@@ -109,3 +109,68 @@ colors:
   branch_label_bg: rgba(102, 198, 255, 0.15)
   branch_label_border: rgba(102, 198, 255, 0.3)
   window_bg: rgba(102, 198, 255, 0.04)
+
+  # ── 层级色板 ──
+  bg_base: '#0f172a'
+  bg_surface: '#1e293b'
+  bg_elevated: '#334155'
+  bg_input: rgba(18, 24, 34, 150)
+
+  # ── 通用状态色 ──
+  state_hover: rgba(255, 255, 255, 0.08)
+  state_active: rgba(255, 255, 255, 0.12)
+  state_disabled: rgba(255, 255, 255, 0.04)
+  state_focus: rgba(102, 198, 255, 0.5)
+
+  # ── 边框层级 ──
+  border_default: '#334155'
+  border_light: rgba(255, 255, 255, 0.06)
+  border_focus: '#60a5fa'
+
+  # ── 功能色 ──
+  scrollbar_bg: rgba(255, 255, 255, 0.05)
+  scrollbar_thumb: rgba(255, 255, 255, 0.20)
+  overlay_mask: rgba(0, 0, 0, 0.5)
+
+components:
+  user_message:
+    padding: '10px 16px'
+    border_radius: '12px'
+    shadow: '0 2px 8px rgba(0,0,0,0.15)'
+    states:
+      default:
+        bg: '{colors.user_card_bg}'
+        text: '{colors.user_card_text}'
+
+  assistant_message:
+    border_radius: '12px'
+    shadow: '0 2px 8px rgba(0,0,0,0.15)'
+    states:
+      default:
+        bg: '{colors.assistant_card_bg}'
+        text: '{colors.assistant_card_text}'
+
+  input_area:
+    border_radius: '8px'
+    border_width: '1px'
+    states:
+      default:
+        bg: '{colors.input_bg_start}'
+        text: '{colors.input_text}'
+        border_color: '{colors.border_default}'
+      focus:
+        bg: '{colors.input_focus_bg_start}'
+        text: '{colors.input_focus_text}'
+        border_color: '{colors.input_focus_border}'
+      disabled:
+        bg: '{colors.state_disabled}'
+        text: '{colors.text_muted}'
+
+  send_button:
+    border_radius: '8px'
+    states:
+      default:
+        bg: '{colors.send_btn_start}'
+        text: '{colors.button_text_on_accent}'
+      hover:
+        bg: '{colors.send_btn_hover_start}'
