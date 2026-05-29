@@ -579,7 +579,9 @@ class ToolExecutor:
                 args.get("ref1"), args.get("ref2"), args.get("path")
             ),
             "bash": lambda: self._builtin_tools.execute_bash(
-                args.get("command", ""), args.get("timeout", 120)
+                args.get("command", ""),
+                args.get("timeout", 120),
+                args.get("context"),
             ),
             # 后台任务工具
             "bg_start": lambda: self._builtin_tools.bg_start(

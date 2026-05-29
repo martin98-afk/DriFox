@@ -87,6 +87,15 @@ class BackgroundTaskManager:
                 cmd = f"chcp 65001 >nul 2>&1 && {command}"
             else:
                 cmd = command
+
+            # 使用 ShellContextManager 的平台适配参数
+            kwargs = {}
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                kwargs["startupinfo"] = startupinfo
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             
             process = subprocess.Popen(
                 cmd,
@@ -98,6 +107,7 @@ class BackgroundTaskManager:
                 encoding="utf-8",
                 errors="replace",
                 cwd=str(workdir),
+                **kwargs,
             )
             
             task = BackgroundTask(
@@ -246,6 +256,9 @@ PID: {task.pid}
 class TerminalTools:
     def __init__(self, owner):
         self._owner = owner
+        # ShellContextManager 实例（与 TerminalTools 同生命周期，保证 context 持久化）
+        from app.tools.shell_context_manager import ShellContextManager
+        self._shell_mgr = ShellContextManager.get_shell_manager()
         # 注册动态获取 workdir 的回调给 BackgroundTaskManager
         BackgroundTaskManager(lambda: self.workdir)
 
@@ -253,80 +266,50 @@ class TerminalTools:
     def workdir(self) -> Path:
         return self._owner.workdir
 
-    def execute_bash(self, command: str, timeout: int = 120) -> ToolResult:
-        """执行 shell 命令，支持可靠的 timeout
-        
-        使用 communicate(timeout) 避免管道死锁，同时在超时时杀死进程。
+    def execute_bash(self, command: str, timeout: int = 120, context: str = None) -> ToolResult:
+        """执行 shell 命令，支持可靠 timeout 和持久上下文
+
+        使用 ShellContextManager 的 marker + base64 机制，
+        避免管道死锁和编码问题。
+
+        参数:
+            command: shell 命令
+            timeout: 超时秒数（默认 120）
+            context: 持久化上下文 ID（可选）。传入已有 ID 则复用该 shell 进程，
+                     传入 None 或空字符串则每次新建进程。
         """
-        import platform
-
         try:
-            # Windows: 强制切换到 UTF-8 代码页，确保输出编码一致
-            if platform.system() == "Windows":
-                # 先设置环境变量，再嵌入 chcp 命令
-                command = f"chcp 65001 >nul 2>&1 && {command}"
+            mgr = self._shell_mgr
 
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                cwd=str(self.workdir),
-            )
+            if context:
+                # 持久化上下文模式
+                ctx_id, output, created, timed_out, exit_code = mgr.run_detailed(
+                    command, context, timeout
+                )
+                if timed_out:
+                    return ToolResult(False, error=output)
 
-            start_time = time.time()
+                combined = output if output else "(no output)"
+                if exit_code is not None and exit_code != 0:
+                    combined = f"exit_code: {exit_code}\n{combined}"
 
-            # 使用子线程执行 communicate，避免阻塞主线程
-            result_holder = {"stdout": None, "stderr": None, "error": None}
-            
-            def communicate_in_thread():
-                """在子线程中执行 communicate，同时读取 stdout 和 stderr"""
-                try:
-                    stdout, stderr = process.communicate()
-                    result_holder["stdout"] = stdout
-                    result_holder["stderr"] = stderr
-                except Exception as e:
-                    result_holder["error"] = str(e)
+                from app.tools.shell_compressor import compress
+                compressed = compress(command, combined)
+                return ToolResult(True, content=compressed)
+            else:
+                # 一次性执行（原有行为）
+                output, timed_out, exit_code = mgr.run_once(command, timeout)
+                if timed_out:
+                    return ToolResult(False, error=output)
 
-            comm_thread = threading.Thread(target=communicate_in_thread, daemon=True)
-            comm_thread.start()
+                combined = output if output else "(command completed with no output)"
+                if exit_code is not None and exit_code != 0:
+                    combined = f"exit_code: {exit_code}\n{combined}"
 
-            # 等待线程完成或超时
-            comm_thread.join(timeout=timeout)
+                from app.tools.shell_compressor import compress
+                compressed = compress(command, combined)
+                return ToolResult(True, content=compressed)
 
-            if comm_thread.is_alive():
-                # 超时：杀死进程
-                try:
-                    process.kill()
-                    # 等待线程结束（进程被杀后 communicate 会立即返回）
-                    comm_thread.join(timeout=5)
-                except Exception:
-                    pass
-
-                elapsed = time.time() - start_time
-                return ToolResult(False, error=f"Command timeout after {elapsed:.1f}s (killed)")
-
-            # 检查是否有错误
-            if result_holder["error"]:
-                return ToolResult(False, error=f"Execution error: {result_holder['error']}")
-
-            # 进程正常完成
-            stdout = result_holder["stdout"] or ""
-            stderr = result_holder["stderr"] or ""
-            
-            output = stdout.strip() if stdout else ""
-            error_out = stderr.strip() if stderr else ""
-            combined = "\n".join(filter(None, [output, error_out]))
-            
-            # Shell 输出压缩（减少 token 消耗）
-            from app.tools.shell_compressor import compress
-            compressed = compress(command, combined if combined else "(command completed with no output)")
-
-            return ToolResult(True, content=compressed)
-        
         except Exception as e:
             return ToolResult(False, error=f"Execution error: {str(e)}")
 
