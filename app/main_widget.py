@@ -2906,6 +2906,12 @@ class OpenAIChatToolWindow(ToolWindow):
         刷新本地 _valid_configs 并更新 UI。
         """
         self._load_model_configs()
+        # 如果设置卡片当前可见（同窗口），刷新服务商列表
+        if (hasattr(self, '_card_manager') 
+            and self._card_manager.is_card_visible("settings", self._window_id)
+            and hasattr(self, '_settings_popup')
+            and hasattr(self._settings_popup, 'llmProviderCard')):
+            self._settings_popup.llmProviderCard._refresh_items()
         # 如果模型选择卡片当前可见，刷新内容
         if hasattr(self, '_card_manager') and self._card_manager.is_card_visible("model_selector", self._window_id):
             self._load_model_selector_to_card()
