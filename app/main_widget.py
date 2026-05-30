@@ -2963,9 +2963,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if result.get('mcp') and hasattr(self, '_settings_popup') and self._settings_popup:
             try:
                 if hasattr(self._settings_popup, 'mcpListCard'):
-                    self._settings_popup.mcpListCard._refresh()
-                    QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
-                    logger.debug("[HotReload] MCP server list refreshed")
+                    card = self._settings_popup.mcpListCard
+                    # 如果当前是自触发的（开关操作），跳过全量刷新
+                    if not card.consume_hot_reload():
+                        card._refresh()
+                        QTimer.singleShot(500, card.refresh_connections)
+                        logger.debug("[HotReload] MCP server list refreshed")
+                    else:
+                        logger.debug("[HotReload] MCP server list: suppress self-triggered refresh")
             except Exception as e:
                 logger.warning(f"[HotReload] 刷新 MCP 列表失败: {e}")
 
