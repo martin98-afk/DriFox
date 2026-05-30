@@ -884,15 +884,14 @@ class OpenAIChatWorker(QThread):
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                     compacted="yes" if _was_compacted else "no")
                 # 每 3 轮触发一次 GC，帮助回收循环引用
-                if self._mem_diag_iter_count % 3 == 0:
-                    if self._mem_diag_enabled:
-                        before_gc = len(gc.get_objects())
+                # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免 stop-the-world GC 阻塞 UI
+                if self._mem_diag_enabled and self._mem_diag_iter_count % 3 == 0:
+                    before_gc = len(gc.get_objects())
                     gc.collect()
-                    if self._mem_diag_enabled:
-                        after_gc = len(gc.get_objects())
-                        freed = before_gc - after_gc
-                        if freed > 1000:
-                            logger.debug(f"[MEM] GC后释放 {freed} 个对象")
+                    after_gc = len(gc.get_objects())
+                    freed = before_gc - after_gc
+                    if freed > 1000:
+                        logger.debug(f"[MEM] GC后释放 {freed} 个对象")
 
                 # 性能优化：移除后台线程中的 processEvents() 和 sleep
                 # 原因：processEvents() 设计用于主线程，在后台线程调用会导致：
@@ -1761,9 +1760,10 @@ class OpenAIChatWorker(QThread):
                 )
 
                 # 自适应 GC：每 100 chunk 收集一次，RSS 增量 > 200MB 时堆压缩
-                if chunk_count % 100 == 0:
+                # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免无条件 stop-the-world GC 阻塞 UI
+                if chunk_count % 100 == 0 and self._mem_diag_enabled:
                     freed = gc.collect()
-                    if freed > 10 and self._mem_diag_enabled:
+                    if freed > 10:
                         logger.debug(f"[MEM] 流式 gc.collect() 释放了 {freed} 个对象")
                     # 在此作用域内获取 RSS，不依赖外部块
                     _gc_rss = 0.0
@@ -1783,11 +1783,9 @@ class OpenAIChatWorker(QThread):
                             heap = kernel32.GetProcessHeap()
                             if heap:
                                 kernel32.HeapCompact(heap, 0)
-                            if self._mem_diag_enabled:
-                                logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
+                            logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
                         except Exception as e:
-                            if self._mem_diag_enabled:
-                                logger.debug(f"[MEM] 堆压缩失败: {e}")
+                            logger.debug(f"[MEM] 堆压缩失败: {e}")
             # 性能优化：移除流式响应中的 processEvents()
             # UI 更新应通过信号-槽机制自然处理，不应强制刷新
             # if chunk_count % 5 == 0:
@@ -1917,9 +1915,11 @@ class OpenAIChatWorker(QThread):
         # httpx+OpenAI 客户端在处理 900+ chunk 时创建大量临时 Python 对象，
         # 这些对象在此处已无引用，但 pymalloc arena 碎片仍然占用 RSS。
         # 主动 gc.collect() + Windows HeapCompact 可降低峰值 RSS。
-        freed_count = gc.collect()
-        if freed_count > 100 and self._mem_diag_enabled:
-            logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
+        # 注意：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免无条件 stop-the-world GC 阻塞 UI
+        if self._mem_diag_enabled:
+            freed_count = gc.collect()
+            if freed_count > 100:
+                logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
 
         return tool_calls_found, tool_args_pending
 

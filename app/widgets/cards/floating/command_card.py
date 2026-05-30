@@ -196,20 +196,17 @@ class CommandItemWidget(QWidget):
         query = self._query
 
         if query:
-            html = ""
+            # 连续子串匹配高亮
             lower_name = display_name.lower()
             lower_query = query.lower()
-            last_end = 0
-            for ch in lower_query:
-                idx = lower_name.find(ch, last_end)
-                if idx >= 0:
-                    html += display_name[last_end:idx]
-                    html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_name[idx]}</span>'
-                    last_end = idx + 1
-                else:
-                    break
-            html += display_name[last_end:]
-            self._name_label.setText(html)
+            idx = lower_name.find(lower_query)
+            if idx >= 0:
+                html = display_name[:idx]
+                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_name[idx:idx + len(query)]}</span>'
+                html += display_name[idx + len(query):]
+                self._name_label.setText(html)
+            else:
+                self._name_label.setText(display_name)
         else:
             self._name_label.setText(display_name)
 
@@ -965,10 +962,12 @@ class CommandCard(QWidget):
         if not query:
             self._filtered_items = list(self._all_items)
         else:
+            # 连续子串匹配（不区分大小写）
+            q_lower = query.lower()
             self._filtered_items = [
                 item for item in self._all_items
-                if query in item["name"].lower()
-                or query in item["description"].lower()
+                if q_lower in item["name"].lower()
+                or q_lower in item["description"].lower()
             ]
 
         # 排序：命令和技能在前，智能体在后，同类型按名称排序
