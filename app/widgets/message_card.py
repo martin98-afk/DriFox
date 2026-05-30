@@ -88,7 +88,7 @@ from app.widgets.render_helpers import (
 _md_instance = None
 ACTION_COLOR_MAP = {
     "ask": "#FF6347",
-    "file": "#4CAF50",   # 文件引用 - 绿色
+    "file": "#4CAF50",  # 文件引用 - 绿色
 }
 DEFAULT_COLOR = "#888888"
 
@@ -112,8 +112,6 @@ _TOOL_RESULT_PATTERN = re.compile(r"^result:\s*(.*)$", re.MULTILINE)
 _NEXT_FIELD_PATTERN = re.compile(r"\n\w+:")
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
-
-
 
 # ======== 欢迎卡片随机 Tips ========
 WELCOME_TIPS = [
@@ -502,10 +500,10 @@ def _render_tool_block_content(content: str) -> str:
             depth = 0
             i = brace_start
             in_string = False
-            
+
             while i < len(content):
                 c = content[i]
-                
+
                 # 字符串内不计入深度
                 if in_string:
                     if c == '\\':
@@ -515,12 +513,12 @@ def _render_tool_block_content(content: str) -> str:
                         in_string = False
                     i += 1
                     continue
-                
+
                 if c == '"':
                     in_string = True
                     i += 1
                     continue
-                
+
                 if c == '{' or c == '[':
                     depth += 1
                 elif c == '}' or c == ']':
@@ -530,7 +528,7 @@ def _render_tool_block_content(content: str) -> str:
                         result_search_start = i + 1
                         break
                 i += 1
-            
+
             # 如果没有找到闭合（JSON 不完整），取已接收的部分
             if not tool_args_str and brace_start >= 0:
                 tool_args_str = content[brace_start:]
@@ -544,7 +542,7 @@ def _render_tool_block_content(content: str) -> str:
         brace_start = content.find("{")
         if brace_start >= 0:
             tool_args_str = content[brace_start:]
-    
+
     # ========== 解析 success ==========
     success_match = _TOOL_SUCCESS_PATTERN.search(content)
     if success_match:
@@ -558,7 +556,7 @@ def _render_tool_block_content(content: str) -> str:
     # ========== 解析 result ==========
     # 关键：从 result: 之后开始搜索，而不是从 result_search_start
     result_start = content.find("result:")
-    
+
     # ========== 解析 diff（可选字段，仅 edit/write 工具有）==========
     diff_content = ""
     diff_start = content.find("\ndiff:")
@@ -648,7 +646,7 @@ def _render_tool_block_content(content: str) -> str:
 
 def _find_string_end(s, start):
     """从 start 位置开始，找到字符串真正结束的位置
-    
+
     规则：只有当引号后面紧跟 , 或 } 或 ] 或 : 时，才认为是字符串结束
     这避免了把字符串内容中的引号误认为是结束
     """
@@ -697,7 +695,7 @@ def _parse_json_partial(json_str: str) -> dict:
 
         # 解析 key
         key_end = _find_string_end(json_str, i + 1)
-        key = json_str[i+1:key_end]
+        key = json_str[i + 1:key_end]
         i = key_end + 1
 
         # 跳过空白和冒号
@@ -711,7 +709,7 @@ def _parse_json_partial(json_str: str) -> dict:
         # 解析 value
         if c == '"':
             value_end = _find_string_end(json_str, i + 1)
-            value = json_str[i+1:value_end]
+            value = json_str[i + 1:value_end]
             i = value_end + 1
             # 处理转义（简化处理）
             value = value.replace('\\"', '"').replace('\\\\', '\\')
@@ -764,13 +762,13 @@ def _parse_json_partial(json_str: str) -> dict:
                 args[key] = float(num_str) if '.' in num_str else int(num_str)
             except:
                 args[key] = num_str
-        elif i + 4 <= n and json_str[i:i+4] == 'true':
+        elif i + 4 <= n and json_str[i:i + 4] == 'true':
             args[key] = True
             i += 4
-        elif i + 5 <= n and json_str[i:i+5] == 'false':
+        elif i + 5 <= n and json_str[i:i + 5] == 'false':
             args[key] = False
             i += 5
-        elif i + 4 <= n and json_str[i:i+4] == 'null':
+        elif i + 4 <= n and json_str[i:i + 4] == 'null':
             args[key] = None
             i += 4
         else:
@@ -788,15 +786,15 @@ def _find_json_bounds(content: str) -> tuple:
     start = content.find('{')
     if start == -1:
         return -1, -1
-    
+
     depth = 0
     i = start
     in_string = False
     escape_next = False
-    
+
     while i < len(content):
         c = content[i]
-        
+
         if escape_next:
             escape_next = False
             i += 1
@@ -817,7 +815,7 @@ def _find_json_bounds(content: str) -> tuple:
                 if depth == 0:
                     return start, i + 1
         i += 1
-    
+
     return start, -1
 
 
@@ -828,7 +826,7 @@ def _extract_args_by_regex(content: str) -> dict:
     """
     if not content:
         return {}
-    
+
     # 方法1: 尝试直接解析整个内容
     content = content.strip()
     try:
@@ -837,7 +835,7 @@ def _extract_args_by_regex(content: str) -> dict:
             return result
     except:
         pass
-    
+
     # 方法2: 找到 JSON 边界，尝试解析
     start, end = _find_json_bounds(content)
     if start >= 0:
@@ -852,7 +850,7 @@ def _extract_args_by_regex(content: str) -> dict:
                 args = _parse_json_partial(json_str)
                 if args:
                     return args
-    
+
     # 方法3: 直接部分解析
     args = _parse_json_partial(content)
     return args if args else {}
@@ -908,21 +906,21 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
             parts.append(md_text[i:])
             break
         parts.append(md_text[i:start_idx])
-        
+
         # 找到 event 属性
         event_start = md_text.find('event="', start_idx)
         if event_start == -1 or event_start > start_idx + 10:
             # 没有 event 属性，跳过这个位置，继续往后找
             i = start_idx + 6
             continue
-        
+
         event_end = md_text.find('"', event_start + len('event="'))
         if event_end == -1:
             parts.append(md_text[start_idx:])
             break
-        
+
         event_name = md_text[event_start + len('event="'):event_end]
-        
+
         # 找到闭合标签
         end_idx = md_text.find("</hook>", start_idx + len("<hook "))
         if end_idx != -1:
@@ -933,7 +931,7 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
                 hook_content = content[content_start + 1:].strip()
             else:
                 hook_content = content.strip()
-            
+
             # 使用 render_hook_block 渲染
             from app.widgets.render_helpers import render_hook_block
             parts.append(render_hook_block(event_name, hook_content, collapsed=not completed))
@@ -1097,10 +1095,10 @@ class ConsoleMonitorPage(QWebEnginePage):
                 # 处理打开文件/文件夹请求
                 try:
                     file_path = msg.split("open_file:", 1)[1]
-                    
+
                     import os
                     import subprocess
-                    
+
                     if os.name == 'nt':
                         if os.path.isdir(file_path):
                             # 文件夹：直接在资源管理器中打开
@@ -1233,12 +1231,12 @@ class CodeWebViewer(QWebEngineView):
             self._context_lost = True
             self._context_lost_count += 1
             self.contextLost.emit()
-            
+
             # 如果已经丢失超过1次，直接请求重建
             if self._context_lost_count > 1:
                 self.needRecreate.emit()
                 return
-            
+
             # 尝试恢复上下文
             self._schedule_context_restore()
 
@@ -1281,7 +1279,7 @@ class CodeWebViewer(QWebEngineView):
                 if parent_widget is None:
                     break
                 widget = parent_widget
-            
+
             if hasattr(widget, 'chat_scroll_area'):
                 scroll_area = getattr(widget, 'chat_scroll_area')
                 if scroll_area:
@@ -1319,12 +1317,12 @@ class CodeWebViewer(QWebEngineView):
         safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
 
         super().resize(safe_w, safe_h)
-    
+
     def setFixedHeight(self, height):
         """限制最大高度，防止 GPU 内存溢出"""
         safe_h = min(height, self.MAX_HEIGHT)
         super().setFixedHeight(safe_h)
-    
+
     def setFixedWidth(self, width):
         """限制最大宽度，防止 GPU 内存溢出"""
         safe_w = min(width, self.MAX_WIDTH)
@@ -1906,17 +1904,15 @@ class CodeWebViewer(QWebEngineView):
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
-                    background: #0d1117;
+                    background: rgba(13,17,23,0.18);
                 }}
-                .tool-diff-inline .line-num:first-child {{
-                    position: sticky;
-                    left: 0;
-                    z-index: 2;
+                .tool-diff-inline .line-num-old {{
+                    border-right: 1px solid rgba(139,148,158,0.16);
                 }}
-                .tool-diff-inline .line-num:nth-child(2) {{
-                    position: sticky;
-                    left: 34px;
-                    z-index: 2;
+                .tool-diff-inline .line-num-new {{
+                    border-right: 1px solid rgba(139,148,158,0.16);
+                }}
+                .tool-diff-inline .line-num-empty {{
                     border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-sign {{
@@ -1926,36 +1922,33 @@ class CodeWebViewer(QWebEngineView):
                     color: #6e7681;
                     user-select: none;
                     font-weight: 700;
-                    position: sticky;
-                    left: 68px;
-                    z-index: 2;
-                    background: #0d1117;
                 }}
                 .tool-diff-inline .line-code {{
                     flex: 1;
                     padding: 0 10px;
-                    white-space: pre;
+                    white-space: pre-wrap;
+                    overflow-x: auto;
                     min-width: 0;
                 }}
                 .tool-diff-inline .diff-add {{
                     background-color: rgba(63, 185, 80, 0.095);
+                    box-shadow: inset 3px 0 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .diff-add .line-sign {{
                     color: #56d364;
                 }}
                 .tool-diff-inline .diff-add .line-code {{
                     color: #aff5b4;
-                    box-shadow: inset 3px 0 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .diff-del {{
                     background-color: rgba(248, 81, 73, 0.095);
+                    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.62);
                 }}
                 .tool-diff-inline .diff-del .line-sign {{
                     color: #ff7b72;
                 }}
                 .tool-diff-inline .diff-del .line-code {{
                     color: #ffdcd7;
-                    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.62);
                 }}
                 .tool-diff-inline .diff-ctx {{
                     color: #adbac7;
@@ -2255,10 +2248,10 @@ class CodeWebViewer(QWebEngineView):
                         }});
 
                         if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise();
-                        
+
                         // 自动滚动到 body 底部（流式时新内容在底部）
                         document.body.scrollTop = document.body.scrollHeight;
-                        
+
                         // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
                     }}
@@ -2418,13 +2411,13 @@ class CodeWebViewer(QWebEngineView):
 
     def _render_markdown_to_html(self, raw_md: str) -> str:
         """渲染 markdown 到 HTML。
-        
+
         reasoning 现在作为 <think> 标签嵌入在 raw_md 中（由 content_to_markdown 生成），
         与文本、工具结果按实际顺序交错排列，不再需要单独的 _reasoning_blocks 逻辑。
         """
         # 刷新字体（响应系统字体设置变化）
         self._refresh_viewer_font_css()
-        
+
         if not self._streaming:
             # 非流式模式：直接渲染，所有 <think> 都是已完成的
             return _render_markdown_to_html_cached(
@@ -2451,12 +2444,12 @@ class CodeWebViewer(QWebEngineView):
             md.reset()
             html_content = md.convert(processed_md)
             html_content = _wrap_code_blocks_with_copy_button_web(html_content)
-            
+
             # 流式模式：追加字数统计显示
             if self._streaming:
                 char_count_html = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
                 html_content = html_content + char_count_html
-            
+
             return html_content
         except Exception:
             return f"<pre>{escape(raw_md)}</pre>"
@@ -2699,7 +2692,7 @@ class CodeWebViewer(QWebEngineView):
             self.setHtml("")
         except RuntimeError:
             pass
-        
+
         # 清理页面对象
         try:
             if hasattr(self, '_page'):
@@ -2707,12 +2700,12 @@ class CodeWebViewer(QWebEngineView):
                 del self._page
         except (RuntimeError, AttributeError):
             pass
-        
+
         # 清理代码块缓存
         if hasattr(self, '_code_block_cache'):
             self._code_block_cache.clear()
             self._code_block_cache = None
-        
+
         # 清理滚动位置
         self._last_scroll_position = 0
 
@@ -2843,7 +2836,7 @@ class PlainTextViewer(QWidget):
                 doc.setUndoRedoEnabled(False)
             except RuntimeError:
                 pass
-        
+
         # 清理引用
         self.text_edit = None
 
@@ -3058,7 +3051,7 @@ class MessageCard(SimpleCardWidget):
         self._apply_card_style()
         # 更新头像
         if hasattr(self, '_av_label'):
-            self._av_label.setStyleSheet( self._build_avatar_style())
+            self._av_label.setStyleSheet(self._build_avatar_style())
         # 更新标题
         if hasattr(self, '_name_label'):
             font_css = get_font_family_css()
@@ -3262,7 +3255,8 @@ class MessageCard(SimpleCardWidget):
         else:
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
-            placeholder.setStyleSheet(f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}")
+            placeholder.setStyleSheet(
+                f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}")
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             main.addWidget(self._viewer_container)
@@ -3518,21 +3512,21 @@ class MessageCard(SimpleCardWidget):
         """需要完全重建 WebEngine 视图（GPU上下文丢失无法恢复时）"""
         if not self._lazy_rendered or self.viewer is None:
             return
-        
+
         # 保存当前内容
         markdown_text = None
         if hasattr(self.viewer, '_markdown_text'):
             markdown_text = self.viewer._markdown_text
-        
+
         # 销毁旧viewer
         self.viewer.deleteLater()
-        
+
         # 重新创建viewer
         for i in reversed(range(self._viewer_layout.count())):
             item = self._viewer_layout.itemAt(i)
             if item and item.widget():
                 item.widget().deleteLater()
-        
+
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
         self.viewer.codeActionRequested.connect(self.actionRequested.emit)
@@ -3545,18 +3539,18 @@ class MessageCard(SimpleCardWidget):
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
         self.viewer._install_dialog_filter()
-        
+
         self._viewer_layout.addWidget(self.viewer)
-        
+
         # 恢复内容
         if markdown_text:
             self.viewer._markdown_text = markdown_text
             self.viewer._schedule_render(immediate=True)
-        
+
         # 恢复正常样式
         self._apply_card_style()
         self._webengine_needs_restore = False
-        
+
         # 同步宽度
         self.sync_width(force=True)
 
@@ -3651,7 +3645,6 @@ class MessageCard(SimpleCardWidget):
             pulse = QColor(self._theme["accent"])
             breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
             shimmer = 0.6 + 0.4 * (math.sin(self._pulse_phase * 1.8) + 1) / 2
-
 
         # ══════════════════════════════════════════════════════
         #  层1：内壁漫射（极柔和的边缘渗光）
@@ -3753,7 +3746,7 @@ class MessageCard(SimpleCardWidget):
 
     def set_error_state(self, is_error: bool, error_message: str = ""):
         """设置错误状态
-        
+
         Args:
             is_error: 是否为错误状态
             error_message: 错误信息（错误状态时显示在状态栏）
@@ -3959,7 +3952,7 @@ class MessageCard(SimpleCardWidget):
 
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
-        
+
         Args:
             delay_ms: 延迟加载毫秒数。默认0立即加载，>0则延迟加载并发送信号
         """
@@ -3995,7 +3988,7 @@ class MessageCard(SimpleCardWidget):
             if self._pending_content is not None:
                 self.set_content(self._pending_content)
                 self._pending_content = None
-            
+
             # 通知懒渲染完成，让父组件可以修正滚动位置
             self.lazyRenderCompleted.emit()
 
@@ -4107,12 +4100,12 @@ class MessageCard(SimpleCardWidget):
 
     def start_new_thinking_block(self):
         """开始一个新的思考块（每轮工具迭代调用一次）
-        
+
         将 reasoning 作为 _content_data 的一个 block，
         与文本、工具结果自然交错排列。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
-        
+
     def append_reasoning(self, text: str):
         """追加思考内容到当前最后一个思考块（流式模式）
 
@@ -4126,10 +4119,11 @@ class MessageCard(SimpleCardWidget):
             if self._content_data[i].get("type") == "reasoning":
                 last_reasoning_idx = i
                 break
-        
+
         if last_reasoning_idx >= 0:
             # 找到已有的最后一个 reasoning 块，追加内容
-            self._content_data[last_reasoning_idx]["content"] = (self._content_data[last_reasoning_idx].get("content", "") or "") + text
+            self._content_data[last_reasoning_idx]["content"] = (self._content_data[last_reasoning_idx].get("content",
+                                                                                                            "") or "") + text
         else:
             # 未找到，新增 reasoning 块
             self._content_data.append({"type": "reasoning", "content": text})
