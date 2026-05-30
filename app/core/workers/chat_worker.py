@@ -390,8 +390,13 @@ class OpenAIChatWorker(QThread):
             self._emit_via_event_bus(event, *args)
 
         # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
+        # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
+        # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
         if signal is not None:
-            signal.emit(*args)
+            try:
+                signal.emit(*args)
+            except (AttributeError, RuntimeError, TypeError) as e:
+                logger.debug(f"[Signal] PyQt信号发射失败 {signal_name}: {e}")
 
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
         """将 signal name 映射到 WorkerEvent"""
@@ -2336,14 +2341,22 @@ class OpenAIChatWorker(QThread):
             dict: 工具结果，或 None（取消）
         """
         try:
-            # ====== 发射 tool_call_started ======
-            self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
+            # ====== 发射 tool_call_started（非关键，失败不阻断） ======
+            try:
+                self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
+            except Exception as e:
+                logger.warning(f"[ToolCall] 发射 tool_call_started 失败: {e}")
 
             # ====== 权限检查 ======
             results_placeholder = []
-            should_continue = self._check_permission(
-                tool_name, arguments, tool_call_id, round_id, results_placeholder
-            )
+            try:
+                should_continue = self._check_permission(
+                    tool_name, arguments, tool_call_id, round_id, results_placeholder
+                )
+            except Exception as e:
+                logger.warning(f"[ToolCall] 权限检查失败: {e}")
+                should_continue = True  # 权限检查失败时默认放行
+
             if not should_continue:
                 return None  # 取消
             if results_placeholder:
@@ -2356,9 +2369,12 @@ class OpenAIChatWorker(QThread):
             if result_obj is self._TOOL_CANCELLED:
                 return None
 
-            # ====== 发射结果信号 ======
-            self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                     tool_call_id, tool_name, arguments, result_obj)
+            # ====== 发射结果信号（非关键，失败不阻断） ======
+            try:
+                self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                         tool_call_id, tool_name, arguments, result_obj)
+            except Exception as e:
+                logger.warning(f"[ToolCall] 发射 tool_result_received 失败: {e}")
 
             return self._build_result_dict(
                 tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj
