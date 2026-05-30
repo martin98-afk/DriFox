@@ -1906,15 +1906,17 @@ class CodeWebViewer(QWebEngineView):
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
-                    background: rgba(13,17,23,0.18);
+                    background: #0d1117;
                 }}
-                .tool-diff-inline .line-num-old {{
-                    border-right: 1px solid rgba(139,148,158,0.16);
+                .tool-diff-inline .line-num:first-child {{
+                    position: sticky;
+                    left: 0;
+                    z-index: 2;
                 }}
-                .tool-diff-inline .line-num-new {{
-                    border-right: 1px solid rgba(139,148,158,0.16);
-                }}
-                .tool-diff-inline .line-num-empty {{
+                .tool-diff-inline .line-num:nth-child(2) {{
+                    position: sticky;
+                    left: 34px;
+                    z-index: 2;
                     border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-sign {{
@@ -1924,33 +1926,36 @@ class CodeWebViewer(QWebEngineView):
                     color: #6e7681;
                     user-select: none;
                     font-weight: 700;
+                    position: sticky;
+                    left: 68px;
+                    z-index: 2;
+                    background: #0d1117;
                 }}
                 .tool-diff-inline .line-code {{
                     flex: 1;
                     padding: 0 10px;
-                    white-space: pre-wrap;
-                    overflow-x: auto;
+                    white-space: pre;
                     min-width: 0;
                 }}
                 .tool-diff-inline .diff-add {{
                     background-color: rgba(63, 185, 80, 0.095);
-                    box-shadow: inset 3px 0 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .diff-add .line-sign {{
                     color: #56d364;
                 }}
                 .tool-diff-inline .diff-add .line-code {{
                     color: #aff5b4;
+                    box-shadow: inset 3px 0 0 rgba(63, 185, 80, 0.65);
                 }}
                 .tool-diff-inline .diff-del {{
                     background-color: rgba(248, 81, 73, 0.095);
-                    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.62);
                 }}
                 .tool-diff-inline .diff-del .line-sign {{
                     color: #ff7b72;
                 }}
                 .tool-diff-inline .diff-del .line-code {{
                     color: #ffdcd7;
+                    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.62);
                 }}
                 .tool-diff-inline .diff-ctx {{
                     color: #adbac7;

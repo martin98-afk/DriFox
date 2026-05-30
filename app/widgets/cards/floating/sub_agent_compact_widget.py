@@ -65,6 +65,9 @@ class _AgentTaskRow(QFrame):
         self.agent_name = agent_name
         self.task_desc = task_desc
         self.is_running = True
+        self._tool_count = 0
+        self._start_time = time.time()
+        self._is_finished = False
 
         # 旋转图标
         self._rotating_icon = _RotatingIcon(":/icons/执行中.svg", size=16, parent=self)
@@ -112,6 +115,22 @@ class _AgentTaskRow(QFrame):
         self.desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(self.desc_label, 1)
 
+        # 工具调用次数
+        self.tool_count_label = QLabel("🔧0", self)
+        self.tool_count_label.setFont(get_unified_font(9))
+        self.tool_count_label.setStyleSheet(
+            f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;"
+        )
+        layout.addWidget(self.tool_count_label)
+
+        # 耗时
+        self.time_label = QLabel("⏱00:00", self)
+        self.time_label.setFont(get_unified_font(9))
+        self.time_label.setStyleSheet(
+            f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;"
+        )
+        layout.addWidget(self.time_label)
+
     def set_rotation_angle(self, angle: float):
         """设置旋转角度（由父组件统一驱动）"""
         if self.is_running:
@@ -120,6 +139,9 @@ class _AgentTaskRow(QFrame):
     def finish(self, success: bool = True):
         """标记任务完成"""
         self.is_running = False
+        self._is_finished = True
+        # 冻结最终耗时
+        self.update_elapsed()
         self._rotating_icon.setVisible(False)
         if success:
             self._success_label = QLabel(self)
@@ -137,6 +159,20 @@ class _AgentTaskRow(QFrame):
             idx = self.layout().indexOf(self._rotating_icon)
             self.layout().removeWidget(self._rotating_icon)
             self.layout().insertWidget(idx, self._error_label)
+
+    def increment_tool_count(self):
+        """工具调用次数 +1"""
+        self._tool_count += 1
+        self.tool_count_label.setText(f"🔧{self._tool_count}")
+
+    def update_elapsed(self):
+        """更新已用时间显示（每秒由父组件定时器驱动）"""
+        if self._is_finished:
+            return
+        elapsed = int(time.time() - self._start_time)
+        mins = elapsed // 60
+        secs = elapsed % 60
+        self.time_label.setText(f"⏱{mins:02d}:{secs:02d}")
 
     def clear_icon(self):
         """清空图标"""
@@ -159,10 +195,17 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._rotation_timer = QTimer(self)
         self._rotation_timer.timeout.connect(self._update_all_rotations)
         self._has_running = False
+        self._batch_started: bool = False  # 当前批次是否已开始（由 main_widget 管理）
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(2000)
         self._hide_timer.timeout.connect(self._auto_hide)
+
+        # 每秒更新一次各行的已用时间
+        self._time_timer = QTimer(self)
+        self._time_timer.timeout.connect(self._update_all_times)
+        self._time_timer.setInterval(1000)
+
         self._setup_ui()
 
     # ── UI 初始化 ──────────────────────────────────────
@@ -263,6 +306,10 @@ class SubAgentCompactFloatingWidget(QWidget):
                 f"padding: 0px 0px; border-radius: 4px;"
             )
             row.desc_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+            row.tool_count_label.setStyleSheet(
+                f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+            row.time_label.setStyleSheet(
+                f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
 
     def set_opacity(self, opacity: float):
         """设置透明度"""
@@ -289,15 +336,23 @@ class SubAgentCompactFloatingWidget(QWidget):
     def _start_rotation(self):
         if not self._rotation_timer.isActive():
             self._rotation_timer.start(30)
+        if not self._time_timer.isActive():
+            self._time_timer.start(1000)
 
     def _stop_rotation(self):
         self._rotation_timer.stop()
+        self._time_timer.stop()
 
     def _update_all_rotations(self):
         self._rotation_angle = (self._rotation_angle + 12) % 360
         for row in self._task_rows.values():
             if row.is_running:
                 row.set_rotation_angle(self._rotation_angle)
+
+    def _update_all_times(self):
+        """更新所有行的已用时间"""
+        for row in self._task_rows.values():
+            row.update_elapsed()
 
     # ── 任务管理 ──────────────────────────────────────
 
@@ -329,6 +384,12 @@ class SubAgentCompactFloatingWidget(QWidget):
             self._apply_style(False)
             self._start_hide_timer()
         self._update_height()
+
+    def add_tool_call(self, task_id: str, tool_name: str, args: dict = None):
+        """记录一次工具调用（更新对应行的工具计数）"""
+        row = self._task_rows.get(task_id)
+        if row:
+            row.increment_tool_count()
 
     def clear(self):
         """清空所有任务"""

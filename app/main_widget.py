@@ -1162,6 +1162,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
 
+        # 注册 /subagents 命令处理器
+        from app.core.builtin_commands import FunctionCommandHandlers
+        FunctionCommandHandlers.register("subagents", self._handle_subagents_command)
+
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
@@ -6356,6 +6360,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, '_sub_agent_compact_widget'):
             self._sub_agent_compact_widget._batch_started = False
 
+    def _handle_subagents_command(self, args: str):
+        """/subagents 命令：重新显示紧凑子智能体卡片"""
+        sub_agent_mgr = self.backend.sub_agent_manager
+        running_tasks = sub_agent_mgr._running_tasks
+
+        if not running_tasks:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.warning(
+                title="暂无运行中的子智能体",
+                content="当前没有正在执行的子智能体任务",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        compact = self._sub_agent_compact_widget
+        compact.clear()
+
+        for task_id, executor in running_tasks.items():
+            compact.add_task(task_id, executor.agent_name, executor.task_description)
+
+        compact._batch_started = True
+        self._card_manager.show_card("sub_agent_compact", self._window_id)
+
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
         """子智能体任务启动（通过 SubAgentManager 信号触发）
 
@@ -6372,8 +6401,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 紧凑卡片：自动弹出 ──
         compact = self._sub_agent_compact_widget
-        if not hasattr(compact, '_batch_started'):
-            compact._batch_started = False
         if not compact._batch_started:
             compact.clear()
         compact._batch_started = True
@@ -6390,7 +6417,7 @@ class OpenAIChatToolWindow(ToolWindow):
         detailed.add_task(task_id, agent_name, task_description)
         detailed.setVisible(False)  # 立即隐藏，只保留日志数据
 
-        # 连接 executor 信号（只连接给详细卡片，紧凑卡片只需 start/finish）
+        # 连接 executor 信号（紧凑卡片 + 详细卡片都需要）
         sub_agent_mgr = self.backend.sub_agent_manager
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
@@ -6398,6 +6425,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 lambda tid, msg: self._sub_agent_floating_widget.update_progress(tid, msg))
             executor.tool_call_started.connect(
                 lambda tid, name, args: self._sub_agent_floating_widget.add_tool_call(tid, name, args))
+            executor.tool_call_started.connect(
+                lambda tid, name, args: self._sub_agent_compact_widget.add_tool_call(tid, name, args))
             executor.tool_result_received.connect(
                 lambda tid, name, result, success: self._sub_agent_floating_widget.add_tool_result(tid, name, result,
                                                                                                    success))
