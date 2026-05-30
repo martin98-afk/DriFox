@@ -46,12 +46,17 @@ class Agent:
     @classmethod
     def from_dict(cls, data: Dict) -> "Agent":
         tools = data.get("tools", {})
+        if isinstance(tools, str):
+            # "Read, Glob, Grep, Bash" → ["Read", "Glob", "Grep", "Bash"]
+            tools = [t.strip() for t in tools.split(",") if t.strip()]
         if isinstance(tools, list):
             tools = {ToolNameMapper.to_native(t): True for t in tools
                      if ToolNameMapper.is_known(t)}
         elif isinstance(tools, dict):
             tools = {ToolNameMapper.to_native(k): v for k, v in tools.items()
                      if ToolNameMapper.is_known(k)}
+        elif tools is None:
+            tools = {}
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),

@@ -275,7 +275,10 @@ def _generate_tool_restriction_text(meta: dict) -> str:
 
     # 白名单模式（tools 字段）
     if tools:
-        if isinstance(tools, list):
+        if isinstance(tools, str):
+            # "Read, Glob, Grep, Bash" → ["Read", "Glob", "Grep", "Bash"]
+            allowed_list = [t.strip() for t in tools.split(",") if t.strip() and ToolNameMapper.is_known(t.strip())]
+        elif isinstance(tools, list):
             allowed_list = [str(t) for t in tools if ToolNameMapper.is_known(t)]
         elif isinstance(tools, dict):
             allowed_list = [str(k) for k, v in tools.items() if v and ToolNameMapper.is_known(k)]

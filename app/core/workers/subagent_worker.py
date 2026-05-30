@@ -357,7 +357,7 @@ class SubAgentExecutor(QThread):
             self.finished_with_result.emit(self.task_id, self._last_result)
 
         except Exception as e:
-            logger.error(f"[SubAgentExecutor] run() error: {e}")
+            logger.exception(f"[SubAgentExecutor] run() error: {e}")
             self._execution_error = str(e)
             # 任务出错，保存错误状态
             if self._log_store_callback:
@@ -996,6 +996,7 @@ class SubAgentManager(QObject):
                     "status": db_task.get("status", "unknown"),
                     "agent_name": db_task.get("agent_name", ""),
                     "task_description": db_task.get("task_description", ""),
+                    "session_id": db_task.get("session_id", ""),
                     "result": db_task.get("result", ""),
                     "error": db_task.get("error", ""),
                 }
@@ -1010,7 +1011,8 @@ class SubAgentManager(QObject):
                 "summary": executor.get_summary(),
                 "logs": executor.get_logs(),
                 "found": True,
-                "status": "running"
+                "status": "running",
+                "session_id": getattr(executor, '_task_session_id', ''),
             }
 
         # 检查已完成的任务（内存）
@@ -1028,7 +1030,8 @@ class SubAgentManager(QObject):
                 },
                 "logs": task_info.get("logs", []),
                 "found": True,
-                "status": "finished"
+                "status": "finished",
+                "session_id": task_info.get("session_id", ""),
             }
 
         return {"summary": {}, "logs": [], "found": False, "status": "unknown"}
@@ -1071,34 +1074,52 @@ class SubAgentManager(QObject):
 
         return results
 
-    def get_tasks_status(self, task_ids: List[str]) -> ToolResult:
-        """获取指定任务的状态"""
+    def get_tasks_status(self, task_ids: List[str], session_id: str = None) -> ToolResult:
+        """获取指定任务的状态（会话隔离）
+        
+        Args:
+            session_id: 可选，传入时只返回属于该会话的任务
+        """
+        effective_session = session_id if session_id else self._current_session_id
         tasks_info = []
         for tid in task_ids:
             if tid in self._running_tasks:
                 executor = self._running_tasks[tid]
+                # 会话隔离：检查 running 任务的 session
+                if effective_session:
+                    task_session = getattr(executor, '_task_session_id', '')
+                    if task_session != effective_session:
+                        continue
                 tasks_info.append({
                     "task_id": tid,
                     "status": "running" if executor.isRunning() else "finishing",
                     "agent": executor.agent_name,
                 })
             elif tid in self._finished_tasks:
+                task_info = self._finished_tasks[tid]
+                task_session = task_info.get("session_id", "")
+                # 会话隔离：只返回当前会话的任务
+                # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
+                if effective_session and task_session != effective_session:
+                    continue
                 tasks_info.append({
                     "task_id": tid,
                     "status": "finished",
-                    "agent": self._finished_tasks[tid].get("agent_name", ""),
+                    "agent": task_info.get("agent_name", ""),
                 })
-            else:
-                tasks_info.append({
-                    "task_id": tid,
-                    "status": "unknown",
-                    "agent": "",
-                })
+            # 其他情况（unknown）不返回，隐藏不存在或不属于当前会话的任务
         return ToolResult(True, content={"tasks": tasks_info})
 
     def get_tasks_status_with_details(self, task_ids: List[str], with_log: bool = False,
-                                      with_result: bool = True) -> ToolResult:
-        """获取指定任务的详细状态"""
+                                      with_result: bool = True, session_id: str = None) -> ToolResult:
+        """获取指定任务的详细状态（会话隔离）
+        
+        Args:
+            session_id: 可选，传入时优先使用（解决跨会话查询问题），
+                        不传时回退到 self._current_session_id
+        """
+        # 优先使用传入的 session_id，避免跨会话污染
+        effective_session = session_id if session_id else self._current_session_id
         tasks_info = []
         for tid in task_ids:
             task_data = self.get_task_logs(tid)
@@ -1107,6 +1128,19 @@ class SubAgentManager(QObject):
                     "task_id": tid,
                     "status": "unknown",
                     "agent": "",
+                })
+                continue
+
+            # 会话隔离：检查任务是否属于当前会话
+            task_session = task_data.get("session_id", "")
+            # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
+            if effective_session and task_session != effective_session:
+                # 任务属于其他会话，返回 unknown（不泄露其他会话的任务信息）
+                tasks_info.append({
+                    "task_id": tid,
+                    "status": "unknown",
+                    "agent": "",
+                    "_reason": "任务属于其他会话",
                 })
                 continue
 
@@ -1119,14 +1153,14 @@ class SubAgentManager(QObject):
 
             # running 状态可以反复查，完成或失败只能查一次（按 session 隔离）
             if status not in ("running", "unknown"):
-                session_queried = self._queried_tasks.get(self._current_session_id, set())
+                session_queried = self._queried_tasks.get(effective_session, set())
                 if tid in session_queried:
                     task_info["_already_queried"] = True
                     task_info["_message"] = "已查询过结果，可通过 id 再次查询"
                     tasks_info.append(task_info)
                     continue
                 session_queried.add(tid)
-                self._queried_tasks[self._current_session_id] = session_queried
+                self._queried_tasks[effective_session] = session_queried
 
             # 是否包含结果
             if with_result:
@@ -1161,7 +1195,8 @@ class SubAgentManager(QObject):
         for task_id, task_info in self._finished_tasks.items():
             # 会话隔离：只返回当前会话的任务
             task_session = task_info.get("session_id", "")
-            if target_session and task_session and task_session != target_session:
+            # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
+            if target_session and task_session != target_session:
                 continue
 
             # 跳过当前正在运行的任务（它们应该由 _running_tasks 处理）

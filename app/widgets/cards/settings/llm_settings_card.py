@@ -669,10 +669,10 @@ class LLMSettingsCard(SystemCardFrame):
         if hasattr(self, "llmApiEnabledCard"):
             self.llmApiEnabledCard.setContent(f"http://localhost:{port}/docs")
 
-    def show(self):
+    def showEvent(self, event):
         if hasattr(self, 'llmProviderCard'):
             self.llmProviderCard._refresh_items()
-        super().show()
+        super().showEvent(event)
 
     def set_opacity(self, opacity: float):
         """设置透明度（保留接口，暂不实现动态透明度）"""

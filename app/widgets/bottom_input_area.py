@@ -83,6 +83,7 @@ class SendableTextEdit(TextEdit):
         # 输入历史浏览
         self._history_list: list = []          # 最近输入历史（最新在前）
         self._history_index: int = -1          # -1 = 不在浏览模式
+        self._history_working_line: str = ""   # 进入历史模式时保存的当前输入（退出时恢复）
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
@@ -323,8 +324,48 @@ class SendableTextEdit(TextEdit):
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
 
+    def _find_partial_param(self, text: str, param_name: str, cursor_pos: int = None):
+        """在输入文本中查找参数名的部分匹配（优先光标附近）
+        
+        用于智能补全：文本中已有 --subag，点击 --subagent 参数时
+        原地替换为 --subagent，避免变成 --subag --subagent
+
+        Args:
+            text: 输入框全文
+            param_name: 参数名，如 "--subagent", "--model="
+            cursor_pos: 光标位置（可选），存在时优先匹配光标附近的参数
+            
+        Returns:
+            (start, end) 部分匹配范围，或 None
+        """
+        import re
+        clean_name = param_name.rstrip("=")
+        
+        # 如果有光标位置，优先找光标附近一定范围内的匹配
+        if cursor_pos is not None:
+            nearby_match = None
+            for m in re.finditer(r'--[\w-]+', text):
+                token = m.group()
+                if clean_name.startswith(token) and token != clean_name:
+                    # 匹配在光标附近（前后 30 字符范围内）
+                    if abs(m.start() - cursor_pos) <= 30:
+                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(nearby_match.start() - cursor_pos):
+                            nearby_match = m
+            if nearby_match:
+                return (nearby_match.start(), nearby_match.end())
+        
+        # 无光标位置或附近无匹配 → 返回第一个匹配（向后兼容）
+        for m in re.finditer(r'--[\w-]+', text):
+            token = m.group()
+            if clean_name.startswith(token) and token != clean_name:
+                return (m.start(), m.end())
+        return None
+
     def insert_parameter_text(self, param_name: str, param_type: str):
         """在光标处插入参数文本（detail 模式参数补全）
+
+        智能补全：如果输入框中已有部分匹配（如 --subag），
+        则原地替换为完整参数名（--subagent），而非追加。
 
         - flag: 插入 " --param-name "
         - value: 插入 " --param="（等待值选择）
@@ -336,11 +377,24 @@ class SendableTextEdit(TextEdit):
         cursor = self.textCursor()
         text = self.toPlainText()
 
-        # 确定插入位置：光标处 或 文本末尾
+        # 智能补全：部分匹配则原地替换（优先光标附近的匹配）
+        cursor_pos = cursor.position()
+        partial = self._find_partial_param(text, param_name, cursor_pos)
+        if partial:
+            cursor.setPosition(partial[0])
+            cursor.setPosition(partial[1], QTextCursor.KeepAnchor)
+            if param_type == "flag":
+                cursor.insertText(f"{param_name} ")
+            elif param_type == "value":
+                cursor.insertText(f"{param_name}")
+            self.setTextCursor(cursor)
+            self.setFocus(Qt.OtherFocusReason)
+            return
+
+        # 无部分匹配 → 在光标处追加
         pos = cursor.position()
         if pos < 0:
             pos = len(text)
-
         cursor.setPosition(pos)
         if param_type == "flag":
             cursor.insertText(f" {param_name} ")
@@ -369,9 +423,11 @@ class SendableTextEdit(TextEdit):
         self._history_index = -1
 
     def _enter_history_mode(self):
-        """进入历史浏览模式：加载最新一条"""
+        """进入历史浏览模式：保存当前文本，加载最新一条"""
         if not self._history_list:
             return
+        # 保存当前输入为 working line，退出时恢复
+        self._history_working_line = self.toPlainText()
         # 进入历史模式时，隐藏命令卡片
         card = self._get_card()
         if card and card.is_card_visible:
@@ -382,12 +438,21 @@ class SendableTextEdit(TextEdit):
         self._set_history_text()
 
     def _set_history_text(self):
-        """根据当前 history_index 设置输入框文本"""
-        if 0 <= self._history_index < len(self._history_list):
+        """根据当前 history_index 设置输入框文本
+
+        - index >= 0: 显示对应历史条目
+        - index == -1: 恢复 working line（退出历史模式）
+        """
+        if self._history_index < 0:
+            # 退出历史模式，恢复进入时保存的文本
+            self._suppress_slash_trigger = self._history_working_line.strip().startswith("/")
+            self.setPlainText(self._history_working_line)
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+            return
+        if self._history_index < len(self._history_list):
             text = self._history_list[self._history_index]
-            # ⚠️ 必须在 setPlainText 之前设置抑制标志！
-            # 否则 textChanged → _on_slash_trigger_check 先执行，标志还没设上
-            # 导致：首次用户按键被错误抑制（标志延后生效），卡片延迟一个按键才出现
             self._suppress_slash_trigger = text.strip().startswith("/")
             self.setPlainText(text)
             # 选中全部文本，方便继续编辑
@@ -414,9 +479,9 @@ class SendableTextEdit(TextEdit):
             return
 
         if new_index < 0:
-            # 超过最新条目，退出浏览模式
+            # 超过最新条目 → 退出浏览模式，恢复 working line
             self._history_index = -1
-            self.clear()
+            self._set_history_text()
             return
 
         self._history_index = new_index
@@ -458,7 +523,12 @@ class SendableTextEdit(TextEdit):
         # 文本变化时总是需要调整高度，不管是否在停止模式
         if not getattr(self, '_initializing', False):
             self._adjust_height_to_content()
-        # detail 模式参数同步（安全兜底，_on_slash_trigger_check 也会调）
+        # 历史模式：用户修改了当前显示的文本 → 退出历史模式，↑↓ 不再切历史
+        if self._history_index >= 0:
+            idx = self._history_index
+            if idx < len(self._history_list) and self._history_list[idx] != self.toPlainText():
+                self._reset_history_mode()
+        # detail 模式参数同步
         self._sync_detail_params()
 
     def _adjust_height_to_content(self):
