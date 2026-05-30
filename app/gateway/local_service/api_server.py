@@ -1,25 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-LLM Chatter HTTP API 服务
-提供远程调用接口，复用 UI 对话逻辑
+Gateway 本地微服务 - HTTP API 服务
 
-核心设计：
-- API 调用直接复用 UI 的 ChatEngine 和 SessionManager
-- 通过 SSE 流式推送响应
-- 会话管理完全复用
+提供远程调用接口，复用 UI 对话逻辑
 
 接口列表：
 - GET  /health                      - 健康检查
 - GET  /docs                        - 打开 API 文档页面
-
-会话管理：
 - GET  /sessions                    - 获取所有会话列表
 - POST /sessions                    - 创建新会话
 - GET  /sessions/{id}               - 获取指定会话详情
 - DELETE /sessions/{id}             - 删除会话
-
-对话接口：
-- POST /sessions/{id}/chat/stream    - 在指定会话中对话（流式 SSE）
+- POST /sessions/{id}/chat/stream   - 在指定会话中对话（流式 SSE）
 - POST /chat/stop                   - 停止当前流式请求
 """
 
@@ -29,11 +21,9 @@ from typing import Optional, Dict, Any
 import orjson as json
 
 # 注册 QProcess::ExitStatus 元类型，解决跨线程信号连接问题
-# PyInstaller 打包后必须注册，否则 QProcess::finished 信号跨线程连接会失败
 try:
     qRegisterMetaType("QProcess::ExitStatus")
 except NameError:
-    # PyQt5 中 qRegisterMetaType 是内置函数，不需要导入
     pass
 
 from fastapi import FastAPI, HTTPException
@@ -96,7 +86,7 @@ class LLMAPIService:
         self.host = host
         self.port = port
         self.app = FastAPI(
-            title="LLM Chatter API",
+            title="DriFox Gateway Local Service",
             description="复用 UI 对话逻辑的远程 API 接口",
             version="2.0.0",
         )
@@ -114,7 +104,7 @@ class LLMAPIService:
             handler = self.get_session_handler()
             return {
                 "status": "ok" if self._running else "stopped",
-                "service": "llm_chatter_api",
+                "service": "drifox_gateway_local",
                 "version": "2.0.0",
                 "running": self._running,
                 "address": f"http://{self.host}:{self.port}" if self._running else None,
@@ -137,11 +127,7 @@ class LLMAPIService:
 
         @self.app.post("/sessions", response_model=Dict[str, Any])
         async def create_session(request: Optional[Dict[str, Any]] = None):
-            """创建新会话
-            
-            Request Body (可选):
-                {"title": "会话标题"}
-            """
+            """创建新会话"""
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(
@@ -187,28 +173,7 @@ class LLMAPIService:
         # ==================== 对话接口（核心，支持并发） ====================
         @self.app.post("/sessions/{session_id}/chat/stream")
         async def chat_stream(session_id: str, request: Dict[str, Any]):
-            """在指定会话中对话（流式 SSE，支持并发）
-            
-            特性：
-            - 每个请求创建独立的 ChatEngine 实例，并发安全
-            - 自动复用 UI 的 ToolExecutor、SessionManager、AgentManager
-            - 会话自动保存
-            
-            Request Body:
-            {
-                "message": "用户消息",
-                "context": {}  // 可选，上下文参数
-            }
-            
-            SSE 事件：
-            - started: 流开始，包含 stream_id
-            - content: 收到的内容片段
-            - tool_call_started: 工具调用开始
-            - tool_result: 工具执行结果
-            - error: 错误
-            - stream_finished: 流结束
-            - complete: 完整响应
-            """
+            """在指定会话中对话（流式 SSE，支持并发）"""
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(
@@ -231,7 +196,7 @@ class LLMAPIService:
                     ):
                         yield event
                 except Exception as e:
-                    logger.exception(f"[API] chat_stream 错误: {e}")
+                    logger.exception(f"[GatewayLocal] chat_stream 错误: {e}")
                     yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
             return StreamingResponse(
@@ -258,7 +223,7 @@ class LLMAPIService:
 
         @self.app.get("/config")
         async def get_config():
-            """获取当前 LLM 配置（自动使用 LLMChatter 选中配置）"""
+            """获取当前 LLM 配置"""
             handler = self.get_session_handler()
             if handler and handler._main_widget:
                 try:
@@ -269,22 +234,22 @@ class LLMAPIService:
                             safe_config["API_KEY"] = "***" + safe_config["API_KEY"][-4:]
                         return {"config": safe_config}
                 except Exception as e:
-                    logger.error(f"[API] get_config 失败: {e}")
+                    logger.error(f"[GatewayLocal] get_config 失败: {e}")
             
             raise HTTPException(status_code=503, detail="配置不可用")
 
     def start(self, background: bool = True):
         """启动服务"""
         if self._running:
-            logger.info("[LLMAPI] 服务已在运行")
+            logger.info("[GatewayLocal] 服务已在运行")
             return
 
         if background:
             self._running = True
             thread = threading.Thread(target=self._run_server, daemon=True)
             thread.start()
-            logger.info(f"[LLMAPI] 服务已启动: http://{self.host}:{self.port}")
-            logger.info("[LLMAPI] API 文档: http://localhost:{}/docs".format(self.port))
+            logger.info(f"[GatewayLocal] 服务已启动: http://{self.host}:{self.port}")
+            logger.info("[GatewayLocal] API 文档: http://localhost:{}/docs".format(self.port))
         else:
             self._run_server()
 
@@ -292,19 +257,15 @@ class LLMAPIService:
         """运行服务器"""
         import uvicorn
         
-        # 强制单进程模式，避免 PyInstaller 打包后 uvicorn 启动多 worker 进程
-        # 导致 QProcess::ExitStatus 跨线程错误
         config = uvicorn.Config(
             self.app,
             host=self.host,
             port=self.port,
             log_level="info",
-            workers=1,                    # 强制单 worker 进程
-            loop="asyncio",               # 强制使用 asyncio 循环
-            lifespan="off",               # 禁用 lifespan 事件，避免启动时的进程检测
+            workers=1,
+            loop="asyncio",
+            lifespan="off",
         )
-        
-        # 禁用 uvicorn 的 autoreload 等可能创建子进程的功能
         config.autoreload = False
         config.reload = False
         config.use_colors = False
@@ -312,21 +273,20 @@ class LLMAPIService:
         server = uvicorn.Server(config)
         self._running = True
         
-        # 确保在主线程的事件循环中运行
         try:
             import asyncio
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(server.serve())
         except Exception as e:
-            logger.error(f"[LLMAPI] Server error: {e}")
+            logger.error(f"[GatewayLocal] Server error: {e}")
         finally:
             self._running = False
 
     def stop(self):
         """停止服务"""
         self._running = False
-        logger.info("[LLMAPI] 服务已停止")
+        logger.info("[GatewayLocal] 服务已停止")
 
 
 def start_llm_api_service(host: str = "0.0.0.0", port: int = 8765):

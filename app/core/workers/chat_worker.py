@@ -889,8 +889,13 @@ class OpenAIChatWorker(QThread):
                         if freed > 1000:
                             logger.debug(f"[MEM] GC后释放 {freed} 个对象")
 
-                QCoreApplication.processEvents()
-                time.sleep(0.01)
+                # 性能优化：移除后台线程中的 processEvents() 和 sleep
+                # 原因：processEvents() 设计用于主线程，在后台线程调用会导致：
+                # 1. 信号丢失或延迟
+                # 2. UI 状态不一致
+                # 3. 可能的死锁
+                # 如果需要 UI 响应，应使用信号-槽机制而非强制事件处理
+                # time.sleep(0.01)
 
         except Exception as e:
             logger.exception("请求失败!")
@@ -1778,8 +1783,10 @@ class OpenAIChatWorker(QThread):
                         except Exception as e:
                             if self._mem_diag_enabled:
                                 logger.debug(f"[MEM] 堆压缩失败: {e}")
-            if chunk_count % 5 == 0:
-                QCoreApplication.processEvents()
+            # 性能优化：移除流式响应中的 processEvents()
+            # UI 更新应通过信号-槽机制自然处理，不应强制刷新
+            # if chunk_count % 5 == 0:
+            #     QCoreApplication.processEvents()
 
         # 非流式响应：usage 在 response 对象本身（而非 chunk）
         if not self.stream:
@@ -2253,12 +2260,15 @@ class OpenAIChatWorker(QThread):
                 }
                 self._permission_approved = False
             # 锁在 while 循环前释放，避免阻塞主线程调用 approve_permission/deny_permission
+            # 性能优化：移除后台线程中的 processEvents()
+            # processEvents() 在非主线程调用会导致信号丢失、死锁等问题
+            # UI 响应应通过信号-槽机制自然处理
             while (self._permission_pending is not None
                    and not self._is_cancelled
                    and not self._tool_execution_cancelled):
-                if not self._legacy_direct_callbacks:
-                    QApplication.processEvents()
-                time.sleep(0.1)
+                # if not self._legacy_direct_callbacks:
+                #     QApplication.processEvents()  # 移除：后台线程不应调用 processEvents()
+                time.sleep(0.1)  # 保留 sleep 用于轮询等待用户授权
 
             if self._is_cancelled or self._tool_execution_cancelled:
                 self._emit_cancelled_tool_result({"id": tool_call_id, "function": {"name": tool_name, "arguments": "{}"}})

@@ -282,7 +282,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_sync_timer.setInterval(80)
         self._scroll_sync_timer.timeout.connect(self._sync_visible_cards_on_scroll)
         self.toolStartUiSyncRequested.connect(
-            self._handle_tool_start_ui_sync, type=Qt.BlockingQueuedConnection
+            self._handle_tool_start_ui_sync, type=Qt.QueuedConnection
         )
         self._is_streaming = False
         self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
@@ -398,7 +398,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""
-        from app.api import (
+        from app.gateway import (
             LLMAPIService,
             APISessionHandler,
             is_service_running,
@@ -421,7 +421,7 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             # 确保服务未启动
             if is_service_running():
-                from app.api import (
+                from app.gateway import (
                     stop_llm_api_service,
                 )
 
@@ -528,7 +528,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _open_api_docs(self):
         """打开 API 文档页面"""
-        from app.api import open_docs
+        from app.gateway import open_docs
         open_docs()
 
     def _duplicate_window(self, branch: bool = False):
@@ -651,12 +651,21 @@ class OpenAIChatToolWindow(ToolWindow):
     def _handle_tool_start_ui_sync(
             self, tool_call_id: str, tool_name: str, arguments: object, round_id: str
     ):
+        """工具开始时的 UI 同步处理（性能优化：移除阻塞调用）
+        
+        修复前：使用 BlockingQueuedConnection + sendPostedEvents + processEvents
+        导致工具执行时 UI 线程被阻塞，出现卡顿。
+        
+        修复后：使用 QueuedConnection + 延迟刷新，UI 通过正常事件循环更新，
+        不再强制同步等待。
+        """
         self._on_tool_call_started(tool_call_id, tool_name, arguments or {}, round_id)
-        QApplication.sendPostedEvents()
-        if self._tool_floating_widget:
-            self._tool_floating_widget.repaint()
-        self.repaint()
-        QApplication.processEvents()
+        # 性能优化：移除强制同步刷新，让 UI 通过正常事件循环自然更新
+        # 原代码会导致后台线程阻塞主线程，造成卡顿
+        # if self._tool_floating_widget:
+        #     self._tool_floating_widget.repaint()
+        # self.repaint()
+        # QApplication.processEvents()
 
     def _get_chat_cards_for_engine(self):
         cards = []

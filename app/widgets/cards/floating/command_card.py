@@ -1145,49 +1145,59 @@ class CommandCard(QWidget):
                 self._item_widgets[self._selected_index], 0, 0
             )
 
-    def select_next(self):
-        """选择下一项"""
+    def select_next(self) -> bool:
+        """选择下一项。返回 True 表示已处理，False 表示未处理（让按键透传）。"""
         if self._value_selection_mode:
             if self._value_widgets and self._selected_value_index < len(self._value_widgets) - 1:
                 self._selected_value_index += 1
                 self._update_value_selection()
-            return
+            return True
         if self._detail_mode and self._detail_has_params:
             # 只对可见参数导航
             visible = [i for i, w in enumerate(self._param_widgets) if w.isVisible()]
             if not visible:
-                return
+                return True
             if self._selected_param_index < visible[-1]:
                 # 找到下一个可见的
                 current_pos = visible.index(self._selected_param_index) if self._selected_param_index in visible else -1
                 if current_pos < len(visible) - 1:
                     self._selected_param_index = visible[current_pos + 1]
                     self._update_param_selection()
-            return
+            return True
+        # detail 模式且无交互参数 → 不处理，让按键透传到输入框
+        if self._detail_mode:
+            return False
+        # 列表模式
         if self._item_widgets and self._selected_index < len(self._item_widgets) - 1:
             self._selected_index += 1
             self._update_selection()
+        return True
 
-    def select_prev(self):
-        """选择上一项"""
+    def select_prev(self) -> bool:
+        """选择上一项。返回 True 表示已处理，False 表示未处理（让按键透传）。"""
         if self._value_selection_mode:
             if self._value_widgets and self._selected_value_index > 0:
                 self._selected_value_index -= 1
                 self._update_value_selection()
-            return
+            return True
         if self._detail_mode and self._detail_has_params:
             visible = [i for i, w in enumerate(self._param_widgets) if w.isVisible()]
             if not visible:
-                return
+                return True
             if self._selected_param_index > visible[0]:
                 current_pos = visible.index(self._selected_param_index) if self._selected_param_index in visible else -1
                 if current_pos > 0:
                     self._selected_param_index = visible[current_pos - 1]
                     self._update_param_selection()
-            return
+            return True
+        # detail 模式且无交互参数 → 不处理，让按键透传到输入框
+        if self._detail_mode:
+            return False
+        # 列表模式
         if self._item_widgets and self._selected_index > 0:
             self._selected_index -= 1
             self._update_selection()
+        return True
 
     def select_current(self):
         """确认选中当前项"""

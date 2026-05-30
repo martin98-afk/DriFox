@@ -657,13 +657,15 @@ class SendableTextEdit(TextEdit):
         # 先检查命令卡片是否可见（但历史浏览模式时跳过）
         if card and card.is_card_visible and not in_history_mode:
             if event.key() == Qt.Key_Down:
-                card.select_next()
-                event.accept()
-                return
+                if card.select_next():
+                    event.accept()
+                    return
+                # 未处理则继续往下走，让按键透传到输入框
             elif event.key() == Qt.Key_Up:
-                card.select_prev()
-                event.accept()
-                return
+                if card.select_prev():
+                    event.accept()
+                    return
+                # 未处理则继续往下走，让按键透传到输入框
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
                 # detail 模式：Tab 触发参数选中，Enter 走正常发送
                 if card.is_detail_mode and event.key() == Qt.Key_Tab:
