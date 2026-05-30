@@ -6421,13 +6421,30 @@ class OpenAIChatToolWindow(ToolWindow):
         if executor:
             agent_name = getattr(executor, "agent_name", "")
             task_description = getattr(executor, "task_description", "")
+            task_session_id = getattr(executor, '_task_session_id', '')
             del sub_agent_mgr._running_tasks[task_id]
         else:
-            agent_name = ""
-            task_description = ""
-        sub_agent_mgr._finished_tasks[task_id] = {"result": result, "error": execution_error or "",
-                                                  "agent_name": agent_name,
-                                                  "task_description": task_description}
+            # executor 可能已被 get_finished_tasks() 移除，此时尝试从 _finished_tasks 恢复字段
+            agent_name = sub_agent_mgr._finished_tasks.get(task_id, {}).get("agent_name", "")
+            task_description = sub_agent_mgr._finished_tasks.get(task_id, {}).get("task_description", "")
+            task_session_id = sub_agent_mgr._finished_tasks.get(task_id, {}).get("session_id", "")
+
+        # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
+        if task_id in sub_agent_mgr._finished_tasks:
+            existing = sub_agent_mgr._finished_tasks[task_id]
+            existing["result"] = result
+            existing["error"] = execution_error or ""
+            existing.setdefault("agent_name", agent_name)
+            existing.setdefault("task_description", task_description)
+            existing.setdefault("session_id", task_session_id)
+        else:
+            sub_agent_mgr._finished_tasks[task_id] = {
+                "result": result,
+                "error": execution_error or "",
+                "agent_name": agent_name,
+                "task_description": task_description,
+                "session_id": task_session_id,
+            }
 
         # 批次完成检查：只有当所有任务都完成时才触发回调
         sub_agent_mgr._batch_completed += 1

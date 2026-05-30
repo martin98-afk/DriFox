@@ -907,16 +907,29 @@ class SubAgentManager(QObject):
                 elapsed = int(time.time() - executor.start_time) if executor.start_time else 0
 
                 task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
-                self._finished_tasks[task_id] = {
-                    "result": result,
-                    "error": error,
-                    "agent_name": agent_name,
-                    "task_description": task_description,
-                    "session_id": task_session_id,
-                    "logs": logs,
-                    "tool_call_count": tool_call_count,
-                    "elapsed_seconds": elapsed,
-                }
+                # 如果 _on_sub_agent_task_finished 已经写入过，避免覆盖已有字段
+                if task_id not in self._finished_tasks:
+                    self._finished_tasks[task_id] = {
+                        "result": result,
+                        "error": error,
+                        "agent_name": agent_name,
+                        "task_description": task_description,
+                        "session_id": task_session_id,
+                        "logs": logs,
+                        "tool_call_count": tool_call_count,
+                        "elapsed_seconds": elapsed,
+                    }
+                else:
+                    # 更新关键字段，保留 session_id 等已有数据
+                    self._finished_tasks[task_id].setdefault("session_id", task_session_id)
+                    self._finished_tasks[task_id].setdefault("logs", logs)
+                    self._finished_tasks[task_id].setdefault("tool_call_count", tool_call_count)
+                    self._finished_tasks[task_id].setdefault("elapsed_seconds", elapsed)
+                    # 总是更新 result/error（_on_sub_agent_task_finished 可能拿到更准的数据）
+                    if result is not None:
+                        self._finished_tasks[task_id]["result"] = result
+                    if error is not None:
+                        self._finished_tasks[task_id]["error"] = error
 
                 # 更新数据库（传入锁定的 session_id）
                 self._save_task_to_store(task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id)
@@ -1151,16 +1164,8 @@ class SubAgentManager(QObject):
                 "agent": task_data.get("summary", {}).get("agent_name", task_data.get("agent_name", "")),
             }
 
-            # running 状态可以反复查，完成或失败只能查一次（按 session 隔离）
-            if status not in ("running", "unknown"):
-                session_queried = self._queried_tasks.get(effective_session, set())
-                if tid in session_queried:
-                    task_info["_already_queried"] = True
-                    task_info["_message"] = "已查询过结果，可通过 id 再次查询"
-                    tasks_info.append(task_info)
-                    continue
-                session_queried.add(tid)
-                self._queried_tasks[effective_session] = session_queried
+            # 显式按 ID 查询始终返回完整结果（不应用 _already_queried 限制）
+            # _already_queried 仅在 get_all_active_tasks_with_details 无条件返回时生效
 
             # 是否包含结果
             if with_result:
