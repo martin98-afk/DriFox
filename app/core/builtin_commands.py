@@ -301,7 +301,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
             if not content.startswith("---"):
                 continue
 
-            parts = content.split("---", 3)
+            parts = content.split("---", 2)
             if len(parts) < 3:
                 continue
 

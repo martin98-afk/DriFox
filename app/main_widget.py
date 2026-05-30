@@ -15,7 +15,7 @@ import sip
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Callable
 
 from PyQt5.QtCore import (
     QTimer,
@@ -1581,12 +1581,20 @@ class OpenAIChatToolWindow(ToolWindow):
         elif command_name == "remember":
             self._remember_to_memory(args)
 
-    def _execute_subagent_task(self, agent_name: str, task_description: str):
+    def _execute_subagent_task(
+        self,
+        agent_name: str,
+        task_description: str,
+        with_context: bool = False,
+        model_value: str = "",
+    ):
         """触发子智能体任务（智能体命令 + --subagent 参数）
 
         Args:
             agent_name: 智能体名称（来自 agents 目录）
             task_description: 子智能体任务描述
+            with_context: 是否传递当前会话历史作为上下文（对应 --with-context）
+            model_value: 模型/服务商指定（对应 --model=xxx，支持 "模型名"、"服务商名"、"服务商:模型名"）
         """
         if not agent_name:
             InfoBar.warning("参数错误", "缺少智能体名称", parent=self, position=InfoBarPosition.BOTTOM)
@@ -1611,21 +1619,134 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error("未就绪", "子智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
             return
 
-        # 构建完整任务描述：如果有剩余的 remainder 内容，追加到任务描述
-        # （remainder 已经在 command_manager 中处理过，但保留扩展性）
-        full_task = task_description
+        # 解析模型配置（支持 --model=xxx 覆盖）
+        llm_config = self._resolve_subagent_model_config(model_value)
 
         # 触发子智能体任务
         sub_agent_mgr.execute_task(
             task_id=f"agent_{uuid.uuid4().hex[:8]}",
             agent_name=agent_name,
-            task_description=full_task,
+            task_description=task_description,
             parent_context="",
-            share_context=True,  # 接入主智能体完整上下文
+            share_context=with_context,  # 由 --with-context 控制
             on_finished=None,
-            on_error=None
+            on_error=None,
+            llm_config=llm_config,
         )
         logger.info(f"[BuiltinCommands] 触发子智能体任务: agent={agent_name}, task={task_description[:50]}...")
+
+    def _resolve_subagent_model_config(self, model_value: str) -> Optional[Dict]:
+        """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
+
+        支持三种格式：
+          - "模型名"          → 仅覆盖当前服务商的模型名称
+          - "服务商名"        → 切换到指定服务商的完整配置
+          - "服务商名:模型名"  → 切换到指定服务商并覆盖模型名称
+
+        Args:
+            model_value: --model=xxx 的原始值（空字符串时不覆盖）
+
+        Returns:
+            Dict: 覆盖后的 LLM 配置，或 None（使用默认配置）
+        """
+        if not model_value:
+            return None  # 使用默认配置
+
+        if ":" in model_value:
+            # 格式: "服务商名:模型名"
+            provider, model_query = model_value.split(":", 1)
+            model_query_lower = model_query.lower()
+            if provider in self._valid_configs:
+                matched = self._fuzzy_match_model_name(
+                    provider, model_query_lower,
+                    lambda: self._get_model_list_for_provider(provider)
+                )
+                if matched is not None:
+                    config = self._valid_configs[provider].copy()
+                    config["模型名称"] = matched
+                    return config
+                else:
+                    available = self._get_model_list_for_provider(provider)
+                    InfoBar.warning("模型不存在", f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
+                                    parent=self, position=InfoBarPosition.BOTTOM)
+                    return None
+            else:
+                InfoBar.warning("未知服务商", f"未找到服务商: {provider}", parent=self, position=InfoBarPosition.BOTTOM)
+                return None
+        elif model_value in self._valid_configs:
+            # 格式: "服务商名" — 切换到该服务商（取当前模型）
+            config = self._valid_configs[model_value].copy()
+            return config
+        else:
+            # 格式: "模型名" — 在当前服务商模糊匹配
+            config = self._get_current_model_config()
+            provider = self._current_provider_name
+            model_query_lower = model_value.lower()
+            matched = self._fuzzy_match_model_name(
+                provider, model_query_lower,
+                lambda: self._get_model_list_for_provider(provider)
+            )
+            if matched is not None:
+                config = dict(config)
+                config["模型名称"] = matched
+                return config
+            else:
+                available = self._get_model_list_for_provider(provider)
+                InfoBar.warning("模型不存在", f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
+                                parent=self, position=InfoBarPosition.BOTTOM)
+                return None
+
+    def _get_model_list_for_provider(self, provider: str) -> List[str]:
+        """获取指定服务商的模型列表（供模糊匹配用）"""
+        config = self._valid_configs.get(provider, {})
+        model_list = config.get("模型列表", [])
+        if isinstance(model_list, str):
+            try:
+                import ast
+                model_list = ast.literal_eval(model_list)
+            except Exception:
+                model_list = []
+        # 也把当前选中的模型加进去（万一不在列表里）
+        current = config.get("模型名称", "")
+        if current and current not in model_list:
+            model_list = [current] + list(model_list)
+        return list(model_list)
+
+    def _fuzzy_match_model_name(self, provider: str, query: str,
+                               get_model_list: Callable[[], List[str]]) -> Optional[str]:
+        """前缀+大小写不敏感模糊匹配模型名
+
+        匹配规则（按优先级）：
+        1. 精确匹配（忽略大小写）
+        2. 前缀匹配（忽略大小写）
+
+        Args:
+            provider: 服务商名（用于日志）
+            query: 用户输入（小写）
+            get_model_list: 获取模型列表的回调
+
+        Returns:
+            匹配到的模型名（原始大小写），无匹配返回 None
+        """
+        model_list = get_model_list()
+        if not model_list:
+            return None
+
+        # 1. 精确匹配（忽略大小写）
+        for name in model_list:
+            if name.lower() == query:
+                return name
+
+        # 2. 前缀匹配（忽略大小写）
+        matches = [name for name in model_list if name.lower().startswith(query)]
+
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            # 多匹配时取第一个（列表顺序已由服务商配置决定）
+            return matches[0]
+
+        return None
 
     def _trigger_context_compaction(self):
         """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
@@ -1685,11 +1806,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._command_card.dismiss()
         self._card_manager.hide_card("command", self._window_id)
 
-    def _on_slash_show_hint(self, cmd_name: str):
+    def _on_slash_show_hint(self, cmd_name: str, selected_type: str = ""):
         """输入框 完整命令 + 空格 - 显示参数提示
 
         将命令卡片切换到 detail 模式，显示该命令的参数提示信息。
         如果卡片尚未显示，先让 CardManager 展开容器。
+
+        Args:
+            cmd_name: 命令名（不含 /）
+            selected_type: 选中项的 display_type（"command"/"prompt"/"agent"），
+                          用于 detail 模式显示对应类型的 hint
         """
         if not hasattr(self, '_command_card'):
             return
@@ -1697,8 +1823,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 如果卡片还没显示（首次进入 detail 模式），展开容器
         if not card.is_card_visible:
             self._card_manager.show_card("command", self._window_id)
-        # 切换到 detail 模式
-        card.show_command_detail(cmd_name)
+        # 切换到 detail 模式（按选中类型显示对应 hint）
+        card.show_command_detail(cmd_name, selected_type)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
 
@@ -3714,13 +3840,26 @@ class OpenAIChatToolWindow(ToolWindow):
         
         ⚠️ 不能只遍历 chat_layout，因为懒加载/回收的卡片不在布局中。
         必须基于 _batch_cards 遍历，使用 _message_batch 计算正确的 round_index。
+        
+        注意：清理 _batch_cards 中对已删除卡片的引用，防止 RuntimeError。
         """
+        cleaned_any = False
         for batch_idx, cards in enumerate(self._batch_cards):
             if not cards:
                 continue
             # 防止 _batch_cards 比 _message_batch 长（删除操作后未同步）
             if batch_idx >= len(self._message_batch):
                 continue
+
+            # 过滤掉已删除的卡片（sip.isdeleted）
+            alive_cards = [w for w in cards if not sip.isdeleted(w)]
+            if len(alive_cards) != len(cards):
+                self._batch_cards[batch_idx] = alive_cards if alive_cards else None
+                cleaned_any = True
+                if not alive_cards:
+                    continue
+                cards = alive_cards
+
             for widget in cards:
                 if not isinstance(widget, MessageCard):
                     continue
@@ -3730,6 +3869,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     widget._round_index = self._get_user_round_index_for_batch_index(
                         batch_idx
                     )
+
+        if cleaned_any:
+            logger.debug("[RefreshRound] Cleaned up deleted card references from _batch_cards")
 
     # ==================== Batch 结构同步 ====================
 
@@ -5031,6 +5173,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 注意：不调用 cleanup，因为撤销操作需要在删除后仍能访问卡片数据
                 deleted_count = delete_widgets_from_layout(widgets_to_remove, self.chat_layout, call_cleanup=False)
 
+                # 清理 _batch_cards 中对已删除卡片的引用，防止后续遍历时 RuntimeError
+                for batch_idx in range(len(self._batch_cards)):
+                    batch = self._batch_cards[batch_idx]
+                    if not batch:
+                        continue
+                    alive = [w for w in batch if not sip.isdeleted(w)]
+                    if len(alive) != len(batch):
+                        self._batch_cards[batch_idx] = alive if alive else None
+
         # === 2. 基于 session.messages 计算截断位置 ===
         canonical_messages = consolidate_messages(session.messages)
         round_ranges = get_user_round_ranges(canonical_messages)
@@ -5045,8 +5196,14 @@ class OpenAIChatToolWindow(ToolWindow):
             session.messages[:cutoff_index], preserve_compaction=False
         )
 
-        # === 4. 同步 _message_batch ===
+        # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
+        # 同步裁剪 _batch_cards 长度，防止旧引用残留
+        new_len = len(self._message_batch)
+        if new_len > len(self._batch_cards):
+            self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
+        elif new_len < len(self._batch_cards):
+            self._batch_cards = self._batch_cards[:new_len]
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
@@ -5238,8 +5395,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
         log_deletion_stats(round_index, len(widgets_to_remove), old_count, new_count)
 
-        # === 3. 同步 _message_batch ===
+        # === 3. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
+        # 同步裁剪 _batch_cards 长度，防止旧引用残留
+        new_len = len(self._message_batch)
+        if new_len > len(self._batch_cards):
+            self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
+        elif new_len < len(self._batch_cards):
+            self._batch_cards = self._batch_cards[:new_len]
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
@@ -5831,10 +5994,14 @@ class OpenAIChatToolWindow(ToolWindow):
             # 遍历最后一个非空批次
             for batch in reversed(self._batch_cards):
                 if batch is not None and batch:
+                    # 过滤掉已删除的卡片，防止 sender in batch 触发 RuntimeError
+                    alive_batch = [w for w in batch if not sip.isdeleted(w)]
+                    if not alive_batch:
+                        continue
                     # 检查当前 sender 是否在最后批次中
-                    if sender in batch:
+                    if sender in alive_batch:
                         # 检查是否是最后批次的最后一张卡片
-                        if sender is batch[-1]:
+                        if sender is alive_batch[-1]:
                             is_last_card = True
                     break
         
@@ -5950,7 +6117,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
-        cmd_result = cmd_mgr.execute(user_text)
+        # 从卡片选中项获取偏好类型（选提示词就按提示词执行，选智能体就按智能体执行）
+        cmd_name = CommandManager.parse_command_name(user_text) or ""
+        preferred_display_type = self.input_area.pop_card_selected_type(cmd_name)
+        cmd_result = cmd_mgr.execute(user_text, preferred_display_type=preferred_display_type)
         if cmd_result is not None:
             match cmd_result.type:
                 case CommandType.FUNCTION:
@@ -5964,7 +6134,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 子智能体命令：触发子智能体任务，不替换提示词
                     # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
                     self.input_area.toggle_send_button(True)
-                    self._execute_subagent_task(cmd_result.command_name, cmd_result.subagent_task)
+                    self._execute_subagent_task(
+                        cmd_result.command_name,
+                        cmd_result.subagent_task,
+                        with_context=cmd_result.subagent_with_context,
+                        model_value=cmd_result.subagent_model_value,
+                    )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
                     # 提示词替换命令：替换 + 追加用户命令

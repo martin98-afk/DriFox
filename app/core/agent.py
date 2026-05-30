@@ -544,12 +544,13 @@ class AgentManager:
         if not content.startswith("---"):
             return None
 
-        parts = content.split("---", 3)
+        # 兼容 body 中包含 --- 分隔符的情况（如代码块分隔）
+        # 使用 split("---", 2) 保留所有 body 内容
+        parts = content.split("---", 2)
         if len(parts) < 3:
             return None
 
-        # parts[0] = "", parts[1] = frontmatter, parts[2] = body
-        # 多行 description 等复杂字段内容在 body 中，不会污染 frontmatter
+        # parts[0] = "", parts[1] = frontmatter, parts[2] = body (完整)
         frontmatter = parts[1]
         body = parts[2].strip()
 

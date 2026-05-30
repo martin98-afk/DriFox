@@ -727,6 +727,7 @@ class SubAgentManager(QObject):
             executor_ref: Dict = None,
             share_context: bool = False,  # 是否共享主智能体上下文
             session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
+            llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
     ) -> bool:
         """执行子智能体任务
 
@@ -734,6 +735,8 @@ class SubAgentManager(QObject):
             session_id: 所属会话 ID。任务创建时即锁定该值，
                         后续回调不再读取全局 _current_session_id，
                         避免同一窗口内切换会话后异步回调用错 session_id。
+            llm_config: 预解析的 LLM 配置（可选）。传入时跳过内部 _get_llm_config() 调用，
+                        用于 --model=xxx 覆盖模型/服务商的场景。
         """
         # 在任务创建时即锁定 session_id，不依赖后续的全局状态
         task_session_id = session_id or self._current_session_id
@@ -763,7 +766,8 @@ class SubAgentManager(QObject):
             return False
 
         try:
-            llm_config = self._get_llm_config()
+            if llm_config is None:
+                llm_config = self._get_llm_config()
             if not llm_config:
                 if on_error:
                     on_error("No LLM config available")

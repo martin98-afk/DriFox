@@ -15,9 +15,9 @@ from PyQt5.QtWidgets import (
     QScrollArea, QFrame, QSizePolicy,
 )
 
-from app.utils.utils import get_font_family_css, get_local_skills
+from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.utils.design_tokens import Colors, font_size_css
-from app.core.command_manager import CommandManager
+from app.core.command_manager import CommandManager, CommandType
 
 
 class _ElidedLabel(QLabel):
@@ -51,10 +51,7 @@ class _ElidedLabel(QLabel):
     def was_elided(self) -> bool:
         return self._was_elided
 
-    @property
-    def item_data(self) -> Dict[str, str]:
-        """返回项数据（用于增量更新时的比较）"""
-        return self._data
+
 
 
 ITEM_HEIGHT = 36       # 每个 item 高度
@@ -248,8 +245,8 @@ class CommandItemWidget(QWidget):
 class CommandCard(QWidget):
     """斜杠命令卡片"""
 
-    commandSelected = pyqtSignal(str)  # 选中命令/技能名称
-    dismissed = pyqtSignal()           # 卡片被关闭
+    commandSelected = pyqtSignal(str, str)  # name, display_type（"command"/"prompt"/"agent"/"skill"/""）
+    dismissed = pyqtSignal()                # 卡片被关闭
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -262,10 +259,12 @@ class CommandCard(QWidget):
         self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
         self._current_query = ""
+        self._current_selected_type: str = ""  # 当前选中项的 display_type（用于 detail 模式）
 
         # Detail mode：匹配到完整命令 + 空格后显示参数提示
         self._detail_mode = False
         self._detail_cmd_name = ""
+        self._detail_selected_type: str = ""  # detail 模式下的选中类型
         self.setVisible(False)
         self._setup_ui()
         self._setup_detail_widget()
@@ -372,6 +371,7 @@ class CommandCard(QWidget):
 
         # 点击整块等同于选中当前命令并发送
         self._detail_container.setCursor(Qt.PointingHandCursor)
+        self._detail_container.mousePressEvent = self._on_detail_clicked
 
     # ---- Detail 模式 ----
 
@@ -385,17 +385,30 @@ class CommandCard(QWidget):
         """detail 模式匹配的命令名"""
         return self._detail_cmd_name
 
-    def show_command_detail(self, cmd_name: str):
+    def show_command_detail(self, cmd_name: str, selected_type: str = ""):
         """切换到 detail 模式：显示指定命令/技能的参数提示
 
         Args:
             cmd_name: 已匹配的命令名或技能名
+            selected_type: 选中项的 display_type（"command"/"prompt"/"agent"）
+                          为空时使用当前选中项类型（通过 _current_selected_type）
         """
-        from app.core.command_manager import CommandManager, CommandType
-        from app.utils.utils import get_skill_by_name
-
         cmd_mgr = CommandManager.get_instance()
-        cmd = cmd_mgr.get_command(cmd_name)
+
+        # 确定使用哪个类型：优先传入参数，其次当前选中项类型
+        use_type = selected_type or self._current_selected_type or ""
+
+        # 按类型查找对应 CommandDefinition（同名多类型时只显示选中类型的 hint）
+        entries = cmd_mgr._commands.get(cmd_name, {})
+        cmd = None
+        if use_type:
+            type_map = {"command": CommandType.FUNCTION, "prompt": CommandType.PROMPT, "agent": CommandType.AGENT}
+            preferred = type_map.get(use_type)
+            if preferred and preferred in entries:
+                cmd = entries[preferred]
+        if not cmd and entries:
+            cmd = next(iter(entries.values()))
+
         skill = get_skill_by_name(cmd_name) if not cmd else None
 
         if not cmd and not skill:
@@ -407,13 +420,14 @@ class CommandCard(QWidget):
 
         self._detail_mode = True
         self._detail_cmd_name = cmd_name
+        self._detail_selected_type = cmd.type.name.lower() if cmd else "skill"
 
         # 更新 UI：只显示描述（截断过长文本），不显示命令名
         if cmd:
             desc = cmd.description
-            # 参数提示：智能体始终显示 --subagent，其他命令显示 argument_hint
+            # 参数提示：智能体始终显示 --subagent + 可选参数，其他命令显示 argument_hint
             if cmd.type == CommandType.AGENT:
-                hint_text = "--subagent &lt;task-desc&gt;"
+                hint_text = "--subagent [--with-context] [--model=<provider>:<model>] <task-desc>"
             else:
                 hint_text = cmd.argument_hint or ""
         else:
@@ -664,8 +678,13 @@ class CommandCard(QWidget):
             self._update_selection()
             self.select_current()
 
+    def _on_detail_clicked(self, event):
+        """detail 模式点击 → 选中当前命令（携带 detail 选中类型）"""
+        self.commandSelected.emit(self._detail_cmd_name, self._detail_selected_type)
+        self.dismiss()
+
     def _update_selection(self):
-        """更新选中高亮"""
+        """更新选中高亮，并记录当前选中项类型供 detail 模式使用"""
         safe_widgets = []
         for widget in self._item_widgets:
             try:
@@ -677,6 +696,12 @@ class CommandCard(QWidget):
 
         for i, widget in enumerate(self._item_widgets):
             widget.set_selected(i == self._selected_index)
+
+        # 记录当前选中项的 display_type（用于 detail 模式显示/执行）
+        if 0 <= self._selected_index < len(self._filtered_items):
+            self._current_selected_type = self._filtered_items[self._selected_index].get("type", "")
+        else:
+            self._current_selected_type = ""
 
         # 滚动到可见区域
         if 0 <= self._selected_index < len(self._item_widgets):
@@ -699,13 +724,13 @@ class CommandCard(QWidget):
     def select_current(self):
         """确认选中当前项"""
         if self._detail_mode:
-            # detail 模式下选中 = 插入命令名
-            self.commandSelected.emit(self._detail_cmd_name)
+            # detail 模式下选中 = 插入命令名（携带 detail 选中类型）
+            self.commandSelected.emit(self._detail_cmd_name, self._detail_selected_type)
             self.dismiss()
             return
         if 0 <= self._selected_index < len(self._filtered_items):
             item = self._filtered_items[self._selected_index]
-            self.commandSelected.emit(item["name"])
+            self.commandSelected.emit(item["name"], item["type"])
             # 如果 emit 触发了 textChanged → _on_slash_trigger_check → detail 模式，
             # 则不再 dismiss（卡片切换到 detail 模式继续可见）
             if not self._detail_mode:

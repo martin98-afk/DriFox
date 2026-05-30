@@ -1,6 +1,7 @@
 # 大模型输入框
 import os
 import re
+from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QInputMethodEvent, QKeyEvent, QKeySequence, QTextCursor, QColor, QTextCharFormat
@@ -26,7 +27,7 @@ class SendableTextEdit(TextEdit):
     agentChanged = pyqtSignal(str)
     slashTriggered = pyqtSignal(str)     # 检测到 / 触发，携带查询文本
     slashDismissed = pyqtSignal()        # / 触发结束
-    slashShowHint = pyqtSignal(str)      # 完整命令 + 空格 → 显示参数提示
+    slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,6 +67,10 @@ class SendableTextEdit(TextEdit):
         # 命令卡片引用（由 main_widget 注入）
         self._command_card_ref = None
         self._slash_trigger_pos = -1  # / 触发位置
+
+        # 卡片选中项：供 execute() 按选中类型执行
+        self._card_selected_name: Optional[str] = None
+        self._card_selected_type: Optional[str] = None  # display_type: command/prompt/agent/skill
 
         # 节流相关
         self._slash_throttle_timer = QTimer(self)
@@ -184,7 +189,9 @@ class SendableTextEdit(TextEdit):
                 if CommandManager.get_instance().is_known_command_name(cmd_name) or get_skill_by_name(cmd_name):
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
                     self._slash_trigger_pos = 0
-                    self.slashShowHint.emit(cmd_name)
+                    # 传入当前选中项的 display_type（供 show_command_detail 显示对应类型的 hint）
+                    selected_type = card._current_selected_type if card else ""
+                    self.slashShowHint.emit(cmd_name, selected_type)
                 else:
                     # 未知命令/技能 + 参数 → 关闭
                     if card and card.is_card_visible:
@@ -257,8 +264,12 @@ class SendableTextEdit(TextEdit):
         self._slash_trigger_pos = -1
         self.setFocus(Qt.OtherFocusReason)
 
-    def _on_command_selected(self, item_name: str):
+    def _on_command_selected(self, item_name: str, item_type: str = ""):
         """命令/技能被选中（由 CommandCard.commandSelected 触发）"""
+        # 记录卡片选中的名称和类型，供 execute() 按选中类型执行
+        self._card_selected_name = item_name if item_type else None
+        self._card_selected_type = item_type or None
+
         card = self._get_card()
         self.insert_command_text(item_name)
         if card:
@@ -268,6 +279,24 @@ class SendableTextEdit(TextEdit):
                 card.dismiss()
         if not (card and card.is_detail_mode):
             self.slashDismissed.emit()
+
+    def pop_card_selected_type(self, cmd_name: str) -> Optional[str]:
+        """弹出卡片选中项的类型（供 main_widget 调用 execute() 前使用）
+
+        调用本方法会同时清除存储，避免二次消费。
+
+        Args:
+            cmd_name: 命令名（不含 /）
+
+        Returns:
+            显示类型字符串 "command"/"prompt"/"agent"，或 None
+        """
+        if self._card_selected_name == cmd_name and self._card_selected_type:
+            result = self._card_selected_type
+            self._card_selected_name = None
+            self._card_selected_type = None
+            return result
+        return None
 
     def _on_card_dismissed(self):
         """卡片被关闭时的清理"""
