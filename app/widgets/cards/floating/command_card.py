@@ -266,11 +266,25 @@ class ParameterItemWidget(QWidget):
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(8)
 
-        # 参数名
+        # 必填/选填标签（放在最前面）
+        if self._param.param_type != "positional":
+            req_tag = QLabel("必填" if self._param.required else "可选")
+            req_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            req_color = Colors.TEXT_ACCENT if self._param.required else Colors.TEXT_MUTED
+            req_tag.setStyleSheet(f"""
+                color: {req_color};
+                background: rgba(128,128,128,0.06);
+                border-radius: 3px;
+                padding: 1px 6px;
+                font-weight: bold;
+            """)
+            layout.addWidget(req_tag)
+
+        # 参数名（加粗）
         self._name_label = QLabel(self._param.name)
         self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        self._name_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; background: transparent;")
+        self._name_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; background: transparent; font-weight: bold;")
         layout.addWidget(self._name_label)
 
         # 参数说明
@@ -294,18 +308,7 @@ class ParameterItemWidget(QWidget):
         """)
         layout.addWidget(type_tag)
 
-        # 必填/选填标签
-        if self._param.param_type != "positional":
-            req_tag = QLabel("必填" if self._param.required else "可选")
-            req_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            req_color = Colors.TEXT_ACCENT if self._param.required else Colors.TEXT_MUTED
-            req_tag.setStyleSheet(f"""
-                color: {req_color};
-                background: rgba(128,128,128,0.06);
-                border-radius: 3px;
-                padding: 1px 6px;
-            """)
-            layout.addWidget(req_tag)
+
 
     @property
     def param_name(self) -> str:
@@ -751,8 +754,8 @@ class CommandCard(QWidget):
             options = param.value_options or []
 
         if not options:
-            # 无可选值，退化为 flag 插入
-            self.parameterSelected.emit(param_name, "flag")
+            # 无可选值：--name= 已在 _execute_param_selection 中插入，无需再操作
+            self._value_selection_mode = False
             return
 
         # 清空旧 value widget

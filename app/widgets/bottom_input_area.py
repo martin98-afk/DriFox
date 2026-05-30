@@ -317,7 +317,19 @@ class SendableTextEdit(TextEdit):
         """值选择完成（来自 CommandCard.parameterValueSelected）
 
         自动补全 --model= 的值。
+        防御：如果文本在当前光标前已包含该值，跳过插入避免重复。
         """
+        text = self.toPlainText()
+        cursor_pos = self.textCursor().position()
+        before_cursor = text[:cursor_pos]
+
+        # 检查光标前是否已有 --key=value（用户手动输入后按 Tab 确认）
+        if value in before_cursor:
+            # 已存在值，只确保有空格
+            if not text.endswith(" ") and not text.endswith("\n"):
+                self.textCursor().insertText(" ")
+            return
+
         cursor = self.textCursor()
         cursor.insertText(value)
         cursor.insertText(" ")
