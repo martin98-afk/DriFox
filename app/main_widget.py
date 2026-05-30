@@ -2032,6 +2032,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self._refresh_context_usage_indicator()
 
     def _refresh_context_usage_indicator(self):
+        """刷新上下文使用环。
+
+        性能优化：加入 500ms 节流。
+        get_context_usage_snapshot → build_messages 会触发 anyio.run(to_thread.run_sync, compactor.compact)，
+        在主线程上阻塞 UI 事件循环。频繁调用（如每次工具执行后）会造成累积卡顿。
+        """
+        import time
+        now = time.monotonic()
+        last = getattr(self, '_last_context_refresh_time', 0.0)
+        if now - last < 0.5:
+            return
+
         ring = getattr(self, "context_usage_ring", None)
         if not ring:
             return
@@ -2047,6 +2059,7 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("normal_tokens", 0),
             snapshot.get("compacted_tokens", 0),
         )
+        self._last_context_refresh_time = now
 
     def _update_balance_display(self):
         """更新余额显示"""
@@ -6962,7 +6975,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保留旧的压缩缓存会导致 state 不一致（缓存说"已压缩"但消息已膨胀）。
         # 清空缓存让下一次 ContextBudgetAllocator 从原始消息正确重新压缩。
         session.set_messages(messages or [], preserve_compaction=False)
-        self._refresh_context_usage_indicator()
+        # 延迟刷新上下文指示器，让 UI 先完成消息更新再处理 compaction
+        # 避免 finished_with_messages 信号处理过程中阻塞主线程
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
     def _on_engine_error(self, error: str):
         self._tool_cancelled_by_user = False

@@ -28,6 +28,7 @@ from html import escape
 from typing import List, Dict, Any, Optional
 
 import orjson as json
+from loguru import logger
 from PyQt5.QtCore import (
     Qt,
     QTimer,
@@ -2536,7 +2537,11 @@ class CodeWebViewer(QWebEngineView):
 
             self._last_rendered_html = html_content
             self._height_report_pending = True
-            js_code = f"updateContent({json.dumps(html_content).decode('utf-8')});"
+            # 全量更新前清除已通过 JS 增量注入的工具块，避免重复
+            js_code = (
+                "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
+                + f"updateContent({json.dumps(html_content).decode('utf-8')});"
+            )
             _tjs0 = _t.time()
             self.page().runJavaScript(js_code)
             _tjs = (_t.time() - _tjs0) * 1000
@@ -4063,10 +4068,34 @@ class MessageCard(SimpleCardWidget):
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
             return
-        # 性能优化：通过 _lazy_markdown_cb 延迟到 _perform_update 执行
-        # 工具结果不必须立即渲染，用 immediate=False 合并到下一次渲染批次
-        self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
-        self.viewer._schedule_render(immediate=False)
+        # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
+        # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
+        try:
+            block_html = render_tool_block(
+                tool_name=tool_name,
+                tool_args=arguments or {},
+                result=str(result) if result is not None else None,
+                success=success,
+                collapsed=True,
+                tool_call_id=tool_call_id,
+                diff=diff,
+            )
+            safe_html = json.dumps(block_html).decode('utf-8')
+            js_code = f"""
+            (function() {{
+                var c = document.getElementById('content-placeholder');
+                if (c) {{
+                    var d = document.createElement('div');
+                    d.setAttribute('data-tool-injected', 'true');
+                    d.innerHTML = {safe_html};
+                    c.appendChild(d);
+                }}
+                reportHeight();
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except Exception as e:
+            logger.warning(f"增量工具块注入失败: {e}")
 
     def get_plain_text(self) -> str:
         if self.role == "assistant":
