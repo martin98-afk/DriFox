@@ -294,6 +294,19 @@ class ParameterItemWidget(QWidget):
         """)
         layout.addWidget(type_tag)
 
+        # 必填/选填标签
+        if self._param.param_type != "positional":
+            req_tag = QLabel("必填" if self._param.required else "可选")
+            req_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            req_color = Colors.TEXT_ACCENT if self._param.required else Colors.TEXT_MUTED
+            req_tag.setStyleSheet(f"""
+                color: {req_color};
+                background: rgba(128,128,128,0.06);
+                border-radius: 3px;
+                padding: 1px 6px;
+            """)
+            layout.addWidget(req_tag)
+
     @property
     def param_name(self) -> str:
         return self._param.name

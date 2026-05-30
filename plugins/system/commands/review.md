@@ -1,6 +1,8 @@
 ---
 description: 审查更改代码
 type: prompt
+argument-hint:
+   "[--branch]": 指定某分支检查代码更改
 ---
 You are a code reviewer. Your job is to review code changes and provide actionable feedback.
 ---

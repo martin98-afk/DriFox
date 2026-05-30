@@ -1,6 +1,9 @@
 ---
 description: 项目笔记初始化
 type: prompt
+argument-hint:
+   "[--refine]": 是否在原笔记基础上进行完善
+   "[--limit]": 限定最大字数
 ---
 请分析此代码库并编写项目笔记，包含以下内容：
 1. 构建/lint/测试命令 - 特别是运行单个测试的方法

@@ -41,6 +41,7 @@ class CommandParameter:
     name: str                # 显示名称，如 "--with-context", "--model="
     description: str = ""    # 说明文字
     param_type: str = "flag" # "flag" | "value" | "positional"
+    required: bool = False   # 是否必填（选填参数在 UI 上显示为灰色/标记）
     value_options: list = field(default_factory=list)  # value 类型的可选值列表（硬编码）
 
 
