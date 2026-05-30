@@ -2574,6 +2574,13 @@ def _compact_process_heap():
         except Exception:
             return 0
 
+    # ========== 核心修复：先释放 Python 对象，再压缩底层 C 堆 ==========
+    # 如果跳过 gc.collect() 直接调 HeapCompact/malloc_trim，
+    # 堆中充满了 Python 残留对象，压缩后能归还 OS 的内存极少。
+    # 使用 gc.collect(2) 收集三代（全量）——cleanup 是低频操作，
+    # 全量收集对性能影响可忽略，且能释放最多内存。
+    gc.collect(2)
+
     try:
         if _sys.platform == 'win32':
             import ctypes
@@ -2594,7 +2601,7 @@ def _compact_process_heap():
                 pass
 
         elif _sys.platform == 'darwin':
-            logger.debug("[MEM-HEAP] macOS: 无堆压缩 API，使用 gc.collect() 替代")
+            logger.debug("[MEM-HEAP] macOS:  HeapCompact/malloc_trim 不可达，gc.collect(2) 已在上面调用")
     except Exception:
         pass
 

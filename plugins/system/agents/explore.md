@@ -5,19 +5,13 @@ hidden: false
 temperature: 0.2
 steps: 30
 permission:
-  read: allow
-  glob: allow
-  grep: allow
-  list: allow
-  bash: allow
   write: deny
   edit: deny
   multi_edit: deny
   todowrite: deny
   todoread: deny
-  task: deny
-  webfetch: allow
-  websearch: allow
+  task_batch: deny
+  "*": allow
 ---
 
 # Role

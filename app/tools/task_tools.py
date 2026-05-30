@@ -180,7 +180,7 @@ class TaskTools:
             else:
                 # 字符串格式：逗号分隔
                 id_list = [tid.strip() for tid in str(task_ids).split(",") if tid.strip()]
-            return manager.get_tasks_status_with_details(id_list, with_log, with_result)
+            return manager.get_tasks_status_with_details(id_list, with_log, with_result, session_id=session_id)
         else:
             return manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
 

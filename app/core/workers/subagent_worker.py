@@ -41,6 +41,10 @@ def _compute_context_budget(llm_config: Dict) -> int:
     Returns:
         可用于历史的 token 预算
     """
+    if not isinstance(llm_config, dict):
+        logger.warning(f"[SubAgentExecutor] _compute_context_budget received non-dict llm_config: {type(llm_config).__name__}, using defaults")
+        return 96000  # 默认 128k * 0.75
+
     profile = get_provider_profile(llm_config)
     context_limit = int(profile.get("context_limit", 128000))
 
@@ -286,6 +290,11 @@ class SubAgentExecutor(QThread):
         self._start_time = time.time()
 
         try:
+            # 防御：确保 llm_config 是 dict
+            if not isinstance(self.llm_config, dict):
+                logger.warning(f"[SubAgentExecutor] run() llm_config is not a dict: {type(self.llm_config).__name__}={self.llm_config!r}")
+                self.llm_config = {}
+
             agent = self.agent_manager.get_agent(self.agent_name)
             if not agent:
                 self.error_occurred.emit(self.task_id, f"Agent not found: {self.agent_name}")
@@ -348,7 +357,7 @@ class SubAgentExecutor(QThread):
             self.finished_with_result.emit(self.task_id, self._last_result)
 
         except Exception as e:
-            logger.error(f"[SubAgentExecutor] run() error: {e}")
+            logger.exception(f"[SubAgentExecutor] run() error: {e}")
             self._execution_error = str(e)
             # 任务出错，保存错误状态
             if self._log_store_callback:
@@ -468,6 +477,10 @@ class SubAgentExecutor(QThread):
         """调用 LLM API（非流式，子智能体后台执行无需流式输出）"""
         # 使用传入的 llm_config 或回退到 self.llm_config
         config = llm_config if llm_config is not None else self.llm_config
+        # 防御：确保 config 是 dict（传递给子智能体的配置可能被意外覆盖为字符串）
+        if not isinstance(config, dict):
+            logger.warning(f"[SubAgentExecutor] _make_api_call received non-dict config: {type(config).__name__}={config!r}, falling back to empty config")
+            config = {}
         api_key = config.get("API_KEY", "").strip()
         base_url = config.get("API_URL") or None
         model = str(config.get("模型名称", "gpt-4o"))
@@ -727,6 +740,7 @@ class SubAgentManager(QObject):
             executor_ref: Dict = None,
             share_context: bool = False,  # 是否共享主智能体上下文
             session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
+            llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
     ) -> bool:
         """执行子智能体任务
 
@@ -734,6 +748,8 @@ class SubAgentManager(QObject):
             session_id: 所属会话 ID。任务创建时即锁定该值，
                         后续回调不再读取全局 _current_session_id，
                         避免同一窗口内切换会话后异步回调用错 session_id。
+            llm_config: 预解析的 LLM 配置（可选）。传入时跳过内部 _get_llm_config() 调用，
+                        用于 --model=xxx 覆盖模型/服务商的场景。
         """
         # 在任务创建时即锁定 session_id，不依赖后续的全局状态
         task_session_id = session_id or self._current_session_id
@@ -763,7 +779,12 @@ class SubAgentManager(QObject):
             return False
 
         try:
-            llm_config = self._get_llm_config()
+            if llm_config is None:
+                llm_config = self._get_llm_config()
+            elif not isinstance(llm_config, dict):
+                # 防御：非 dict 的 llm_config（可能从 main_widget 传入的异常值）
+                logger.warning(f"[SubAgentManager] execute_task llm_config is not a dict: {type(llm_config).__name__}={llm_config!r}, falling back to default")
+                llm_config = self._get_llm_config()
             if not llm_config:
                 if on_error:
                     on_error("No LLM config available")
@@ -886,16 +907,29 @@ class SubAgentManager(QObject):
                 elapsed = int(time.time() - executor.start_time) if executor.start_time else 0
 
                 task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
-                self._finished_tasks[task_id] = {
-                    "result": result,
-                    "error": error,
-                    "agent_name": agent_name,
-                    "task_description": task_description,
-                    "session_id": task_session_id,
-                    "logs": logs,
-                    "tool_call_count": tool_call_count,
-                    "elapsed_seconds": elapsed,
-                }
+                # 如果 _on_sub_agent_task_finished 已经写入过，避免覆盖已有字段
+                if task_id not in self._finished_tasks:
+                    self._finished_tasks[task_id] = {
+                        "result": result,
+                        "error": error,
+                        "agent_name": agent_name,
+                        "task_description": task_description,
+                        "session_id": task_session_id,
+                        "logs": logs,
+                        "tool_call_count": tool_call_count,
+                        "elapsed_seconds": elapsed,
+                    }
+                else:
+                    # 更新关键字段，保留 session_id 等已有数据
+                    self._finished_tasks[task_id].setdefault("session_id", task_session_id)
+                    self._finished_tasks[task_id].setdefault("logs", logs)
+                    self._finished_tasks[task_id].setdefault("tool_call_count", tool_call_count)
+                    self._finished_tasks[task_id].setdefault("elapsed_seconds", elapsed)
+                    # 总是更新 result/error（_on_sub_agent_task_finished 可能拿到更准的数据）
+                    if result is not None:
+                        self._finished_tasks[task_id]["result"] = result
+                    if error is not None:
+                        self._finished_tasks[task_id]["error"] = error
 
                 # 更新数据库（传入锁定的 session_id）
                 self._save_task_to_store(task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id)
@@ -975,6 +1009,7 @@ class SubAgentManager(QObject):
                     "status": db_task.get("status", "unknown"),
                     "agent_name": db_task.get("agent_name", ""),
                     "task_description": db_task.get("task_description", ""),
+                    "session_id": db_task.get("session_id", ""),
                     "result": db_task.get("result", ""),
                     "error": db_task.get("error", ""),
                 }
@@ -989,7 +1024,8 @@ class SubAgentManager(QObject):
                 "summary": executor.get_summary(),
                 "logs": executor.get_logs(),
                 "found": True,
-                "status": "running"
+                "status": "running",
+                "session_id": getattr(executor, '_task_session_id', ''),
             }
 
         # 检查已完成的任务（内存）
@@ -1007,7 +1043,8 @@ class SubAgentManager(QObject):
                 },
                 "logs": task_info.get("logs", []),
                 "found": True,
-                "status": "finished"
+                "status": "finished",
+                "session_id": task_info.get("session_id", ""),
             }
 
         return {"summary": {}, "logs": [], "found": False, "status": "unknown"}
@@ -1050,34 +1087,52 @@ class SubAgentManager(QObject):
 
         return results
 
-    def get_tasks_status(self, task_ids: List[str]) -> ToolResult:
-        """获取指定任务的状态"""
+    def get_tasks_status(self, task_ids: List[str], session_id: str = None) -> ToolResult:
+        """获取指定任务的状态（会话隔离）
+        
+        Args:
+            session_id: 可选，传入时只返回属于该会话的任务
+        """
+        effective_session = session_id if session_id else self._current_session_id
         tasks_info = []
         for tid in task_ids:
             if tid in self._running_tasks:
                 executor = self._running_tasks[tid]
+                # 会话隔离：检查 running 任务的 session
+                if effective_session:
+                    task_session = getattr(executor, '_task_session_id', '')
+                    if task_session != effective_session:
+                        continue
                 tasks_info.append({
                     "task_id": tid,
                     "status": "running" if executor.isRunning() else "finishing",
                     "agent": executor.agent_name,
                 })
             elif tid in self._finished_tasks:
+                task_info = self._finished_tasks[tid]
+                task_session = task_info.get("session_id", "")
+                # 会话隔离：只返回当前会话的任务
+                # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
+                if effective_session and task_session != effective_session:
+                    continue
                 tasks_info.append({
                     "task_id": tid,
                     "status": "finished",
-                    "agent": self._finished_tasks[tid].get("agent_name", ""),
+                    "agent": task_info.get("agent_name", ""),
                 })
-            else:
-                tasks_info.append({
-                    "task_id": tid,
-                    "status": "unknown",
-                    "agent": "",
-                })
+            # 其他情况（unknown）不返回，隐藏不存在或不属于当前会话的任务
         return ToolResult(True, content={"tasks": tasks_info})
 
     def get_tasks_status_with_details(self, task_ids: List[str], with_log: bool = False,
-                                      with_result: bool = True) -> ToolResult:
-        """获取指定任务的详细状态"""
+                                      with_result: bool = True, session_id: str = None) -> ToolResult:
+        """获取指定任务的详细状态（会话隔离）
+        
+        Args:
+            session_id: 可选，传入时优先使用（解决跨会话查询问题），
+                        不传时回退到 self._current_session_id
+        """
+        # 优先使用传入的 session_id，避免跨会话污染
+        effective_session = session_id if session_id else self._current_session_id
         tasks_info = []
         for tid in task_ids:
             task_data = self.get_task_logs(tid)
@@ -1089,6 +1144,19 @@ class SubAgentManager(QObject):
                 })
                 continue
 
+            # 会话隔离：检查任务是否属于当前会话
+            task_session = task_data.get("session_id", "")
+            # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
+            if effective_session and task_session != effective_session:
+                # 任务属于其他会话，返回 unknown（不泄露其他会话的任务信息）
+                tasks_info.append({
+                    "task_id": tid,
+                    "status": "unknown",
+                    "agent": "",
+                    "_reason": "任务属于其他会话",
+                })
+                continue
+
             status = task_data.get("status", "unknown")
             task_info = {
                 "task_id": tid,
@@ -1096,16 +1164,8 @@ class SubAgentManager(QObject):
                 "agent": task_data.get("summary", {}).get("agent_name", task_data.get("agent_name", "")),
             }
 
-            # running 状态可以反复查，完成或失败只能查一次（按 session 隔离）
-            if status not in ("running", "unknown"):
-                session_queried = self._queried_tasks.get(self._current_session_id, set())
-                if tid in session_queried:
-                    task_info["_already_queried"] = True
-                    task_info["_message"] = "已查询过结果，可通过 id 再次查询"
-                    tasks_info.append(task_info)
-                    continue
-                session_queried.add(tid)
-                self._queried_tasks[self._current_session_id] = session_queried
+            # 显式按 ID 查询始终返回完整结果（不应用 _already_queried 限制）
+            # _already_queried 仅在 get_all_active_tasks_with_details 无条件返回时生效
 
             # 是否包含结果
             if with_result:
@@ -1140,7 +1200,8 @@ class SubAgentManager(QObject):
         for task_id, task_info in self._finished_tasks.items():
             # 会话隔离：只返回当前会话的任务
             task_session = task_info.get("session_id", "")
-            if target_session and task_session and task_session != target_session:
+            # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
+            if target_session and task_session != target_session:
                 continue
 
             # 跳过当前正在运行的任务（它们应该由 _running_tasks 处理）

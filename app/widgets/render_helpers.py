@@ -474,6 +474,47 @@ def _render_diff_preview(diff_text: str) -> str:
     return "".join(rows)
 
 
+# 内建工具图标映射（按模块×操作类型分类）
+_TOOL_ICON_MAP = {
+    # 文件工具 - 读取
+    "read": "📖",
+    "todoread": "📖",
+    "read_project_note": "📖",
+    # 文件工具 - 写入/编辑
+    "write": "✏️",
+    "edit": "✏️",
+    "multi_edit": "✏️",
+    "todowrite": "✏️",
+    "edit_project_note": "✏️",
+    # 文件工具 - 搜索/扫描
+    "grep": "🔍",
+    "glob": "🔍",
+    "list": "🔍",
+    "scan_repo": "🔍",
+    "stage_files": "🔍",
+    # 终端/后台命令
+    "bash": "💻",
+    "bg_start": "💻",
+    "bg_stop": "💻",
+    "bg_logs": "💻",
+    "bg_list": "💻",
+    # 网络工具
+    "websearch": "🌐",
+    "webfetch": "🌐",
+    # 子智能体任务
+    "task": "🤖",
+    "task_batch": "🤖",
+    "task_status": "🤖",
+    # 技能工具
+    "skill": "⚡",
+    "list_skills": "⚡",
+    # 提问工具
+    "question": "❓",
+    # 诊断工具
+    "get_diagnostics": "🩺",
+}
+
+
 def render_tool_block(
     tool_name: str,
     tool_args: dict,
@@ -485,10 +526,10 @@ def render_tool_block(
 ) -> str:
     """渲染工具块，参数横向表格展示（左列参数名，右列结果值）"""
 
-    # 检测是否为 MCP 工具（mcp__server__tool）
-    is_mcp_tool = tool_name.startswith("mcp__")
+    # 检测是否为 MCP 工具（mcp__ 前缀或 mcp_list_servers）
+    is_mcp_tool = tool_name.startswith("mcp__") or tool_name == "mcp_list_servers"
 
-    # 检测是否为子智能体任务（包括旧的 task 和新的 task_batch）
+    # 检测是否为子智能体任务（特殊渲染逻辑）
     is_sub_agent_task = tool_name in ("task", "task_batch")
 
     # 状态图标
@@ -501,15 +542,18 @@ def render_tool_block(
             f'margin-left: 6px;">{status_text}</span>'
         )
 
+    # 图标与颜色按类型区分
     if is_mcp_tool:
         icon = "🌐"
         title_color = "#00BCD4"
-        tool_name = "__".join(tool_name.split("__")[2:])
+        if tool_name.startswith("mcp__"):
+            tool_name = "__".join(tool_name.split("__")[2:])
     elif is_sub_agent_task:
         icon = "🤖"
         title_color = "#9C27B0"
     else:
-        icon = "🔧"
+        # 从图标映射表查找，未找到则用默认扳手图标
+        icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
         title_color = "#FFA500"
 
     # 子智能体任务特殊处理

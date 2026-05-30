@@ -793,6 +793,58 @@ class HistoryCard(QWidget):
         if self._current_tab == "history":
             self._update_display()
 
+    def remove_session_card(self, session_id: str) -> bool:
+        """手术式删除单个历史会话卡片，避免全量刷新。
+
+        直接从布局和缓存中移除指定 session_id 的卡片，
+        同时更新 _all_history 数据。
+        如果当前在归档标签页或该 session 不在显示列表中，则回退到全量刷新。
+
+        Returns:
+            True 表示成功手术式删除；False 表示需要调用方回退到全量刷新
+        """
+        if self._current_tab != "history":
+            return False
+        if self._search_filter:
+            # 搜索模式下缓存/布局不一致，回退全量刷新
+            return False
+
+        # 从缓存中查找卡片
+        card = self._cached_cards.get(session_id)
+        if card is None:
+            return False
+
+        # 从布局中移除该卡片
+        layout = self.get_content_layout()
+        if layout is None:
+            return False
+
+        # 找到卡片在布局中的位置并移除
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget() is card:
+                layout.takeAt(i)
+                break
+
+        # 删除卡片 widget
+        card.deleteLater()
+        self._cached_cards.pop(session_id, None)
+
+        # 从 _all_history 中移除该会话
+        self._all_history = [
+            s for s in self._all_history
+            if s.get("session_id") != session_id
+        ]
+
+        # 更新 _current_index：如果被删除的是当前会话，index 置 None
+        if self._current_index is not None:
+            if 0 <= self._current_index < len(self._all_history):
+                pass  # 索引不变
+            else:
+                self._current_index = None
+
+        return True
+
     def set_archived_sessions(self, archived_list: List[Dict]):
         """设置归档会话列表"""
         self._archived_sessions = archived_list

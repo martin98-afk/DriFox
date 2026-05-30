@@ -29,9 +29,19 @@
                 # 用替换文本继续发送
                 text = result.replacement
 """
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
+
+
+@dataclass
+class CommandParameter:
+    """命令参数定义（用于 detail 模式交互式参数列表）"""
+    name: str                # 显示名称，如 "--with-context", "--model="
+    description: str = ""    # 说明文字
+    param_type: str = "flag" # "flag" | "value" | "positional"
+    value_options: list = field(default_factory=list)  # value 类型的可选值列表（硬编码）
 
 
 class CommandType(Enum):
@@ -49,6 +59,8 @@ class CommandResult:
     command_name: str = ""       # 匹配到的命令名
     replacement: str = ""        # 提示词替换文本（仅 PROMPT/AGENT 命令）
     subagent_task: str = ""      # 子智能体任务描述（仅 SUBAGENT 命令）
+    subagent_with_context: bool = False  # --with-context 是否传递主智能体上下文
+    subagent_model_value: str = ""      # --model=xxx 原始值（如 "OpenAI:gpt-4o"）
     remainder: str = ""          # 命令后的用户输入（保留部分）
 
 
@@ -60,6 +72,7 @@ class CommandDefinition:
     description: str = ""
     argument_hint: str = ""      # 参数提示（显示在命令卡片 detail 模式）
     prompt_text: str = ""        # PROMPT/AGENT 命令使用
+    parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -75,6 +88,15 @@ class CommandDefinition:
             "description": self.description,
             "type": display_type,
         }
+
+
+def _pick_first_entry(entries: Dict[CommandType, "CommandDefinition"]) -> "CommandDefinition":
+    """按优先级 AGENT > PROMPT > FUNCTION 从 entries 中选一个，兜底取第一个"""
+    for t in (CommandType.AGENT, CommandType.PROMPT, CommandType.FUNCTION):
+        if t in entries:
+            return entries[t]
+    # 兜底：取第一个注册的类型
+    return next(iter(entries.values()))
 
 
 class CommandManager:
@@ -99,7 +121,8 @@ class CommandManager:
         cls._instance = None
 
     def __init__(self):
-        self._commands: Dict[str, CommandDefinition] = {}
+        # 按 (名称 → {类型 → 定义}) 组织，同名不同类型可共存
+        self._commands: Dict[str, Dict[CommandType, CommandDefinition]] = {}
 
     # ---- 注册 / 注销 ----
 
@@ -110,6 +133,7 @@ class CommandManager:
         description: str = "",
         argument_hint: str = "",
         prompt_text: str = "",
+        parameters: Optional[List[CommandParameter]] = None,
     ):
         """注册一个内置命令
 
@@ -119,32 +143,49 @@ class CommandManager:
             description: 描述文本（显示在命令卡片中）
             argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
             prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
+            parameters: 可交互参数列表（用于 detail 模式参数补全）
         """
-        self._commands[name] = CommandDefinition(
+        if name not in self._commands:
+            self._commands[name] = {}
+        self._commands[name][command_type] = CommandDefinition(
             name=name,
             type=command_type,
             description=description,
             argument_hint=argument_hint,
             prompt_text=prompt_text,
+            parameters=parameters or [],
         )
 
     def unregister(self, name: str):
-        """取消注册一个命令"""
+        """取消注册一个命令（移除该名称下的所有类型）"""
         self._commands.pop(name, None)
 
     def has_command(self, name: str) -> bool:
-        """检查命令是否已注册"""
-        return name in self._commands
+        """检查命令是否已注册（任一类型）"""
+        entries = self._commands.get(name, {})
+        return len(entries) > 0
 
     def get_command(self, name: str) -> Optional[CommandDefinition]:
-        """获取命令定义"""
-        return self._commands.get(name)
+        """获取命令定义（同名多类型时返回第一个）"""
+        entries = self._commands.get(name, {})
+        if not entries:
+            return None
+        # 返回第一个注册的类型（稳定顺序：按 CommandType 枚举值排序）
+        for cmd in entries.values():
+            return cmd
 
     # ---- 查询 ----
 
     def get_all_commands(self) -> List[Dict[str, str]]:
-        """获取所有命令的显示列表（供 CommandCard 使用）"""
-        return [cmd.to_display_dict() for cmd in self._commands.values()]
+        """获取所有命令的显示列表（供 CommandCard 使用）
+
+        同名不同类型的命令都会返回（如 /review 命令和 /review 智能体同时存在）。
+        """
+        result = []
+        for entries in self._commands.values():
+            for cmd in entries.values():
+                result.append(cmd.to_display_dict())
+        return result
 
     def get_command_names(self) -> List[str]:
         """获取所有命令名"""
@@ -166,22 +207,68 @@ class CommandManager:
             return parts[0] if parts else None
         return None
 
+    @staticmethod
+    def parse_active_params(text: str) -> Set[str]:
+        """从输入文本中提取已存在的参数名
+
+        匹配规则：
+        - --key=value → "--key="
+        - --flag      → "--flag"
+        - --key       → "--key="（文本末尾，正在输入的值参数）
+
+        Args:
+            text: 输入框文本
+
+        Returns:
+            参数名集合，如 {"--with-context", "--model="}
+        """
+        if not text or not text.strip():
+            return set()
+
+        result: Set[str] = set()
+
+        # 1. --key=value 形式的完整参数
+        for m in re.finditer(r'--[\w-]+=', text):
+            result.add(m.group())
+
+        # 2. 独立 --flag 形式的参数（前后是空白/字符串边界，且不跟 =）
+        for m in re.finditer(r'(?:^|\s)(--[\w-]+)(?=\s|$)', text):
+            flag = m.group(1)
+            if flag + "=" not in result:  # 排除已被 --key= 覆盖的
+                result.add(flag)
+
+        # 3. 文本末尾可能正在输入的 --key（如用户刚打完 --model，还没打 = 和值）
+        for m in re.finditer(r'--([\w-]+)$', text):
+            result.add(f"--{m.group(1)}=")
+
+        return result
+
     def is_builtin_command(self, text: str) -> bool:
         """判断输入文本是否匹配某个已注册的内置命令"""
         name = self.parse_command_name(text)
-        return name is not None and name in self._commands
+        return name is not None and self.has_command(name)
 
     def is_known_command_name(self, name: str) -> bool:
-        """根据命令名判断是否为内置命令（不含 /）"""
-        return name in self._commands
+        """根据命令名判断是否为内置命令（不含 /，任一类型存在即可）"""
+        return self.has_command(name)
 
     # ---- 执行 ----
 
-    def execute(self, text: str) -> Optional[CommandResult]:
+    # 显示类型 → CommandType 映射（来自 CommandCard 的 display_type）
+    _DISPLAY_TYPE_MAP = {
+        "command": CommandType.FUNCTION,
+        "prompt": CommandType.PROMPT,
+        "agent": CommandType.AGENT,
+    }
+
+    def execute(self, text: str,
+                preferred_display_type: Optional[str] = None) -> Optional[CommandResult]:
         """解析并执行命令
 
         Args:
             text: 用户输入的完整文本
+            preferred_display_type: 可选，来自 CommandCard 的 display_type
+                （"command"/"prompt"/"agent"），按此类型优先匹配执行
 
         Returns:
             Optional[CommandResult]:
@@ -190,12 +277,29 @@ class CommandManager:
             - CommandResult(type=PROMPT): 提示词替换命令，使用 replacement 作为发送文本
             - CommandResult(type=AGENT): 智能体命令，使用 replacement 作为发送文本
             - CommandResult(type=SUBAGENT): 智能体命令 + --subagent，触发子智能体任务
+
+        同名不同类型同时存在时执行策略：
+        1. 如果提供了 preferred_display_type（来自卡片选中），优先匹配该类型
+        2. 否则按优先级：AGENT > PROMPT > FUNCTION
+           （保持与原有"智能体覆盖命令"行为一致）
         """
         cmd_name = self.parse_command_name(text)
         if not cmd_name or cmd_name not in self._commands:
             return None
 
-        cmd = self._commands[cmd_name]
+        entries = self._commands[cmd_name]
+        if not entries:
+            return None
+
+        # 选取匹配类型：优先卡片选中 → 回落默认优先级
+        if preferred_display_type:
+            preferred = self._DISPLAY_TYPE_MAP.get(preferred_display_type)
+            if preferred and preferred in entries:
+                cmd = entries[preferred]
+            else:
+                cmd = _pick_first_entry(entries)
+        else:
+            cmd = _pick_first_entry(entries)
 
         # 提取命令后的用户输入（保留部分）
         remainder = ""
@@ -220,33 +324,31 @@ class CommandManager:
                 before_subagent = remainder[:subagent_match].rstrip()
                 after_subagent = remainder[subagent_match + len("--subagent"):].lstrip()
 
-                # 找到下一个 -- 参数的位置
-                next_flag_pos = -1
-                for i in range(len(after_subagent)):
-                    if after_subagent[i] == '-' and (i == 0 or after_subagent[i-1] == ' '):
-                        if after_subagent[i:].startswith("--"):
-                            next_flag_pos = i
-                            break
+                # 解析子智能体 flag：--with-context, --model=xxx
+                text_for_task, subagent_with_context, subagent_model_value = (
+                    self._parse_subagent_flags(after_subagent)
+                )
 
-                if next_flag_pos >= 0:
-                    subagent_task = after_subagent[:next_flag_pos].strip()
-                    remainder_after_subagent = after_subagent[next_flag_pos:].strip()
+                # 找到下一个 -- 参数的位置（从任务描述中分离后续 -- 参数）
+                next_flag_match = re.search(r"(?:^|\s)(--)", text_for_task)
+                if next_flag_match:
+                    split_pos = next_flag_match.start(1)
+                    subagent_task = text_for_task[:split_pos].strip()
+                    remainder_after_subagent = text_for_task[split_pos:].strip()
                 else:
-                    subagent_task = after_subagent.strip()
+                    subagent_task = text_for_task.strip()
                     remainder_after_subagent = ""
 
                 # 重新组装 remainder
-                if before_subagent or remainder_after_subagent:
-                    remainder = before_subagent
-                    if remainder_after_subagent:
-                        remainder = f"{remainder} {remainder_after_subagent}" if remainder else remainder_after_subagent
-                else:
-                    remainder = ""
+                parts = [p for p in (before_subagent, remainder_after_subagent) if p]
+                remainder = " ".join(parts)
 
                 return CommandResult(
                     type=CommandType.SUBAGENT,
                     command_name=cmd_name,
                     subagent_task=subagent_task,
+                    subagent_with_context=subagent_with_context,
+                    subagent_model_value=subagent_model_value,
                     remainder=remainder,
                 )
 
@@ -257,3 +359,31 @@ class CommandManager:
             replacement=cmd.prompt_text,
             remainder=remainder,
         )
+
+    @staticmethod
+    def _parse_subagent_flags(text: str):
+        """从文本开头解析 --with-context 和 --model=xxx 标志
+
+        返回 (剩余文本, with_context, model_value)。
+        """
+        with_context = False
+        model_value = ""
+
+        while text:
+            text = text.lstrip()
+            if text.startswith("--with-context"):
+                with_context = True
+                text = text[len("--with-context"):].lstrip()
+            elif text.startswith("--model="):
+                eq_pos = text.find("=")
+                space_pos = text.find(" ", eq_pos)
+                if space_pos < 0:
+                    model_value = text[eq_pos + 1:]
+                    text = ""
+                else:
+                    model_value = text[eq_pos + 1:space_pos]
+                    text = text[space_pos:].lstrip()
+            else:
+                break
+
+        return text, with_context, model_value
