@@ -118,6 +118,8 @@ class SendableTextEdit(TextEdit):
         """注入命令卡片引用（由 main_widget 创建并注册）"""
         self._command_card_ref = card
         card.commandSelected.connect(self._on_command_selected)
+        card.parameterSelected.connect(self._on_parameter_selected)
+        card.parameterValueSelected.connect(self._on_param_value_selected)
         card.dismissed.connect(self._on_card_dismissed)
 
     def _get_card(self):
@@ -182,6 +184,8 @@ class SendableTextEdit(TextEdit):
                 # 避免每次敲键都触发 get_skill_by_name（扫描文件系统）和 signal 发射
                 card = self._get_card()
                 if card and card.is_detail_mode and card.detail_cmd_name == cmd_name:
+                    # 同步参数显隐：追踪输入框中的参数变化
+                    self._sync_detail_params()
                     return
 
                 from app.core.command_manager import CommandManager
@@ -302,6 +306,61 @@ class SendableTextEdit(TextEdit):
         """卡片被关闭时的清理"""
         self._slash_trigger_pos = -1
 
+    # ==================== Detail 模式参数交互 ====================
+
+    def _on_parameter_selected(self, param_name: str, param_type: str):
+        """参数项被选中（来自 CommandCard.parameterSelected）"""
+        self.insert_parameter_text(param_name, param_type)
+
+    def _on_param_value_selected(self, value: str):
+        """值选择完成（来自 CommandCard.parameterValueSelected）
+
+        自动补全 --model= 的值。
+        """
+        cursor = self.textCursor()
+        cursor.insertText(value)
+        cursor.insertText(" ")
+        self.setTextCursor(cursor)
+        self.setFocus(Qt.OtherFocusReason)
+
+    def insert_parameter_text(self, param_name: str, param_type: str):
+        """在光标处插入参数文本（detail 模式参数补全）
+
+        - flag: 插入 " --param-name "
+        - value: 插入 " --param="（等待值选择）
+        - positional: 不插入（提示用户自行输入）
+        """
+        if param_type == "positional":
+            return
+
+        cursor = self.textCursor()
+        text = self.toPlainText()
+
+        # 确定插入位置：光标处 或 文本末尾
+        pos = cursor.position()
+        if pos < 0:
+            pos = len(text)
+
+        cursor.setPosition(pos)
+        if param_type == "flag":
+            cursor.insertText(f" {param_name} ")
+        elif param_type == "value":
+            cursor.insertText(f" {param_name}")
+        self.setTextCursor(cursor)
+        self.setFocus(Qt.OtherFocusReason)
+
+    def _sync_detail_params(self):
+        """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片"""
+        from app.core.command_manager import CommandManager
+        card = self._get_card()
+        if not card or not card.is_detail_mode:
+            return
+        text = self.toPlainText()
+        if not text:
+            return
+        active = CommandManager.parse_active_params(text)
+        card.update_active_params(active)
+
     # ==================== 输入历史浏览 ====================
 
     def load_history(self, history_list: list):
@@ -399,6 +458,8 @@ class SendableTextEdit(TextEdit):
         # 文本变化时总是需要调整高度，不管是否在停止模式
         if not getattr(self, '_initializing', False):
             self._adjust_height_to_content()
+        # detail 模式参数同步（安全兜底，_on_slash_trigger_check 也会调）
+        self._sync_detail_params()
 
     def _adjust_height_to_content(self):
         """根据内容自动调整高度
@@ -516,7 +577,11 @@ class SendableTextEdit(TextEdit):
                 event.accept()
                 return
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
-                # detail 模式：不拦截 Enter/Tab，让走正常行为（发送/输入）
+                # detail 模式：Tab 触发参数选中，Enter 走正常发送
+                if card.is_detail_mode and event.key() == Qt.Key_Tab:
+                    card.select_current()
+                    event.accept()
+                    return
                 if not card.is_detail_mode:
                     card.select_current()
                     event.accept()

@@ -28,7 +28,7 @@ from typing import Callable, Dict, Any, Optional
 import yaml
 from loguru import logger
 
-from app.core.command_manager import CommandManager, CommandType
+from app.core.command_manager import CommandManager, CommandType, CommandParameter
 from app.tools.tool_name_mapper import ToolNameMapper
 
 
@@ -95,12 +95,28 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         restriction_text = _generate_tool_restriction_text(meta)
         enhanced_body = restriction_text + body if restriction_text else body
 
+        # 解析 parameters：从 YAML frontmatter 转换为 CommandParameter 列表
+        raw_params = meta.get("parameters", [])
+        params = []
+        for p in raw_params:
+            name = p.get("name", "")
+            desc = p.get("desc", p.get("description", ""))
+            # 自动推断 param_type：--xxx= 结尾是 value，-- 开头是 flag，否则 positional
+            if name.startswith("--") and name.endswith("="):
+                ptype = "value"
+            elif name.startswith("--"):
+                ptype = "flag"
+            else:
+                ptype = "positional"
+            params.append(CommandParameter(name=name, description=desc, param_type=ptype))
+
         return {
             "name": file_path.stem,  # 文件名作为命令名
             "description": meta.get("description", ""),
             "argument_hint": meta.get("argument-hint", ""),
             "type": meta.get("type", "prompt"),
             "prompt_text": enhanced_body,  # 已包含工具限制说明（如有）
+            "parameters": params,
         }
     except Exception as e:
         logger.error(f"[BuiltinCommands] Failed to load command {file_path}: {e}")
@@ -222,6 +238,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
                 description=cmd["description"],
                 argument_hint=cmd["argument_hint"],
                 prompt_text=cmd["prompt_text"],
+                parameters=cmd.get("parameters", []),
             )
             commands.append(cmd)
     return commands
@@ -295,6 +312,14 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
         logger.warning("[BuiltinCommands] No agent files found from any source")
         return
 
+    # 所有智能体命令共享的参数定义
+    agent_params = [
+        CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）"),
+        CommandParameter("--with-context", "传递当前会话历史给子智能体"),
+        CommandParameter("--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value"),
+        CommandParameter("<task-desc>", "子智能体任务描述", param_type="positional"),
+    ]
+
     for md_file in agent_files:
         try:
             content = md_file.read_text(encoding="utf-8")
@@ -327,6 +352,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
                 command_type=CommandType.AGENT,
                 description=description,
                 prompt_text=enhanced_body,
+                parameters=agent_params,
             )
             logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
                         f"{' (with tool restrictions)' if restriction_text else ''}")

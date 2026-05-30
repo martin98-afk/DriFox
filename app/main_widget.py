@@ -1823,10 +1823,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # 如果卡片还没显示（首次进入 detail 模式），展开容器
         if not card.is_card_visible:
             self._card_manager.show_card("command", self._window_id)
+        # 构建数据源（供 detail 模式参数列表使用）
+        data_provider = {
+            "model_options": self._get_all_model_options_flat(),
+        }
         # 切换到 detail 模式（按选中类型显示对应 hint）
-        card.show_command_detail(cmd_name, selected_type)
+        card.show_command_detail(cmd_name, selected_type, data_provider=data_provider)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
+
+    def _get_all_model_options_flat(self) -> list:
+        """平展所有服务商:模型名列表"""
+        options = []
+        for provider, config in self._valid_configs.items():
+            models = self._get_model_list_for_provider(provider)
+            for model in models:
+                options.append(f"{provider}:{model}")
+        return sorted(options)
 
     def _toggle_model_selector_card(self):
         """切换模型选择卡片的显示"""
@@ -4402,15 +4415,29 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._clear_chat_area, self._show_initial_welcome
             )
 
-        # 刷新历史会话卡片
+        # 手术式删除卡片 vs 全量刷新
         current_tab = self._history_popup_card._current_tab if hasattr(self._history_popup_card,
                                                                        '_current_tab') else "history"
-        if current_tab == "archived":
-            # 如果当前在归档标签页，需要清理并刷新
-            refresh_history_card_if_visible(self._history_card,
-                                            lambda: self._refresh_history_toggle_panel(is_archived=True))
+        if archived_current:
+            # 归档的是当前会话 → UI 变化大（新会话创建、活跃标记变更），需要全量刷新
+            if current_tab == "archived":
+                refresh_history_card_if_visible(self._history_card,
+                                                lambda: self._refresh_history_toggle_panel(is_archived=True))
+            else:
+                refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
         else:
-            refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+            # 归档的是非当前会话 → 可以直接手术式删除卡片，避免全量刷新
+            if current_tab == "archived":
+                # 归档标签页下，需要刷新归档列表
+                refresh_history_card_if_visible(self._history_card,
+                                                lambda: self._refresh_history_toggle_panel(is_archived=True))
+            else:
+                # 历史标签页下，手术式删除卡片
+                removed = self._history_popup_card.remove_session_card(session_id) if hasattr(
+                    self._history_popup_card, 'remove_session_card') else False
+                if not removed:
+                    # 回退：手术式删除失败，走全量刷新
+                    refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:

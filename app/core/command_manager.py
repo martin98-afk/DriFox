@@ -30,9 +30,18 @@
                 text = result.replacement
 """
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
+
+
+@dataclass
+class CommandParameter:
+    """命令参数定义（用于 detail 模式交互式参数列表）"""
+    name: str                # 显示名称，如 "--with-context", "--model="
+    description: str = ""    # 说明文字
+    param_type: str = "flag" # "flag" | "value" | "positional"
+    value_options: list = field(default_factory=list)  # value 类型的可选值列表（硬编码）
 
 
 class CommandType(Enum):
@@ -63,6 +72,7 @@ class CommandDefinition:
     description: str = ""
     argument_hint: str = ""      # 参数提示（显示在命令卡片 detail 模式）
     prompt_text: str = ""        # PROMPT/AGENT 命令使用
+    parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -123,6 +133,7 @@ class CommandManager:
         description: str = "",
         argument_hint: str = "",
         prompt_text: str = "",
+        parameters: Optional[List[CommandParameter]] = None,
     ):
         """注册一个内置命令
 
@@ -132,6 +143,7 @@ class CommandManager:
             description: 描述文本（显示在命令卡片中）
             argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
             prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
+            parameters: 可交互参数列表（用于 detail 模式参数补全）
         """
         if name not in self._commands:
             self._commands[name] = {}
@@ -141,6 +153,7 @@ class CommandManager:
             description=description,
             argument_hint=argument_hint,
             prompt_text=prompt_text,
+            parameters=parameters or [],
         )
 
     def unregister(self, name: str):
@@ -193,6 +206,42 @@ class CommandManager:
             parts = text[1:].split(maxsplit=1)
             return parts[0] if parts else None
         return None
+
+    @staticmethod
+    def parse_active_params(text: str) -> Set[str]:
+        """从输入文本中提取已存在的参数名
+
+        匹配规则：
+        - --key=value → "--key="
+        - --flag      → "--flag"
+        - --key       → "--key="（文本末尾，正在输入的值参数）
+
+        Args:
+            text: 输入框文本
+
+        Returns:
+            参数名集合，如 {"--with-context", "--model="}
+        """
+        if not text or not text.strip():
+            return set()
+
+        result: Set[str] = set()
+
+        # 1. --key=value 形式的完整参数
+        for m in re.finditer(r'--[\w-]+=', text):
+            result.add(m.group())
+
+        # 2. 独立 --flag 形式的参数（前后是空白/字符串边界，且不跟 =）
+        for m in re.finditer(r'(?:^|\s)(--[\w-]+)(?=\s|$)', text):
+            flag = m.group(1)
+            if flag + "=" not in result:  # 排除已被 --key= 覆盖的
+                result.add(flag)
+
+        # 3. 文本末尾可能正在输入的 --key（如用户刚打完 --model，还没打 = 和值）
+        for m in re.finditer(r'--([\w-]+)$', text):
+            result.add(f"--{m.group(1)}=")
+
+        return result
 
     def is_builtin_command(self, text: str) -> bool:
         """判断输入文本是否匹配某个已注册的内置命令"""

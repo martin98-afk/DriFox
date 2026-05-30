@@ -41,6 +41,10 @@ def _compute_context_budget(llm_config: Dict) -> int:
     Returns:
         可用于历史的 token 预算
     """
+    if not isinstance(llm_config, dict):
+        logger.warning(f"[SubAgentExecutor] _compute_context_budget received non-dict llm_config: {type(llm_config).__name__}, using defaults")
+        return 96000  # 默认 128k * 0.75
+
     profile = get_provider_profile(llm_config)
     context_limit = int(profile.get("context_limit", 128000))
 
@@ -286,6 +290,11 @@ class SubAgentExecutor(QThread):
         self._start_time = time.time()
 
         try:
+            # 防御：确保 llm_config 是 dict
+            if not isinstance(self.llm_config, dict):
+                logger.warning(f"[SubAgentExecutor] run() llm_config is not a dict: {type(self.llm_config).__name__}={self.llm_config!r}")
+                self.llm_config = {}
+
             agent = self.agent_manager.get_agent(self.agent_name)
             if not agent:
                 self.error_occurred.emit(self.task_id, f"Agent not found: {self.agent_name}")
@@ -468,6 +477,10 @@ class SubAgentExecutor(QThread):
         """调用 LLM API（非流式，子智能体后台执行无需流式输出）"""
         # 使用传入的 llm_config 或回退到 self.llm_config
         config = llm_config if llm_config is not None else self.llm_config
+        # 防御：确保 config 是 dict（传递给子智能体的配置可能被意外覆盖为字符串）
+        if not isinstance(config, dict):
+            logger.warning(f"[SubAgentExecutor] _make_api_call received non-dict config: {type(config).__name__}={config!r}, falling back to empty config")
+            config = {}
         api_key = config.get("API_KEY", "").strip()
         base_url = config.get("API_URL") or None
         model = str(config.get("模型名称", "gpt-4o"))
@@ -767,6 +780,10 @@ class SubAgentManager(QObject):
 
         try:
             if llm_config is None:
+                llm_config = self._get_llm_config()
+            elif not isinstance(llm_config, dict):
+                # 防御：非 dict 的 llm_config（可能从 main_widget 传入的异常值）
+                logger.warning(f"[SubAgentManager] execute_task llm_config is not a dict: {type(llm_config).__name__}={llm_config!r}, falling back to default")
                 llm_config = self._get_llm_config()
             if not llm_config:
                 if on_error:
