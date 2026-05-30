@@ -16,6 +16,7 @@ from loguru import logger
 from app.tools import get_builtin_tools_schema
 from app.core.hook_manager import HookManager
 from app.tools.tool_name_mapper import ToolNameMapper
+from app.core.builtin_commands import _generate_tool_restriction_text
 
 
 @dataclass
@@ -562,7 +563,13 @@ class AgentManager:
 
         agent = Agent.from_dict(meta)
         agent.name = file_path.stem
-        agent.prompt = body
+
+        # 在提示词第一行追加工具限制说明
+        restriction_text = _generate_tool_restriction_text(meta)
+        if restriction_text:
+            agent.prompt = restriction_text + body
+        else:
+            agent.prompt = body
 
         return agent
 

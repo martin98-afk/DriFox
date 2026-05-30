@@ -6,6 +6,7 @@ SQLite 数据库管理器 - 单例模式
 每个数据库文件只有一个 DatabaseManager 实例。
 """
 import sqlite3
+import threading
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class DatabaseManager:
             cls._instance = super().__new__(cls)
             cls._instance._conn = None
             cls._instance._db_path = None
+            cls._instance._lock = threading.Lock()
         return cls._instance
 
     def connect(self, db_path: str) -> bool:
@@ -98,19 +100,20 @@ class DatabaseManager:
     def execute_sql(self, sql: str, params: tuple = ()) -> Tuple[bool, str]:
         if not self._conn:
             return False, "未连接数据库"
-        try:
-            cursor = self._conn.cursor()
-            cursor.execute(sql, params)
-            self._conn.commit()
-            stripped_sql = sql.strip().upper()
-            if stripped_sql.startswith("SELECT") or stripped_sql.startswith("PRAGMA"):
-                rows = cursor.fetchall()
-                return True, [dict(row) for row in rows]
-            else:
-                return True, f"影响行数: {cursor.rowcount}"
-        except Exception as e:
-            self._conn.rollback()
-            return False, str(e)
+        with self._lock:
+            try:
+                cursor = self._conn.cursor()
+                cursor.execute(sql, params)
+                self._conn.commit()
+                stripped_sql = sql.strip().upper()
+                if stripped_sql.startswith("SELECT") or stripped_sql.startswith("PRAGMA"):
+                    rows = cursor.fetchall()
+                    return True, [dict(row) for row in rows]
+                else:
+                    return True, f"影响行数: {cursor.rowcount}"
+            except Exception as e:
+                self._conn.rollback()
+                return False, str(e)
 
     def create_table(
         self, table_name: str, columns: List[Dict[str, str]]

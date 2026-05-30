@@ -29,6 +29,7 @@ import yaml
 from loguru import logger
 
 from app.core.command_manager import CommandManager, CommandType
+from app.tools.tool_name_mapper import ToolNameMapper
 
 
 # ============================================================
@@ -90,12 +91,16 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         if not meta:
             return None
 
+        # 生成工具限制说明（有 tools/permission 限制时追加到提示词第一行）
+        restriction_text = _generate_tool_restriction_text(meta)
+        enhanced_body = restriction_text + body if restriction_text else body
+
         return {
             "name": file_path.stem,  # 文件名作为命令名
             "description": meta.get("description", ""),
             "argument_hint": meta.get("argument-hint", ""),
             "type": meta.get("type", "prompt"),
-            "prompt_text": body,  # prompt/agent 类型使用文件内容作为提示词
+            "prompt_text": enhanced_body,  # 已包含工具限制说明（如有）
         }
     except Exception as e:
         logger.error(f"[BuiltinCommands] Failed to load command {file_path}: {e}")
@@ -226,6 +231,63 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
 # agents 目录加载（通过 PluginManager）
 # ============================================================
 
+def _generate_tool_restriction_text(meta: dict) -> str:
+    """从 frontmatter 生成工具限制说明文本（放在提示词第一行）
+
+    支持三种限制字段：
+    - tools: 工具白名单列表（仅允许列出的工具）
+    - permission: 工具权限配置（deny 表示禁用）
+    - allowed-tools: 显式允许的工具列表（来自 Claude Code 等插件格式）
+
+    Args:
+        meta: YAML frontmatter 解析结果
+
+    Returns:
+        限制说明文本（空字符串表示无限制），格式如：
+        "[工具限制] 仅允许以下工具: read, write, edit\n"
+    """
+    tools = meta.get("tools", None)
+    permission = meta.get("permission", None)
+    allowed_tools = meta.get("allowed-tools", None)
+
+    lines = []
+
+    # 白名单模式（tools / allowed-tools）与 deny 模式互斥
+    # 白名单已隐式拒绝所有不在列表中的工具，无需再输出 deny 行
+    whitelist_active = False
+
+    # 白名单模式（tools 字段）
+    if tools:
+        if isinstance(tools, list):
+            allowed_list = [str(t) for t in tools if ToolNameMapper.is_known(t)]
+        elif isinstance(tools, dict):
+            allowed_list = [str(k) for k, v in tools.items() if v and ToolNameMapper.is_known(k)]
+        else:
+            allowed_list = []
+        if allowed_list:
+            mapped = [ToolNameMapper.to_native(t) for t in allowed_list]
+            lines.append(f"[工具限制] 仅允许以下工具: {', '.join(mapped)}")
+            whitelist_active = True
+
+    # 白名单模式（allowed-tools，来自 Claude Code 等插件格式）
+    if allowed_tools and isinstance(allowed_tools, list):
+        known = [str(t) for t in allowed_tools if ToolNameMapper.is_known(t)]
+        if known:
+            mapped = [ToolNameMapper.to_native(t) for t in known]
+            lines.append(f"[工具限制] 仅允许以下工具: {', '.join(mapped)}")
+            whitelist_active = True
+
+    # deny 模式（仅当没有白名单时才有意义）
+    if permission and isinstance(permission, dict) and not whitelist_active:
+        denied = [k for k, v in permission.items() if v == "deny"]
+        if denied:
+            mapped_denied = [ToolNameMapper.to_native(d) for d in denied]
+            lines.append(f"[工具限制] 已禁用: {', '.join(mapped_denied)}")
+
+    # 返回：空时返回空字符串（与 agent.py 保持一致，空字符串拼接不产生多余换行）
+    return ("\n".join(lines) + "\n\n") if lines else ""
+
+
 def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
     """加载智能体命令：优先 PluginManager 路径，回退到 app/agents/"""
     agent_files = _get_agent_files()
@@ -256,13 +318,18 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
 
             description = meta.get("description", "")
 
+            # 有工具限制时，在提示词第一行追加限制说明
+            restriction_text = _generate_tool_restriction_text(meta)
+            enhanced_body = restriction_text + body if restriction_text else body
+
             cmd_mgr.register(
                 name=md_file.stem,
                 command_type=CommandType.AGENT,
                 description=description,
-                prompt_text=body,
+                prompt_text=enhanced_body,
             )
-            logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}")
+            logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
+                        f"{' (with tool restrictions)' if restriction_text else ''}")
 
         except Exception as e:
             logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")
