@@ -215,7 +215,6 @@ class CommandManager:
         匹配规则：
         - --key=value → "--key="
         - --flag      → "--flag"
-        - --key       → "--key="（文本末尾，正在输入的值参数）
 
         Args:
             text: 输入框文本
@@ -228,7 +227,7 @@ class CommandManager:
 
         result: Set[str] = set()
 
-        # 1. --key=value 形式的完整参数
+        # 1. --key=value 形式的完整参数（如 --model=gpt-4o → "--model="）
         for m in re.finditer(r'--[\w-]+=', text):
             result.add(m.group())
 
@@ -237,10 +236,6 @@ class CommandManager:
             flag = m.group(1)
             if flag + "=" not in result:  # 排除已被 --key= 覆盖的
                 result.add(flag)
-
-        # 3. 文本末尾可能正在输入的 --key（如用户刚打完 --model，还没打 = 和值）
-        for m in re.finditer(r'--([\w-]+)$', text):
-            result.add(f"--{m.group(1)}=")
 
         return result
 

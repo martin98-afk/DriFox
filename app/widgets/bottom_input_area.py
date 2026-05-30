@@ -144,6 +144,9 @@ class SendableTextEdit(TextEdit):
                 self.slashDismissed.emit()
             return
 
+        # 无论什么分支，先同步 detail 模式参数显隐（删除/修改参数时恢复列表项）
+        self._sync_detail_params()
+
         card = self._get_card()
         try:
             cursor = self.textCursor()
@@ -408,10 +411,15 @@ class SendableTextEdit(TextEdit):
         if pos < 0:
             pos = len(text)
         cursor.setPosition(pos)
+        # 智能判断是否需要前导空格：光标前是空格 / -- / 文本开头 → 不加
+        need_space = pos > 0 and text[pos-1] not in (" ", "\t", "\n")
+        if pos >= 2 and text[pos-2:pos] == "--":
+            need_space = False
+        prefix = " " if need_space else ""
         if param_type == "flag":
-            cursor.insertText(f" {param_name} ")
+            cursor.insertText(f"{prefix}{param_name} ")
         elif param_type == "value":
-            cursor.insertText(f" {param_name}")
+            cursor.insertText(f"{prefix}{param_name}")
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
 
@@ -422,9 +430,7 @@ class SendableTextEdit(TextEdit):
         if not card or not card.is_detail_mode:
             return
         text = self.toPlainText()
-        if not text:
-            return
-        active = CommandManager.parse_active_params(text)
+        active = CommandManager.parse_active_params(text) if text else set()
         card.update_active_params(active)
 
     # ==================== 输入历史浏览 ====================

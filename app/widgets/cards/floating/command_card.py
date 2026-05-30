@@ -639,10 +639,14 @@ class CommandCard(QWidget):
         self.setVisible(True)
 
         # 动态计算高度
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
 
     def _adjust_detail_height(self):
         """根据内容动态调整 detail 容器高度"""
+        # 如果宽度尚未初始化，延迟到事件循环结束后再计算
+        if self.width() <= 0:
+            QTimer.singleShot(0, self._adjust_detail_height)
+            return
         margins = self._detail_container.layout().contentsMargins()
         v_margin = margins.top() + margins.bottom()
         spacing = self._detail_container.layout().spacing()
@@ -795,7 +799,7 @@ class CommandCard(QWidget):
         self._update_value_selection()
 
         # 重算高度
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
 
     def _on_value_clicked(self, value: str):
         """值选择项被点击"""
@@ -809,7 +813,7 @@ class CommandCard(QWidget):
         self._value_selection_param = ""
         self._detail_value_scroll.setVisible(False)
         self._detail_params_scroll.setVisible(True)
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
 
     def update_active_params(self, active: set):
         """根据输入中已存在的参数名列表，显隐参数项
@@ -817,13 +821,31 @@ class CommandCard(QWidget):
         Args:
             active: 输入文本中已存在的参数名集合，如 {"--with-context", "--model="}
         """
-        if not self._detail_mode or not self._detail_has_params:
+        if not self._detail_mode:
             return
+
+        if not self._detail_has_params:
+            return
+
+        # 安全兜底：_param_widgets 为空时重建
+        if not self._param_widgets:
+            cmd_mgr = CommandManager.get_instance()
+            entries = cmd_mgr._commands.get(self._detail_cmd_name, {})
+            for entry in entries.values():
+                if entry.parameters:
+                    self._build_param_widgets(entry.parameters)
+                    break
+            if not self._param_widgets:
+                return
 
         # 值选择模式：检查对应的参数是否还在输入中
         if self._value_selection_mode and self._value_selection_param:
             param_clean = self._value_selection_param.rstrip("=")
-            still_active = any(a.rstrip("=") == param_clean for a in active)
+            # value 参数必须有 = 才算激活（防止 --xxx 裸名也被算作激活）
+            still_active = any(
+                "=" in a and a.rstrip("=") == param_clean
+                for a in active
+            )
             if not still_active:
                 # 参数已被删掉 → 退出值选择模式，回到参数列表
                 self._exit_value_selection()
@@ -832,17 +854,24 @@ class CommandCard(QWidget):
         for w in self._param_widgets:
             param_key = w.param_name
             param_clean = param_key.rstrip("=")
-            # 检查 active 集合中是否有同名参数
-            is_active = any(a.rstrip("=") == param_clean for a in active)
+            if w.param_type == "value" and param_key.endswith("="):
+                is_active = any("=" in a and a.rstrip("=") == param_clean for a in active)
+            else:
+                is_active = any(a.rstrip("=") == param_clean for a in active)
             w.setVisible(not is_active)
             if w.isVisible():
                 any_visible = True
 
-        # 无可见参数时隐藏整个滚动区
+        # 显示/隐藏参数滚动区
         self._detail_params_scroll.setVisible(any_visible)
-
+        if any_visible:
+            self._detail_params_content.setVisible(True)
         # 重算高度
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
+        # 通知父容器布局更新
+        parent = self.parentWidget()
+        if parent:
+            parent.updateGeometry()
 
     def _update_param_selection(self):
         """更新参数列表选中高亮"""
@@ -874,10 +903,14 @@ class CommandCard(QWidget):
                 self._value_widgets[self._selected_value_index], 0, 0
             )
 
-    def _reset_detail_mode(self):
-        """退出 detail 模式，回到列表模式"""
+    def _reset_detail_mode(self) -> bool:
+        """退出 detail 模式，回到列表模式
+
+        Returns:
+            True 如果之前处于 detail 模式
+        """
         if not self._detail_mode:
-            return
+            return False
         self._detail_mode = False
         self._detail_cmd_name = ""
         self._detail_has_params = False
@@ -889,6 +922,11 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)
         self._scroll_area.setVisible(True)
+        # 清除 detail 模式设置的固定高度，让列表模式自由撑开
+        self.setMaximumHeight(16777215)
+        self.setMinimumHeight(0)
+        self.updateGeometry()
+        return True
 
     def _refresh_data(self):
         """刷新完整数据列表（命令 + 技能）
@@ -1200,13 +1238,16 @@ class CommandCard(QWidget):
             query: 搜索查询
             incremental: 是否增量更新（默认开启，可提升流畅性）
         """
-        self._reset_detail_mode()  # 回到列表模式（如果之前在 detail 模式）
+        was_detail = self._reset_detail_mode()  # 回到列表模式
         self._current_query = query
         self._refresh_data()
-        self.load_items(query, incremental=incremental)
+        # 从 detail 回列表时强制全量刷新，避免首次高度异常
+        self.load_items(query, incremental=incremental and not was_detail)
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)
+        if was_detail:
+            self.updateGeometry()
 
     def invalidate_cache(self):
         """使缓存失效，下次 show_card 时自动重建
