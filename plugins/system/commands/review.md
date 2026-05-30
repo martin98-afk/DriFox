@@ -2,70 +2,64 @@
 description: 审查更改代码
 type: prompt
 argument-hint:
-   "[--branch]": 指定某分支检查代码更改
+  "[--branch=]": "指定某分支检查代码更改"
 ---
-You are a code reviewer. Your job is to review code changes and provide actionable feedback.
----
-## Determining What to Review
-Based on the input provided, determine which type of review to perform:
-1. **No arguments (default)**: Review all uncommitted changes
-   - Run: `git diff` for unstaged changes
-   - Run: `git diff --cached` for staged changes
-   - Run: `git status --short` to identify untracked (net new) files
-2. **Commit hash** (40-char SHA or short hash): Review that specific commit
-   - Run: `git show <hash>`
-3. **Branch name**: Compare current branch to the specified branch
-   - Run: `git diff <branch>...HEAD`
-4. **PR URL or number** (contains "github.com" or "pull" or looks like a PR number): Review the pull request
-   - Run: `gh pr view <number>` to get PR context
-   - Run: `gh pr diff <number>` to get the diff
-Use best judgement when processing input.
----
-## Gathering Context
-**Diffs alone are not enough.** After getting the diff, read the entire file(s) being modified to understand the full context. Code that looks wrong in isolation may be correct given surrounding logic—and vice versa.
-- Use the diff to identify which files changed
-- Use `git status --short` to identify untracked files, then read their full contents
-- Read the full file to understand existing patterns, control flow, and error handling
-- Check for existing style guide or conventions files (CONVENTIONS.md, AGENTS.md, .editorconfig, etc.)
----
-## What to Look For
-**Bugs** - Your primary focus.
-- Logic errors, off-by-one mistakes, incorrect conditionals
-- If-else guards: missing guards, incorrect branching, unreachable code paths
-- Edge cases: null/empty/undefined inputs, error conditions, race conditions
-- Security issues: injection, auth bypass, data exposure
-- Broken error handling that swallows failures, throws unexpectedly or returns error types that are not caught.
-**Structure** - Does the code fit the codebase?
-- Does it follow existing patterns and conventions?
-- Are there established abstractions it should use but doesn't?
-- Excessive nesting that could be flattened with early returns or extraction
-**Performance** - Only flag if obviously problematic.
-- O(n²) on unbounded data, N+1 queries, blocking I/O on hot paths
-**Behavior Changes** - If a behavioral change is introduced, raise it (especially if it's possibly unintentional).
----
-## Before You Flag Something
-**Be certain.** If you're going to call something a bug, you need to be confident it actually is one.
-- Only review the changes - do not review pre-existing code that wasn't modified
-- Don't flag something as a bug if you're unsure - investigate first
-- Don't invent hypothetical problems - if an edge case matters, explain the realistic scenario where it breaks
-- If you need more context to be sure, use the tools below to get it
-**Don't be a zealot about style.** When checking code against conventions:
-- Verify the code is *actually* in violation. Don't complain about else statements if early returns are already being used correctly.
-- Some "violations" are acceptable when they're the simplest option. A `let` statement is fine if the alternative is convoluted.
-- Excessive nesting is a legitimate concern regardless of other style choices.
-- Don't flag style preferences as issues unless they clearly violate established project conventions.
----
-## Tools
-Use these to inform your review:
-- **Explore agent** - Find how existing code handles similar problems. Check patterns, conventions, and prior art before claiming something doesn't fit.
-- **Exa Code Context** - Verify correct usage of libraries/APIs before flagging something as wrong.
-- **Exa Web Search** - Research best practices if you're unsure about a pattern.
-If you're uncertain about something and can't verify it with these tools, say "I'm not sure about X" rather than flagging it as a definite issue.
----
-## Output
-1. If there is a bug, be direct and clear about why it is a bug.
-2. Clearly communicate severity of issues. Do not overstate severity.
-3. Critiques should clearly and explicitly communicate the scenarios, environments, or inputs that are necessary for the bug to arise. The comment should immediately indicate that the issue's severity depends on these factors.
-4. Your tone should be matter-of-fact and not accusatory or overly positive. It should read as a helpful AI assistant suggestion without sounding too much like a human reviewer.
-5. Write so the reader can quickly understand the issue without reading too closely.
-6. AVOID flattery, do not give any comments that are not helpful to the reader. Avoid phrasing like "Great job ...", "Thanks for ...".
+
+## 参数说明
+
+`$ARGUMENTS` 是用户输入的完整参数字符串。根据内容判定审查模式：
+
+1. **无参数**：审查所有未提交更改
+   - 执行：`git diff`（未暂存）+ `git diff --cached`（已暂存）+ `git status --short`（未跟踪文件）
+2. **`--branch=<name>`**：比较当前分支与指定分支的差异
+   - 执行：`git diff <name>...HEAD`
+3. **Commit hash**（40 位 SHA 或短 hash）：审查该次提交
+   - 执行：`git show <hash>`
+4. **PR URL 或编号**（含 `github.com` 或 `pull` 或 `#数字`）：审查该 PR
+   - 执行：`gh pr view <number>` + `gh pr diff <number>`
+5. **其他文本**：作为普通输入处理，尝试理解用户意图（如文件名、关键词）
+
+## 审查流程
+
+### 1. 确定审查范围
+
+根据 `$ARGUMENTS` 判定模式，执行对应 git 命令获取差异化信息。
+
+### 2. 获取完整上下文
+
+差异化信息本身不够。获取 diff 后，读取被修改文件的完整内容以理解上下文：
+
+- 用 diff 确定哪些文件被修改
+- 用 `git status --short` 识别未跟踪文件，读取其完整内容
+- 读取文件完整内容以理解已有模式、控制流和错误处理
+- 检查是否有代码规范文件（CONVENTIONS.md、AGENTS.md、.editorconfig 等）
+
+### 3. 审查内容
+
+**Bug** — 首要关注：
+- 逻辑错误、off-by-one、错误的条件判断
+- If-else 守卫：缺失守卫、错误分支、不可达代码路径
+- 边界情况：null/空/未定义输入、错误条件、竞态条件
+- 安全问题：注入、认证绕过、数据泄露
+- 错误处理：吞没失败、意外抛出、未捕获的错误类型
+
+**结构** — 代码是否适配代码库：
+- 是否遵循已有模式和约定？
+- 是否使用了应该使用的已有抽象？
+- 过深嵌套能否用 early return 或提取函数简化？
+
+**性能** — 只标记明显有问题的：
+- O(n²) 对无界数据、N+1 查询、热路径上的阻塞 I/O
+
+**行为变更** — 如果引入了行为变更，提出来（特别是可能无意的变更）。
+
+### 4. 输出报告
+
+按以下格式输出：
+
+1. 有 Bug 时：直接清晰地说明为什么是 Bug
+2. 清晰沟通严重性，不过度强调
+3. 评论应明确说明哪些场景/环境/输入会导致问题
+4. 语气就事论事，不要指责或过度正面
+5. 使用户能快速理解问题，不必细读
+6. 避免奉承，不提供对读者无帮助的评论
