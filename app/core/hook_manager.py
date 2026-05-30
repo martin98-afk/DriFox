@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Any, Callable, Union
 
 from PyQt5.QtCore import QThreadPool, QRunnable, pyqtSignal, QObject
 from loguru import logger
+from app.tools.tool_name_mapper import ToolNameMapper
 
 
 class HookType(Enum):
@@ -161,10 +162,13 @@ class HookMatchRule:
         if not self.matcher:
             return True
         
-        # 工具名匹配
+        # 工具名匹配（支持别名）
         if self.matcher.startswith("tool:"):
-            tool_name = self.matcher[5:]
-            return context.get("tool_name") == tool_name
+            pattern = self.matcher[5:]
+            actual = context.get("tool_name", "")
+            # 两边都用 ToolNameMapper 归一化
+            return (ToolNameMapper.to_native(pattern) ==
+                    ToolNameMapper.to_native(actual))
         
         # 正则匹配用户消息
         message = context.get("message", "")

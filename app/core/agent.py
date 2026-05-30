@@ -8,13 +8,14 @@
 import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Set
 
 import yaml
 from loguru import logger
 
 from app.tools import get_builtin_tools_schema
 from app.core.hook_manager import HookManager
+from app.tools.tool_name_mapper import ToolNameMapper
 
 
 @dataclass
@@ -45,7 +46,11 @@ class Agent:
     def from_dict(cls, data: Dict) -> "Agent":
         tools = data.get("tools", {})
         if isinstance(tools, list):
-            tools = {t: True for t in tools}
+            tools = {ToolNameMapper.to_native(t): True for t in tools
+                     if ToolNameMapper.is_known(t)}
+        elif isinstance(tools, dict):
+            tools = {ToolNameMapper.to_native(k): v for k, v in tools.items()
+                     if ToolNameMapper.is_known(k)}
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),
@@ -174,24 +179,35 @@ class PermissionResolver:
         if tools_config is None:
             self._tools_config: Dict[str, bool] = {}
         elif isinstance(tools_config, list):
-            self._tools_config = {t: True for t in tools_config}
+            self._tools_config = {ToolNameMapper.to_native(t): True for t in tools_config
+                                  if ToolNameMapper.is_known(t)}
         else:
-            self._tools_config = tools_config
+            self._tools_config = {ToolNameMapper.to_native(k): v for k, v in tools_config.items()
+                                  if ToolNameMapper.is_known(k)}
         self._cache: Dict[tuple, str] = {}
         self._task_cache: Dict[str, str] = {}
 
     def resolve(self, tool: str, pattern: str = "*") -> str:
+        tool = ToolNameMapper.to_native(tool)
         cache_key = (tool, pattern)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        if tool in self._tools_config:
-            result = "allow" if self._tools_config[tool] else "deny"
-            self._cache[cache_key] = result
-            return result
+        # 白名单语义：如果 tools 非空，未列出的工具全部拒绝
+        if self._tools_config:
+            if tool in self._tools_config:
+                result = "allow" if self._tools_config[tool] else "deny"
+                self._cache[cache_key] = result
+                return result
+            else:
+                # 工具不在白名单中 → 拒绝
+                self._cache[cache_key] = "deny"
+                return "deny"
 
+        # tools 为空 → 退回到权限配置和默认行为
         if "*" in self._tools_config:
-            result = "allow" if self._tools_config["*"] else "deny"
+            # 这条路径现在不可达（上面非空已返回），保留用于日志兼容
+            result = "allow" if self._tools_config.get("*", True) else "deny"
             self._cache[cache_key] = result
             return result
 
@@ -217,21 +233,35 @@ class PermissionResolver:
     def _collect_rules(self, tool: str) -> List[tuple]:
         rules = []
 
-        global_tool_config = self._global.get(tool, {})
-        if isinstance(global_tool_config, str):
-            rules.append(("*", global_tool_config))
-        elif isinstance(global_tool_config, dict):
-            for k, v in global_tool_config.items():
-                rules.append((k, v))
-
-        agent_tool_config = self._config.get(tool, {})
-        if isinstance(agent_tool_config, str):
-            rules.append(("*", agent_tool_config))
-        elif isinstance(agent_tool_config, dict):
-            for k, v in agent_tool_config.items():
-                rules.append((k, v))
+        # 遍历所有 key 的别名变体，保证匹配
+        for config in (self._global, self._config):
+            tool_config = self._get_any_key(config, tool)
+            if isinstance(tool_config, str):
+                rules.append(("*", tool_config))
+            elif isinstance(tool_config, dict):
+                for k, v in tool_config.items():
+                    rules.append((k, v))
 
         return rules
+
+    @staticmethod
+    def _get_any_key(d: dict, native_key: str) -> object:
+        """从字典中获取指定键的值，支持原生名查找（兼容大小写别名）
+
+        优先精确匹配，然后尝试别名匹配。
+        """
+        # 先尝试精确匹配
+        if native_key in d:
+            return d[native_key]
+        # 再尝试原生名匹配（如果 native_key 本身是别名，先转原生）
+        native = ToolNameMapper.to_native(native_key)
+        if native in d:
+            return d[native]
+        # 遍历所有 key 做别名匹配
+        for k in d:
+            if ToolNameMapper.to_native(k) == native:
+                return d[k]
+        return {}
 
     def _match_rules(self, pattern: str, rules: List[tuple]) -> str:
         if not rules:
