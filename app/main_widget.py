@@ -1911,7 +1911,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
                     qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
                     name = cmd_def.name
-                    qs.activated.connect(lambda n=name: self._execute_command(n))
+
+                    def _on_shortcut(n=name):
+                        try:
+                            self._execute_command(n)
+                        except RuntimeError:
+                            pass
+
+                    qs.activated.connect(_on_shortcut)
                     self._command_shortcuts.append(qs)
 
     def _execute_command(self, command_name: str, args: str = ""):
