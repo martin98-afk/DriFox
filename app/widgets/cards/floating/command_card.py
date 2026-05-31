@@ -144,7 +144,7 @@ class CommandItemWidget(QWidget):
             CommandItemWidget {{
                 background-color: {bg};
                 border: none;
-                border-radius: 0px;
+                border-radius: 4px;
             }}
         """)
 
@@ -453,12 +453,12 @@ class CommandCard(QWidget):
             }}
             QScrollBar:vertical {{
                 background: transparent;
-                width: 12px;
+                width: 5px;
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
                 background: {Colors.SCROLLBAR_HANDLE_BG};
-                border-radius: 6px;
+                border-radius: 3px;
                 min-height: 30px;
             }}
             QScrollBar::handle:vertical:hover {{

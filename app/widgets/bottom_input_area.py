@@ -47,9 +47,9 @@ class SendableTextEdit(TextEdit):
         self.setAcceptRichText(False)
         self.setLineWrapMode(TextEdit.WidgetWidth)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(44)
+        self.setMinimumHeight(48)
         self.setMaximumHeight(160)
-        self.setFixedHeight(44)
+        self.setFixedHeight(48)
 
         self._agent_combo = ComboBox(self)
         self._agent_combo.setFixedSize(68, 26)
@@ -102,8 +102,6 @@ class SendableTextEdit(TextEdit):
 
     def _apply_send_btn_style(self):
         """从 Colors 应用发送按钮样式"""
-        from app.utils.design_tokens import Colors
-
         Colors.refresh()
         radius = Colors.SEND_BTN_RADIUS
         self.send_btn.setStyleSheet(f"""
@@ -117,10 +115,17 @@ class SendableTextEdit(TextEdit):
             TransparentToolButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
+                border: 1px solid rgba(255,255,255,0.25);
+            }}
+            TransparentToolButton:pressed {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
+                padding: 1px;
             }}
             TransparentToolButton:disabled {{
                 background: {Colors.TOOLBAR_BG};
                 color: {Colors.TEXT_SECONDARY};
+                border: 1px solid transparent;
             }}
         """)
 
@@ -970,6 +975,7 @@ class SendableTextEdit(TextEdit):
         if not self._glow_effect:
             return
         try:
+            Colors.refresh()
             # 延迟挂载发光效果到父卡片
             if self._glow_target is None:
                 card = self.parent()
@@ -978,31 +984,32 @@ class SendableTextEdit(TextEdit):
                 if card and hasattr(card, "_input_card"):
                     self._glow_target = card._input_card
                     self._glow_target.setGraphicsEffect(self._glow_effect)
-                if self._glow_target:
-                    self._glow_effect.setBlurRadius(target_blur)
-                    color = QColor(201, 168, 92, target_alpha)
-                    self._glow_effect.setColor(color)
-                    # 焦点时高亮边框颜色
-                    if target_alpha > 0:
-                        self._glow_target.setStyleSheet(f"""
-                            QWidget {{
-                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                    stop:0 {Colors.INPUT_FOCUS_BG_START},
-                                    stop:1 {Colors.INPUT_FOCUS_BG_END});
-                                border: 2px solid {Colors.INPUT_FOCUS_BORDER};
-                                border-radius: 14px;
-                            }}
-                        """)
-                    else:
-                        self._glow_target.setStyleSheet(f"""
-                            QWidget {{
-                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                    stop:0 {Colors.INPUT_BG_START},
-                                    stop:1 {Colors.INPUT_BG_END});
-                                border: 1px solid {Colors.INPUT_BORDER};
-                                border-radius: 14px;
-                            }}
-                        """)
+            if self._glow_target:
+                self._glow_effect.setBlurRadius(target_blur)
+                glow_color = QColor(Colors.INPUT_FOCUS_BORDER)
+                glow_color.setAlpha(target_alpha)
+                self._glow_effect.setColor(glow_color)
+                # 焦点时高亮边框颜色
+                if target_alpha > 0:
+                    self._glow_target.setStyleSheet(f"""
+                        QWidget {{
+                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 {Colors.INPUT_FOCUS_BG_START},
+                                stop:1 {Colors.INPUT_FOCUS_BG_END});
+                            border: 2px solid {Colors.INPUT_FOCUS_BORDER};
+                            border-radius: 14px;
+                        }}
+                    """)
+                else:
+                    self._glow_target.setStyleSheet(f"""
+                        QWidget {{
+                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 {Colors.INPUT_BG_START},
+                                stop:1 {Colors.INPUT_BG_END});
+                            border: 1px solid {Colors.INPUT_BORDER};
+                            border-radius: 14px;
+                        }}
+                    """)
         except Exception:
             pass
 
