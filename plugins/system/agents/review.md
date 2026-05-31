@@ -6,13 +6,11 @@ permission:
   edit: deny
   multi_edit: deny
   write: deny
-  question: deny
   todowrite: deny
   todoread: deny
   task_batch: deny
   task_status: deny
-  read_project_note: deny
-  edit_project_note: deny
+  question: deny
   "*": allow
 ---
 
