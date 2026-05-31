@@ -5,6 +5,7 @@ ChatBackend - 统一后端接口
 """
 import asyncio
 import os
+import re
 import time
 
 import orjson as json
@@ -25,6 +26,38 @@ from app.core.tool_executor import ToolExecutor
 from app.core.workers.subagent_worker import SubAgentManager
 from app.utils.history_manager import HistoryManager
 from app.utils.utils import get_app_data_dir
+
+
+# 支持的图片扩展名
+_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+
+
+def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
+    """
+    从 Markdown 内容中提取本地图片文件路径。
+    
+    检测 ![alt](path) 语法，只提取本地存在的图片文件。
+    对远程 URL、不存在的文件、非图片文件均不提取。
+    
+    Args:
+        content: Markdown 文本内容
+    
+    Returns:
+        (clean_content, image_paths) - 清理后的文本和本地图片路径列表
+    """
+    image_paths: list[str] = []
+
+    def _replace_img(match: re.Match) -> str:
+        path = match.group(1).strip()
+        if os.path.isfile(path):
+            ext = os.path.splitext(path)[1].lower()
+            if ext in _IMAGE_EXTENSIONS:
+                image_paths.append(path)
+                return ""  # 移除图片标记
+        return match.group(0)  # 保留原样
+
+    cleaned = re.sub(r'!\[.*?\]\((.+?)\)', _replace_img, content)
+    return cleaned, image_paths
 
 
 class ChatBackend(QObject):
@@ -1443,14 +1476,30 @@ class ChatBackend(QObject):
                 _push_to_platform(f"✅ **{name}** 完成\n{summary}")
 
             def on_stream_finished(response):
-                """AI 完成 → 发送最终完整回复"""
+                """AI 完成 → 发送最终完整回复，自动检测并发送本地图片"""
                 content = response or "".join(gateway_chunks)
                 final = content or "抱歉，我没有生成有效回复，请重试。"
 
                 logger.info(f"[Gateway] AI completed, response_len={len(response)}, final_len={len(final)}")
 
-                # 发送最终回复（替换之前的流式预览，不重复）
-                _push_to_platform(f"💬 **DriFox 助手**\n\n{final}")
+                # 提取并发送本地图片
+                clean_content, image_paths = _extract_markdown_images(final)
+                for img_path in image_paths:
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            self._gateway_send_image(gw_platform, chat_id, img_path),
+                            _ev_loop,
+                        )
+                    except Exception as e:
+                        logger.error(f"[Gateway] Image send error: {e}")
+
+                # 发送清理后的文本
+                text_to_send = clean_content.strip()
+                if text_to_send:
+                    _push_to_platform(f"💬 **DriFox 助手**\n\n{text_to_send}")
+                elif not image_paths:
+                    # 既无图片也无文字，兜底发送原文
+                    _push_to_platform(f"💬 **DriFox 助手**\n\n{final}")
 
                 # 通知异步等待的 future
                 try:
@@ -1592,6 +1641,22 @@ class ChatBackend(QObject):
                 return result
             except Exception as e:
                 logger.error(f"[Gateway] Send failed: {e}")
+                return SendResult(success=False, error=str(e))
+        
+        logger.warning(f"[Gateway] No adapter for platform {platform}")
+        return SendResult(success=False, error="No adapter")
+    
+    async def _gateway_send_image(self, platform: Any, chat_id: str, image_path: str, **kwargs) -> Any:
+        """发送图片到平台"""
+        from app.gateway.base import SendResult
+
+        adapter = self._gateway_manager.get_adapter(platform)
+        if adapter:
+            try:
+                result = await adapter.send_image(chat_id, image_path)
+                return result
+            except Exception as e:
+                logger.error(f"[Gateway] Send image failed: {e}")
                 return SendResult(success=False, error=str(e))
         
         logger.warning(f"[Gateway] No adapter for platform {platform}")
