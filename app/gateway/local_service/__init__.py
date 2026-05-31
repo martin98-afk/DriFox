@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-LLM Chatter API 模块
+Gateway 本地微服务模块 - 提供 HTTP API 接口
 
-提供远程调用接口，复用 UI 对话逻辑。
+复用 UI 对话逻辑的远程 API 接口，支持：
+- FastAPI HTTP 服务
+- SSE 流式对话
+- 完全隔离的会话上下文
+- 并发请求支持
 """
 
-from app.api.api_server import (
+from app.gateway.local_service.api_server import (
     LLMAPIService,
     get_llm_api_service,
     ensure_service_running,
@@ -14,12 +18,14 @@ from app.api.api_server import (
     is_service_running,
     open_docs,
 )
-from app.api.api_session_handler import (
+
+from app.gateway.local_service.session_handler import (
     APISessionHandler,
     APIHistoryManager,
     StreamContext,
 )
-from app.api.api_isolated_context import (
+
+from app.gateway.local_service.isolated_context import (
     IsolatedChatContext,
     IsolatedContextRegistry,
 )

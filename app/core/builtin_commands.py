@@ -72,6 +72,85 @@ class FunctionCommandHandlers:
 # 命令文件加载器
 # ============================================================
 
+def _parse_param_name(name_raw: str) -> dict:
+    """解析参数名，提取 [] 包裹的可选标记
+
+    Args:
+        name_raw: 原始参数名，如 "--branch" 或 "[--verbose]"
+
+    Returns:
+        {"name": 清理后的参数名, "required": bool}
+    """
+    name = name_raw.strip()
+    if name.startswith("[") and name.endswith("]"):
+        return {"name": name[1:-1].strip(), "required": False}
+    return {"name": name, "required": True}
+
+
+def _parse_raw_params_to_command_params(raw: any) -> list:
+    """将 YAML frontmatter 中的参数描述统一转为 CommandParameter 列表
+
+    支持格式：
+      1. 数组：parameters: [{name: --branch, desc: ...}, ...]
+      2. 字典：parameters: {--branch: desc, [--verbose]: desc}
+      3. 字典：argument-hint: {--branch: desc, [--verbose]: desc}（复用旧字段）
+    """
+    if not raw:
+        return []
+
+    params = []
+
+    if isinstance(raw, dict):
+        # 格式 2/3：字典 {参数名: 描述}
+        for key, value in raw.items():
+            parsed = _parse_param_name(key)
+            name = parsed["name"]
+            desc = str(value) if value else ""
+            # 自动推断 param_type
+            if name.startswith("--") and name.endswith("="):
+                ptype = "value"
+            elif name.startswith("--"):
+                ptype = "flag"
+            else:
+                ptype = "positional"
+            params.append(CommandParameter(
+                name=name, description=desc,
+                param_type=ptype, required=parsed["required"],
+            ))
+    elif isinstance(raw, list):
+        # 格式 1：数组 [{name, desc, ...}]
+        for p in raw:
+            if isinstance(p, str):
+                # 列表元素是纯字符串 → 视为 positional 参数名
+                parsed = _parse_param_name(p)
+                params.append(CommandParameter(
+                    name=parsed["name"], description="",
+                    param_type="positional", required=parsed["required"],
+                ))
+                continue
+            name = p.get("name", "")
+            if not name:
+                continue
+            parsed = _parse_param_name(name)
+            name = parsed["name"]
+            desc = p.get("desc", p.get("description", ""))
+            # 自动推断 param_type
+            if name.startswith("--") and name.endswith("="):
+                ptype = "value"
+            elif name.startswith("--"):
+                ptype = "flag"
+            else:
+                ptype = "positional"
+            # 显式 required 优先，否则从 [] 推断
+            required = p.get("required", parsed["required"])
+            params.append(CommandParameter(
+                name=name, description=desc,
+                param_type=ptype, required=required,
+            ))
+
+    return params
+
+
 def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
     """加载单个命令文件"""
     try:
@@ -113,7 +192,7 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         return {
             "name": file_path.stem,  # 文件名作为命令名
             "description": meta.get("description", ""),
-            "argument_hint": meta.get("argument-hint", ""),
+            "argument_hint": argument_hint,
             "type": meta.get("type", "prompt"),
             "prompt_text": enhanced_body,  # 已包含工具限制说明（如有）
             "parameters": params,

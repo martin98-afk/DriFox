@@ -74,8 +74,9 @@ class UIConversationAdapter(QObject):
         self.stream_finished.emit(response)
 
     def on_messages_updated(self, messages: List[Dict]):
-        from app.core.message_content import consolidate_messages
-        self.messages_updated.emit(consolidate_messages(messages or []))
+        # 注意：不在此处调用 consolidate_messages，session.set_messages 内部已做一次 consolidation。
+        # 避免主线程上两次全量遍历的冗余开销。
+        self.messages_updated.emit(messages or [])
 
     def on_error(self, error: str):
         self.error_occurred.emit(error)

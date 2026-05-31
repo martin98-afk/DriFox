@@ -83,11 +83,23 @@ class CommandDefinition:
             CommandType.SUBAGENT: "agent",
         }
         display_type = type_map.get(self.type, "command")
-        return {
+        result = {
             "name": self.name,
             "description": self.description,
             "type": display_type,
         }
+        if self.shortcut:
+            result["shortcut"] = self.shortcut
+        return result
+
+
+def _pick_first_entry(entries: Dict[CommandType, "CommandDefinition"]) -> "CommandDefinition":
+    """按优先级 AGENT > PROMPT > FUNCTION 从 entries 中选一个，兜底取第一个"""
+    for t in (CommandType.AGENT, CommandType.PROMPT, CommandType.FUNCTION):
+        if t in entries:
+            return entries[t]
+    # 兜底：取第一个注册的类型
+    return next(iter(entries.values()))
 
 
 def _pick_first_entry(entries: Dict[CommandType, "CommandDefinition"]) -> "CommandDefinition":
@@ -193,6 +205,26 @@ class CommandManager:
 
     # ---- 解析 ----
 
+    # 显示后缀 → 显示类型映射
+    _SUFFIX_TO_TYPE = {
+        "-skill": "skill",
+        "-prompt": "prompt",
+        "-cmd": "command",
+        "-agent": "agent",
+    }
+
+    @staticmethod
+    def parse_suffixed_name(name: str):
+        """解析带后缀的命令名，返回 (原始名, 显示类型)
+
+        如 "tdd-skill" → ("tdd", "skill")
+        如 "tdd" → ("tdd", None)
+        """
+        for suffix, dtype in CommandManager._SUFFIX_TO_TYPE.items():
+            if name.endswith(suffix) and len(name) > len(suffix):
+                return name[:-len(suffix)], dtype
+        return name, None
+
     @staticmethod
     def parse_command_name(text: str) -> Optional[str]:
         """从输入文本中提取命令名（去掉 / 前缀）
@@ -272,7 +304,7 @@ class CommandManager:
 
         Returns:
             Optional[CommandResult]:
-            - None: 不是内置命令
+            - None: 不是内置命令（或指定为 skill 类型）
             - CommandResult(type=FUNCTION): 函数命令，调用方需执行对应 handler
             - CommandResult(type=PROMPT): 提示词替换命令，使用 replacement 作为发送文本
             - CommandResult(type=AGENT): 智能体命令，使用 replacement 作为发送文本
@@ -284,7 +316,22 @@ class CommandManager:
            （保持与原有"智能体覆盖命令"行为一致）
         """
         cmd_name = self.parse_command_name(text)
-        if not cmd_name or cmd_name not in self._commands:
+        if not cmd_name:
+            return None
+
+        # 解析后缀：如 "tdd-skill" → base="tdd", type="skill"
+        base_name, suffix_type = self.parse_suffixed_name(cmd_name)
+
+        # skill 类型不由 CommandManager 处理，返回 None 由主流程走技能替换
+        if suffix_type == "skill":
+            return None
+
+        # 有后缀时优先使用后缀推断的类型
+        if suffix_type:
+            preferred_display_type = preferred_display_type or suffix_type
+            cmd_name = base_name
+
+        if cmd_name not in self._commands:
             return None
 
         entries = self._commands[cmd_name]

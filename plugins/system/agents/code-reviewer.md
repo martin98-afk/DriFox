@@ -7,7 +7,6 @@ steps: 100
 permission:
   edit: deny
   multi_edit: deny
-  bash: ask
   write: deny
   task_batch: deny
   "*": allow

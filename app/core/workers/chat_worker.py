@@ -390,8 +390,13 @@ class OpenAIChatWorker(QThread):
             self._emit_via_event_bus(event, *args)
 
         # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
+        # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
+        # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
         if signal is not None:
-            signal.emit(*args)
+            try:
+                signal.emit(*args)
+            except (AttributeError, RuntimeError, TypeError) as e:
+                logger.debug(f"[Signal] PyQt信号发射失败 {signal_name}: {e}")
 
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
         """将 signal name 映射到 WorkerEvent"""
@@ -879,18 +884,22 @@ class OpenAIChatWorker(QThread):
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                     compacted="yes" if _was_compacted else "no")
                 # 每 3 轮触发一次 GC，帮助回收循环引用
-                if self._mem_diag_iter_count % 3 == 0:
-                    if self._mem_diag_enabled:
-                        before_gc = len(gc.get_objects())
+                # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免 stop-the-world GC 阻塞 UI
+                if self._mem_diag_enabled and self._mem_diag_iter_count % 3 == 0:
+                    before_gc = len(gc.get_objects())
                     gc.collect()
-                    if self._mem_diag_enabled:
-                        after_gc = len(gc.get_objects())
-                        freed = before_gc - after_gc
-                        if freed > 1000:
-                            logger.debug(f"[MEM] GC后释放 {freed} 个对象")
+                    after_gc = len(gc.get_objects())
+                    freed = before_gc - after_gc
+                    if freed > 1000:
+                        logger.debug(f"[MEM] GC后释放 {freed} 个对象")
 
-                QCoreApplication.processEvents()
-                time.sleep(0.01)
+                # 性能优化：移除后台线程中的 processEvents() 和 sleep
+                # 原因：processEvents() 设计用于主线程，在后台线程调用会导致：
+                # 1. 信号丢失或延迟
+                # 2. UI 状态不一致
+                # 3. 可能的死锁
+                # 如果需要 UI 响应，应使用信号-槽机制而非强制事件处理
+                # time.sleep(0.01)
 
         except Exception as e:
             logger.exception("请求失败!")
@@ -1751,9 +1760,10 @@ class OpenAIChatWorker(QThread):
                 )
 
                 # 自适应 GC：每 100 chunk 收集一次，RSS 增量 > 200MB 时堆压缩
-                if chunk_count % 100 == 0:
+                # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免无条件 stop-the-world GC 阻塞 UI
+                if chunk_count % 100 == 0 and self._mem_diag_enabled:
                     freed = gc.collect()
-                    if freed > 10 and self._mem_diag_enabled:
+                    if freed > 10:
                         logger.debug(f"[MEM] 流式 gc.collect() 释放了 {freed} 个对象")
                     # 在此作用域内获取 RSS，不依赖外部块
                     _gc_rss = 0.0
@@ -1773,13 +1783,13 @@ class OpenAIChatWorker(QThread):
                             heap = kernel32.GetProcessHeap()
                             if heap:
                                 kernel32.HeapCompact(heap, 0)
-                            if self._mem_diag_enabled:
-                                logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
+                            logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
                         except Exception as e:
-                            if self._mem_diag_enabled:
-                                logger.debug(f"[MEM] 堆压缩失败: {e}")
-            if chunk_count % 5 == 0:
-                QCoreApplication.processEvents()
+                            logger.debug(f"[MEM] 堆压缩失败: {e}")
+            # 性能优化：移除流式响应中的 processEvents()
+            # UI 更新应通过信号-槽机制自然处理，不应强制刷新
+            # if chunk_count % 5 == 0:
+            #     QCoreApplication.processEvents()
 
         # 非流式响应：usage 在 response 对象本身（而非 chunk）
         if not self.stream:
@@ -1905,9 +1915,11 @@ class OpenAIChatWorker(QThread):
         # httpx+OpenAI 客户端在处理 900+ chunk 时创建大量临时 Python 对象，
         # 这些对象在此处已无引用，但 pymalloc arena 碎片仍然占用 RSS。
         # 主动 gc.collect() + Windows HeapCompact 可降低峰值 RSS。
-        freed_count = gc.collect()
-        if freed_count > 100 and self._mem_diag_enabled:
-            logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
+        # 注意：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免无条件 stop-the-world GC 阻塞 UI
+        if self._mem_diag_enabled:
+            freed_count = gc.collect()
+            if freed_count > 100:
+                logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
 
         return tool_calls_found, tool_args_pending
 
@@ -2253,12 +2265,15 @@ class OpenAIChatWorker(QThread):
                 }
                 self._permission_approved = False
             # 锁在 while 循环前释放，避免阻塞主线程调用 approve_permission/deny_permission
+            # 性能优化：移除后台线程中的 processEvents()
+            # processEvents() 在非主线程调用会导致信号丢失、死锁等问题
+            # UI 响应应通过信号-槽机制自然处理
             while (self._permission_pending is not None
                    and not self._is_cancelled
                    and not self._tool_execution_cancelled):
-                if not self._legacy_direct_callbacks:
-                    QApplication.processEvents()
-                time.sleep(0.1)
+                # if not self._legacy_direct_callbacks:
+                #     QApplication.processEvents()  # 移除：后台线程不应调用 processEvents()
+                time.sleep(0.1)  # 保留 sleep 用于轮询等待用户授权
 
             if self._is_cancelled or self._tool_execution_cancelled:
                 self._emit_cancelled_tool_result({"id": tool_call_id, "function": {"name": tool_name, "arguments": "{}"}})
@@ -2326,14 +2341,22 @@ class OpenAIChatWorker(QThread):
             dict: 工具结果，或 None（取消）
         """
         try:
-            # ====== 发射 tool_call_started ======
-            self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
+            # ====== 发射 tool_call_started（非关键，失败不阻断） ======
+            try:
+                self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
+            except Exception as e:
+                logger.warning(f"[ToolCall] 发射 tool_call_started 失败: {e}")
 
             # ====== 权限检查 ======
             results_placeholder = []
-            should_continue = self._check_permission(
-                tool_name, arguments, tool_call_id, round_id, results_placeholder
-            )
+            try:
+                should_continue = self._check_permission(
+                    tool_name, arguments, tool_call_id, round_id, results_placeholder
+                )
+            except Exception as e:
+                logger.warning(f"[ToolCall] 权限检查失败: {e}")
+                should_continue = True  # 权限检查失败时默认放行
+
             if not should_continue:
                 return None  # 取消
             if results_placeholder:
@@ -2346,9 +2369,12 @@ class OpenAIChatWorker(QThread):
             if result_obj is self._TOOL_CANCELLED:
                 return None
 
-            # ====== 发射结果信号 ======
-            self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                     tool_call_id, tool_name, arguments, result_obj)
+            # ====== 发射结果信号（非关键，失败不阻断） ======
+            try:
+                self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                         tool_call_id, tool_name, arguments, result_obj)
+            except Exception as e:
+                logger.warning(f"[ToolCall] 发射 tool_result_received 失败: {e}")
 
             return self._build_result_dict(
                 tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj

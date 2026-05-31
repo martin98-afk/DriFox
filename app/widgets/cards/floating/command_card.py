@@ -94,6 +94,12 @@ class CommandItemWidget(QWidget):
         self._desc_label.setMinimumWidth(0)
         layout.addWidget(self._desc_label, 1)
 
+        # 快捷键标签（仅内建命令的 function 类型显示）
+        self._shortcut_label = QLabel()
+        self._shortcut_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        layout.addWidget(self._shortcut_label)
+
         # 类型标签（技能显示【技能】，智能体显示【智能体】，提示词显示【提示词】）
         item_type = self._data["type"]
         if item_type == "skill":
@@ -111,6 +117,14 @@ class CommandItemWidget(QWidget):
             self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
             layout.addWidget(self._tag_label)
+
+        # 快捷键文本（仅 command 类型且有快捷键时显示）
+        shortcut = self._data.get("shortcut", "")
+        if item_type == "command" and shortcut:
+            self._shortcut_label.setText(shortcut)
+            self._shortcut_label.setVisible(True)
+        else:
+            self._shortcut_label.setVisible(False)
 
         self._apply_style()
         self._update_display()
@@ -187,31 +201,45 @@ class CommandItemWidget(QWidget):
                 }}
             """)
 
+        # 快捷键标签样式：类键盘键帽风格，加粗
+        shortcut = self._data.get("shortcut", "")
+        if item_type == "command" and shortcut:
+            shortcut_fg = Colors.TEXT_MUTED
+            self._shortcut_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {shortcut_fg};
+                    {get_font_family_css()} {font_size_css(10)};
+                    background: rgba(128,128,128,0.1);
+                    border-radius: 3px;
+                    padding: 1px 5px;
+                    font-weight: bold;
+                }}
+            """)
+
     def _update_display(self):
         """更新名称显示（含查询高亮）"""
         name = self._data["name"]
+        # 优先使用 display_name（跨类型重名时加后缀），否则回退到 name
+        display_name = self._data.get("display_name", name)
         # 命令需要加 / 前缀，技能和智能体直接显示名称
         item_type = self._data["type"]
-        display_name = f"/{name}" if item_type == "command" else name
+        display_text = f"/{display_name}" if item_type == "command" else display_name
         query = self._query
 
         if query:
-            html = ""
-            lower_name = display_name.lower()
+            # 连续子串匹配高亮（匹配原始 name + display_name，高亮 display_text）
+            lower_text = display_text.lower()
             lower_query = query.lower()
-            last_end = 0
-            for ch in lower_query:
-                idx = lower_name.find(ch, last_end)
-                if idx >= 0:
-                    html += display_name[last_end:idx]
-                    html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_name[idx]}</span>'
-                    last_end = idx + 1
-                else:
-                    break
-            html += display_name[last_end:]
-            self._name_label.setText(html)
+            idx = lower_text.find(lower_query)
+            if idx >= 0:
+                html = display_text[:idx]
+                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_text[idx:idx + len(query)]}</span>'
+                html += display_text[idx + len(query):]
+                self._name_label.setText(html)
+            else:
+                self._name_label.setText(display_text)
         else:
-            self._name_label.setText(display_name)
+            self._name_label.setText(display_text)
 
     def set_selected(self, selected: bool):
         """设置选中状态"""
@@ -627,6 +655,10 @@ class CommandCard(QWidget):
 
     def _adjust_detail_height(self):
         """根据内容动态调整 detail 容器高度"""
+        # 如果宽度尚未初始化，延迟到事件循环结束后再计算
+        if self.width() <= 0:
+            QTimer.singleShot(0, self._adjust_detail_height)
+            return
         margins = self._detail_container.layout().contentsMargins()
         v_margin = margins.top() + margins.bottom()
         spacing = self._detail_container.layout().spacing()
@@ -862,6 +894,94 @@ class CommandCard(QWidget):
         """退出 detail 模式，回到列表模式"""
         if not self._detail_mode:
             return
+
+        if not self._detail_has_params:
+            return
+
+        # 安全兜底：_param_widgets 为空时重建
+        if not self._param_widgets:
+            cmd_mgr = CommandManager.get_instance()
+            entries = cmd_mgr._commands.get(self._detail_cmd_name, {})
+            for entry in entries.values():
+                if entry.parameters:
+                    self._build_param_widgets(entry.parameters)
+                    break
+            if not self._param_widgets:
+                return
+
+        # 值选择模式：检查对应的参数是否还在输入中
+        if self._value_selection_mode and self._value_selection_param:
+            param_clean = self._value_selection_param.rstrip("=")
+            # value 参数必须有 = 才算激活（防止 --xxx 裸名也被算作激活）
+            still_active = any(
+                "=" in a and a.rstrip("=") == param_clean
+                for a in active
+            )
+            if not still_active:
+                # 参数已被删掉 → 退出值选择模式，回到参数列表
+                self._exit_value_selection()
+
+        any_visible = False
+        for w in self._param_widgets:
+            param_key = w.param_name
+            param_clean = param_key.rstrip("=")
+            if w.param_type == "value" and param_key.endswith("="):
+                is_active = any("=" in a and a.rstrip("=") == param_clean for a in active)
+            else:
+                is_active = any(a.rstrip("=") == param_clean for a in active)
+            w.setVisible(not is_active)
+            if w.isVisible():
+                any_visible = True
+
+        # 显示/隐藏参数滚动区
+        self._detail_params_scroll.setVisible(any_visible)
+        if any_visible:
+            self._detail_params_content.setVisible(True)
+        # 重算高度
+        self._adjust_detail_height()
+        # 通知父容器布局更新
+        parent = self.parentWidget()
+        if parent:
+            parent.updateGeometry()
+
+    def _update_param_selection(self):
+        """更新参数列表选中高亮"""
+        for i, w in enumerate(self._param_widgets):
+            w.set_selected(i == self._selected_param_index)
+        # 滚动到可见
+        if 0 <= self._selected_param_index < len(self._param_widgets):
+            self._detail_params_scroll.ensureWidgetVisible(
+                self._param_widgets[self._selected_param_index], 0, 0
+            )
+
+    def _update_value_selection(self):
+        """更新值列表选中高亮，滚动到可见"""
+        Colors.refresh()
+        for i, w in enumerate(self._value_widgets):
+            if i == self._selected_value_index:
+                w.setStyleSheet(f"""
+                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
+                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+                """)
+            else:
+                w.setStyleSheet(f"""
+                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;
+                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+                """)
+        # 滚动到可见
+        if 0 <= self._selected_value_index < len(self._value_widgets):
+            self._detail_value_scroll.ensureWidgetVisible(
+                self._value_widgets[self._selected_value_index], 0, 0
+            )
+
+    def _reset_detail_mode(self) -> bool:
+        """退出 detail 模式，回到列表模式
+
+        Returns:
+            True 如果之前处于 detail 模式
+        """
+        if not self._detail_mode:
+            return False
         self._detail_mode = False
         self._detail_cmd_name = ""
         self._detail_has_params = False
@@ -873,6 +993,11 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)
         self._scroll_area.setVisible(True)
+        # 清除 detail 模式设置的固定高度，让列表模式自由撑开
+        self.setMaximumHeight(16777215)
+        self.setMinimumHeight(0)
+        self.updateGeometry()
+        return True
 
     def _refresh_data(self):
         """刷新完整数据列表（命令 + 技能）
@@ -896,6 +1021,26 @@ class CommandCard(QWidget):
             for s in get_local_skills()
         ]
         self._all_items = commands + skills
+
+        # 检测跨类型重名，添加 display_name 后缀以区分
+        # 同名不同类型的项（如 "tdd" 同时是技能和提示词）各自加后缀
+        name_type_map = {}
+        for item in self._all_items:
+            name_type_map.setdefault(item["name"], set()).add(item["type"])
+
+        suffix_map = {
+            "skill": "-skill",
+            "prompt": "-prompt",
+            "command": "-cmd",
+            "agent": "-agent",
+        }
+        for item in self._all_items:
+            if len(name_type_map.get(item["name"], set())) > 1:
+                suffix = suffix_map.get(item["type"], "")
+                item["display_name"] = f"{item['name']}{suffix}"
+            else:
+                item["display_name"] = item["name"]
+
         self._all_items_cache = list(self._all_items)
         self._cache_dirty = False
 
@@ -911,10 +1056,13 @@ class CommandCard(QWidget):
         if not query:
             self._filtered_items = list(self._all_items)
         else:
+            # 连续子串匹配（不区分大小写）
+            q_lower = query.lower()
             self._filtered_items = [
                 item for item in self._all_items
-                if query in item["name"].lower()
-                or query in item["description"].lower()
+                if q_lower in item["name"].lower()
+                or q_lower in item.get("display_name", item["name"]).lower()
+                or q_lower in item["description"].lower()
             ]
 
         # 排序：命令和技能在前，智能体在后，同类型按名称排序
@@ -971,9 +1119,17 @@ class CommandCard(QWidget):
             if key in old_by_key_copy and key not in seen_keys:
                 w = old_by_key_copy.pop(key)  # 消耗掉这个 key
                 seen_keys.add(key)
-                # 更新高亮查询（query 变化时重新渲染名称）
+                # 更新 widget 数据和显示（热重载后 shortcut 等字段可能变化）
+                w._data = item
                 w._query = self._current_query
                 w._update_display()
+                # 刷新快捷键标签
+                shortcut = item.get("shortcut", "")
+                if item["type"] == "command" and shortcut:
+                    w._shortcut_label.setText(shortcut)
+                    w._shortcut_label.setVisible(True)
+                else:
+                    w._shortcut_label.setVisible(False)
                 new_widgets.append(w)
             else:
                 # 创建新 widget
@@ -1134,6 +1290,7 @@ class CommandCard(QWidget):
         if self._item_widgets and self._selected_index > 0:
             self._selected_index -= 1
             self._update_selection()
+        return True
 
     def select_current(self):
         """确认选中当前项"""
@@ -1184,13 +1341,16 @@ class CommandCard(QWidget):
             query: 搜索查询
             incremental: 是否增量更新（默认开启，可提升流畅性）
         """
-        self._reset_detail_mode()  # 回到列表模式（如果之前在 detail 模式）
+        was_detail = self._reset_detail_mode()  # 回到列表模式
         self._current_query = query
         self._refresh_data()
-        self.load_items(query, incremental=incremental)
+        # 从 detail 回列表时强制全量刷新，避免首次高度异常
+        self.load_items(query, incremental=incremental and not was_detail)
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)
+        if was_detail:
+            self.updateGeometry()
 
     def invalidate_cache(self):
         """使缓存失效，下次 show_card 时自动重建

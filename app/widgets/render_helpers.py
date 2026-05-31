@@ -236,24 +236,29 @@ def _parse_subagent_task_ids(result: str) -> str:
     return ""
 
 
+_WORD_RE = re.compile(r'(\w+|\W+)')
+
+
 def _word_diff_html(old_text: str, new_text: str) -> tuple:
-    """字符级差异高亮，返回 (old_html, new_html)"""
+    """词级差异高亮，返回 (old_html, new_html)"""
     if len(old_text) + len(new_text) > 2000:
         return escape(old_text), escape(new_text)
-    matcher = difflib.SequenceMatcher(None, old_text, new_text, autojunk=False)
+    old_tokens = _WORD_RE.findall(old_text) or [old_text]
+    new_tokens = _WORD_RE.findall(new_text) or [new_text]
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
     old_parts = []
     new_parts = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
-            old_parts.append(escape(old_text[i1:i2]))
-            new_parts.append(escape(new_text[j1:j2]))
+            old_parts.append(escape(''.join(old_tokens[i1:i2])))
+            new_parts.append(escape(''.join(new_tokens[j1:j2])))
         elif tag == 'delete':
-            old_parts.append(f'<span class="word-del">{escape(old_text[i1:i2])}</span>')
+            old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
         elif tag == 'insert':
-            new_parts.append(f'<span class="word-add">{escape(new_text[j1:j2])}</span>')
+            new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
         elif tag == 'replace':
-            old_parts.append(f'<span class="word-del">{escape(old_text[i1:i2])}</span>')
-            new_parts.append(f'<span class="word-add">{escape(new_text[j1:j2])}</span>')
+            old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
+            new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
     return ''.join(old_parts), ''.join(new_parts)
 
 
@@ -297,7 +302,7 @@ def _render_diff_preview(diff_text: str) -> str:
     将 unified diff 文本渲染为带行号、词级差异高亮的 HTML。
 
     支持: 文件头(---/+++) → hunk 头(@@) → 逐行差异
-    连续 -/+ 行对会做字符级 word diff。
+    连续 -/+ 行对会做词级差异高亮。
     超过 500 行时截断并显示行数。
     """
     lines = diff_text.split("\n")[1:]
@@ -326,8 +331,7 @@ def _render_diff_preview(diff_text: str) -> str:
         if line is None:
             rows.append(
                 f'<div class="diff-line diff-truncated">'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>'
             )
@@ -350,16 +354,14 @@ def _render_diff_preview(diff_text: str) -> str:
                     display = new_path or old_path
                 rows.append(
                     f'<div class="diff-line diff-file-header">'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num">&nbsp;</span>'
                     f'<span class="line-sign"></span>'
                     f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(display)}</span></div>'
                 )
             else:
                 rows.append(
                     f'<div class="diff-line diff-file-header">'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num">&nbsp;</span>'
                     f'<span class="line-sign"></span>'
                     f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(line[4:]))}</span></div>'
                 )
@@ -369,8 +371,7 @@ def _render_diff_preview(diff_text: str) -> str:
             # 单独的 --- 行（没有 +++ 跟随），先渲染 header 再处理当前行
             rows.append(
                 f'<div class="diff-line diff-file-header">'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(_pending_old_header[4:]))}</span></div>'
             )
@@ -384,8 +385,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 new_ln = int(m.group(2))
             rows.append(
                 f'<div class="diff-line diff-hunk">'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
+                f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">{escape(line)}</span></div>'
             )
@@ -401,33 +401,35 @@ def _render_diff_preview(diff_text: str) -> str:
                 add_lines.append(lines[i][1:])  # 去掉前缀 +
                 i += 1
 
-            # 配对 word diff
+            # 配对 word diff：旧行放一起，新行放一起
             pair_count = min(len(del_lines), len(add_lines))
+            old_rows = []
+            new_rows = []
             for k in range(pair_count):
                 old_html, new_html = _word_diff_html(del_lines[k], add_lines[k])
-                rows.append(
+                old_rows.append(
                     f'<div class="diff-line diff-del">'
-                    f'<span class="line-num line-num-old">{old_ln}</span>'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num">{old_ln}</span>'
                     f'<span class="line-sign">-</span>'
                     f'<span class="line-code">{old_html}</span></div>'
                 )
-                rows.append(
+                new_rows.append(
                     f'<div class="diff-line diff-add">'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
-                    f'<span class="line-num line-num-new">{new_ln}</span>'
+                    f'<span class="line-num">{new_ln}</span>'
                     f'<span class="line-sign">+</span>'
                     f'<span class="line-code">{new_html}</span></div>'
                 )
                 old_ln += 1
                 new_ln += 1
 
+            rows.extend(old_rows)
+            rows.extend(new_rows)
+
             # 未配对的删除行
             for k in range(pair_count, len(del_lines)):
                 rows.append(
                     f'<div class="diff-line diff-del">'
-                    f'<span class="line-num line-num-old">{old_ln}</span>'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
+                    f'<span class="line-num">{old_ln}</span>'
                     f'<span class="line-sign">-</span>'
                     f'<span class="line-code">{escape(del_lines[k])}</span></div>'
                 )
@@ -437,8 +439,7 @@ def _render_diff_preview(diff_text: str) -> str:
             for k in range(pair_count, len(add_lines)):
                 rows.append(
                     f'<div class="diff-line diff-add">'
-                    f'<span class="line-num line-num-empty">&nbsp;</span>'
-                    f'<span class="line-num line-num-new">{new_ln}</span>'
+                    f'<span class="line-num">{new_ln}</span>'
                     f'<span class="line-sign">+</span>'
                     f'<span class="line-code">{escape(add_lines[k])}</span></div>'
                 )
@@ -448,8 +449,7 @@ def _render_diff_preview(diff_text: str) -> str:
             # 单独的增加行（前面没有匹配的删除行）
             rows.append(
                 f'<div class="diff-line diff-add">'
-                f'<span class="line-num line-num-empty">&nbsp;</span>'
-                f'<span class="line-num line-num-new">{new_ln}</span>'
+                f'<span class="line-num">{new_ln}</span>'
                 f'<span class="line-sign">+</span>'
                 f'<span class="line-code">{escape(line[1:])}</span></div>'
             )
@@ -460,8 +460,7 @@ def _render_diff_preview(diff_text: str) -> str:
             stripped = line[1:] if line.startswith(" ") else line
             rows.append(
                 f'<div class="diff-line diff-ctx">'
-                f'<span class="line-num line-num-old">{old_ln if old_ln > 0 else ""}</span>'
-                f'<span class="line-num line-num-new">{new_ln if new_ln > 0 else ""}</span>'
+                f'<span class="line-num">{new_ln if new_ln > 0 else ""}</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">{escape(stripped)}</span></div>'
             )

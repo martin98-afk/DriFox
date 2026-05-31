@@ -53,6 +53,22 @@ from app.gateway.session_manager import (
 
 from app.gateway.message_handler import MessageHandler
 
+# 本地微服务（原 app.api）
+from app.gateway.local_service import (
+    LLMAPIService,
+    get_llm_api_service,
+    ensure_service_running,
+    start_llm_api_service,
+    stop_llm_api_service,
+    is_service_running,
+    open_docs,
+    APISessionHandler,
+    APIHistoryManager,
+    StreamContext,
+    IsolatedChatContext,
+    IsolatedContextRegistry,
+)
+
 __all__ = [
     # 基础
     "Platform",
@@ -78,7 +94,17 @@ __all__ = [
     # 消息处理
     "MessageHandler",
     
-    # 适配器
-    "WeComAdapter",
-    "DingTalkAdapter",
+    # 本地微服务
+    "LLMAPIService",
+    "get_llm_api_service",
+    "ensure_service_running",
+    "start_llm_api_service",
+    "stop_llm_api_service",
+    "is_service_running",
+    "open_docs",
+    "APISessionHandler",
+    "APIHistoryManager",
+    "StreamContext",
+    "IsolatedChatContext",
+    "IsolatedContextRegistry",
 ]

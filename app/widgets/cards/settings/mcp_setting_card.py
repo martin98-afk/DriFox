@@ -516,6 +516,12 @@ class MCPServerRow(CardWidget):
         self._name = server_data.get("name", "")
         self._setup_ui(server_data)
 
+    def set_enabled(self, enabled: bool):
+        """外部更新开关状态（避免全量刷新）"""
+        self.switch.blockSignals(True)
+        self.switch.setChecked(enabled)
+        self.switch.blockSignals(False)
+
     def _setup_ui(self, data: dict):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
@@ -593,6 +599,10 @@ class MCPListSettingCard(ExpandSettingCard):
         self._pending_server_switches: Dict[str, bool] = {}
         self._pending_global_switch: bool = True
         self._global_switch_pending = False
+        # 行引用（用于开关操作时直接更新，避免全量刷新）
+        self._server_rows: Dict[str, "MCPServerRow"] = {}
+        # 自触发抑制：本卡片的开关操作不触发 watchfiles 热重载回刷
+        self._suppress_hot_reload = False
         
         self._setup_ui()
         self._refresh()
@@ -750,6 +760,10 @@ class MCPListSettingCard(ExpandSettingCard):
         self._global_switch_pending = False
 
         enabled = self._pending_global_switch
+
+        # 标记：接下来的写文件操作是自触发的，抑制热重载回刷
+        self._suppress_hot_reload = True
+
         self.cfg.set(self.cfg.mcp_enabled, enabled, save=True)
         if enabled:
             servers = self._get_servers()
@@ -759,6 +773,13 @@ class MCPListSettingCard(ExpandSettingCard):
         else:
             self._hot_disconnect_all()
         self.serversChanged.emit()
+
+    def consume_hot_reload(self) -> bool:
+        """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新"""
+        if self._suppress_hot_reload:
+            self._suppress_hot_reload = False
+            return True
+        return False
 
     # ── 列表刷新 ──────────────────────────────────────
 
@@ -784,6 +805,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 row.removeRequested.connect(self._on_remove_server)
                 row.editRequested.connect(self._show_edit_dialog)
                 row.enabledChanged.connect(self._on_enabled_changed)
+                self._server_rows[server_data.get("name", "")] = row
                 self.viewLayout.addWidget(row)
 
             count = len(servers)
@@ -850,11 +872,14 @@ class MCPListSettingCard(ExpandSettingCard):
         self._switch_debounce_timer.start()
 
     def _do_debounced_switch(self):
-        """防抖到期：按最终状态批量执行连接/断开"""
+        """防抖到期：按最终状态批量更新开关状态（不触发全量刷新）"""
         if not self._pending_server_switches:
             return
         tasks = dict(self._pending_server_switches)
         self._pending_server_switches.clear()
+
+        # 标记：接下来的写文件操作是自触发的，抑制热重载回刷
+        self._suppress_hot_reload = True
 
         # 批量更新配置（通过 PluginManager 更新 enabled 状态）
         servers = self._get_servers()
@@ -865,18 +890,21 @@ class MCPListSettingCard(ExpandSettingCard):
                 server_data["enabled"] = enabled
                 pm.update_mcp_server(name, server_data)
 
-        # 执行热连接/断开
+        # 执行热连接/断开，并直接更新对应行的开关状态
         for name, enabled in tasks.items():
+            row = self._server_rows.get(name)
             if enabled and self.cfg.mcp_enabled.value:
-                # 跳过防重复检查，强制重新连接（connect_server_background 内部会先断后连）
-                # 确保新的 MCPServerConnection 使用最新的 enabled 配置
+                # 跳过防重复检查，强制重新连接
                 server_data = next((s for s in servers if s.get("name") == name), {})
                 self._hot_connect(name, server_data, force=True)
             else:
                 self._hot_disconnect(name)
+            # 直接更新行的开关状态（避免全量刷新）
+            if row:
+                row.set_enabled(enabled)
 
-        self._refresh()
-        self.serversChanged.emit()
+        # 只在添加/删除时才调用全量刷新
+        # self.serversChanged.emit()
 
     # ── 公开刷新方法（供 settings 弹窗 show 时调用） ──
 

@@ -638,7 +638,7 @@ class LLMSettingsCard(SystemCardFrame):
             LLMSettingsCard._autostart_toggling = False
 
     def _on_llm_api_enabled_changed(self, enabled):
-        from app.api import (
+        from app.gateway import (
             stop_llm_api_service,
             is_service_running,
             get_llm_api_service,
@@ -655,7 +655,7 @@ class LLMSettingsCard(SystemCardFrame):
         self._on_settings_changed()
 
     def _on_llm_api_port_changed(self, port):
-        from app.api import (
+        from app.gateway import (
             stop_llm_api_service,
             is_service_running,
             get_llm_api_service,

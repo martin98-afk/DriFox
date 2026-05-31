@@ -281,10 +281,11 @@ class TrayManager(QObject):
 
         for i, w in enumerate(self._selected_windows):
             try:
-                col = i % cols
-                row = i // cols
-                new_x = available.x() + margin + col * (win_w + margin)
-                new_y = available.y() + margin + row * (win_h + margin)
+                col = i % cols          # 0 = 最右列
+                row = i // cols         # 0 = 最底行
+                # 从右下角开始填充：第1个窗口在右下角，向左/向上排列
+                new_x = available.right() - margin - win_w - col * (win_w + margin)
+                new_y = available.bottom() - margin - win_h - row * (win_h + margin)
                 w.setGeometry(new_x, new_y, win_w, win_h)
             except RuntimeError:
                 pass
