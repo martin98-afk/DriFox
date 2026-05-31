@@ -47,17 +47,17 @@ class SendableTextEdit(TextEdit):
         self.setAcceptRichText(False)
         self.setLineWrapMode(TextEdit.WidgetWidth)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(48)
-        self.setMaximumHeight(160)
-        self.setFixedHeight(48)
+        self.setMinimumHeight(52)
+        self.setMaximumHeight(180)
+        self.setFixedHeight(52)
 
         self._agent_combo = ComboBox(self)
-        self._agent_combo.setFixedSize(68, 26)
+        self._agent_combo.setFixedSize(75, 28)
         self._agent_combo.setStyleSheet(self._build_combo_style())
         self._agent_combo.currentTextChanged.connect(self._on_agent_changed)
 
         self.send_btn = TransparentToolButton(FluentIcon.SEND, self)
-        self.send_btn.setFixedSize(30, 30)
+        self.send_btn.setFixedSize(34, 34)
         self.send_btn.setToolTip("发送（Enter）")
         self.send_btn.clicked.connect(self._on_send_click)
         self.send_btn.setDisabled(True)
@@ -115,17 +115,10 @@ class SendableTextEdit(TextEdit):
             TransparentToolButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
-                border: 1px solid rgba(255,255,255,0.25);
-            }}
-            TransparentToolButton:pressed {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {Colors.SEND_BTN_HOVER_START}, stop:1 {Colors.SEND_BTN_HOVER_END});
-                padding: 1px;
             }}
             TransparentToolButton:disabled {{
                 background: {Colors.TOOLBAR_BG};
                 color: {Colors.TEXT_SECONDARY};
-                border: 1px solid transparent;
             }}
         """)
 
@@ -602,19 +595,22 @@ class SendableTextEdit(TextEdit):
             return
 
         doc = self.document()
-        content_height = int(doc.size().height()) + 18
-        new_height = max(38, min(130, content_height))
+        content_height = int(doc.size().height()) + 24
+        new_height = max(44, min(160, content_height))
 
         if self.height() != new_height:
             parent = self.parent()
+            # 暂停重绘，避免两次 setFixedHeight 触发的中间布局被渲染
             if parent:
                 parent.setUpdatesEnabled(False)
             self.setUpdatesEnabled(False)
 
+            # 先设卡片高度（父），再设输入框高度（子）
+            # 确保当子 resize 触发布局级联时，父已有正确的约束
             if parent:
-                toolbar_height = 30
+                toolbar_height = 34
                 separator_height = 1
-                card_padding = 3
+                card_padding = 4
                 parent.setFixedHeight(
                     new_height + separator_height + toolbar_height + card_padding
                 )
@@ -896,10 +892,10 @@ class SendableTextEdit(TextEdit):
                 background: transparent;
                 color: {Colors.INPUT_TEXT};
                 border: none;
-                border-radius: 14px 14px 0 0;
-                padding: 8px 44px 8px 14px;
+                border-radius: 16px 16px 0 0;
+                padding: 12px 52px 12px 20px;
                 selection-background-color: {Colors.SELECTED_BG};
-                {get_font_family_css()} {font_size_css(14)};
+                {get_font_family_css()} {font_size_css(15)};
             }}
             QTextEdit:focus {{
                 border: none;
@@ -936,9 +932,9 @@ class SendableTextEdit(TextEdit):
                 background-color: {Colors.TOOLBAR_BG};
                 color: {Colors.INPUT_TEXT};
                 border: 1px solid {Colors.INPUT_BORDER};
-                border-radius: 8px;
-                padding: 2px 8px;
-                {get_font_family_css()} {font_size_css(11)};
+                border-radius: 10px;
+                padding: 3px 10px;
+                {get_font_family_css()} {font_size_css(12)};
             }}
             ComboBox:hover {{
                 background-color: {Colors.HOVER_BG};
@@ -946,21 +942,21 @@ class SendableTextEdit(TextEdit):
             }}
             ComboBox::drop-down {{
                 border: none;
-                width: 14px;
+                width: 16px;
             }}
             ComboBox::down-arrow {{
-                border-left: 3px solid transparent;
-                border-right: 3px solid transparent;
-                border-top: 4px solid {Colors.INPUT_TEXT};
-                margin-right: 1px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid {Colors.INPUT_TEXT};
+                margin-right: 2px;
             }}
             ComboBox AbstractItemView {{
                 background-color: {Colors.CONTENT_BG};
                 color: {Colors.INPUT_TEXT};
                 selection-background-color: {Colors.TEXT_ACCENT};
                 border: 1px solid {Colors.INPUT_BORDER};
-                border-radius: 8px;
-                padding: 3px;
+                border-radius: 10px;
+                padding: 4px;
             }}
         """
 
