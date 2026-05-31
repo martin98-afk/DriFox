@@ -1402,7 +1402,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
         self.input_area.clearRequested.connect(self._on_clear_shortcut)
-        self.input_area.newSessionRequested.connect(self._create_new_session)
         self.input_area.agentChanged.connect(self._on_agent_changed)
         self.input_area.textChanged.connect(self._on_input_area_height_changed)
         self.input_area.slashTriggered.connect(self._on_slash_triggered)

@@ -529,14 +529,8 @@ class SendableTextEdit(TextEdit):
         self._shortcut_clear = QShortcut(QKeySequence("Ctrl+L"), self)
         self._shortcut_clear.activated.connect(self._on_clear_shortcut)
 
-        self._shortcut_new = QShortcut(QKeySequence("Ctrl+N"), self)
-        self._shortcut_new.activated.connect(self._on_new_session_shortcut)
-
     def _on_clear_shortcut(self):
         self.clearRequested.emit()
-
-    def _on_new_session_shortcut(self):
-        self.newSessionRequested.emit()
 
     def _on_text_changed(self):
         has_text = bool(self.toPlainText().strip())
