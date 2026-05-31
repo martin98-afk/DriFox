@@ -412,6 +412,7 @@ class CommandManager:
     def _parse_subagent_flags(text: str):
         """从文本开头解析 --with-context 和 --model=xxx 标志
 
+        支持 --model="Azure OpenAI:gpt-4o" 带引号值的格式。
         返回 (剩余文本, with_context, model_value)。
         """
         with_context = False
@@ -424,13 +425,26 @@ class CommandManager:
                 text = text[len("--with-context"):].lstrip()
             elif text.startswith("--model="):
                 eq_pos = text.find("=")
-                space_pos = text.find(" ", eq_pos)
-                if space_pos < 0:
-                    model_value = text[eq_pos + 1:]
-                    text = ""
+                after_eq = text[eq_pos + 1:]
+
+                # 支持带引号的值：--model="Azure OpenAI gpt-4o"
+                if after_eq.startswith('"'):
+                    close_quote = after_eq.find('"', 1)
+                    if close_quote >= 0:
+                        model_value = after_eq[1:close_quote]
+                        text = after_eq[close_quote + 1:].lstrip()
+                    else:
+                        # 没有闭合引号，取到末尾
+                        model_value = after_eq[1:]
+                        text = ""
                 else:
-                    model_value = text[eq_pos + 1:space_pos]
-                    text = text[space_pos:].lstrip()
+                    space_pos = after_eq.find(" ")
+                    if space_pos < 0:
+                        model_value = after_eq
+                        text = ""
+                    else:
+                        model_value = after_eq[:space_pos]
+                        text = after_eq[space_pos:].lstrip()
             else:
                 break
 

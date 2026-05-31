@@ -349,21 +349,26 @@ class SendableTextEdit(TextEdit):
         """值选择完成（来自 CommandCard.parameterValueSelected）
 
         自动补全 --model= 的值。
+        如果值包含空格（如 "Azure OpenAI:gpt-4o"），自动加双引号。
         防御：如果文本在当前光标前已包含该值，跳过插入避免重复。
         """
         text = self.toPlainText()
         cursor_pos = self.textCursor().position()
         before_cursor = text[:cursor_pos]
 
+        # 确定要插入的值（含空格时自动加双引号）
+        inserted_value = f'"{value}"' if " " in value else value
+
         # 检查光标前是否已有 --key=value（用户手动输入后按 Tab 确认）
-        if value in before_cursor:
+        # 同时检查原始值和带引号版本
+        if value in before_cursor or inserted_value in before_cursor:
             # 已存在值，只确保有空格
             if not text.endswith(" ") and not text.endswith("\n"):
                 self.textCursor().insertText(" ")
             return
 
         cursor = self.textCursor()
-        cursor.insertText(value)
+        cursor.insertText(inserted_value)
         cursor.insertText(" ")
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
