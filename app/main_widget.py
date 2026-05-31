@@ -650,7 +650,7 @@ class OpenAIChatToolWindow(ToolWindow):
         title_bar.insert_button(1, self._branch_btn)
         # 创建设置按钮
         self._settings_btn = TransparentToolButton(FluentIcon.SETTING, self)
-        self._settings_btn.setFixedSize(28, 28)
+        self._settings_btn.setFixedSize(24, 24)
         self._settings_btn.setToolTip("设置")
         self._settings_btn.clicked.connect(self._toggle_settings_card)
         title_bar.insert_button(2, self._settings_btn)
@@ -1166,8 +1166,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 动态更新主题选项
         update_theme_options()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 1, 1)
-        layout.setSpacing(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # 创建卡片容器
         self._top_card_container = TopCardContainer()
@@ -1240,10 +1240,10 @@ class OpenAIChatToolWindow(ToolWindow):
         Colors.refresh()
         title_style = f"""QLabel {{
             color: {Colors.TEXT_PRIMARY};
-            {font_size_css(15)}
+            {font_size_css(13)}
             font-weight: bold;
-            padding: 6px 4px;
-            border-radius: 10px;
+            padding: 3px 4px;
+            border-radius: 6px;
             background-color: transparent;
             {font_css}
         }}
@@ -1252,10 +1252,10 @@ class OpenAIChatToolWindow(ToolWindow):
         }}
         QLineEdit {{
             color: {Colors.TEXT_PRIMARY};
-            {font_size_css(15)}
+            {font_size_css(13)}
             font-weight: bold;
-            padding: 6px 4px;
-            border-radius: 10px;
+            padding: 3px 4px;
+            border-radius: 6px;
             background-color: transparent;
             border: none;
             {font_css}
@@ -1275,7 +1275,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # right_layout 保持简化，显示余额和 context_usage_ring
         right_layout = QHBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(4)
 
         # 余额显示
         self.balance_display = BalanceDisplay(self)
@@ -1421,7 +1421,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)
-        self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
+        self.chat_scroll_area.setViewportMargins(1, 1, 6, 1)
         self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         # 背景图片层 - 从主题配置加载
@@ -1430,8 +1430,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
-        self.chat_layout.setContentsMargins(6, 6, 6, 6)
-        self.chat_layout.setSpacing(8)
+        self.chat_layout.setContentsMargins(3, 3, 3, 3)
+        self.chat_layout.setSpacing(5)
         self.chat_layout.setAlignment(Qt.AlignBottom)
         self.chat_scroll_area.setWidget(self.chat_container)
 
@@ -1684,20 +1684,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     stop:0 {Colors.INPUT_BG_START},
                     stop:1 {Colors.INPUT_BG_END});
                 border: 1px solid {Colors.INPUT_BORDER};
-                border-radius: 16px;
+                border-radius: 14px;
             }}
         """)
         card_layout = QVBoxLayout(self._input_card)
-        card_layout.setContentsMargins(2, 2, 2, 2)
+        card_layout.setContentsMargins(1, 1, 1, 1)
         card_layout.setSpacing(0)
 
         # 输入框（融入卡片，无边框）
         self.input_area = SendableTextEdit(self._input_card)
         self.input_area._agent_combo.hide()
         self.input_area._initializing = False
-        self.input_area.setFixedHeight(52)
+        self.input_area.setFixedHeight(44)
         self.input_area.setPlaceholderText("给 DriFox 发送消息...")
-        setFont(self.input_area, scale_font_size(15))
+        setFont(self.input_area, scale_font_size(14))
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
         self.input_area.clearRequested.connect(self._on_clear_shortcut)
@@ -3598,10 +3598,10 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
             QLineEdit {{
                 color: {Colors.TEXT_PRIMARY};
-                {font_size_css(15)}
+                {font_size_css(13)}
                 font-weight: bold;
-                padding: 6px 4px;
-                border-radius: 10px;
+                padding: 3px 4px;
+                border-radius: 6px;
                 background-color: transparent;
                 border: none;
                 {font_css}
@@ -3620,7 +3620,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         stop:0 {Colors.INPUT_BG_START},
                         stop:1 {Colors.INPUT_BG_END});
                     border: 1px solid {Colors.INPUT_BORDER};
-                    border-radius: 16px;
+                    border-radius: 14px;
                 }}
             """)
         if hasattr(self, "_model_btn_container"):
