@@ -41,6 +41,60 @@ def _ensure_dingtalk_imports():
         AckMessage = AM
 
 
+def _patch_dingtalk_stream_logging():
+    """
+    Monkey-patch dingtalk_stream.stream.DingTalkStreamClient.start()
+    
+    修复三方库 stream.py:89 的日志错误：
+        self.logger.exception('unknown exception', e)
+            # TypeError: not all arguments converted during string formatting
+    修改为:
+        self.logger.exception('unknown exception', exc_info=e)
+    """
+    import asyncio.exceptions
+    import websockets
+    import dingtalk_stream.stream as dstream
+    from urllib.parse import quote_plus
+
+    original_start = dstream.DingTalkStreamClient.start
+
+    async def patched_start(self):
+        """Fixed version of DingTalkStreamClient.start()"""
+        self.pre_start()
+        while True:
+            try:
+                connection = self.open_connection()
+                if not connection:
+                    self.logger.error('open connection failed')
+                    await asyncio.sleep(10)
+                    continue
+                self.logger.info('endpoint is %s', connection)
+
+                uri = f'{connection["endpoint"]}?ticket={quote_plus(connection["ticket"])}'
+                async with websockets.connect(uri) as websocket:
+                    self.websocket = websocket
+                    asyncio.create_task(self.keepalive(websocket))
+                    async for raw_message in websocket:
+                        json_message = json.loads(raw_message)
+                        asyncio.create_task(self.background_task(json_message))
+            except KeyboardInterrupt:
+                break
+            except (asyncio.exceptions.CancelledError,
+                    websockets.exceptions.ConnectionClosedError) as e:
+                self.logger.error('[start] network exception, error=%s', e)
+                await asyncio.sleep(10)
+                continue
+            except Exception as e:
+                await asyncio.sleep(3)
+                # 🔧 FIXED: exc_info=e 而非作为位置参数传入
+                self.logger.exception('unknown exception', exc_info=e)
+                continue
+            finally:
+                pass
+
+    dstream.DingTalkStreamClient.start = patched_start
+
+
 # 预导入钉钉 SDK 组件
 _ensure_dingtalk_imports()
 
@@ -97,6 +151,9 @@ class DingTalkAdapter(BasePlatformAdapter):
             self._last_error = "依赖不可用"
             return False
         
+        # 修复三方库 dingtalk-stream 的日志 bug（TypeError 噪声）
+        _patch_dingtalk_stream_logging()
+        
         if not self._client_id or not self._client_secret:
             logger.error("[DingTalk] client_id and client_secret are required")
             self._last_error = "缺少 client_id 或 client_secret"
@@ -140,25 +197,38 @@ class DingTalkAdapter(BasePlatformAdapter):
     async def _run_stream(self) -> None:
         """运行 Stream 客户端"""
         self._backoff_idx = 0
+        _consecutive_timeouts = 0
         
         while self._running:
             try:
                 await self._stream_client.start()
             except asyncio.CancelledError:
                 return
+            except (TimeoutError, asyncio.TimeoutError) as e:
+                if not self._running:
+                    return
+                _consecutive_timeouts += 1
+                if _consecutive_timeouts == 1:
+                    logger.warning(
+                        "[DingTalk] WebSocket connection timed out — check network / firewall. "
+                        "DingTalk server may be unreachable."
+                    )
+                else:
+                    logger.warning(f"[DingTalk] Timeout again ({_consecutive_timeouts}x): {e}")
             except Exception as e:
                 if not self._running:
                     return
+                _consecutive_timeouts = 0
                 logger.warning(f"[DingTalk] Stream error: {e}")
-                
-                if not self._running:
-                    return
-                
-                delay = RECONNECT_BACKOFF[min(self._backoff_idx, len(RECONNECT_BACKOFF) - 1)]
-                self._backoff_idx += 1
-                
-                logger.info(f"[DingTalk] Reconnecting in {delay}s...")
-                await asyncio.sleep(delay)
+            
+            if not self._running:
+                return
+            
+            delay = RECONNECT_BACKOFF[min(self._backoff_idx, len(RECONNECT_BACKOFF) - 1)]
+            self._backoff_idx += 1
+            
+            logger.info(f"[DingTalk] Reconnecting in {delay}s...")
+            await asyncio.sleep(delay)
     
     async def disconnect(self) -> None:
         """断开连接"""

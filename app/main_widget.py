@@ -1428,13 +1428,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._apply_bg_from_theme()
 
         self.chat_container = QWidget()
-        Colors.refresh()
-        self.chat_container.setStyleSheet(f"""
-            QWidget {{
-                background: {Colors.WINDOW_BG};
-                border: none;
-            }}
-        """)
+        self.chat_container.setStyleSheet("background: transparent;")
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setContentsMargins(3, 3, 3, 3)
         self.chat_layout.setSpacing(5)
@@ -1701,7 +1695,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area = SendableTextEdit(self._input_card)
         self.input_area._agent_combo.hide()
         self.input_area._initializing = False
-        self.input_area.setFixedHeight(44)
+        self.input_area.setFixedHeight(48)
         self.input_area.setPlaceholderText("给 DriFox 发送消息...")
         setFont(self.input_area, scale_font_size(14))
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
@@ -3600,7 +3594,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 {font_css}
             }}
             QLabel:hover {{
-                background-color: {Colors.HOVER_BG};
+                background-color: rgba(255, 255, 255, 0.06);
             }}
             QLineEdit {{
                 color: {Colors.TEXT_PRIMARY};
@@ -3613,19 +3607,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 {font_css}
             }}
             QLineEdit:focus {{
-                background-color: {Colors.TOOLBAR_BG};
-                border: 1px solid {Colors.BORDER};
+                background-color: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.3);
             }}
             """
             self.title_edit.setStyleSheet(title_style)
-        # 刷新聊天区域背景
-        if hasattr(self, "chat_container"):
-            self.chat_container.setStyleSheet(f"""
-                QWidget {{
-                    background: {Colors.WINDOW_BG};
-                    border: none;
-                }}
-            """)
         # 刷新输入卡片背景
         if hasattr(self, "_input_card"):
             self._input_card.setStyleSheet(f"""
