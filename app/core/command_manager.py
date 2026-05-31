@@ -194,6 +194,26 @@ class CommandManager:
 
     # ---- 解析 ----
 
+    # 显示后缀 → 显示类型映射
+    _SUFFIX_TO_TYPE = {
+        "-skill": "skill",
+        "-prompt": "prompt",
+        "-cmd": "command",
+        "-agent": "agent",
+    }
+
+    @staticmethod
+    def parse_suffixed_name(name: str):
+        """解析带后缀的命令名，返回 (原始名, 显示类型)
+
+        如 "tdd-skill" → ("tdd", "skill")
+        如 "tdd" → ("tdd", None)
+        """
+        for suffix, dtype in CommandManager._SUFFIX_TO_TYPE.items():
+            if name.endswith(suffix) and len(name) > len(suffix):
+                return name[:-len(suffix)], dtype
+        return name, None
+
     @staticmethod
     def parse_command_name(text: str) -> Optional[str]:
         """从输入文本中提取命令名（去掉 / 前缀）
@@ -242,11 +262,20 @@ class CommandManager:
     def is_builtin_command(self, text: str) -> bool:
         """判断输入文本是否匹配某个已注册的内置命令"""
         name = self.parse_command_name(text)
-        return name is not None and self.has_command(name)
+        if name is None:
+            return False
+        # 去除后缀检查
+        base_name, suffix_type = self.parse_suffixed_name(name)
+        if suffix_type == "skill":
+            return False  # 技能由外部处理
+        return self.has_command(base_name or name)
 
     def is_known_command_name(self, name: str) -> bool:
         """根据命令名判断是否为内置命令（不含 /，任一类型存在即可）"""
-        return self.has_command(name)
+        base_name, suffix_type = self.parse_suffixed_name(name)
+        if suffix_type == "skill":
+            return False
+        return self.has_command(base_name or name)
 
     # ---- 执行 ----
 
@@ -264,30 +293,46 @@ class CommandManager:
         Args:
             text: 用户输入的完整文本
             preferred_display_type: 可选，来自 CommandCard 的 display_type
-                （"command"/"prompt"/"agent"），按此类型优先匹配执行
+                （"command"/"prompt"/"agent"/"skill"），按此类型优先匹配执行
 
         Returns:
             Optional[CommandResult]:
-            - None: 不是内置命令
+            - None: 不是内置命令（或指定为 skill 类型）
             - CommandResult(type=FUNCTION): 函数命令，调用方需执行对应 handler
             - CommandResult(type=PROMPT): 提示词替换命令，使用 replacement 作为发送文本
             - CommandResult(type=AGENT): 智能体命令，使用 replacement 作为发送文本
             - CommandResult(type=SUBAGENT): 智能体命令 + --subagent，触发子智能体任务
 
         同名不同类型同时存在时执行策略：
-        1. 如果提供了 preferred_display_type（来自卡片选中），优先匹配该类型
-        2. 否则按优先级：AGENT > PROMPT > FUNCTION
+        1. 如果命令名带后缀（如 "tdd-skill"），提取原始名+目标类型，优先匹配
+        2. 如果提供了 preferred_display_type（来自卡片选中），优先匹配该类型
+        3. 否则按优先级：AGENT > PROMPT > FUNCTION
            （保持与原有"智能体覆盖命令"行为一致）
         """
         cmd_name = self.parse_command_name(text)
-        if not cmd_name or cmd_name not in self._commands:
+        if not cmd_name:
+            return None
+
+        # 解析后缀：如 "tdd-skill" → base="tdd", type="skill"
+        base_name, suffix_type = self.parse_suffixed_name(cmd_name)
+
+        # skill 类型不由 CommandManager 处理，返回 None 由主流程走技能替换
+        if suffix_type == "skill":
+            return None
+
+        # 有后缀时优先使用后缀推断的类型
+        if suffix_type:
+            preferred_display_type = preferred_display_type or suffix_type
+            cmd_name = base_name
+
+        if cmd_name not in self._commands:
             return None
 
         entries = self._commands[cmd_name]
         if not entries:
             return None
 
-        # 选取匹配类型：优先卡片选中 → 回落默认优先级
+        # 选取匹配类型：优先卡片选中/后缀推断 → 回落默认优先级
         if preferred_display_type:
             preferred = self._DISPLAY_TYPE_MAP.get(preferred_display_type)
             if preferred and preferred in entries:

@@ -190,25 +190,27 @@ class CommandItemWidget(QWidget):
     def _update_display(self):
         """更新名称显示（含查询高亮）"""
         name = self._data["name"]
+        # 优先使用 display_name（跨类型重名时加后缀），否则回退到 name
+        display_name = self._data.get("display_name", name)
         # 命令需要加 / 前缀，技能和智能体直接显示名称
         item_type = self._data["type"]
-        display_name = f"/{name}" if item_type == "command" else name
+        display_text = f"/{display_name}" if item_type == "command" else display_name
         query = self._query
 
         if query:
-            # 连续子串匹配高亮
-            lower_name = display_name.lower()
+            # 连续子串匹配高亮（匹配原始 name + display_name，高亮 display_text）
+            lower_text = display_text.lower()
             lower_query = query.lower()
-            idx = lower_name.find(lower_query)
+            idx = lower_text.find(lower_query)
             if idx >= 0:
-                html = display_name[:idx]
-                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_name[idx:idx + len(query)]}</span>'
-                html += display_name[idx + len(query):]
+                html = display_text[:idx]
+                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_text[idx:idx + len(query)]}</span>'
+                html += display_text[idx + len(query):]
                 self._name_label.setText(html)
             else:
-                self._name_label.setText(display_name)
+                self._name_label.setText(display_text)
         else:
-            self._name_label.setText(display_name)
+            self._name_label.setText(display_text)
 
     def set_selected(self, selected: bool):
         """设置选中状态"""
@@ -947,6 +949,26 @@ class CommandCard(QWidget):
             for s in get_local_skills()
         ]
         self._all_items = commands + skills
+
+        # 检测跨类型重名，添加 display_name 后缀以区分
+        # 同名不同类型的项（如 "tdd" 同时是技能和提示词）各自加后缀
+        name_type_map = {}
+        for item in self._all_items:
+            name_type_map.setdefault(item["name"], set()).add(item["type"])
+
+        suffix_map = {
+            "skill": "-skill",
+            "prompt": "-prompt",
+            "command": "-cmd",
+            "agent": "-agent",
+        }
+        for item in self._all_items:
+            if len(name_type_map.get(item["name"], set())) > 1:
+                suffix = suffix_map.get(item["type"], "")
+                item["display_name"] = f"{item['name']}{suffix}"
+            else:
+                item["display_name"] = item["name"]
+
         self._all_items_cache = list(self._all_items)
         self._cache_dirty = False
 
@@ -967,6 +989,7 @@ class CommandCard(QWidget):
             self._filtered_items = [
                 item for item in self._all_items
                 if q_lower in item["name"].lower()
+                or q_lower in item.get("display_name", item["name"]).lower()
                 or q_lower in item["description"].lower()
             ]
 
@@ -1227,7 +1250,8 @@ class CommandCard(QWidget):
         # 列表模式：选中命令/技能
         if 0 <= self._selected_index < len(self._filtered_items):
             item = self._filtered_items[self._selected_index]
-            self.commandSelected.emit(item["name"], item["type"])
+            insert_name = item.get("display_name", item["name"])
+            self.commandSelected.emit(insert_name, item["type"])
             # 如果 emit 触发了 textChanged → _on_slash_trigger_check → detail 模式，
             # 则不再 dismiss（卡片切换到 detail 模式继续可见）
             if not self._detail_mode:

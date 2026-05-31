@@ -6217,13 +6217,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
             parts = user_text[1:].split(maxsplit=1)
-            if parts and get_skill_by_name(parts[0]):
-                skill_name = parts[0]
-                remainder = parts[1] if len(parts) > 1 else ""
-                if remainder:
-                    user_text = f"加载这个智能体技能：@{skill_name}\n{remainder}"
-                else:
-                    user_text = f"加载这个智能体技能：@{skill_name}"
+            if parts:
+                # 解析后缀：如 "tdd-skill" → "tdd"
+                raw_name, _ = CommandManager.parse_suffixed_name(parts[0])
+                skill_name = raw_name or parts[0]
+                if get_skill_by_name(skill_name):
+                    remainder = parts[1] if len(parts) > 1 else ""
+                    if remainder:
+                        user_text = f"加载这个智能体技能：@{skill_name}\n{remainder}"
+                    else:
+                        user_text = f"加载这个智能体技能：@{skill_name}"
         # ---- 技能替换结束 ----
 
         # 非函数命令：检查是否正在流式输出

@@ -194,12 +194,18 @@ class SendableTextEdit(TextEdit):
 
                 from app.core.command_manager import CommandManager
                 from app.utils.utils import get_skill_by_name
-                if CommandManager.get_instance().is_known_command_name(cmd_name) or get_skill_by_name(cmd_name):
+                # 解析后缀：如 "tdd-skill" → base="tdd", type="skill"
+                raw_cmd, _ = CommandManager.parse_suffixed_name(cmd_name)
+                check_name = raw_cmd or cmd_name
+                if (CommandManager.get_instance().is_known_command_name(cmd_name)
+                        or get_skill_by_name(cmd_name)
+                        or (raw_cmd and CommandManager.get_instance().is_known_command_name(raw_cmd))
+                        or (raw_cmd and get_skill_by_name(raw_cmd))):
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
                     self._slash_trigger_pos = 0
                     # 传入当前选中项的 display_type（供 show_command_detail 显示对应类型的 hint）
                     selected_type = card._current_selected_type if card else ""
-                    self.slashShowHint.emit(cmd_name, selected_type)
+                    self.slashShowHint.emit(check_name, selected_type)
                 else:
                     # 未知命令/技能 + 参数 → 关闭
                     if card and card.is_card_visible:
