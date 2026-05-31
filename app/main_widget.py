@@ -1428,7 +1428,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._apply_bg_from_theme()
 
         self.chat_container = QWidget()
-        self.chat_container.setStyleSheet("background: transparent;")
+        Colors.refresh()
+        self.chat_container.setStyleSheet(f"""
+            QWidget {{
+                background: {Colors.WINDOW_BG};
+                border: none;
+            }}
+        """)
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setContentsMargins(3, 3, 3, 3)
         self.chat_layout.setSpacing(5)
@@ -3594,7 +3600,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 {font_css}
             }}
             QLabel:hover {{
-                background-color: rgba(255, 255, 255, 0.06);
+                background-color: {Colors.HOVER_BG};
             }}
             QLineEdit {{
                 color: {Colors.TEXT_PRIMARY};
@@ -3607,11 +3613,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 {font_css}
             }}
             QLineEdit:focus {{
-                background-color: rgba(255, 255, 255, 0.1);
-                border: 1px solid rgba(255, 255, 255, 0.3);
+                background-color: {Colors.TOOLBAR_BG};
+                border: 1px solid {Colors.BORDER};
             }}
             """
             self.title_edit.setStyleSheet(title_style)
+        # 刷新聊天区域背景
+        if hasattr(self, "chat_container"):
+            self.chat_container.setStyleSheet(f"""
+                QWidget {{
+                    background: {Colors.WINDOW_BG};
+                    border: none;
+                }}
+            """)
         # 刷新输入卡片背景
         if hasattr(self, "_input_card"):
             self._input_card.setStyleSheet(f"""
