@@ -144,7 +144,7 @@ class CommandItemWidget(QWidget):
             CommandItemWidget {{
                 background-color: {bg};
                 border: none;
-                border-radius: 0px;
+                border-radius: 4px;
             }}
         """)
 

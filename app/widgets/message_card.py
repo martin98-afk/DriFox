@@ -80,7 +80,7 @@ from app.core import (
 )
 from app.core.message_content import make_tool_result_block
 from app.utils.utils import get_font_family_css, get_icon
-from app.utils.design_tokens import current_theme, scale_font_size, Colors, font_size_css, _get_global_font
+from app.utils.design_tokens import current_theme, scale_font_size, Colors, font_size_css, _get_global_font, fade_in_widget
 from app.widgets.render_helpers import (
     render_tool_block,
 )
@@ -3354,6 +3354,9 @@ class MessageCard(SimpleCardWidget):
             }}
             """
         )
+
+        # 淡入动画：新消息微妙出现（200ms，仅透明度）
+        fade_in_widget(self, 200)
 
     def start_streaming_anim(self):
         if self._streaming:

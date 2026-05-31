@@ -43,7 +43,7 @@ class SendableTextEdit(TextEdit):
 
         self._setup_glow_effect()
         self._apply_input_style()
-        self.setPlaceholderText("给 DriFox 发送消息，Enter 发送，Shift+Enter 换行")
+        self.setPlaceholderText("给 DriFox 发送消息，Enter 发送")
         self.setAcceptRichText(False)
         self.setLineWrapMode(TextEdit.WidgetWidth)
         self.setAcceptDrops(True)
@@ -98,8 +98,6 @@ class SendableTextEdit(TextEdit):
 
     def _apply_send_btn_style(self):
         """从 Colors 应用发送按钮样式"""
-        from app.utils.design_tokens import Colors
-
         Colors.refresh()
         radius = Colors.SEND_BTN_RADIUS
         self.send_btn.setStyleSheet(f"""
@@ -347,7 +345,7 @@ class SendableTextEdit(TextEdit):
         自动补全 --model= 的值。
         """
         cursor = self.textCursor()
-        cursor.insertText(value)
+        cursor.insertText(inserted_value)
         cursor.insertText(" ")
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
@@ -940,6 +938,7 @@ class SendableTextEdit(TextEdit):
         if not self._glow_effect:
             return
         try:
+            Colors.refresh()
             # 延迟挂载发光效果到父卡片
             if self._glow_target is None:
                 card = self.parent()
@@ -950,8 +949,9 @@ class SendableTextEdit(TextEdit):
                     self._glow_target.setGraphicsEffect(self._glow_effect)
             if self._glow_target:
                 self._glow_effect.setBlurRadius(target_blur)
-                color = QColor(201, 168, 92, target_alpha)
-                self._glow_effect.setColor(color)
+                glow_color = QColor(Colors.INPUT_FOCUS_BORDER)
+                glow_color.setAlpha(target_alpha)
+                self._glow_effect.setColor(glow_color)
                 # 焦点时高亮边框颜色
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
@@ -960,7 +960,7 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_FOCUS_BG_START},
                                 stop:1 {Colors.INPUT_FOCUS_BG_END});
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
-                            border-radius: 16px;
+                            border-radius: 14px;
                         }}
                     """)
                 else:
@@ -970,7 +970,7 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_BG_START},
                                 stop:1 {Colors.INPUT_BG_END});
                             border: 1px solid {Colors.INPUT_BORDER};
-                            border-radius: 16px;
+                            border-radius: 14px;
                         }}
                     """)
         except Exception:

@@ -403,6 +403,54 @@ class BorderRadius:
     LG = "18px"  # 搜索框、输入区域
 
 
+# ============ 动效系统 ============
+class Animations:
+    """动画时间与缓动 Token — 克制使用，仅关键处动效"""
+    FAST_MS = 150       # 按钮按下/释放
+    NORMAL_MS = 200     # 卡片淡入、过渡
+    SLOW_MS = 300       # 展开/折叠
+
+    # 缓动曲线
+    EASE_OUT = "QEasingCurve::OutCubic"
+    EASE_IN_OUT = "QEasingCurve::InOutQuad"
+
+    # 位移量
+    FADE_SLIDE_Y = 8   # 淡入上滑像素数
+
+
+# ============ 阴影系统 ============
+class Shadows:
+    """阴影 Token — 通过 QGraphicsDropShadowEffect 实现"""
+    # 标准卡片阴影
+    CARD = {
+        "blur_radius": 12,
+        "offset_x": 0,
+        "offset_y": 4,
+        "color": "rgba(0, 0, 0, 0.25)",
+    }
+    # 浮动卡片阴影（更明显）
+    FLOATING = {
+        "blur_radius": 20,
+        "offset_x": 0,
+        "offset_y": 8,
+        "color": "rgba(0, 0, 0, 0.35)",
+    }
+    # 聚焦发光
+    GLOW = {
+        "blur_radius": 15,
+        "offset_x": 0,
+        "offset_y": 0,
+        "color": "rgba(201, 168, 92, 0.3)",
+    }
+
+
+class BorderRadius:
+    """圆角 Token"""
+    SM = "4px"   # 小标签、小按钮
+    MD = "8px"   # 卡片、输入框
+    LG = "18px"  # 搜索框、输入区域
+
+
 # ============ 间距系统 ============
 class Spacing:
     """间距 Token（单位：px）"""
@@ -476,7 +524,7 @@ class CardStyles:
     
     @staticmethod
     def scroll_area() -> str:
-        """滚动区域样式"""
+        """滚动区域样式 — 超薄、半透明、精致"""
         Colors.refresh()
         return f"""
             QScrollArea {{
@@ -488,15 +536,19 @@ class CardStyles:
             }}
             QScrollBar:vertical {{
                 background: transparent;
-                width: 8px;
+                width: 6px;
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
                 background: {Colors.SCROLLBAR_HANDLE_BG};
-                border-radius: 4px;
+                border-radius: 3px;
                 min-height: 30px;
             }}
             QScrollBar::handle:vertical:hover {{
+                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
+                width: 8px;
+            }}
+            QScrollBar::handle:vertical:pressed {{
                 background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
@@ -777,6 +829,40 @@ def get_content_bg_style() -> str:
         background-color: {Colors.CONTENT_BG};
         border-radius: 6px;
     """
+
+
+def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
+    """为 widget 添加淡入动画（透明度 0→1），简洁克制"""
+    from PyQt5.QtWidgets import QGraphicsOpacityEffect
+    from PyQt5.QtCore import QPropertyAnimation
+
+    effect = QGraphicsOpacityEffect(widget)
+    widget.setGraphicsEffect(effect)
+    anim = QPropertyAnimation(effect, b"opacity", widget)
+    anim.setDuration(duration)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.start()
+    # 保持引用防止被回收
+    widget._fade_anim = anim
+
+
+def apply_card_shadow(widget, shadow_type: str = "card"):
+    """为 widget 添加预设阴影效果
+    
+    Args:
+        widget: 目标控件
+        shadow_type: "card" | "floating" | "glow"
+    """
+    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+    from PyQt5.QtGui import QColor
+
+    config = getattr(Shadows, shadow_type.upper(), Shadows.CARD)
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setBlurRadius(config["blur_radius"])
+    effect.setOffset(config["offset_x"], config["offset_y"])
+    effect.setColor(QColor(config["color"]))
+    widget.setGraphicsEffect(effect)
 
 
 # 从 utils 导入字体家族 CSS 函数供复用

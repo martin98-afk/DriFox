@@ -40,14 +40,14 @@ class ToolWindowTitleBar(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setFixedHeight(32)
+        self.setFixedHeight(28)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 4, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 0, 2, 0)
+        layout.setSpacing(4)
 
         self._icon_widget = IconWidget(self)
-        self._icon_widget.setFixedSize(16, 16)
+        self._icon_widget.setFixedSize(14, 14)
 
         self._title_label = QLabel(self)
         self._title_label.setObjectName("titleLabel")
@@ -60,20 +60,23 @@ class ToolWindowTitleBar(QWidget):
         self._action_container.setObjectName("actionContainer")
         self._action_layout = QHBoxLayout(self._action_container)
         self._action_layout.setContentsMargins(0, 0, 0, 0)
-        self._action_layout.setSpacing(4)
+        self._action_layout.setSpacing(3)
         layout.addWidget(self._action_container)
 
         # 内存显示标签
         self._memory_label = QLabel(self)
         self._memory_label.setObjectName("memoryLabel")
-        self._memory_label.setFixedHeight(22)
+        self._memory_label.setFixedHeight(20)
         from app.utils.design_tokens import Colors
+
         self._memory_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(12)}px; "
-            f"padding: 2px 6px; background-color: transparent; border: none; border-radius: 4px;"
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
+            f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
         )
         self._memory_label.hide()  # 默认隐藏，子类可以控制显示
-        layout.insertWidget(layout.indexOf(self._action_container) - 1, self._memory_label)
+        layout.insertWidget(
+            layout.indexOf(self._action_container) - 1, self._memory_label
+        )
 
         # 内存刷新定时器
         self._memory_timer = QTimer(self)
@@ -84,11 +87,11 @@ class ToolWindowTitleBar(QWidget):
         # 设置按钮已移除（移到主窗口内）
 
         self._min_btn = TransparentToolButton(get_icon("最小化"), self)
-        self._min_btn.setFixedSize(24, 24)
+        self._min_btn.setFixedSize(22, 22)
         self._min_btn.setToolTip("最小化")
 
         self._popup_btn = TransparentToolButton(FIF.CLOSE, self)
-        self._popup_btn.setFixedSize(24, 24)
+        self._popup_btn.setFixedSize(22, 22)
         self._popup_btn.setToolTip("关闭")
         self._popup_btn.clicked.connect(self._on_popup_clicked)
 
@@ -105,6 +108,7 @@ class ToolWindowTitleBar(QWidget):
 
         # 使用主题颜色
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         title_color = Colors.TEXT_PRIMARY
         btn_hover = Colors.HOVER_BG
@@ -117,10 +121,10 @@ class ToolWindowTitleBar(QWidget):
             }}
             #titleLabel {{
                 color: {title_color};
-                font-size: {scale_font_size(15)}px;
+                font-size: {scale_font_size(13)}px;
                 font-weight: bold;
                 font-family: "{font_name}";
-                padding: 0 4px;
+                padding: 0 3px;
             }}
             #actionContainer {{
                 background-color: transparent;
@@ -128,8 +132,8 @@ class ToolWindowTitleBar(QWidget):
             ToolButton {{
                 background-color: transparent;
                 border: none;
-                border-radius: 4px;
-                padding: 2px;
+                border-radius: 3px;
+                padding: 1px;
             }}
             ToolButton:hover {{
                 background-color: {btn_hover};
@@ -354,6 +358,7 @@ class OpacitySlider(QWidget):
 
 class LockButtonWidget(QWidget):
     """独立的锁定按钮小部件，在穿透模式下可独立显示和交互"""
+
     lockClicked = pyqtSignal(bool)
 
     def __init__(self, parent=None):
@@ -400,8 +405,15 @@ class LockButtonWidget(QWidget):
                 # 其他应用在前台 → 强制 TOPMOST 防止被遮挡
                 HWND_TOPMOST = -1
                 hwnd = wintypes.HWND(int(self.winId()))
-                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                user32.SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                )
                 self.raise_()
                 return
 
@@ -415,25 +427,41 @@ class LockButtonWidget(QWidget):
                     HWND_NOTOPMOST = -2
                     hwnd = wintypes.HWND(int(self.winId()))
                     # ① 移除 TOPMOST 状态，使对话框可以浮于锁定按钮之上
-                    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                    user32.SetWindowPos(
+                        hwnd,
+                        HWND_NOTOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                    )
                     # ② 再将锁定按钮放置在对话框下方（SetWindowPos 的 hWndInsertAfter 参数
                     #    表示窗口将被插入到此 HWND 之后，即下方）
                     active_hwnd = wintypes.HWND(int(active.winId()))
-                    user32.SetWindowPos(hwnd, active_hwnd, 0, 0, 0, 0,
-                                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                    user32.SetWindowPos(
+                        hwnd,
+                        active_hwnd,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                    )
                     return
 
             # 本应用在前台，无对话框 → 正常提升 z-order
             hwnd = wintypes.HWND(int(self.winId()))
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            user32.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            )
             self.raise_()
         except Exception:
             pass  # 忽略可能的异常
 
     def _setup_ui(self):
         from qfluentwidgets import ToolButton
+
         self._btn = ToolButton(self)
         self._btn.setFixedSize(26, 26)
         self._btn.clicked.connect(self._on_click)
@@ -451,7 +479,11 @@ class LockButtonWidget(QWidget):
             self._btn.setToolTip("取消锁定（恢复交互）")
             # 将 Colors.SYSTEM_ACCENT 转为 rgba 格式用于按钮背景
             _accent_qc = QColor(Colors.SYSTEM_ACCENT)
-            _accent_r, _accent_g, _accent_b = _accent_qc.red(), _accent_qc.green(), _accent_qc.blue()
+            _accent_r, _accent_g, _accent_b = (
+                _accent_qc.red(),
+                _accent_qc.green(),
+                _accent_qc.blue(),
+            )
             self._btn.setStyleSheet(f"""
                 QToolButton {{
                     background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 200);
@@ -578,7 +610,7 @@ class ToolPopupDialog(QDialog):
             | Qt.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(400, 300)
+        self.setMinimumSize(360, 260)
         # 禁用系统 SizeGrip，使用自定义边缘拖拽（边缘区域已加大，更易用）
         self.setSizeGripEnabled(False)
 
@@ -693,7 +725,9 @@ class ToolPopupDialog(QDialog):
     def _sync_slider_position(self):
         """同步 slider 位置到对话框右侧（锁定按钮下方）"""
         if self._opacity_slider and not self._lock_mode:
-            pos = self.mapToGlobal(QPoint(self.width(), 10 + 30))  # 往下移30px，避开锁定按钮
+            pos = self.mapToGlobal(
+                QPoint(self.width(), 10 + 30)
+            )  # 往下移30px，避开锁定按钮
             self._opacity_slider.move(pos)
 
     def _set_window_passthrough(self, enabled: bool):
@@ -808,8 +842,7 @@ class ToolPopupDialog(QDialog):
 
     def keyPressEvent(self, event):
         # Shift+ESC: 清除所有窗口选中状态（解除分组）
-        if (event.key() == Qt.Key_Escape
-                and event.modifiers() == Qt.ShiftModifier):
+        if event.key() == Qt.Key_Escape and event.modifiers() == Qt.ShiftModifier:
             TrayManager.get_instance().deselect_all()
             event.accept()
             return
@@ -820,8 +853,9 @@ class ToolPopupDialog(QDialog):
             return
 
         # Ctrl+Shift+G: 排列选中窗口为网格
-        if (event.key() == Qt.Key_G
-                and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)):
+        if event.key() == Qt.Key_G and event.modifiers() == (
+            Qt.ControlModifier | Qt.ShiftModifier
+        ):
             TrayManager.get_instance().arrange_selected_windows_grid()
             event.accept()
             return
@@ -831,24 +865,24 @@ class ToolPopupDialog(QDialog):
     def closeEvent(self, event):
         # 获取 TrayManager 实例
         tray_manager = TrayManager.get_instance()
-        
+
         # window_count 包含当前窗口，所以:
         # = 1 表示当前窗口是唯一的
         # > 1 表示还有其他窗口
         remaining_count = tray_manager.window_count
-        
+
         logger.info(f"[CloseLogic] 窗口关闭，当前窗口总数: {remaining_count}")
-        
+
         if remaining_count <= 1:
             # 当前窗口是唯一的（或马上就是唯一的），隐藏到托盘而非退出
             self._is_closing = False
             event.ignore()
             self.hide()
-            
+
             # 确保托盘图标存在
             if not tray_manager._tray_icon.isVisible():
                 tray_manager._tray_icon.show()
-            
+
             logger.info("[CloseLogic] 最后一个窗口隐藏到托盘")
         else:
             # 还有其他窗口，直接关闭当前窗口
@@ -856,10 +890,10 @@ class ToolPopupDialog(QDialog):
                 event.accept()
                 return
             self._is_closing = True
-            
+
             # 注销当前窗口
             tray_manager.unregister_window(self)
-            
+
             # 关闭时同时隐藏锁定按钮
             if self._lock_btn_widget:
                 self._lock_btn_widget.hide()
@@ -867,10 +901,11 @@ class ToolPopupDialog(QDialog):
             # 通知 tool_instance 标记为已销毁，防止异步回调继续执行
             try:
                 from PyQt5 import sip
+
                 if self.tool_instance and not sip.isdeleted(self.tool_instance):
                     self.tool_instance._is_destroyed = True
                     # 通知父窗口移除引用，防止内存泄漏
-                    if hasattr(self.tool_instance, '_popup_refs'):
+                    if hasattr(self.tool_instance, "_popup_refs"):
                         refs = list(self.tool_instance._popup_refs)
                         if self in refs:
                             refs.remove(self)
@@ -885,7 +920,9 @@ class ToolPopupDialog(QDialog):
         """监听窗口状态变化"""
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange:
-            logger.debug(f"[DockRestore] WindowStateChange - isMinimized={self.isMinimized()}, isVisible={self.isVisible()}")
+            logger.debug(
+                f"[DockRestore] WindowStateChange - isMinimized={self.isMinimized()}, isVisible={self.isVisible()}"
+            )
             if platform.system() == "Darwin":
                 # macOS: 如果窗口被隐藏了，尝试恢复
                 if not self.isVisible():
@@ -1083,7 +1120,7 @@ class ToolPopupDialog(QDialog):
                 if self._snap_locked_offset:
                     locked_x = self._snap_locked_offset.x()
                     locked_y = self._snap_locked_offset.y()
-                    if (abs(self.x() - locked_x) < 2 and abs(self.y() - locked_y) < 2):
+                    if abs(self.x() - locked_x) < 2 and abs(self.y() - locked_y) < 2:
                         # 已锁定在吸附位置，跳过
                         pass
                     elif not snapped_x and not snapped_y:
@@ -1152,6 +1189,7 @@ class ToolPopupDialog(QDialog):
         # 从全局 TrayManager 注销
         try:
             from app.tray_manager import TrayManager
+
             TrayManager.get_instance().unregister_window(self)
         except Exception:
             pass
@@ -1161,7 +1199,9 @@ class ToolPopupDialog(QDialog):
             self._opacity_slider = OpacitySlider(self)
             self._opacity_slider.opacityChanged.connect(self._on_opacity_changed)
         # 同步滑块位置但不触发 opacityChanged 信号（避免无意义的重绘链）
-        self._opacity_slider.setOpacity(int(self.windowOpacity() * 100), emit_change=False)
+        self._opacity_slider.setOpacity(
+            int(self.windowOpacity() * 100), emit_change=False
+        )
         if self._lock_mode:
             self._reparent_slider_to_desktop()
         else:
@@ -1200,7 +1240,9 @@ class ToolPopupDialog(QDialog):
         # macOS: 监听应用激活事件，当 Dock 图标被点击时恢复窗口
         if platform.system() == "Darwin":
             if event.type() == QEvent.ApplicationActivate:
-                logger.info(f"[DockRestore] ApplicationActivate - isMinimized={self.isMinimized()}, isVisible={self.isVisible()}")
+                logger.info(
+                    f"[DockRestore] ApplicationActivate - isMinimized={self.isMinimized()}, isVisible={self.isVisible()}"
+                )
                 if self.isMinimized() or not self.isVisible():
                     logger.info("[DockRestore] Restoring from minimized/hidden...")
                     self._was_minimized = False
