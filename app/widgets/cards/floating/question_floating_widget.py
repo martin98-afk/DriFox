@@ -415,8 +415,12 @@ class QuestionFloatingWidget(QWidget):
         main_layout.setSpacing(3)
 
         # ── 顶栏 ──
-        header = QHBoxLayout()
+        self._header_widget = QWidget()
+        self._header_widget.setCursor(Qt.PointingHandCursor)
+        self._header_widget.installEventFilter(self)
+        header = QHBoxLayout(self._header_widget)
         header.setSpacing(8)
+        header.setContentsMargins(0, 0, 0, 0)
 
         self._collapse_btn = QPushButton()
         self._collapse_btn.setIcon(get_icon("折叠"))
@@ -444,7 +448,7 @@ class QuestionFloatingWidget(QWidget):
         header.addWidget(self._page_label)
         header.addStretch()
 
-        main_layout.addLayout(header)
+        main_layout.addWidget(self._header_widget)
 
         # ── 问题标题（超出 160px 高度时滚动） ──
         self._question_scroll = QScrollArea()
@@ -572,6 +576,12 @@ class QuestionFloatingWidget(QWidget):
         """)
         self._question_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT};background:transparent;")
         self._hint_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
+
+    def eventFilter(self, obj, event):
+        if obj is self._header_widget and event.type() == QEvent.MouseButtonPress:
+            self._toggle_collapse()
+            return True
+        return super().eventFilter(obj, event)
 
     def _toggle_collapse(self):
         """折叠/展开提问卡片，仅保留顶栏"""

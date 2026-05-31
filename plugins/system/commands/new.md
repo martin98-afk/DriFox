@@ -1,5 +1,5 @@
 ---
 description: 新建会话
 type: function
-shortcut: Ctrl+N
+shortcut: Ctrl+Shift+N
 ---

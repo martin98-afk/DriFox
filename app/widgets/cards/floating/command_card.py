@@ -201,7 +201,7 @@ class CommandItemWidget(QWidget):
                 }}
             """)
 
-        # 快捷键标签样式：类键盘键帽风格
+        # 快捷键标签样式：类键盘键帽风格，加粗
         shortcut = self._data.get("shortcut", "")
         if item_type == "command" and shortcut:
             shortcut_fg = Colors.TEXT_MUTED
@@ -212,7 +212,7 @@ class CommandItemWidget(QWidget):
                     background: rgba(128,128,128,0.1);
                     border-radius: 3px;
                     padding: 1px 5px;
-                    font-weight: normal;
+                    font-weight: bold;
                 }}
             """)
 
@@ -1076,9 +1076,17 @@ class CommandCard(QWidget):
             if key in old_by_key_copy and key not in seen_keys:
                 w = old_by_key_copy.pop(key)  # 消耗掉这个 key
                 seen_keys.add(key)
-                # 更新高亮查询（query 变化时重新渲染名称）
+                # 更新 widget 数据和显示（热重载后 shortcut 等字段可能变化）
+                w._data = item
                 w._query = self._current_query
                 w._update_display()
+                # 刷新快捷键标签
+                shortcut = item.get("shortcut", "")
+                if item["type"] == "command" and shortcut:
+                    w._shortcut_label.setText(shortcut)
+                    w._shortcut_label.setVisible(True)
+                else:
+                    w._shortcut_label.setVisible(False)
                 new_widgets.append(w)
             else:
                 # 创建新 widget

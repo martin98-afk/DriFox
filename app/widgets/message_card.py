@@ -1898,22 +1898,14 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
-                    min-width: 34px;
-                    padding: 0 6px;
+                    min-width: 38px;
+                    padding: 0 8px;
                     text-align: right;
                     color: #6e7681;
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
                     background: rgba(13,17,23,0.18);
-                }}
-                .tool-diff-inline .line-num-old {{
-                    border-right: 1px solid rgba(139,148,158,0.16);
-                }}
-                .tool-diff-inline .line-num-new {{
-                    border-right: 1px solid rgba(139,148,158,0.16);
-                }}
-                .tool-diff-inline .line-num-empty {{
                     border-right: 1px solid rgba(139,148,158,0.16);
                 }}
                 .tool-diff-inline .line-sign {{

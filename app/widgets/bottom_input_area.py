@@ -4,7 +4,14 @@ import re
 from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QInputMethodEvent, QKeyEvent, QKeySequence, QTextCursor, QColor, QTextCharFormat
+from PyQt5.QtGui import (
+    QInputMethodEvent,
+    QKeyEvent,
+    QKeySequence,
+    QTextCursor,
+    QColor,
+    QTextCharFormat,
+)
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
 from qfluentwidgets import FluentIcon, ComboBox
@@ -14,7 +21,7 @@ from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
 
 # 预编译正则表达式
-_FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
+_FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
 
 class SendableTextEdit(TextEdit):
@@ -25,8 +32,8 @@ class SendableTextEdit(TextEdit):
     historyUpRequested = pyqtSignal()
     historyDownRequested = pyqtSignal()
     agentChanged = pyqtSignal(str)
-    slashTriggered = pyqtSignal(str)     # 检测到 / 触发，携带查询文本
-    slashDismissed = pyqtSignal()        # / 触发结束
+    slashTriggered = pyqtSignal(str)  # 检测到 / 触发，携带查询文本
+    slashDismissed = pyqtSignal()  # / 触发结束
     slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
 
     def __init__(self, parent=None):
@@ -59,7 +66,7 @@ class SendableTextEdit(TextEdit):
         self.textChanged.connect(self._on_slash_trigger_check)
 
         # 关闭 qfluentwidgets TextEdit 焦点时的底部高亮
-        if hasattr(self, 'layer'):
+        if hasattr(self, "layer"):
             self.layer.hide()
 
         self._setup_keyboard_shortcuts()
@@ -70,7 +77,9 @@ class SendableTextEdit(TextEdit):
 
         # 卡片选中项：供 execute() 按选中类型执行
         self._card_selected_name: Optional[str] = None
-        self._card_selected_type: Optional[str] = None  # display_type: command/prompt/agent/skill
+        self._card_selected_type: Optional[str] = (
+            None  # display_type: command/prompt/agent/skill
+        )
 
         # 节流相关
         self._slash_throttle_timer = QTimer(self)
@@ -81,9 +90,11 @@ class SendableTextEdit(TextEdit):
         self._slash_trigger_count = 0  # 快速触发计数
 
         # 输入历史浏览
-        self._history_list: list = []          # 最近输入历史（最新在前）
-        self._history_index: int = -1          # -1 = 不在浏览模式
-        self._history_working_line: str = ""   # 进入历史模式时保存的当前输入（退出时恢复）
+        self._history_list: list = []  # 最近输入历史（最新在前）
+        self._history_index: int = -1  # -1 = 不在浏览模式
+        self._history_working_line: str = (
+            ""  # 进入历史模式时保存的当前输入（退出时恢复）
+        )
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
@@ -92,6 +103,7 @@ class SendableTextEdit(TextEdit):
     def _apply_send_btn_style(self):
         """从 Colors 应用发送按钮样式"""
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         radius = Colors.SEND_BTN_RADIUS
         self.send_btn.setStyleSheet(f"""
@@ -194,13 +206,19 @@ class SendableTextEdit(TextEdit):
 
                 from app.core.command_manager import CommandManager
                 from app.utils.utils import get_skill_by_name
+
                 # 解析后缀：如 "tdd-skill" → base="tdd", type="skill"
                 raw_cmd, _ = CommandManager.parse_suffixed_name(cmd_name)
                 check_name = raw_cmd or cmd_name
-                if (CommandManager.get_instance().is_known_command_name(cmd_name)
-                        or get_skill_by_name(cmd_name)
-                        or (raw_cmd and CommandManager.get_instance().is_known_command_name(raw_cmd))
-                        or (raw_cmd and get_skill_by_name(raw_cmd))):
+                if (
+                    CommandManager.get_instance().is_known_command_name(cmd_name)
+                    or get_skill_by_name(cmd_name)
+                    or (
+                        raw_cmd
+                        and CommandManager.get_instance().is_known_command_name(raw_cmd)
+                    )
+                    or (raw_cmd and get_skill_by_name(raw_cmd))
+                ):
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
                     self._slash_trigger_pos = 0
                     # 传入当前选中项的 display_type（供 show_command_detail 显示对应类型的 hint）
@@ -223,14 +241,19 @@ class SendableTextEdit(TextEdit):
     def _apply_slash_throttle(self, query: str):
         """应用节流逻辑：快速输入时降低触发频率"""
         import time
+
         # 计算时间间隔（毫秒）
         current_ms = int(time.time() * 1000)
-        time_delta = current_ms - self._last_slash_trigger_time if self._last_slash_trigger_time > 0 else 1000
+        time_delta = (
+            current_ms - self._last_slash_trigger_time
+            if self._last_slash_trigger_time > 0
+            else 1000
+        )
         self._last_slash_trigger_time = current_ms
-        
+
         # 判断输入速度：小于 150ms 认为快速输入
         is_fast_input = time_delta < 150 and self._slash_trigger_count > 0
-        
+
         if is_fast_input:
             self._slash_trigger_count += 1
             # 快速输入模式：更新待发送的 query，延长计时器
@@ -244,12 +267,12 @@ class SendableTextEdit(TextEdit):
             # 正常速度：直接发射信号
             self._cancel_slash_throttle()
             self.slashTriggered.emit(query)
-    
+
     def _on_slash_throttle_timeout(self):
         """节流定时器超时：发射最终的 query"""
         if self._slash_trigger_pos >= 0:
             self.slashTriggered.emit(self._pending_slash_query)
-    
+
     def _cancel_slash_throttle(self):
         """取消节流定时器"""
         self._slash_throttle_timer.stop()
@@ -347,7 +370,7 @@ class SendableTextEdit(TextEdit):
 
     def _find_partial_param(self, text: str, param_name: str, cursor_pos: int = None):
         """在输入文本中查找参数名的部分匹配（优先光标附近）
-        
+
         用于智能补全：文本中已有 --subag，点击 --subagent 参数时
         原地替换为 --subagent，避免变成 --subag --subagent
 
@@ -355,28 +378,31 @@ class SendableTextEdit(TextEdit):
             text: 输入框全文
             param_name: 参数名，如 "--subagent", "--model="
             cursor_pos: 光标位置（可选），存在时优先匹配光标附近的参数
-            
+
         Returns:
             (start, end) 部分匹配范围，或 None
         """
         import re
+
         clean_name = param_name.rstrip("=")
-        
+
         # 如果有光标位置，优先找光标附近一定范围内的匹配
         if cursor_pos is not None:
             nearby_match = None
-            for m in re.finditer(r'--[\w-]+', text):
+            for m in re.finditer(r"--[\w-]+", text):
                 token = m.group()
                 if clean_name.startswith(token) and token != clean_name:
                     # 匹配在光标附近（前后 30 字符范围内）
                     if abs(m.start() - cursor_pos) <= 30:
-                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(nearby_match.start() - cursor_pos):
+                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(
+                            nearby_match.start() - cursor_pos
+                        ):
                             nearby_match = m
             if nearby_match:
                 return (nearby_match.start(), nearby_match.end())
-        
+
         # 无光标位置或附近无匹配 → 返回第一个匹配（向后兼容）
-        for m in re.finditer(r'--[\w-]+', text):
+        for m in re.finditer(r"--[\w-]+", text):
             token = m.group()
             if clean_name.startswith(token) and token != clean_name:
                 return (m.start(), m.end())
@@ -418,8 +444,8 @@ class SendableTextEdit(TextEdit):
             pos = len(text)
         cursor.setPosition(pos)
         # 智能判断是否需要前导空格：光标前是空格 / -- / 文本开头 → 不加
-        need_space = pos > 0 and text[pos-1] not in (" ", "\t", "\n")
-        if pos >= 2 and text[pos-2:pos] == "--":
+        need_space = pos > 0 and text[pos - 1] not in (" ", "\t", "\n")
+        if pos >= 2 and text[pos - 2 : pos] == "--":
             need_space = False
         prefix = " " if need_space else ""
         if param_type == "flag":
@@ -432,6 +458,7 @@ class SendableTextEdit(TextEdit):
     def _sync_detail_params(self):
         """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片"""
         from app.core.command_manager import CommandManager
+
         card = self._get_card()
         if not card or not card.is_detail_mode:
             return
@@ -469,7 +496,9 @@ class SendableTextEdit(TextEdit):
         """
         if self._history_index < 0:
             # 退出历史模式，恢复进入时保存的文本
-            self._suppress_slash_trigger = self._history_working_line.strip().startswith("/")
+            self._suppress_slash_trigger = (
+                self._history_working_line.strip().startswith("/")
+            )
             self.setPlainText(self._history_working_line)
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.End)
@@ -536,15 +565,18 @@ class SendableTextEdit(TextEdit):
         has_text = bool(self.toPlainText().strip())
         # 在停止模式下，按钮应该始终可用（用于停止正在进行的请求）
         # 只在发送模式下才根据文本内容决定是否启用
-        if not getattr(self, '_is_stop_mode', False):
+        if not getattr(self, "_is_stop_mode", False):
             self.send_btn.setDisabled(not has_text)
         # 文本变化时总是需要调整高度，不管是否在停止模式
-        if not getattr(self, '_initializing', False):
+        if not getattr(self, "_initializing", False):
             self._adjust_height_to_content()
         # 历史模式：用户修改了当前显示的文本 → 退出历史模式，↑↓ 不再切历史
         if self._history_index >= 0:
             idx = self._history_index
-            if idx < len(self._history_list) and self._history_list[idx] != self.toPlainText():
+            if (
+                idx < len(self._history_list)
+                and self._history_list[idx] != self.toPlainText()
+            ):
                 self._reset_history_mode()
         # detail 模式参数同步
         self._sync_detail_params()
@@ -556,9 +588,9 @@ class SendableTextEdit(TextEdit):
         setFixedHeight 内部会立即触发 resize，如果两个高度分步设置
         会导致两次独立布局重算，下方按钮栏就会抖动。
         """
-        if getattr(self, '_initializing', False):
+        if getattr(self, "_initializing", False):
             return
-        
+
         doc = self.document()
         content_height = int(doc.size().height()) + 24
         new_height = max(44, min(160, content_height))
@@ -576,7 +608,9 @@ class SendableTextEdit(TextEdit):
                 toolbar_height = 34
                 separator_height = 1
                 card_padding = 4
-                parent.setFixedHeight(new_height + separator_height + toolbar_height + card_padding)
+                parent.setFixedHeight(
+                    new_height + separator_height + toolbar_height + card_padding
+                )
             self.setFixedHeight(new_height)
 
             self.setUpdatesEnabled(True)
@@ -741,22 +775,24 @@ class SendableTextEdit(TextEdit):
             # 首先检查是否是真正的文件拖拽（通过 URLs）
             is_file_drop = False
             file_paths = []  # 收集所有拖入的文件路径
-            
+
             if source.hasUrls():
                 urls = source.urls()
                 if urls:
-                    file_paths = [url.toLocalFile() for url in urls if url.toLocalFile()]
+                    file_paths = [
+                        url.toLocalFile() for url in urls if url.toLocalFile()
+                    ]
                     is_file_drop = True
             elif source.hasText():
                 text = source.text()
-                
+
                 # 文本内容拖入：逐行解析文件路径
                 # 只有实际存在的路径才被认为是文件
                 if "file:/" in text:
                     try:
                         lines = text.split("\n")
                         for line in lines:
-                            path = _FILE_PREFIX_PATTERN.sub('', line)
+                            path = _FILE_PREFIX_PATTERN.sub("", line)
                             if path and os.path.exists(path):
                                 file_paths.append(path)
                         if file_paths:
@@ -773,60 +809,60 @@ class SendableTextEdit(TextEdit):
                             is_file_drop = True
                     except Exception:
                         pass
-            
+
             if is_file_drop and file_paths:
                 try:
                     # 保存默认格式
                     cursor = self.textCursor()
                     default_format = QTextCharFormat()  # 创建干净的默认格式
-                    
+
                     # 先插入一个空格占位符，用默认格式
                     cursor.insertText(" ", default_format)
-                    
+
                     # 准备要插入的文件路径文本——所有文件
                     insert_text = "\n".join([f"路径: {p}" for p in file_paths])
-                    
+
                     # 记录文件路径的起始位置
                     path_start = cursor.position()
-                    
+
                     # 插入文件路径文本
                     cursor.insertText(insert_text)
-                    
+
                     # 记录文件路径的结束位置
                     path_end = cursor.position()
-                    
+
                     # 高亮显示拖入的文件路径
                     cursor.setPosition(path_start)
                     cursor.setPosition(path_end, QTextCursor.KeepAnchor)
-                    
+
                     # 创建高亮格式 - 使用和技能一样的金色
                     highlight_format = QTextCharFormat()
                     highlight_format.setForeground(QColor("#C9A85C"))
                     highlight_format.setFontWeight(700)
                     cursor.setCharFormat(highlight_format)
-                    
+
                     # 最后再插入一个空格，用默认格式
                     cursor.setPosition(path_end)
                     cursor.clearSelection()
                     cursor.insertText(" ", default_format)
-                    
+
                     # 确保光标在最后，使用默认格式
                     final_pos = cursor.position()
                     cursor.setPosition(final_pos)
                     cursor.setCharFormat(default_format)
                     self.setTextCursor(cursor)
-                    
+
                     # 确保输入框有焦点
                     self.setFocus(Qt.OtherFocusReason)
-                    
+
                     return
                 except Exception:
                     # 如果文件路径插入失败，回退到默认处理
                     pass
-            
+
             # 其他情况使用默认处理
             super().insertFromMimeData(source)
-            
+
         except Exception as e:
             # 捕获所有异常，确保应用不会崩溃
             try:
@@ -924,9 +960,9 @@ class SendableTextEdit(TextEdit):
     def refresh_style(self):
         """刷新样式（响应主题切换）"""
         self._apply_input_style()
-        if hasattr(self, '_agent_combo') and self._agent_combo:
+        if hasattr(self, "_agent_combo") and self._agent_combo:
             self._agent_combo.setStyleSheet(self._build_combo_style())
-        
+
     def _animate_glow(self, target_blur, target_alpha, duration=300):
         """动画发光效果 - 作用到父级 _input_card 的边框"""
         if not self._glow_effect:
@@ -935,9 +971,9 @@ class SendableTextEdit(TextEdit):
             # 延迟挂载发光效果到父卡片
             if self._glow_target is None:
                 card = self.parent()
-                while card and not hasattr(card, '_input_card'):
+                while card and not hasattr(card, "_input_card"):
                     card = card.parent()
-                if card and hasattr(card, '_input_card'):
+                if card and hasattr(card, "_input_card"):
                     self._glow_target = card._input_card
                     self._glow_target.setGraphicsEffect(self._glow_effect)
             if self._glow_target:
@@ -975,7 +1011,7 @@ class SendableTextEdit(TextEdit):
             QTimer.singleShot(0, self._ensure_cursor_visible)
         except Exception:
             pass
-        
+
     def focusOutEvent(self, event):
         try:
             super().focusOutEvent(event)
