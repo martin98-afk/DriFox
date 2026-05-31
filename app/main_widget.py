@@ -1565,6 +1565,20 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.builtin_commands import register_all_commands
         register_all_commands()
 
+        from app.core.command_manager import CommandManager, CommandType
+        from PyQt5.QtWidgets import QShortcut
+        from PyQt5.QtGui import QKeySequence
+
+        cmd_mgr = CommandManager.get_instance()
+        self._command_shortcuts = []
+        for entries in cmd_mgr._commands.values():
+            for cmd_type, cmd_def in entries.items():
+                if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
+                    qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
+                    name = cmd_def.name
+                    qs.activated.connect(lambda n=name: self._execute_command(n))
+                    self._command_shortcuts.append(qs)
+
     def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
 

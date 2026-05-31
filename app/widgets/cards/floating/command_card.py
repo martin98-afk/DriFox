@@ -94,6 +94,12 @@ class CommandItemWidget(QWidget):
         self._desc_label.setMinimumWidth(0)
         layout.addWidget(self._desc_label, 1)
 
+        # 快捷键标签（仅内建命令的 function 类型显示）
+        self._shortcut_label = QLabel()
+        self._shortcut_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        layout.addWidget(self._shortcut_label)
+
         # 类型标签（技能显示【技能】，智能体显示【智能体】，提示词显示【提示词】）
         item_type = self._data["type"]
         if item_type == "skill":
@@ -111,6 +117,14 @@ class CommandItemWidget(QWidget):
             self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
             layout.addWidget(self._tag_label)
+
+        # 快捷键文本（仅 command 类型且有快捷键时显示）
+        shortcut = self._data.get("shortcut", "")
+        if item_type == "command" and shortcut:
+            self._shortcut_label.setText(shortcut)
+            self._shortcut_label.setVisible(True)
+        else:
+            self._shortcut_label.setVisible(False)
 
         self._apply_style()
         self._update_display()
@@ -184,6 +198,21 @@ class CommandItemWidget(QWidget):
                     {get_font_family_css()} {font_size_css(11)};
                     font-weight: bold;
                     background: transparent;
+                }}
+            """)
+
+        # 快捷键标签样式：类键盘键帽风格
+        shortcut = self._data.get("shortcut", "")
+        if item_type == "command" and shortcut:
+            shortcut_fg = Colors.TEXT_MUTED
+            self._shortcut_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {shortcut_fg};
+                    {get_font_family_css()} {font_size_css(10)};
+                    background: rgba(128,128,128,0.1);
+                    border-radius: 3px;
+                    padding: 1px 5px;
+                    font-weight: normal;
                 }}
             """)
 

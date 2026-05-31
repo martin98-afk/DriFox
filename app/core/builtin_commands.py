@@ -196,6 +196,7 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
             "type": meta.get("type", "prompt"),
             "prompt_text": enhanced_body,  # 已包含工具限制说明（如有）
             "parameters": params,
+            "shortcut": meta.get("shortcut", ""),
         }
     except Exception as e:
         logger.error(f"[BuiltinCommands] Failed to load command {file_path}: {e}")
@@ -318,6 +319,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
                 argument_hint=cmd["argument_hint"],
                 prompt_text=cmd["prompt_text"],
                 parameters=cmd.get("parameters", []),
+                shortcut=cmd.get("shortcut", ""),
             )
             commands.append(cmd)
     return commands

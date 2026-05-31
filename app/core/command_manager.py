@@ -74,6 +74,7 @@ class CommandDefinition:
     argument_hint: str = ""      # 参数提示（显示在命令卡片 detail 模式）
     prompt_text: str = ""        # PROMPT/AGENT 命令使用
     parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
+    shortcut: str = ""           # 快捷键，如 "Ctrl+Shift+B"
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -84,11 +85,14 @@ class CommandDefinition:
             CommandType.SUBAGENT: "agent",
         }
         display_type = type_map.get(self.type, "command")
-        return {
+        result = {
             "name": self.name,
             "description": self.description,
             "type": display_type,
         }
+        if self.shortcut:
+            result["shortcut"] = self.shortcut
+        return result
 
 
 def _pick_first_entry(entries: Dict[CommandType, "CommandDefinition"]) -> "CommandDefinition":
@@ -135,6 +139,7 @@ class CommandManager:
         argument_hint: str = "",
         prompt_text: str = "",
         parameters: Optional[List[CommandParameter]] = None,
+        shortcut: str = "",
     ):
         """注册一个内置命令
 
@@ -145,6 +150,7 @@ class CommandManager:
             argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
             prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
             parameters: 可交互参数列表（用于 detail 模式参数补全）
+            shortcut: 快捷键，如 "Ctrl+Shift+B"
         """
         if name not in self._commands:
             self._commands[name] = {}
@@ -155,6 +161,7 @@ class CommandManager:
             argument_hint=argument_hint,
             prompt_text=prompt_text,
             parameters=parameters or [],
+            shortcut=shortcut,
         )
 
     def unregister(self, name: str):
