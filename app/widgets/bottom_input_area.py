@@ -980,6 +980,15 @@ class SendableTextEdit(TextEdit):
             self._agent_combo.setStyleSheet(self._build_combo_style())
 
     def _animate_glow(self, target_blur, target_alpha, duration=300):
+        try:
+            host = self.parent()
+            while host and not hasattr(host, "_apply_bottom_input_stack_style"):
+                host = host.parent()
+            if host:
+                host._apply_bottom_input_stack_style(target_alpha > 0)
+                return
+        except Exception:
+            pass
         """动画发光效果 - 作用到父级 _input_card 的边框"""
         if not self._glow_effect:
             return
@@ -999,6 +1008,8 @@ class SendableTextEdit(TextEdit):
                 glow_color.setAlpha(target_alpha)
                 self._glow_effect.setColor(glow_color)
                 # 焦点时高亮边框颜色
+                # 关键：保持仅上圆角 + border-bottom: none，让输入卡与下方
+                # 工具栏条仍拼接成一张完整圆角卡，不要被改成"独立圆角卡"
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
@@ -1006,7 +1017,11 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_FOCUS_BG_START},
                                 stop:1 {Colors.INPUT_FOCUS_BG_END});
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
-                            border-radius: 14px;
+                            border-bottom: none;
+                            border-top-left-radius: 16px;
+                            border-top-right-radius: 16px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
                         }}
                     """)
                 else:
@@ -1016,7 +1031,11 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_BG_START},
                                 stop:1 {Colors.INPUT_BG_END});
                             border: 1px solid {Colors.INPUT_BORDER};
-                            border-radius: 14px;
+                            border-bottom: none;
+                            border-top-left-radius: 16px;
+                            border-top-right-radius: 16px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
                         }}
                     """)
         except Exception:

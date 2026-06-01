@@ -178,6 +178,10 @@ class Colors:
     INPUT_BORDER = "#2B3850"
     INPUT_FOCUS_BORDER = "#C9A85C"
     INPUT_PLACEHOLDER = "rgba(242, 246, 255, 0.4)"
+
+    # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
+    TOOLBAR_STRIP_BG = "rgba(24, 31, 45, 150)"
+    TOOLBAR_STRIP_BORDER = "#2B3850"
     
     # 实时卡片色
     REALTIME_BORDER = "#4a90d9"
@@ -314,6 +318,8 @@ class Colors:
         cls.INPUT_PLACEHOLDER = theme.get("input_placeholder", cls.INPUT_PLACEHOLDER)
         cls.CAPSULE_BG = theme.get("capsule_bg", "rgba(27, 35, 50, 180)")
         cls.CAPSULE_BORDER = theme.get("capsule_border", "rgba(43, 56, 80, 200)")
+        cls.TOOLBAR_STRIP_BG = theme.get("toolbar_strip_bg", cls.TOOLBAR_STRIP_BG)
+        cls.TOOLBAR_STRIP_BORDER = theme.get("toolbar_strip_border", cls.TOOLBAR_STRIP_BORDER)
         
         # 实时卡片色
         cls.REALTIME_BORDER = theme.get("realtime_border", cls.REALTIME_BORDER)

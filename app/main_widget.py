@@ -23,7 +23,7 @@ from PyQt5.QtCore import (
     QThreadPool,
     Qt,
 )
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QColor
 from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QScrollArea,
     QSizePolicy,
+    QGraphicsDropShadowEffect,
 )
 from loguru import logger
 from qfluentwidgets import (
@@ -1687,33 +1688,20 @@ class OpenAIChatToolWindow(ToolWindow):
             self._on_scroll_changed
         )
 
-        # ===== 底部输入区域（一体化圆弧卡片设计）=====
+        # ===== 底部输入区域（输入卡片 + 独立工具栏条两张卡）=====
         self._bottom_input_container = QWidget(self)
         self._bottom_input_container.setStyleSheet(
             "QWidget#bottomContainer { background: transparent; }"
         )
         self._bottom_input_container.setObjectName("bottomContainer")
         bottom_layout = QVBoxLayout(self._bottom_input_container)
+        self._bottom_input_layout = bottom_layout
         bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(0)
+        bottom_layout.setSpacing(-10)
 
-        # ===== 一体化输入卡片（圆角大弧线包裹输入框+工具栏）=====
+        # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
         self._input_card = QWidget(self._bottom_input_container)
         self._input_card.setObjectName("_input_card")
-        Colors.refresh()
-        self._input_card.setStyleSheet(f"""
-            QWidget#_input_card {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {Colors.INPUT_BG_START},
-                    stop:1 {Colors.INPUT_BG_END});
-                border: 1px solid {Colors.INPUT_BORDER};
-                border-bottom: none;
-                border-top-left-radius: 16px;
-                border-top-right-radius: 16px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """)
         card_layout = QVBoxLayout(self._input_card)
         card_layout.setContentsMargins(2, 2, 2, 2)
         card_layout.setSpacing(0)
@@ -1781,35 +1769,30 @@ class OpenAIChatToolWindow(ToolWindow):
         card_layout.addWidget(separator)
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
-        # 关键：工具栏从 _input_card 中拆出，放到主 layout 自己的容器里。
-        # 这样 _input_card 缩小到 0 时，工具栏的窗口绝对坐标不变。
-        self._bottom_toolbar_strip = QWidget(self)
+        # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
+        # 放在主 layout 自己的容器里。这样 _input_card 缩小到 0 时，
+        # 工具栏的窗口绝对坐标不变——按钮栏不出现视觉跳动。
+        # 视觉上是独立第二张卡：下方圆角 + 渐变 + 边框；颜色使用专属
+        # TOOLBAR_STRIP_BG/TOOLBAR_STRIP_BORDER token（与输入卡片解耦，
+        # 主题可分别调控）。
+        self._bottom_toolbar_strip = QWidget(self._bottom_input_container)
         self._bottom_toolbar_strip.setObjectName("bottomToolbarStrip")
-        self._bottom_toolbar_strip.setFixedHeight(34)
-        Colors.refresh()
-        # 与 _input_card 视觉拼接：上半透明、底部圆角与卡片风格统一
-        self._bottom_toolbar_strip.setStyleSheet(f"""
-            QWidget#bottomToolbarStrip {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {Colors.INPUT_BG_END},
-                    stop:1 {Colors.INPUT_BG_END});
-                border: 1px solid {Colors.INPUT_BORDER};
-                border-top: none;
-                border-bottom-left-radius: 16px;
-                border-bottom-right-radius: 16px;
-            }}
-        """)
+        self._bottom_toolbar_strip.setFixedHeight(36)
         strip_layout = QHBoxLayout(self._bottom_toolbar_strip)
-        strip_layout.setContentsMargins(8, 2, 8, 2)
+        # 上下 3px 留白 + 28px 内容 = 34px，工具栏 28px 居中放置
+        strip_layout.setContentsMargins(10, 4, 10, 4)
         strip_layout.setSpacing(8)
 
         # ===== 工具栏（现在挂在独立 strip 上）=====
         toolbar_widget = QWidget(self._bottom_toolbar_strip)
-        toolbar_widget.setFixedHeight(34)
+        # 28px 高度匹配 strip 内部 28px 内容区，配合 VCenter 完美居中
+        toolbar_widget.setFixedHeight(28)
         toolbar_widget.setStyleSheet("background: transparent; border: none;")
         toolbar_layout = QHBoxLayout(toolbar_widget)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(8)
+        # 内部子项统一 28px 时无需对齐；当前 26/28/28 混用 → VCenter 兜底
+        toolbar_layout.setAlignment(Qt.AlignVCenter)
 
         # 模型选择（无边框，只保留背景）
         self._model_btn_container = QWidget(toolbar_widget)
@@ -1928,12 +1911,83 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工具栏挂到独立 strip（不在 _input_card 里了）
         strip_layout.addWidget(toolbar_widget)
 
+        self._bottom_input_container.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._input_card_shadow = QGraphicsDropShadowEffect(self._input_card)
+        self._input_card_shadow.setOffset(0, 0)
+        self._input_card.setGraphicsEffect(self._input_card_shadow)
+        self._bottom_toolbar_shadow = QGraphicsDropShadowEffect(self._bottom_toolbar_strip)
+        self._bottom_toolbar_shadow.setBlurRadius(14)
+        self._bottom_toolbar_shadow.setOffset(0, 4)
+        self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 70))
+        self._bottom_toolbar_strip.setGraphicsEffect(self._bottom_toolbar_shadow)
+        self._input_card_focused = False
+        self._input_area_collapsed = False
+        self._apply_bottom_input_stack_style()
+
         bottom_layout.addWidget(self._input_card)
+        bottom_layout.addWidget(self._bottom_toolbar_strip)
+        self._bottom_toolbar_strip.lower()
+        self._input_card.raise_()
 
         layout.addWidget(self._bottom_input_container)
-        layout.addWidget(self._bottom_toolbar_strip)
 
     # ========== 内置命令初始化 ==========
+
+    def _apply_bottom_input_stack_style(self, focused: bool | None = None):
+        """Refresh the stacked input card and toolbar strip visuals."""
+        if focused is not None:
+            self._input_card_focused = focused
+        if not hasattr(self, "_input_card") or not hasattr(self, "_bottom_toolbar_strip"):
+            return
+
+        Colors.refresh()
+        collapsed = bool(getattr(self, "_input_area_collapsed", False))
+        focused = bool(getattr(self, "_input_card_focused", False)) and not collapsed
+        if hasattr(self, "_bottom_input_layout"):
+            self._bottom_input_layout.setSpacing(0 if collapsed else -10)
+
+        input_border = Colors.INPUT_FOCUS_BORDER if focused else Colors.INPUT_BORDER
+        input_border_width = 2 if focused else 1
+        input_bg_start = Colors.INPUT_FOCUS_BG_START if focused else Colors.INPUT_BG_START
+        input_bg_end = Colors.INPUT_FOCUS_BG_END if focused else Colors.INPUT_BG_END
+        toolbar_top_radius = 16 if collapsed else 0
+        toolbar_border_top = f"1px solid {Colors.TOOLBAR_STRIP_BORDER}" if collapsed else "none"
+
+        self._input_card.setStyleSheet(f"""
+            QWidget#_input_card {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {input_bg_start},
+                    stop:1 {input_bg_end});
+                border: {input_border_width}px solid {input_border};
+                border-top-left-radius: 16px;
+                border-top-right-radius: 16px;
+                border-bottom-left-radius: 14px;
+                border-bottom-right-radius: 14px;
+            }}
+        """)
+        self._bottom_toolbar_strip.setStyleSheet(f"""
+            QWidget#bottomToolbarStrip {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {Colors.TOOLBAR_STRIP_BG},
+                    stop:1 {Colors.TOOLBAR_STRIP_BG});
+                border: 1px solid {Colors.TOOLBAR_STRIP_BORDER};
+                border-top: {toolbar_border_top};
+                border-top-left-radius: {toolbar_top_radius}px;
+                border-top-right-radius: {toolbar_top_radius}px;
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
+            }}
+        """)
+
+        if hasattr(self, "_input_card_shadow"):
+            if focused:
+                glow = QColor(Colors.INPUT_FOCUS_BORDER)
+                glow.setAlpha(170)
+                self._input_card_shadow.setBlurRadius(24)
+                self._input_card_shadow.setColor(glow)
+            else:
+                self._input_card_shadow.setBlurRadius(12)
+                self._input_card_shadow.setColor(QColor(0, 0, 0, 55))
 
     def _init_builtin_commands(self):
         """注册并初始化所有内置命令"""
@@ -2999,6 +3053,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # 隐藏输入区释放空间给系统卡片
             self.input_area.setVisible(False)
             self.input_area.setFocusPolicy(Qt.NoFocus)
+            self._input_area_collapsed = True
+            self._apply_bottom_input_stack_style(False)
             # 释放 _input_card 的高度约束，让它缩到 0
             self._input_card.setMinimumHeight(0)
             self._input_card.setMaximumHeight(0)
@@ -3046,6 +3102,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "input_area"):
             self.setUpdatesEnabled(False)
             self.input_area.setFocusPolicy(Qt.ClickFocus)
+            self._input_area_collapsed = False
+            self._apply_bottom_input_stack_style(self.input_area.hasFocus())
             self._input_card.setMinimumHeight(0)
             self._input_card.setMaximumHeight(16777215)
             self._on_input_area_height_changed()
@@ -3787,16 +3845,14 @@ class OpenAIChatToolWindow(ToolWindow):
             """
             self.title_edit.setStyleSheet(title_style)
         # 刷新输入卡片背景
+        # 关键：保持仅上圆角 + border-bottom: none，与下方工具栏条拼接
+        # 成一张完整圆角卡（输入卡顶部圆角 + 工具栏底部圆角 = 整体胶囊）
         if hasattr(self, "_input_card"):
-            self._input_card.setStyleSheet(f"""
-                QWidget#_input_card {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 {Colors.INPUT_BG_START},
-                        stop:1 {Colors.INPUT_BG_END});
-                    border: 1px solid {Colors.INPUT_BORDER};
-                    border-radius: 16px;
-                }}
-            """)
+            self._apply_bottom_input_stack_style()
+        # 刷新底部工具栏条背景（独立 token，与输入卡片解耦）
+        # 同样保持仅下圆角 + border-top: none，与输入卡拼接成一张卡
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._apply_bottom_input_stack_style()
         if hasattr(self, "_model_btn_container"):
             self._model_btn_container.setStyleSheet(f"""
                 background: {Colors.TOOLBAR_BG};
