@@ -1417,9 +1417,9 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._top_card_container)
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(80)
+        self.chat_scroll_area.setMinimumHeight(0)
         self.chat_scroll_area.setMinimumWidth(400)
-        self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)
         self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
