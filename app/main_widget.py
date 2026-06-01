@@ -1298,7 +1298,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
         # 标题栏分组分隔线：[标题] │ [余额+圆环]
-        session_bar_layout.addWidget(_make_vdivider())
+        # session_bar_layout.addWidget(_make_vdivider())
 
         # right_layout 保持简化，显示余额和 context_usage_ring
         right_layout = QHBoxLayout()
@@ -1717,6 +1717,18 @@ class OpenAIChatToolWindow(ToolWindow):
         card_layout.setContentsMargins(2, 2, 2, 2)
         card_layout.setSpacing(0)
 
+        # 输入卡环境光晕容器（包裹 _input_card，承载宽柔的外层环境光）
+        # 实现双层 halo：输入卡自身 = 紧致主光（primary），wrapper = 弥散环境光（ambient）
+        self._input_card_wrapper = QWidget(self._bottom_input_container)
+        self._input_card_wrapper.setObjectName("_input_card_wrapper")
+        self._input_card_wrapper.setAttribute(Qt.WA_TranslucentBackground, True)
+        wrapper_layout = QVBoxLayout(self._input_card_wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(0)
+        # 把 _input_card 移入 wrapper
+        self._input_card.setParent(self._input_card_wrapper)
+        wrapper_layout.addWidget(self._input_card)
+
         # 输入框（融入卡片，无边框）
         self.input_area = SendableTextEdit(self._input_card)
         self.input_area._agent_combo.hide()
@@ -1918,9 +1930,15 @@ class OpenAIChatToolWindow(ToolWindow):
         strip_layout.addWidget(toolbar_widget)
 
         self._bottom_input_container.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._input_card_shadow = QGraphicsDropShadowEffect(self._input_card)
-        self._input_card_shadow.setOffset(0, 0)
-        self._input_card.setGraphicsEffect(self._input_card_shadow)
+        # 双层 halo：主光（紧致）在 _input_card，环境光（弥散）在 wrapper
+        self._input_card_primary_shadow = QGraphicsDropShadowEffect(self._input_card)
+        self._input_card_primary_shadow.setOffset(0, 0)
+        self._input_card.setGraphicsEffect(self._input_card_primary_shadow)
+        self._input_card_ambient_shadow = QGraphicsDropShadowEffect(
+            self._input_card_wrapper
+        )
+        self._input_card_ambient_shadow.setOffset(0, 0)
+        self._input_card_wrapper.setGraphicsEffect(self._input_card_ambient_shadow)
         self._bottom_toolbar_shadow = QGraphicsDropShadowEffect(
             self._bottom_toolbar_strip
         )
@@ -1932,7 +1950,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._input_area_collapsed = False
         self._apply_bottom_input_stack_style()
 
-        bottom_layout.addWidget(self._input_card)
+        bottom_layout.addWidget(self._input_card_wrapper)
         # 预留 36px 空间给工具栏（工具栏本身不在 layout 里，绝对定位）。
         # 输入卡 + 这 36px = 输入容器高度；工具栏钉死在窗口底部 36px，
         # 与输入容器底部对齐（输入卡隐藏时容器仍占 36px，工具栏位置不变）。
@@ -2027,18 +2045,33 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
         """)
 
-        if hasattr(self, "_input_card_shadow"):
+        # === 双层 halo：主光（紧致） + 环境光（弥散）===
+        # 输入卡自身带主光，wrapper 带环境光，叠加形成"核心亮→柔光晕开"
+        if hasattr(self, "_input_card_primary_shadow"):
             if focused:
-                # 输入卡 = 主光源（halo cascade 顶层）
-                # alpha / blur 来自 Colors（由当前主题注入）
                 glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(Colors.GLOW_PRIMARY_ALPHA)
-                self._input_card_shadow.setBlurRadius(Colors.GLOW_PRIMARY_BLUR)
-                self._input_card_shadow.setOffset(0, 0)
-                self._input_card_shadow.setColor(glow)
+                glow.setAlpha(Colors.INPUT_GLOW_PRIMARY_ALPHA)
+                self._input_card_primary_shadow.setBlurRadius(
+                    Colors.INPUT_GLOW_PRIMARY_BLUR
+                )
+                self._input_card_primary_shadow.setOffset(0, 0)
+                self._input_card_primary_shadow.setColor(glow)
             else:
-                self._input_card_shadow.setBlurRadius(12)
-                self._input_card_shadow.setColor(QColor(0, 0, 0, 55))
+                self._input_card_primary_shadow.setBlurRadius(0)
+                self._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
+
+        if hasattr(self, "_input_card_ambient_shadow"):
+            if focused:
+                glow = QColor(Colors.INPUT_FOCUS_BORDER)
+                glow.setAlpha(Colors.INPUT_GLOW_AMBIENT_ALPHA)
+                self._input_card_ambient_shadow.setBlurRadius(
+                    Colors.INPUT_GLOW_AMBIENT_BLUR
+                )
+                self._input_card_ambient_shadow.setOffset(0, 0)
+                self._input_card_ambient_shadow.setColor(glow)
+            else:
+                self._input_card_ambient_shadow.setBlurRadius(0)
+                self._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
 
         # 工具栏 = 环境光晕（halo cascade 底层）
         # 与输入卡同色系但更弥散、更柔和，营造"主光 → 回声"的层次。

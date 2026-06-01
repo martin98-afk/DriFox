@@ -190,6 +190,13 @@ class Colors:
     GLOW_AMBIENT_ALPHA = 110
     GLOW_AMBIENT_BLUR = 36
 
+    # 输入卡双层 halo：主光（紧致） + 环境光（弥散）
+    # 输入卡自带主光 + wrapper 带环境光，叠加形成"核心亮→柔光晕开"层次
+    INPUT_GLOW_PRIMARY_BLUR = 18
+    INPUT_GLOW_PRIMARY_ALPHA = 220
+    INPUT_GLOW_AMBIENT_BLUR = 42
+    INPUT_GLOW_AMBIENT_ALPHA = 80
+
     # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
     TOOLBAR_STRIP_BG = "rgba(24, 31, 45, 150)"
     TOOLBAR_STRIP_BORDER = "#2B3850"
@@ -349,6 +356,20 @@ class Colors:
         cls.GLOW_PRIMARY_BLUR = theme.get("glow_primary_blur", cls.GLOW_PRIMARY_BLUR)
         cls.GLOW_AMBIENT_ALPHA = theme.get("glow_ambient_alpha", cls.GLOW_AMBIENT_ALPHA)
         cls.GLOW_AMBIENT_BLUR = theme.get("glow_ambient_blur", cls.GLOW_AMBIENT_BLUR)
+
+        # 输入卡双层 halo 独立 token（可从主题 YAML 中覆盖）
+        cls.INPUT_GLOW_PRIMARY_BLUR = theme.get(
+            "input_glow_primary_blur", cls.INPUT_GLOW_PRIMARY_BLUR
+        )
+        cls.INPUT_GLOW_PRIMARY_ALPHA = theme.get(
+            "input_glow_primary_alpha", cls.INPUT_GLOW_PRIMARY_ALPHA
+        )
+        cls.INPUT_GLOW_AMBIENT_BLUR = theme.get(
+            "input_glow_ambient_blur", cls.INPUT_GLOW_AMBIENT_BLUR
+        )
+        cls.INPUT_GLOW_AMBIENT_ALPHA = theme.get(
+            "input_glow_ambient_alpha", cls.INPUT_GLOW_AMBIENT_ALPHA
+        )
 
         cls.CAPSULE_BG = theme.get("capsule_bg", "rgba(27, 35, 50, 180)")
         cls.CAPSULE_BORDER = theme.get("capsule_border", "rgba(43, 56, 80, 200)")
@@ -537,6 +558,20 @@ class Shadows:
     }
     # 兼容旧名（历史别名，等价于 GLOW_PRIMARY）
     GLOW = GLOW_PRIMARY
+
+    # 输入卡双层 halo 专用
+    INPUT_GLOW_PRIMARY = {
+        "blur_radius": 18,
+        "offset_x": 0,
+        "offset_y": 0,
+        "alpha": 220,
+    }
+    INPUT_GLOW_AMBIENT = {
+        "blur_radius": 42,
+        "offset_x": 0,
+        "offset_y": 0,
+        "alpha": 80,
+    }
 
 
 class BorderRadius:

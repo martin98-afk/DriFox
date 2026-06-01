@@ -990,27 +990,21 @@ class SendableTextEdit(TextEdit):
                 return
         except Exception:
             pass
-        """动画发光效果 - 作用到父级 _input_card 的边框"""
+        """后备：刷新输入卡样式（仅样式表，双层 glow 由 host._apply_bottom_input_stack_style 管理）"""
         if not self._glow_effect:
             return
         try:
             Colors.refresh()
-            # 延迟挂载发光效果到父卡片
+            # 延迟定位父卡片
             if self._glow_target is None:
                 card = self.parent()
                 while card and not hasattr(card, "_input_card"):
                     card = card.parent()
                 if card and hasattr(card, "_input_card"):
                     self._glow_target = card._input_card
-                    self._glow_target.setGraphicsEffect(self._glow_effect)
             if self._glow_target:
-                self._glow_effect.setBlurRadius(target_blur)
-                glow_color = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow_color.setAlpha(target_alpha)
-                self._glow_effect.setColor(glow_color)
                 # 后备样式：与 main_widget._apply_bottom_input_stack_style 保持一致
-                # 输入卡是"拼接胶囊"上半部：上 16px 圆角 + 下直角 + border-bottom: none
-                # （toolbar 顶上的 1px 灰边兼任分隔线，组合成完整胶囊）
+                # 注意：不再 setGraphicsEffect（_input_card 已有 _input_card_primary_shadow 管理主光）
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{

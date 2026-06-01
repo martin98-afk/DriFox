@@ -116,3 +116,9 @@ colors:
   branch_label_bg: rgba(120, 130, 160, 0.15)
   branch_label_border: rgba(120, 130, 160, 0.3)
   window_bg: rgba(120, 130, 160, 0.04)
+
+  # ── 输入卡双层 halo ──
+  input_glow_primary_blur: 14
+  input_glow_primary_alpha: 205
+  input_glow_ambient_blur: 48
+  input_glow_ambient_alpha: 62
