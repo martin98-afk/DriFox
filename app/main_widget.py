@@ -196,7 +196,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _question_tool_call_id = None
     _todo_was_visible_before_system: bool = False  # 打开系统卡片前todo的可见状态
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
-    _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
+    _system_cards_open: bool = (
+        False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
+    )
     _window_active: bool = True
     # AutoLoop 状态
     _is_auto_loop_running: bool = False
@@ -1378,7 +1380,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
         self._provider_edit_card.setFixedHeight(300)
         self._provider_edit_popup = ProviderEditCard(parent=self)
-        self._provider_edit_popup.saved.connect(self._on_provider_edit_saved)
+        # 默认是新建流程（ProviderEditCard 内部 is_new 默认 True）
+        self._provider_edit_popup.saved.connect(
+            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
+        )
         self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
         self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
         # 照抄历史卡片的导入按钮模式：在标题栏加保存按钮，信号连到内容组件
@@ -1688,7 +1693,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._on_scroll_changed
         )
 
-        # ===== 底部输入区域（输入卡片 + 独立工具栏条两张卡）=====
+        # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
+        # 视觉目标：输入框 + toolbar 等宽，无间距，无外 padding，紧贴 chat 区。
+        #          上半圆角（输入卡） + 下半圆角（toolbar），中间一条边框线作分隔。
+        # 抖动修复：spacing 永久固定 0，不再随 collapsed 切换；toolbar y 位置
+        #          只取决于 _input_card 高度的单调变化，无"先下后上"中间帧。
         self._bottom_input_container = QWidget(self)
         self._bottom_input_container.setStyleSheet(
             "QWidget#bottomContainer { background: transparent; }"
@@ -1697,7 +1706,7 @@ class OpenAIChatToolWindow(ToolWindow):
         bottom_layout = QVBoxLayout(self._bottom_input_container)
         self._bottom_input_layout = bottom_layout
         bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(-10)
+        bottom_layout.setSpacing(0)
 
         # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
         self._input_card = QWidget(self._bottom_input_container)
@@ -1759,14 +1768,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始化内置命令
         self._init_builtin_commands()
-
-        # 分隔线
-        separator = QFrame(self._input_card)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFixedHeight(1)
-        Colors.refresh()
-        separator.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
-        card_layout.addWidget(separator)
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
@@ -1915,7 +1916,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._input_card_shadow = QGraphicsDropShadowEffect(self._input_card)
         self._input_card_shadow.setOffset(0, 0)
         self._input_card.setGraphicsEffect(self._input_card_shadow)
-        self._bottom_toolbar_shadow = QGraphicsDropShadowEffect(self._bottom_toolbar_strip)
+        self._bottom_toolbar_shadow = QGraphicsDropShadowEffect(
+            self._bottom_toolbar_strip
+        )
         self._bottom_toolbar_shadow.setBlurRadius(14)
         self._bottom_toolbar_shadow.setOffset(0, 4)
         self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 70))
@@ -1926,6 +1929,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         bottom_layout.addWidget(self._input_card)
         bottom_layout.addWidget(self._bottom_toolbar_strip)
+
         self._bottom_toolbar_strip.lower()
         self._input_card.raise_()
 
@@ -1934,44 +1938,63 @@ class OpenAIChatToolWindow(ToolWindow):
     # ========== 内置命令初始化 ==========
 
     def _apply_bottom_input_stack_style(self, focused: bool | None = None):
-        """Refresh the stacked input card and toolbar strip visuals."""
+        """刷新输入卡 + 工具栏拼接样式（等宽紧贴，上圆角 + 下圆角合成胶囊）
+
+        视觉结构：
+        - _input_card：上方 16px 圆角，下方直角；border 完整除了 border-bottom: none
+        - _bottom_toolbar_strip：上方直角，下方 16px 圆角；border 完整含 border-top
+          作为分隔线；左右下边框 1px 灰色，永远不变（不跟随焦点）
+        - 两张卡严丝合缝拼接，整体看起来是一张胶囊
+        - collapsed 时（系统卡片打开，input_card 高=0）：toolbar 切回四角圆角，
+          独立成一张完整卡片显示
+
+        抖动修复：
+        - spacing 永久 0，toolbar y 位置只随 _input_card 高度单调变化
+        - stylesheet 切换（圆角变化）不影响 layout 几何，无中间帧错位
+        """
         if focused is not None:
             self._input_card_focused = focused
-        if not hasattr(self, "_input_card") or not hasattr(self, "_bottom_toolbar_strip"):
+        if not hasattr(self, "_input_card") or not hasattr(
+            self, "_bottom_toolbar_strip"
+        ):
             return
 
         Colors.refresh()
         collapsed = bool(getattr(self, "_input_area_collapsed", False))
         focused = bool(getattr(self, "_input_card_focused", False)) and not collapsed
-        if hasattr(self, "_bottom_input_layout"):
-            self._bottom_input_layout.setSpacing(0 if collapsed else -10)
 
         input_border = Colors.INPUT_FOCUS_BORDER if focused else Colors.INPUT_BORDER
         input_border_width = 2 if focused else 1
-        input_bg_start = Colors.INPUT_FOCUS_BG_START if focused else Colors.INPUT_BG_START
+        input_bg_start = (
+            Colors.INPUT_FOCUS_BG_START if focused else Colors.INPUT_BG_START
+        )
         input_bg_end = Colors.INPUT_FOCUS_BG_END if focused else Colors.INPUT_BG_END
-        toolbar_top_radius = 16 if collapsed else 0
-        toolbar_border_top = f"1px solid {Colors.TOOLBAR_STRIP_BORDER}" if collapsed else "none"
 
+        # 输入卡：上圆角 + 下直角 + border-bottom: none（让 toolbar 上 border 兼任分隔线）
         self._input_card.setStyleSheet(f"""
             QWidget#_input_card {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {input_bg_start},
                     stop:1 {input_bg_end});
                 border: {input_border_width}px solid {input_border};
+                border-bottom: none;
                 border-top-left-radius: 16px;
                 border-top-right-radius: 16px;
-                border-bottom-left-radius: 14px;
-                border-bottom-right-radius: 14px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
         """)
+
+        # toolbar：上方直角（紧贴 input_card 下方）+ 下方 16px 圆角
+        # - 不 collapsed：四周边框完整，其中 border-top 1px 灰色作分隔线
+        # - collapsed：四角圆角（独立完整卡，主卡已缩到 0）
+        toolbar_top_radius = 16 if collapsed else 0
         self._bottom_toolbar_strip.setStyleSheet(f"""
             QWidget#bottomToolbarStrip {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {Colors.TOOLBAR_STRIP_BG},
                     stop:1 {Colors.TOOLBAR_STRIP_BG});
                 border: 1px solid {Colors.TOOLBAR_STRIP_BORDER};
-                border-top: {toolbar_border_top};
                 border-top-left-radius: {toolbar_top_radius}px;
                 border-top-right-radius: {toolbar_top_radius}px;
                 border-bottom-left-radius: 16px;
@@ -2484,7 +2507,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         标题用 display_name（人类可读），图标按 provider_name 查找。
         """
-        if self._current_provider_name and self._current_provider_name in self._valid_configs:
+        if (
+            self._current_provider_name
+            and self._current_provider_name in self._valid_configs
+        ):
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
@@ -2508,10 +2534,15 @@ class OpenAIChatToolWindow(ToolWindow):
             config_id = getattr(self, "_display_to_config_id", {}).get(provider_name)
             pname = provider_name
             if config_id and config_id in self._valid_configs:
-                pname = self._valid_configs[config_id].get("provider_name", provider_name)
+                pname = self._valid_configs[config_id].get(
+                    "provider_name", provider_name
+                )
             icon_widget = ProviderIconWidget(pname, 20)
             self._model_selector_card.set_icon_widget(icon_widget)
-        elif self._current_provider_name and self._current_provider_name in self._valid_configs:
+        elif (
+            self._current_provider_name
+            and self._current_provider_name in self._valid_configs
+        ):
             # 滚到顶部时恢复显示当前选中的服务商
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
@@ -2586,9 +2617,7 @@ class OpenAIChatToolWindow(ToolWindow):
             saved_providers[config_id]["模型名称"] = model_name
             self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
             # 更新 _valid_configs 确保 ChatEngine 能读到最新配置
-            self._valid_configs[config_id] = saved_providers.get(
-                config_id, {}
-            ).copy()
+            self._valid_configs[config_id] = saved_providers.get(config_id, {}).copy()
             self._valid_configs[config_id]["模型名称"] = model_name
 
         # 重新加载模型配置（_load_model_configs 已修复：保持窗口自身选择优先）
@@ -2637,9 +2666,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            self.current_model_btn.setToolTip(
-                f"{display} · {self._current_model_name}"
-            )
+            self.current_model_btn.setToolTip(f"{display} · {self._current_model_name}")
         elif self._current_provider_name:
             self._model_btn_text.setText(display)
             self.current_model_btn.setToolTip(display)
@@ -2718,19 +2745,41 @@ class OpenAIChatToolWindow(ToolWindow):
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
-    def _on_provider_edit_saved(self, provider_name: str, provider_info: dict):
-        """服务商编辑保存后的回调"""
+    def _on_provider_edit_saved(
+        self, provider_name: str, provider_info: dict, is_new: bool = False
+    ):
+        """服务商编辑保存后的回调
+
+        config_id 改用 apikey 的稳定 hash（见 app.core.provider_profile.apply_provider_save），
+        编辑同 apikey 始终命中同一条目，避免 uuid 时代"保存产生重复"的 bug。
+        """
         # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
-        # 如果 provider_info 中已有 config_id，则使用现有的；否则生成新的
-        config_id = provider_info.get("config_id")
-        if not config_id:
-            config_id = uuid.uuid4().hex[:8]
-            provider_info["config_id"] = config_id
-        # 确保 provider_name 存在于 provider_info 中
-        provider_info["provider_name"] = provider_name
-        saved_providers[config_id] = provider_info
+        old_selected = self._current_provider_name
+
+        from app.core.provider_profile import apply_provider_save
+
+        new_config_id = apply_provider_save(
+            saved_providers, provider_info, provider_name, is_new=is_new
+        )
+
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
+
+        # 如果 apikey 改了导致 config_id 变化（apply_provider_save 删了旧条目），
+        # 同步更新当前窗口的选择，避免 _current_provider_name 指向已删除的 key
+        if (
+            old_selected
+            and old_selected != new_config_id
+            and self._valid_configs.get(old_selected)
+        ):
+            # 当前选择被新条目替换时，迁移窗口级选择
+            if (
+                saved_providers.get(new_config_id) is provider_info
+                and old_selected not in saved_providers
+            ):
+                self._current_provider_name = new_config_id
+                if self.cfg.llm_selected_model.value == old_selected:
+                    self.cfg.set(self.cfg.llm_selected_model, new_config_id, save=True)
 
         # 隐藏服务商编辑卡片，显示设置卡片
         self._card_manager.hide_card("provider_edit", self._window_id)
@@ -2764,7 +2813,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._provider_edit_popup = ProviderEditCard(
             provider_name="", provider_info={}, is_new=True, parent=self
         )
-        self._provider_edit_popup.saved.connect(self._on_provider_edit_saved)
+        # 新建流程必须把 is_new=True 透传给保存回调
+        self._provider_edit_popup.saved.connect(
+            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
+        )
         self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
         # 替换卡片内容
         while self._provider_edit_card.content_layout.count():
@@ -2860,7 +2912,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
         # 优先使用用户填写的配置名称（name），其次使用服务商名称（provider_name），最后回退到 config_id
-        display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
+        display_name = provider_info.get("name", "") or provider_info.get(
+            "provider_name", config_id
+        )
         self._provider_edit_card.set_title(f"⚙️ 编辑: {display_name}")
         # 在 provider_info 中添加 provider_name（如果不存在）
         if "provider_name" not in provider_info:
@@ -2872,7 +2926,10 @@ class OpenAIChatToolWindow(ToolWindow):
             is_new=False,
             parent=self,
         )
-        self._provider_edit_popup.saved.connect(self._on_provider_edit_saved)
+        # 编辑流程透传 is_new=False；provider_info 里的旧 config_id 由表单带到回调
+        self._provider_edit_popup.saved.connect(
+            lambda name, info: self._on_provider_edit_saved(name, info, is_new=False)
+        )
         self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
         # 替换卡片内容
         while self._provider_edit_card.content_layout.count():
@@ -3043,6 +3100,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
         from app.tool_popup import ToolPopupDialog
+
         if ToolPopupDialog._any_window_dragging:
             return
         if hasattr(self, "input_area"):
@@ -3080,6 +3138,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
         from app.tool_popup import ToolPopupDialog
+
         if ToolPopupDialog._any_window_dragging:
             return
         for cid in (
@@ -3224,9 +3283,19 @@ class OpenAIChatToolWindow(ToolWindow):
         if current_name in self._valid_configs:
             config = self._valid_configs[current_name].copy()
         # 移除连接信息、元数据字段和无关的额外字段
-        for pop_key in ["备注", "获取地址", "模型名称", "API_URL", "API_KEY",
-                        "模型列表", "provider_name", "name", "config_id",
-                        "display_name", "认证方式"]:
+        for pop_key in [
+            "备注",
+            "获取地址",
+            "模型名称",
+            "API_URL",
+            "API_KEY",
+            "模型列表",
+            "provider_name",
+            "name",
+            "config_id",
+            "display_name",
+            "认证方式",
+        ]:
             config.pop(pop_key, None)
 
         self._model_config_popup.set_config(current_name, config)
@@ -4006,7 +4075,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 优先使用用户填的"配置名称"（name），空则回退到 provider_name
             base_name = config.get("name", "") or pname
             idx = suffix_map.get(config_id, 0)
-            config["display_name"] = base_name if idx == 0 else f"{base_name} #{idx + 1}"
+            config["display_name"] = (
+                base_name if idx == 0 else f"{base_name} #{idx + 1}"
+            )
             self._valid_configs[config_id] = config
 
         # 恢复或设置当前选中的服务商和模型

@@ -614,6 +614,7 @@ class SendableTextEdit(TextEdit):
         # 窗口拖拽过程中跳过高度调整，防止布局重算干扰窗口管理
         try:
             from app.tool_popup import ToolPopupDialog
+
             if ToolPopupDialog._any_window_dragging:
                 return
         except ImportError:
@@ -1007,9 +1008,9 @@ class SendableTextEdit(TextEdit):
                 glow_color = QColor(Colors.INPUT_FOCUS_BORDER)
                 glow_color.setAlpha(target_alpha)
                 self._glow_effect.setColor(glow_color)
-                # 焦点时高亮边框颜色
-                # 关键：保持仅上圆角 + border-bottom: none，让输入卡与下方
-                # 工具栏条仍拼接成一张完整圆角卡，不要被改成"独立圆角卡"
+                # 后备样式：与 main_widget._apply_bottom_input_stack_style 保持一致
+                # 输入卡是"拼接胶囊"上半部：上 16px 圆角 + 下直角 + border-bottom: none
+                # （toolbar 顶上的 1px 灰边兼任分隔线，组合成完整胶囊）
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{

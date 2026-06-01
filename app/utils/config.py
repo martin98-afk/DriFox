@@ -95,42 +95,52 @@ class Settings(QConfig):
 
     @classmethod
     def _migrate_saved_providers(cls, instance):
-        """迁移旧格式的服务商配置：将服务商名称为键的字典转换为配置 ID 为键的字典"""
+        """迁移旧格式的服务商配置：键统一为 apikey 的稳定 hash（替代旧 uuid）。
+
+        - 旧格式 1（provider_name 为键）→ 新格式
+        - 旧格式 2（uuid 为键但 value 内缺 config_id 字段）→ 补齐 config_id，
+          并把 key 重映射为 apikey hash（与 value 内一致）
+        - 同 apikey 的重复条目：合并为 1 条（dict 顺序中后写入者胜出）
+        """
         saved_providers = instance.llm_saved_providers.value
         if not saved_providers or not isinstance(saved_providers, dict):
             return
-        
-        # 检查是否已经是新格式（键为配置 ID）
-        # 简单检查：如果所有键都是 8 位十六进制字符串，则认为是新格式
-        import re
-        hex_pattern = re.compile(r'^[0-9a-f]{8}$')
-        if all(hex_pattern.match(key) for key in saved_providers.keys()):
-            return  # 已经是新格式
-        
-        # 迁移到新格式
-        new_saved_providers = {}
-        old_to_new = {}  # 旧 provider_name → 新 config_id 映射
-        for provider_name, info in saved_providers.items():
-            # 生成配置 ID
-            import uuid
-            config_id = uuid.uuid4().hex[:8]
-            old_to_new[provider_name] = config_id
-            # 确保 info 是字典
+
+        from app.core.provider_profile import apply_provider_save
+
+        new_saved_providers: dict = {}
+        old_to_new: dict = {}
+
+        for old_key, info in saved_providers.items():
             if not isinstance(info, dict):
                 info = {}
-            # 添加 provider_name 字段（如果不存在）
-            if "provider_name" not in info:
-                info["provider_name"] = provider_name
-            new_saved_providers[config_id] = info
-        
-        # 更新配置
+            api_key = info.get("API_KEY", "")
+            # 构造临时表项走 apply_provider_save：
+            #   1) 计算新 hash；2) 合并同 apikey 重复条目；3) 写入 config_id 字段
+            tmp_info = dict(info)
+            tmp_info.pop("config_id", None)  # 强制按 hash 重算
+            new_key = apply_provider_save(
+                new_saved_providers, tmp_info, info.get("provider_name", old_key)
+            )
+            old_to_new[old_key] = new_key
+
+        # 没变化就别动磁盘
+        if new_saved_providers.keys() == saved_providers.keys() and all(
+            isinstance(v, dict) and v.get("config_id") == k
+            for k, v in new_saved_providers.items()
+        ):
+            return
+
         instance.llm_saved_providers.value = new_saved_providers
-        # 同步更新已选模型：如果 llm_selected_model 仍指向旧的 provider_name，映射到新 config_id
+        # 同步更新已选模型：旧 key → 新 key
         selected = instance.llm_selected_model.value
         if selected and selected in old_to_new:
             instance.llm_selected_model.value = old_to_new[selected]
         instance.save()
-        logger.info(f"已迁移 {len(saved_providers)} 个服务商配置到新格式")
+        logger.info(
+            f"已迁移 {len(saved_providers)} 个服务商配置到 apikey hash 格式 "
+            f"（合并后 {len(new_saved_providers)} 条）"
+        )
 
     @classmethod
     def _extend_theme_validator_before_load(cls):

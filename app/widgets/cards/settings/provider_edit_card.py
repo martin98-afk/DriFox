@@ -472,14 +472,17 @@ class ProviderEditCard(QWidget):
             self.modelCombo.blockSignals(False)
 
     def _on_save(self):
-        """保存"""
+        """保存。
+
+        不再手工保留 config_id——config_id 现在由 main_widget 端基于 apikey
+        的稳定 hash 计算（见 app.core.provider_profile.apply_provider_save），
+        编辑同 apikey 始终命中同一条目，不会再产生重复。
+        """
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
         current_models = self.modelCombo.get_all_models()
-        # 关键修复：必须保留原始 config_id！
-        # 编辑已有配置时如果丢失 config_id，main_widget 会生成新 UUID，
-        # 导致同一个服务商产生重复条目（用户感知为"覆盖"）。
-        existing_config_id = self.provider_info.get("config_id", "")
         existing_models = self.provider_info.get("模型列表", [])
+        # 编辑场景下保留旧 config_id，让 main_widget 能据此判断 apikey 是否被改过
+        existing_config_id = self.provider_info.get("config_id", "")
         self.provider_info = {
             "API_URL": self.apiUrlCombo.currentText().strip(),
             "API_KEY": self.apiKeyEdit.text().strip(),

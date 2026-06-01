@@ -7,7 +7,86 @@ live provider config (`API_URL`, `模型名称`, `认证方式`) so the chatter 
 stays aligned with software-level provider settings.
 """
 
+import hashlib
+import uuid as _uuid
 from typing import Any, Dict
+
+
+def compute_provider_config_id(provider_info: Dict[str, Any]) -> str:
+    """用 (API_URL, API_KEY) 的稳定 hash 作为 config_id（替代旧 uuid）。
+
+    返回 SHA-256(f"{url}\\x00{apikey}") 的前 8 位 hex；
+    url 和 apikey 都为空时兜底用随机 uuid。
+
+    用 (URL, apikey) 而非纯 apikey 的目的：同一服务商常会有「coding plan
+    vs 普通 plan」之类走不同 base_url 的配置，URL 参与 hash 才能正确区分。
+    用 hash 而非 uuid 的目的：编辑同一 (URL, apikey) 的服务商时始终命中
+    同一条目，避免「保存后产生重复条目」的 bug。
+    """
+    api_url = (provider_info.get("API_URL", "") or "").strip()
+    api_key = (provider_info.get("API_KEY", "") or "").strip()
+    if not api_url and not api_key:
+        return _uuid.uuid4().hex[:8]
+    return hashlib.sha256(f"{api_url}\x00{api_key}".encode("utf-8")).hexdigest()[:8]
+
+
+def apply_provider_save(
+    saved_providers: Dict[str, Dict[str, Any]],
+    provider_info: Dict[str, Any],
+    provider_name: str,
+    is_new: bool = False,
+) -> str:
+    """把一次服务商保存应用到 saved_providers 字典上，返回新的 config_id。
+
+    - 新建（is_new=True）或没有旧 config_id：按 (URL, apikey) hash 落新条目。
+    - 编辑且 (URL, apikey) 没变：原位更新同一条目。
+    - 编辑且 (URL, apikey) 变了：删旧条目，按新 (URL, apikey) 落新条目。
+    - 兜底：若 provider_info 没带 config_id 字段（老数据 / 迁移期），
+      按 (URL, apikey) 在 saved_providers 里反查；查到多条则保留第一条，其余删掉。
+
+    该函数会就地修改 saved_providers 和 provider_info（写入 config_id 字段）。
+    """
+    new_config_id = compute_provider_config_id(provider_info)
+    old_config_id = provider_info.get("config_id", "")
+    api_url = (provider_info.get("API_URL", "") or "").strip()
+    api_key = (provider_info.get("API_KEY", "") or "").strip()
+
+    # 兜底：老数据里 value 没有 config_id 字段，按 (URL, apikey) 反查
+    if not old_config_id:
+        duplicates = [
+            k
+            for k, v in saved_providers.items()
+            if (v.get("API_URL", "") or "").strip() == api_url
+            and (v.get("API_KEY", "") or "").strip() == api_key
+        ]
+        if duplicates:
+            old_config_id = duplicates[0]
+            # 顺带清理同 (URL, apikey) 的重复条目
+            for dup in duplicates[1:]:
+                saved_providers.pop(dup, None)
+
+    # 始终以新 hash 为准
+    provider_info["config_id"] = new_config_id
+    provider_info["provider_name"] = provider_name
+
+    if is_new and old_config_id == new_config_id:
+        # 新建流程但 (URL, apikey) 命中已有条目 → 走更新分支
+        saved_providers[new_config_id] = provider_info
+        return new_config_id
+
+    if is_new or not old_config_id:
+        saved_providers[new_config_id] = provider_info
+        return new_config_id
+
+    if old_config_id == new_config_id:
+        saved_providers[new_config_id] = provider_info
+        return new_config_id
+
+    # (URL, apikey) 变了：旧条目删掉，按新组合落新位置
+    if old_config_id in saved_providers:
+        del saved_providers[old_config_id]
+    saved_providers[new_config_id] = provider_info
+    return new_config_id
 
 
 # 合理的输出 token 上限（基于各模型已知的 API 限制）
