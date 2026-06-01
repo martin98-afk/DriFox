@@ -6439,12 +6439,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 if idx is not None:
                     self.history_manager.update_session(
-                        idx, session.messages, **compaction_info
+                        idx,
+                        session.messages,
+                        project=self._current_project,
+                        **compaction_info,
                     )
                 else:
                     self.history_manager.save_session(
                         session.messages,
                         session_id=session.session_id,
+                        project=self._current_project,
                         **compaction_info,
                     )
         except Exception as e:
@@ -8561,6 +8565,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 session_id=session.session_id if session else None,
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
+                project=self._current_project,
             )
             self._current_session_id = session.session_id if session else None
 
@@ -8999,6 +9004,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
+                    project=self._current_project,
                 )
             else:
                 self.history_manager.save_session(
@@ -9007,6 +9013,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
+                    project=self._current_project,
                 )
                 self._current_session_id = session.session_id
         else:
@@ -9016,6 +9023,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
+                project=self._current_project,
             )
             self._current_session_id = session.session_id
 
