@@ -1776,7 +1776,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 视觉上是独立第二张卡：下方圆角 + 渐变 + 边框；颜色使用专属
         # TOOLBAR_STRIP_BG/TOOLBAR_STRIP_BORDER token（与输入卡片解耦，
         # 主题可分别调控）。
-        self._bottom_toolbar_strip = QWidget(self._bottom_input_container)
+        # 工具栏作为 self 的直接子控件（不放在任何 layout 里），
+        # 通过 resizeEvent 绝对定位到窗口底部。这样输入卡折叠/展开时
+        # 工具栏的窗口绝对 Y 坐标完全不变，不再被 VBoxLayout 推上/推下。
+        self._bottom_toolbar_strip = QWidget(self)
         self._bottom_toolbar_strip.setObjectName("bottomToolbarStrip")
         self._bottom_toolbar_strip.setFixedHeight(36)
         strip_layout = QHBoxLayout(self._bottom_toolbar_strip)
@@ -1928,12 +1931,32 @@ class OpenAIChatToolWindow(ToolWindow):
         self._apply_bottom_input_stack_style()
 
         bottom_layout.addWidget(self._input_card)
-        bottom_layout.addWidget(self._bottom_toolbar_strip)
-
-        self._bottom_toolbar_strip.lower()
-        self._input_card.raise_()
+        # 预留 36px 空间给工具栏（工具栏本身不在 layout 里，绝对定位）。
+        # 输入卡 + 这 36px = 输入容器高度；工具栏钉死在窗口底部 36px，
+        # 与输入容器底部对齐（输入卡隐藏时容器仍占 36px，工具栏位置不变）。
+        bottom_layout.addSpacing(36)
 
         layout.addWidget(self._bottom_input_container)
+
+        # 初始定位工具栏（resizeEvent 会持续更新）
+        self._position_bottom_toolbar()
+
+    def _position_bottom_toolbar(self):
+        """将底部工具栏绝对定位到窗口底部 36px。
+
+        工具栏是 self 的直接子控件，不在 main layout 里。这样：
+        - 输入卡折叠/展开时，工具栏的窗口绝对 Y 坐标完全不变。
+        - 系统卡片打开时，工具栏也不会被推上去。
+        位置 = 窗口底部 1px margin 内缩 36px，与输入容器底部 36px spacer 对齐。
+        """
+        if not hasattr(self, "_bottom_toolbar_strip"):
+            return
+        w = self.width()
+        h = self.height()
+        toolbar_h = 36
+        toolbar_y = max(0, h - 1 - toolbar_h)
+        toolbar_w = max(0, w - 2)
+        self._bottom_toolbar_strip.setGeometry(1, toolbar_y, toolbar_w, toolbar_h)
 
     # ========== 内置命令初始化 ==========
 
@@ -2011,6 +2034,20 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 self._input_card_shadow.setBlurRadius(12)
                 self._input_card_shadow.setColor(QColor(0, 0, 0, 55))
+
+        # 工具栏跟着输入卡一起发光：焦点时金色 24px 模糊、无 offset，
+        # 与输入卡合成统一的"发光胶囊"。未焦点时恢复原黑色 drop shadow。
+        if hasattr(self, "_bottom_toolbar_shadow"):
+            if focused:
+                glow = QColor(Colors.INPUT_FOCUS_BORDER)
+                glow.setAlpha(170)
+                self._bottom_toolbar_shadow.setBlurRadius(24)
+                self._bottom_toolbar_shadow.setOffset(0, 0)
+                self._bottom_toolbar_shadow.setColor(glow)
+            else:
+                self._bottom_toolbar_shadow.setBlurRadius(14)
+                self._bottom_toolbar_shadow.setOffset(0, 4)
+                self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 70))
 
     def _init_builtin_commands(self):
         """注册并初始化所有内置命令"""
@@ -2757,11 +2794,30 @@ class OpenAIChatToolWindow(ToolWindow):
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
         old_selected = self._current_provider_name
 
-        from app.core.provider_profile import apply_provider_save
-
-        new_config_id = apply_provider_save(
-            saved_providers, provider_info, provider_name, is_new=is_new
+        from app.core.provider_profile import (
+            ProviderConfigCollision,
+            apply_provider_save,
         )
+
+        try:
+            new_config_id = apply_provider_save(
+                saved_providers, provider_info, provider_name, is_new=is_new
+            )
+        except ProviderConfigCollision:
+            # 撞 id 冲突：弹简单提示，保留表单让用户修改
+            from qfluentwidgets import MessageBox
+
+            w = MessageBox(
+                "配置冲突",
+                "该 (API_URL, API_KEY) 组合已被其他配置占用，请修改后重试。\n\n"
+                "同名服务商可以使用不同 base_url 分别配置（如 coding plan / 普通 plan），\n"
+                "但 (URL, KEY) 必须唯一。",
+                self.window(),
+            )
+            w.yesButton.setText("知道了")
+            w.cancelButton.hide()
+            w.exec_()
+            return  # 不隐藏表单，用户继续编辑
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
 
@@ -3652,6 +3708,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_debounce_timer.start()
         self._resize_complete_timer.stop()
         self._resize_complete_timer.start()
+        # 重新定位底部工具栏（绝对定位，不在 layout 里）
+        self._position_bottom_toolbar()
 
     def _set_cards_resize_preview_mode(self, enabled: bool):
         if enabled == self._resize_preview_active:

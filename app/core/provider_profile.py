@@ -9,7 +9,18 @@ stays aligned with software-level provider settings.
 
 import hashlib
 import uuid as _uuid
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+
+class ProviderConfigCollision(Exception):
+    """保存时 (API_URL, API_KEY) 组合与已有条目冲突"""
+
+    def __init__(self, existing_config_id: str, existing_name: str = ""):
+        self.existing_config_id = existing_config_id
+        self.existing_name = existing_name
+        super().__init__(
+            f"该 (API_URL, API_KEY) 组合已被「{existing_name or existing_config_id}」占用，请修改后重试"
+        )
 
 
 def compute_provider_config_id(provider_info: Dict[str, Any]) -> str:
@@ -38,22 +49,24 @@ def apply_provider_save(
 ) -> str:
     """把一次服务商保存应用到 saved_providers 字典上，返回新的 config_id。
 
-    - 新建（is_new=True）或没有旧 config_id：按 (URL, apikey) hash 落新条目。
+    - 新建（is_new=True）：按 (URL, apikey) hash 落新条目；如果 hash 撞到已有条目则拒绝。
     - 编辑且 (URL, apikey) 没变：原位更新同一条目。
-    - 编辑且 (URL, apikey) 变了：删旧条目，按新 (URL, apikey) 落新条目。
-    - 兜底：若 provider_info 没带 config_id 字段（老数据 / 迁移期），
-      按 (URL, apikey) 在 saved_providers 里反查；查到多条则保留第一条，其余删掉。
+    - 编辑且 (URL, apikey) 变了：删旧条目，按新组合落新位置（新 hash 撞到别的条目则拒绝）。
+    - 编辑模式 + 兜底（provider_info 没带 config_id 字段的老数据）：
+      按 (URL, apikey) 在 saved_providers 里反查，查到多条则合并，查不到则落新位置。
 
     该函数会就地修改 saved_providers 和 provider_info（写入 config_id 字段）。
+    发生冲突时抛出 ProviderConfigCollision。
     """
     new_config_id = compute_provider_config_id(provider_info)
     old_config_id = provider_info.get("config_id", "")
-    api_url = (provider_info.get("API_URL", "") or "").strip()
-    api_key = (provider_info.get("API_KEY", "") or "").strip()
 
-    # 兜底：老数据里 value 没有 config_id 字段，按 (URL, apikey) 反查
-    if not old_config_id:
-        duplicates = [
+    # ---- 兜底：编辑模式 + 老数据（无 config_id 字段）按 (URL, KEY) 反查 ----
+    # 新建模式不走此兜底（正常情况新建表单不带 config_id）
+    if not old_config_id and not is_new:
+        api_url = (provider_info.get("API_URL", "") or "").strip()
+        api_key = (provider_info.get("API_KEY", "") or "").strip()
+        duplicates: List[str] = [
             k
             for k, v in saved_providers.items()
             if (v.get("API_URL", "") or "").strip() == api_url
@@ -61,16 +74,26 @@ def apply_provider_save(
         ]
         if duplicates:
             old_config_id = duplicates[0]
-            # 顺带清理同 (URL, apikey) 的重复条目
             for dup in duplicates[1:]:
                 saved_providers.pop(dup, None)
 
-    # 始终以新 hash 为准
+    # ---- 写入 hash 到 provider_info ----
     provider_info["config_id"] = new_config_id
     provider_info["provider_name"] = provider_name
 
+    # ---- 撞 id 冲突检测 ----
+    # new_config_id 已经是别人家的 key 了 → 拒绝保存，抛出异常
+    if new_config_id != old_config_id and new_config_id in saved_providers:
+        existing = saved_providers[new_config_id]
+        existing_name = (
+            existing.get("name", "")
+            or existing.get("provider_name", "")
+            or new_config_id
+        )
+        raise ProviderConfigCollision(new_config_id, existing_name)
+
+    # ---- 写入 saved_providers ----
     if is_new and old_config_id == new_config_id:
-        # 新建流程但 (URL, apikey) 命中已有条目 → 走更新分支
         saved_providers[new_config_id] = provider_info
         return new_config_id
 
