@@ -47,7 +47,7 @@ class ToolWindowTitleBar(QWidget):
         layout.setSpacing(4)
 
         self._icon_widget = IconWidget(self)
-        self._icon_widget.setFixedSize(14, 14)
+        self._icon_widget.setFixedSize(16, 16)
 
         self._title_label = QLabel(self)
         self._title_label.setObjectName("titleLabel")
@@ -87,9 +87,11 @@ class ToolWindowTitleBar(QWidget):
         # 设置按钮已移除（移到主窗口内）
 
         self._min_btn = TransparentToolButton(get_icon("最小化"), self)
+        self._min_btn.setFixedSize(28, 28)
         self._min_btn.setToolTip("最小化")
 
         self._popup_btn = TransparentToolButton(FIF.CLOSE, self)
+        self._popup_btn.setFixedSize(28, 28)
         self._popup_btn.setToolTip("关闭")
         self._popup_btn.clicked.connect(self._on_popup_clicked)
 

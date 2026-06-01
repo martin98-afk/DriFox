@@ -69,6 +69,7 @@ from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
+    Shadows,
     font_size_css,
     scale_font_size,
     apply_font_size_to_widget,
@@ -218,7 +219,7 @@ class OpenAIChatToolWindow(ToolWindow):
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
 
-    def __init__(self, homepage, button):
+    def __init__(self, homepage):
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
         super().__init__(homepage)
         # 需要在 super().__init__() 之前初始化所有依赖项
@@ -643,12 +644,14 @@ class OpenAIChatToolWindow(ToolWindow):
         title_bar.show_memory_label()
         # 创建复制窗口按钮
         self._copy_btn = TransparentToolButton(get_icon("新建窗口"), self)
+        self._copy_btn.setFixedSize(28, 28)
         self._copy_btn.setToolTip("新建窗口")
         self._copy_btn.clicked.connect(lambda: self._duplicate_window(branch=False))
         title_bar.insert_button(0, self._copy_btn)
 
         # 创建分支按钮
         self._branch_btn = TransparentToolButton(get_icon("分支"), self)
+        self._branch_btn.setFixedSize(28, 28)
         self._branch_btn.setToolTip("分支当前对话")
         self._branch_btn.clicked.connect(lambda: self._duplicate_window(branch=True))
         title_bar.insert_button(1, self._branch_btn)
@@ -713,7 +716,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
 
             # 创建新的窗口实例
-            new_instance = OpenAIChatToolWindow(valid_homepage, None)
+            new_instance = OpenAIChatToolWindow(valid_homepage)
 
             # 如果是分支模式，传递当前会话的消息
             if branch:
@@ -2027,22 +2030,32 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if hasattr(self, "_input_card_shadow"):
             if focused:
+                # 输入卡 = 主光源：halo cascade 顶层（token: Shadows.GLOW_PRIMARY）
+                # alpha 高、blur 紧凑 → 收紧、聚焦的辉光，是胶囊的"光源"
+                token = Shadows.GLOW_PRIMARY
                 glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(170)
-                self._input_card_shadow.setBlurRadius(24)
+                glow.setAlpha(token["alpha"])
+                self._input_card_shadow.setBlurRadius(token["blur_radius"])
+                self._input_card_shadow.setOffset(token["offset_x"], token["offset_y"])
                 self._input_card_shadow.setColor(glow)
             else:
                 self._input_card_shadow.setBlurRadius(12)
                 self._input_card_shadow.setColor(QColor(0, 0, 0, 55))
 
-        # 工具栏跟着输入卡一起发光：焦点时金色 24px 模糊、无 offset，
-        # 与输入卡合成统一的"发光胶囊"。未焦点时恢复原黑色 drop shadow。
+        # 工具栏 = 环境光晕：halo cascade 底层（token: Shadows.GLOW_AMBIENT）
+        # 与输入卡同色系但更弥散、更柔和，营造"主光 → 回声"的层次。
+        # 视觉上像是输入卡把光"洒"到工具栏，整体仍是统一的发光胶囊，
+        # 但有清晰的主次，不抢戏也不脱节。
+        # 未焦点时工具栏保留轻微下投阴影（offset 0,4）增强"落地"感。
         if hasattr(self, "_bottom_toolbar_shadow"):
             if focused:
+                token = Shadows.GLOW_AMBIENT
                 glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(170)
-                self._bottom_toolbar_shadow.setBlurRadius(24)
-                self._bottom_toolbar_shadow.setOffset(0, 0)
+                glow.setAlpha(token["alpha"])
+                self._bottom_toolbar_shadow.setBlurRadius(token["blur_radius"])
+                self._bottom_toolbar_shadow.setOffset(
+                    token["offset_x"], token["offset_y"]
+                )
                 self._bottom_toolbar_shadow.setColor(glow)
             else:
                 self._bottom_toolbar_shadow.setBlurRadius(14)
@@ -8321,9 +8334,13 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         if getattr(self, "_is_destroyed", False):
             return
-        # 隐藏输入框，让用户专注看问题
+        # 隐藏输入框 + 工具栏，让用户专注看问题
+        # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
+        #  必须单独隐藏，否则会与提问卡片重叠）
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(False)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(False)
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
@@ -8339,9 +8356,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._card_manager.hide_card("question", self._window_id)
-        # 恢复输入框
+        # 恢复输入框 + 工具栏
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(True)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(True)
         self._restore_after_question_close()
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -8376,8 +8395,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._card_manager.hide_card("question", self._window_id)
+        # 恢复输入框 + 工具栏
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(True)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(True)
         self._restore_after_question_close()
 
         if self._pending_permission_tool_call_id:
@@ -8438,9 +8460,11 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
-        # 隐藏输入框，让用户专注看问题
+        # 隐藏输入框 + 工具栏，让用户专注看问题
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(False)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(False)
         # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
         self._card_manager.show_card("question", self._window_id)
         self._question_floating_widget.setUpdatesEnabled(False)
@@ -9565,8 +9589,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.clear()
         # 隐藏消息列表（保持滚动位置不变）
         self.chat_scroll_area.setVisible(False)
-        # 隐藏输入容器
+        # 隐藏输入容器 + 工具栏
         self._bottom_input_container.setVisible(False)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
 
@@ -9577,8 +9603,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """解锁 UI — 恢复消息列表和输入框"""
         # 恢复消息列表
         self.chat_scroll_area.setVisible(True)
-        # 恢复输入容器
+        # 恢复输入容器 + 工具栏
         self._bottom_input_container.setVisible(True)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(True)
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 

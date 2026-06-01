@@ -441,13 +441,35 @@ class Shadows:
         "offset_y": 8,
         "color": "rgba(0, 0, 0, 0.35)",
     }
-    # 聚焦发光
-    GLOW = {
-        "blur_radius": 15,
+    # ===== 聚焦发光（halo cascade — 主光 + 环境光晕双层 token）=====
+    # 焦点态时输入卡 + 工具栏一起发光，构成"发光胶囊"。
+    # 两者同色系（取自 Colors.INPUT_FOCUS_BORDER，主题感知），
+    # 通过 alpha / blur 的差异营造"主光 → 回声"的层次：
+    # 上紧下散、上亮下柔，不抢戏也不脱节。
+    #
+    # 注意：GLOW_* 系列不携带 color 字段 — 颜色由调用方从
+    # Colors.INPUT_FOCUS_BORDER 读取，alpha 由 token 显式声明。
+    # 这样主题切换时颜色自动跟随，无需维护两套 rgba 字面量。
+
+    # 聚焦主光源 — 输入卡等"活动"控件的辉光
+    # alpha 较高、blur 紧凑 → 收紧、聚焦，是胶囊的"光源"
+    GLOW_PRIMARY = {
+        "blur_radius": 26,
         "offset_x": 0,
         "offset_y": 0,
-        "color": "rgba(201, 168, 92, 0.3)",
+        "alpha": 195,
     }
+    # 聚焦环境光晕 — 工具栏等"次级"控件的余光
+    # alpha 较主光源低 ~44%、blur 较主光源宽 ~38%
+    # → 弥散、柔和，像主光"洒"过来的余晖
+    GLOW_AMBIENT = {
+        "blur_radius": 36,
+        "offset_x": 0,
+        "offset_y": 0,
+        "alpha": 110,
+    }
+    # 兼容旧名（历史别名，等价于 GLOW_PRIMARY）
+    GLOW = GLOW_PRIMARY
 
 
 class BorderRadius:
@@ -855,10 +877,13 @@ def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
 
 def apply_card_shadow(widget, shadow_type: str = "card"):
     """为 widget 添加预设阴影效果
-    
+
     Args:
         widget: 目标控件
-        shadow_type: "card" | "floating" | "glow"
+        shadow_type: "card" | "floating" | "glow" | "glow_primary" | "glow_ambient"
+            - "card"/"floating": 静态 drop shadow（深色 + offset）
+            - "glow*": 聚焦发光 halo，颜色取自 Colors.INPUT_FOCUS_BORDER（主题感知），
+              alpha / blur_radius 来自对应 token
     """
     from PyQt5.QtWidgets import QGraphicsDropShadowEffect
     from PyQt5.QtGui import QColor
@@ -867,7 +892,16 @@ def apply_card_shadow(widget, shadow_type: str = "card"):
     effect = QGraphicsDropShadowEffect(widget)
     effect.setBlurRadius(config["blur_radius"])
     effect.setOffset(config["offset_x"], config["offset_y"])
-    effect.setColor(QColor(config["color"]))
+
+    if shadow_type.lower().startswith("glow"):
+        # GLOW_* 系列：颜色跟随主题，alpha 来自 token
+        Colors.refresh()
+        glow = QColor(Colors.INPUT_FOCUS_BORDER)
+        glow.setAlpha(config.get("alpha", 170))
+        effect.setColor(glow)
+    else:
+        # CARD / FLOATING：颜色直接来自 token 的 color 字段
+        effect.setColor(QColor(config["color"]))
     widget.setGraphicsEffect(effect)
 
 

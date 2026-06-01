@@ -191,7 +191,7 @@ def main():
             pass
 
     fake_page = FakePage()
-    chat_window = OpenAIChatToolWindow(fake_page, None)
+    chat_window = OpenAIChatToolWindow(fake_page)
 
     # 延迟创建 ToolPopupDialog 和初始化 TrayManager
     # 等 chat_window 的 __init__ 完成后再创建弹窗，避免窗口渲染阻塞主线程

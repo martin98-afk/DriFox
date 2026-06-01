@@ -2243,7 +2243,10 @@ class CodeWebViewer(QWebEngineView):
                         if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise();
 
                         // 自动滚动到 body 底部（流式时新内容在底部）
-                        document.body.scrollTop = document.body.scrollHeight;
+                        // setTimeout 确保 Qt WebEngine 在 innerHTML 替换后完成布局再滚动
+                        setTimeout(function() {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                        }}, 0);
 
                         // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
@@ -2395,7 +2398,10 @@ class CodeWebViewer(QWebEngineView):
                     c.appendChild(p);
                 }}
                 // 流式增量追加时，让 body 内部滚动到最底部
-                document.body.scrollTop = document.body.scrollHeight;
+                // 使用 setTimeout(0) 确保 Qt WebEngine 布局更新完毕后再滚动
+                setTimeout(function() {{
+                    document.body.scrollTop = document.body.scrollHeight;
+                }}, 0);
             }})();
             """
             self.page().runJavaScript(js)
@@ -3839,7 +3845,14 @@ class MessageCard(SimpleCardWidget):
         self._last_applied_viewer_height = height
         self.viewer.setFixedHeight(height)
         self.heightChanged.emit(height)
-        # 简化：直接触发布局更新，不再区分动画状态
+        # viewer 高度变化后 body 视口可能改变，重新滚动到底部确保溢出时内部滚动位置正确
+        if self._streaming and hasattr(self.viewer, 'page') and self.viewer.page():
+            try:
+                self.viewer.page().runJavaScript(
+                    "setTimeout(function() { document.body.scrollTop = document.body.scrollHeight; }, 0);"
+                )
+            except RuntimeError:
+                pass
 
     def sync_width(self, force: bool = False):
         """同步卡片宽度
