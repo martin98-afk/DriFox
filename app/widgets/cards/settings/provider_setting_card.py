@@ -190,7 +190,7 @@ class ProviderIconWidget(IconWidget):
 class ProviderItem(QWidget):
     removed = pyqtSignal(QWidget)
     selected = pyqtSignal(QWidget)
-    editRequested = pyqtSignal(str, dict)  # provider_name, provider_info
+    editRequested = pyqtSignal(str, dict)  # config_id, provider_info
 
     def __init__(
         self, config_id: str, provider_info: dict, is_default: bool, parent=None
@@ -301,7 +301,7 @@ class ProviderListSettingCard(ExpandSettingCard):
     defaultProviderChanged = pyqtSignal(str)
     # 新增信号：用于触发卡片显示
     showAddProviderCard = pyqtSignal()  # 显示添加服务商卡片
-    showEditProviderCard = pyqtSignal(str, dict)  # 显示编辑服务商卡片
+    showEditProviderCard = pyqtSignal(str, dict)  # config_id, provider_info
 
     def __init__(
         self,
@@ -401,7 +401,7 @@ class ProviderListSettingCard(ExpandSettingCard):
         item = ProviderItem(config_id, info, is_default, self.view)
         item.removed.connect(self._show_confirm_dialog)
         item.selected.connect(lambda i: self._select_provider(i))
-        # editRequested 信号传递服务商名称和配置信息
+        # editRequested 信号传递 config_id 和 provider_info
         item.editRequested.connect(lambda n, i: self._show_edit_dialog(n, i, item))
         # 如果是默认服务商，立即应用选中样式
         if is_default and hasattr(item, '_default_style'):

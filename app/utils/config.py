@@ -109,10 +109,12 @@ class Settings(QConfig):
         
         # 迁移到新格式
         new_saved_providers = {}
+        old_to_new = {}  # 旧 provider_name → 新 config_id 映射
         for provider_name, info in saved_providers.items():
             # 生成配置 ID
             import uuid
             config_id = uuid.uuid4().hex[:8]
+            old_to_new[provider_name] = config_id
             # 确保 info 是字典
             if not isinstance(info, dict):
                 info = {}
@@ -123,6 +125,10 @@ class Settings(QConfig):
         
         # 更新配置
         instance.llm_saved_providers.value = new_saved_providers
+        # 同步更新已选模型：如果 llm_selected_model 仍指向旧的 provider_name，映射到新 config_id
+        selected = instance.llm_selected_model.value
+        if selected and selected in old_to_new:
+            instance.llm_selected_model.value = old_to_new[selected]
         instance.save()
         logger.info(f"已迁移 {len(saved_providers)} 个服务商配置到新格式")
 

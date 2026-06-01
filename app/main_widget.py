@@ -2742,17 +2742,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("hook_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
 
-    def _show_provider_edit_card(self, provider_name: str, provider_info: dict):
+    def _show_provider_edit_card(self, config_id: str, provider_info: dict):
         """显示编辑服务商卡片"""
         # 隐藏设置卡片
         self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
-        # 显示配置名称（如果存在），否则显示服务商名称
-        display_name = provider_info.get("name", "") or provider_name
+        # 优先使用用户填写的配置名称（name），其次使用服务商名称（provider_name），最后回退到 config_id
+        display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
         self._provider_edit_card.set_title(f"⚙️ 编辑: {display_name}")
         # 在 provider_info 中添加 provider_name（如果不存在）
         if "provider_name" not in provider_info:
-            provider_info["provider_name"] = provider_name
+            provider_info["provider_name"] = display_name
         # 重新创建 ProviderEditCard 用于编辑
         self._provider_edit_popup = ProviderEditCard(
             provider_name=provider_info["provider_name"],
