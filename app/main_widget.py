@@ -1166,6 +1166,21 @@ class OpenAIChatToolWindow(ToolWindow):
         Colors.refresh()
         # 动态更新主题选项
         update_theme_options()
+
+        # 标题栏分组分隔线（1px 竖线，用主题色 DIVIDER_COLOR）
+        def _make_vdivider() -> QFrame:
+            div = QFrame(self)
+            div.setFrameShape(QFrame.VLine)
+            div.setFixedHeight(18)
+            div.setFixedWidth(1)
+            Colors.refresh()
+            div.setStyleSheet(
+                f"color: {Colors.DIVIDER_COLOR}; "
+                f"background: {Colors.DIVIDER_COLOR}; "
+                "border: none;"
+            )
+            return div
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(1)
@@ -1271,7 +1286,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self.title_edit.editingFinished.connect(self._on_title_edit_finished)
 
         session_bar_layout.addWidget(self._project_branch_container)
+
+        # 标题栏分组分隔线：[项目▸分支] │ [标题]
+        session_bar_layout.addWidget(_make_vdivider())
+
         session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
+
+        # 标题栏分组分隔线：[标题] │ [余额+圆环]
+        session_bar_layout.addWidget(_make_vdivider())
 
         # right_layout 保持简化，显示余额和 context_usage_ring
         right_layout = QHBoxLayout()
