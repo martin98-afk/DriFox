@@ -76,6 +76,10 @@ colors:
   input_border: '#6a3a50'
   input_focus_border: '#e85a7a'
   input_placeholder: rgba(240, 224, 230, 0.4)
+
+  # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
+  toolbar_strip_bg: rgba(44, 24, 34, 150)
+  toolbar_strip_border: '#6a3a50'
   realtime_border: '#d06080'
   realtime_accent: '#f090a8'
   realtime_accent_warm: '#f0b070'
