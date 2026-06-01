@@ -69,6 +69,14 @@ class SendableTextEdit(TextEdit):
         if hasattr(self, "layer"):
             self.layer.hide()
 
+        # 防抖定时器：合并连续 resize 事件中的发送按钮定位，
+        # 避免 setMinimumHeight/setMaximumHeight 与父布局级联 resize
+        # 触发的多次 resizeEvent 把按钮跳到中间位置。
+        self._send_btn_debounce_timer = QTimer(self)
+        self._send_btn_debounce_timer.setSingleShot(True)
+        self._send_btn_debounce_timer.setInterval(0)
+        self._send_btn_debounce_timer.timeout.connect(self._position_send_button)
+
         self._setup_keyboard_shortcuts()
 
         # 命令卡片引用（由 main_widget 注入）
@@ -459,15 +467,21 @@ class SendableTextEdit(TextEdit):
         self.setFocus(Qt.OtherFocusReason)
 
     def _sync_detail_params(self):
-        """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片"""
+        """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片
+
+        同时透传完整文本和光标位置，供卡片做：
+        - 自动检测 --model 前缀并弹出模型列表
+        - 模型列表的实时搜索过滤
+        """
         from app.core.command_manager import CommandManager
 
         card = self._get_card()
         if not card or not card.is_detail_mode:
             return
         text = self.toPlainText()
+        cursor_pos = self.textCursor().position()
         active = CommandManager.parse_active_params(text) if text else set()
-        card.update_active_params(active)
+        card.update_active_params(active, full_text=text, cursor_pos=cursor_pos)
 
     # ==================== 输入历史浏览 ====================
 
@@ -587,14 +601,17 @@ class SendableTextEdit(TextEdit):
     def _adjust_height_to_content(self):
         """根据内容自动调整高度
 
-        一次性更新输入框和父卡片高度，通过暂停重绘确保中间态不被渲染。
-        setFixedHeight 内部会立即触发 resize，如果两个高度分步设置
-        会导致两次独立布局重算，下方按钮栏就会抖动。
+        setFixedHeight + updateGeometry 把尺寸变更交给 Qt 事件循环处理，
+        父卡片、工具栏、发送按钮由 layout 级联 resize / debounce timer
+        自然到位；不在 textChanged 回调里同步冲刷事件，避免超高内容
+        切回原高时阻塞 UI 线程造成的卡顿。_adjusting_height 防重入。
         """
         if getattr(self, "_initializing", False):
             return
+        if getattr(self, "_adjusting_height", False):
+            return  # 防重入：级联 resize 不要再进入
 
-        # 窗口拖拽过程中跳过高度调整，防止 setFixedHeight 干扰布局
+        # 窗口拖拽过程中跳过高度调整，防止布局重算干扰窗口管理
         try:
             from app.tool_popup import ToolPopupDialog
             if ToolPopupDialog._any_window_dragging:
@@ -607,28 +624,14 @@ class SendableTextEdit(TextEdit):
         new_height = max(44, min(160, content_height))
 
         if self.height() != new_height:
-            parent = self.parent()
-            # 暂停重绘，避免两次 setFixedHeight 触发的中间布局被渲染
-            if parent:
-                parent.setUpdatesEnabled(False)
-            self.setUpdatesEnabled(False)
-
-            # 先设卡片高度（父），再设输入框高度（子）
-            # 确保当子 resize 触发布局级联时，父已有正确的约束
-            if parent:
-                toolbar_height = 34
-                separator_height = 1
-                card_padding = 4
-                parent.setFixedHeight(
-                    new_height + separator_height + toolbar_height + card_padding
-                )
-            self.setFixedHeight(new_height)
-
-            self.setUpdatesEnabled(True)
-            if parent:
-                parent.setUpdatesEnabled(True)
-                parent.update()
-            self.update()
+            self._adjusting_height = True
+            try:
+                self.setFixedHeight(new_height)
+                self.updateGeometry()
+                # 发送按钮位置由 resizeEvent → debounce timer(0ms) 在
+                # 事件循环下一轮自然定位，不在这里强行同步冲刷。
+            finally:
+                self._adjusting_height = False
 
     def _rebind_send_btn(self, handler):
         try:
@@ -675,7 +678,9 @@ class SendableTextEdit(TextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._position_send_button()
+        # 每次 resize 重启定时器；连续多次 resize 只会触发最后一次定位，
+        # 保证发送按钮一次到位（不抖）。
+        self._send_btn_debounce_timer.start()
 
     def _position_send_button(self):
         """定位发送按钮到输入框右下角"""
