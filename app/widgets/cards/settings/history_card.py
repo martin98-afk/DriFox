@@ -814,6 +814,13 @@ class HistoryCard(QWidget):
         if card is None:
             return False
 
+        # 记录被删除会话的原始索引（用于后续修正 _current_index）
+        removed_index = None
+        for idx, s in enumerate(self._all_history):
+            if s.get("session_id") == session_id:
+                removed_index = idx
+                break
+
         # 从布局中移除该卡片
         layout = self.get_content_layout()
         if layout is None:
@@ -836,12 +843,20 @@ class HistoryCard(QWidget):
             if s.get("session_id") != session_id
         ]
 
-        # 更新 _current_index：如果被删除的是当前会话，index 置 None
-        if self._current_index is not None:
-            if 0 <= self._current_index < len(self._all_history):
-                pass  # 索引不变
-            else:
+        # 更新 _current_index：如果被删除的是当前会话，index 置 None；
+        # 如果删除位置在当前会话之前，当前会话索引减 1
+        if self._current_index is not None and removed_index is not None:
+            if removed_index == self._current_index:
                 self._current_index = None
+            elif removed_index < self._current_index:
+                self._current_index -= 1
+
+        # 【关键修复】同步更新剩余缓存卡片的 _index，使其与 _all_history 中的新位置一致
+        for new_idx, s in enumerate(self._all_history):
+            sid = s.get("session_id", "")
+            cached_card = self._cached_cards.get(sid)
+            if cached_card is not None and cached_card._index != new_idx:
+                cached_card._index = new_idx
 
         return True
 

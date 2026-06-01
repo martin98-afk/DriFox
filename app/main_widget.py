@@ -2156,119 +2156,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return None
 
-    def _resolve_subagent_model_config(self, model_value: str) -> Optional[Dict]:
-        """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
-
-        支持三种格式：
-          - "模型名"          → 仅覆盖当前服务商的模型名称
-          - "服务商名"        → 切换到指定服务商的完整配置
-          - "服务商名:模型名"  → 切换到指定服务商并覆盖模型名称
-
-        Args:
-            model_value: --model=xxx 的原始值（空字符串时不覆盖）
-
-        Returns:
-            Dict: 覆盖后的 LLM 配置，或 None（使用默认配置）
-        """
-        if not model_value:
-            return None  # 使用默认配置
-
-        if ":" in model_value:
-            # 格式: "服务商名:模型名"
-            provider, model_query = model_value.split(":", 1)
-            model_query_lower = model_query.lower()
-            if provider in self._valid_configs:
-                matched = self._fuzzy_match_model_name(
-                    provider, model_query_lower,
-                    lambda: self._get_model_list_for_provider(provider)
-                )
-                if matched is not None:
-                    config = self._valid_configs[provider].copy()
-                    config["模型名称"] = matched
-                    return config
-                else:
-                    available = self._get_model_list_for_provider(provider)
-                    InfoBar.warning("模型不存在", f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
-                                    parent=self, position=InfoBarPosition.BOTTOM)
-                    return None
-            else:
-                InfoBar.warning("未知服务商", f"未找到服务商: {provider}", parent=self, position=InfoBarPosition.BOTTOM)
-                return None
-        elif model_value in self._valid_configs:
-            # 格式: "服务商名" — 切换到该服务商（取当前模型）
-            config = self._valid_configs[model_value].copy()
-            return config
-        else:
-            # 格式: "模型名" — 在当前服务商模糊匹配
-            config = self._get_current_model_config()
-            provider = self._current_provider_name
-            model_query_lower = model_value.lower()
-            matched = self._fuzzy_match_model_name(
-                provider, model_query_lower,
-                lambda: self._get_model_list_for_provider(provider)
-            )
-            if matched is not None:
-                config = dict(config)
-                config["模型名称"] = matched
-                return config
-            else:
-                available = self._get_model_list_for_provider(provider)
-                InfoBar.warning("模型不存在", f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
-                                parent=self, position=InfoBarPosition.BOTTOM)
-                return None
-
-    def _get_model_list_for_provider(self, provider: str) -> List[str]:
-        """获取指定服务商的模型列表（供模糊匹配用）"""
-        config = self._valid_configs.get(provider, {})
-        model_list = config.get("模型列表", [])
-        if isinstance(model_list, str):
-            try:
-                import ast
-                model_list = ast.literal_eval(model_list)
-            except Exception:
-                model_list = []
-        # 也把当前选中的模型加进去（万一不在列表里）
-        current = config.get("模型名称", "")
-        if current and current not in model_list:
-            model_list = [current] + list(model_list)
-        return list(model_list)
-
-    def _fuzzy_match_model_name(self, provider: str, query: str,
-                               get_model_list: Callable[[], List[str]]) -> Optional[str]:
-        """前缀+大小写不敏感模糊匹配模型名
-
-        匹配规则（按优先级）：
-        1. 精确匹配（忽略大小写）
-        2. 前缀匹配（忽略大小写）
-
-        Args:
-            provider: 服务商名（用于日志）
-            query: 用户输入（小写）
-            get_model_list: 获取模型列表的回调
-
-        Returns:
-            匹配到的模型名（原始大小写），无匹配返回 None
-        """
-        model_list = get_model_list()
-        if not model_list:
-            return None
-
-        # 1. 精确匹配（忽略大小写）
-        for name in model_list:
-            if name.lower() == query:
-                return name
-
-        # 2. 前缀匹配（忽略大小写）
-        matches = [name for name in model_list if name.lower().startswith(query)]
-
-        if len(matches) == 1:
-            return matches[0]
-        elif len(matches) > 1:
-            # 多匹配时取第一个（列表顺序已由服务商配置决定）
-            return matches[0]
-
-        return None
-
     def _trigger_context_compaction(self):
         """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
         session = self.session_manager.get_current_session()
@@ -3578,10 +3465,12 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         self._load_model_configs()
         # 如果设置卡片当前可见（同窗口），刷新服务商列表
-        if (hasattr(self, '_card_manager') 
+        if (
+            hasattr(self, "_card_manager")
             and self._card_manager.is_card_visible("settings", self._window_id)
-            and hasattr(self, '_settings_popup')
-            and hasattr(self._settings_popup, 'llmProviderCard')):
+            and hasattr(self, "_settings_popup")
+            and hasattr(self._settings_popup, "llmProviderCard")
+        ):
             self._settings_popup.llmProviderCard._refresh_items()
         # 如果模型选择卡片当前可见，刷新内容
         if hasattr(self, "_card_manager") and self._card_manager.is_card_visible(
@@ -4663,7 +4552,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         ⚠️ 不能只遍历 chat_layout，因为懒加载/回收的卡片不在布局中。
         必须基于 _batch_cards 遍历，使用 _message_batch 计算正确的 round_index。
-        
+
         注意：清理 _batch_cards 中对已删除卡片的引用，防止 RuntimeError。
         """
         cleaned_any = False
@@ -4694,7 +4583,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
 
         if cleaned_any:
-            logger.debug("[RefreshRound] Cleaned up deleted card references from _batch_cards")
+            logger.debug(
+                "[RefreshRound] Cleaned up deleted card references from _batch_cards"
+            )
 
     # ==================== Batch 结构同步 ====================
 
@@ -5239,28 +5130,42 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 手术式删除卡片 vs 全量刷新
-        current_tab = self._history_popup_card._current_tab if hasattr(self._history_popup_card,
-                                                                       '_current_tab') else "history"
+        current_tab = (
+            self._history_popup_card._current_tab
+            if hasattr(self._history_popup_card, "_current_tab")
+            else "history"
+        )
         if archived_current:
             # 归档的是当前会话 → UI 变化大（新会话创建、活跃标记变更），需要全量刷新
             if current_tab == "archived":
-                refresh_history_card_if_visible(self._history_card,
-                                                lambda: self._refresh_history_toggle_panel(is_archived=True))
+                refresh_history_card_if_visible(
+                    self._history_card,
+                    lambda: self._refresh_history_toggle_panel(is_archived=True),
+                )
             else:
-                refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+                refresh_history_card_if_visible(
+                    self._history_card, self._refresh_history_toggle_panel
+                )
         else:
             # 归档的是非当前会话 → 可以直接手术式删除卡片，避免全量刷新
             if current_tab == "archived":
                 # 归档标签页下，需要刷新归档列表
-                refresh_history_card_if_visible(self._history_card,
-                                                lambda: self._refresh_history_toggle_panel(is_archived=True))
+                refresh_history_card_if_visible(
+                    self._history_card,
+                    lambda: self._refresh_history_toggle_panel(is_archived=True),
+                )
             else:
                 # 历史标签页下，手术式删除卡片
-                removed = self._history_popup_card.remove_session_card(session_id) if hasattr(
-                    self._history_popup_card, 'remove_session_card') else False
+                removed = (
+                    self._history_popup_card.remove_session_card(session_id)
+                    if hasattr(self._history_popup_card, "remove_session_card")
+                    else False
+                )
                 if not removed:
                     # 回退：手术式删除失败，走全量刷新
-                    refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+                    refresh_history_card_if_visible(
+                        self._history_card, self._refresh_history_toggle_panel
+                    )
 
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:
@@ -6050,15 +5955,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 deleted_count = delete_widgets_from_layout(
                     widgets_to_remove, self.chat_layout, call_cleanup=False
                 )
-
-                # 清理 _batch_cards 中对已删除卡片的引用，防止后续遍历时 RuntimeError
-                for batch_idx in range(len(self._batch_cards)):
-                    batch = self._batch_cards[batch_idx]
-                    if not batch:
-                        continue
-                    alive = [w for w in batch if not sip.isdeleted(w)]
-                    if len(alive) != len(batch):
-                        self._batch_cards[batch_idx] = alive if alive else None
 
                 # 清理 _batch_cards 中对已删除卡片的引用，防止后续遍历时 RuntimeError
                 for batch_idx in range(len(self._batch_cards)):
@@ -7066,7 +6962,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从卡片选中项获取偏好类型（选提示词就按提示词执行，选智能体就按智能体执行）
         cmd_name = CommandManager.parse_command_name(user_text) or ""
         preferred_display_type = self.input_area.pop_card_selected_type(cmd_name)
-        cmd_result = cmd_mgr.execute(user_text, preferred_display_type=preferred_display_type)
+        cmd_result = cmd_mgr.execute(
+            user_text, preferred_display_type=preferred_display_type
+        )
         if cmd_result is not None:
             match cmd_result.type:
                 case CommandType.FUNCTION:
@@ -7388,13 +7286,19 @@ class OpenAIChatToolWindow(ToolWindow):
         if executor:
             agent_name = getattr(executor, "agent_name", "")
             task_description = getattr(executor, "task_description", "")
-            task_session_id = getattr(executor, '_task_session_id', '')
+            task_session_id = getattr(executor, "_task_session_id", "")
             del sub_agent_mgr._running_tasks[task_id]
         else:
             # executor 可能已被 get_finished_tasks() 移除，此时尝试从 _finished_tasks 恢复字段
-            agent_name = sub_agent_mgr._finished_tasks.get(task_id, {}).get("agent_name", "")
-            task_description = sub_agent_mgr._finished_tasks.get(task_id, {}).get("task_description", "")
-            task_session_id = sub_agent_mgr._finished_tasks.get(task_id, {}).get("session_id", "")
+            agent_name = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
+                "agent_name", ""
+            )
+            task_description = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
+                "task_description", ""
+            )
+            task_session_id = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
+                "session_id", ""
+            )
 
         # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
         if task_id in sub_agent_mgr._finished_tasks:

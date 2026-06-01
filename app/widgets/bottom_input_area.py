@@ -32,8 +32,8 @@ class SendableTextEdit(TextEdit):
     historyUpRequested = pyqtSignal()
     historyDownRequested = pyqtSignal()
     agentChanged = pyqtSignal(str)
-    slashTriggered = pyqtSignal(str)     # 检测到 / 触发，携带查询文本
-    slashDismissed = pyqtSignal()        # / 触发结束
+    slashTriggered = pyqtSignal(str)  # 检测到 / 触发，携带查询文本
+    slashDismissed = pyqtSignal()  # / 触发结束
     slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
 
     def __init__(self, parent=None):
@@ -77,7 +77,9 @@ class SendableTextEdit(TextEdit):
 
         # 卡片选中项：供 execute() 按选中类型执行
         self._card_selected_name: Optional[str] = None
-        self._card_selected_type: Optional[str] = None  # display_type: command/prompt/agent/skill
+        self._card_selected_type: Optional[str] = (
+            None  # display_type: command/prompt/agent/skill
+        )
 
         # 节流相关
         self._slash_throttle_timer = QTimer(self)
@@ -88,9 +90,11 @@ class SendableTextEdit(TextEdit):
         self._slash_trigger_count = 0  # 快速触发计数
 
         # 输入历史浏览
-        self._history_list: list = []          # 最近输入历史（最新在前）
-        self._history_index: int = -1          # -1 = 不在浏览模式
-        self._history_working_line: str = ""   # 进入历史模式时保存的当前输入（退出时恢复）
+        self._history_list: list = []  # 最近输入历史（最新在前）
+        self._history_index: int = -1  # -1 = 不在浏览模式
+        self._history_working_line: str = (
+            ""  # 进入历史模式时保存的当前输入（退出时恢复）
+        )
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
@@ -217,7 +221,7 @@ class SendableTextEdit(TextEdit):
                     self._slash_trigger_pos = 0
                     # 传入当前选中项的 display_type（供 show_command_detail 显示对应类型的 hint）
                     selected_type = card._current_selected_type if card else ""
-                    self.slashShowHint.emit(cmd_name, selected_type)
+                    self.slashShowHint.emit(check_name, selected_type)
                 else:
                     # 未知命令/技能 + 参数 → 关闭
                     if card and card.is_card_visible:
@@ -343,7 +347,24 @@ class SendableTextEdit(TextEdit):
         """值选择完成（来自 CommandCard.parameterValueSelected）
 
         自动补全 --model= 的值。
+        如果值包含空格（如 "Azure OpenAI:gpt-4o"），自动加双引号。
+        防御：如果文本在当前光标前已包含该值，跳过插入避免重复。
         """
+        text = self.toPlainText()
+        cursor_pos = self.textCursor().position()
+        before_cursor = text[:cursor_pos]
+
+        # 确定要插入的值（含空格时自动加双引号）
+        inserted_value = f'"{value}"' if " " in value else value
+
+        # 检查光标前是否已有 --key=value（用户手动输入后按 Tab 确认）
+        # 同时检查原始值和带引号版本
+        if value in before_cursor or inserted_value in before_cursor:
+            # 已存在值，只确保有空格
+            if not text.endswith(" ") and not text.endswith("\n"):
+                self.textCursor().insertText(" ")
+            return
+
         cursor = self.textCursor()
         cursor.insertText(inserted_value)
         cursor.insertText(" ")
@@ -352,7 +373,7 @@ class SendableTextEdit(TextEdit):
 
     def _find_partial_param(self, text: str, param_name: str, cursor_pos: int = None):
         """在输入文本中查找参数名的部分匹配（优先光标附近）
-        
+
         用于智能补全：文本中已有 --subag，点击 --subagent 参数时
         原地替换为 --subagent，避免变成 --subag --subagent
 
@@ -360,28 +381,31 @@ class SendableTextEdit(TextEdit):
             text: 输入框全文
             param_name: 参数名，如 "--subagent", "--model="
             cursor_pos: 光标位置（可选），存在时优先匹配光标附近的参数
-            
+
         Returns:
             (start, end) 部分匹配范围，或 None
         """
         import re
+
         clean_name = param_name.rstrip("=")
-        
+
         # 如果有光标位置，优先找光标附近一定范围内的匹配
         if cursor_pos is not None:
             nearby_match = None
-            for m in re.finditer(r'--[\w-]+', text):
+            for m in re.finditer(r"--[\w-]+", text):
                 token = m.group()
                 if clean_name.startswith(token) and token != clean_name:
                     # 匹配在光标附近（前后 30 字符范围内）
                     if abs(m.start() - cursor_pos) <= 30:
-                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(nearby_match.start() - cursor_pos):
+                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(
+                            nearby_match.start() - cursor_pos
+                        ):
                             nearby_match = m
             if nearby_match:
                 return (nearby_match.start(), nearby_match.end())
-        
+
         # 无光标位置或附近无匹配 → 返回第一个匹配（向后兼容）
-        for m in re.finditer(r'--[\w-]+', text):
+        for m in re.finditer(r"--[\w-]+", text):
             token = m.group()
             if clean_name.startswith(token) and token != clean_name:
                 return (m.start(), m.end())
@@ -422,23 +446,27 @@ class SendableTextEdit(TextEdit):
         if pos < 0:
             pos = len(text)
         cursor.setPosition(pos)
+        # 智能判断是否需要前导空格：光标前是空格 / -- / 文本开头 → 不加
+        need_space = pos > 0 and text[pos - 1] not in (" ", "\t", "\n")
+        if pos >= 2 and text[pos - 2 : pos] == "--":
+            need_space = False
+        prefix = " " if need_space else ""
         if param_type == "flag":
-            cursor.insertText(f" {param_name} ")
+            cursor.insertText(f"{prefix}{param_name} ")
         elif param_type == "value":
-            cursor.insertText(f" {param_name}")
+            cursor.insertText(f"{prefix}{param_name}")
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
 
     def _sync_detail_params(self):
         """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片"""
         from app.core.command_manager import CommandManager
+
         card = self._get_card()
         if not card or not card.is_detail_mode:
             return
         text = self.toPlainText()
-        if not text:
-            return
-        active = CommandManager.parse_active_params(text)
+        active = CommandManager.parse_active_params(text) if text else set()
         card.update_active_params(active)
 
     # ==================== 输入历史浏览 ====================
@@ -471,7 +499,9 @@ class SendableTextEdit(TextEdit):
         """
         if self._history_index < 0:
             # 退出历史模式，恢复进入时保存的文本
-            self._suppress_slash_trigger = self._history_working_line.strip().startswith("/")
+            self._suppress_slash_trigger = (
+                self._history_working_line.strip().startswith("/")
+            )
             self.setPlainText(self._history_working_line)
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.End)
@@ -546,7 +576,10 @@ class SendableTextEdit(TextEdit):
         # 历史模式：用户修改了当前显示的文本 → 退出历史模式，↑↓ 不再切历史
         if self._history_index >= 0:
             idx = self._history_index
-            if idx < len(self._history_list) and self._history_list[idx] != self.toPlainText():
+            if (
+                idx < len(self._history_list)
+                and self._history_list[idx] != self.toPlainText()
+            ):
                 self._reset_history_mode()
         # detail 模式参数同步
         self._sync_detail_params()

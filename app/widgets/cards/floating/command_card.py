@@ -294,11 +294,25 @@ class ParameterItemWidget(QWidget):
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(8)
 
-        # 参数名
+        # 必填/选填标签（放在最前面）
+        if self._param.param_type != "positional":
+            req_tag = QLabel("必填" if self._param.required else "可选")
+            req_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            req_color = Colors.TEXT_ACCENT if self._param.required else Colors.TEXT_MUTED
+            req_tag.setStyleSheet(f"""
+                color: {req_color};
+                background: rgba(128,128,128,0.06);
+                border-radius: 3px;
+                padding: 1px 6px;
+                font-weight: bold;
+            """)
+            layout.addWidget(req_tag)
+
+        # 参数名（加粗）
         self._name_label = QLabel(self._param.name)
         self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        self._name_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; background: transparent;")
+        self._name_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; background: transparent; font-weight: bold;")
         layout.addWidget(self._name_label)
 
         # 参数说明
@@ -321,6 +335,8 @@ class ParameterItemWidget(QWidget):
             padding: 1px 6px;
         """)
         layout.addWidget(type_tag)
+
+
 
     @property
     def param_name(self) -> str:
@@ -651,7 +667,7 @@ class CommandCard(QWidget):
         self.setVisible(True)
 
         # 动态计算高度
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
 
     def _adjust_detail_height(self):
         """根据内容动态调整 detail 容器高度"""
@@ -770,8 +786,8 @@ class CommandCard(QWidget):
             options = param.value_options or []
 
         if not options:
-            # 无可选值，退化为 flag 插入
-            self.parameterSelected.emit(param_name, "flag")
+            # 无可选值：--name= 已在 _execute_param_selection 中插入，无需再操作
+            self._value_selection_mode = False
             return
 
         # 清空旧 value widget
@@ -811,7 +827,7 @@ class CommandCard(QWidget):
         self._update_value_selection()
 
         # 重算高度
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
 
     def _on_value_clicked(self, value: str):
         """值选择项被点击"""
@@ -825,7 +841,7 @@ class CommandCard(QWidget):
         self._value_selection_param = ""
         self._detail_value_scroll.setVisible(False)
         self._detail_params_scroll.setVisible(True)
-        QTimer.singleShot(0, self._adjust_detail_height)
+        self._adjust_detail_height()
 
     def update_active_params(self, active: set):
         """根据输入中已存在的参数名列表，显隐参数项
@@ -833,65 +849,6 @@ class CommandCard(QWidget):
         Args:
             active: 输入文本中已存在的参数名集合，如 {"--with-context", "--model="}
         """
-        if not self._detail_mode or not self._detail_has_params:
-            return
-
-        # 值选择模式：检查对应的参数是否还在输入中
-        if self._value_selection_mode and self._value_selection_param:
-            param_clean = self._value_selection_param.rstrip("=")
-            still_active = any(a.rstrip("=") == param_clean for a in active)
-            if not still_active:
-                # 参数已被删掉 → 退出值选择模式，回到参数列表
-                self._exit_value_selection()
-
-        any_visible = False
-        for w in self._param_widgets:
-            param_key = w.param_name
-            param_clean = param_key.rstrip("=")
-            # 检查 active 集合中是否有同名参数
-            is_active = any(a.rstrip("=") == param_clean for a in active)
-            w.setVisible(not is_active)
-            if w.isVisible():
-                any_visible = True
-
-        # 无可见参数时隐藏整个滚动区
-        self._detail_params_scroll.setVisible(any_visible)
-
-        # 重算高度
-        QTimer.singleShot(0, self._adjust_detail_height)
-
-    def _update_param_selection(self):
-        """更新参数列表选中高亮"""
-        for i, w in enumerate(self._param_widgets):
-            w.set_selected(i == self._selected_param_index)
-        # 滚动到可见
-        if 0 <= self._selected_param_index < len(self._param_widgets):
-            self._detail_params_scroll.ensureWidgetVisible(
-                self._param_widgets[self._selected_param_index], 0, 0
-            )
-
-    def _update_value_selection(self):
-        """更新值列表选中高亮，滚动到可见"""
-        Colors.refresh()
-        for i, w in enumerate(self._value_widgets):
-            if i == self._selected_value_index:
-                w.setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
-            else:
-                w.setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
-        # 滚动到可见
-        if 0 <= self._selected_value_index < len(self._value_widgets):
-            self._detail_value_scroll.ensureWidgetVisible(
-                self._value_widgets[self._selected_value_index], 0, 0
-            )
-
-    def _reset_detail_mode(self):
-        """退出 detail 模式，回到列表模式"""
         if not self._detail_mode:
             return
 
@@ -1247,46 +1204,55 @@ class CommandCard(QWidget):
                 self._item_widgets[self._selected_index], 0, 0
             )
 
-    def select_next(self):
-        """选择下一项"""
+    def select_next(self) -> bool:
+        """选择下一项。返回 True 表示已处理，False 表示未处理（让按键透传）。"""
         if self._value_selection_mode:
             if self._value_widgets and self._selected_value_index < len(self._value_widgets) - 1:
                 self._selected_value_index += 1
                 self._update_value_selection()
-            return
+            return True
         if self._detail_mode and self._detail_has_params:
             # 只对可见参数导航
             visible = [i for i, w in enumerate(self._param_widgets) if w.isVisible()]
             if not visible:
-                return
+                return True
             if self._selected_param_index < visible[-1]:
                 # 找到下一个可见的
                 current_pos = visible.index(self._selected_param_index) if self._selected_param_index in visible else -1
                 if current_pos < len(visible) - 1:
                     self._selected_param_index = visible[current_pos + 1]
                     self._update_param_selection()
-            return
+            return True
+        # detail 模式且无交互参数 → 不处理，让按键透传到输入框
+        if self._detail_mode:
+            return False
+        # 列表模式
         if self._item_widgets and self._selected_index < len(self._item_widgets) - 1:
             self._selected_index += 1
             self._update_selection()
+        return True
 
-    def select_prev(self):
-        """选择上一项"""
+    def select_prev(self) -> bool:
+        """选择上一项。返回 True 表示已处理，False 表示未处理（让按键透传）。"""
         if self._value_selection_mode:
             if self._value_widgets and self._selected_value_index > 0:
                 self._selected_value_index -= 1
                 self._update_value_selection()
-            return
+            return True
         if self._detail_mode and self._detail_has_params:
             visible = [i for i, w in enumerate(self._param_widgets) if w.isVisible()]
             if not visible:
-                return
+                return True
             if self._selected_param_index > visible[0]:
                 current_pos = visible.index(self._selected_param_index) if self._selected_param_index in visible else -1
                 if current_pos > 0:
                     self._selected_param_index = visible[current_pos - 1]
                     self._update_param_selection()
-            return
+            return True
+        # detail 模式且无交互参数 → 不处理，让按键透传到输入框
+        if self._detail_mode:
+            return False
+        # 列表模式
         if self._item_widgets and self._selected_index > 0:
             self._selected_index -= 1
             self._update_selection()
@@ -1321,7 +1287,8 @@ class CommandCard(QWidget):
         # 列表模式：选中命令/技能
         if 0 <= self._selected_index < len(self._filtered_items):
             item = self._filtered_items[self._selected_index]
-            self.commandSelected.emit(item["name"], item["type"])
+            insert_name = item.get("display_name", item["name"])
+            self.commandSelected.emit(insert_name, item["type"])
             # 如果 emit 触发了 textChanged → _on_slash_trigger_check → detail 模式，
             # 则不再 dismiss（卡片切换到 detail 模式继续可见）
             if not self._detail_mode:

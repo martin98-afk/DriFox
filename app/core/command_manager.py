@@ -41,6 +41,7 @@ class CommandParameter:
     name: str                # 显示名称，如 "--with-context", "--model="
     description: str = ""    # 说明文字
     param_type: str = "flag" # "flag" | "value" | "positional"
+    required: bool = False   # 是否必填（选填参数在 UI 上显示为灰色/标记）
     value_options: list = field(default_factory=list)  # value 类型的可选值列表（硬编码）
 
 
@@ -73,6 +74,7 @@ class CommandDefinition:
     argument_hint: str = ""      # 参数提示（显示在命令卡片 detail 模式）
     prompt_text: str = ""        # PROMPT/AGENT 命令使用
     parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
+    shortcut: str = ""           # 快捷键，如 "Ctrl+Shift+B"
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -91,15 +93,6 @@ class CommandDefinition:
         if self.shortcut:
             result["shortcut"] = self.shortcut
         return result
-
-
-def _pick_first_entry(entries: Dict[CommandType, "CommandDefinition"]) -> "CommandDefinition":
-    """按优先级 AGENT > PROMPT > FUNCTION 从 entries 中选一个，兜底取第一个"""
-    for t in (CommandType.AGENT, CommandType.PROMPT, CommandType.FUNCTION):
-        if t in entries:
-            return entries[t]
-    # 兜底：取第一个注册的类型
-    return next(iter(entries.values()))
 
 
 def _pick_first_entry(entries: Dict[CommandType, "CommandDefinition"]) -> "CommandDefinition":
@@ -146,6 +139,7 @@ class CommandManager:
         argument_hint: str = "",
         prompt_text: str = "",
         parameters: Optional[List[CommandParameter]] = None,
+        shortcut: str = "",
     ):
         """注册一个内置命令
 
@@ -156,6 +150,7 @@ class CommandManager:
             argument_hint: 参数提示（如 "<system-dir> | --portfolio <parent-dir>"）
             prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
             parameters: 可交互参数列表（用于 detail 模式参数补全）
+            shortcut: 快捷键，如 "Ctrl+Shift+B"
         """
         if name not in self._commands:
             self._commands[name] = {}
@@ -166,6 +161,7 @@ class CommandManager:
             argument_hint=argument_hint,
             prompt_text=prompt_text,
             parameters=parameters or [],
+            shortcut=shortcut,
         )
 
     def unregister(self, name: str):
@@ -246,7 +242,6 @@ class CommandManager:
         匹配规则：
         - --key=value → "--key="
         - --flag      → "--flag"
-        - --key       → "--key="（文本末尾，正在输入的值参数）
 
         Args:
             text: 输入框文本
@@ -259,7 +254,7 @@ class CommandManager:
 
         result: Set[str] = set()
 
-        # 1. --key=value 形式的完整参数
+        # 1. --key=value 形式的完整参数（如 --model=gpt-4o → "--model="）
         for m in re.finditer(r'--[\w-]+=', text):
             result.add(m.group())
 
@@ -269,20 +264,25 @@ class CommandManager:
             if flag + "=" not in result:  # 排除已被 --key= 覆盖的
                 result.add(flag)
 
-        # 3. 文本末尾可能正在输入的 --key（如用户刚打完 --model，还没打 = 和值）
-        for m in re.finditer(r'--([\w-]+)$', text):
-            result.add(f"--{m.group(1)}=")
-
         return result
 
     def is_builtin_command(self, text: str) -> bool:
         """判断输入文本是否匹配某个已注册的内置命令"""
         name = self.parse_command_name(text)
-        return name is not None and self.has_command(name)
+        if name is None:
+            return False
+        # 去除后缀检查
+        base_name, suffix_type = self.parse_suffixed_name(name)
+        if suffix_type == "skill":
+            return False  # 技能由外部处理
+        return self.has_command(base_name or name)
 
     def is_known_command_name(self, name: str) -> bool:
         """根据命令名判断是否为内置命令（不含 /，任一类型存在即可）"""
-        return self.has_command(name)
+        base_name, suffix_type = self.parse_suffixed_name(name)
+        if suffix_type == "skill":
+            return False
+        return self.has_command(base_name or name)
 
     # ---- 执行 ----
 
@@ -300,7 +300,7 @@ class CommandManager:
         Args:
             text: 用户输入的完整文本
             preferred_display_type: 可选，来自 CommandCard 的 display_type
-                （"command"/"prompt"/"agent"），按此类型优先匹配执行
+                （"command"/"prompt"/"agent"/"skill"），按此类型优先匹配执行
 
         Returns:
             Optional[CommandResult]:
@@ -311,8 +311,9 @@ class CommandManager:
             - CommandResult(type=SUBAGENT): 智能体命令 + --subagent，触发子智能体任务
 
         同名不同类型同时存在时执行策略：
-        1. 如果提供了 preferred_display_type（来自卡片选中），优先匹配该类型
-        2. 否则按优先级：AGENT > PROMPT > FUNCTION
+        1. 如果命令名带后缀（如 "tdd-skill"），提取原始名+目标类型，优先匹配
+        2. 如果提供了 preferred_display_type（来自卡片选中），优先匹配该类型
+        3. 否则按优先级：AGENT > PROMPT > FUNCTION
            （保持与原有"智能体覆盖命令"行为一致）
         """
         cmd_name = self.parse_command_name(text)
@@ -338,7 +339,7 @@ class CommandManager:
         if not entries:
             return None
 
-        # 选取匹配类型：优先卡片选中 → 回落默认优先级
+        # 选取匹配类型：优先卡片选中/后缀推断 → 回落默认优先级
         if preferred_display_type:
             preferred = self._DISPLAY_TYPE_MAP.get(preferred_display_type)
             if preferred and preferred in entries:
