@@ -77,6 +77,11 @@ colors:
   input_border: '#3a5880'
   input_focus_border: '#3498db'
   input_placeholder: rgba(216, 228, 242, 0.4)
+  # 聚焦发光 halo cascade — 主光源（输入卡）与 环境光晕（工具栏）分层
+  glow_primary_alpha: 190
+  glow_primary_blur: 26
+  glow_ambient_alpha: 110
+  glow_ambient_blur: 36
 
   # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
   toolbar_strip_bg: rgba(20, 30, 50, 150)

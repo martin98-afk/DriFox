@@ -15,6 +15,7 @@ def _get_global_font() -> str:
     """获取全局字体名称，用于样式表"""
     try:
         from app.utils.config import Settings
+
         return Settings.get_instance().llm_font_family.value
     except Exception:
         try:
@@ -34,6 +35,7 @@ FONT_SIZE_OPTIONS = {
 def get_ui_font_size_key() -> str:
     try:
         from app.utils.config import Settings
+
         key = Settings.get_instance().ui_font_size.value
     except Exception:
         key = "medium"
@@ -55,32 +57,33 @@ def font_size_css(size: int) -> str:
 
 def apply_font_size_to_widget(widget, base_size: int = 14):
     """递归设置 widget 及其所有子控件的字体像素大小
-    
+
     用于解决 qfluentwidgets 组件字体不随配置变化的问题。
     qfluentwidgets 的 QSS 使用硬编码字体大小（如 font: 14px），
     setFont() 无法覆盖，必须通过 stylesheet 强制覆盖。
-    
+
     Args:
         widget: 要设置字体的 widget
         base_size: 基础字体大小（会经过 scale_font_size 缩放）
     """
     from PyQt5.QtWidgets import QWidget
+
     scaled = scale_font_size(base_size)
     content_scaled = scale_font_size(11)
     font_family = _get_global_font()
-    
+
     for child in widget.findChildren(QWidget):
         child_font = child.font()
         child_font.setPixelSize(scaled)
         child_font.setFamily(font_family)
         child.setFont(child_font)
-    
+
     # qfluentwidgets SettingCard / ExpandSettingCard 的 titleLabel / contentLabel
     # 使用硬编码 QSS（font: 14px / font: 11px），setFont 无法覆盖，必须用 stylesheet 强制
     from qfluentwidgets.components.settings.setting_card import SettingCard
     from qfluentwidgets.components.settings.expand_setting_card import ExpandSettingCard
     from qfluentwidgets.components.widgets.switch_button import SwitchButton
-    
+
     for card in widget.findChildren(SettingCard):
         card.titleLabel.setStyleSheet(
             f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
@@ -88,19 +91,19 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
         card.contentLabel.setStyleSheet(
             f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
         )
-    
+
     for card in widget.findChildren(ExpandSettingCard):
         # ExpandSettingCard 内部的 HeaderSettingCard 继承 SettingCard，已在上面处理
         # 但其 titleLabel objectName 是 "titleLabel"，需要额外用 objectName 选择器覆盖
-        if hasattr(card, 'card') and hasattr(card.card, 'titleLabel'):
+        if hasattr(card, "card") and hasattr(card.card, "titleLabel"):
             card.card.titleLabel.setStyleSheet(
                 f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
             )
-        if hasattr(card, 'card') and hasattr(card.card, 'contentLabel'):
+        if hasattr(card, "card") and hasattr(card.card, "contentLabel"):
             card.card.contentLabel.setStyleSheet(
                 f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
             )
-    
+
     # SwitchButton 内部 QLabel 也硬编码了 font: 14px
     for switch in widget.findChildren(SwitchButton):
         switch.setStyleSheet(
@@ -119,8 +122,8 @@ def get_window_style() -> str:
     return f"""
     #OpenAIChatToolWindow {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-            stop:0 {window.get('gradient_start', 'rgba(10, 14, 22, 255)')},
-            stop:1 {window.get('gradient_end', 'rgba(15, 20, 30, 255)')});
+            stop:0 {window.get("gradient_start", "rgba(10, 14, 22, 255)")},
+            stop:1 {window.get("gradient_end", "rgba(15, 20, 30, 255)")});
     }}
     """
 
@@ -138,7 +141,7 @@ def get_capsule_style() -> str:
 # ============ 颜色系统 ============
 class Colors:
     """颜色 Token - 动态从 ThemeManager 读取"""
-    
+
     # 默认值（fallback，用于主题未加载时）
     CARD_BG = "rgba(33, 33, 38, {alpha})"
     CARD_BG_SOLID = "rgba(33, 33, 38, 250)"
@@ -155,7 +158,7 @@ class Colors:
     TAB_HOVER_BG = "rgba(255, 255, 255, 0.1)"
     HOVER_BG = "rgba(255, 255, 255, 0.08)"
     SELECTED_BG = "rgba(102, 198, 255, 0.35)"
-    
+
     # 组件级颜色
     USER_CARD_BG = "rgba(27, 42, 67, 150)"
     USER_CARD_ACCENT = "#9FC3FF"
@@ -179,10 +182,18 @@ class Colors:
     INPUT_FOCUS_BORDER = "#C9A85C"
     INPUT_PLACEHOLDER = "rgba(242, 246, 255, 0.4)"
 
+    # 聚焦发光 halo cascade — 各主题可单独微调 alpha / blur，
+    # 实现"主光 → 环境光晕"的个性化光效。
+    # 默认值取自 Shadows.GLOW_PRIMARY / GLOW_AMBIENT。
+    GLOW_PRIMARY_ALPHA = 195
+    GLOW_PRIMARY_BLUR = 26
+    GLOW_AMBIENT_ALPHA = 110
+    GLOW_AMBIENT_BLUR = 36
+
     # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
     TOOLBAR_STRIP_BG = "rgba(24, 31, 45, 150)"
     TOOLBAR_STRIP_BORDER = "#2B3850"
-    
+
     # 实时卡片色
     REALTIME_BORDER = "#4a90d9"
     REALTIME_ACCENT = "#7dd3fc"
@@ -194,18 +205,18 @@ class Colors:
     REALTIME_TEXT_SECONDARY = "rgba(226, 235, 249, 0.7)"
     REALTIME_TAG_BG = "rgba(125, 211, 252, 0.15)"
     REALTIME_TAG_BORDER = "rgba(125, 211, 252, 0.3)"
-    
+
     # 系统卡片色
     SYSTEM_BORDER = "#3d4a60"
     SYSTEM_ACCENT = "#66c6ff"
-    
+
     # 发送按钮
     SEND_BTN_START = "#C9A85C"
     SEND_BTN_END = "#B8956A"
     SEND_BTN_HOVER_START = "#D4B878"
     SEND_BTN_HOVER_END = "#C9A060"
     SEND_BTN_RADIUS = 17  # 按钮圆角半径
-    
+
     # 时间线
     TIMELINE_NODE = "#5A5A5A"
     TIMELINE_NODE_HOVER = "#6BA3FF"
@@ -213,17 +224,17 @@ class Colors:
     TIMELINE_NODE_SELECTED = "#FFA500"
     TIMELINE_LINE = "#3A3A3A"
     TIMELINE_LINE_PROGRESS = "#00FF7F"
-    
+
     # 上下文圆环
     RING_NORMAL = "#5aa9ff"
     RING_WARNING = "#f6c453"
     RING_DANGER = "#ff6b6b"
     RING_COMPACTED = "#9b59b6"
-    
+
     # 分支标签
     BRANCH_LABEL_BG = "rgba(102, 198, 255, 0.15)"
     BRANCH_LABEL_BORDER = "rgba(102, 198, 255, 0.3)"
-    
+
     # 窗口淡背景色
     WINDOW_BG = "rgba(102, 198, 255, 0.04)"
 
@@ -274,7 +285,7 @@ class Colors:
         theme = current_theme()
         if not theme:
             return
-        
+
         cls.CARD_BG = (
             theme["card_bg"].rsplit(",", 1)[0] + ", {alpha})"
             if theme["card_bg"].startswith("rgba(")
@@ -293,74 +304,117 @@ class Colors:
         cls.TAB_HOVER_BG = theme.get("hover_bg", cls.TAB_HOVER_BG)
         cls.HOVER_BG = theme.get("hover_bg", cls.HOVER_BG)
         cls.SELECTED_BG = theme.get("selected_bg", cls.SELECTED_BG)
-        
+
         # 组件级颜色
         cls.USER_CARD_BG = theme.get("user_card_bg", cls.USER_CARD_BG)
         cls.USER_CARD_ACCENT = theme.get("user_card_accent", cls.USER_CARD_ACCENT)
         cls.USER_CARD_TEXT = theme.get("user_card_text", cls.USER_CARD_TEXT)
         cls.USER_CARD_MUTED = theme.get("user_card_muted", cls.USER_CARD_MUTED)
         cls.ASSISTANT_CARD_BG = theme.get("assistant_card_bg", cls.ASSISTANT_CARD_BG)
-        cls.ASSISTANT_CARD_ACCENT = theme.get("assistant_card_accent", cls.ASSISTANT_CARD_ACCENT)
-        cls.ASSISTANT_CARD_TEXT = theme.get("assistant_card_text", cls.ASSISTANT_CARD_TEXT)
-        cls.ASSISTANT_CARD_MUTED = theme.get("assistant_card_muted", cls.ASSISTANT_CARD_MUTED)
+        cls.ASSISTANT_CARD_ACCENT = theme.get(
+            "assistant_card_accent", cls.ASSISTANT_CARD_ACCENT
+        )
+        cls.ASSISTANT_CARD_TEXT = theme.get(
+            "assistant_card_text", cls.ASSISTANT_CARD_TEXT
+        )
+        cls.ASSISTANT_CARD_MUTED = theme.get(
+            "assistant_card_muted", cls.ASSISTANT_CARD_MUTED
+        )
         cls.AGENT_BTN_TEXT = theme.get("agent_btn_text", cls.AGENT_BTN_TEXT)
-        cls.AGENT_BTN_TEXT_ACTIVE = theme.get("agent_btn_text_active", cls.AGENT_BTN_TEXT_ACTIVE)
-        cls.AGENT_BTN_BG_ACTIVE = theme.get("agent_btn_bg_active", cls.AGENT_BTN_BG_ACTIVE)
-        cls.AGENT_BTN_SEPARATOR = theme.get("agent_btn_separator", cls.AGENT_BTN_SEPARATOR)
+        cls.AGENT_BTN_TEXT_ACTIVE = theme.get(
+            "agent_btn_text_active", cls.AGENT_BTN_TEXT_ACTIVE
+        )
+        cls.AGENT_BTN_BG_ACTIVE = theme.get(
+            "agent_btn_bg_active", cls.AGENT_BTN_BG_ACTIVE
+        )
+        cls.AGENT_BTN_SEPARATOR = theme.get(
+            "agent_btn_separator", cls.AGENT_BTN_SEPARATOR
+        )
         cls.INPUT_BG_START = theme.get("input_bg_start", cls.INPUT_BG_START)
         cls.INPUT_BG_END = theme.get("input_bg_end", cls.INPUT_BG_END)
-        cls.INPUT_FOCUS_BG_START = theme.get("input_focus_bg_start", cls.INPUT_FOCUS_BG_START)
+        cls.INPUT_FOCUS_BG_START = theme.get(
+            "input_focus_bg_start", cls.INPUT_FOCUS_BG_START
+        )
         cls.INPUT_FOCUS_BG_END = theme.get("input_focus_bg_end", cls.INPUT_FOCUS_BG_END)
         cls.INPUT_TEXT = theme.get("input_text", cls.INPUT_TEXT)
         cls.INPUT_FOCUS_TEXT = theme.get("input_focus_text", cls.INPUT_FOCUS_TEXT)
         cls.INPUT_BORDER = theme.get("input_border", cls.INPUT_BORDER)
         cls.INPUT_FOCUS_BORDER = theme.get("input_focus_border", cls.INPUT_FOCUS_BORDER)
         cls.INPUT_PLACEHOLDER = theme.get("input_placeholder", cls.INPUT_PLACEHOLDER)
+
+        # 聚焦发光 halo cascade — 各主题可独立微调，缺省用 cls 类级默认值
+        # （与 Shadows.GLOW_PRIMARY / GLOW_AMBIENT 保持同步；此处不直接引用 Shadows，
+        #  因为本 refresh() 在 Shadows 类定义之前已被模块级调用）
+        cls.GLOW_PRIMARY_ALPHA = theme.get("glow_primary_alpha", cls.GLOW_PRIMARY_ALPHA)
+        cls.GLOW_PRIMARY_BLUR = theme.get("glow_primary_blur", cls.GLOW_PRIMARY_BLUR)
+        cls.GLOW_AMBIENT_ALPHA = theme.get("glow_ambient_alpha", cls.GLOW_AMBIENT_ALPHA)
+        cls.GLOW_AMBIENT_BLUR = theme.get("glow_ambient_blur", cls.GLOW_AMBIENT_BLUR)
+
         cls.CAPSULE_BG = theme.get("capsule_bg", "rgba(27, 35, 50, 180)")
         cls.CAPSULE_BORDER = theme.get("capsule_border", "rgba(43, 56, 80, 200)")
         cls.TOOLBAR_STRIP_BG = theme.get("toolbar_strip_bg", cls.TOOLBAR_STRIP_BG)
-        cls.TOOLBAR_STRIP_BORDER = theme.get("toolbar_strip_border", cls.TOOLBAR_STRIP_BORDER)
-        
+        cls.TOOLBAR_STRIP_BORDER = theme.get(
+            "toolbar_strip_border", cls.TOOLBAR_STRIP_BORDER
+        )
+
         # 实时卡片色
         cls.REALTIME_BORDER = theme.get("realtime_border", cls.REALTIME_BORDER)
         cls.REALTIME_ACCENT = theme.get("realtime_accent", cls.REALTIME_ACCENT)
-        cls.REALTIME_ACCENT_WARM = theme.get("realtime_accent_warm", cls.REALTIME_ACCENT_WARM)
+        cls.REALTIME_ACCENT_WARM = theme.get(
+            "realtime_accent_warm", cls.REALTIME_ACCENT_WARM
+        )
         cls.REALTIME_SUCCESS = theme.get("realtime_success", cls.REALTIME_SUCCESS)
         cls.REALTIME_ERROR = theme.get("realtime_error", cls.REALTIME_ERROR)
         cls.REALTIME_BG = theme.get("realtime_bg", cls.REALTIME_BG)
         cls.REALTIME_TEXT = theme.get("realtime_text", cls.REALTIME_TEXT)
-        cls.REALTIME_TEXT_SECONDARY = theme.get("realtime_text_secondary", cls.REALTIME_TEXT_SECONDARY)
+        cls.REALTIME_TEXT_SECONDARY = theme.get(
+            "realtime_text_secondary", cls.REALTIME_TEXT_SECONDARY
+        )
         cls.REALTIME_TAG_BG = theme.get("realtime_tag_bg", cls.REALTIME_TAG_BG)
-        cls.REALTIME_TAG_BORDER = theme.get("realtime_tag_border", cls.REALTIME_TAG_BORDER)
-        
+        cls.REALTIME_TAG_BORDER = theme.get(
+            "realtime_tag_border", cls.REALTIME_TAG_BORDER
+        )
+
         # 系统卡片色
         cls.SYSTEM_BORDER = theme.get("system_border", cls.SYSTEM_BORDER)
         cls.SYSTEM_ACCENT = theme.get("system_accent", cls.SYSTEM_ACCENT)
-        
+
         # 发送按钮
         cls.SEND_BTN_START = theme.get("send_btn_start", cls.SEND_BTN_START)
         cls.SEND_BTN_END = theme.get("send_btn_end", cls.SEND_BTN_END)
-        cls.SEND_BTN_HOVER_START = theme.get("send_btn_hover_start", cls.SEND_BTN_HOVER_START)
+        cls.SEND_BTN_HOVER_START = theme.get(
+            "send_btn_hover_start", cls.SEND_BTN_HOVER_START
+        )
         cls.SEND_BTN_HOVER_END = theme.get("send_btn_hover_end", cls.SEND_BTN_HOVER_END)
         cls.SEND_BTN_RADIUS = theme.get("send_btn_radius", cls.SEND_BTN_RADIUS)
-        
+
         # 时间线
         cls.TIMELINE_NODE = theme.get("timeline_node", cls.TIMELINE_NODE)
-        cls.TIMELINE_NODE_HOVER = theme.get("timeline_node_hover", cls.TIMELINE_NODE_HOVER)
-        cls.TIMELINE_NODE_VISIBLE = theme.get("timeline_node_visible", cls.TIMELINE_NODE_VISIBLE)
-        cls.TIMELINE_NODE_SELECTED = theme.get("timeline_node_selected", cls.TIMELINE_NODE_SELECTED)
+        cls.TIMELINE_NODE_HOVER = theme.get(
+            "timeline_node_hover", cls.TIMELINE_NODE_HOVER
+        )
+        cls.TIMELINE_NODE_VISIBLE = theme.get(
+            "timeline_node_visible", cls.TIMELINE_NODE_VISIBLE
+        )
+        cls.TIMELINE_NODE_SELECTED = theme.get(
+            "timeline_node_selected", cls.TIMELINE_NODE_SELECTED
+        )
         cls.TIMELINE_LINE = theme.get("timeline_line", cls.TIMELINE_LINE)
-        cls.TIMELINE_LINE_PROGRESS = theme.get("timeline_line_progress", cls.TIMELINE_LINE_PROGRESS)
-        
+        cls.TIMELINE_LINE_PROGRESS = theme.get(
+            "timeline_line_progress", cls.TIMELINE_LINE_PROGRESS
+        )
+
         # 上下文圆环
         cls.RING_NORMAL = theme.get("ring_normal", cls.RING_NORMAL)
         cls.RING_WARNING = theme.get("ring_warning", cls.RING_WARNING)
         cls.RING_DANGER = theme.get("ring_danger", cls.RING_DANGER)
         cls.RING_COMPACTED = theme.get("ring_compacted", cls.RING_COMPACTED)
-        
+
         # 分支标签
         cls.BRANCH_LABEL_BG = theme.get("branch_label_bg", cls.BRANCH_LABEL_BG)
-        cls.BRANCH_LABEL_BORDER = theme.get("branch_label_border", cls.BRANCH_LABEL_BORDER)
+        cls.BRANCH_LABEL_BORDER = theme.get(
+            "branch_label_border", cls.BRANCH_LABEL_BORDER
+        )
         cls.WINDOW_BG = theme.get("window_bg", cls.WINDOW_BG)
 
         cls.ACCENT_WARM = theme.get("accent_warm", cls.ACCENT_WARM)
@@ -369,18 +423,28 @@ class Colors:
         cls.TOOLBAR_BG = theme.get("toolbar_bg", cls.TOOLBAR_BG)
         cls.DIVIDER_COLOR = theme.get("divider_color", cls.DIVIDER_COLOR)
         cls.HOVER_BG_STRONG = theme.get("hover_bg_strong", cls.HOVER_BG_STRONG)
-        cls.SCROLLBAR_HANDLE_BG = theme.get("scrollbar_handle_bg", cls.SCROLLBAR_HANDLE_BG)
-        cls.SCROLLBAR_HANDLE_HOVER_BG = theme.get("scrollbar_handle_hover_bg", cls.SCROLLBAR_HANDLE_HOVER_BG)
-        cls.CARD_PLACEHOLDER_TEXT = theme.get("card_placeholder_text", cls.CARD_PLACEHOLDER_TEXT)
+        cls.SCROLLBAR_HANDLE_BG = theme.get(
+            "scrollbar_handle_bg", cls.SCROLLBAR_HANDLE_BG
+        )
+        cls.SCROLLBAR_HANDLE_HOVER_BG = theme.get(
+            "scrollbar_handle_hover_bg", cls.SCROLLBAR_HANDLE_HOVER_BG
+        )
+        cls.CARD_PLACEHOLDER_TEXT = theme.get(
+            "card_placeholder_text", cls.CARD_PLACEHOLDER_TEXT
+        )
 
         # 卡片级语义色
-        cls.BUTTON_TEXT_ON_ACCENT = theme.get("button_text_on_accent", cls.BUTTON_TEXT_ON_ACCENT)
+        cls.BUTTON_TEXT_ON_ACCENT = theme.get(
+            "button_text_on_accent", cls.BUTTON_TEXT_ON_ACCENT
+        )
         cls.STATUS_INFO = theme.get("status_info", cls.STATUS_INFO)
         cls.STATUS_DANGER_BG = theme.get("status_danger_bg", cls.STATUS_DANGER_BG)
         cls.STATUS_ARCHIVE_BG = theme.get("status_archive_bg", cls.STATUS_ARCHIVE_BG)
         cls.CARD_BG_DIM = theme.get("card_bg_dim", cls.CARD_BG_DIM)
         cls.ARCHIVED_CARD_BG = theme.get("archived_card_bg", cls.ARCHIVED_CARD_BG)
-        cls.ARCHIVED_CARD_BORDER = theme.get("archived_card_border", cls.ARCHIVED_CARD_BORDER)
+        cls.ARCHIVED_CARD_BORDER = theme.get(
+            "archived_card_border", cls.ARCHIVED_CARD_BORDER
+        )
 
         # 语法高亮色
         cls.SYNTAX_STEP = theme.get("syntax_step", cls.SYNTAX_STEP)
@@ -404,29 +468,32 @@ Colors.refresh()
 
 class BorderRadius:
     """圆角 Token"""
-    SM = "4px"   # 小标签、小按钮
-    MD = "8px"   # 卡片、输入框
+
+    SM = "4px"  # 小标签、小按钮
+    MD = "8px"  # 卡片、输入框
     LG = "18px"  # 搜索框、输入区域
 
 
 # ============ 动效系统 ============
 class Animations:
     """动画时间与缓动 Token — 克制使用，仅关键处动效"""
-    FAST_MS = 150       # 按钮按下/释放
-    NORMAL_MS = 200     # 卡片淡入、过渡
-    SLOW_MS = 300       # 展开/折叠
+
+    FAST_MS = 150  # 按钮按下/释放
+    NORMAL_MS = 200  # 卡片淡入、过渡
+    SLOW_MS = 300  # 展开/折叠
 
     # 缓动曲线
     EASE_OUT = "QEasingCurve::OutCubic"
     EASE_IN_OUT = "QEasingCurve::InOutQuad"
 
     # 位移量
-    FADE_SLIDE_Y = 8   # 淡入上滑像素数
+    FADE_SLIDE_Y = 8  # 淡入上滑像素数
 
 
 # ============ 阴影系统 ============
 class Shadows:
     """阴影 Token — 通过 QGraphicsDropShadowEffect 实现"""
+
     # 标准卡片阴影
     CARD = {
         "blur_radius": 12,
@@ -474,14 +541,16 @@ class Shadows:
 
 class BorderRadius:
     """圆角 Token"""
-    SM = "4px"   # 小标签、小按钮
-    MD = "8px"   # 卡片、输入框
+
+    SM = "4px"  # 小标签、小按钮
+    MD = "8px"  # 卡片、输入框
     LG = "18px"  # 搜索框、输入区域
 
 
 # ============ 间距系统 ============
 class Spacing:
     """间距 Token（单位：px）"""
+
     XS = 4
     SM = 8
     MD = 12
@@ -493,14 +562,16 @@ class Spacing:
 # ============ 字体系统 ============
 class FontSizes:
     """字体大小 Token"""
+
     XS = "10px"
-    SM = "11px"   # 正文、标签
-    MD = "12px"   # 标题
-    LG = "14px"   # 大标题
+    SM = "11px"  # 正文、标签
+    MD = "12px"  # 标题
+    LG = "14px"  # 大标题
 
 
 class FontWeights:
     """字重 Token"""
+
     NORMAL = ""
     BOLD = "bold"
 
@@ -508,6 +579,7 @@ class FontWeights:
 # ============ 组件尺寸 ============
 class Sizes:
     """组件尺寸 Token"""
+
     ICON_SM = QSize(12, 12)
     ICON_MD = QSize(16, 16)
     ICON_LG = QSize(20, 20)
@@ -515,7 +587,7 @@ class Sizes:
     BUTTON_H_SM = 29  # 小按钮高度
     BUTTON_H_MD = 36  # 中按钮高度
 
-    CARD_MIN_H = 53   # 列表项最小高度
+    CARD_MIN_H = 53  # 列表项最小高度
 
     # ToolButton 统一规格
     TOOL_BUTTON_SZ = QSize(28, 28)
@@ -528,7 +600,7 @@ class Sizes:
 # ============ CSS 模板 ============
 class CardStyles:
     """卡片样式模板"""
-    
+
     @staticmethod
     def card(alpha: int = 250) -> str:
         """标准卡片样式"""
@@ -540,7 +612,7 @@ class CardStyles:
                 border-radius: 8px;
             }}
         """
-    
+
     @staticmethod
     def card_content() -> str:
         """卡片内容区样式"""
@@ -549,7 +621,7 @@ class CardStyles:
             background-color: {Colors.CONTENT_BG};
             border-radius: 6px;
         """
-    
+
     @staticmethod
     def scroll_area() -> str:
         """滚动区域样式 — 超薄、半透明、精致"""
@@ -586,13 +658,14 @@ class CardStyles:
                 background: none;
             }}
         """
-    
+
     @staticmethod
     def edit_card_style() -> str:
         """统一表单输入框样式（供 mcp/hook/provider_edit/gateway 等设置卡片复用）"""
         Colors.refresh()
         from app.utils.utils import get_font_family_css
         from app.utils.design_tokens import font_size_css
+
         return f"""
         QWidget {{
             background: transparent;
@@ -625,18 +698,18 @@ class CardStyles:
             border-color: {Colors.INPUT_FOCUS_BORDER};
         }}
         """
-    
+
     @staticmethod
     def title_icon(emoji: str = "⚙️") -> str:
         """标题图标样式（返回 emoji）"""
         return emoji
-    
+
     @staticmethod
     def title_label() -> str:
         """标题文字样式"""
         Colors.refresh()
         return f"color: {Colors.TEXT_ACCENT};"
-    
+
     @staticmethod
     def close_button() -> str:
         """关闭按钮样式"""
@@ -645,7 +718,7 @@ class CardStyles:
 
 class TabStyles:
     """标签样式模板"""
-    
+
     @staticmethod
     def active() -> str:
         Colors.refresh()
@@ -682,7 +755,7 @@ class TabStyles:
 
 class ItemStyles:
     """列表项样式模板"""
-    
+
     @staticmethod
     def radio_button() -> str:
         """单选按钮样式"""
@@ -699,7 +772,7 @@ class ItemStyles:
                 background-color: #0078d4;
             }
         """
-    
+
     @staticmethod
     def tag() -> str:
         """标签样式"""

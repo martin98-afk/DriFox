@@ -69,7 +69,6 @@ from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
-    Shadows,
     font_size_css,
     scale_font_size,
     apply_font_size_to_widget,
@@ -2030,32 +2029,28 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if hasattr(self, "_input_card_shadow"):
             if focused:
-                # 输入卡 = 主光源：halo cascade 顶层（token: Shadows.GLOW_PRIMARY）
-                # alpha 高、blur 紧凑 → 收紧、聚焦的辉光，是胶囊的"光源"
-                token = Shadows.GLOW_PRIMARY
+                # 输入卡 = 主光源（halo cascade 顶层）
+                # alpha / blur 来自 Colors（由当前主题注入）
                 glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(token["alpha"])
-                self._input_card_shadow.setBlurRadius(token["blur_radius"])
-                self._input_card_shadow.setOffset(token["offset_x"], token["offset_y"])
+                glow.setAlpha(Colors.GLOW_PRIMARY_ALPHA)
+                self._input_card_shadow.setBlurRadius(Colors.GLOW_PRIMARY_BLUR)
+                self._input_card_shadow.setOffset(0, 0)
                 self._input_card_shadow.setColor(glow)
             else:
                 self._input_card_shadow.setBlurRadius(12)
                 self._input_card_shadow.setColor(QColor(0, 0, 0, 55))
 
-        # 工具栏 = 环境光晕：halo cascade 底层（token: Shadows.GLOW_AMBIENT）
+        # 工具栏 = 环境光晕（halo cascade 底层）
         # 与输入卡同色系但更弥散、更柔和，营造"主光 → 回声"的层次。
         # 视觉上像是输入卡把光"洒"到工具栏，整体仍是统一的发光胶囊，
         # 但有清晰的主次，不抢戏也不脱节。
         # 未焦点时工具栏保留轻微下投阴影（offset 0,4）增强"落地"感。
         if hasattr(self, "_bottom_toolbar_shadow"):
             if focused:
-                token = Shadows.GLOW_AMBIENT
                 glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(token["alpha"])
-                self._bottom_toolbar_shadow.setBlurRadius(token["blur_radius"])
-                self._bottom_toolbar_shadow.setOffset(
-                    token["offset_x"], token["offset_y"]
-                )
+                glow.setAlpha(Colors.GLOW_AMBIENT_ALPHA)
+                self._bottom_toolbar_shadow.setBlurRadius(Colors.GLOW_AMBIENT_BLUR)
+                self._bottom_toolbar_shadow.setOffset(0, 0)
                 self._bottom_toolbar_shadow.setColor(glow)
             else:
                 self._bottom_toolbar_shadow.setBlurRadius(14)
