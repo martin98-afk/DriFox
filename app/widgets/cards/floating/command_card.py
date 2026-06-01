@@ -613,9 +613,9 @@ class CommandCard(QWidget):
         if not cmd and not skill:
             return
 
-        # 已在此命令的 detail 模式，无需刷新
+        # 已在此命令的 detail 模式，跳过 UI 重新渲染
+        # （data_provider 已在本方法开头更新，不影响值选择列表的实时性）
         if self._detail_mode and self._detail_cmd_name == cmd_name:
-            # 但需要更新 data_provider（可能异步加载）
             return
 
         self._detail_mode = True

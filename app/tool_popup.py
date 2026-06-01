@@ -3,7 +3,7 @@ import platform
 import uuid
 import psutil
 from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor
+from PyQt5.QtGui import QPainter, QColor, QMouseEvent
 from PyQt5.QtWidgets import (
     QWidget,
     QStackedWidget,
@@ -580,6 +580,9 @@ class ResizeEdge(QWidget):
 class ToolPopupDialog(QDialog):
     popupClosed = pyqtSignal(str, bool, object)
     globalOpacityChanged = pyqtSignal(float)  # 透明度变化信号，参数为 0.0-1.0
+    # 类变量：标记是否有任何 ToolPopupDialog 正在被拖拽
+    # 用于阻止在拖拽过程中执行可能引起窗口高度变化的布局操作
+    _any_window_dragging: bool = False
 
     def __init__(self, tool_instance, parent=None, border_color: str = "none"):
         super().__init__(parent)
@@ -983,8 +986,16 @@ class ToolPopupDialog(QDialog):
         painter.setPen(border_color)
         painter.drawRoundedRect(0, 0, self.width() - 4, self.height() - 4, 10, 10)
 
-    def _get_edge_at_pos(self, pos):
-        """检测指定位置位于哪个边缘"""
+    def _get_edge_at_pos(self, pos_or_event):
+        """检测指定位置位于哪个边缘
+
+        核心修复：通过全局坐标 → 弹窗本地坐标转换，绕过事件传播中坐标重映射不一致问题。
+        参数可以是 QPoint 或 QMouseEvent。
+        """
+        if isinstance(pos_or_event, QMouseEvent):
+            pos = self.mapFromGlobal(pos_or_event.globalPos())
+        else:
+            pos = pos_or_event
         x, y = pos.x(), pos.y()
         w, h = self.width(), self.height()
         edge = ResizeEdge.EDGE_NONE
@@ -1048,8 +1059,21 @@ class ToolPopupDialog(QDialog):
                 event.accept()
                 return
 
-            title_bar = self.tool_instance.get_title_bar()
-            if title_bar and event.y() < title_bar.height():
+            # 核心修复：使用全局坐标检测标题栏命中
+            # event.pos() 在事件传播时可能坐标重映射不正确，
+            # 改用 event.globalPos() + title_bar.mapToGlobal() 绕过此问题
+            try:
+                title_bar = self.tool_instance.get_title_bar()
+            except RuntimeError:
+                title_bar = None
+            is_title_bar_click = False
+            if title_bar is not None and title_bar.isVisible():
+                title_bar_global = title_bar.geometry()
+                title_bar_global.moveTopLeft(
+                    title_bar.mapToGlobal(title_bar_global.topLeft())
+                )
+                is_title_bar_click = title_bar_global.contains(event.globalPos())
+            if is_title_bar_click:
                 # 标题栏拖拽（不影响分组，仅非选中窗口不触发批量移动）
                 self._hide_opacity_slider()
                 self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
@@ -1057,7 +1081,7 @@ class ToolPopupDialog(QDialog):
                 return
 
             # 非标题栏区域点击 → 如果点击的是非选中窗口，开始边缘拖拽
-            edge = self._get_edge_at_pos(event.pos())
+            edge = self._get_edge_at_pos(event)
             if edge != ResizeEdge.EDGE_NONE:
                 self._resize_edge = edge
                 self._resize_start_pos = event.globalPos()
@@ -1067,18 +1091,30 @@ class ToolPopupDialog(QDialog):
                 return
 
     def mouseMoveEvent(self, event):
-        # 每次鼠标移动都清除应用级光标覆盖（QSizeGrip 系统级 resize 后可能残留）
-        while QApplication.overrideCursor() is not None:
-            QApplication.restoreOverrideCursor()
+        # 只在有拖拽/缩放操作时才清理光标覆盖，避免干扰 Qt 内部窗口管理
+        if event.buttons() != Qt.NoButton and (
+            self._resize_edge != ResizeEdge.EDGE_NONE or self._drag_pos is not None
+        ):
+            while QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
         # 始终更新光标（不受拖拽状态影响）
-        title_bar = self.tool_instance.get_title_bar()
-        title_height = title_bar.height() if title_bar else 0
-        if event.y() <= title_height:
+        try:
+            title_bar = self.tool_instance.get_title_bar()
+        except RuntimeError:
+            title_bar = None
+        is_title_bar_area = False
+        if title_bar is not None and title_bar.isVisible():
+            title_bar_global = title_bar.geometry()
+            title_bar_global.moveTopLeft(
+                title_bar.mapToGlobal(title_bar_global.topLeft())
+            )
+            is_title_bar_area = title_bar_global.contains(event.globalPos())
+        if is_title_bar_area:
             # 标题栏区域：保持正常光标
             self.setCursor(Qt.ArrowCursor)
         else:
             # 内容区域：根据边缘位置更新光标
-            edge = self._get_edge_at_pos(event.pos())
+            edge = self._get_edge_at_pos(event)
             if edge == ResizeEdge.EDGE_TOP or edge == ResizeEdge.EDGE_BOTTOM:
                 self.setCursor(Qt.SizeVerCursor)
             elif edge == ResizeEdge.EDGE_LEFT or edge == ResizeEdge.EDGE_RIGHT:
@@ -1103,6 +1139,7 @@ class ToolPopupDialog(QDialog):
 
             # 标题栏拖拽移动（支持批量 + 吸附对齐）
             if self._drag_pos:
+                ToolPopupDialog._any_window_dragging = True
                 new_pos = event.globalPos() - self._drag_pos
                 delta = new_pos - self.pos()
                 self.move(new_pos)
@@ -1152,6 +1189,7 @@ class ToolPopupDialog(QDialog):
         self._snap_locked_offset = None
         self._resize_edge = ResizeEdge.EDGE_NONE
         self._resize_start_geometry = None
+        ToolPopupDialog._any_window_dragging = False
         # 释放鼠标后彻底清空应用级光标栈（Qt 内部 resize 可能叠了多层覆盖）
         while QApplication.overrideCursor() is not None:
             QApplication.restoreOverrideCursor()

@@ -594,6 +594,14 @@ class SendableTextEdit(TextEdit):
         if getattr(self, "_initializing", False):
             return
 
+        # 窗口拖拽过程中跳过高度调整，防止 setFixedHeight 干扰布局
+        try:
+            from app.tool_popup import ToolPopupDialog
+            if ToolPopupDialog._any_window_dragging:
+                return
+        except ImportError:
+            pass
+
         doc = self.document()
         content_height = int(doc.size().height()) + 24
         new_height = max(44, min(160, content_height))

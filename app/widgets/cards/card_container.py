@@ -66,6 +66,13 @@ class CardContainer(QWidget):
     
     def _schedule_expand(self):
         """防抖调度：有可见卡片则展开，否则折叠"""
+        # 窗口拖拽过程中跳过容器展开/折叠，防止布局级联干扰
+        try:
+            from app.tool_popup import ToolPopupDialog
+            if ToolPopupDialog._any_window_dragging:
+                return
+        except ImportError:
+            pass
         has_visible = any(w.isVisible() for w in self._cards.values())
         if self._is_expanded() and has_visible:
             return  # 已展开且有可见卡片，不再重复触发布局

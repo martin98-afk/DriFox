@@ -284,6 +284,24 @@ class ProviderEditCard(QWidget):
 
         main_layout.addLayout(model_row)
 
+        # 配置名称行
+        config_name_row = QHBoxLayout()
+        config_name_label = BodyLabel("配置名称:")
+        config_name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        config_name_row.addWidget(config_name_label)
+        self.configNameEdit = LineEdit()
+        # 如果是编辑模式，且 provider_info 中有 name 字段，则填充
+        if not self.is_new and "name" in self.provider_info:
+            self.configNameEdit.setText(self.provider_info["name"])
+        else:
+            # 新建时，默认使用服务商名称
+            if self.is_new:
+                self.configNameEdit.setText(self.nameCombo.currentText())
+            else:
+                self.configNameEdit.setText(self.provider_name)
+        config_name_row.addWidget(self.configNameEdit, 1)
+        main_layout.addLayout(config_name_row)
+
         # 保存按钮已移到 BaseSettingsCard 标题栏，信号由外部连接
 
         # 新建时调用一次初始化
@@ -457,15 +475,25 @@ class ProviderEditCard(QWidget):
         """保存"""
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
         current_models = self.modelCombo.get_all_models()
+        # 关键修复：必须保留原始 config_id！
+        # 编辑已有配置时如果丢失 config_id，main_widget 会生成新 UUID，
+        # 导致同一个服务商产生重复条目（用户感知为"覆盖"）。
+        existing_config_id = self.provider_info.get("config_id", "")
+        existing_models = self.provider_info.get("模型列表", [])
         self.provider_info = {
             "API_URL": self.apiUrlCombo.currentText().strip(),
             "API_KEY": self.apiKeyEdit.text().strip(),
             "模型名称": self.modelCombo.currentText().strip(),
             "认证方式": "bearer",
+            "name": self.configNameEdit.text().strip(),
         }
+        if existing_config_id:
+            self.provider_info["config_id"] = existing_config_id
         if current_models:
             self.provider_info["模型列表"] = current_models
-        elif "模型列表" not in self.provider_info:
+        elif existing_models:
+            self.provider_info["模型列表"] = existing_models
+        else:
             self.provider_info["模型列表"] = []
         self.saved.emit(provider_name, self.provider_info)
 

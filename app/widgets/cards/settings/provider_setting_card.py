@@ -190,21 +190,28 @@ class ProviderIconWidget(IconWidget):
 class ProviderItem(QWidget):
     removed = pyqtSignal(QWidget)
     selected = pyqtSignal(QWidget)
-    editRequested = pyqtSignal(str, dict)
+    editRequested = pyqtSignal(str, dict)  # provider_name, provider_info
 
     def __init__(
-        self, provider_name: str, provider_info: dict, is_default: bool, parent=None
+        self, config_id: str, provider_info: dict, is_default: bool, parent=None
     ):
         super().__init__(parent=parent)
-        self.provider_name = provider_name
+        self.config_id = config_id
+        # 从 provider_info 中获取服务商名称，如果没有则使用 config_id
+        self.provider_name = provider_info.get("provider_name", config_id)
         self.provider_info = provider_info
         self.is_default = is_default
+        # 同名分组的后缀索引：0=不显示，1+=显示 "#2"、"#3"...
+        self.suffix_index = provider_info.get("_suffix_index", 0)
         self._setup_ui()
+        # 保存默认样式用于 highlight/恢复切换
+        self._default_style = self.styleSheet()
         self._connect_signals()
 
     def _setup_ui(self):
         self.setFixedHeight(56)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(f"""
             ProviderItem {{
                 background-color: transparent;
@@ -219,31 +226,18 @@ class ProviderItem(QWidget):
         main_layout.setContentsMargins(12, 8, 12, 8)
         main_layout.setSpacing(12)
 
-        self.radioButton = QPushButton()
-        self.radioButton.setFixedSize(20, 20)
-        self.radioButton.setCheckable(True)
-        self.radioButton.setChecked(self.is_default)
-        self.radioButton.setCursor(Qt.PointingHandCursor)
-        self.radioButton.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                border: 2px solid {Colors.TEXT_MUTED};
-                border-radius: 10px;
-            }}
-            QPushButton:checked {{
-                border: 2px solid {Colors.SYSTEM_ACCENT};
-                background-color: {Colors.SYSTEM_ACCENT};
-            }}
-            QPushButton:hover {{
-                border-color: {Colors.SYSTEM_ACCENT};
-            }}
-        """)
+
 
         self.iconWidget = ProviderIconWidget(self.provider_name, 32)
 
         info_layout = QVBoxLayout()
         info_layout.setSpacing(2)
-        self.nameLabel = QLabel(self.provider_name)
+        # 显示配置名称（如果存在），否则显示服务商名称
+        display_name = self.provider_info.get("name", "") or self.provider_name
+        # 同名分组时附加后缀，让用户能区分多个同服务商配置
+        if self.suffix_index >= 1:
+            display_name = f"{display_name} #{self.suffix_index + 1}"
+        self.nameLabel = QLabel(display_name)
         self.nameLabel.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; {font_size_css(14)} font-weight: 500; {get_font_family_css()}"
         )
@@ -253,7 +247,6 @@ class ProviderItem(QWidget):
         info_layout.addWidget(self.nameLabel)
         info_layout.addWidget(self.modelLabel)
 
-        main_layout.addWidget(self.radioButton, 0, Qt.AlignLeft | Qt.AlignVCenter)
         main_layout.addWidget(self.iconWidget, 0, Qt.AlignLeft | Qt.AlignVCenter)
         main_layout.addLayout(info_layout)
         main_layout.addStretch(1)
@@ -277,16 +270,26 @@ class ProviderItem(QWidget):
 
     def _connect_signals(self):
         self.removeButton.clicked.connect(lambda: self.removed.emit(self))
-        self.radioButton.clicked.connect(lambda: self.selected.emit(self))
         self.editButton.clicked.connect(self._on_edit)
 
+    def mousePressEvent(self, event):
+        """点击整项（非按钮区域）设为默认服务商"""
+        self.selected.emit(self)
+        super().mousePressEvent(event)
+
     def _on_edit(self):
-        self.editRequested.emit(self.provider_name, self.provider_info)
+        self.editRequested.emit(self.config_id, self.provider_info)
 
     def update_info(self, name: str, info: dict):
         self.provider_name = name
         self.provider_info = info
-        self.nameLabel.setText(name)
+        # 同步后缀索引（同名数量变化时可能需要重新计算）
+        self.suffix_index = info.get("_suffix_index", self.suffix_index)
+        # 更新显示名称
+        display_name = info.get("name", "") or name
+        if self.suffix_index >= 1:
+            display_name = f"{display_name} #{self.suffix_index + 1}"
+        self.nameLabel.setText(display_name)
         self.modelLabel.setText(info.get("模型名称", ""))
         self.iconWidget.provider_name = name
         self.iconWidget._init_icon()
@@ -365,19 +368,54 @@ class ProviderListSettingCard(ExpandSettingCard):
             else {}
         )
         self.default_provider = qconfig.get(self.defaultProviderItem) or ""
+        # 按 provider_name 分组计算后缀索引：
+        # - 唯一配置：suffix_index = 0（不显示后缀）
+        # - 多个同名配置：按字典顺序第 1 个 = 0，第 2 个 = 1（显示 #2），第 3 个 = 2（显示 #3）...
+        name_groups: dict[str, list[str]] = {}
+        for cid, info in self.providers.items():
+            pname = info.get("provider_name", cid)
+            name_groups.setdefault(pname, []).append(cid)
+        suffix_map: dict[str, int] = {}
+        for pname, cids in name_groups.items():
+            if len(cids) == 1:
+                suffix_map[cids[0]] = 0
+            else:
+                for idx, cid in enumerate(cids):
+                    suffix_map[cid] = idx
         while self.viewLayout.count() > 0:
             item = self.viewLayout.takeAt(0)
             if item.widget() and item.widget() != self.addProviderButton:
                 item.widget().deleteLater()
-        for name, info in self.providers.items():
-            is_default = name == self.default_provider
-            self._add_provider_item(name, info, is_default)
+        # 遍历配置字典，键为配置 ID，值为配置信息
+        for config_id, info in self.providers.items():
+            # 判断是否为默认服务商：比较配置 ID 或服务商名称
+            is_default = (config_id == self.default_provider) or (
+                info.get("provider_name") == self.default_provider
+            )
+            # 附加后缀索引到 info（供 ProviderItem 显示使用，不持久化到配置）
+            display_info = dict(info)
+            display_info["_suffix_index"] = suffix_map.get(config_id, 0)
+            self._add_provider_item(config_id, display_info, is_default)
 
-    def _add_provider_item(self, name: str, info: dict, is_default: bool):
-        item = ProviderItem(name, info, is_default, self.view)
+    def _add_provider_item(self, config_id: str, info: dict, is_default: bool):
+        item = ProviderItem(config_id, info, is_default, self.view)
         item.removed.connect(self._show_confirm_dialog)
         item.selected.connect(lambda i: self._select_provider(i))
+        # editRequested 信号传递服务商名称和配置信息
         item.editRequested.connect(lambda n, i: self._show_edit_dialog(n, i, item))
+        # 如果是默认服务商，立即应用选中样式
+        if is_default and hasattr(item, '_default_style'):
+            indicator_style = f"""
+                ProviderItem {{
+                    background-color: transparent;
+                    border-radius: 8px;
+                    border-left: 3px solid {Colors.SYSTEM_ACCENT};
+                }}
+                ProviderItem:hover {{
+                    background-color: {Colors.HOVER_BG};
+                }}
+            """
+            item.setStyleSheet(indicator_style)
         self.viewLayout.addWidget(item)
         item.show()
         self._adjustViewSize()
@@ -386,9 +424,9 @@ class ProviderListSettingCard(ExpandSettingCard):
         # 发送信号，让主窗口处理卡片显示
         self.showAddProviderCard.emit()
 
-    def _show_edit_dialog(self, name: str, info: dict, item: ProviderItem):
-        # 发送信号，让主窗口处理卡片显示
-        self.showEditProviderCard.emit(name, info)
+    def _show_edit_dialog(self, config_id: str, info: dict, item: ProviderItem):
+        # 发送信号，让主窗口处理卡片显示，传递配置 ID 和配置信息
+        self.showEditProviderCard.emit(config_id, info)
 
     def _show_confirm_dialog(self, item: ProviderItem):
         title = self.tr("确定要删除这个服务商吗?")
@@ -400,26 +438,42 @@ class ProviderListSettingCard(ExpandSettingCard):
         w.exec_()
 
     def _remove_provider(self, item: ProviderItem):
-        if item.provider_name not in self.providers:
+        if item.config_id not in self.providers:
             return
-        del self.providers[item.provider_name]
+        del self.providers[item.config_id]
         qconfig.set(self.configItem, self.providers, save=True)
         self.viewLayout.removeWidget(item)
         item.deleteLater()
         self._adjustViewSize()
         self.providerChanged.emit(self.providers)
-        if self.default_provider == item.provider_name:
+        # 如果删除的是默认服务商，则更新默认服务商
+        if self.default_provider == item.config_id or self.default_provider == item.provider_name:
             keys = list(self.providers.keys())
             self.default_provider = keys[0] if keys else ""
             qconfig.set(self.defaultProviderItem, self.default_provider, save=True)
             self.defaultProviderChanged.emit(self.default_provider)
 
     def _select_provider(self, item: ProviderItem):
+        # 取消旧选中项的样式标记
         for i in range(self.viewLayout.count()):
             w = self.viewLayout.itemAt(i).widget()
-            if isinstance(w, ProviderItem) and w != item:
-                w.radioButton.setChecked(False)
-        item.radioButton.setChecked(True)
-        self.default_provider = item.provider_name
+            if isinstance(w, ProviderItem) and w != item and hasattr(w, '_default_style'):
+                w.setStyleSheet(w._default_style)
+        # 为新选中项添加标记样式（左边框高亮）
+        if not hasattr(item, '_default_style'):
+            item._default_style = item.styleSheet()
+        indicator_style = f"""
+            ProviderItem {{
+                background-color: transparent;
+                border-radius: 8px;
+                border-left: 3px solid {Colors.SYSTEM_ACCENT};
+            }}
+            ProviderItem:hover {{
+                background-color: {Colors.HOVER_BG};
+            }}
+        """
+        item.setStyleSheet(indicator_style)
+        # 默认服务商使用配置 ID
+        self.default_provider = item.config_id
         qconfig.set(self.defaultProviderItem, self.default_provider, save=True)
         self.defaultProviderChanged.emit(self.default_provider)

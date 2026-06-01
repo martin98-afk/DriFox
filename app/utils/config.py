@@ -86,10 +86,45 @@ class Settings(QConfig):
                 cls._extend_theme_validator_before_load()
                 cls._instance.load()
                 cls._config_loaded = True  # 标记配置成功加载
+                # 迁移旧格式的服务商配置
+                cls._migrate_saved_providers(cls._instance)
             except:
                 logger.exception("无法加载配置文件")
                 cls._config_loaded = False
         return cls._instance
+
+    @classmethod
+    def _migrate_saved_providers(cls, instance):
+        """迁移旧格式的服务商配置：将服务商名称为键的字典转换为配置 ID 为键的字典"""
+        saved_providers = instance.llm_saved_providers.value
+        if not saved_providers or not isinstance(saved_providers, dict):
+            return
+        
+        # 检查是否已经是新格式（键为配置 ID）
+        # 简单检查：如果所有键都是 8 位十六进制字符串，则认为是新格式
+        import re
+        hex_pattern = re.compile(r'^[0-9a-f]{8}$')
+        if all(hex_pattern.match(key) for key in saved_providers.keys()):
+            return  # 已经是新格式
+        
+        # 迁移到新格式
+        new_saved_providers = {}
+        for provider_name, info in saved_providers.items():
+            # 生成配置 ID
+            import uuid
+            config_id = uuid.uuid4().hex[:8]
+            # 确保 info 是字典
+            if not isinstance(info, dict):
+                info = {}
+            # 添加 provider_name 字段（如果不存在）
+            if "provider_name" not in info:
+                info["provider_name"] = provider_name
+            new_saved_providers[config_id] = info
+        
+        # 更新配置
+        instance.llm_saved_providers.value = new_saved_providers
+        instance.save()
+        logger.info(f"已迁移 {len(saved_providers)} 个服务商配置到新格式")
 
     @classmethod
     def _extend_theme_validator_before_load(cls):

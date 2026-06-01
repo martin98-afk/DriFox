@@ -195,6 +195,7 @@ class OpenAIChatToolWindow(ToolWindow):
     _question_tool_call_id = None
     _todo_was_visible_before_system: bool = False  # 打开系统卡片前todo的可见状态
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
+    _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
     # AutoLoop 状态
     _is_auto_loop_running: bool = False
@@ -1416,9 +1417,9 @@ class OpenAIChatToolWindow(ToolWindow):
         layout.addWidget(self._top_card_container)
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(0)
+        self.chat_scroll_area.setMinimumHeight(80)
         self.chat_scroll_area.setMinimumWidth(400)
-        self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)
         self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
@@ -2026,6 +2027,37 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[BuiltinCommands] 触发子智能体任务: agent={agent_name}, task={task_description[:50]}..."
         )
 
+    def _resolve_service_provider(self, name: str) -> Optional[str]:
+        """把用户传入的"服务商名"解析成 config_id
+
+        支持以下写法（按优先级）：
+          1. config_id（如 "b2c3d4e5"）—— 直接命中 _valid_configs
+          2. display_name（如 "OpenCode Zen #2"）—— 查 _display_to_config_id 映射
+          3. provider_name（如 "OpenCode Zen"，同名时取第一个）—— 遍历匹配
+          4. 大小写不敏感的 provider_name 匹配
+        返回 None 表示找不到。
+        """
+        if not name:
+            return None
+        # 1. config_id 直接命中
+        if name in self._valid_configs:
+            return name
+        # 2. display_name 命中
+        display_to_config = getattr(self, "_display_to_config_id", {})
+        if name in display_to_config:
+            return display_to_config[name]
+        # 3. provider_name 精确匹配（同名取第一个）
+        for cid, info in self._valid_configs.items():
+            if info.get("provider_name") == name:
+                return cid
+        # 4. provider_name 大小写不敏感匹配
+        name_lower = name.lower()
+        for cid, info in self._valid_configs.items():
+            pname = info.get("provider_name", "")
+            if pname and pname.lower() == name_lower:
+                return cid
+        return None
+
     def _resolve_subagent_model_config(self, model_value: str) -> Optional[Dict]:
         """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
 
@@ -2034,11 +2066,7 @@ class OpenAIChatToolWindow(ToolWindow):
           - "服务商名"        → 切换到指定服务商的完整配置
           - "服务商名:模型名"  → 切换到指定服务商并覆盖模型名称
 
-        Args:
-            model_value: --model=xxx 的原始值（空字符串时不覆盖）
-
-        Returns:
-            Dict: 覆盖后的 LLM 配置，或 None（使用默认配置）
+        "服务商名" 支持：config_id / display_name / provider_name 三种写法。
         """
         if not model_value:
             return None  # 使用默认配置
@@ -2046,27 +2074,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if ":" in model_value:
             # 格式: "服务商名:模型名"
             provider, model_query = model_value.split(":", 1)
-            model_query_lower = model_query.lower()
-            if provider in self._valid_configs:
-                matched = self._fuzzy_match_model_name(
-                    provider,
-                    model_query_lower,
-                    lambda: self._get_model_list_for_provider(provider),
-                )
-                if matched is not None:
-                    config = self._valid_configs[provider].copy()
-                    config["模型名称"] = matched
-                    return config
-                else:
-                    available = self._get_model_list_for_provider(provider)
-                    InfoBar.warning(
-                        "模型不存在",
-                        f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
-                        parent=self,
-                        position=InfoBarPosition.BOTTOM,
-                    )
-                    return None
-            else:
+            config_id = self._resolve_service_provider(provider)
+            if config_id is None:
                 InfoBar.warning(
                     "未知服务商",
                     f"未找到服务商: {provider}",
@@ -2074,33 +2083,51 @@ class OpenAIChatToolWindow(ToolWindow):
                     position=InfoBarPosition.BOTTOM,
                 )
                 return None
-        elif model_value in self._valid_configs:
-            # 格式: "服务商名" — 切换到该服务商（取当前模型）
-            config = self._valid_configs[model_value].copy()
-            return config
-        else:
-            # 格式: "模型名" — 在当前服务商模糊匹配
-            config = self._get_current_model_config()
-            provider = self._current_provider_name
-            model_query_lower = model_value.lower()
+            model_query_lower = model_query.lower()
             matched = self._fuzzy_match_model_name(
-                provider,
+                config_id,
                 model_query_lower,
-                lambda: self._get_model_list_for_provider(provider),
+                lambda: self._get_model_list_for_provider(config_id),
             )
             if matched is not None:
-                config = dict(config)
+                config = self._valid_configs[config_id].copy()
                 config["模型名称"] = matched
                 return config
             else:
-                available = self._get_model_list_for_provider(provider)
+                available = self._get_model_list_for_provider(config_id)
                 InfoBar.warning(
                     "模型不存在",
-                    f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
+                    f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
                     parent=self,
                     position=InfoBarPosition.BOTTOM,
                 )
                 return None
+        # 格式: "服务商名" — 切换到该服务商（取默认模型）
+        config_id = self._resolve_service_provider(model_value)
+        if config_id is not None:
+            return self._valid_configs[config_id].copy()
+        # 格式: "模型名" — 在当前服务商模糊匹配
+        config = self._get_current_model_config()
+        provider = self._current_provider_name
+        model_query_lower = model_value.lower()
+        matched = self._fuzzy_match_model_name(
+            provider,
+            model_query_lower,
+            lambda: self._get_model_list_for_provider(provider),
+        )
+        if matched is not None:
+            config = dict(config)
+            config["模型名称"] = matched
+            return config
+        else:
+            available = self._get_model_list_for_provider(provider)
+            InfoBar.warning(
+                "模型不存在",
+                f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return None
 
     def _get_model_list_for_provider(self, provider: str) -> List[str]:
         """获取指定服务商的模型列表（供模糊匹配用）"""
@@ -2269,10 +2296,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def _get_all_model_options_flat(self) -> list:
         """平展所有服务商:模型名列表"""
         options = []
-        for provider, config in self._valid_configs.items():
-            models = self._get_model_list_for_provider(provider)
+        for config_id, config in self._valid_configs.items():
+            # 用 display_name 给用户看，避免 UUID 出现
+            display = config.get("display_name", config.get("provider_name", config_id))
+            models = self._get_model_list_for_provider(config_id)
             for model in models:
-                options.append(f"{provider}:{model}")
+                options.append(f"{display}:{model}")
         return sorted(options)
 
     def _toggle_model_selector_card(self):
@@ -2291,7 +2320,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _load_model_selector_to_card(self):
         """加载模型数据到模型选择卡片"""
         provider_models_data = []
-        for provider_name, config in self._valid_configs.items():
+        # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
+        self._display_to_config_id: dict[str, str] = {}
+        # 维护 display_name → provider_name 映射，用于 model_selector 找 icon
+        self._display_to_provider_name: dict[str, str] = {}
+        for config_id, config in self._valid_configs.items():
+            display_name = config.get(
+                "display_name", config.get("provider_name", config_id)
+            )
+            pname = config.get("provider_name", config_id)
+            self._display_to_config_id[display_name] = config_id
+            self._display_to_provider_name[display_name] = pname
             model_list = []
             if "模型列表" in config:
                 saved_models = config["模型列表"]
@@ -2304,47 +2343,73 @@ class OpenAIChatToolWindow(ToolWindow):
                         saved_models = []
                 if isinstance(saved_models, list):
                     model_list = list(saved_models)
-            elif provider_name in PROVIDER_MODELS:
-                model_list = list(PROVIDER_MODELS[provider_name])
+            elif pname in PROVIDER_MODELS:
+                model_list = list(PROVIDER_MODELS[pname])
             cur_model = config.get("模型名称", "")
             if cur_model and cur_model not in model_list:
                 model_list.insert(0, cur_model)
             if not model_list and cur_model:
                 model_list = [cur_model]
-            is_current = provider_name == self._current_provider_name
-            provider_models_data.append((provider_name, model_list, is_current))
+            is_current = config_id == self._current_provider_name
+            # 传给 model_selector 用 display_name（用户看到的名），不要传 config_id
+            provider_models_data.append((display_name, model_list, is_current))
+
+        # 找当前选中服务商的 display_name
+        current_display = ""
+        if self._current_provider_name in self._valid_configs:
+            current_display = self._valid_configs[self._current_provider_name].get(
+                "display_name", self._current_provider_name
+            )
 
         self._model_selector_card_content.set_providers_data(
             provider_models_data,
-            self._current_provider_name or "",
+            current_display,
             self._current_model_name or "",
+            self._display_to_provider_name,
         )
 
         # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"
         self._update_model_selector_header()
 
     def _update_model_selector_header(self):
-        """根据当前服务商/模型状态，更新模型选择卡片的头部（图标 + 初始标题）"""
-        if self._current_provider_name:
-            # 有服务商：显示服务商图标 + 当前服务商名（吸顶滚动时会被 _on_sticky_provider_changed 覆盖）
-            icon_widget = ProviderIconWidget(self._current_provider_name, 20)
+        """根据当前服务商/模型状态，更新模型选择卡片的头部（图标 + 初始标题）
+
+        标题用 display_name（人类可读），图标按 provider_name 查找。
+        """
+        if self._current_provider_name and self._current_provider_name in self._valid_configs:
+            config = self._valid_configs[self._current_provider_name]
+            display = config.get("display_name", self._current_provider_name)
+            pname = config.get("provider_name", display)
+            # 用 provider_name 找 icon（PROVIDER_ICONS 按服务商名索引，不是 display_name）
+            icon_widget = ProviderIconWidget(pname, 20)
             self._model_selector_card.set_icon_widget(icon_widget)
-            self._model_selector_card.set_title_text(self._current_provider_name)
+            self._model_selector_card.set_title_text(display)
         else:
             # 无服务商：显示默认图标 + "模型选择"
             self._model_selector_card.set_icon("🤖")
             self._model_selector_card.set_title_text("模型选择")
 
     def _on_sticky_provider_changed(self, provider_name: str):
-        """滚动时吸顶服务商变化，更新标题栏显示当前服务商名和图标"""
+        """滚动时吸顶服务商变化，更新标题栏显示当前服务商名和图标
+
+        provider_name 是从 model_selector 传来的 display_name（不是 config_id）。
+        """
         if provider_name:
             self._model_selector_card.set_title_text(provider_name)
-            icon_widget = ProviderIconWidget(provider_name, 20)
+            # 用 display_name → config_id → provider_name 链反查，找图标
+            config_id = getattr(self, "_display_to_config_id", {}).get(provider_name)
+            pname = provider_name
+            if config_id and config_id in self._valid_configs:
+                pname = self._valid_configs[config_id].get("provider_name", provider_name)
+            icon_widget = ProviderIconWidget(pname, 20)
             self._model_selector_card.set_icon_widget(icon_widget)
-        elif self._current_provider_name:
+        elif self._current_provider_name and self._current_provider_name in self._valid_configs:
             # 滚到顶部时恢复显示当前选中的服务商
-            self._model_selector_card.set_title_text(self._current_provider_name)
-            icon_widget = ProviderIconWidget(self._current_provider_name, 20)
+            config = self._valid_configs[self._current_provider_name]
+            display = config.get("display_name", self._current_provider_name)
+            pname = config.get("provider_name", display)
+            self._model_selector_card.set_title_text(display)
+            icon_widget = ProviderIconWidget(pname, 20)
             self._model_selector_card.set_icon_widget(icon_widget)
 
     def _on_add_provider_from_card(self):
@@ -2384,26 +2449,39 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_model_selected_from_popup(self, provider_name: str, model_name: str):
         """从弹窗/卡片选中模型后切换
 
+        provider_name 可能是 display_name（如 "OpenCode Zen #2"）或 config_id，
+        统一转回 config_id 后再处理。
+
         多窗口隔离：全局配置保存最后使用的服务高（作为新窗口默认值），
         但窗口实例的 _current_provider_name/_current_model_name 不受其他窗口影响。
         """
-        self._current_provider_name = provider_name
+        # 关键修复：先转 config_id，避免后续 _valid_configs[display_name] 创建新条目
+        display_to_config = getattr(self, "_display_to_config_id", {})
+        config_id = display_to_config.get(provider_name, provider_name)
+        self._current_provider_name = config_id
         self._current_model_name = model_name
         # 保存到全局配置（作为新窗口的默认值，不影响当前窗口实例）
-        self.cfg.set(self.cfg.llm_selected_model, provider_name, save=True)
+        self.cfg.set(self.cfg.llm_selected_model, config_id, save=True)
 
         # 更新 saved_providers 中的模型名称
         # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
-        if provider_name in saved_providers:
-            saved_providers[provider_name]["模型名称"] = model_name
+        # 优先用 _display_to_config_id 映射找 config_id；
+        # 找不到时回退到遍历查找（兼容旧代码路径）
+        if config_id not in saved_providers:
+            config_id = None
+            for cid, info in saved_providers.items():
+                if cid == provider_name or info.get("provider_name") == provider_name:
+                    config_id = cid
+                    break
+        if config_id and config_id in saved_providers:
+            saved_providers[config_id]["模型名称"] = model_name
             self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
-
-        # 更新 _valid_configs 确保 ChatEngine 能读到最新配置
-        self._valid_configs[provider_name] = saved_providers.get(
-            provider_name, {}
-        ).copy()
-        self._valid_configs[provider_name]["模型名称"] = model_name
+            # 更新 _valid_configs 确保 ChatEngine 能读到最新配置
+            self._valid_configs[config_id] = saved_providers.get(
+                config_id, {}
+            ).copy()
+            self._valid_configs[config_id]["模型名称"] = model_name
 
         # 重新加载模型配置（_load_model_configs 已修复：保持窗口自身选择优先）
         self._load_model_configs()
@@ -2429,10 +2507,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """更新模型选择按钮的图标和文字显示"""
         if not hasattr(self, "current_model_btn"):
             return
-        # 设置图标
+        # 当前服务商的显示名 + provider_name（用于找 icon）
+        display = self._current_provider_name
+        pname = self._current_provider_name
+        if self._current_provider_name in self._valid_configs:
+            config = self._valid_configs[self._current_provider_name]
+            display = config.get("display_name", self._current_provider_name)
+            pname = config.get("provider_name", display)
+        # 设置图标（按 provider_name 查 PROVIDER_ICONS，不按 UUID 查）
         icon = None
-        if self._current_provider_name:
-            icon_name = PROVIDER_ICONS.get(self._current_provider_name, "")
+        if pname:
+            icon_name = PROVIDER_ICONS.get(pname, "")
             if icon_name:
                 icon = get_icon(icon_name)
 
@@ -2441,15 +2526,15 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             self._model_btn_icon.clear()
 
-        # 设置文字
+        # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
             self.current_model_btn.setToolTip(
-                f"{self._current_provider_name} · {self._current_model_name}"
+                f"{display} · {self._current_model_name}"
             )
         elif self._current_provider_name:
-            self._model_btn_text.setText(self._current_provider_name)
-            self.current_model_btn.setToolTip(self._current_provider_name)
+            self._model_btn_text.setText(display)
+            self.current_model_btn.setToolTip(display)
         else:
             self._model_btn_text.setText("选择模型...")
             self.current_model_btn.setToolTip("")
@@ -2525,7 +2610,14 @@ class OpenAIChatToolWindow(ToolWindow):
         """服务商编辑保存后的回调"""
         # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
-        saved_providers[provider_name] = provider_info
+        # 如果 provider_info 中已有 config_id，则使用现有的；否则生成新的
+        config_id = provider_info.get("config_id")
+        if not config_id:
+            config_id = uuid.uuid4().hex[:8]
+            provider_info["config_id"] = config_id
+        # 确保 provider_name 存在于 provider_info 中
+        provider_info["provider_name"] = provider_name
+        saved_providers[config_id] = provider_info
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
 
         # 隐藏服务商编辑卡片，显示设置卡片
@@ -2655,10 +2747,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏设置卡片
         self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
-        self._provider_edit_card.set_title(f"⚙️ 编辑: {provider_name}")
+        # 显示配置名称（如果存在），否则显示服务商名称
+        display_name = provider_info.get("name", "") or provider_name
+        self._provider_edit_card.set_title(f"⚙️ 编辑: {display_name}")
+        # 在 provider_info 中添加 provider_name（如果不存在）
+        if "provider_name" not in provider_info:
+            provider_info["provider_name"] = provider_name
         # 重新创建 ProviderEditCard 用于编辑
         self._provider_edit_popup = ProviderEditCard(
-            provider_name=provider_name,
+            provider_name=provider_info["provider_name"],
             provider_info=provider_info,
             is_new=False,
             parent=self,
@@ -2827,7 +2924,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_system_card_opened(self, card_id: str):
         """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间"""
+        # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
+        from app.tool_popup import ToolPopupDialog
+        if ToolPopupDialog._any_window_dragging:
+            return
         if hasattr(self, "input_area"):
+            # 标记系统卡片处于打开状态（供 _do_hide_input_area 做竞态保护）
+            self._system_cards_open = True
+
             # 暂停重绘，先设置卡片高度为工具栏高度
             self._input_card.setUpdatesEnabled(False)
             self._input_card.setFixedHeight(34 + 1 + 4)  # toolbar + separator + padding
@@ -2840,12 +2944,20 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(0, lambda: self._do_hide_input_area())
 
     def _do_hide_input_area(self):
-        """延迟隐藏输入框，由 _on_system_card_opened 调用"""
-        if hasattr(self, "input_area"):
+        """延迟隐藏输入框，由 _on_system_card_opened 调用
+
+        注意：_on_system_card_closed 可能在定时器触发前执行，
+        必须检查 _system_cards_open 避免在恢复后再次隐藏输入框。
+        """
+        if hasattr(self, "input_area") and getattr(self, "_system_cards_open", False):
             self.input_area.setVisible(False)
 
     def _on_system_card_closed(self, card_id: str):
         """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
+        # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
+        from app.tool_popup import ToolPopupDialog
+        if ToolPopupDialog._any_window_dragging:
+            return
         for cid in (
             "model_selector",
             "model_config",
@@ -2860,6 +2972,9 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             if self._card_manager.is_card_visible(cid, self._window_id):
                 return
+        # 所有系统卡片已关闭，清除打开标记
+        self._system_cards_open = False
+
         if hasattr(self, "input_area"):
             # 暂停重绘，先恢复高度再恢复可见性，避免布局中间态
             self._input_card.setUpdatesEnabled(False)
@@ -2981,21 +3096,16 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_provider_name if self._current_provider_name else "无"
         )
 
-        saved_providers = self.cfg.llm_saved_providers.value or {}
-        provider_config = saved_providers.get(current_name, {})
-        config = provider_config.copy()
-        # 合并默认配置，确保新增字段（如思考模式）在已保存的配置中也存在
-        default_config = FREE_PROVIDERS.get(current_name, {})
-        for default_key, default_value in default_config.items():
-            if default_key not in config:
-                config[default_key] = default_value
-        config.pop("备注", None)
-        config.pop("获取地址", None)
-        # 只保留参数配置，移除连接信息
-        config.pop("模型名称", None)
-        config.pop("API_URL", None)
-        config.pop("API_KEY", None)
-        config.pop("模型列表", None)
+        # 关键修复：从 _valid_configs 读取（已通过 _load_model_configs 合并了 FREE_PROVIDERS 默认参数）
+        # 而不是从 saved_providers 直接读（绕过默认值合并，会丢"温度"、"最大Token"等字段）
+        config = {}
+        if current_name in self._valid_configs:
+            config = self._valid_configs[current_name].copy()
+        # 移除连接信息、元数据字段和无关的额外字段
+        for pop_key in ["备注", "获取地址", "模型名称", "API_URL", "API_KEY",
+                        "模型列表", "provider_name", "name", "config_id",
+                        "display_name", "认证方式"]:
+            config.pop(pop_key, None)
 
         self._model_config_popup.set_config(current_name, config)
 
@@ -3747,16 +3857,37 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs.clear()
 
         saved_providers = self.cfg.llm_saved_providers.value or {}
-        for provider_name in saved_providers:
-            config = saved_providers[provider_name].copy()
+        # 计算同名分组的后缀映射（与 ProviderListSettingCard._refresh_items 一致）：
+        # 唯一配置：无后缀；多个同名：第 1 个无后缀，第 2/3/... 个显示 #2/#3/...
+        name_groups: dict[str, list[str]] = {}
+        for cid, info in saved_providers.items():
+            pname = info.get("provider_name", cid)
+            name_groups.setdefault(pname, []).append(cid)
+        suffix_map: dict[str, int] = {}
+        for pname, cids in name_groups.items():
+            if len(cids) == 1:
+                suffix_map[cids[0]] = 0
+            else:
+                for idx, cid in enumerate(cids):
+                    suffix_map[cid] = idx
+
+        for config_id in saved_providers:
+            config = saved_providers[config_id].copy()
             config.pop("备注", None)
             config.pop("获取地址", None)
-            # 合并默认配置，确保新增字段（如思考模式）在已保存的配置中也存在
-            default_config = FREE_PROVIDERS.get(provider_name, {})
+            # 关键修复：用 provider_name 字段（人类可读名）合并默认配置，
+            # 而不是用 config_id（UUID）—— 否则新字段（如思考模式）无法被默认配置补充
+            pname = config.get("provider_name", config_id)
+            default_config = FREE_PROVIDERS.get(pname, {})
             for default_key, default_value in default_config.items():
                 if default_key not in config:
                     config[default_key] = default_value
-            self._valid_configs[provider_name] = config
+            # 附加 display_name（含后缀）供 UI 显示使用，不持久化
+            # 优先使用用户填的"配置名称"（name），空则回退到 provider_name
+            base_name = config.get("name", "") or pname
+            idx = suffix_map.get(config_id, 0)
+            config["display_name"] = base_name if idx == 0 else f"{base_name} #{idx + 1}"
+            self._valid_configs[config_id] = config
 
         # 恢复或设置当前选中的服务商和模型
         # 优先级：窗口自身选择 > 全局默认 > 列表第一个
@@ -3878,6 +4009,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "_input_card"):
             return
         if getattr(self, "_is_destroyed", False):
+            return
+        # 在窗口拖拽过程中跳过高度调整，防止布局重算干扰窗口管理
+        from app.tool_popup import ToolPopupDialog
+        if ToolPopupDialog._any_window_dragging:
             return
         try:
             input_height = self.input_area.height()
