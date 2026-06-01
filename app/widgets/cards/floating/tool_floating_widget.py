@@ -74,7 +74,7 @@ class ToolFloatingWidget(QWidget):
         self._rotation_timer = QTimer(self)
         self._rotation_timer.timeout.connect(self._update_rotation)
         self._rotating = False
-        self._svg_renderer = _RotatingIcon(":/icons/执行中new.svg", size=18)
+        self._svg_renderer = _RotatingIcon(":/icons/执行中.svg", size=18)
         self._svg_success_pixmap = QPixmap(18, 18)
         self._svg_success_pixmap.fill(Qt.transparent)
         _svg_success_renderer = QSvgRenderer(":/icons/成功.svg")
