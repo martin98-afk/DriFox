@@ -1707,7 +1707,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     stop:0 {Colors.INPUT_BG_START},
                     stop:1 {Colors.INPUT_BG_END});
                 border: 1px solid {Colors.INPUT_BORDER};
-                border-radius: 16px;
+                border-bottom: none;
+                border-top-left-radius: 16px;
+                border-top-right-radius: 16px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
         """)
         card_layout = QVBoxLayout(self._input_card)
@@ -1725,7 +1729,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
         self.input_area.clearRequested.connect(self._on_clear_shortcut)
         self.input_area.agentChanged.connect(self._on_agent_changed)
-        self.input_area.textChanged.connect(self._on_input_area_height_changed)
+        # 注意：textChanged 已在 SendableTextEdit 内部连接 _on_text_changed
+        # 并触发 _adjust_height_to_content；这里不重复连接，避免一次输入
+        # 触发两次布局重算导致抖动。系统卡片开/关路径会显式调用
+        # _on_input_area_height_changed。
         self.input_area.slashTriggered.connect(self._on_slash_triggered)
         self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         self.input_area.slashShowHint.connect(self._on_slash_show_hint)
@@ -1773,12 +1780,35 @@ class OpenAIChatToolWindow(ToolWindow):
         separator.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
         card_layout.addWidget(separator)
 
-        # ===== 工具栏（卡片内部，分隔线下方）=====
-        toolbar_widget = QWidget(self._input_card)
+        # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
+        # 关键：工具栏从 _input_card 中拆出，放到主 layout 自己的容器里。
+        # 这样 _input_card 缩小到 0 时，工具栏的窗口绝对坐标不变。
+        self._bottom_toolbar_strip = QWidget(self)
+        self._bottom_toolbar_strip.setObjectName("bottomToolbarStrip")
+        self._bottom_toolbar_strip.setFixedHeight(34)
+        Colors.refresh()
+        # 与 _input_card 视觉拼接：上半透明、底部圆角与卡片风格统一
+        self._bottom_toolbar_strip.setStyleSheet(f"""
+            QWidget#bottomToolbarStrip {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {Colors.INPUT_BG_END},
+                    stop:1 {Colors.INPUT_BG_END});
+                border: 1px solid {Colors.INPUT_BORDER};
+                border-top: none;
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
+            }}
+        """)
+        strip_layout = QHBoxLayout(self._bottom_toolbar_strip)
+        strip_layout.setContentsMargins(8, 2, 8, 2)
+        strip_layout.setSpacing(8)
+
+        # ===== 工具栏（现在挂在独立 strip 上）=====
+        toolbar_widget = QWidget(self._bottom_toolbar_strip)
         toolbar_widget.setFixedHeight(34)
         toolbar_widget.setStyleSheet("background: transparent; border: none;")
         toolbar_layout = QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(8, 2, 8, 2)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(8)
 
         # 模型选择（无边框，只保留背景）
@@ -1895,11 +1925,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         toolbar_layout.addWidget(self._toolbar_capsule)
 
-        card_layout.addWidget(toolbar_widget)
+        # 工具栏挂到独立 strip（不在 _input_card 里了）
+        strip_layout.addWidget(toolbar_widget)
 
         bottom_layout.addWidget(self._input_card)
 
         layout.addWidget(self._bottom_input_container)
+        layout.addWidget(self._bottom_toolbar_strip)
 
     # ========== 内置命令初始化 ==========
 
@@ -2949,37 +2981,47 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.hide_card("auto_loop_running", self._window_id)
 
     def _on_system_card_opened(self, card_id: str):
-        """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间"""
+        """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间
+
+        关键修复：工具栏已移出 _input_card，独立放在主 layout 最底部的
+        _bottom_toolbar_strip 里。_input_card 缩小或隐藏都不会影响工具栏
+        相对窗口的绝对位置——它永远钉死在窗口底部 34px。
+        """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
         from app.tool_popup import ToolPopupDialog
         if ToolPopupDialog._any_window_dragging:
             return
         if hasattr(self, "input_area"):
-            # 标记系统卡片处于打开状态（供 _do_hide_input_area 做竞态保护）
+            # 标记系统卡片处于打开状态
             self._system_cards_open = True
 
-            # 暂停重绘，先设置卡片高度为工具栏高度
-            self._input_card.setUpdatesEnabled(False)
-            self._input_card.setFixedHeight(34 + 1 + 4)  # toolbar + separator + padding
-
-            # 恢复重绘，让卡片先显示出来
-            self._input_card.setUpdatesEnabled(True)
+            self.setUpdatesEnabled(False)
+            # 隐藏输入区释放空间给系统卡片
+            self.input_area.setVisible(False)
+            self.input_area.setFocusPolicy(Qt.NoFocus)
+            # 释放 _input_card 的高度约束，让它缩到 0
+            self._input_card.setMinimumHeight(0)
+            self._input_card.setMaximumHeight(0)
+            self.setUpdatesEnabled(True)
             self._input_card.update()
 
-            # 延迟隐藏输入框，等卡片显示完成后再执行（避免闪烁：先显示卡片再隐藏区域）
-            QTimer.singleShot(0, lambda: self._do_hide_input_area())
-
     def _do_hide_input_area(self):
-        """延迟隐藏输入框，由 _on_system_card_opened 调用
+        """保留向后兼容 — 已在 _on_system_card_opened 同步执行 setVisible(False)
 
-        注意：_on_system_card_closed 可能在定时器触发前执行，
-        必须检查 _system_cards_open 避免在恢复后再次隐藏输入框。
+        原来通过 QTimer.singleShot(0) 延迟一帧再隐藏 input_area，
+        正是这个延迟导致 toolbar 出现"短暂在容器外"的中间帧而视觉抖动。
+        修复后改为同步执行，不再需要此方法。保留仅为防止外部引用断裂。
         """
-        if hasattr(self, "input_area") and getattr(self, "_system_cards_open", False):
-            self.input_area.setVisible(False)
+        pass
 
     def _on_system_card_closed(self, card_id: str):
-        """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框"""
+        """系统卡片关闭时检查是否还有其他同类卡片开着，没有则恢复文本输入框
+
+        关键顺序：必须先 setFixedHeight(91) 恢复 _input_card 高度，
+        再 setVisible(True) input_area。理由与 _on_system_card_opened 对称：
+        避免 setVisible(True) 时 _input_card 仍 39px，input_area 加入
+        layout 后 toolbar 几何被推到 53-87（容器外）造成视觉跳变。
+        """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
         from app.tool_popup import ToolPopupDialog
         if ToolPopupDialog._any_window_dragging:
@@ -3002,17 +3044,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._system_cards_open = False
 
         if hasattr(self, "input_area"):
-            # 暂停重绘，先恢复高度再恢复可见性，避免布局中间态
-            self._input_card.setUpdatesEnabled(False)
-            self.input_area.setUpdatesEnabled(False)
-
-            # 先恢复输入框可见性
-            self.input_area.setVisible(True)
-            # 再重新计算卡片高度
+            self.setUpdatesEnabled(False)
+            self.input_area.setFocusPolicy(Qt.ClickFocus)
+            self._input_card.setMinimumHeight(0)
+            self._input_card.setMaximumHeight(16777215)
             self._on_input_area_height_changed()
-
-            self.input_area.setUpdatesEnabled(True)
-            self._input_card.setUpdatesEnabled(True)
+            self.input_area.setVisible(True)
+            self.setUpdatesEnabled(True)
             self._input_card.update()
 
     def _system_cards(self) -> list:
@@ -4027,29 +4065,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_input_area_height_changed(self):
         """输入框高度变化时同步调整卡片高度
 
-        大部分情况由 input_area._adjust_height_to_content() 内部
-        一次性设置输入框和卡片高度，此处作为备用：
-        - textChanged 信号：卡片高度已在 _adjust_height_to_content 中设置，此处为 no-op
-        - 系统卡片关闭恢复：直接调用以重新计算并恢复卡片高度
+        textChanged 触发的路径已由 input_area._adjust_height_to_content()
+        内部一次完成（只动输入框高度，父卡片由布局自动撑大，无抖动）。
+        此函数仅作为入口，实际工作转发给 _adjust_height_to_content，
+        避免在两处各自手动 setFixedHeight 父卡片导致重复布局重算。
         """
-        if not hasattr(self, "_input_card"):
+        if not hasattr(self, "input_area"):
             return
         if getattr(self, "_is_destroyed", False):
             return
-        # 在窗口拖拽过程中跳过高度调整，防止布局重算干扰窗口管理
-        from app.tool_popup import ToolPopupDialog
-        if ToolPopupDialog._any_window_dragging:
-            return
         try:
-            input_height = self.input_area.height()
-            toolbar_height = 34
-            separator_height = 1
-            card_padding = 4  # 上下各2px
-            card_height = (
-                input_height + separator_height + toolbar_height + card_padding
-            )
-            if self._input_card.height() != card_height:
-                self._input_card.setFixedHeight(card_height)
+            self.input_area._adjust_height_to_content()
         except Exception:
             pass
 

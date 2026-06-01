@@ -87,11 +87,9 @@ class ToolWindowTitleBar(QWidget):
         # 设置按钮已移除（移到主窗口内）
 
         self._min_btn = TransparentToolButton(get_icon("最小化"), self)
-        self._min_btn.setFixedSize(22, 22)
         self._min_btn.setToolTip("最小化")
 
         self._popup_btn = TransparentToolButton(FIF.CLOSE, self)
-        self._popup_btn.setFixedSize(22, 22)
         self._popup_btn.setToolTip("关闭")
         self._popup_btn.clicked.connect(self._on_popup_clicked)
 

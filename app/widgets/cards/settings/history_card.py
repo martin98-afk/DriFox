@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 
 from pypinyin import lazy_pinyin
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QDragEnterEvent
 from PyQt5.QtWidgets import (
     QWidget,
@@ -677,7 +677,7 @@ class HistoryCard(QWidget):
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(0)  # 下一个事件循环立即执行
         self._render_timer.timeout.connect(self._process_render_batch)
-        self._batch_size = 12  # 每批渲染 12 个 widget
+        self._batch_size = 30  # 每批渲染 30 个 widget（增大批次减少事件循环次数）
 
         # 分组标题 + 间隔线缓存（避免重复创建/销毁）
         self._cached_headers: Dict[str, _SectionHeader] = {}
@@ -718,8 +718,9 @@ class HistoryCard(QWidget):
 
     def _do_search(self):
         """防抖超时后执行实际搜索刷新"""
-        # 搜索时清空拼音缓存，数据可能已变化
-        self._pinyin_cache.clear()
+        # 注意：不再清空 _pinyin_cache。会话标题/预览的拼音与 session_id 绑定，
+        # 只要 session 存在，拼音结果就不变。删除会话时其缓存条目自然失效。
+        # 这样每次搜索避免 O(n) 次 lazy_pinyin 重复计算。
         self._update_display()
 
     def get_content_layout(self) -> QVBoxLayout:
@@ -897,8 +898,10 @@ class HistoryCard(QWidget):
             content_widget.repaint()
 
         # 分批渲染 widget
+        # 关键修复：第一批也延迟到下一个事件循环执行，确保 _on_system_card_opened
+        # 完成的输入区收缩布局已生效后再开始创建 widget，避免工具栏抖动。
         self._render_batch_index = 0
-        self._process_render_batch()
+        QTimer.singleShot(0, self._process_render_batch)
 
     def _process_render_batch(self):
         """处理下一批渲染任务"""

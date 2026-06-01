@@ -150,15 +150,20 @@ class HistoryManager:
         self._init_storage()
 
     def _deduplicate_history_sessions(self):
-        """去重历史会话列表，保持最新的一个"""
+        """去重历史会话列表，保持最新的一个
+
+        原实现使用 list.insert(0, ...) 在 reversed 循环里反复前插，是 O(n²)。
+        改为基于 dict 保持插入顺序的单次遍历，O(n)。
+        列表本身已按 updated_at DESC 排序（最新在索引 0），
+        因此正向遍历首次出现的即为最新，保留即可。
+        """
         seen_ids = set()
         unique_sessions = []
-        # 倒序遍历，保留最新的（后面的是更新的）
-        for session in reversed(self._history_sessions):
+        for session in self._history_sessions:
             session_id = session.get("session_id")
-            if session_id not in seen_ids:
+            if session_id and session_id not in seen_ids:
                 seen_ids.add(session_id)
-                unique_sessions.insert(0, session)  # 插回开头保持顺序
+                unique_sessions.append(session)
         removed = len(self._history_sessions) - len(unique_sessions)
         if removed > 0:
             logger.warning(f"[HistoryManager] 移除了 {removed} 个重复会话")
