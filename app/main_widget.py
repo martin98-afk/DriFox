@@ -2582,13 +2582,17 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 获取当前选中的服务商配置
-        provider_name = getattr(self, "_current_provider_name", "")
-        if not provider_name:
+        # _current_provider_name 在「单服务商多配置」改造后是 config_id（UUID），
+        # 真实的服务商类型名在 config["provider_name"] 里。BalanceDisplay 按
+        # provider_name 做白名单判断，所以这里必须用 config["provider_name"]。
+        config_id = getattr(self, "_current_provider_name", "")
+        if not config_id:
             balance_display.clear()
             return
 
-        config = self._valid_configs.get(provider_name, {})
+        config = self._valid_configs.get(config_id, {})
         api_key = config.get("API_KEY", "")
+        provider_name = config.get("provider_name", "")
 
         balance_display.set_provider(provider_name, api_key)
 
@@ -7882,15 +7886,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _refresh_balance(self):
         """刷新余额显示（对话完成后调用）"""
         logger.debug(
-            f"[Balance] _refresh_balance called, provider={getattr(self, '_current_provider_name', 'None')}"
+            f"[Balance] _refresh_balance called, config_id={getattr(self, '_current_provider_name', 'None')}"
         )
         balance_display = getattr(self, "balance_display", None)
         if balance_display:
-            # 如果当前服务商支持余额查询，则刷新
-            provider_name = getattr(self, "_current_provider_name", "")
+            # _current_provider_name 是 config_id；要先取出真实的 provider_name
+            # 才能匹配余额查询白名单。
+            config_id = getattr(self, "_current_provider_name", "")
+            config = self._valid_configs.get(config_id, {})
+            provider_name = config.get("provider_name", "")
             logger.debug(f"[Balance] provider_name={provider_name}")
             if provider_name in ("DeepSeek", "SiliconFlow (硅基流动)"):
-                config = self._valid_configs.get(provider_name, {})
                 api_key = config.get("API_KEY", "")
                 logger.debug(f"[Balance] api_key exists: {bool(api_key)}")
                 if api_key:
