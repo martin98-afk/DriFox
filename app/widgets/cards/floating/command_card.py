@@ -613,9 +613,9 @@ class CommandCard(QWidget):
         if not cmd and not skill:
             return
 
-        # 已在此命令的 detail 模式，无需刷新
+        # 已在此命令的 detail 模式，跳过 UI 重新渲染
+        # （data_provider 已在本方法开头更新，不影响值选择列表的实时性）
         if self._detail_mode and self._detail_cmd_name == cmd_name:
-            # 但需要更新 data_provider（可能异步加载）
             return
 
         self._detail_mode = True
@@ -773,8 +773,13 @@ class CommandCard(QWidget):
             self.parameterSelected.emit(widget.param_name, widget.param_type)
             self._switch_to_value_selection(widget)
 
-    def _switch_to_value_selection(self, widget: "ParameterItemWidget"):
-        """切换到值选择模式：显示当前参数的可选值"""
+    def _switch_to_value_selection(self, widget: "ParameterItemWidget", query: str = ""):
+        """切换到值选择模式：显示当前参数的可选值
+
+        Args:
+            widget: 参数项 widget（提供 param_name 和可选值来源）
+            query: 搜索关键字（按子串过滤，用于实时搜索）
+        """
         param_name = widget.param_name
         param = widget._param
 
@@ -790,6 +795,8 @@ class CommandCard(QWidget):
             self._value_selection_mode = False
             return
 
+        filtered = self._filter_value_options(options, query)
+
         # 清空旧 value widget
         for w in self._value_widgets:
             try:
@@ -801,7 +808,7 @@ class CommandCard(QWidget):
         self._selected_value_index = -1
 
         # 构建值列表
-        for val in options:
+        for val in filtered:
             item = QLabel(val)
             item.setFixedHeight(ITEM_HEIGHT)
             item.setCursor(Qt.PointingHandCursor)
@@ -829,6 +836,124 @@ class CommandCard(QWidget):
         # 重算高度
         self._adjust_detail_height()
 
+    # ---- 自动检测 --model 触发值选择 / 实时搜索 ----
+
+    def _auto_switch_to_value_selection(self, text: str, cursor_pos: int = -1):
+        """检测 --model 前缀输入，自动进入/刷新值选择模式
+
+        行为：
+        - 用户在 detail 命令范围内输入 `--m`/`--mo`/`--mod`/.../`--model=` 时自动弹出模型列表
+        - 已在值选择模式时，根据光标前内容实时过滤
+        - cursor_pos=-1 时按"到下一个空格/末尾"取搜索关键字
+        """
+        import re
+
+        # 1. 找 --model 前缀位置（--m, --mo, --model, --model= 都匹配）
+        #    使用 lookahead 限制最长匹配到 = 之前/或 整个 token
+        match = re.search(r'--model[a-z-]*', text)
+        if not match:
+            return
+
+        token_start = match.start()
+        token_end = match.end()  # 包含 = 时指向 = 之后
+
+        # 2. 限定在 detail 命令范围内（避免误识别）
+        #    detail 模式的输入形如 "/agent --model=xxx"
+        cmd_prefix_len = len(self._detail_cmd_name) + 2  # "/<cmd_name> "
+        if token_start < cmd_prefix_len:
+            return
+
+        # 3. 找到对应的参数 widget（必须在 _param_widgets 中且仍可见）
+        target_widget = None
+        for w in self._param_widgets:
+            if w.param_name == "--model=" and w.param_type == "value":
+                if w.isVisible():
+                    target_widget = w
+                break
+        if target_widget is None:
+            return  # 参数已激活（被显隐为不可见），不做自动触发
+
+        # 4. 提取搜索 query：match 之后到光标/下一个空格的内容
+        query = self._extract_model_query(text, token_end, cursor_pos)
+
+        # 5. 已在值选择模式：仅刷新过滤
+        if self._value_selection_mode and self._value_selection_param == "--model=":
+            self._refresh_value_list(query)
+            return
+
+        # 6. 否则切到值选择模式
+        self._switch_to_value_selection(target_widget, query=query)
+
+    def _extract_model_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
+        """提取 --model= 之后到光标前/下一个空格前的子串作为搜索关键字"""
+        if cursor_pos < 0 or cursor_pos > len(text):
+            cursor_pos = len(text)
+        # 右边界 = min(光标, 下一个空格)
+        right = cursor_pos
+        space_pos = text.find(" ", after_token_end)
+        if space_pos >= 0 and space_pos < right:
+            right = space_pos
+        return text[after_token_end:right].lower()
+
+    def _filter_value_options(self, options: list, query: str) -> list:
+        """按子串过滤选项（不区分大小写）；空 query 返回全部"""
+        if not query:
+            return list(options)
+        q = query.lower()
+        return [opt for opt in options if q in opt.lower()]
+
+    def _refresh_value_list(self, query: str):
+        """在不重建模式状态的前提下，仅刷新值列表 widget（用于实时搜索）"""
+        param_name = self._value_selection_param
+        if not param_name:
+            return
+
+        # 重新取源 options
+        options = []
+        if param_name == "--model=":
+            options = self._data_provider.get("model_options", [])
+        else:
+            # 非 --model= 的 value 参数：从 widget 反查
+            for w in self._param_widgets:
+                if w.param_name == param_name:
+                    options = w._param.value_options or []
+                    break
+
+        filtered = self._filter_value_options(options, query)
+
+        # 重建 widget
+        for w in self._value_widgets:
+            try:
+                self._detail_value_layout.removeWidget(w)
+                w.deleteLater()
+            except RuntimeError:
+                pass
+        self._value_widgets.clear()
+
+        for val in filtered:
+            item = QLabel(val)
+            item.setFixedHeight(ITEM_HEIGHT)
+            item.setCursor(Qt.PointingHandCursor)
+            item.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_PRIMARY}; background: transparent;
+                    padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
+                }}
+            """)
+            item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
+            self._detail_value_layout.addWidget(item)
+            self._value_widgets.append(item)
+
+        # 保持选中索引在有效范围
+        if self._value_widgets:
+            self._selected_value_index = min(
+                max(self._selected_value_index, 0), len(self._value_widgets) - 1
+            )
+        else:
+            self._selected_value_index = -1
+        self._update_value_selection()
+        self._adjust_detail_height()
+
     def _on_value_clicked(self, value: str):
         """值选择项被点击"""
         self.parameterValueSelected.emit(value)
@@ -843,11 +968,13 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(True)
         self._adjust_detail_height()
 
-    def update_active_params(self, active: set):
+    def update_active_params(self, active: set, full_text: str = "", cursor_pos: int = -1):
         """根据输入中已存在的参数名列表，显隐参数项
 
         Args:
             active: 输入文本中已存在的参数名集合，如 {"--with-context", "--model="}
+            full_text: 完整输入文本（用于自动检测 --model 触发值选择 + 实时搜索）
+            cursor_pos: 光标位置（实时搜索关键字的右边界）
         """
         if not self._detail_mode:
             return
@@ -894,6 +1021,11 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(any_visible)
         if any_visible:
             self._detail_params_content.setVisible(True)
+
+        # 自动检测 --model 前缀：进入/刷新值选择模式（实时搜索）
+        if full_text and any_visible:
+            self._auto_switch_to_value_selection(full_text, cursor_pos)
+
         # 重算高度
         self._adjust_detail_height()
         # 通知父容器布局更新

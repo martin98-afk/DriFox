@@ -38,11 +38,16 @@ def _calculate_scroll_height(total_items: int) -> int:
 
 
 class ProviderHeader(QWidget):
-    """服务商标题行"""
+    """服务商标题行
 
-    def __init__(self, provider_name: str, parent=None):
+    display_name：给用户看到的标题（可能带 " #2" 后缀区分同名配置）
+    icon_provider_name：用于在 PROVIDER_ICONS 中查找图标的 key（一般是 base 服务商名）
+    """
+
+    def __init__(self, display_name: str, icon_provider_name: str = None, parent=None):
         super().__init__(parent)
-        self.provider_name = provider_name
+        self.display_name = display_name
+        self.icon_provider_name = icon_provider_name or display_name
         self.setFixedHeight(36)
         self.setStyleSheet("background: transparent;")
 
@@ -50,12 +55,12 @@ class ProviderHeader(QWidget):
         layout.setContentsMargins(10, 0, 8, 0)
         layout.setSpacing(8)
 
-        # 服务商图标
-        self.icon_widget = ProviderIconWidget(provider_name, 20)
+        # 服务商图标（按 icon_provider_name 查找，避免 " #2" 后缀让图标找不到）
+        self.icon_widget = ProviderIconWidget(self.icon_provider_name, 20)
         layout.addWidget(self.icon_widget)
 
-        # 服务商名称
-        self.name_label = QLabel(provider_name, self)
+        # 服务商名称（显示用，含后缀）
+        self.name_label = QLabel(self.display_name, self)
         self._apply_name_style()
         layout.addWidget(self.name_label)
 
@@ -208,11 +213,18 @@ class ModelSelectorCardContent(QWidget):
 
     def set_providers_data(
         self,
-        provider_models: List[Tuple[str, List[str], bool]],  # (provider, [models], is_current_provider)
+        provider_models: List[Tuple[str, List[str], bool]],  # (display_name, [models], is_current_provider)
         current_provider: str,
         current_model: str,
+        display_to_provider_name: Optional[dict] = None,
     ):
-        """设置服务商和模型数据"""
+        """设置服务商和模型数据
+
+        provider_models 中的 provider_name 是 display_name（含 " #2" 后缀），
+        用于显示和 ModelItem 内部 active 判定。
+        display_to_provider_name: 可选映射，display_name → icon_provider_name，
+        用于让 ProviderHeader 正确找到服务商图标（PROVIDER_ICONS 不识别后缀）。
+        """
         # 重置滚动位置，避免重建后旧滚动位置导致吸顶服务商计算错误
         self.scroll_area.verticalScrollBar().setValue(0)
         self._current_provider = current_provider
@@ -232,6 +244,7 @@ class ModelSelectorCardContent(QWidget):
                 self._clear_layout(item.layout())
 
         search_text = self._search_text
+        name_map = display_to_provider_name or {}
 
         for provider_name, models, is_current_provider in provider_models:
             # 过滤
@@ -242,8 +255,9 @@ class ModelSelectorCardContent(QWidget):
             else:
                 filtered_models = models
 
-            # 服务商标题
-            header = ProviderHeader(provider_name, self.content_widget)
+            # 服务商标题：显示名是 display_name，图标查找用 icon_provider_name
+            icon_name = name_map.get(provider_name, provider_name)
+            header = ProviderHeader(provider_name, icon_name, self.content_widget)
             self.content_layout.addWidget(header)
             self._provider_headers.append((header, provider_name))
 

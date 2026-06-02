@@ -76,6 +76,15 @@ colors:
   input_border: '#31594f'
   input_focus_border: '#57d29a'
   input_placeholder: rgba(218, 240, 232, 0.4)
+  # 聚焦发光 halo cascade — 主光源（输入卡）与 环境光晕（工具栏）分层
+  glow_primary_alpha: 185
+  glow_primary_blur: 28
+  glow_ambient_alpha: 100
+  glow_ambient_blur: 34
+
+  # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
+  toolbar_strip_bg: rgba(18, 42, 35, 150)
+  toolbar_strip_border: '#31594f'
   realtime_border: '#2dd4bf'
   realtime_accent: '#5eead4'
   realtime_accent_warm: '#fbbf24'
@@ -106,3 +115,9 @@ colors:
   branch_label_bg: rgba(87, 210, 154, 0.15)
   branch_label_border: rgba(87, 210, 154, 0.3)
   window_bg: rgba(87, 210, 154, 0.04)
+
+  # ── 输入卡双层 halo ──
+  input_glow_primary_blur: 18
+  input_glow_primary_alpha: 225
+  input_glow_ambient_blur: 42
+  input_glow_ambient_alpha: 75

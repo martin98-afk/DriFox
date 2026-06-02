@@ -261,21 +261,27 @@ class GatewayEngine(QObject, BaseEngine):
                 return "📋 **当前模型**: 暂无配置的服务商\n请在桌面端设置中添加服务商。"
 
             lines = ["📋 **可用模型**:\n"]
-            for name in sorted(saved_providers.keys()):
-                models = saved_providers[name].get("模型列表", [])
-                model_name = saved_providers[name].get("模型名称", "")
-                marker = " ◀ 当前服务商" if name == current_provider else ""
-                session_marker = " ⚡ 会话覆盖" if name == session_provider else ""
+            for config_id, info in sorted(saved_providers.items()):
+                models = info.get("模型列表", [])
+                model_name = info.get("模型名称", "")
+                # 显示配置名称（如果存在），否则显示服务商名称
+                display_name = info.get("name", "") or info.get("provider_name", config_id)
+                # 判断是否为当前服务商：比较配置 ID 或服务商名称
+                is_current = (config_id == current_provider) or (info.get("provider_name") == current_provider)
+                marker = " ◀ 当前服务商" if is_current else ""
+                # 会话覆盖判断：比较配置 ID 或服务商名称
+                is_session = (config_id == session_provider) or (info.get("provider_name") == session_provider)
+                session_marker = " ⚡ 会话覆盖" if is_session else ""
 
                 if models:
-                    lines.append(f"**{name}**{marker}{session_marker}")
+                    lines.append(f"**{display_name}**{marker}{session_marker}")
                     lines.append(f"  模型: `{model_name}`")
                     if len(models) > 1:
                         lines.append(f"  可选: {', '.join(f'`{m}`' for m in models[:8])}")
                 else:
-                    lines.append(f"**{name}**{marker}{session_marker} — `{model_name}`")
+                    lines.append(f"**{display_name}**{marker}{session_marker} — `{model_name}`")
 
-                if session_provider == name:
+                if is_session:
                     lines.append(f"  ⚡ 会话级模型: `{session_model}`")
 
                 lines.append("")
@@ -286,27 +292,40 @@ class GatewayEngine(QObject, BaseEngine):
         provider_name = parts[0]
         model_name = parts[1] if len(parts) > 1 else ""
 
-        matches = [n for n in saved_providers if provider_name.lower() in n.lower()]
+        # 匹配服务商：支持配置 ID、服务商名称、配置名称
+        matches = []
+        for config_id, info in saved_providers.items():
+            # 匹配配置 ID
+            if provider_name.lower() in config_id.lower():
+                matches.append(config_id)
+                continue
+            # 匹配服务商名称
+            if info.get("provider_name") and provider_name.lower() in info["provider_name"].lower():
+                matches.append(config_id)
+                continue
+            # 匹配配置名称
+            if info.get("name") and provider_name.lower() in info["name"].lower():
+                matches.append(config_id)
+                continue
+
         if not matches:
             return f"❌ 未找到服务商 `{provider_name}`\n发送 `/model` 查看服务商列表。"
 
-        provider = matches[0]
-        config = saved_providers[provider]
+        config_id = matches[0]
+        config = saved_providers[config_id]
+        display_name = config.get("name", "") or config.get("provider_name", config_id)
 
         if not model_name:
             model_name = config.get("模型名称", "")
             available = config.get("模型列表", [])
             if available:
                 opt_list = ", ".join(f"`{m}`" for m in available[:10])
-                return (f"📋 **{provider}** 当前模型: `{model_name}`\n"
+                return (f"📋 **{display_name}** 当前模型: `{model_name}`\n"
                         f"可选: {opt_list}")
-            return f"📋 **{provider}** 当前模型: `{model_name}`"
+            return f"📋 **{display_name}** 当前模型: `{model_name}`"
 
-        if provider not in saved_providers:
-            return f"❌ 未找到服务商 `{provider}`"
-
-        session.metadata["model"] = {"provider": provider, "model": model_name}
-        return (f"✅ 已切换到 **{provider}** 的模型: `{model_name}`\n"
+        session.metadata["model"] = {"provider": config_id, "model": model_name}
+        return (f"✅ 已切换到 **{display_name}** 的模型: `{model_name}`\n"
                 f"（仅当前 Gateway 会话生效）")
 
     def _cmd_agent(self, args: str, session: ChatSession) -> str:

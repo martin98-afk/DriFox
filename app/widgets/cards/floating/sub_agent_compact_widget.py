@@ -70,7 +70,7 @@ class _AgentTaskRow(QFrame):
         self._is_finished = False
 
         # 旋转图标
-        self._rotating_icon = _RotatingIcon(":/icons/执行中.svg", size=16, parent=self)
+        self._rotating_icon = _RotatingIcon(":/icons/执行中new.svg", size=16, parent=self)
         # 成功后显示的静态图标
         self._success_pixmap = QPixmap(16, 16)
         self._success_pixmap.fill(Qt.transparent)

@@ -284,6 +284,24 @@ class ProviderEditCard(QWidget):
 
         main_layout.addLayout(model_row)
 
+        # 配置名称行
+        config_name_row = QHBoxLayout()
+        config_name_label = BodyLabel("配置名称:")
+        config_name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        config_name_row.addWidget(config_name_label)
+        self.configNameEdit = LineEdit()
+        # 如果是编辑模式，且 provider_info 中有 name 字段，则填充
+        if not self.is_new and "name" in self.provider_info:
+            self.configNameEdit.setText(self.provider_info["name"])
+        else:
+            # 新建时，默认使用服务商名称
+            if self.is_new:
+                self.configNameEdit.setText(self.nameCombo.currentText())
+            else:
+                self.configNameEdit.setText(self.provider_name)
+        config_name_row.addWidget(self.configNameEdit, 1)
+        main_layout.addLayout(config_name_row)
+
         # 保存按钮已移到 BaseSettingsCard 标题栏，信号由外部连接
 
         # 新建时调用一次初始化
@@ -454,18 +472,31 @@ class ProviderEditCard(QWidget):
             self.modelCombo.blockSignals(False)
 
     def _on_save(self):
-        """保存"""
+        """保存。
+
+        不再手工保留 config_id——config_id 现在由 main_widget 端基于 apikey
+        的稳定 hash 计算（见 app.core.provider_profile.apply_provider_save），
+        编辑同 apikey 始终命中同一条目，不会再产生重复。
+        """
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
         current_models = self.modelCombo.get_all_models()
+        existing_models = self.provider_info.get("模型列表", [])
+        # 编辑场景下保留旧 config_id，让 main_widget 能据此判断 apikey 是否被改过
+        existing_config_id = self.provider_info.get("config_id", "")
         self.provider_info = {
             "API_URL": self.apiUrlCombo.currentText().strip(),
             "API_KEY": self.apiKeyEdit.text().strip(),
             "模型名称": self.modelCombo.currentText().strip(),
             "认证方式": "bearer",
+            "name": self.configNameEdit.text().strip(),
         }
+        if existing_config_id:
+            self.provider_info["config_id"] = existing_config_id
         if current_models:
             self.provider_info["模型列表"] = current_models
-        elif "模型列表" not in self.provider_info:
+        elif existing_models:
+            self.provider_info["模型列表"] = existing_models
+        else:
             self.provider_info["模型列表"] = []
         self.saved.emit(provider_name, self.provider_info)
 

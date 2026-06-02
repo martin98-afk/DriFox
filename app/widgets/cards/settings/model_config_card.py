@@ -56,8 +56,12 @@ class ModelConfigCard(QWidget):
         self._clear_layout(self.layout)
         self._widgets.clear()
 
-        # 连接信息字段（由外部过滤了再传进来，但补一个安全跳过）
-        skip_keys = {"模型名称", "API_URL", "API_KEY", "认证方式", "获取地址", "模型列表", "选择模型"}
+        # 连接信息 + 系统字段（不渲染到参数列表中）
+        skip_keys = {
+            "模型名称", "API_URL", "API_KEY", "认证方式", "获取地址",
+            "模型列表", "选择模型", "provider_name", "name", "config_id",
+            "display_name", "_suffix_index",
+        }
 
         for key, value in config.items():
             if key in skip_keys:

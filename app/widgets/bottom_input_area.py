@@ -1,9 +1,10 @@
 # 大模型输入框
+import math
 import os
 import re
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import (
     QInputMethodEvent,
     QKeyEvent,
@@ -11,6 +12,8 @@ from PyQt5.QtGui import (
     QTextCursor,
     QColor,
     QTextCharFormat,
+    QPainter,
+    QPainterPath, QPen,
 )
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
@@ -68,6 +71,14 @@ class SendableTextEdit(TextEdit):
         # 关闭 qfluentwidgets TextEdit 焦点时的底部高亮
         if hasattr(self, "layer"):
             self.layer.hide()
+
+        # 防抖定时器：合并连续 resize 事件中的发送按钮定位，
+        # 避免 setMinimumHeight/setMaximumHeight 与父布局级联 resize
+        # 触发的多次 resizeEvent 把按钮跳到中间位置。
+        self._send_btn_debounce_timer = QTimer(self)
+        self._send_btn_debounce_timer.setSingleShot(True)
+        self._send_btn_debounce_timer.setInterval(0)
+        self._send_btn_debounce_timer.timeout.connect(self._position_send_button)
 
         self._setup_keyboard_shortcuts()
 
@@ -459,15 +470,21 @@ class SendableTextEdit(TextEdit):
         self.setFocus(Qt.OtherFocusReason)
 
     def _sync_detail_params(self):
-        """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片"""
+        """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片
+
+        同时透传完整文本和光标位置，供卡片做：
+        - 自动检测 --model 前缀并弹出模型列表
+        - 模型列表的实时搜索过滤
+        """
         from app.core.command_manager import CommandManager
 
         card = self._get_card()
         if not card or not card.is_detail_mode:
             return
         text = self.toPlainText()
+        cursor_pos = self.textCursor().position()
         active = CommandManager.parse_active_params(text) if text else set()
-        card.update_active_params(active)
+        card.update_active_params(active, full_text=text, cursor_pos=cursor_pos)
 
     # ==================== 输入历史浏览 ====================
 
@@ -587,40 +604,38 @@ class SendableTextEdit(TextEdit):
     def _adjust_height_to_content(self):
         """根据内容自动调整高度
 
-        一次性更新输入框和父卡片高度，通过暂停重绘确保中间态不被渲染。
-        setFixedHeight 内部会立即触发 resize，如果两个高度分步设置
-        会导致两次独立布局重算，下方按钮栏就会抖动。
+        setFixedHeight + updateGeometry 把尺寸变更交给 Qt 事件循环处理，
+        父卡片、工具栏、发送按钮由 layout 级联 resize / debounce timer
+        自然到位；不在 textChanged 回调里同步冲刷事件，避免超高内容
+        切回原高时阻塞 UI 线程造成的卡顿。_adjusting_height 防重入。
         """
         if getattr(self, "_initializing", False):
             return
+        if getattr(self, "_adjusting_height", False):
+            return  # 防重入：级联 resize 不要再进入
+
+        # 窗口拖拽过程中跳过高度调整，防止布局重算干扰窗口管理
+        try:
+            from app.tool_popup import ToolPopupDialog
+
+            if ToolPopupDialog._any_window_dragging:
+                return
+        except ImportError:
+            pass
 
         doc = self.document()
         content_height = int(doc.size().height()) + 24
         new_height = max(44, min(160, content_height))
 
         if self.height() != new_height:
-            parent = self.parent()
-            # 暂停重绘，避免两次 setFixedHeight 触发的中间布局被渲染
-            if parent:
-                parent.setUpdatesEnabled(False)
-            self.setUpdatesEnabled(False)
-
-            # 先设卡片高度（父），再设输入框高度（子）
-            # 确保当子 resize 触发布局级联时，父已有正确的约束
-            if parent:
-                toolbar_height = 34
-                separator_height = 1
-                card_padding = 4
-                parent.setFixedHeight(
-                    new_height + separator_height + toolbar_height + card_padding
-                )
-            self.setFixedHeight(new_height)
-
-            self.setUpdatesEnabled(True)
-            if parent:
-                parent.setUpdatesEnabled(True)
-                parent.update()
-            self.update()
+            self._adjusting_height = True
+            try:
+                self.setFixedHeight(new_height)
+                self.updateGeometry()
+                # 发送按钮位置由 resizeEvent → debounce timer(0ms) 在
+                # 事件循环下一轮自然定位，不在这里强行同步冲刷。
+            finally:
+                self._adjusting_height = False
 
     def _rebind_send_btn(self, handler):
         try:
@@ -667,7 +682,9 @@ class SendableTextEdit(TextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._position_send_button()
+        # 每次 resize 重启定时器；连续多次 resize 只会触发最后一次定位，
+        # 保证发送按钮一次到位（不抖）。
+        self._send_btn_debounce_timer.start()
 
     def _position_send_button(self):
         """定位发送按钮到输入框右下角"""
@@ -967,25 +984,30 @@ class SendableTextEdit(TextEdit):
             self._agent_combo.setStyleSheet(self._build_combo_style())
 
     def _animate_glow(self, target_blur, target_alpha, duration=300):
-        """动画发光效果 - 作用到父级 _input_card 的边框"""
+        try:
+            host = self.parent()
+            while host and not hasattr(host, "_apply_bottom_input_stack_style"):
+                host = host.parent()
+            if host:
+                host._apply_bottom_input_stack_style(target_alpha > 0)
+                return
+        except Exception:
+            pass
+        """后备：刷新输入卡样式（仅样式表，双层 glow 由 host._apply_bottom_input_stack_style 管理）"""
         if not self._glow_effect:
             return
         try:
             Colors.refresh()
-            # 延迟挂载发光效果到父卡片
+            # 延迟定位父卡片
             if self._glow_target is None:
                 card = self.parent()
                 while card and not hasattr(card, "_input_card"):
                     card = card.parent()
                 if card and hasattr(card, "_input_card"):
                     self._glow_target = card._input_card
-                    self._glow_target.setGraphicsEffect(self._glow_effect)
             if self._glow_target:
-                self._glow_effect.setBlurRadius(target_blur)
-                glow_color = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow_color.setAlpha(target_alpha)
-                self._glow_effect.setColor(glow_color)
-                # 焦点时高亮边框颜色
+                # 后备样式：与 main_widget._apply_bottom_input_stack_style 保持一致
+                # 注意：不再 setGraphicsEffect（_input_card 已有 _input_card_primary_shadow 管理主光）
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
@@ -993,7 +1015,11 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_FOCUS_BG_START},
                                 stop:1 {Colors.INPUT_FOCUS_BG_END});
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
-                            border-radius: 14px;
+                            border-bottom: none;
+                            border-top-left-radius: 16px;
+                            border-top-right-radius: 16px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
                         }}
                     """)
                 else:
@@ -1003,7 +1029,11 @@ class SendableTextEdit(TextEdit):
                                 stop:0 {Colors.INPUT_BG_START},
                                 stop:1 {Colors.INPUT_BG_END});
                             border: 1px solid {Colors.INPUT_BORDER};
-                            border-radius: 14px;
+                            border-bottom: none;
+                            border-top-left-radius: 16px;
+                            border-top-right-radius: 16px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
                         }}
                     """)
         except Exception:
@@ -1052,3 +1082,166 @@ class SendableTextEdit(TextEdit):
         """重写 clear 方法，清空输入时退出历史浏览模式"""
         self._reset_history_mode()
         super().clear()
+
+
+class InputGlowUnderlay(QWidget):
+    """统一胶囊向内发光层。
+
+    输入卡（上圆角 + border-bottom:none）和工具栏条（上方下圆）原本是两个
+    独立 widget，各自挂 QGraphicsDropShadowEffect 时，光晕只跟自己的局部
+    轮廓走，接缝处又互相遮挡 —— 看起来就像"只有上半弧形发光"。
+
+    本控件作为主窗口的子控件，绝对定位覆盖整个胶囊（含 margin），通过
+    paintEvent 一次性绘制连贯的胶囊形 **向内** 发光：边缘最亮、向胶囊中心
+    平滑衰减，类似 lit-up 霓虹边框效果。鼠标事件全部穿透，不影响输入 / 按钮。
+
+    使用方式：
+      ``set_pill_geometry`` 同步胶囊在 underlay 内部坐标中的位置与圆角；
+      ``set_glow`` 切换主光 / 环境光的强度（聚焦 / 失焦）；
+      ``set_color`` 切换发光色（主题切换）。
+    """
+
+    DEFAULT_RADIUS = 16
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._color = QColor(201, 168, 92)
+        self._primary_alpha = 0
+        self._primary_blur = 0
+        self._ambient_alpha = 0
+        self._ambient_blur = 0
+        self._pill_x = 0
+        self._pill_y = 0
+        self._pill_w = 0
+        self._pill_h = 0
+        self._radius = self.DEFAULT_RADIUS
+
+    def set_color(self, color: QColor):
+        c = QColor(color)
+        if c.rgb() == self._color.rgb():
+            return
+        self._color = c
+        self.update()
+
+    def set_glow(
+        self,
+        primary_alpha: int,
+        primary_blur: int,
+        ambient_alpha: int,
+        ambient_blur: int,
+    ):
+        if (
+            primary_alpha == self._primary_alpha
+            and primary_blur == self._primary_blur
+            and ambient_alpha == self._ambient_alpha
+            and ambient_blur == self._ambient_blur
+        ):
+            return
+        self._primary_alpha = max(0, int(primary_alpha))
+        self._primary_blur = max(0, int(primary_blur))
+        self._ambient_alpha = max(0, int(ambient_alpha))
+        self._ambient_blur = max(0, int(ambient_blur))
+        self.update()
+
+    def set_pill_geometry(
+        self,
+        pill_x: int,
+        pill_y: int,
+        pill_w: int,
+        pill_h: int,
+        radius: int = DEFAULT_RADIUS,
+    ):
+        if (
+            pill_x == self._pill_x
+            and pill_y == self._pill_y
+            and pill_w == self._pill_w
+            and pill_h == self._pill_h
+            and radius == self._radius
+        ):
+            return
+        self._pill_x = int(pill_x)
+        self._pill_y = int(pill_y)
+        self._pill_w = max(0, int(pill_w))
+        self._pill_h = max(0, int(pill_h))
+        self._radius = max(0, int(radius))
+        self.update()
+
+    def has_visible_glow(self) -> bool:
+        return (
+            self._pill_w > 0
+            and self._pill_h > 0
+            and (
+                (self._primary_alpha > 0 and self._primary_blur > 0)
+                or (self._ambient_alpha > 0 and self._ambient_blur > 0)
+            )
+        )
+
+    def paintEvent(self, event):
+        if not self.has_visible_glow():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(Qt.NoBrush)
+
+        # 正向裁剪：只在胶囊 **内部** 绘制 —— 这样发光从边缘向中心扩散，
+        # 不会溢出胶囊轮廓外（外面的窗口背景保持纯净）。
+        inner = QPainterPath()
+        inner.addRoundedRect(
+            QRectF(self._pill_x, self._pill_y, self._pill_w, self._pill_h),
+            self._radius,
+            self._radius,
+        )
+        painter.setClipPath(inner)
+
+        # 先画环境光（弥散底层，更深更柔），再画主光（紧致核心，更亮更窄）
+        # 两层叠加形成"边缘核心亮 → 向心柔光晕开"的层次
+        if self._ambient_blur > 0 and self._ambient_alpha > 0:
+            self._paint_inner_halo(
+                painter, self._ambient_blur, self._ambient_alpha, falloff=2.0
+            )
+        if self._primary_blur > 0 and self._primary_alpha > 0:
+            self._paint_inner_halo(
+                painter, self._primary_blur, self._primary_alpha, falloff=2.4
+            )
+
+    def _paint_inner_halo(
+        self, painter: QPainter, blur: int, alpha: int, falloff: float
+    ):
+        """从胶囊边缘向内堆叠 N 道单像素描边圆角矩形，模拟向心高斯衰减。
+
+        第 i 层位于离边缘 i 像素处（向胶囊中心方向），alpha 按
+        ``exp(-(t*falloff)^2)`` 递减 ─→ 边缘最亮、深处趋近透明。
+        因为 paintEvent 之前已 clip 到胶囊内部，stroke 多出来的部分不会
+        画到胶囊外面，每一道描边都是闭合的圆角矩形轮廓。
+        """
+        steps = max(blur, 12)
+        for i in range(steps):
+            t = i / steps  # 0 边缘 → 1 深处
+            falloff_factor = math.exp(-((t * falloff) ** 2))
+            layer_alpha = int(alpha * falloff_factor)
+            if layer_alpha < 1:
+                continue
+            layer_alpha = min(255, layer_alpha)
+            c = QColor(self._color)
+            c.setAlpha(layer_alpha)
+
+            pen = QPen(c, 1)
+            pen.setCosmetic(True)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+
+            # i + 0.5 偏移：把 1px 描边正好画在像素中心，抗锯齿更平滑
+            offset = i + 0.5
+            w = self._pill_w - 2 * offset
+            h = self._pill_h - 2 * offset
+            if w <= 0 or h <= 0:
+                break
+            r = max(0.0, self._radius - offset)
+            painter.drawRoundedRect(
+                QRectF(self._pill_x + offset, self._pill_y + offset, w, h),
+                r,
+                r,
+            )

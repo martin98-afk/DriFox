@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
-from PyQt5.QtCore import QEvent, QTimer
+from PyQt5.QtCore import QEvent, QTimer, QPropertyAnimation, QEasingCurve, Qt
 from loguru import logger
 
 from app.widgets.cards.card_manager import CardManager, ContainerType
@@ -27,6 +27,7 @@ class CardContainer(QWidget):
         self._card_manager: Optional[CardManager] = None
         self._window_id: Optional[str] = None  # 多窗口隔离
         self._expand_timer: Optional[QTimer] = None  # 防抖展开定时器
+        self._expand_animation: Optional[QPropertyAnimation] = None  # 展开/折叠动画
         self._setup_ui()
     
     def _setup_ui(self):
@@ -65,10 +66,21 @@ class CardContainer(QWidget):
         self._schedule_expand()
     
     def _schedule_expand(self):
-        """防抖调度：有可见卡片则展开，否则折叠"""
+        """防抖调度：有可见卡片则展开，否则折叠
+
+        注意：不在"已展开"时早 return。
+        子卡片（如 CommandCard 切 detail 模式）可能在已展开容器内
+        通过 setFixedHeight 改变自身高度，需要容器重新跑 _do_expand
+        以动画到新高度。_do_expand 内部会用 sizeHint 差异判断避免无谓动画。
+        """
+        # 窗口拖拽过程中跳过容器展开/折叠，防止布局级联干扰
+        try:
+            from app.tool_popup import ToolPopupDialog
+            if ToolPopupDialog._any_window_dragging:
+                return
+        except ImportError:
+            pass
         has_visible = any(w.isVisible() for w in self._cards.values())
-        if self._is_expanded() and has_visible:
-            return  # 已展开且有可见卡片，不再重复触发布局
         # 取消上次未执行的防抖
         if self._expand_timer:
             self._expand_timer.stop()
@@ -77,7 +89,7 @@ class CardContainer(QWidget):
             self._expand_timer.setSingleShot(True)
             self._expand_timer.setInterval(0)
             self._expand_timer.timeout.connect(self._do_expand)
-        
+
         if has_visible:
             # ⚡ 有可见卡片：立即展开，不等到 timer 触发
             # 否则父容器高度为 0 时，卡片虽然 setVisible(True) 但在屏幕上看不见
@@ -87,14 +99,67 @@ class CardContainer(QWidget):
             self._expand_timer.start()
     
     def _do_expand(self):
-        """执行展开/折叠"""
+        """执行展开/折叠动画（200ms 缓动，OutCubic）"""
         has_visible = any(w.isVisible() for w in self._cards.values())
+
+        # 取消进行中的动画，避免叠加造成跳变
+        if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+            self._expand_animation.stop()
+            try:
+                self._expand_animation.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+
+        # 解除 minHeight 限制，确保折叠动画能跑到 0
+        self.setMinimumHeight(0)
+
         if has_visible:
-            # 放开最大高度限制，让 Qt 布局系统自动计算合适高度
+            # ── 展开：从 0 高度动画到 layout 算出的自然高度 ──
+            # 先放开 maxHeight，让 layout 算出"展开后该有多高"
             self.setMaximumHeight(self._EXPAND_MAX)
+            natural_h = self._layout.sizeHint().height()
+            if natural_h <= 0:
+                # 兜底：layout 没算出高度，直接放开
+                return
+            current_h = self.height()
+            # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
+            if abs(natural_h - current_h) < 2:
+                return
+            self._animate_height(current_h, natural_h, on_finished=None)
         else:
-            self.setMinimumHeight(0)
-            self.setMaximumHeight(0)
+            # ── 折叠：从当前高度动画到 0，结束后锁定 maxHeight=0 ──
+            # 折叠前 maxHeight 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实 height
+            if self.maximumHeight() < self._EXPAND_MAX:
+                self.setMaximumHeight(self._EXPAND_MAX)
+            current_h = self.height()
+            if current_h <= 0:
+                self.setMaximumHeight(0)
+                return
+            self._animate_height(
+                current_h,
+                0,
+                on_finished=lambda: self.setMaximumHeight(0),
+            )
+
+    def _animate_height(self, start_h: int, end_h: int, on_finished=None):
+        """用 QPropertyAnimation 动画 maximumHeight，200ms OutCubic"""
+        self._expand_animation = QPropertyAnimation(self, b"maximumHeight")
+        self._expand_animation.setDuration(200)
+        self._expand_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._expand_animation.setStartValue(start_h)
+        self._expand_animation.setEndValue(end_h)
+        if on_finished is not None:
+            def _on_done():
+                try:
+                    on_finished()
+                finally:
+                    try:
+                        if self._expand_animation is not None:
+                            self._expand_animation.finished.disconnect(_on_done)
+                    except (TypeError, RuntimeError):
+                        pass
+            self._expand_animation.finished.connect(_on_done)
+        self._expand_animation.start()
     
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器，并注册专属回调"""
