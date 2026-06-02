@@ -18,6 +18,7 @@ MessageCard - 消息卡片组件
 import base64
 import hashlib
 import math
+import os
 import random
 import re
 import time
@@ -47,7 +48,7 @@ from PyQt5.QtGui import (
     QLinearGradient,
     QPainterPath,
 )
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -1053,6 +1054,45 @@ def _inject_context_links(md_text: str) -> str:
     return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
 
 
+def _resolve_image_src(html_content: str) -> str:
+    """
+    将 HTML 中的图片 src 相对路径转为绝对 file:/// 路径。
+    
+    检测 <img src="相对路径"> 中的 src，如果路径是相对路径且本地文件存在，
+    则转换为 file:/// 绝对路径，确保 QWebEngineView 能正常加载。
+    已存在的绝对路径（http/https/file/data/qrc）跳过处理。
+    """
+    _img_src_pattern = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
+    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def _replacer(match):
+        prefix = match.group(1)
+        src = match.group(2)
+        suffix = match.group(3)
+
+        # 跳过已经是绝对 URL 或 data URI 的 src
+        if src.startswith(('http://', 'https://', 'file://', 'data:',
+                           'qrc:/', '#', 'blob:')):
+            return match.group(0)
+
+        # 尝试解析为绝对路径
+        if os.path.isabs(src):
+            # 已经是绝对路径，直接检查文件是否存在
+            candidate = os.path.normpath(src)
+        else:
+            # 相对路径：以项目根目录为基准拼接
+            candidate = os.path.normpath(os.path.join(_project_root, src))
+
+        if os.path.isfile(candidate):
+            # 本地文件存在，转为 file:/// 路径
+            file_url = QUrl.fromLocalFile(candidate).toString()
+            return f'{prefix}{file_url}{suffix}'
+
+        return match.group(0)
+
+    return _img_src_pattern.sub(_replacer, html_content)
+
+
 # ======== WebViewer ========
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
@@ -1206,6 +1246,12 @@ class CodeWebViewer(QWebEngineView):
 
         self._page = ConsoleMonitorPage(self)
         self.setPage(self._page)
+
+        # 启用本地文件访问，支持 markdown 图片显示
+        ws = self.settings()
+        ws.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
+        ws.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
+
         # 透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.page().setBackgroundColor(Qt.transparent)
@@ -1524,6 +1570,15 @@ class CodeWebViewer(QWebEngineView):
 
                 #content-placeholder {{ color: var(--text); }}
                 #content-placeholder * {{ color: inherit; }}
+                /* 图片自适应卡片宽度 */
+                #content-placeholder img {{
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: 8px;
+                    display: block;
+                    margin: 8px 0;
+                    object-fit: contain;
+                }}
                 h1, h2, h3, h4, h5, h6 {{ color: #FFFFFF !important; font-weight: 700; letter-spacing: 0.01em; }}
                 h1 {{ font-size: 1.45em; margin: 12px 0 8px; }}
                 h2 {{ font-size: 1.25em; margin: 10px 0 6px; }}
@@ -2350,7 +2405,9 @@ class CodeWebViewer(QWebEngineView):
         </body>
         </html>
         """
-        self.setHtml(html, QUrl(""))
+        # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.setHtml(html, QUrl.fromLocalFile(_project_root + "/"))
 
     def append_chunk(self, text: str):
         if not text:
@@ -2419,10 +2476,13 @@ class CodeWebViewer(QWebEngineView):
 
         if not self._streaming:
             # 非流式模式：直接渲染，所有 <think> 都是已完成的
-            return _render_markdown_to_html_cached(
+            html_content = _render_markdown_to_html_cached(
                 raw_md,
                 "",
             )
+            # 将图片相对路径转为绝对 file:/// 路径
+            html_content = _resolve_image_src(html_content)
+            return html_content
 
         # 流式模式：仅在最后一个块是 reasoning 时，去掉其闭合标签
         # 判断标准：markdown 以 </think> 结尾（说明最后一个块恰好是 reasoning）
@@ -2443,6 +2503,9 @@ class CodeWebViewer(QWebEngineView):
             md.reset()
             html_content = md.convert(processed_md)
             html_content = _wrap_code_blocks_with_copy_button_web(html_content)
+
+            # 将图片相对路径转为绝对 file:/// 路径
+            html_content = _resolve_image_src(html_content)
 
             # 流式模式：追加字数统计显示
             if self._streaming:
