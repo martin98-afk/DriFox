@@ -246,7 +246,31 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
     def replacer(match):
         lang = (match.group(1) or "").replace("language-", "").strip()
         code_content_raw = match.group(2) or ""
-        # --- 优化后的代码块逻辑 ---
+
+        # ===== ECharts 代码块：渲染为交互式图表 =====
+        if lang == "echarts":
+            try:
+                # 解码 HTML 实体
+                json_text = (
+                    code_content_raw.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", '"')
+                )
+                # 验证 JSON 合法性
+                json.loads(json_text)
+                # base64 编码防止 HTML 属性转义问题
+                b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
+                chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
+                return f'''
+                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
+                '''
+            except Exception:
+                # JSON 解析失败，降级为普通代码块
+                pass
+
+        # --- 普通代码块处理 ---
         try:
             copy_text = (
                 code_content_raw.replace("&lt;", "<")
@@ -1485,6 +1509,7 @@ class CodeWebViewer(QWebEngineView):
 
         cdn_libs = """
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
         """
 
         scrollbar_css = """
@@ -2156,6 +2181,22 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 0 10px 10px 0;
                     color: var(--text-secondary) !important;
                 }}
+
+                /* ===== ECharts 图表容器 ===== */
+                .echarts-container {{
+                    width: 100%;
+                    min-height: 300px;
+                    height: auto;
+                    margin: 12px 0;
+                    border-radius: 10px;
+                    background: rgba(22, 27, 34, 0.6);
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                }}
+
+                /* 内容区图片可点击打开 */
+                #content-placeholder img {{
+                    cursor: pointer;
+                }}
             </style>
         </head>
         <body>
@@ -2297,6 +2338,25 @@ class CodeWebViewer(QWebEngineView):
 
                         if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise();
 
+                        // 初始化 ECharts 图表
+                        if (window.echarts) {{
+                            document.querySelectorAll('.echarts-container').forEach(function(el) {{
+                                try {{
+                                    var jsonB64 = el.getAttribute('data-echarts-json');
+                                    if (!jsonB64 || el._echartInited) return;
+                                    var option = JSON.parse(atob(jsonB64));
+                                    var chart = echarts.init(el, 'dark');
+                                    chart.setOption(option);
+                                    el._echartInited = true;
+                                    // 卡片 resize 时自适应
+                                    var _ro = new ResizeObserver(function() {{ chart.resize(); }});
+                                    _ro.observe(el);
+                                }} catch(e) {{
+                                    console.error('ECharts init error:', e);
+                                }}
+                            }});
+                        }}
+
                         // 自动滚动到 body 底部（流式时新内容在底部）
                         // setTimeout 确保 Qt WebEngine 在 innerHTML 替换后完成布局再滚动
                         setTimeout(function() {{
@@ -2356,6 +2416,14 @@ class CodeWebViewer(QWebEngineView):
                         }} else {{
                             console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
                         }}
+                        return;
+                    }}
+                    // 图片点击 → 系统默认程序打开
+                    const img = e.target.closest('#content-placeholder img');
+                    if (img) {{
+                        e.stopPropagation();
+                        e.preventDefault();
+                        console.log('pywebview_action:open_url:' + img.src);
                         return;
                     }}
                     const link = e.target.closest('a');
