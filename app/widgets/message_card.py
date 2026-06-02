@@ -2335,8 +2335,6 @@ class CodeWebViewer(QWebEngineView):
                             }}
                         }});
 
-                        if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise();
-
                         // 初始化 ECharts 图表
                         if (window.echarts) {{
                             document.querySelectorAll('.echarts-container').forEach(function(el) {{
