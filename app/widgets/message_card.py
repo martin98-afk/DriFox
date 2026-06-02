@@ -2012,7 +2012,6 @@ class CodeWebViewer(QWebEngineView):
                     flex: 1;
                     padding: 0 10px;
                     white-space: pre-wrap;
-                    overflow-x: auto;
                     min-width: 0;
                 }}
                 .tool-diff-inline .diff-add {{

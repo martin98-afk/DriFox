@@ -57,10 +57,13 @@ DEFAULT_MODEL_PARAMS: Dict[str, Any] = {
 # 格式：模型名（小写精确匹配）-> {
 #     context_limit:    int,          # 上下文窗口（tokens）
 #     supports_thinking: bool,        # 是否支持思考模式
-#     thinking_param:   str|None,     # 思考控制字段名
-#                                     #   "reasoning_effort" -> 请求体 reasoning_effort 字段
-#                                     #   "thinking"         -> extra_body.thinking
-#                                     #   "thinking_budget"  -> extra_body.thinking_budget
+#     thinking_param:   str|None,    # 思考控制字段名：
+#                                    #   "reasoning_effort" -> 请求体 reasoning_effort 字段
+#                                    #   "thinking"         -> extra_body.thinking
+#                                    #   "thinking_budget"  -> extra_body.thinking_budget
+#     thinking_enable_value: str = "enabled"
+#                                    # thinking.type 的值。多数模型用 "enabled"，
+#                                    # MiniMax 系列用 "adaptive"
 #     supports_vision:  bool,         # 是否支持图像（默认 False）
 #     source:           str,          # 数据来源（必填）
 #     note:             str,          # 备注（可选）
@@ -72,12 +75,12 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
     # ========== OpenCode Go 真实模型（用户 2026-06-02 给出 + models.dev 验证） ==========
     # OpenCode Go 是付费服务（首月 $5，之后 $10/月），这些是它真实提供的模型。
     "kimi-k2.5": {
-        "context_limit": 262144, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "models.dev", "note": "Moonshot Kimi K2.5，2026-01-27 发布",
+        "context_limit": 262144, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "models.dev", "note": "Moonshot Kimi K2.5，2026-01-27 发布；API 用 thinking:enabled/disabled",
     },
     "kimi-k2.6": {
-        "context_limit": 262144, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "models.dev", "note": "Moonshot Kimi K2.6，2026-04-20/21 发布，原生多模态",
+        "context_limit": 262144, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "models.dev", "note": "Moonshot Kimi K2.6，2026-04-20/21 发布；API 用 thinking:enabled/disabled",
     },
     "glm-5": {
         "context_limit": 202752, "supports_thinking": True, "thinking_param": "thinking",
@@ -88,32 +91,32 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "source": "models.dev", "note": "智谱 GLM-5.1，2026-03-27 发布",
     },
     "mimo-v2.5-pro": {
-        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "vendor_official", "note": "小米 MiMo-V2.5-Pro，2026-04-23 公测，2026-04-27 开源；1.02T 总参 / 42B 激活",
+        "context_limit": 1000000,
+        "source": "vendor_official", "note": "小米 MiMo-V2.5-Pro，2026-04-23 公测，2026-04-27 开源；OpenCode Go 提供。思考控制参数未确认，暂不开放开关",
     },
     "mimo-v2.5": {
-        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "vendor_official", "note": "小米 MiMo-V2.5 全模态通用模型，2026-04-23 公测",
+        "context_limit": 1000000,
+        "source": "vendor_official", "note": "小米 MiMo-V2.5 全模态通用模型，2026-04-23 公测；OpenCode Go 提供。思考控制参数未确认，暂不开放开关",
     },
     "minimax-m2.5": {
-        "context_limit": 204800, "supports_thinking": True, "thinking_param": "reasoning_effort",
+        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
         "source": "models.dev", "note": "MiniMax M2.5，2026-02-12 发布",
     },
     "minimax-m2.7": {
-        "context_limit": 196608, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "models.dev", "note": "MiniMax M2.7，2026-03-18 发布，自我进化 Agent 旗舰",
+        "context_limit": 196608, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
+        "source": "models.dev", "note": "MiniMax M2.7，2026-03-18 发布",
     },
     "minimax-m3": {
-        "context_limit": 512000, "supports_thinking": True, "thinking_param": "reasoning_effort",
+        "context_limit": 512000, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
         "source": "models.dev", "note": "MiniMax M3，2026-05-31 发布，全模态",
     },
     "qwen3.6-plus": {
-        "context_limit": 128000, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "models.dev", "note": "通义 Qwen3.6-Plus，2026-04-02 发布，编程模型",
+        "context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "models.dev", "note": "通义 Qwen3.6-Plus，2026-04-02 发布；API 格式同 DashScope 系",
     },
     "qwen3.7-max": {
-        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "vendor_official", "note": "通义 Qwen3.7-Max，2026-05-20 阿里云峰会发布，百万级上下文",
+        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "vendor_official", "note": "通义 Qwen3.7-Max，2026-05-20 阿里云峰会发布；API 格式同 DashScope 系",
     },
     "deepseek-v4-pro": {
         "context_limit": 1048576, "supports_thinking": True, "thinking_param": "reasoning_effort",
@@ -129,16 +132,16 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
     # 用户确认它们是 OpenCode Zen 的免费档，所以这里不填具体值，让它们走
     # L3 服务商默认（200k）。如未来核实到精确值再加。
     "kimi-k2.5-free": {
-        "context_limit": 262144, "supports_thinking": True,
+        "context_limit": 262144, "supports_thinking": True, "thinking_param": "thinking",
         "source": "user_provided", "note": "OpenCode Zen 免费档，转发到 Kimi K2.5",
     },
     "minimax-m2.5-free": {
-        "context_limit": 204800, "supports_thinking": True,
+        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
         "source": "user_provided", "note": "OpenCode Zen 免费档，转发到 MiniMax M2.5",
     },
     # "glm-5-free" - 是 GLM-5 的 OpenCode Zen 代理，context 推测与 glm-5 一致
     "glm-5-free": {
-        "context_limit": 202752, "supports_thinking": True,
+        "context_limit": 202752, "supports_thinking": True, "thinking_param": "thinking",
         "source": "inferred", "note": "OpenCode Zen 免费档转发 GLM-5；context 沿用 glm-5",
     },
 

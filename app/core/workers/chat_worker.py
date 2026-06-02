@@ -618,15 +618,19 @@ class OpenAIChatWorker(QThread):
             # 优先从 MODEL_CAPABILITIES 获取 thinking_param，回退到 provider_profile
             caps = get_model_capabilities(model)
             t_param = None
+            enable_value = "enabled"  # 大多数模型用 "enabled"
             if caps:
                 t_param = caps.get("thinking_param")
+                enable_value = caps.get("thinking_enable_value", "enabled")
             if not t_param:
                 profile = get_provider_profile(self.llm_config)
                 t_param = profile.get("thinking_param")
 
             if thinking_mode is True:
                 if t_param == "thinking":
-                    extra_body["thinking"] = {"type": "enabled"}
+                    extra_body["thinking"] = {"type": enable_value}
+                    # 用 thinking 控制的模型不支持同时传 reasoning_effort
+                    extra_body.pop("reasoning_effort", None)
                 elif t_param == "thinking_budget":
                     budget = self.llm_config.get("思考预算", 4096)
                     extra_body["thinking_budget"] = budget
@@ -636,7 +640,7 @@ class OpenAIChatWorker(QThread):
                     extra_body["thinking"] = {"type": "disabled"}
                 elif t_param == "thinking_budget":
                     extra_body.pop("thinking_budget", None)
-                # 关闭思考时必须移除 reasoning_effort（否则 API 仍可能启用思考）
+                # 关闭思考时必须移除 reasoning_effort
                 extra_body.pop("reasoning_effort", None)
 
         # 处理认证
