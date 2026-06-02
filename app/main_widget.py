@@ -77,6 +77,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
+    InputGlowUnderlay,
     SendableTextEdit,
 )
 from app.widgets.cards import (
@@ -940,6 +941,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if obj == self and event.type() == event.Type.Resize:
             if hasattr(self, "_bg_label") and self._bg_label is not None:
                 self._bg_label.resize(self.size())
+        # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
+        # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
+        if event.type() == event.Type.Resize and obj in (
+            getattr(self, "_input_card_wrapper", None),
+            getattr(self, "_bottom_input_container", None),
+        ):
+            self._position_input_glow_underlay()
         return super().eventFilter(obj, event)
 
     def _connect_opacity_signal(self):
@@ -1930,15 +1938,25 @@ class OpenAIChatToolWindow(ToolWindow):
         strip_layout.addWidget(toolbar_widget)
 
         self._bottom_input_container.setAttribute(Qt.WA_TranslucentBackground, True)
-        # 双层 halo：主光（紧致）在 _input_card，环境光（弥散）在 wrapper
+        # 统一胶囊光晕底层：跨越输入卡 + 工具栏整个胶囊，由 paintEvent 自绘连贯环绕光，
+        # 避免两个独立 widget 各挂 QGraphicsDropShadowEffect 时光晕只走局部轮廓、
+        # 接缝处互相遮挡导致"只上半弧形发光"的诡异观感。
+        self._input_glow_underlay = InputGlowUnderlay(self)
+        # 旧的 input_card 主光 / wrapper 环境光保留为占位但默认关闭：发光统一由 underlay 提供。
+        # 之所以不直接删除，是为了保留 setGraphicsEffect 钩子，方便未来需要时复用。
         self._input_card_primary_shadow = QGraphicsDropShadowEffect(self._input_card)
         self._input_card_primary_shadow.setOffset(0, 0)
+        self._input_card_primary_shadow.setBlurRadius(0)
+        self._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
         self._input_card.setGraphicsEffect(self._input_card_primary_shadow)
         self._input_card_ambient_shadow = QGraphicsDropShadowEffect(
             self._input_card_wrapper
         )
         self._input_card_ambient_shadow.setOffset(0, 0)
+        self._input_card_ambient_shadow.setBlurRadius(0)
+        self._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
         self._input_card_wrapper.setGraphicsEffect(self._input_card_ambient_shadow)
+        # 工具栏自身只保留失焦态的轻微下投阴影增强"落地"感，聚焦发光交给 underlay 统一处理
         self._bottom_toolbar_shadow = QGraphicsDropShadowEffect(
             self._bottom_toolbar_strip
         )
@@ -1957,6 +1975,16 @@ class OpenAIChatToolWindow(ToolWindow):
         bottom_layout.addSpacing(36)
 
         layout.addWidget(self._bottom_input_container)
+
+        # 向内发光：underlay 必须在输入容器 / 工具栏 **之上** 才不会被它们
+        # 的不透明背景盖住；setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # 已让鼠标事件全部穿透，不影响文本输入 / 按钮点击。
+        self._input_glow_underlay.raise_()
+
+        # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何
+        # （输入框高度自适应、系统卡片折叠都会改它们的尺寸）
+        self._input_card_wrapper.installEventFilter(self)
+        self._bottom_input_container.installEventFilter(self)
 
         # 初始定位工具栏（resizeEvent 会持续更新）
         self._position_bottom_toolbar()
@@ -1977,6 +2005,56 @@ class OpenAIChatToolWindow(ToolWindow):
         toolbar_y = max(0, h - 1 - toolbar_h)
         toolbar_w = max(0, w - 2)
         self._bottom_toolbar_strip.setGeometry(1, toolbar_y, toolbar_w, toolbar_h)
+        # 工具栏位置 / 大小变了 → 胶囊光晕底层也需要同步
+        self._position_input_glow_underlay()
+
+    def _position_input_glow_underlay(self):
+        """同步光晕底层的几何到当前输入卡 + 工具栏组合的胶囊轮廓。
+
+        胶囊 = 输入卡 wrapper 的 顶部 ─→ 工具栏条 的 底部，宽度同两者一致。
+        underlay 自身比胶囊四周再大出 ``margin`` px，给柔光留出绘制空间，
+        否则 paintEvent 里画的 expansion 会被 underlay 自己的边界裁掉。
+        """
+        if not hasattr(self, "_input_glow_underlay"):
+            return
+        if not hasattr(self, "_input_card_wrapper") or not hasattr(
+            self, "_bottom_toolbar_strip"
+        ):
+            return
+        wrapper = self._input_card_wrapper
+        toolbar = self._bottom_toolbar_strip
+        if wrapper.width() <= 0 or toolbar.width() <= 0:
+            return
+
+        # 取两者在主窗口坐标系中的几何（wrapper 在 layout 里 → 用 mapTo）
+        try:
+            wrapper_top_left = wrapper.mapTo(self, wrapper.rect().topLeft())
+        except Exception:
+            return
+        wrapper_top = wrapper_top_left.y()
+        toolbar_geo = toolbar.geometry()
+        toolbar_bottom = toolbar_geo.bottom() + 1  # geometry().bottom() 是含端点的最后像素
+
+        pill_left = wrapper_top_left.x()
+        pill_top = wrapper_top
+        pill_width = wrapper.width()
+        pill_height = max(0, toolbar_bottom - pill_top)
+        if pill_width <= 0 or pill_height <= 0:
+            return
+
+        # 给光晕留 margin（要 >= 最大 blur，避免被 underlay 自己的矩形边界裁掉）
+        margin = 80
+        underlay_x = pill_left - margin
+        underlay_y = pill_top - margin
+        underlay_w = pill_width + 2 * margin
+        underlay_h = pill_height + 2 * margin
+        self._input_glow_underlay.setGeometry(
+            underlay_x, underlay_y, underlay_w, underlay_h
+        )
+        # 胶囊在 underlay 局部坐标中的位置
+        self._input_glow_underlay.set_pill_geometry(
+            margin, margin, pill_width, pill_height, radius=16
+        )
 
     # ========== 内置命令初始化 ==========
 
@@ -2007,7 +2085,10 @@ class OpenAIChatToolWindow(ToolWindow):
         focused = bool(getattr(self, "_input_card_focused", False)) and not collapsed
 
         input_border = Colors.INPUT_FOCUS_BORDER if focused else Colors.INPUT_BORDER
-        input_border_width = 2 if focused else 1
+        # 上下边框宽度保持一致（1px），不要在焦点时加粗成 2px：
+        # 2px 的亮色 border 会形成明显的"边缘高亮"，和工具栏 1px 边框
+        # 视觉上不一致；焦点态的差异改由 underlay 的内发光承担。
+        input_border_width = 1
         input_bg_start = (
             Colors.INPUT_FOCUS_BG_START if focused else Colors.INPUT_BG_START
         )
@@ -2045,46 +2126,44 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
         """)
 
-        # === 双层 halo：主光（紧致） + 环境光（弥散）===
-        # 输入卡自身带主光，wrapper 带环境光，叠加形成"核心亮→柔光晕开"
+        # === 统一胶囊光晕底层 ===
+        # 旧实现里两个 widget 各挂 QGraphicsDropShadowEffect，光晕只走各自局部
+        # 轮廓 + 接缝相互遮挡 → 看起来"上半弧形发光、下半突兀"。现在改由
+        # InputGlowUnderlay 沿整个胶囊轮廓一次性自绘，per-widget shadow 保留壳
+        # 但归零，避免叠加污染。
         if hasattr(self, "_input_card_primary_shadow"):
-            if focused:
-                glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(Colors.INPUT_GLOW_PRIMARY_ALPHA)
-                self._input_card_primary_shadow.setBlurRadius(
-                    Colors.INPUT_GLOW_PRIMARY_BLUR
-                )
-                self._input_card_primary_shadow.setOffset(0, 0)
-                self._input_card_primary_shadow.setColor(glow)
-            else:
-                self._input_card_primary_shadow.setBlurRadius(0)
-                self._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
+            self._input_card_primary_shadow.setBlurRadius(0)
+            self._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
 
         if hasattr(self, "_input_card_ambient_shadow"):
-            if focused:
-                glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(Colors.INPUT_GLOW_AMBIENT_ALPHA)
-                self._input_card_ambient_shadow.setBlurRadius(
-                    Colors.INPUT_GLOW_AMBIENT_BLUR
-                )
-                self._input_card_ambient_shadow.setOffset(0, 0)
-                self._input_card_ambient_shadow.setColor(glow)
-            else:
-                self._input_card_ambient_shadow.setBlurRadius(0)
-                self._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
+            self._input_card_ambient_shadow.setBlurRadius(0)
+            self._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
 
-        # 工具栏 = 环境光晕（halo cascade 底层）
-        # 与输入卡同色系但更弥散、更柔和，营造"主光 → 回声"的层次。
-        # 视觉上像是输入卡把光"洒"到工具栏，整体仍是统一的发光胶囊，
-        # 但有清晰的主次，不抢戏也不脱节。
-        # 未焦点时工具栏保留轻微下投阴影（offset 0,4）增强"落地"感。
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.set_color(QColor(Colors.INPUT_FOCUS_BORDER))
+            if focused:
+                # 只要柔和的内发光（环境光层），不要主光那层紧致高亮 ─→
+                # 避免边缘出现"亮色描边"的 lit-border 观感，让上下视觉一致。
+                # 同时复用下方的 INPUT_GLOW_AMBIENT_* token，主题可微调。
+                self._input_glow_underlay.set_glow(
+                    primary_alpha=0,
+                    primary_blur=0,
+                    ambient_alpha=Colors.INPUT_GLOW_AMBIENT_ALPHA,
+                    ambient_blur=Colors.INPUT_GLOW_AMBIENT_BLUR,
+                )
+            else:
+                self._input_glow_underlay.set_glow(0, 0, 0, 0)
+            # 焦点 / 折叠状态变化都可能改变胶囊几何（如 toolbar 圆角切换、
+            # input_card 折叠到 0），同步一次确保 underlay 跟上
+            self._position_input_glow_underlay()
+
+        # 工具栏：失焦保留轻微下投阴影（offset 0,4）增强"落地"感；
+        # 聚焦时光晕由 underlay 接管，工具栏自身阴影关闭，避免与 underlay 叠加。
         if hasattr(self, "_bottom_toolbar_shadow"):
             if focused:
-                glow = QColor(Colors.INPUT_FOCUS_BORDER)
-                glow.setAlpha(Colors.GLOW_AMBIENT_ALPHA)
-                self._bottom_toolbar_shadow.setBlurRadius(Colors.GLOW_AMBIENT_BLUR)
+                self._bottom_toolbar_shadow.setBlurRadius(0)
                 self._bottom_toolbar_shadow.setOffset(0, 0)
-                self._bottom_toolbar_shadow.setColor(glow)
+                self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 0))
             else:
                 self._bottom_toolbar_shadow.setBlurRadius(14)
                 self._bottom_toolbar_shadow.setOffset(0, 4)

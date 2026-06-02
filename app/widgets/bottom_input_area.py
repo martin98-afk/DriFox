@@ -1,9 +1,10 @@
 # 大模型输入框
+import math
 import os
 import re
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import (
     QInputMethodEvent,
     QKeyEvent,
@@ -11,6 +12,8 @@ from PyQt5.QtGui import (
     QTextCursor,
     QColor,
     QTextCharFormat,
+    QPainter,
+    QPainterPath, QPen,
 )
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
@@ -1079,3 +1082,166 @@ class SendableTextEdit(TextEdit):
         """重写 clear 方法，清空输入时退出历史浏览模式"""
         self._reset_history_mode()
         super().clear()
+
+
+class InputGlowUnderlay(QWidget):
+    """统一胶囊向内发光层。
+
+    输入卡（上圆角 + border-bottom:none）和工具栏条（上方下圆）原本是两个
+    独立 widget，各自挂 QGraphicsDropShadowEffect 时，光晕只跟自己的局部
+    轮廓走，接缝处又互相遮挡 —— 看起来就像"只有上半弧形发光"。
+
+    本控件作为主窗口的子控件，绝对定位覆盖整个胶囊（含 margin），通过
+    paintEvent 一次性绘制连贯的胶囊形 **向内** 发光：边缘最亮、向胶囊中心
+    平滑衰减，类似 lit-up 霓虹边框效果。鼠标事件全部穿透，不影响输入 / 按钮。
+
+    使用方式：
+      ``set_pill_geometry`` 同步胶囊在 underlay 内部坐标中的位置与圆角；
+      ``set_glow`` 切换主光 / 环境光的强度（聚焦 / 失焦）；
+      ``set_color`` 切换发光色（主题切换）。
+    """
+
+    DEFAULT_RADIUS = 16
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._color = QColor(201, 168, 92)
+        self._primary_alpha = 0
+        self._primary_blur = 0
+        self._ambient_alpha = 0
+        self._ambient_blur = 0
+        self._pill_x = 0
+        self._pill_y = 0
+        self._pill_w = 0
+        self._pill_h = 0
+        self._radius = self.DEFAULT_RADIUS
+
+    def set_color(self, color: QColor):
+        c = QColor(color)
+        if c.rgb() == self._color.rgb():
+            return
+        self._color = c
+        self.update()
+
+    def set_glow(
+        self,
+        primary_alpha: int,
+        primary_blur: int,
+        ambient_alpha: int,
+        ambient_blur: int,
+    ):
+        if (
+            primary_alpha == self._primary_alpha
+            and primary_blur == self._primary_blur
+            and ambient_alpha == self._ambient_alpha
+            and ambient_blur == self._ambient_blur
+        ):
+            return
+        self._primary_alpha = max(0, int(primary_alpha))
+        self._primary_blur = max(0, int(primary_blur))
+        self._ambient_alpha = max(0, int(ambient_alpha))
+        self._ambient_blur = max(0, int(ambient_blur))
+        self.update()
+
+    def set_pill_geometry(
+        self,
+        pill_x: int,
+        pill_y: int,
+        pill_w: int,
+        pill_h: int,
+        radius: int = DEFAULT_RADIUS,
+    ):
+        if (
+            pill_x == self._pill_x
+            and pill_y == self._pill_y
+            and pill_w == self._pill_w
+            and pill_h == self._pill_h
+            and radius == self._radius
+        ):
+            return
+        self._pill_x = int(pill_x)
+        self._pill_y = int(pill_y)
+        self._pill_w = max(0, int(pill_w))
+        self._pill_h = max(0, int(pill_h))
+        self._radius = max(0, int(radius))
+        self.update()
+
+    def has_visible_glow(self) -> bool:
+        return (
+            self._pill_w > 0
+            and self._pill_h > 0
+            and (
+                (self._primary_alpha > 0 and self._primary_blur > 0)
+                or (self._ambient_alpha > 0 and self._ambient_blur > 0)
+            )
+        )
+
+    def paintEvent(self, event):
+        if not self.has_visible_glow():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(Qt.NoBrush)
+
+        # 正向裁剪：只在胶囊 **内部** 绘制 —— 这样发光从边缘向中心扩散，
+        # 不会溢出胶囊轮廓外（外面的窗口背景保持纯净）。
+        inner = QPainterPath()
+        inner.addRoundedRect(
+            QRectF(self._pill_x, self._pill_y, self._pill_w, self._pill_h),
+            self._radius,
+            self._radius,
+        )
+        painter.setClipPath(inner)
+
+        # 先画环境光（弥散底层，更深更柔），再画主光（紧致核心，更亮更窄）
+        # 两层叠加形成"边缘核心亮 → 向心柔光晕开"的层次
+        if self._ambient_blur > 0 and self._ambient_alpha > 0:
+            self._paint_inner_halo(
+                painter, self._ambient_blur, self._ambient_alpha, falloff=2.0
+            )
+        if self._primary_blur > 0 and self._primary_alpha > 0:
+            self._paint_inner_halo(
+                painter, self._primary_blur, self._primary_alpha, falloff=2.4
+            )
+
+    def _paint_inner_halo(
+        self, painter: QPainter, blur: int, alpha: int, falloff: float
+    ):
+        """从胶囊边缘向内堆叠 N 道单像素描边圆角矩形，模拟向心高斯衰减。
+
+        第 i 层位于离边缘 i 像素处（向胶囊中心方向），alpha 按
+        ``exp(-(t*falloff)^2)`` 递减 ─→ 边缘最亮、深处趋近透明。
+        因为 paintEvent 之前已 clip 到胶囊内部，stroke 多出来的部分不会
+        画到胶囊外面，每一道描边都是闭合的圆角矩形轮廓。
+        """
+        steps = max(blur, 12)
+        for i in range(steps):
+            t = i / steps  # 0 边缘 → 1 深处
+            falloff_factor = math.exp(-((t * falloff) ** 2))
+            layer_alpha = int(alpha * falloff_factor)
+            if layer_alpha < 1:
+                continue
+            layer_alpha = min(255, layer_alpha)
+            c = QColor(self._color)
+            c.setAlpha(layer_alpha)
+
+            pen = QPen(c, 1)
+            pen.setCosmetic(True)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+
+            # i + 0.5 偏移：把 1px 描边正好画在像素中心，抗锯齿更平滑
+            offset = i + 0.5
+            w = self._pill_w - 2 * offset
+            h = self._pill_h - 2 * offset
+            if w <= 0 or h <= 0:
+                break
+            r = max(0.0, self._radius - offset)
+            painter.drawRoundedRect(
+                QRectF(self._pill_x + offset, self._pill_y + offset, w, h),
+                r,
+                r,
+            )
