@@ -1509,18 +1509,6 @@ class CodeWebViewer(QWebEngineView):
             )
 
         cdn_libs = """
-        <script>
-        // MathJax 3 全局配置：启用 $...$ 行内公式分隔符
-        // 必须在 tex-mml-chtml.js 加载前声明，否则异步加载会使用默认配置
-        window.MathJax = {
-            tex: {
-                inlineMath: [['$', '$'], ['\\(', '\\)']],
-                displayMath: [['$$', '$$'], ['\\[', '\\]']],
-                processEscapes: true
-            }
-        };
-        </script>
-        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
         """
 
