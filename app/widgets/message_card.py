@@ -270,6 +270,22 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
                 # JSON 解析失败，降级为普通代码块
                 pass
 
+        # ===== Mermaid 代码块：渲染为流程图等（回退方案） =====
+        if lang == "mermaid":
+            try:
+                mermaid_text = (
+                    code_content_raw.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", '"')
+                )
+                b64_mermaid = base64.b64encode(mermaid_text.encode("utf-8")).decode("ascii")
+                mermaid_id = "mermaid-" + hashlib.sha1(mermaid_text.encode("utf-8")).hexdigest()[:12]
+                return f'''<pre id="{mermaid_id}" class="mermaid" data-mermaid-def="{b64_mermaid}" style="width:100%;margin:12px 0;border-radius:10px;overflow:hidden;">{escape(mermaid_text)}</pre>'''
+            except Exception:
+                pass
+
         # --- 普通代码块处理 ---
         try:
             copy_text = (
@@ -973,11 +989,38 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
 _LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
 
 
+# ===== Mermaid 块预处理：在 markdown 解析前替换为占位符 =====
+_MERMAID_BLOCK_PATTERN = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
+_MERMAID_PLACEHOLDER_PATTERN = re.compile(r"<!--MERMAID_PLACEHOLDER:([a-zA-Z0-9+/=]+)-->")
+
+def _preprocess_mermaid_blocks(md_text: str) -> str:
+    """将 ```mermaid 代码块替换为 HTML 注释占位符（跳过 markdown 解析器）"""
+    def _replacer(match):
+        content = match.group(1).strip()
+        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        return f"<!--MERMAID_PLACEHOLDER:{b64}-->"
+    return _MERMAID_BLOCK_PATTERN.sub(_replacer, md_text)
+
+
+def _postprocess_mermaid_blocks(html: str) -> str:
+    """将占位符替换为实际的 Mermaid 渲染容器"""
+    def _replacer(match):
+        b64 = match.group(1)
+        text = base64.b64decode(b64).decode("utf-8")
+        mermaid_id = "mermaid-" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+        return f'<pre id="{mermaid_id}" class="mermaid" data-mermaid-def="{b64}" style="width: 100%; margin: 12px 0; border-radius: 10px; overflow: hidden;">{escape(text)}</pre>'
+    return _MERMAID_PLACEHOLDER_PATTERN.sub(_replacer, html)
+
+
 @lru_cache(maxsize=256)
 def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
     """
+    # 预处理 mermaid（在 markdown 解析前替换为占位符，避免被 markdown 库或
+    # _wrap_code_blocks_with_copy_button_web 当作普通代码块处理）
+    raw_md = _preprocess_mermaid_blocks(raw_md)
+
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
@@ -989,7 +1032,10 @@ def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
         md = get_markdown_instance()
         md.reset()
         html_content = md.convert(processed_md)
-        return _wrap_code_blocks_with_copy_button_web(html_content)
+        html_content = _wrap_code_blocks_with_copy_button_web(html_content)
+        # 后处理 mermaid：将占位符恢复为渲染容器
+        html_content = _postprocess_mermaid_blocks(html_content)
+        return html_content
     except Exception:
         return f"<pre>{escape(raw_md)}</pre>"
 
@@ -1510,6 +1556,7 @@ class CodeWebViewer(QWebEngineView):
         cdn_libs = """
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
         """
 
         scrollbar_css = """
@@ -2193,6 +2240,16 @@ class CodeWebViewer(QWebEngineView):
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
 
+                /* ===== Mermaid 图表容器 ===== */
+                pre.mermaid {{
+                    background: rgba(22, 27, 34, 0.6);
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                    border-radius: 10px;
+                    padding: 16px;
+                    overflow-x: auto;
+                    text-align: center;
+                }}
+
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
                     cursor: pointer;
@@ -2355,6 +2412,39 @@ class CodeWebViewer(QWebEngineView):
                                     console.error('ECharts init error:', e);
                                 }}
                             }});
+                        }}
+
+                        // 初始化 Mermaid 图表（使用 render() 保证兼容性）
+                        var mermaidNodes = document.querySelectorAll('pre.mermaid:not([data-mermaid-inited])');
+                        if (mermaidNodes.length > 0) {{
+                            console.log('Mermaid: found ' + mermaidNodes.length + ' node(s) to render');
+                            if (window.mermaid) {{
+                                mermaid.initialize({{ startOnLoad: false, theme: 'dark', securityLevel: 'loose' }});
+                                mermaidNodes.forEach(function(el) {{
+                                    var def = el.getAttribute('data-mermaid-def');
+                                    if (!def) {{ console.warn('Mermaid: no data-mermaid-def on', el); return; }}
+                                    try {{
+                                        var text = atob(def);
+                                        var uid = el.id || 'mermaid-' + Math.random().toString(36).substr(2, 9);
+                                        mermaid.render(uid, text).then(function(result) {{
+                                            el.innerHTML = result.svg;
+                                            el.setAttribute('data-mermaid-inited', 'true');
+                                            if (result.bindFunctions) result.bindFunctions(el);
+                                            console.log('Mermaid: rendered successfully');
+                                        }}).catch(function(e) {{
+                                            console.error('Mermaid render error:', e.message);
+                                            el.innerHTML = '<div style=\"color:#ff7b72;padding:12px;text-align:center;\">⚠️ 图表渲染失败</div>';
+                                        }});
+                                    }} catch(e) {{
+                                        console.error('Mermaid parse error:', e.message);
+                                    }}
+                                }});
+                            }} else {{
+                                console.warn('Mermaid: CDN not loaded (window.mermaid is undefined)');
+                                mermaidNodes.forEach(function(el) {{
+                                    el.innerHTML = '<div style=\"color:#ff7b72;padding:12px;text-align:center;\">⚠️ Mermaid CDN 未加载</div>';
+                                }});
+                            }}
                         }}
 
                         // 自动滚动到 body 底部（流式时新内容在底部）
@@ -2559,6 +2649,9 @@ class CodeWebViewer(QWebEngineView):
             # 末尾正好是 reasoning 块的闭合标签，去掉它表示该块尚未完成
             streaming_md = streaming_md[:-len("</think>")].rstrip()
 
+        # 预处理 mermaid（在 markdown 解析前替换为占位符）
+        streaming_md = _preprocess_mermaid_blocks(streaming_md)
+
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
@@ -2571,6 +2664,8 @@ class CodeWebViewer(QWebEngineView):
             md.reset()
             html_content = md.convert(processed_md)
             html_content = _wrap_code_blocks_with_copy_button_web(html_content)
+            # 后处理 mermaid：将占位符恢复为渲染容器
+            html_content = _postprocess_mermaid_blocks(html_content)
 
             # 将图片相对路径转为绝对 file:/// 路径
             html_content = _resolve_image_src(html_content)

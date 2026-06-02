@@ -6558,10 +6558,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._current_session_id
                 )
                 if idx is not None:
+                    # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
                     self.history_manager.update_session(
                         idx,
                         session.messages,
-                        project=self._current_project,
                         **compaction_info,
                     )
                 else:
@@ -8277,13 +8277,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id
             )
             if idx is not None:
+                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
                 self.history_manager.update_session(
                     idx,
                     saved_messages,
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
                 )
             else:
                 self.history_manager.save_session(
@@ -9129,13 +9129,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id
             )
             if idx is not None:
+                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
+                # 避免项目切换后 _current_project 已改变，导致旧会话被错误地划归新项目
                 self.history_manager.update_session(
                     idx,
                     session.messages,
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
                 )
             else:
                 self.history_manager.save_session(
