@@ -726,8 +726,7 @@ class AgentManager:
   
 ### 消息渲染能力
 - 支持 Markdown 渲染、代码高亮、LaTeX 数学公式（$...$ / $$...$$）
-- 使用 ```echarts 代码块可生成交互式 ECharts 图表（JSON 格式的配置项）
-- 使用 ```mermaid 代码块可渲染流程图/时序图/类图等（Mermaid 语法）
+- 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）
 - 工具卡片的 diff 差异对比会自动渲染，无需手动处理
 """.strip()
 

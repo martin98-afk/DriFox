@@ -264,7 +264,7 @@ class SubAgentCompactFloatingWidget(QWidget):
 
         # ── 任务列表容器 ──
         self._body_layout = QVBoxLayout()
-        self._body_layout.setContentsMargins(24, 0, 0, 0)  # 缩进，与标题对齐
+        self._body_layout.setContentsMargins(12, 0, 0, 0)  # 缩进，与标题对齐
         self._body_layout.setSpacing(2)
         main_layout.addLayout(self._body_layout)
 
