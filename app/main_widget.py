@@ -1596,6 +1596,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型配置卡片
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
+        self._model_config_card.setFixedHeight(360)  # 默认 180 偏小，提高以便显示更多参数
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)

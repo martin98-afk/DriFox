@@ -63,10 +63,27 @@ class ModelConfigCard(QWidget):
             "display_name", "_suffix_index",
         }
 
+        # 收集要渲染的字段：[(order, key, value, meta), ...]
+        items = []
+        seen_display_names = set()  # 用于去重 display_name 相同的字段（如 最大Token / 上下文长度）
         for key, value in config.items():
             if key in skip_keys:
                 continue
             meta = PARAM_SCHEMA.get(key, {})
+            if meta.get("hide_in_card"):
+                continue
+            display_name = meta.get("display_name", key)
+            if display_name in seen_display_names:
+                # 同名只渲染一次（保留先出现的）
+                continue
+            seen_display_names.add(display_name)
+            order = meta.get("order", 999)
+            items.append((order, key, value, meta))
+
+        # 按 order 排序
+        items.sort(key=lambda x: x[0])
+
+        for _order, key, value, meta in items:
             ui_type = meta.get("ui_type") or self._infer_fallback_type(key, value)
             widget = self._create_widget(key, ui_type, value, meta)
             display_name = meta.get("display_name", key)
