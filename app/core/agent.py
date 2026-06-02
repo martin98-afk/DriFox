@@ -725,7 +725,7 @@ class AgentManager:
   - [文件夹名](file|文件夹路径)
   
 ### 消息渲染能力
-- 支持 Markdown 渲染、代码高亮、LaTeX 数学公式（$...$ / $$...$$）
+- 支持 Markdown 渲染、代码高亮
 - 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）
 - 工具卡片的 diff 差异对比会自动渲染，无需手动处理
 """.strip()
