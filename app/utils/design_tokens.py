@@ -139,20 +139,20 @@ def get_capsule_style() -> str:
 
 
 # ============ 发光预设（glow presets）============
-# 每个预设一组完整 token，覆盖 INPUT_FOCUS_BORDER + 4 个 INPUT_GLOW_* + 2 个 UNFOCUSED_*
+# 每个预设一组 token，**只控制发光强度（ambient/primary/unfocused）**，
+# **不控制颜色** —— 颜色由主题 yaml 自己的 `input_focus_border` 决定。
 # 主题 yaml 中通过 `input_glow_preset: "breath"` 切换；不写则用类级默认值（保留原观感）。
 #
 # 设计原则：
 # - subtle  : 淡光，alpha 最低 + blur 最小，金属边缘的微弱反射
 # - breath  : 聚焦光 + 失焦态微光，焦点切换如"由弱到强"，奢华感来自持续呼吸
 # - platinum: 冷白金，去除暖色印象，最现代
-# - ember   : 保留原版金色，四档中最亮（80% 原亮度），给习惯高调观感的用户
+# - ember   : 四档中最亮（强度高），给习惯高调观感的用户
 #
 # 字段顺序：先填 INPUT_GLOW_AMBIENT_* 后填 UNFOCUSED_* —— 前者控制聚焦态光效强度，
-# 后者决定失焦态是否保留微光。两组都用同一色系（取 input_focus_border）。
+# 后者决定失焦态是否保留微光。颜色一律跟随主题的 `input_focus_border`。
 GLOW_PRESETS = {
     "subtle": {
-        "input_focus_border": "#B59A6A",
         "input_glow_primary_alpha": 0,
         "input_glow_primary_blur": 0,
         "input_glow_ambient_alpha": 35,
@@ -161,16 +161,14 @@ GLOW_PRESETS = {
         "input_glow_unfocused_ambient_blur": 0,
     },
     "breath": {
-        "input_focus_border": "#B59A6A",
         "input_glow_primary_alpha": 0,
         "input_glow_primary_blur": 0,
-        "input_glow_ambient_alpha": 60,
-        "input_glow_ambient_blur": 28,
-        "input_glow_unfocused_ambient_alpha": 22,
-        "input_glow_unfocused_ambient_blur": 22,
+        "input_glow_ambient_alpha": 65,
+        "input_glow_ambient_blur": 30,
+        "input_glow_unfocused_ambient_alpha": 38,
+        "input_glow_unfocused_ambient_blur": 30,
     },
     "platinum": {
-        "input_focus_border": "#C8C5BD",
         "input_glow_primary_alpha": 0,
         "input_glow_primary_blur": 0,
         "input_glow_ambient_alpha": 55,
@@ -179,7 +177,6 @@ GLOW_PRESETS = {
         "input_glow_unfocused_ambient_blur": 0,
     },
     "ember": {
-        "input_focus_border": "#C9A85C",
         "input_glow_primary_alpha": 0,
         "input_glow_primary_blur": 0,
         "input_glow_ambient_alpha": 70,
@@ -562,7 +559,10 @@ class Colors:
 
     @classmethod
     def apply_glow_preset(cls, preset_name: str) -> bool:
-        """应用发光预设：一次性覆盖 INPUT_FOCUS_BORDER + INPUT_GLOW_* + UNFOCUSED_*
+        """应用发光预设：**只覆盖发光强度 token，不覆盖 INPUT_FOCUS_BORDER**
+
+        INPUT_FOCUS_BORDER（颜色）由主题 yaml 自己负责，预设不介入。
+        这样主题可以自由组合"颜色 + 强度"，例如辐射绿 fallback + ember 强度。
 
         Args:
             preset_name: GLOW_PRESETS 的 key（subtle / breath / platinum / ember）
@@ -573,9 +573,6 @@ class Colors:
         preset = GLOW_PRESETS.get(preset_name)
         if preset is None:
             return False
-        cls.INPUT_FOCUS_BORDER = preset.get(
-            "input_focus_border", cls.INPUT_FOCUS_BORDER
-        )
         cls.INPUT_GLOW_PRIMARY_ALPHA = preset.get(
             "input_glow_primary_alpha", cls.INPUT_GLOW_PRIMARY_ALPHA
         )

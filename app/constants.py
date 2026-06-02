@@ -61,6 +61,7 @@ PARAM_SCHEMA = {
         "range": {"min": -2.0, "max": 2.0, "step": 0.01, "type": "float"},
         "api_param": "frequency_penalty",
         "order": 320,
+        "hide_in_card": True,  # 不常用，不在配置卡显示
     },
     "presence_penalty": {
         "display_name": "存在惩罚",
@@ -68,6 +69,7 @@ PARAM_SCHEMA = {
         "range": {"min": -2.0, "max": 2.0, "step": 0.01, "type": "float"},
         "api_param": "presence_penalty",
         "order": 330,
+        "hide_in_card": True,  # 不常用，不在配置卡显示
     },
     "思考模式": {
         "display_name": "思考模式",

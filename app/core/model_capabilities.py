@@ -47,9 +47,8 @@ DEFAULT_MODEL_PARAMS: Dict[str, Any] = {
     "presence_penalty": 0.0,
     "上下文长度": 128000,
     "最大Token": 128000,
-    "思考模式": False,
-    "思考等级": "medium",
-    "启用技能": False,
+    # 注：思考模式/思考等级/启用技能不在兜底里——
+    # 这些字段对不支持的模型无意义，仅在 MODEL_CAPABILITIES 标记 supports_thinking=True 时才注入。
 }
 
 
@@ -89,11 +88,11 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "source": "models.dev", "note": "智谱 GLM-5.1，2026-03-27 发布",
     },
     "mimo-v2.5-pro": {
-        "context_limit": 1000000, "supports_thinking": True,
+        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "reasoning_effort",
         "source": "vendor_official", "note": "小米 MiMo-V2.5-Pro，2026-04-23 公测，2026-04-27 开源；1.02T 总参 / 42B 激活",
     },
     "mimo-v2.5": {
-        "context_limit": 1000000, "supports_thinking": True,
+        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "reasoning_effort",
         "source": "vendor_official", "note": "小米 MiMo-V2.5 全模态通用模型，2026-04-23 公测",
     },
     "minimax-m2.5": {
@@ -362,8 +361,15 @@ def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, A
         result["最大Token"] = caps["context_limit"]
         result["上下文长度"] = caps["context_limit"]
         if caps.get("supports_thinking"):
-            result["思考模式"] = True
-            result["思考等级"] = "medium"
+            # 仅在 config 还没显式设置时填默认（避免覆盖用户的 model_overrides）
+            if "思考模式" not in result:
+                result["思考模式"] = True
+            if "思考等级" not in result:
+                result["思考等级"] = "medium"
         else:
-            result["思考模式"] = False
+            # 模型不支持思考 → 主动移除思考相关字段
+            # （用户如果之前在 model_overrides 里显式开过，会在 _load_model_config_to_card 后续被补回）
+            result.pop("思考模式", None)
+            result.pop("思考等级", None)
+            result.pop("思考预算", None)
     return result

@@ -117,10 +117,5 @@ colors:
   branch_label_border: "rgba(53, 247, 138, 0.3)"
   window_bg: "rgba(53, 247, 138, 0.04)"
 
-  # ── 输入卡发光（ember 强度 70/30 + 主题自己的辐射绿 input_focus_border）──
-  # 不走 preset：preset 会把 input_focus_border 强覆盖为预设色。这里直接落
-  # ember 的 4 个 ambient/primary token，颜色留给上方的 input_focus_border。
-  input_glow_primary_blur: 0
-  input_glow_primary_alpha: 0
-  input_glow_ambient_blur: 30
-  input_glow_ambient_alpha: 70
+  # ── 输入卡发光预设（ember 强度 70/30；颜色由上方 input_focus_border 决定）──
+  input_glow_preset: "ember"

@@ -35,6 +35,7 @@ from app.constants import PARAM_SCHEMA
 from app.core.conversation.config import PermissionCache
 from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
 from app.core.provider_profile import get_provider_profile
+from app.core.model_capabilities import get_model_capabilities
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
@@ -559,7 +560,14 @@ class OpenAIChatWorker(QThread):
         缓存结果，只在配置变化时重新构建。
         """
         # 检查是否需要更新缓存
-        config_key = str(self.llm_config.get("API_KEY", "")) + str(self.llm_config.get("API_URL", ""))
+        # 缓存键必须包含所有影响 extra_body 的参数，否则改思考模式等不会生效
+        sig_parts = [
+            str(self.llm_config.get(k, ""))
+            for k in ("API_KEY", "API_URL", "模型名称",
+                      "思考模式", "思考等级", "思考预算",
+                      "温度", "top_p", "最大Token", "max_new_tokens")
+        ]
+        config_key = "|".join(sig_parts)
 
         if self._cached_api_config is not None and self._cached_api_config.get("_config_key") == config_key:
             # 缓存有效，返回基础配置（messages 和 tools 每次不同，需要单独设置）
@@ -583,7 +591,10 @@ class OpenAIChatWorker(QThread):
             skip_params.update({"temperature", "top_p"})
 
         for cn_key, value in self.llm_config.items():
-            if cn_key in ["API_KEY", "API_URL", "模型名称", "系统提示", "启用技能"]:
+            if cn_key in {"API_KEY", "API_URL", "API_BASE", "认证方式", "模型名称",
+                          "系统提示", "启用技能",
+                          "name", "provider_name", "config_id", "display_name",
+                          "_suffix_index", "备注", "获取地址", "模型列表"}:
                 continue
             # 从 PARAM_SCHEMA 查找 API 参数名
             meta = PARAM_SCHEMA.get(cn_key, {})
@@ -601,27 +612,32 @@ class OpenAIChatWorker(QThread):
         if max_tokens is not None:
             extra_body["max_tokens"] = self._cap_max_output_tokens(model, max_tokens)
 
-        # 处理服务商特有的思考模式参数
-        profile = get_provider_profile(self.llm_config)
-        provider_family = profile["family"]
+        # 处理思考模式（通用逻辑，不再按 family 硬编码）
+        thinking_mode = self.llm_config.get("思考模式")
+        if thinking_mode is not None:
+            # 优先从 MODEL_CAPABILITIES 获取 thinking_param，回退到 provider_profile
+            caps = get_model_capabilities(model)
+            t_param = None
+            if caps:
+                t_param = caps.get("thinking_param")
+            if not t_param:
+                profile = get_provider_profile(self.llm_config)
+                t_param = profile.get("thinking_param")
 
-        if provider_family == "deepseek":
-            thinking_mode = self.llm_config.get("思考模式")
             if thinking_mode is True:
-                extra_body["thinking"] = {"type": "enabled"}
-                # reasoning_effort 由映射自动流入，无需额外处理
-            elif thinking_mode is False:
-                extra_body["thinking"] = {"type": "disabled"}
-                # API 要求：关闭思考时不能传 reasoning_effort
+                if t_param == "thinking":
+                    extra_body["thinking"] = {"type": "enabled"}
+                elif t_param == "thinking_budget":
+                    budget = self.llm_config.get("思考预算", 4096)
+                    extra_body["thinking_budget"] = budget
+                # reasoning_effort 由 思考等级 的 api_param 映射自动流入
+            else:  # False - 关闭思考
+                if t_param == "thinking":
+                    extra_body["thinking"] = {"type": "disabled"}
+                elif t_param == "thinking_budget":
+                    extra_body.pop("thinking_budget", None)
+                # 关闭思考时必须移除 reasoning_effort（否则 API 仍可能启用思考）
                 extra_body.pop("reasoning_effort", None)
-
-        elif provider_family == "zhipu":
-            thinking_mode = self.llm_config.get("思考模式")
-            if thinking_mode is True:
-                extra_body["thinking"] = {"type": "enabled"}
-            elif thinking_mode is False:
-                extra_body["thinking"] = {"type": "disabled"}
-            # 智谱AI 不支持 reasoning_effort，已有映射不会注入
 
         # 处理认证
         auth_headers = None

@@ -103,22 +103,25 @@ background:
 
 ##### 4.5.1 发光预设（推荐写法）
 
-主题最简洁的做法是直接指定 `input_glow_preset`，由 DriFox 一次性填回以上 7 个 token，省去手调。预设有 4 档：
+主题最简洁的做法是直接指定 `input_glow_preset`，由 DriFox 一次性填回 6 个发光强度 token。**预设只控制发光强度，不管颜色** —— 颜色由本主题的 `input_focus_border` 决定。这样主题可以自由组合"颜色 + 强度"，例如辐射绿 + ember 强度。
 
-| 预设 | 风格 | 适用 |
+预设有 4 档：
+
+| 预设 | 风格（强度） | 适用 |
 |------|------|------|
-| `subtle`   | 香槟金 `#B59A6A`，halo 最克制（35/18），失焦关 | 追求低调 |
-| `breath`   | 香槟金 `#B59A6A`，halo 适中（60/28），失焦保留微光（22/22） | 奢华感最强 |
-| `platinum` | 白金 `#C8C5BD`，halo 适中（55/26），失焦关 | 冷峻现代 |
-| `ember`    | 鲜金 `#C9A85C`，halo 中等偏强（环境 70/30），失焦 18/20 | 略高于原版亮度，四档中最亮 |
+| `subtle`   | halo 最克制（聚焦 35/18，失焦 0），失焦完全关 | 追求低调 |
+| `breath`   | halo 中等（聚焦 65/30，失焦 38/30），失焦保留微光 | 奢华感最强（"由弱到强"焦点切换） |
+| `platinum` | halo 适中（聚焦 55/26，失焦 0），失焦关 | 冷峻现代 |
+| `ember`    | halo 偏强（聚焦 70/30，失焦 18/20），四档中最亮 | 喜欢高调观感 |
 
 写法示例：
 ```yaml
 colors:
-  input_glow_preset: "breath"   # 必填字段，写这一行就行
+  input_focus_border: "#35f78a"   # 辐射绿（颜色由主题决定）
+  input_glow_preset: "ember"      # ember 强度
 ```
 
-> ⚠️ 写 `input_glow_preset` 会覆盖所有 7 个 `input_glow_*` / `input_focus_border` 字段，避免"半套预设"导致的视觉割裂。如需在预设基础上微调，请复制预设参数到对应 token 后**删除** `input_glow_preset` 行。
+> 💡 预设**不会**覆盖 `input_focus_border`，只覆盖 6 个 `input_glow_*` token。如需在预设基础上微调某个强度参数，请先复制预设的 6 个数值到对应 token 后**删除** `input_glow_preset` 行。
 
 #### 5. 实时交互卡片
 - `realtime_border`: 边框（用 accent 或相近色）

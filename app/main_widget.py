@@ -1594,9 +1594,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("memory", self._memory_card)
 
-        # 模型配置卡片
+        # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
-        self._model_config_card.setFixedHeight(360)  # 默认 180 偏小，提高以便显示更多参数
+        self._model_config_card.setFixedHeight(280)  # 初始值，set_config 时会重新计算
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
@@ -3996,12 +3996,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         self._load_model_configs()
-        InfoBar.success(
-            "已保存",
-            "配置已保存到本地。",
-            parent=self,
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
+        logger.debug(
+            f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}"
         )
 
     def _on_settings_config_changed(self):

@@ -470,7 +470,10 @@ class SubAgentExecutor(QThread):
         extra_body = {}
 
         for cn_key, value in config.items():
-            if cn_key in ["API_KEY", "API_URL", "模型名称", "系统提示", "启用技能"]:
+            if cn_key in {"API_KEY", "API_URL", "API_BASE", "认证方式", "模型名称",
+                          "系统提示", "启用技能",
+                          "name", "provider_name", "config_id", "display_name",
+                          "_suffix_index", "备注", "获取地址", "模型列表"}:
                 continue
 
             meta = PARAM_SCHEMA.get(cn_key, {})
