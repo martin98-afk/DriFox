@@ -86,6 +86,18 @@ PARAM_SCHEMA = {
     },
 }
 
+# ============================================================
+# 模型级参数（按模型名持久化，不按服务商实例）
+# ============================================================
+# 用户在 UI 上改这些参数时，会存入 `llm_model_overrides[模型名]`，
+# 而不是 `saved_providers[config_id]`。
+# 连接级参数（API_URL, API_KEY, 认证方式等）仍按服务商实例存。
+MODEL_LEVEL_KEYS = frozenset(
+    "温度 temp 最大Token 上下文长度 max_new_tokens "
+    "top_p frequency_penalty presence_penalty "
+    "思考模式 思考预算 思考等级 启用技能".split()
+)
+
 
 PROVIDER_MODELS = {
     "火山方舟": [
@@ -210,7 +222,7 @@ FREE_PROVIDERS = {
         "API_KEY": "",
         "模型名称": "deepseek-v4-flash-free",
         "温度": 0.7,
-        "最大Token": 128000,
+        "最大Token": 200000,
         "认证方式": "bearer",
         "获取地址": "https://opencode.ai/auth",
     },

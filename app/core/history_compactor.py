@@ -31,7 +31,7 @@ from app.core.message_content import (
     consolidate_messages,
     content_to_text,
 )
-from app.core.provider_profile import get_provider_profile
+from app.core.model_capabilities import resolve_context_limit, resolve_max_output_tokens
 from app.core.token_estimator import count_messages_tokens
 from app.core.workers.error_handler import create_api_call_with_retry
 
@@ -714,43 +714,20 @@ class HistoryCompactor:
     def get_budget(self, llm_config: Optional[Dict] = None) -> int:
         """
         计算可用历史预算
-        
+
         Args:
             llm_config: 模型配置（不传则用 get_model_config）
-            
+
         Returns:
             int: 可用于历史的 token 预算
         """
         if llm_config is None:
             llm_config = self._get_model_config() or {}
-        
-        profile = get_provider_profile(llm_config)
-        context_limit = int(profile.get("context_limit", 128000))
 
-        # 支持多种配置字段名
-        for key in ("context_limit", "context_window", "max_context_tokens", "最大Token"):
-            value = llm_config.get(key)
-            if value not in (None, ""):
-                try:
-                    context_limit = int(value)
-                    break
-                except (ValueError, TypeError):
-                    logger.debug(f"Failed to parse context_limit from: {value}")
+        context_limit = resolve_context_limit(llm_config)
+        max_output_tokens = resolve_max_output_tokens(llm_config)
 
-        max_output_tokens = llm_config.get("最大新Token", 
-            llm_config.get("max_tokens",
-                llm_config.get("max_output_tokens", 
-                    profile.get("max_output_tokens", 4096)
-                )
-            )
-        )
-        try:
-            max_output_tokens = int(max_output_tokens)
-        except (ValueError, TypeError):
-            logger.debug(f"Failed to parse max_output_tokens: {max_output_tokens}, using default")
-            max_output_tokens = int(profile.get("max_output_tokens", 4096))
-
-        # O1 模型需要更大的输出预留
+        # O1/O3 模型需要更大的输出预留
         model_name = str(llm_config.get("model", "")).lower()
         reserved = min(800, max_output_tokens)
         if "o1" in model_name or "o3" in model_name:

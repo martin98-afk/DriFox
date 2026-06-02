@@ -52,6 +52,7 @@ from qfluentwidgets import (
 
 from app.constants import (
     FREE_PROVIDERS,
+    MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
     PROVIDER_MODELS,
 )
@@ -64,6 +65,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
+from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.command_manager import CommandManager, CommandType
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
@@ -843,6 +845,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         多窗口隔离：使用 _current_model_name 覆盖全局配置中的模型名称，
         确保每个窗口使用自己选中的模型，而非其他窗口最后选择的模型。
+
+        合并顺序（低 → 高）：
+            1. _valid_configs (provider 实例 + 服务商默认)
+            2. apply_model_defaults (硬编码兜底 + 模型能力)
+            3. model_overrides[当前模型名] (用户调过的参数，最高)
         """
         selected_name = (
             self._current_provider_name
@@ -856,6 +863,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 确保使用当前窗口选中的模型名称，而非全局配置中的模型名称（多窗口隔离）
             if self._current_model_name:
                 config["模型名称"] = self._current_model_name
+            # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 FREE_PROVIDERS 的部分默认值）
+            config = apply_model_defaults(config, self._current_model_name)
+            # 叠加用户按模型名覆盖的参数（最高优先级）
+            model_overrides = getattr(self.cfg, "llm_model_overrides", None)
+            if model_overrides and self._current_model_name:
+                overrides = (model_overrides.value or {}).get(
+                    self._current_model_name, {}
+                )
+                if overrides:
+                    config.update(overrides)
             return config
 
         return {}
@@ -2152,7 +2169,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     ambient_blur=Colors.INPUT_GLOW_AMBIENT_BLUR,
                 )
             else:
-                self._input_glow_underlay.set_glow(0, 0, 0, 0)
+                # 失焦态：默认完全关闭；glow preset（如 breath）会通过
+                # INPUT_GLOW_UNFOCUSED_* token 保留微光，营造"持续呼吸"的奢华感
+                self._input_glow_underlay.set_glow(
+                    primary_alpha=0,
+                    primary_blur=0,
+                    ambient_alpha=Colors.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA,
+                    ambient_blur=Colors.INPUT_GLOW_UNFOCUSED_AMBIENT_BLUR,
+                )
             # 焦点 / 折叠状态变化都可能改变胶囊几何（如 toolbar 圆角切换、
             # input_card 折叠到 0），同步一次确保 underlay 跟上
             self._position_input_glow_underlay()
@@ -3458,6 +3482,20 @@ class OpenAIChatToolWindow(ToolWindow):
         config = {}
         if current_name in self._valid_configs:
             config = self._valid_configs[current_name].copy()
+
+        # 叠加模型默认值（三层兜底：硬编码 > 模型能力 > 已有配置）
+        # 当服务商不在 FREE_PROVIDERS（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
+        config = apply_model_defaults(config, self._current_model_name)
+
+        # 叠加用户按模型名保存的覆盖值（最高优先级）
+        model_overrides = getattr(self.cfg, "llm_model_overrides", None)
+        if model_overrides and self._current_model_name:
+            overrides = (model_overrides.value or {}).get(
+                self._current_model_name, {}
+            )
+            if overrides:
+                config.update(overrides)
+
         # 移除连接信息、元数据字段和无关的额外字段
         for pop_key in [
             "备注",
@@ -3913,16 +3951,49 @@ class OpenAIChatToolWindow(ToolWindow):
         current_name = self._current_provider_name
         if not current_name:
             return
-        # 只更新参数，保留连接信息
-        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
+        if not new_config:
+            return
+
+        # 区分模型级与连接级字段
+        model_keys = MODEL_LEVEL_KEYS
+        model_fields = {}
+        conn_fields = {}
+        current_model_name = new_config.get("模型名称", self._current_model_name or "")
+
+        for key, value in new_config.items():
+            if key in model_keys:
+                model_fields[key] = value
+            else:
+                conn_fields[key] = value
+
+        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
+        model_overrides = copy.deepcopy(self.cfg.llm_model_overrides.value) or {}
+
         old_config = saved_providers.get(
             current_name, self._valid_configs.get(current_name, {})
         )
-        old_config.update(new_config)
-        self._valid_configs[current_name] = old_config
-        saved_providers[current_name] = old_config
-        self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
+
+        # 1. 连接级字段 → 写入 saved_providers[config_id]
+        if conn_fields:
+            old_config.update(conn_fields)
+            self._valid_configs[current_name] = old_config
+            saved_providers[current_name] = old_config
+            self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
+            logger.debug(
+                f"[_on_config_applied] 连接级字段 -> saved_providers[{current_name}]: {list(conn_fields.keys())}"
+            )
+
+        # 2. 模型级字段 → 写入 model_overrides[模型名]
+        if model_fields and current_model_name:
+            existing = model_overrides.get(current_model_name, {}).copy()
+            existing.update(model_fields)
+            model_overrides[current_model_name] = existing
+            self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
+            logger.debug(
+                f"[_on_config_applied] 模型级字段 -> model_overrides[{current_model_name}]: {list(model_fields.keys())}"
+            )
+
         self._load_model_configs()
         InfoBar.success(
             "已保存",

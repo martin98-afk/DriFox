@@ -117,7 +117,4 @@ colors:
   window_bg: rgba(212, 137, 59, 0.04)
 
   # ── 输入卡双层 halo ──
-  input_glow_primary_blur: 17
-  input_glow_primary_alpha: 230
-  input_glow_ambient_blur: 44
-  input_glow_ambient_alpha: 82
+  input_glow_preset: "ember"

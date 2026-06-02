@@ -19,6 +19,7 @@ from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
 
 from app.core.provider_profile import get_provider_profile
+from app.core.model_capabilities import resolve_context_limit, resolve_max_output_tokens
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
@@ -45,33 +46,8 @@ def _compute_context_budget(llm_config: Dict) -> int:
         logger.warning(f"[SubAgentExecutor] _compute_context_budget received non-dict llm_config: {type(llm_config).__name__}, using defaults")
         return 96000  # 默认 128k * 0.75
 
-    profile = get_provider_profile(llm_config)
-    context_limit = int(profile.get("context_limit", 128000))
-
-    # 支持多种配置字段名
-    for key in ("context_limit", "context_window", "max_context_tokens", "最大Token"):
-        value = llm_config.get(key)
-        if value not in (None, ""):
-            try:
-                context_limit = int(value)
-                break
-            except (ValueError, TypeError):
-                pass
-
-    max_output_tokens = llm_config.get(
-        "最大新Token",
-        llm_config.get(
-            "max_tokens",
-            llm_config.get(
-                "max_output_tokens",
-                profile.get("max_output_tokens", 4096),
-            ),
-        ),
-    )
-    try:
-        max_output_tokens = int(max_output_tokens)
-    except (ValueError, TypeError):
-        max_output_tokens = int(profile.get("max_output_tokens", 4096))
+    context_limit = resolve_context_limit(llm_config)
+    max_output_tokens = resolve_max_output_tokens(llm_config)
 
     # O1/O3 模型需要更大的输出预留
     model_name = str(

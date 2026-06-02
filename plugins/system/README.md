@@ -102,6 +102,8 @@ system/
 
 通过 `/theme` 命令生成新主题。
 
+主题 YAML 中 `colors` 段还支持 `input_glow_preset` 字段（`subtle` / `breath` / `platinum` / `ember`），用于一键切换输入框聚焦发光的整体风格。详细 token 与参数见 [`commands/theme.md`](./commands/theme.md) 第 4.5 节。
+
 ### Hooks (`hooks/`)
 
 Hooks 是事件驱动的扩展点，系统在特定生命周期触发时执行对应逻辑。当前系统内置 Hooks 配置为空，供插件扩展使用。
