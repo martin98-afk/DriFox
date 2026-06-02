@@ -373,7 +373,13 @@ class OpenAIChatWorker(QThread):
             event: 事件类型
             *args, **kwargs: 事件数据
         """
-        self._event_bus.emit(event, *args, **kwargs)
+        # 修复：cleanup() 会把 self._event_bus 置为 None 以断开闭包引用，
+        # 而 ThreadPoolExecutor 子线程仍可能在并行工具执行结束后调用本方法，
+        # 此处需做 None 保护，避免 'NoneType' object has no attribute 'emit'。
+        bus = self._event_bus
+        if bus is None:
+            return
+        bus.emit(event, *args, **kwargs)
 
     def _emit_with_callback(self, signal_name: str, signal, *args) -> None:
         """发射信号并尝试直接回调（已废弃，推荐使用 _emit_via_event_bus）
@@ -385,19 +391,24 @@ class OpenAIChatWorker(QThread):
             signal: Qt 信号对象（保留用于向后兼容）
             *args: 传递给回调/信号的参数
         """
-        # 映射 signal_name 到 WorkerEvent
-        event = self._signal_name_to_event(signal_name)
-        if event:
-            self._emit_via_event_bus(event, *args)
+        try:
+            # 映射 signal_name 到 WorkerEvent
+            event = self._signal_name_to_event(signal_name)
+            if event:
+                self._emit_via_event_bus(event, *args)
 
-        # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
-        # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
-        # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
-        if signal is not None:
-            try:
-                signal.emit(*args)
-            except (AttributeError, RuntimeError, TypeError) as e:
-                logger.debug(f"[Signal] PyQt信号发射失败 {signal_name}: {e}")
+            # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
+            # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
+            # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
+            if signal is not None:
+                try:
+                    signal.emit(*args)
+                except (AttributeError, RuntimeError, TypeError) as e:
+                    logger.debug(f"[Signal] PyQt信号发射失败 {signal_name}: {e}")
+        except Exception as e:
+            # 兜底：cleanup() 后子线程调用本方法可能命中各类 None 资源，
+            # 这里吞掉而非向上抛，避免阻断并行工具结果的处理路径。
+            logger.debug(f"[Signal] _emit_with_callback 兜底 {signal_name}: {e}")
 
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
         """将 signal name 映射到 WorkerEvent"""
