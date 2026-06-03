@@ -7584,12 +7584,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
-                    # 提示词替换命令：替换 + 追加用户命令
+                    # 提示词替换命令：替换 + 用 $ARGUMENTS 占位符替换
                     user_text = cmd_result.replacement
                     if cmd_result.remainder:
-                        user_text = (
-                            f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
-                        )
+                        if "$ARGUMENTS$" in user_text:
+                            user_text = user_text.replace(
+                                "$ARGUMENTS$", cmd_result.remainder
+                            )
+                        else:
+                            # fallback: 无 $ARGUMENTS$ 时保留旧行为
+                            user_text = (
+                                f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
+                            )
                     # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
 
