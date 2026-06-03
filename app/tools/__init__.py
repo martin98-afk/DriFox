@@ -986,26 +986,23 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         f"【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
     )
     if subagent_names:
-        subagent_list = ", ".join(subagent_names)
-        subagent_para_desc += f"\n\n可用子智能体: {subagent_list}"
+        subagent_para_desc += (
+            "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
+        )
 
-    # Update the subagent_para schema with dynamic content
+    # Update the subagent_para schema
     for schema in schemas:
         if schema["function"]["name"] == "subagent_para":
             schema["function"]["description"] = subagent_para_desc
-            if subagent_names:
-                schema["function"]["parameters"]["properties"]["tasks"]["items"][
-                    "properties"
-                ]["agent"]["description"] += f" (可选：{', '.join(subagent_names)})"
             break
 
-    # 动态生成 subagent_dag 工具描述（注入可用子智能体列表）
+    # 更新 subagent_dag 工具描述
     for schema in schemas:
         if schema["function"]["name"] == "subagent_dag":
             if subagent_names:
-                schema["function"]["parameters"]["properties"]["nodes"]["items"][
-                    "properties"
-                ]["agent"]["description"] += f" (可选：{', '.join(subagent_names)})"
+                schema["function"]["description"] += (
+                    "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
+                )
             break
 
     # 动态注入 MCP 工具 schema

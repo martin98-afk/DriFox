@@ -1196,6 +1196,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
                 success=bool(msg.get("success", True)),
                 tool_call_id=msg.get("tool_call_id", ""),
                 diff=msg.get("diff"),
+                echarts=msg.get("echarts"),
             )
     assistant_card.finish_streaming()
 
