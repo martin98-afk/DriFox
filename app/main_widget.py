@@ -725,6 +725,24 @@ class OpenAIChatToolWindow(ToolWindow):
             # 创建新的窗口实例
             new_instance = OpenAIChatToolWindow(valid_homepage)
 
+            # ── 多窗口隔离：把源窗口的项目上下文原样复制给新窗口 ──
+            # 必须在 __init__ 跑完之后立刻覆盖,否则新窗口会从全局 cfg 读到
+            # 最近一次 _on_project_selected 写入的"当前最新选择的项目",
+            # 导致分支/复制窗口错位显示项目名。
+            new_instance._current_project = self._current_project
+            new_instance._current_workdir = dict(self._current_workdir)  # 浅拷贝防共享
+            new_instance.backend._current_project = self._current_project
+            if new_instance.backend.tool_executor:
+                new_instance.backend.tool_executor.set_current_project(self._current_project)
+            if hasattr(new_instance, "_project_label"):
+                new_instance._project_label.setText(self._current_project)
+            # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
+            if hasattr(new_instance, "_refresh_project_branch_style"):
+                new_instance._refresh_project_branch_style()
+            if hasattr(new_instance, "_update_branch"):
+                new_instance._update_branch()
+            # ──────────────────────────────────────────────────
+
             # 如果是分支模式，传递当前会话的消息
             if branch:
                 current_session = self.session_manager.get_current_session()
@@ -735,6 +753,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._branch_session_data = {
                         "messages": branch_messages,
                         "name": branch_name,
+                        "project": self._current_project,  # 记录源项目，便于历史分组/检索
                     }
                 # 分支模式不跳过历史恢复，而是使用传入的分支数据
                 new_instance._skip_restore_history = (
@@ -1119,6 +1138,8 @@ class OpenAIChatToolWindow(ToolWindow):
         session.topic_summary = (
             name  # 同步 topic_summary，避免 _display_current_session 覆盖 title_edit
         )
+        # 记录分支所属项目(走 metadata 而非新增字段,保持核心数据模型不变)
+        session.metadata["project"] = self._current_project
         self._current_session_id = session.session_id
 
         # 清空聊天区域
