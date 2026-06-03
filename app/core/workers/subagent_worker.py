@@ -941,7 +941,25 @@ class SubAgentManager(QObject):
 
         # 5. 生成 ECharts 节点图并立即返回
         echarts_json = self._build_dag_echarts_json(nodes, edges, node_map)
-        return ToolResult(True, content={"dag_id": dag_id, "status": "running", "total": len(nodes)}, echarts=echarts_json)
+        # 附带每个节点的 task_id，方便 LLM 通过 subagent_status 查询单个节点结果
+        nodes_info = [
+            {
+                "id": n["id"],
+                "task_id": node_map[n["id"]]["_task_id"],
+                "agent": n["agent"],
+            }
+            for n in nodes
+        ]
+        return ToolResult(
+            True,
+            content={
+                "dag_id": dag_id,
+                "status": "running",
+                "total": len(nodes),
+                "nodes": nodes_info,
+            },
+            echarts=echarts_json,
+        )
 
     def _start_dag_node(self, dag_id: str, nid: str):
         """启动 DAG 中的单个节点"""
@@ -1017,6 +1035,12 @@ class SubAgentManager(QObject):
         executor.finished_with_result.connect(
             lambda tid, result: self._on_dag_node_finished(dag_id, nid, tid, result)
         )
+        # 节点出错回调（补充 finished_with_result 的缺失路径）
+        # 如果 executor 出错（agent 不存在/LLM 异常等），error_occurred 被 emit
+        # 但 finished_with_result 不会被 emit，导致下游节点永远无法启动
+        executor.error_occurred.connect(
+            lambda tid, error: self._on_dag_node_error(dag_id, nid, tid, error)
+        )
 
         self._running_tasks[task_id] = executor
         node["_status"] = "running"
@@ -1026,24 +1050,71 @@ class SubAgentManager(QObject):
         self.task_started.emit(task_id, node["agent"], node["description"])
 
     def _on_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
-        """DAG 节点执行完成"""
+        """DAG 节点执行完成（正常路径）
+
+        注意：不在此处 emit task_finished，由 _on_sub_agent_task_started 连接的
+        UI 回调路径（finished_with_result → _on_sub_agent_finished → task_finished）
+        统一触发批次数和 _finished_tasks 写入，避免双重计数。
+        """
         dag_state = self._dag_states.get(dag_id)
         if not dag_state:
             return
         node_map = dag_state["node_map"]
         node = node_map[nid]
 
-        # 更新节点状态（具体 result/error 由 _on_sub_agent_task_finished 写入 _finished_tasks）
+        # 更新节点状态
         executor = self._running_tasks.get(task_id)
         error = getattr(executor, "_execution_error", None) if executor else None
         node["_status"] = "failed" if error else "completed"
         node["_result"] = result
         node["_error"] = error or ""
 
-        # 触发 task_finished 信号（让 UI 更新 + 批次计数 + _finished_tasks 写入）
-        self.task_finished.emit(task_id, result)
-
         # 检查下游节点
+        self._check_dag_downstream(dag_id, nid)
+
+        # 检查是否全部完成
+        all_done = all(
+            node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled")
+            for nid in node_map
+        )
+        if all_done:
+            self._dag_states.pop(dag_id, None)
+
+    def _on_dag_node_error(self, dag_id: str, nid: str, task_id: str, error: str):
+        """DAG 节点执行出错（error_occurred 路径）
+
+        当 executor 遇到未预期异常（agent 不存在、LLM 配置无效等），
+        只 emit error_occurred 而不 emit finished_with_result。
+        此方法确保：
+        1. 节点状态标记为 failed
+        2. 写入 _finished_tasks（UI 回调不会触发）
+        3. 触发 task_finished，让批次计数器和 UI 更新
+        4. 级联跳过下游节点
+        5. 检查 DAG 是否全部完成
+        """
+        dag_state = self._dag_states.get(dag_id)
+        if not dag_state:
+            return
+        node_map = dag_state["node_map"]
+        node = node_map[nid]
+
+        node["_status"] = "failed"
+        node["_result"] = ""
+        node["_error"] = error or "节点执行失败"
+
+        # 写入 _finished_tasks（此路径没有 UI 回调，必须手动写）
+        self._finished_tasks[task_id] = {
+            "result": "",
+            "error": error or "节点执行失败",
+            "agent_name": node.get("agent", ""),
+            "task_description": node.get("description", ""),
+            "session_id": dag_state["session_id"],
+        }
+
+        # 触发 task_finished（让批次计数器和 UI 紧凑卡片更新）
+        self.task_finished.emit(task_id, "")
+
+        # 级联跳过下游节点
         self._check_dag_downstream(dag_id, nid)
 
         # 检查是否全部完成
