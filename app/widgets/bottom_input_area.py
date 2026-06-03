@@ -65,10 +65,6 @@ class SendableTextEdit(TextEdit):
         self.send_btn.clicked.connect(self._on_send_click)
         self.send_btn.setDisabled(True)
         self._apply_send_btn_style()
-        # 立即把按钮放到输入框右下角，避免首次显示落在 (0, 0)（即
-        # 视觉上的"左边"），再等 resizeEvent → debounce timer 异步
-        # 触发后跳回右下角造成的"过一会才到右边"。
-        self._position_send_button()
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_slash_trigger_check)
 
@@ -689,6 +685,16 @@ class SendableTextEdit(TextEdit):
         # 每次 resize 重启定时器；连续多次 resize 只会触发最后一次定位，
         # 保证发送按钮一次到位（不抖）。
         self._send_btn_debounce_timer.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 首次显示时同步定位发送按钮——showEvent 在 paintEvent 之前
+        # 同步执行，且此时 width()/height() 已由父布局确定。
+        # 否则：__init__ 阶段 width/height 都是 0，send_btn 落在 (0, 0)
+        # （输入框内的"左边"），要等 resizeEvent → debounce timer(0ms)
+        # 异步跑一轮才到右下角——视觉上就是"刚进去按钮在左边，过一会
+        # 才到右边"。后续 resize 仍走 debounce timer 路径。
+        self._position_send_button()
 
     def _position_send_button(self):
         """定位发送按钮到输入框右下角"""

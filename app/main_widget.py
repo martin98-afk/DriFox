@@ -176,6 +176,8 @@ from app.widgets.ui_helpers import (
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐 DriFox"
     icon = get_icon("drifox")
+    # 所有窗口实例列表（用于广播事件）
+    _instances: List[OpenAIChatToolWindow] = []
     session_manager = None
     _valid_configs: Dict[str, Dict[str, Any]] = {}
     history_manager = None
@@ -393,6 +395,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 自动检查更新（启动时静默检查）
         self._init_auto_update_check()
+
+        # 注册到全局实例列表（用于多窗口事件广播）
+        OpenAIChatToolWindow._instances.append(self)
 
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
@@ -4044,7 +4049,11 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _on_plugin_hot_reload(self, result: dict):
-        """插件热更新完成时的回调（watchfiles 自动触发）"""
+        """插件热更新完成时的回调（watchfiles 自动触发）
+
+        多窗口广播：遍历所有窗口实例，逐一失效命令卡片缓存。
+        如有窗口当前命令卡片可见，立即重建内容。
+        """
         if not hasattr(self, "backend") or not self.backend:
             return
         # 不弹 InfoBar，仅日志记录
@@ -4054,20 +4063,45 @@ class OpenAIChatToolWindow(ToolWindow):
             f"skills={result.get('skills')}, mcp={result.get('mcp')}"
         )
 
-        # 命令卡片缓存失效：任何影响命令/技能列表的变更都需要重建缓存
-        if hasattr(self, "_command_card"):
-            needs_invalidation = (
-                result.get("commands")
-                or result.get("skills")
-                or result.get("agents", 0) > 0
-            )
+        needs_invalidation = (
+            result.get("commands")
+            or result.get("skills")
+            or result.get("agents", 0) > 0
+        )
+
+        # 广播给所有窗口实例
+        for win in OpenAIChatToolWindow._instances:
+            if not hasattr(win, "_command_card"):
+                continue
+            if win._is_destroyed:
+                continue
+
             if needs_invalidation:
-                self._command_card.invalidate_cache()
-                logger.debug("[HotReload] command_card cache invalidated")
+                win._command_card.invalidate_cache()
+                # 如果命令卡片当前可见，立即重建内容
+                if win._command_card.is_card_visible:
+                    try:
+                        text = win.input_area.toPlainText()
+                        if text.startswith("/"):
+                            # 只取第一个词（命令名）作为搜索查询，忽略参数部分
+                            raw = text[1:].strip()
+                            query = raw.split()[0] if raw else ""
+                            win._command_card.show_card(query)
+                        else:
+                            win._command_card.show_card("")
+                    except (RuntimeError, AttributeError):
+                        # 多窗口竞态：窗口已被销毁
+                        pass
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
-            self._register_command_shortcuts()
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    win._register_command_shortcuts()
+                except (RuntimeError, AttributeError):
+                    pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
         # 主题变更：主动刷新设置面板中的主题下拉列表
@@ -9242,6 +9276,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def closeEvent(self, event):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
+
+        # 从全局实例列表中移除
+        try:
+            OpenAIChatToolWindow._instances.remove(self)
+        except (ValueError, Exception):
+            pass
 
         # 多窗口隔离：注销窗口及其卡片数据
         try:
