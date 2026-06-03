@@ -200,16 +200,6 @@ class OpenAIChatToolWindow(ToolWindow):
     _question_floating_widget = None
     _question_tool_call_id = None
     _todo_was_visible_before_system: bool = False  # 打开系统卡片前todo的可见状态
-    # 全屏卡片：打开时隐藏消息列表并 stretch 填满剩余空间
-    _FULLSCREEN_CARDS = frozenset({"settings", "history", "memory", "auto_loop_config", "model_selector"})
-    _FULLSCREEN_WIDGET_MAP = {
-        "settings": "_settings_popup",
-        "history": "_history_card",
-        "memory": "_memory_card",
-        "auto_loop_config": "_auto_loop_config_card",
-        "model_selector": "_model_selector_card",
-    }
-    _TOP_CONTAINER_CARDS = frozenset({"settings"})
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = (
         False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
@@ -973,10 +963,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if obj == self and event.type() == event.Type.Resize:
             if hasattr(self, "_bg_label") and self._bg_label is not None:
                 self._bg_label.resize(self.size())
-            # 全屏卡片跟随窗口调整大小
-            if hasattr(self, '_saved_card_states') and self._saved_card_states:
-                for card_id in list(self._saved_card_states.keys()):
-                    self._recalc_fullscreen_height(card_id)
         # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
         # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
         if event.type() == event.Type.Resize and obj in (
@@ -3339,10 +3325,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.setUpdatesEnabled(True)
             self._input_card.update()
 
-        # 全屏模式：隐藏消息列表并让卡片 stretch 填满
-        if card_id in self._FULLSCREEN_CARDS:
-            self._enable_fullscreen_mode(card_id)
-
     def _do_hide_input_area(self):
         """保留向后兼容 — 已在 _on_system_card_opened 同步执行 setVisible(False)
 
@@ -3394,10 +3376,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.setUpdatesEnabled(True)
             self._input_card.update()
 
-        # 恢复消息列表（如果被全屏卡片隐藏了）
-        if not self.chat_scroll_area.isVisible():
-            self._disable_fullscreen_mode()
-
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
         return [
@@ -3430,107 +3408,6 @@ class OpenAIChatToolWindow(ToolWindow):
             and self._todo_floating_widget._todo_list
         ):
             self._todo_floating_widget.setVisible(True)
-
-    # ── 全屏卡片模式 ──────────────────────────────────────
-
-    def _get_fullscreen_card_widget(self, card_id: str):
-        """通过卡片 ID 获取对应的全屏卡片 widget"""
-        attr = self._FULLSCREEN_WIDGET_MAP.get(card_id)
-        if attr:
-            return getattr(self, attr, None)
-        return None
-
-    def _get_card_container_for_card(self, card_id: str):
-        """确定卡片所在的容器（Top / Bottom）"""
-        if card_id in self._TOP_CONTAINER_CARDS:
-            return self._top_card_container
-        return self._bottom_card_container
-
-    def _recalc_fullscreen_height(self, card_id: str):
-        """重新计算全屏卡片高度（窗口 resize 时调用）
-
-        关键：必须同时设置容器的 maxHeight 为 16777215，
-        否则 CardContainer 已启动的展开动画会把 maxHeight 限制在原固定高度，
-        导致卡片只能显示原固定高度那么多。
-        """
-        card = self._get_fullscreen_card_widget(card_id)
-        container = self._get_card_container_for_card(card_id)
-        if not card or not container:
-            return
-        # toolbar (36px) 始终在底部，卡片填满 toolbar 之上的全部空间
-        toolbar_h = 36
-        available_h = self.height() - toolbar_h - 4  # 4px 边距
-        if available_h < 100:
-            available_h = 100
-
-        # 解除容器高度限制，让卡片占满
-        container.setMinimumHeight(0)
-        container.setMaximumHeight(16777215)
-
-        # 卡片固定到可用高度
-        card.setMinimumHeight(0)
-        card.setMaximumHeight(available_h)
-        card.setFixedHeight(available_h)
-        card.updateGeometry()
-
-    def _enable_fullscreen_mode(self, card_id: str):
-        """全屏卡片打开：隐藏消息列表 → 卡片填满 toolbar 之上的空间
-
-        toolbar 保持可见。卡片在 toolbar 之上显示（不被遮挡）。
-
-        关键修复：必须停掉 CardContainer 已启动的展开动画，
-        并把容器 maxHeight 设为不受限，否则动画会限制卡片高度只能到原固定值。
-        """
-        # 懒初始化实例变量（避免类级可变对象跨实例共享）
-        if not hasattr(self, '_saved_card_states'):
-            self._saved_card_states = {}
-        card = self._get_fullscreen_card_widget(card_id)
-        container = self._get_card_container_for_card(card_id)
-        if not card or not container:
-            return
-
-        # 保存原始约束用于恢复
-        self._saved_card_states[card_id] = {
-            "card_min_h": card.minimumHeight(),
-            "card_max_h": card.maximumHeight(),
-            "container_max_h": container.maximumHeight(),
-        }
-
-        # 1. 停止 CardContainer 正在运行的展开动画（关键！否则动画会限制高度）
-        if hasattr(container, '_expand_animation') and container._expand_animation:
-            try:
-                container._expand_animation.stop()
-            except (RuntimeError, TypeError):
-                pass
-        # 同时取消防抖 timer
-        if hasattr(container, '_expand_timer') and container._expand_timer:
-            try:
-                container._expand_timer.stop()
-            except (RuntimeError, TypeError):
-                pass
-
-        # 2. 隐藏消息列表，释放空间
-        self.chat_scroll_area.setVisible(False)
-
-        # 3. 计算并设置可用高度（同步设置容器 maxHeight 防动画限制）
-        self._recalc_fullscreen_height(card_id)
-
-    def _disable_fullscreen_mode(self):
-        """恢复消息列表并重置卡片原始尺寸"""
-        for card_id, state in self._saved_card_states.items():
-            card = self._get_fullscreen_card_widget(card_id)
-            container = self._get_card_container_for_card(card_id)
-            if card:
-                card.setMinimumHeight(state["card_min_h"])
-                card.setMaximumHeight(state["card_max_h"])
-                # 如果原始有固定高度，恢复之
-                if state["card_min_h"] == state["card_max_h"]:
-                    card.setFixedHeight(state["card_min_h"])
-            if container:
-                container.setMaximumHeight(state["container_max_h"])
-
-        self._saved_card_states.clear()
-        self.chat_scroll_area.setVisible(True)
 
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
@@ -9150,8 +9027,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新记忆卡片的项目
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             self._memory_card_popup.set_project(project)
-            # 自动切换到项目笔记tab（触发头部标签和内容同步切换）
-            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
             # 切换项目时自动同步工作目录
             self._sync_working_directory()
         # 刷新历史面板
@@ -9159,6 +9034,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 自动弹出长期记忆卡片
         if not self._memory_card.isVisible():
             self._toggle_memory_card()
+        # 卡片弹出后，再切换到项目笔记标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
+        if hasattr(self, "_memory_card") and self._memory_card:
+            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
         # 自动触发新建会话
         self._create_new_session()
 
