@@ -84,6 +84,7 @@ from app.widgets.bottom_input_area import (
 )
 from app.widgets.cards import (
     CardManager,
+    CardContainer,
     ContainerType,
     TopCardContainer,
     BottomCardContainer,
@@ -1528,7 +1529,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 历史会话卡片
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setFixedHeight(350)
         # 设置历史/归档标签
         self._history_card.setup_tabs(
             [
@@ -1585,7 +1585,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 记忆管理卡片
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setFixedHeight(350)
         # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
         self._memory_card.setup_tabs(
             [
@@ -1637,7 +1636,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型选择卡片（底部卡片形式）
         self._model_selector_card = BaseSettingsCard("", "", self)
-        self._model_selector_card.setFixedHeight(350)
         self._model_selector_card_content = ModelSelectorCardContent()
         self._model_selector_card_content.modelSelected.connect(
             self._on_model_selected_from_popup
@@ -3385,6 +3383,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 所有系统卡片已关闭，清除打开标记
         self._system_cards_open = False
 
+        # 先恢复全屏模式（显示 _bottom_input_container + 消息列表 + 重置卡片约束）
+        if not self.chat_scroll_area.isVisible():
+            self._disable_fullscreen_mode()
+
         if hasattr(self, "input_area"):
             self.setUpdatesEnabled(False)
             self.input_area.setFocusPolicy(Qt.ClickFocus)
@@ -3429,6 +3431,198 @@ class OpenAIChatToolWindow(ToolWindow):
             and self._todo_floating_widget._todo_list
         ):
             self._todo_floating_widget.setVisible(True)
+
+    # ── 全屏卡片模式 ──────────────────────────────────────
+
+    def _get_fullscreen_card_widget(self, card_id: str):
+        """通过卡片 ID 获取对应的全屏卡片 widget"""
+        attr = self._FULLSCREEN_WIDGET_MAP.get(card_id)
+        if attr:
+            return getattr(self, attr, None)
+        return None
+
+    def _get_card_container_for_card(self, card_id: str):
+        """确定卡片所在的容器（Top / Bottom）"""
+        if card_id in self._TOP_CONTAINER_CARDS:
+            return self._top_card_container
+        return self._bottom_card_container
+
+    def _recalc_fullscreen_height(self, card_id: str):
+        """重新计算全屏卡片高度（窗口 resize 时调用）
+
+        关键：必须同时设置容器的 maxHeight 为 16777215，
+        否则 CardContainer 已启动的展开动画会把 maxHeight 限制在原固定高度，
+        导致卡片只能显示原固定高度那么多。
+        """
+        card = self._get_fullscreen_card_widget(card_id)
+        # 高度计算基于"卡片当前所在的容器"（全屏时已 reparent 到 top）
+        container = card.parentWidget() if card else None
+        if not card or not isinstance(container, CardContainer):
+            return
+        # toolbar (36px) 始终在底部，卡片填满 toolbar 之上的全部空间
+        toolbar_h = 36
+        available_h = self.height() - toolbar_h - 4  # 4px 边距
+        if available_h < 100:
+            available_h = 100
+
+        # 解除容器高度限制，让卡片占满
+        container.setMinimumHeight(0)
+        container.setMaximumHeight(16777215)
+
+        # 卡片固定到可用高度
+        card.setMinimumHeight(0)
+        card.setMaximumHeight(available_h)
+        card.setFixedHeight(available_h)
+        card.updateGeometry()
+
+    def _stop_container_animations(self, container):
+        """停止 CardContainer 的所有展开动画和防抖 timer"""
+        if not container:
+            return
+        if hasattr(container, '_expand_animation') and container._expand_animation:
+            try:
+                container._expand_animation.stop()
+            except (RuntimeError, TypeError):
+                pass
+        if hasattr(container, '_expand_timer') and container._expand_timer:
+            try:
+                container._expand_timer.stop()
+            except (RuntimeError, TypeError):
+                pass
+
+    def _reparent_card(self, card, source_container, target_container, card_id: str):
+        """把卡片从 source_container 移到 target_container（同步 _cards dict）
+
+        关键：必须同步更新双方容器的 _cards dict，否则 CardContainer 会因为
+        _cards 中残留旧引用而错误地认为自己还有可见卡片，触发错误动画。
+        """
+        if not card or not target_container or source_container is target_container:
+            return
+        # 先停止双方容器动画（防 reparent 过程中触发的 resize 引发新动画）
+        self._stop_container_animations(source_container)
+        self._stop_container_animations(target_container)
+        # 从 source 的 _cards dict 和 layout 移除
+        if isinstance(source_container, CardContainer):
+            if hasattr(source_container, '_cards') and card_id in source_container._cards:
+                del source_container._cards[card_id]
+            source_container.layout().removeWidget(card)
+            # source 容器现在没有可见卡片，让它折叠
+            source_container.setMaximumHeight(0)
+        # 添加到 target 的 _cards dict 和 layout
+        if isinstance(target_container, CardContainer):
+            if hasattr(target_container, '_cards'):
+                target_container._cards[card_id] = card
+        card.setParent(target_container)
+        target_container.layout().addWidget(card)
+
+    def _enable_fullscreen_mode(self, card_id: str):
+        """全屏卡片打开：把卡片 reparent 到 top 容器 + 隐藏消息列表/输入区 → 占满
+
+        原因：bottom container 下方有 _bottom_input_container，向上缩窗口时
+        bottom 容器不能及时收缩，卡片和 toolbar 之间出现一大片空白。
+        移到 top container 后 resize 行为正常（与 settings 卡片一致）。
+
+        关闭时放回原容器，恢复原状。
+        """
+        # 懒初始化实例变量（避免类级可变对象跨实例共享）
+        if not hasattr(self, '_saved_card_states'):
+            self._saved_card_states = {}
+        card = self._get_fullscreen_card_widget(card_id)
+        if not card:
+            return
+
+        # 记录原容器（卡片的当前 parent 才是真相，_get_card_container_for_card 是初始注册的位置）
+        original_container = card.parentWidget()
+        target_container = self._top_card_container
+        was_in_top = (original_container is target_container)
+
+        # 保存原始约束用于恢复
+        main_layout = self.layout()
+        saved_margins = main_layout.contentsMargins()
+        self._saved_card_states[card_id] = {
+            "card_min_h": card.minimumHeight(),
+            "card_max_h": card.maximumHeight(),
+            "original_container": original_container,
+            "was_in_top": was_in_top,
+            "layout_top_margin": saved_margins.top(),
+        }
+
+        # 临时把主 layout 顶部 margin 设为 0（默认 1px），让 top 容器贴顶、消除卡片上方 1px 遗留空间
+        main_layout.setContentsMargins(
+            saved_margins.left(), 0, saved_margins.right(), saved_margins.bottom()
+        )
+
+        # 1. 如果原本不在 top，reparent 到 top 容器（同步 _cards dict）
+        if not was_in_top:
+            self._reparent_card(card, original_container, target_container, card_id)
+            card.setVisible(True)
+
+        # 2. 停止 top 容器的动画
+        self._stop_container_animations(target_container)
+
+        # 3. 隐藏消息列表 + 底部输入容器（释放布局空间）
+        self.chat_scroll_area.setVisible(False)
+        self._bottom_input_container.setVisible(False)
+
+        # 隐藏输入框发光效果（以 self 为 parent 的独立 widget，全屏时不该覆盖卡片）
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
+
+        # 4. 解除 top 容器高度限制，让卡片占满
+        target_container.setMinimumHeight(0)
+        target_container.setMaximumHeight(16777215)
+
+        # 5. 直接用 self.height() 减 toolbar 高度：主 layout 顶部 margin 已临时为 0，
+        #    top 容器从 Y=0 开始，卡片底部贴 toolbar 上沿即可。
+        toolbar_h = 36
+        available_h = self.height() - toolbar_h - 2
+        if available_h < 100:
+            available_h = 100
+
+        card.setMinimumHeight(0)
+        card.setMaximumHeight(available_h)
+        card.setFixedHeight(available_h)
+        card.updateGeometry()
+
+    def _disable_fullscreen_mode(self):
+        """恢复消息列表/输入区 + 把卡片 reparent 回原容器 + 重置原始尺寸"""
+        for card_id, state in self._saved_card_states.items():
+            card = self._get_fullscreen_card_widget(card_id)
+            if not card:
+                continue
+            original_container = state.get("original_container")
+            was_in_top = state.get("was_in_top", False)
+
+            # 1. 如果原本不在 top，把卡片放回原容器
+            if not was_in_top and isinstance(original_container, CardContainer):
+                self._reparent_card(card, card.parentWidget(), original_container, card_id)
+            # 2. 恢复卡片原始尺寸
+            card.setMinimumHeight(state["card_min_h"])
+            card.setMaximumHeight(state["card_max_h"])
+            if state["card_min_h"] == state["card_max_h"]:
+                card.setFixedHeight(state["card_min_h"])
+            # 3. 解除 top 容器 maxHeight 限制（让 _do_expand 重新计算）
+            self._top_card_container.setMinimumHeight(0)
+            self._top_card_container.setMaximumHeight(16777215)
+
+            # 恢复主 layout 顶部 margin（如果本次保存过）
+            if "layout_top_margin" in state:
+                margins = self.layout().contentsMargins()
+                self.layout().setContentsMargins(
+                    margins.left(),
+                    state["layout_top_margin"],
+                    margins.right(),
+                    margins.bottom(),
+                )
+
+        # 恢复输入框发光效果
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
+
+        self._saved_card_states.clear()
+        # 4. 恢复消息列表和输入区
+        self._bottom_input_container.setVisible(True)
+        self.chat_scroll_area.setVisible(True)
 
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""

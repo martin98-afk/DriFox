@@ -626,9 +626,9 @@ class AgentManager:
         if not agents:
             return ""
 
-        lines = ["## Available Subagents\n可直接使用的子智能体列表："]
+        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para和subagent_dag使用)："]
         for a in agents:
-            lines.append(f"- **{a.name}**: {a.description}")
+            lines.append(f"- **{a.name}**: {a.description[:300]}")
 
         return "\n".join(lines)
 
