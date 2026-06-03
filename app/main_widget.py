@@ -7893,22 +7893,20 @@ class OpenAIChatToolWindow(ToolWindow):
             task_session_id = getattr(executor, "_task_session_id", "")
             del sub_agent_mgr._running_tasks[task_id]
         else:
-            # executor 可能已被 get_finished_tasks() 移除，此时尝试从 _finished_tasks 恢复字段
-            agent_name = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
-                "agent_name", ""
-            )
-            task_description = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
-                "task_description", ""
-            )
-            task_session_id = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
-                "session_id", ""
-            )
+            # executor 可能已被 get_finished_tasks() 移除（DAG 节点由 _on_dag_node_finished 提前删除 running_tasks）
+            # 此时从 _finished_tasks 恢复字段（此时 DAG 已写入 error 信息，不要覆盖）
+            existing = sub_agent_mgr._finished_tasks.get(task_id, {})
+            agent_name = existing.get("agent_name", "")
+            task_description = existing.get("task_description", "")
+            task_session_id = existing.get("session_id", "")
 
         # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
         if task_id in sub_agent_mgr._finished_tasks:
             existing = sub_agent_mgr._finished_tasks[task_id]
             existing["result"] = result
-            existing["error"] = execution_error or ""
+            # 已有 error（如 DAG 写入的跳过信息）不要覆盖
+            if "error" not in existing or not existing["error"]:
+                existing["error"] = execution_error or ""
             existing.setdefault("agent_name", agent_name)
             existing.setdefault("task_description", task_description)
             existing.setdefault("session_id", task_session_id)
@@ -8187,6 +8185,13 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             diff_val = getattr(result, "diff", None) if result else None
 
+        # 提取 echarts 字段（ToolResult 对象或 dict 格式）
+        echarts_val = None
+        if isinstance(result, dict):
+            echarts_val = result.get("echarts", None)
+        else:
+            echarts_val = getattr(result, "echarts", None) if result else None
+
         if self._current_assistant_card:
             self._current_assistant_card.append_tool_result(
                 tool_name=tool_name,
@@ -8195,6 +8200,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 success=success,
                 tool_call_id=tool_call_id,
                 diff=diff_val,
+                echarts=echarts_val,
             )
 
         self._scroll_to_bottom()

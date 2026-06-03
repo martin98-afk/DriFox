@@ -152,6 +152,45 @@ class TaskTools:
             logger.error(f"[Task] subagent_para_execute exception: {e}")
             return ToolResult(False, error=f"批量任务启动失败: {str(e)}")
 
+    def subagent_dag_execute(
+            self, nodes: List[Dict], edges: List[Dict],
+            session_id: str = "", sub_agent_manager=None
+    ) -> ToolResult:
+        """
+        执行 DAG 工作流（同步）。按拓扑排序分批并行执行节点，
+        下游节点自动获取上游节点结果。
+
+        Args:
+            nodes: List[Dict], 每个节点包含:
+                - id: str 节点唯一标识
+                - agent: str 子智能体名称
+                - description: str 任务描述
+                - context: str (可选) 额外上下文
+            edges: List[Dict], 依赖关系 [{"from": "id1", "to": "id2"}]
+            session_id: 当前会话 ID
+            sub_agent_manager: 子智能体管理器实例
+
+        Returns:
+            ToolResult: success=True, content={"nodes": [{"id": str, "status": str, "result": str, "error": str}]}
+        """
+        manager = sub_agent_manager or self._sub_agent_manager
+        if not manager:
+            return ToolResult(False, error="子智能体管理器未初始化")
+
+        if not nodes:
+            return ToolResult(False, error="节点列表为空")
+
+        try:
+            # 委托给 SubAgentManager 执行 DAG
+            return manager.execute_dag(
+                nodes=nodes,
+                edges=edges,
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.error(f"[Task] subagent_dag_execute exception: {e}")
+            return ToolResult(False, error=f"DAG 工作流执行失败: {str(e)}")
+
     def subagent_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True,
                      session_id: str = "", sub_agent_manager=None) -> ToolResult:
         """

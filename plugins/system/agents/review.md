@@ -10,6 +10,7 @@ permission:
   todoread: deny
   subagent_para: deny
   subagent_status: deny
+  subagent_dag: deny
   question: deny
   "*": allow
 ---

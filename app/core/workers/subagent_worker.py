@@ -2,7 +2,7 @@
 """
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
 """
-
+import orjson
 import orjson as json
 import re
 import time
@@ -857,6 +857,314 @@ class SubAgentManager(QObject):
             if on_error:
                 on_error(str(e))
             return False
+
+    def execute_dag(self, nodes: List[Dict], edges: List[Dict], session_id: str = "") -> ToolResult:
+        """
+        执行 DAG 工作流（异步）。验证 DAG 后立即返回 ECharts 节点图，
+        后台按拓扑顺序执行，全部完成后回调通知。
+
+        Args:
+            nodes: [{"id": str, "agent": str, "description": str, "context": str}]
+            edges: [{"from": str, "to": str}]
+            session_id: 会话 ID
+
+        Returns:
+            ToolResult: success=True, echarts=节点图JSON
+        """
+        import uuid
+
+        # 1. 验证 DAG
+        node_map = {n["id"]: dict(n) for n in nodes}
+        for edge in edges:
+            if edge["from"] not in node_map:
+                return ToolResult(False, error=f"节点 '{edge['from']}' 不存在")
+            if edge["to"] not in node_map:
+                return ToolResult(False, error=f"节点 '{edge['to']}' 不存在")
+
+        # 构建邻接表 + 入度表
+        adj = {nid: [] for nid in node_map}
+        in_degree = {nid: 0 for nid in node_map}
+        for edge in edges:
+            adj[edge["from"]].append(edge["to"])
+            in_degree[edge["to"]] += 1
+
+        # 环检测
+        queue = [nid for nid in node_map if in_degree[nid] == 0]
+        sorted_count = 0
+        while queue:
+            nid = queue.pop(0)
+            sorted_count += 1
+            for neighbor in adj[nid]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        if sorted_count != len(node_map):
+            return ToolResult(False, error="DAG 中存在环，请检查 edges 定义")
+
+        # 2. 初始化 DAG 状态
+        task_session_id = session_id or self._current_session_id
+        dag_id = str(uuid.uuid4())
+
+        # 为每个节点生成 task_id
+        for n in nodes:
+            nid = n["id"]
+            node_map[nid]["_task_id"] = str(uuid.uuid4())
+            node_map[nid]["_status"] = "pending"
+            node_map[nid]["_result"] = ""
+            node_map[nid]["_error"] = ""
+
+        # 存储 DAG 状态到管理器
+        dag_state = {
+            "dag_id": dag_id,
+            "node_map": node_map,
+            "adj": adj,
+            "in_degree": {nid: 0 for nid in node_map},  # 重新计算
+            "upstream_results": {nid: [] for nid in node_map},
+            "session_id": task_session_id,
+        }
+        for edge in edges:
+            dag_state["in_degree"][edge["to"]] += 1
+
+        if not hasattr(self, "_dag_states"):
+            self._dag_states: Dict[str, Dict] = {}
+        self._dag_states[dag_id] = dag_state
+
+        # 3. 设置批次计数器（所有 DAG 节点计入同一批次）
+        all_task_ids = [node_map[nid]["_task_id"] for nid in node_map]
+        self._batch_total += len(all_task_ids)
+        self._batch_task_ids.update(all_task_ids)
+
+        # 4. 启动入度为0的节点
+        ready_nodes = [nid for nid in node_map if dag_state["in_degree"][nid] == 0]
+        for nid in ready_nodes:
+            self._start_dag_node(dag_id, nid)
+
+        # 5. 生成 ECharts 节点图并立即返回
+        echarts_json = self._build_dag_echarts_json(nodes, edges, node_map)
+        return ToolResult(True, content={"dag_id": dag_id, "status": "running", "total": len(nodes)}, echarts=echarts_json)
+
+    def _start_dag_node(self, dag_id: str, nid: str):
+        """启动 DAG 中的单个节点"""
+        dag_state = self._dag_states[dag_id]
+        node_map = dag_state["node_map"]
+        node = node_map[nid]
+        task_id = node["_task_id"]
+        task_session_id = dag_state["session_id"]
+
+        # 检查上游是否有失败的节点（failed 或 skipped 都级联跳过）
+        upstream_failed = any(
+            node_map[up["from"]]["_status"] in ("failed", "skipped")
+            for up in dag_state["upstream_results"][nid]
+        )
+        if upstream_failed:
+            node["_status"] = "skipped"
+            node["_error"] = "上游节点执行失败，跳过"
+            # 跳过的节点也需要触发完成信号，让批次计数器工作
+            self._finished_tasks[task_id] = {
+                "result": "",
+                "error": "上游节点执行失败，跳过",
+                "agent_name": node.get("agent", ""),
+                "task_description": node.get("description", ""),
+                "session_id": task_session_id,
+            }
+            self.task_finished.emit(task_id, "")
+            # 跳过节点也要检查下游
+            self._check_dag_downstream(dag_id, nid)
+            return
+
+        # 构建 context：自动注入上游结果
+        context_parts = []
+        if dag_state["upstream_results"][nid]:
+            context_parts.append("## 上游节点结果")
+            for up in dag_state["upstream_results"][nid]:
+                up_node = node_map[up["from"]]
+                result_text = up_node.get("_result", "") or "(无输出)"
+                context_parts.append(
+                    f"### {up['from']} ({up_node.get('agent', '')})\n{result_text}"
+                )
+        if node.get("context"):
+            context_parts.append(node["context"])
+        full_context = "\n\n".join(context_parts) if context_parts else ""
+
+        llm_config = self._get_llm_config()
+        if not isinstance(llm_config, dict):
+            llm_config = {}
+
+        agent = self._agent_manager.get_agent(node["agent"])
+        max_iterations = agent.steps if agent and agent.steps else 30
+
+        executor = SubAgentExecutor(
+            task_id=task_id,
+            agent_name=node["agent"],
+            task_description=node["description"],
+            llm_config=llm_config,
+            agent_manager=self._agent_manager,
+            tool_executor=self._tool_executor,
+            parent_context=full_context,
+            is_subagent_call=True,
+            max_iterations=max_iterations,
+        )
+        executor._task_session_id = task_session_id
+
+        if self._session_store:
+            executor.set_log_store_callback(
+                lambda *args, _sid=task_session_id: self._save_task_to_store(*args, session_id=_sid)
+            )
+        if self._get_history_messages:
+            executor.set_history_getter(self._get_history_messages)
+
+        # 节点完成回调
+        executor.finished_with_result.connect(
+            lambda tid, result: self._on_dag_node_finished(dag_id, nid, tid, result)
+        )
+
+        self._running_tasks[task_id] = executor
+        node["_status"] = "running"
+        executor.start()
+
+        self._save_task_to_store(task_id, node["agent"], node["description"], "running", session_id=task_session_id)
+        self.task_started.emit(task_id, node["agent"], node["description"])
+
+    def _on_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
+        """DAG 节点执行完成"""
+        dag_state = self._dag_states.get(dag_id)
+        if not dag_state:
+            return
+        node_map = dag_state["node_map"]
+        node = node_map[nid]
+
+        # 更新节点状态（具体 result/error 由 _on_sub_agent_task_finished 写入 _finished_tasks）
+        executor = self._running_tasks.get(task_id)
+        error = getattr(executor, "_execution_error", None) if executor else None
+        node["_status"] = "failed" if error else "completed"
+        node["_result"] = result
+        node["_error"] = error or ""
+
+        # 触发 task_finished 信号（让 UI 更新 + 批次计数 + _finished_tasks 写入）
+        self.task_finished.emit(task_id, result)
+
+        # 检查下游节点
+        self._check_dag_downstream(dag_id, nid)
+
+        # 检查是否全部完成
+        all_done = all(
+            node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled")
+            for nid in node_map
+        )
+        if all_done:
+            self._dag_states.pop(dag_id, None)
+
+    def _check_dag_downstream(self, dag_id: str, nid: str):
+        """DAG 节点完成后，检查并启动下游节点"""
+        dag_state = self._dag_states.get(dag_id)
+        if not dag_state:
+            return
+        for neighbor in dag_state["adj"][nid]:
+            dag_state["upstream_results"][neighbor].append({"from": nid})
+            dag_state["in_degree"][neighbor] -= 1
+            if dag_state["in_degree"][neighbor] == 0:
+                self._start_dag_node(dag_id, neighbor)
+
+    def _build_dag_echarts_json(self, nodes: List[Dict], edges: List[Dict], node_map: Dict) -> str:
+        """
+        根据 DAG 生成 ECharts 力导向图 JSON。
+
+        节点颜色按状态区分：
+        - pending:   #FFC107 (黄)
+        - running:   #2196F3 (蓝)
+        - completed: #4CAF50 (绿)
+        - failed:    #F44336 (红)
+        - skipped:   #9E9E9E (灰)
+        """
+        status_categories = [
+            {"name": "pending",   "itemStyle": {"color": "#FFC107", "borderColor": "#d4a020", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(255,193,7,0.4)"}},
+            {"name": "running",   "itemStyle": {"color": "#2196F3", "borderColor": "#1976D2", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(33,150,243,0.4)"}},
+            {"name": "completed", "itemStyle": {"color": "#4CAF50", "borderColor": "#388E3C", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(76,175,80,0.4)"}},
+            {"name": "failed",    "itemStyle": {"color": "#F44336", "borderColor": "#D32F2F", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(244,67,54,0.4)"}},
+            {"name": "skipped",   "itemStyle": {"color": "#9E9E9E", "borderColor": "#757575", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(158,158,158,0.4)"}},
+        ]
+        status_map = {c["name"]: i for i, c in enumerate(status_categories)}
+
+        echarts_nodes = []
+        for n in nodes:
+            nid = n["id"]
+            node_info = node_map[nid]
+            status = node_info["_status"]
+            agent = n.get("agent", "")
+            desc = n.get("description", "")
+            # 用 agent 名作为节点显示名，tooltip 显示完整描述
+            echarts_nodes.append({
+                "id": nid,
+                "name": f"{nid} ({agent})",
+                "symbolSize": 50,
+                "category": status_map.get(status, 4),
+                "draggable": True,
+                "description": desc[:100],
+            })
+
+        echarts_edges = []
+        for e in edges:
+            echarts_edges.append({
+                "source": e["from"],
+                "target": e["to"],
+                "lineStyle": {"width": 2, "opacity": 0.6, "curveness": 0.15},
+            })
+
+        chart_config = {
+            "title": {
+                "text": "子智能体工作流",
+                "left": "center",
+                "textStyle": {"fontSize": 16, "fontWeight": "bold", "color": "#ccc"},
+            },
+            "tooltip": {
+                "trigger": "item",
+                "formatter": "{b}",
+            },
+            "series": [{
+                "type": "graph",
+                "layout": "force",
+                "symbolSize": 50,
+                "roam": True,
+                "draggable": True,
+                "focusNodeAdjacency": True,
+                "edgeSymbol": ["none", "arrow"],
+                "edgeSymbolSize": [0, 8],
+                "label": {
+                    "show": True,
+                    "position": "bottom",
+                    "fontSize": 11,
+                    "fontWeight": "bold",
+                    "color": "#ccc",
+                    "offset": [0, 6],
+                },
+                "lineStyle": {
+                    "color": "source",
+                    "curveness": 0.15,
+                    "width": 1.5,
+                    "opacity": 0.6,
+                },
+                "force": {
+                    "repulsion": 500,
+                    "edgeLength": [80, 200],
+                    "layoutAnimation": True,
+                    "friction": 0.1,
+                    "gravity": 0.05,
+                },
+                "categories": status_categories,
+                "data": echarts_nodes,
+                "links": echarts_edges,
+                "emphasis": {
+                    "focus": "adjacency",
+                    "lineStyle": {"width": 3},
+                },
+                "blur": {"opacity": 0.2},
+                "animation": True,
+                "animationDuration": 1000,
+                "animationEasing": "cubicOut",
+            }],
+        }
+
+        return json.dumps(chart_config, option=orjson.OPT_INDENT_2).decode('utf-8')
 
     def cancel_task(self, task_id: str) -> bool:
         """取消子智能体任务"""

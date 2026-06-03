@@ -13,6 +13,7 @@ permission:
   todowrite: deny
   todoread: deny
   subagent_para: deny
+  subagent_dag: deny
   "*": allow
 ---
 

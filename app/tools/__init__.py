@@ -845,6 +845,63 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "subagent_dag",
+            "description": "批量分发子智能体任务组成 DAG 工作流（有向无环图）。支持节点间依赖关系定义，系统自动按拓扑排序分批并行执行，下游节点自动获取上游节点结果。\n\n【同步执行】调用本工具后会等待所有节点执行完成再返回结果，不需要额外查询。\n\n【依赖解析】系统根据 edges 计算拓扑排序，入度为0的节点并行执行，完成后自动将结果注入下游节点的 context。\n\n【失败处理】如果某个节点执行失败，依赖它的下游节点自动标记为 skipped，不会执行。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nodes": {
+                        "type": "array",
+                        "description": "工作流节点列表",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "节点唯一标识（如 'step1', 'analyze', 'build'），供 edges 引用",
+                                },
+                                "agent": {
+                                    "type": "string",
+                                    "description": "子智能体名称",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "该节点的任务描述",
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": "额外上下文信息（可选），将追加到自动注入的上游结果之后",
+                                },
+                            },
+                            "required": ["id", "agent", "description"],
+                        },
+                    },
+                    "edges": {
+                        "type": "array",
+                        "description": "节点间的依赖关系。例如 [{\"from\": \"step1\", \"to\": \"step2\"}] 表示 step2 依赖 step1",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": {
+                                    "type": "string",
+                                    "description": "上游节点 ID",
+                                },
+                                "to": {
+                                    "type": "string",
+                                    "description": "下游节点 ID",
+                                },
+                            },
+                            "required": ["from", "to"],
+                        },
+                    },
+                },
+                "required": ["nodes", "edges"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "question",
             "description": "向用户提问并获取回答。当需要了解用户偏好、需求或让用户做选择时，**必须**使用此工具。\n\n支持一次性提多个问题，每个问题可以有自己的选项列表。\n\n## 参数说明\n- questions: 问题列表（**必填**），列表里每个元素是一个独立的问题对象\n  - question: 问题内容（字符串，必填）\n  - options: 选项列表（数组，可选）。每个选项是一个对象：\n    - label: 选项标题（字符串，必填）\n    - description: 选项描述（字符串，可选，小字显示在标题下方）\n  - multiple: 是否允许多选（布尔值，可选，默认 false）",
             "parameters": {
@@ -938,6 +995,15 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
             schema["function"]["description"] = subagent_para_desc
             if subagent_names:
                 schema["function"]["parameters"]["properties"]["tasks"]["items"][
+                    "properties"
+                ]["agent"]["description"] += f" (可选：{', '.join(subagent_names)})"
+            break
+
+    # 动态生成 subagent_dag 工具描述（注入可用子智能体列表）
+    for schema in schemas:
+        if schema["function"]["name"] == "subagent_dag":
+            if subagent_names:
+                schema["function"]["parameters"]["properties"]["nodes"]["items"][
                     "properties"
                 ]["agent"]["description"] += f" (可选：{', '.join(subagent_names)})"
             break

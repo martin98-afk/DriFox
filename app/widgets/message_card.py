@@ -594,6 +594,18 @@ def _render_tool_block_content(content: str) -> str:
             diff_content = diff_after[:diff_next.start()].strip()
         else:
             diff_content = diff_after.strip()
+
+    # ========== 解析 echarts（可选字段，仅 subagent_dag 有）==========
+    echarts_content = ""
+    echarts_start = content.find("\necharts:")
+    if echarts_start != -1:
+        echarts_after = content[echarts_start + 9:]
+        # echarts JSON 持续到末尾或下一个字段
+        echarts_next = _NEXT_FIELD_PATTERN.search(echarts_after)
+        if echarts_next:
+            echarts_content = echarts_after[:echarts_next.start()].strip()
+        else:
+            echarts_content = echarts_after.strip()
     if result_start >= 0:
         result_after = content[result_start + 7:]  # 跳过 "result:"
         # 找到 result 内容的结束位置（下一个字段之前）
@@ -666,7 +678,7 @@ def _render_tool_block_content(content: str) -> str:
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
     return render_tool_block(
         tool_name, args_dict, tool_result, tool_success, collapsed=True,
-        tool_call_id=tool_call_id, diff=diff_content
+        tool_call_id=tool_call_id, diff=diff_content, echarts=echarts_content
     )
 
 
@@ -4192,6 +4204,7 @@ class MessageCard(SimpleCardWidget):
             success: bool = True,
             tool_call_id: str = None,
             diff: str = None,
+            echarts: str = None,
     ):
         self._content_data.append(
             make_tool_result_block(
@@ -4201,6 +4214,7 @@ class MessageCard(SimpleCardWidget):
                 success=success,
                 tool_call_id=tool_call_id,
                 diff=diff,
+                echarts=echarts,
             )
         )
         # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算
@@ -4218,6 +4232,7 @@ class MessageCard(SimpleCardWidget):
                 collapsed=True,
                 tool_call_id=tool_call_id,
                 diff=diff,
+                echarts=echarts,
             )
             safe_html = json.dumps(block_html).decode('utf-8')
             js_code = f"""

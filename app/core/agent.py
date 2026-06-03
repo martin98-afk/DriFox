@@ -650,7 +650,7 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=self._builtin_tools)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        forbidden_tools = {"question", "subagent_para", "subagent_status"}
+        forbidden_tools = {"question", "subagent_para", "subagent_status", "subagent_dag"}
         if is_subagent_call:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
@@ -706,7 +706,7 @@ class AgentManager:
         subagent_constraints = """
 ## 子智能体约束
 - 【禁止】使用 `question` 工具（需要用户交互，不支持）
-- 【禁止】使用 `subagent_para` 和 `subagent_status` 工具（子智能体不能再发布子智能体）
+- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）
 - 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）
 - 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认
 - 【必须】独立完成任务，不需要主智能体介入

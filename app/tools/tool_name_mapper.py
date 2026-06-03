@@ -35,6 +35,7 @@ class ToolNameMapper:
         "webfetch": ["WebFetch", "Fetch", "FetchPage", "FetchUrl"],
         "subagent_para": ["subagents-para", "subagent-para", "TaskBatch", "Batch", "task", "Task"],
         "subagent_status": ["subagent-status", "TaskStatus", "Status"],
+        "subagent_dag": ["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
         "todowrite": ["TodoWrite", "todo_write"],
         "todoread": ["TodoRead", "todo_read"],
         "skill": ["Skill"],

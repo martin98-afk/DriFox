@@ -2356,6 +2356,7 @@ class OpenAIChatWorker(QThread):
             "round_id": round_id,
             "diff": getattr(result_obj, "diff", None) if result_obj else None,
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
+            "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
         }
 
     def _execute_one_tool_parallel(self, tool_name, tool_call_id, arguments, round_id, idx):

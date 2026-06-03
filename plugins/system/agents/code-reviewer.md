@@ -9,6 +9,7 @@ permission:
   multi_edit: deny
   write: deny
   subagent_para: deny
+  subagent_dag: deny
   "*": allow
 ---
 
