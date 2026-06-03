@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
 """
 通用工具函数模块
+
+提供应用程序使用的各种工具函数：
+- 路径和资源管理
+- 字体和图标配置
+- 技能加载和管理
+- 应用更新检查
+- 异步更新检查器
+- JSON 序列化/反序列化
 """
-import asyncio
+import asyncio  # 用于 AsyncUpdateChecker
 import os
-import re
-import socket
 import sys
-import weakref
-from pathlib import Path
 
 import httpx
 import orjson as json
+import re
+import socket
+from pathlib import Path
+
 import psutil
 import requests
 import yaml
@@ -27,43 +35,60 @@ except ImportError:
 
 from app.utils.icon_name_map import ICON_NAME_TO_FILE
 
+# ANSI 颜色代码映射
 ANSI_COLOR_MAP = {
-    "30": "#000000", "31": "#ff0000", "32": "#00ff00", "33": "#ffff00",
-    "34": "#0000ff", "35": "#ff00ff", "36": "#00ffff", "37": "#ffffff",
-    "90": "#808080", "91": "#ff5555", "92": "#50fa7b", "93": "#f1fa8c",
-    "94": "#8be9fd", "95": "#ff79c6", "96": "#8be9fd", "97": "#ffffff",
+    "30": "#000000",  # 黑色
+    "31": "#ff0000",  # 红色
+    "32": "#00ff00",  # 绿色
+    "33": "#ffff00",  # 黄色
+    "34": "#0000ff",  # 蓝色
+    "35": "#ff00ff",  # 紫色
+    "36": "#00ffff",  # 青色
+    "37": "#ffffff",  # 白色
+    "90": "#808080",  # 亮黑
+    "91": "#ff5555",  # 亮红
+    "92": "#50fa7b",  # 亮绿
+    "93": "#f1fa8c",  # 亮黄
+    "94": "#8be9fd",  # 亮蓝
+    "95": "#ff79c6",  # 亮紫
+    "96": "#8be9fd",  # 亮青
+    "97": "#ffffff",  # 亮白
 }
-_ICON_CACHE = {}
-
-# 预编译正则
-_ANSI_CURSOR_PATTERN = re.compile(r"\x1b\[[0-9;]*[ABCDHfJKmnsu]")
-_ANSI_COLOR_PATTERN = re.compile(r"\x1b\[([0-9;]*)m")
-_ANSI_RESET_PATTERN = re.compile(r"\x1b\[0m")
+_ICON_CACHE = {}  # 缓存图标名 → QIcon 实例
 
 
 def get_app_data_dir() -> Path:
-    """获取应用数据目录（跨平台兼容）"""
+    """获取应用数据目录（跨平台兼容）
+
+    开发环境: 当前目录/.drifox
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    """
+    # 开发环境
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
         return Path('.drifox')
 
+    # macOS .app: 使用 Application Support（用户可写）
     if sys.platform == 'darwin':
         from AppKit import NSApplicationSupportDirectory, NSUserDomainMask, NSFileManager
         paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
             NSApplicationSupportDirectory, NSUserDomainMask
         )
         if paths:
-            app_support = Path(paths[0].fileSystemRepresentation().decode('utf-8')) / 'Drifox'
+            app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
+            app_support = Path(app_support_path) / 'Drifox'
             app_support.mkdir(parents=True, exist_ok=True)
             return app_support / '.drifox'
 
+    # Windows/Linux 打包: 使用 ~/.drifox（用户 home，不受安装位置限制）
     return Path.home() / '.drifox'
 
 
-_MIGRATED_FLAG = False
+_MIGRATED_FLAG = False  # 防止重复迁移
 
 
 def _checkpoint_sqlite_db(db_path: Path):
-    """对 SQLite 执行 WAL checkpoint"""
+    """对 SQLite 数据库执行 WAL 检查点，确保数据全部刷回主文件"""
     import sqlite3
     try:
         conn = sqlite3.connect(str(db_path), timeout=1)
@@ -74,23 +99,34 @@ def _checkpoint_sqlite_db(db_path: Path):
 
 
 def migrate_app_data_if_needed():
-    """迁移旧版本数据到用户可写目录（仅打包版需要）"""
+    """将旧版本数据迁移到用户可写目录（仅打包版需要）
+
+    旧路径: <安装目录>/.drifox (Program Files 等，可能权限受限)
+    新路径: ~/.drifox 或 macOS: Application Support
+
+    迁移仅在以下情况执行：
+    1. 旧目录存在有效数据（app.config 或 sessions.db）
+    2. 新目录不存在，或新目录存在但没有有效数据（只有 logs/ 等空壳子目录）
+    """
     global _MIGRATED_FLAG
     if _MIGRATED_FLAG:
         return
     _MIGRATED_FLAG = True
 
+    # 开发环境不需要迁移
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
         return
 
     from loguru import logger
     import shutil
 
+    # 旧路径：安装目录旁（Program Files）
     old_dir = Path(sys._MEIPASS).parent / '.drifox' if hasattr(sys, '_MEIPASS') else None
     if not old_dir or not old_dir.exists():
         logger.debug(f"[迁移] 旧目录不存在，跳过迁移: {old_dir}")
         return
 
+    # 检查旧目录是否有有效数据
     has_old_data = (old_dir / "app.config").exists() or (old_dir / "sessions.db").exists()
     if not has_old_data:
         logger.debug(f"[迁移] 旧目录无有效数据，跳过迁移: {old_dir}")
@@ -98,29 +134,36 @@ def migrate_app_data_if_needed():
 
     new_dir = get_app_data_dir()
     if new_dir.exists():
+        # 新目录已存在：检查是否有有效数据，有则跳过，无则覆盖
         has_new_data = (new_dir / "app.config").exists() or (new_dir / "sessions.db").exists()
         if has_new_data:
             logger.info(f"[迁移] 目标目录已有数据，跳过迁移: {new_dir}")
             return
         logger.info(f"[迁移] 目标目录存在但无有效数据，准备覆盖: {new_dir}")
 
+    # 关键：先 checkpoint SQLite 数据库，把 WAL 数据刷回主文件
+    # 否则 shutil.copytree 可能只复制到不完整的 .db 文件
     for db_file in old_dir.glob("*.db"):
         logger.info(f"[迁移] 检查点: {db_file.name}")
         _checkpoint_sqlite_db(db_file)
 
     logger.info(f"[迁移] 复制数据: {old_dir} → {new_dir}")
     new_dir.parent.mkdir(parents=True, exist_ok=True)
+    # 如果新目录存在但无有效数据，先删除再复制，避免残留旧 logs/ 等
     if new_dir.exists():
         shutil.rmtree(str(new_dir))
     shutil.copytree(str(old_dir), str(new_dir), dirs_exist_ok=False)
 
-    old_db, new_db = old_dir / "sessions.db", new_dir / "sessions.db"
+    # 验证迁移结果
+    old_db = old_dir / "sessions.db"
+    new_db = new_dir / "sessions.db"
     if old_db.exists() and new_db.exists():
         logger.info(f"[迁移] sessions.db: {old_db.stat().st_size} → {new_db.stat().st_size} bytes")
     elif new_db.exists():
         logger.info(f"[迁移] sessions.db 复制完成")
     else:
         logger.warning(f"[迁移] sessions.db 未找到，数据可能是空的")
+
 
 def get_pinyin_search_keys(text):
     """生成拼音全拼和首字母缩写"""
@@ -145,12 +188,21 @@ def kill_proc_tree(pid):
         pass
 
 
+# 预编译 ANSI 处理正则表达式
+_ANSI_CURSOR_PATTERN = re.compile(r"\x1b\[[0-9;]*[ABCDHfJKmnsu]")
+_ANSI_COLOR_PATTERN = re.compile(r"\x1b\[([0-9;]*)m")
+_ANSI_RESET_PATTERN = re.compile(r"\x1b\[0m")
+_ANSI_REMAINS_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def ansi_to_html(text):
-    """将 ANSI 颜色代码转换为 HTML span 标签"""
+    """
+    将 ANSI 颜色代码转换为 HTML span 标签
+    """
     if not text:
         return ""
 
-    # 移除光标控制序列
+    # 移除光标控制序列（如 \x1b[2K）
     text = _ANSI_CURSOR_PATTERN.sub("", text)
 
     # 处理颜色代码
@@ -200,47 +252,77 @@ def ansi_to_rich_text(text):
 def resource_path(relative_path) -> str:
     """获取打包后资源文件的绝对路径"""
     if hasattr(sys, "_MEIPASS"):
+        # 如果是打包后的环境
         base_path = sys._MEIPASS
     else:
+        # 开发环境，直接使用当前路径
         base_path = os.path.abspath(".")
+
     return os.path.join(base_path, relative_path)
 
 
 def get_port_node(port):
-    """安全获取端口所属节点"""
+    """安全获取端口所属节点，兼容 property 和 method"""
     node = port.node
     return node() if callable(node) else node
 
 
 def get_icon(icon_name: str) -> QIcon:
-    """从 Qt 资源系统加载图标（高性能、无磁盘 I/O）"""
+    """
+    从 Qt 资源系统加载图标（高性能、无磁盘 I/O）
+
+    Args:
+        icon_name: 图标名（不含扩展名），如 "copy"
+
+    Returns:
+        QIcon 实例
+    """
     if icon_name in _ICON_CACHE:
         return _ICON_CACHE[icon_name]
 
+    # 1. 从映射表中找真实文件名
     filename = ICON_NAME_TO_FILE.get(icon_name)
     if filename:
-        icon = QIcon(f":/icons/{filename}")
+        resource_path = f":/icons/{filename}"
+        icon = QIcon(resource_path)
+        # 可选：再做一次 null 检查（虽然理论上不会错）
         if not icon.isNull():
             _ICON_CACHE[icon_name] = icon
             return icon
 
+    # 2. fallback 到 FluentIcon
     try:
         from qfluentwidgets import FluentIcon
+
         icon = FluentIcon.APPLICATION.icon()
         _ICON_CACHE[icon_name] = icon
         return icon
     except Exception:
         pass
 
+    # 3. 最终 fallback
     return QIcon()
 
 
 def get_local_skills() -> list:
-    """获取本地技能列表（支持插件路径）"""
+    """获取本地技能列表，支持多个搜索路径
+
+    搜索路径优先级：
+    - 已启用插件的 skills/ 目录（PluginManager）
+    - 旧路径做回退：app/skills, .opencode/skills, ~/.agents/skills
+
+    返回字段：
+    - name: 技能名称（无前缀，用于 load_skill 内部查找）
+    - qualified_name: 完整名称（用户插件含 plugin: 前缀，用于列表展示）
+    - description: 技能描述
+    - plugin_name: 所属插件名（非插件来源为 None）
+    - is_system: 是否为系统插件技能
+    """
     results = []
     seen = set()
+    seen_qualified = set()
 
-    # Phase 1: PluginManager 路径
+    # ---- Phase 1: PluginManager 路径（带插件上下文） ----
     try:
         from app.core.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
@@ -253,15 +335,19 @@ def get_local_skills() -> list:
                 if not skills_base.exists():
                     continue
                 for skill_dir in skills_base.iterdir():
-                    if skill_dir.is_dir() and not skill_dir.name.startswith(("_", ".")):
-                        entry = _parse_skill_dir(skill_dir, plugin_name, is_system)
-                        if entry and entry["name"] not in seen:
-                            seen.add(entry["name"])
-                            results.append(entry)
+                    if not skill_dir.is_dir():
+                        continue
+                    if skill_dir.name.startswith("_") or skill_dir.name.startswith("."):
+                        continue
+                    entry = _parse_skill_dir(skill_dir, plugin_name, is_system)
+                    if entry and entry["name"] not in seen:
+                        seen.add(entry["name"])
+                        seen_qualified.add(entry["qualified_name"])
+                        results.append(entry)
     except (ImportError, Exception):
         pass
 
-    # Phase 2: 旧路径回退
+    # ---- Phase 2: 旧路径回退（无插件上下文） ----
     fallback_dirs = [
         Path(__file__).parent.parent / "skills",
         Path(__file__).parent.parent / ".opencode" / "skills",
@@ -273,28 +359,33 @@ def get_local_skills() -> list:
         if not skills_base.exists():
             continue
         for skill_dir in skills_base.iterdir():
-            if skill_dir.is_dir() and not skill_dir.name.startswith(("_", ".")):
-                entry = _parse_skill_dir(skill_dir, plugin_name=None, is_system=True)
-                if entry and entry["name"] not in seen:
-                    seen.add(entry["name"])
-                    results.append(entry)
+            if not skill_dir.is_dir():
+                continue
+            if skill_dir.name.startswith("_") or skill_dir.name.startswith("."):
+                continue
+            entry = _parse_skill_dir(skill_dir, plugin_name=None, is_system=True)
+            if entry and entry["name"] not in seen:
+                seen.add(entry["name"])
+                seen_qualified.add(entry["qualified_name"])
+                results.append(entry)
 
     return results
 
 
-def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None, is_system: bool = True) -> dict | None:
+def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
+                     is_system: bool = True) -> dict | None:
     """解析技能目录，返回技能信息字典"""
-    for name in ["SKILL.md", "skill.md"]:
-        skill_file = skill_dir / name
-        if skill_file.exists():
-            break
-    else:
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.exists():
+        skill_file = skill_dir / "skill.md"
+    if not skill_file.exists():
         return None
 
     content = skill_file.read_text(encoding="utf-8")
     name = skill_dir.name
     description = ""
 
+    # 解析 frontmatter
     if content.startswith("---"):
         try:
             frontmatter = content.split("---", 2)[1]
@@ -305,7 +396,11 @@ def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None, is_system:
         except Exception:
             pass
 
-    qualified_name = f"{plugin_name}:{name}" if plugin_name and not is_system else name
+    # 用户插件技能加命名空间前缀
+    if plugin_name and not is_system:
+        qualified_name = f"{plugin_name}:{name}"
+    else:
+        qualified_name = name
 
     return {
         "name": name,
@@ -326,12 +421,26 @@ def get_skill_by_name(name: str) -> dict | None:
 
 
 def load_skill(name: str) -> tuple[bool, str, str]:
-    """加载指定技能，返回 (成功, 内容, 工作目录)"""
+    """加载指定技能，返回 (成功, 内容, 工作目录)
+
+    支持两种名称格式：
+    - "skillname" — 按名称在所有路径中查找
+    - "plugin:skillname" — 限定到指定插件
+
+    Args:
+        name: 技能名称（可选带 plugin: 前缀）
+
+    Returns:
+        (成功标志, 内容或错误信息, 技能工作目录路径)
+    """
+    # 解析命名空间前缀
     raw_name = name
     target_plugin = None
     if ":" in name:
-        target_plugin, _, name = name.partition(":")
+        target_plugin, _, skill_name = name.partition(":")
+        name = skill_name
 
+    # 基础搜索路径
     search_paths = [
         Path(__file__).parent.parent / "skills" / name / "SKILL.md",
         Path(__file__).parent.parent / ".opencode" / "skills" / name / "SKILL.md",
@@ -339,35 +448,49 @@ def load_skill(name: str) -> tuple[bool, str, str]:
         Path.home() / ".agents" / "skills" / name / "SKILL.md",
     ]
 
+    # 插件路径（PluginManager 已初始化时添加为最高优先级）
     try:
         from app.core.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             if target_plugin:
+                # 限定到指定插件
                 for plugin in pm._iter_enabled_plugins():
                     if plugin.name == target_plugin:
-                        search_paths.insert(0, plugin.path / "skills" / name / "SKILL.md")
+                        p = plugin.path / "skills" / name / "SKILL.md"
+                        search_paths.insert(0, p)
                         break
             else:
+                # 无前缀：按优先级扫描全部
                 for item in pm.get_skills_with_plugin():
-                    search_paths.insert(0, item["path"] / name / "SKILL.md")
+                    p = item["path"] / name / "SKILL.md"
+                    search_paths.insert(0, p)
     except (ImportError, Exception):
         pass
 
+    found_path = None
     for path in search_paths:
         if path.exists():
-            content = path.read_text(encoding="utf-8")
-            content = content.split("---", 2)[-1].strip()
-            return (True, content, str(path.parent.resolve()))
+            found_path = path
+            break
 
-    return (False, f"Skill not found: {raw_name}", "")
+    if not found_path:
+        return (False, f"Skill not found: {raw_name}", "")
+
+    content = found_path.read_text(encoding="utf-8")
+    # 去除 frontmatter
+    content = content.split("---", 2)[-1].strip()
+    workspace = str(found_path.parent.resolve())
+
+    return (True, content, workspace)
 
 
 def list_skills_with_intro() -> str:
     """获取技能列表，包含 SKILLS.md 介绍"""
     skills = get_local_skills()
-    skills_intro = ""
 
+    # 从插件路径查找 SKILLS.md（优先使用优先级最高的）
+    skills_intro = ""
     try:
         from app.core.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
@@ -380,12 +503,14 @@ def list_skills_with_intro() -> str:
     except (ImportError, Exception):
         pass
 
+    # 回退：旧路径
     if not skills_intro:
         main_skills_dir = Path(__file__).parent.parent / "skills"
         skills_readme = main_skills_dir / "SKILLS.md"
         if skills_readme.exists():
             skills_intro = skills_readme.read_text(encoding="utf-8") + "\n\n"
 
+    # 生成 XML 格式（使用 qualified_name 以示含前缀）
     skills_xml = "<available_skills>\n"
     for skill in skills:
         desc = skill.get("description", "").replace("<", "&lt;").replace(">", "&gt;")
@@ -396,35 +521,48 @@ def list_skills_with_intro() -> str:
     return skills_intro + skills_xml
 
 
-# 字体工具函数
-def _get_font_family() -> str:
-    """获取用户配置的字体"""
+def get_canvas_font(size=10, bold=False):
+    from app.utils.design_tokens import scale_font_size
     try:
-        return Settings.get_instance().llm_font_family.value
+        font_family = Settings.get_instance().llm_font_family.value
     except Exception:
         try:
-            return Settings.get_instance().canvas_font_selected.value
+            font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
-            return "Segoe UI"
+            font_family = "Segoe UI"
 
-
-def get_canvas_font(size=10, bold=False):
-    """获取画布字体"""
-    from app.utils.design_tokens import scale_font_size
-    font = QFont(_get_font_family(), scale_font_size(size))
+    font = QFont(font_family, scale_font_size(size))
     if bold:
         font.setBold(True)
     return font
 
 
 def get_unified_font(size=10, bold=False):
-    """获取统一字体"""
-    return get_canvas_font(size, bold)
+    """Get font with unified font family configured by user"""
+    from app.utils.design_tokens import scale_font_size
+    try:
+        font_family = Settings.get_instance().llm_font_family.value
+    except Exception:
+        try:
+            font_family = Settings.get_instance().canvas_font_selected.value
+        except Exception:
+            font_family = "Segoe UI"
+    font = QFont(font_family, scale_font_size(size))
+    if bold:
+        font.setBold(True)
+    return font
 
 
 def get_font_family_css() -> str:
-    """获取 CSS font-family 字符串"""
-    return f"font-family: '{_get_font_family()}';"
+    """获取 CSS font-family 字符串，用于 stylesheet 中保持字体统一"""
+    try:
+        font_family = Settings.get_instance().llm_font_family.value
+    except Exception:
+        try:
+            font_family = Settings.get_instance().canvas_font_selected.value
+        except Exception:
+            font_family = "Segoe UI"
+    return f"font-family: '{font_family}';"
 
 
 def str_to_bool(value):
@@ -444,49 +582,89 @@ def serialize_for_json(obj, large_list_threshold=1000):
     """递归将对象转换为 JSON 可序列化格式"""
     if isinstance(obj, dict):
         return {k: serialize_for_json(v) for k, v in obj.items()}
-    elif hasattr(obj, "serialize") and callable(obj.serialize):
+    elif hasattr(obj, "serialize") and callable(getattr(obj, "serialize")):
         try:
             return obj.serialize()
-        except Exception:
+        except:
             return str(obj)
     else:
+        # 其他类型：尝试转为字符串
         try:
-            json.dumps(obj)
+            json.dumps(obj)  # 测试是否可序列化
             return obj
         except (TypeError, ValueError):
             return None
 
 
 def deserialize_from_json(obj):
-    """递归将 JSON 对象反序列化"""
     if isinstance(obj, dict):
         return {k: deserialize_from_json(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [deserialize_from_json(v) for v in obj]
-    return obj
+    else:
+        return obj
+
+
+class DownloadThread(QThread):
+    progress_signal = pyqtSignal(int)  # 进度信号
+    finished_signal = pyqtSignal(str)  # 完成信号（返回文件路径）
+    error_signal = pyqtSignal(str)  # 错误信号
+    canceled_signal = pyqtSignal()  # 取消信号（新增）
+
+    def __init__(self, url, file_path, token):
+        super().__init__()
+        self.url = url
+        self.file_path = file_path
+        self.headers = {"Authorization": token} if token else {}
+        self.is_canceled = False  # 取消标志位
+        self.session = requests.Session()  # 使用 Session 以便关闭连接
+
+    def run(self):
+        try:
+            response = self.session.get(self.url, headers=self.headers, stream=True, timeout=10)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+
+            with open(self.file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if self.is_canceled:  # 每次读取前检查取消标志
+                        f.close()
+                        os.remove(self.file_path)  # 删除不完整文件
+                        self.canceled_signal.emit()
+                        return
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            progress = int((downloaded / total_size) * 100)
+                            self.progress_signal.emit(progress)
+
+            self.finished_signal.emit(self.file_path)
+        except Exception as e:
+            if not self.is_canceled:  # 非取消情况才触发错误信号
+                self.error_signal.emit(str(e))
+        finally:
+            self.session.close()  # 确保释放网络资源
 
 
 class AsyncUpdateChecker(QThread):
-    finished = pyqtSignal(object)
+    finished = pyqtSignal(object)  # 返回 latest_release 或 None
     error = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 使用 weakref 避免循环引用导致 parent 被删除后仍持有引用
         self._parent_ref = weakref.ref(parent) if parent else None
-        self._repo = None
-        self._platform = None
-        self._token = None
-
-    def _get_parent_attr(self, name: str, default=None):
-        if self._parent_ref is not None:
-            p = self._parent_ref()
-            if p is not None:
-                return getattr(p, name, default)
-        return getattr(self, f"_{name}", default)
 
     @property
     def repo(self):
-        return self._get_parent_attr("repo")
+        if self._parent_ref is not None:
+            p = self._parent_ref()
+            if p is not None:
+                return p.repo
+        return getattr(self, '_repo', None)
 
     @repo.setter
     def repo(self, value):
@@ -494,7 +672,11 @@ class AsyncUpdateChecker(QThread):
 
     @property
     def platform(self):
-        return self._get_parent_attr("platform")
+        if self._parent_ref is not None:
+            p = self._parent_ref()
+            if p is not None:
+                return p.platform
+        return getattr(self, '_platform', None)
 
     @platform.setter
     def platform(self, value):
@@ -502,7 +684,11 @@ class AsyncUpdateChecker(QThread):
 
     @property
     def token(self):
-        return self._get_parent_attr("token")
+        if self._parent_ref is not None:
+            p = self._parent_ref()
+            if p is not None:
+                return p.token
+        return getattr(self, '_token', None)
 
     @token.setter
     def token(self, value):
@@ -513,15 +699,17 @@ class AsyncUpdateChecker(QThread):
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28"
         }
-        if self.token:
-            headers["Authorization"] = f"token {self.token}"
+        headers = headers | {"Authorization": f"token {self.token}"} if self.token else headers
         url = f"https://api.github.com/repos/{self.repo}/releases/latest"
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
+                print("GitHub API 响应:", resp.json())
                 return resp.json()
-            self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
-            return None
+            else:
+                print("GitHub API 响应:", resp.text)
+                self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
+                return None
 
     async def fetch_gitee(self):
         headers = {"Authorization": self.token} if self.token else {}
@@ -530,8 +718,9 @@ class AsyncUpdateChecker(QThread):
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 return resp.json()
-            self.error.emit(f"Gitee API 请求失败：{resp.status_code}")
-            return None
+            else:
+                self.error.emit(f"Gitee API 请求失败：{resp.status_code}")
+                return None
 
     async def fetch_gitcode(self):
         headers = {"Authorization": self.token} if self.token else {}
@@ -540,17 +729,23 @@ class AsyncUpdateChecker(QThread):
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 return resp.json()
-            self.error.emit(f"Gitcode API 请求失败：{resp.status_code}")
-            return None
+            else:
+                self.error.emit(f"Gitcode API 请求失败：{resp.status_code}")
+                return None
 
     def run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         try:
-            fetchers = {"github": self.fetch_github, "gitee": self.fetch_gitee, "gitcode": self.fetch_gitcode}
-            result = loop.run_until_complete(fetchers.get(self.platform, lambda: None)())
-            if result is None and self.platform not in fetchers:
+            if self.platform == "github":
+                result = loop.run_until_complete(self.fetch_github())
+            elif self.platform == "gitee":
+                result = loop.run_until_complete(self.fetch_gitee())
+            elif self.platform == "gitcode":
+                result = loop.run_until_complete(self.fetch_gitcode())
+            else:
+                result = None
                 self.error.emit("不支持的平台")
         except Exception as e:
             self.error.emit(str(e))
