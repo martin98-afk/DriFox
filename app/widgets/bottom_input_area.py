@@ -1061,6 +1061,18 @@ class SendableTextEdit(TextEdit):
         try:
             super().focusOutEvent(event)
             self._animate_glow(0, 0, 200)
+            # 失焦时关闭命令卡片：用户点击输入框外 → 焦点离开输入框 → 卡片消失。
+            # 这是修复命令卡片"消失/显示反向"bug 的核心：
+            #   - 旧逻辑在 mousePressEvent 中 dismiss（错）：点输入框内也被关
+            #   - 这里改为在失焦时 dismiss（对）：点输入框外才被关
+            # 兼容性说明：CommandCard 的所有子 widget 默认 focusPolicy=NoFocus，
+            # 点击它们不会夺走 SendableTextEdit 的焦点，因此本 dismiss 不会
+            # 误伤"点击卡片内项"的场景。若将来 CommandCard 引入 focusable 子
+            # 控件导致用户点不到项，可在此加 QTimer 延迟 + hasFocus() 复检。
+            card = self._get_card()
+            if card and card.is_card_visible:
+                card.dismiss()
+                self.slashDismissed.emit()
         except Exception:
             pass
 
@@ -1071,21 +1083,14 @@ class SendableTextEdit(TextEdit):
 
     def mousePressEvent(self, event):
         # 点击时退出历史浏览模式
+        # 注意：点击输入框内不主动 dismiss 命令卡片 —— 卡片跟随输入框失焦关闭
+        # （见 focusOutEvent），这样点击卡片项或在输入框内继续编辑时卡片仍可见。
         if self._history_index >= 0:
             self._reset_history_mode()
-        # 点击时隐藏命令卡片
-        card = self._get_card()
-        if card and card.is_card_visible:
-            card.dismiss()
-            self.slashDismissed.emit()
         super().mousePressEvent(event)
 
     def wheelEvent(self, event):
-        # 滚轮时隐藏命令卡片
-        card = self._get_card()
-        if card and card.is_card_visible:
-            card.dismiss()
-            self.slashDismissed.emit()
+        # 输入框内滚轮不主动 dismiss 命令卡片 —— 同 mousePressEvent
         super().wheelEvent(event)
 
     def clear(self):
