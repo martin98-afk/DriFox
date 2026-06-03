@@ -117,9 +117,5 @@ colors:
   branch_label_border: "rgba(53, 247, 138, 0.3)"
   window_bg: "rgba(53, 247, 138, 0.04)"
 
-  # ── 输入卡双层 halo（叠加在主光/环境光之上）──
-  # 主光紧致聚焦，环境光弥散柔和，叠加形成"核心亮→柔光晕开"
-  input_glow_primary_blur: 18
-  input_glow_primary_alpha: 230
-  input_glow_ambient_blur: 46
-  input_glow_ambient_alpha: 85
+  # ── 输入卡发光预设（ember 强度 70/30；颜色由上方 input_focus_border 决定）──
+  input_glow_preset: "ember"

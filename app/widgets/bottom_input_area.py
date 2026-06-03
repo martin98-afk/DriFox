@@ -15,7 +15,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPainterPath, QPen,
 )
-from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
 from qfluentwidgets import FluentIcon, ComboBox
 from qfluentwidgets import TextEdit, TransparentToolButton
@@ -686,6 +686,16 @@ class SendableTextEdit(TextEdit):
         # 保证发送按钮一次到位（不抖）。
         self._send_btn_debounce_timer.start()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 首次显示时同步定位发送按钮——showEvent 在 paintEvent 之前
+        # 同步执行，且此时 width()/height() 已由父布局确定。
+        # 否则：__init__ 阶段 width/height 都是 0，send_btn 落在 (0, 0)
+        # （输入框内的"左边"），要等 resizeEvent → debounce timer(0ms)
+        # 异步跑一轮才到右下角——视觉上就是"刚进去按钮在左边，过一会
+        # 才到右边"。后续 resize 仍走 debounce timer 路径。
+        self._position_send_button()
+
     def _position_send_button(self):
         """定位发送按钮到输入框右下角"""
         if self.send_btn:
@@ -1051,8 +1061,30 @@ class SendableTextEdit(TextEdit):
         try:
             super().focusOutEvent(event)
             self._animate_glow(0, 0, 200)
+            # 延迟检查失焦后的焦点去向：点击 CommandCard 项时焦点可能短暂转移，
+            # 这里用 0ms 延迟等焦点稳定后再判断焦点是否在命令卡片子树中。
+            # 若焦点在卡片内 → 保持卡片可见；若焦点在外（真正失焦）→ 关闭卡片。
+            QTimer.singleShot(0, self._deferred_focus_check_dismiss)
         except Exception:
             pass
+
+    def _deferred_focus_check_dismiss(self):
+        """失焦延迟检查：若焦点仍在输入框或在命令卡片内，不关闭卡片"""
+        card = self._get_card()
+        if not card or not card.is_card_visible:
+            return
+        focused = QApplication.focusWidget()
+        if focused is self:
+            return
+        # 检查焦点是否在命令卡片子树内
+        if focused:
+            p = focused
+            while p:
+                if p is card:
+                    return
+                p = p.parent()
+        card.dismiss()
+        self.slashDismissed.emit()
 
     def _ensure_cursor_visible(self):
         cursor = self.textCursor()
@@ -1061,21 +1093,14 @@ class SendableTextEdit(TextEdit):
 
     def mousePressEvent(self, event):
         # 点击时退出历史浏览模式
+        # 注意：点击输入框内不主动 dismiss 命令卡片 —— 卡片跟随输入框失焦关闭
+        # （见 focusOutEvent），这样点击卡片项或在输入框内继续编辑时卡片仍可见。
         if self._history_index >= 0:
             self._reset_history_mode()
-        # 点击时隐藏命令卡片
-        card = self._get_card()
-        if card and card.is_card_visible:
-            card.dismiss()
-            self.slashDismissed.emit()
         super().mousePressEvent(event)
 
     def wheelEvent(self, event):
-        # 滚轮时隐藏命令卡片
-        card = self._get_card()
-        if card and card.is_card_visible:
-            card.dismiss()
-            self.slashDismissed.emit()
+        # 输入框内滚轮不主动 dismiss 命令卡片 —— 同 mousePressEvent
         super().wheelEvent(event)
 
     def clear(self):

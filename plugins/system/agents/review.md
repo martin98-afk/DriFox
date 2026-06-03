@@ -8,8 +8,9 @@ permission:
   write: deny
   todowrite: deny
   todoread: deny
-  task_batch: deny
-  task_status: deny
+  subagent_para: deny
+  subagent_status: deny
+  subagent_dag: deny
   question: deny
   "*": allow
 ---

@@ -32,8 +32,7 @@ class SystemCardFrame(QFrame):
     # ── UI 构建 ──────────────────────────────────────────
 
     def _build_base_ui(self):
-        self.setSizePolicy(1, 0)
-        self.setFixedHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._apply_base_style()
 
         main_layout = QVBoxLayout(self)

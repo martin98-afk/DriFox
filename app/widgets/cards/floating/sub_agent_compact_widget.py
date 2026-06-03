@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-子智能体紧凑型悬浮框 - task_batch 触发时自动弹出
+子智能体紧凑型悬浮框 - subagent_para 触发时自动弹出
 类似 ToolFloatingWidget 的风格：每行一个子智能体，显示旋转图标 + agent名 + 任务描述
 与 SubAgentFloatingWidget（详细日志面板）完全独立
 """
@@ -70,7 +70,7 @@ class _AgentTaskRow(QFrame):
         self._is_finished = False
 
         # 旋转图标
-        self._rotating_icon = _RotatingIcon(":/icons/执行中new.svg", size=16, parent=self)
+        self._rotating_icon = _RotatingIcon(":/icons/执行中.svg", size=16, parent=self)
         # 成功后显示的静态图标
         self._success_pixmap = QPixmap(16, 16)
         self._success_pixmap.fill(Qt.transparent)
@@ -264,7 +264,7 @@ class SubAgentCompactFloatingWidget(QWidget):
 
         # ── 任务列表容器 ──
         self._body_layout = QVBoxLayout()
-        self._body_layout.setContentsMargins(24, 0, 0, 0)  # 缩进，与标题对齐
+        self._body_layout.setContentsMargins(12, 0, 0, 0)  # 缩进，与标题对齐
         self._body_layout.setSpacing(2)
         main_layout.addLayout(self._body_layout)
 

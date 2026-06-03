@@ -103,19 +103,10 @@ class ContextBudgetAllocator:
         messages: List[Dict[str, Any]] = []
 
         # 获取系统提示
-        if current_agent:
-            full_system_prompt = self._agent_manager.get_agent_system_prompt(
-                current_agent, is_subagent_call=False
-            )
-        else:
-            full_system_prompt = self._agent_manager.get_unified_system_prompt()
-
+        full_system_prompt = self._agent_manager.get_agent_system_prompt(
+            current_agent, is_subagent_call=False
+        )
         prompt_parts = [full_system_prompt]
-
-        # 添加自定义提示（固定内容）
-        custom_prompt = llm_config.get("系统提示", "").strip()
-        if custom_prompt:
-            prompt_parts.append(custom_prompt)
 
         # 添加启用的技能内容（放在 system prompt 最后，可能变化但相对稳定）
         enabled_skills = Settings.get_instance().llm_enabled_skills.value

@@ -52,6 +52,7 @@ from qfluentwidgets import (
 
 from app.constants import (
     FREE_PROVIDERS,
+    MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
     PROVIDER_MODELS,
 )
@@ -64,6 +65,7 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
+from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.command_manager import CommandManager, CommandType
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
@@ -174,6 +176,8 @@ from app.widgets.ui_helpers import (
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐 DriFox"
     icon = get_icon("drifox")
+    # 所有窗口实例列表（用于广播事件）
+    _instances: List[OpenAIChatToolWindow] = []
     session_manager = None
     _valid_configs: Dict[str, Dict[str, Any]] = {}
     history_manager = None
@@ -391,6 +395,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 自动检查更新（启动时静默检查）
         self._init_auto_update_check()
+
+        # 注册到全局实例列表（用于多窗口事件广播）
+        OpenAIChatToolWindow._instances.append(self)
 
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
@@ -718,6 +725,24 @@ class OpenAIChatToolWindow(ToolWindow):
             # 创建新的窗口实例
             new_instance = OpenAIChatToolWindow(valid_homepage)
 
+            # ── 多窗口隔离：把源窗口的项目上下文原样复制给新窗口 ──
+            # 必须在 __init__ 跑完之后立刻覆盖,否则新窗口会从全局 cfg 读到
+            # 最近一次 _on_project_selected 写入的"当前最新选择的项目",
+            # 导致分支/复制窗口错位显示项目名。
+            new_instance._current_project = self._current_project
+            new_instance._current_workdir = dict(self._current_workdir)  # 浅拷贝防共享
+            new_instance.backend._current_project = self._current_project
+            if new_instance.backend.tool_executor:
+                new_instance.backend.tool_executor.set_current_project(self._current_project)
+            if hasattr(new_instance, "_project_label"):
+                new_instance._project_label.setText(self._current_project)
+            # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
+            if hasattr(new_instance, "_refresh_project_branch_style"):
+                new_instance._refresh_project_branch_style()
+            if hasattr(new_instance, "_update_branch"):
+                new_instance._update_branch()
+            # ──────────────────────────────────────────────────
+
             # 如果是分支模式，传递当前会话的消息
             if branch:
                 current_session = self.session_manager.get_current_session()
@@ -728,6 +753,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._branch_session_data = {
                         "messages": branch_messages,
                         "name": branch_name,
+                        "project": self._current_project,  # 记录源项目，便于历史分组/检索
                     }
                 # 分支模式不跳过历史恢复，而是使用传入的分支数据
                 new_instance._skip_restore_history = (
@@ -843,6 +869,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         多窗口隔离：使用 _current_model_name 覆盖全局配置中的模型名称，
         确保每个窗口使用自己选中的模型，而非其他窗口最后选择的模型。
+
+        合并顺序（低 → 高）：
+            1. _valid_configs (provider 实例 + 服务商默认)
+            2. apply_model_defaults (硬编码兜底 + 模型能力)
+            3. model_overrides[当前模型名] (用户调过的参数，最高)
         """
         selected_name = (
             self._current_provider_name
@@ -856,6 +887,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 确保使用当前窗口选中的模型名称，而非全局配置中的模型名称（多窗口隔离）
             if self._current_model_name:
                 config["模型名称"] = self._current_model_name
+            # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 FREE_PROVIDERS 的部分默认值）
+            config = apply_model_defaults(config, self._current_model_name)
+            # 叠加用户按模型名覆盖的参数（最高优先级）
+            model_overrides = getattr(self.cfg, "llm_model_overrides", None)
+            if model_overrides and self._current_model_name:
+                overrides = (model_overrides.value or {}).get(
+                    self._current_model_name, {}
+                )
+                if overrides:
+                    config.update(overrides)
             return config
 
         return {}
@@ -1097,6 +1138,8 @@ class OpenAIChatToolWindow(ToolWindow):
         session.topic_summary = (
             name  # 同步 topic_summary，避免 _display_current_session 覆盖 title_edit
         )
+        # 记录分支所属项目(走 metadata 而非新增字段,保持核心数据模型不变)
+        session.metadata["project"] = self._current_project
         self._current_session_id = session.session_id
 
         # 清空聊天区域
@@ -1577,8 +1620,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("memory", self._memory_card)
 
-        # 模型配置卡片
+        # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
+        self._model_config_card.setFixedHeight(280)  # 初始值，set_config 时会重新计算
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
@@ -2152,7 +2196,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     ambient_blur=Colors.INPUT_GLOW_AMBIENT_BLUR,
                 )
             else:
-                self._input_glow_underlay.set_glow(0, 0, 0, 0)
+                # 失焦态：默认完全关闭；glow preset（如 breath）会通过
+                # INPUT_GLOW_UNFOCUSED_* token 保留微光，营造"持续呼吸"的奢华感
+                self._input_glow_underlay.set_glow(
+                    primary_alpha=0,
+                    primary_blur=0,
+                    ambient_alpha=Colors.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA,
+                    ambient_blur=Colors.INPUT_GLOW_UNFOCUSED_AMBIENT_BLUR,
+                )
             # 焦点 / 折叠状态变化都可能改变胶囊几何（如 toolbar 圆角切换、
             # input_card 折叠到 0），同步一次确保 underlay 跟上
             self._position_input_glow_underlay()
@@ -3458,6 +3509,20 @@ class OpenAIChatToolWindow(ToolWindow):
         config = {}
         if current_name in self._valid_configs:
             config = self._valid_configs[current_name].copy()
+
+        # 叠加模型默认值（三层兜底：硬编码 > 模型能力 > 已有配置）
+        # 当服务商不在 FREE_PROVIDERS（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
+        config = apply_model_defaults(config, self._current_model_name)
+
+        # 叠加用户按模型名保存的覆盖值（最高优先级）
+        model_overrides = getattr(self.cfg, "llm_model_overrides", None)
+        if model_overrides and self._current_model_name:
+            overrides = (model_overrides.value or {}).get(
+                self._current_model_name, {}
+            )
+            if overrides:
+                config.update(overrides)
+
         # 移除连接信息、元数据字段和无关的额外字段
         for pop_key in [
             "备注",
@@ -3913,23 +3978,52 @@ class OpenAIChatToolWindow(ToolWindow):
         current_name = self._current_provider_name
         if not current_name:
             return
-        # 只更新参数，保留连接信息
-        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
+        if not new_config:
+            return
+
+        # 区分模型级与连接级字段
+        model_keys = MODEL_LEVEL_KEYS
+        model_fields = {}
+        conn_fields = {}
+        current_model_name = new_config.get("模型名称", self._current_model_name or "")
+
+        for key, value in new_config.items():
+            if key in model_keys:
+                model_fields[key] = value
+            else:
+                conn_fields[key] = value
+
+        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
+        model_overrides = copy.deepcopy(self.cfg.llm_model_overrides.value) or {}
+
         old_config = saved_providers.get(
             current_name, self._valid_configs.get(current_name, {})
         )
-        old_config.update(new_config)
-        self._valid_configs[current_name] = old_config
-        saved_providers[current_name] = old_config
-        self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
+
+        # 1. 连接级字段 → 写入 saved_providers[config_id]
+        if conn_fields:
+            old_config.update(conn_fields)
+            self._valid_configs[current_name] = old_config
+            saved_providers[current_name] = old_config
+            self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
+            logger.debug(
+                f"[_on_config_applied] 连接级字段 -> saved_providers[{current_name}]: {list(conn_fields.keys())}"
+            )
+
+        # 2. 模型级字段 → 写入 model_overrides[模型名]
+        if model_fields and current_model_name:
+            existing = model_overrides.get(current_model_name, {}).copy()
+            existing.update(model_fields)
+            model_overrides[current_model_name] = existing
+            self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
+            logger.debug(
+                f"[_on_config_applied] 模型级字段 -> model_overrides[{current_model_name}]: {list(model_fields.keys())}"
+            )
+
         self._load_model_configs()
-        InfoBar.success(
-            "已保存",
-            "配置已保存到本地。",
-            parent=self,
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
+        logger.debug(
+            f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}"
         )
 
     def _on_settings_config_changed(self):
@@ -3976,7 +4070,11 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _on_plugin_hot_reload(self, result: dict):
-        """插件热更新完成时的回调（watchfiles 自动触发）"""
+        """插件热更新完成时的回调（watchfiles 自动触发）
+
+        多窗口广播：遍历所有窗口实例，逐一失效命令卡片缓存。
+        如有窗口当前命令卡片可见，立即重建内容。
+        """
         if not hasattr(self, "backend") or not self.backend:
             return
         # 不弹 InfoBar，仅日志记录
@@ -3986,20 +4084,45 @@ class OpenAIChatToolWindow(ToolWindow):
             f"skills={result.get('skills')}, mcp={result.get('mcp')}"
         )
 
-        # 命令卡片缓存失效：任何影响命令/技能列表的变更都需要重建缓存
-        if hasattr(self, "_command_card"):
-            needs_invalidation = (
-                result.get("commands")
-                or result.get("skills")
-                or result.get("agents", 0) > 0
-            )
+        needs_invalidation = (
+            result.get("commands")
+            or result.get("skills")
+            or result.get("agents", 0) > 0
+        )
+
+        # 广播给所有窗口实例
+        for win in OpenAIChatToolWindow._instances:
+            if not hasattr(win, "_command_card"):
+                continue
+            if win._is_destroyed:
+                continue
+
             if needs_invalidation:
-                self._command_card.invalidate_cache()
-                logger.debug("[HotReload] command_card cache invalidated")
+                win._command_card.invalidate_cache()
+                # 如果命令卡片当前可见，立即重建内容
+                if win._command_card.is_card_visible:
+                    try:
+                        text = win.input_area.toPlainText()
+                        if text.startswith("/"):
+                            # 只取第一个词（命令名）作为搜索查询，忽略参数部分
+                            raw = text[1:].strip()
+                            query = raw.split()[0] if raw else ""
+                            win._command_card.show_card(query)
+                        else:
+                            win._command_card.show_card("")
+                    except (RuntimeError, AttributeError):
+                        # 多窗口竞态：窗口已被销毁
+                        pass
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
-            self._register_command_shortcuts()
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    win._register_command_shortcuts()
+                except (RuntimeError, AttributeError):
+                    pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
         # 主题变更：主动刷新设置面板中的主题下拉列表
@@ -6558,10 +6681,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._current_session_id
                 )
                 if idx is not None:
+                    # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
                     self.history_manager.update_session(
                         idx,
                         session.messages,
-                        project=self._current_project,
                         **compaction_info,
                     )
                 else:
@@ -7482,12 +7605,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
-                    # 提示词替换命令：替换 + 追加用户命令
+                    # 提示词替换命令：替换 + 用 $ARGUMENTS 占位符替换
                     user_text = cmd_result.replacement
                     if cmd_result.remainder:
-                        user_text = (
-                            f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
-                        )
+                        if "$ARGUMENTS$" in user_text:
+                            user_text = user_text.replace(
+                                "$ARGUMENTS$", cmd_result.remainder
+                            )
+                        else:
+                            # fallback: 无 $ARGUMENTS$ 时保留旧行为
+                            user_text = (
+                                f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
+                            )
                     # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
 
@@ -7785,22 +7914,20 @@ class OpenAIChatToolWindow(ToolWindow):
             task_session_id = getattr(executor, "_task_session_id", "")
             del sub_agent_mgr._running_tasks[task_id]
         else:
-            # executor 可能已被 get_finished_tasks() 移除，此时尝试从 _finished_tasks 恢复字段
-            agent_name = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
-                "agent_name", ""
-            )
-            task_description = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
-                "task_description", ""
-            )
-            task_session_id = sub_agent_mgr._finished_tasks.get(task_id, {}).get(
-                "session_id", ""
-            )
+            # executor 可能已被 get_finished_tasks() 移除（DAG 节点由 _on_dag_node_finished 提前删除 running_tasks）
+            # 此时从 _finished_tasks 恢复字段（此时 DAG 已写入 error 信息，不要覆盖）
+            existing = sub_agent_mgr._finished_tasks.get(task_id, {})
+            agent_name = existing.get("agent_name", "")
+            task_description = existing.get("task_description", "")
+            task_session_id = existing.get("session_id", "")
 
         # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
         if task_id in sub_agent_mgr._finished_tasks:
             existing = sub_agent_mgr._finished_tasks[task_id]
             existing["result"] = result
-            existing["error"] = execution_error or ""
+            # 已有 error（如 DAG 写入的跳过信息）不要覆盖
+            if "error" not in existing or not existing["error"]:
+                existing["error"] = execution_error or ""
             existing.setdefault("agent_name", agent_name)
             existing.setdefault("task_description", task_description)
             existing.setdefault("session_id", task_session_id)
@@ -7851,7 +7978,7 @@ class OpenAIChatToolWindow(ToolWindow):
         total = len(batch_tasks)
         failed = sum(1 for t in batch_tasks if not t["success"])
 
-        # 生成任务列表（包含任务名和ID，方便LLM用task_status查询）
+        # 生成任务列表（包含任务名和ID，方便LLM用subagent_status查询）
         task_lines = []
         for t in batch_tasks:
             status_icon = "✅" if t["success"] else "❌"
@@ -7870,7 +7997,7 @@ class OpenAIChatToolWindow(ToolWindow):
 本次完成的任务：
 {task_list_text}
 
-请使用 task_status 工具查询以上任务的详细结果。"""
+请使用 subagent_status 工具查询以上任务的详细结果。"""
 
         is_currently_streaming = (
             self.backend.chat_engine and self.backend.chat_engine.is_streaming
@@ -8079,6 +8206,13 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             diff_val = getattr(result, "diff", None) if result else None
 
+        # 提取 echarts 字段（ToolResult 对象或 dict 格式）
+        echarts_val = None
+        if isinstance(result, dict):
+            echarts_val = result.get("echarts", None)
+        else:
+            echarts_val = getattr(result, "echarts", None) if result else None
+
         if self._current_assistant_card:
             self._current_assistant_card.append_tool_result(
                 tool_name=tool_name,
@@ -8087,6 +8221,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 success=success,
                 tool_call_id=tool_call_id,
                 diff=diff_val,
+                echarts=echarts_val,
             )
 
         self._scroll_to_bottom()
@@ -8277,13 +8412,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id
             )
             if idx is not None:
+                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
                 self.history_manager.update_session(
                     idx,
                     saved_messages,
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
                 )
             else:
                 self.history_manager.save_session(
@@ -8913,8 +9048,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新记忆卡片的项目
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             self._memory_card_popup.set_project(project)
-            # 自动切换到项目笔记tab（触发头部标签和内容同步切换）
-            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
             # 切换项目时自动同步工作目录
             self._sync_working_directory()
         # 刷新历史面板
@@ -8922,6 +9055,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 自动弹出长期记忆卡片
         if not self._memory_card.isVisible():
             self._toggle_memory_card()
+        # 卡片弹出后，再切换到项目笔记标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
+        if hasattr(self, "_memory_card") and self._memory_card:
+            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
         # 自动触发新建会话
         self._create_new_session()
 
@@ -9129,13 +9265,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id
             )
             if idx is not None:
+                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
+                # 避免项目切换后 _current_project 已改变，导致旧会话被错误地划归新项目
                 self.history_manager.update_session(
                     idx,
                     session.messages,
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
                 )
             else:
                 self.history_manager.save_session(
@@ -9173,6 +9310,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def closeEvent(self, event):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
+
+        # 从全局实例列表中移除
+        try:
+            OpenAIChatToolWindow._instances.remove(self)
+        except (ValueError, Exception):
+            pass
 
         # 多窗口隔离：注销窗口及其卡片数据
         try:

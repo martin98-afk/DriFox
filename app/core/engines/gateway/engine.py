@@ -541,7 +541,7 @@ class GatewayEngine(QObject, BaseEngine):
 
 ### 【禁止使用的工具】
 - ❌ **禁止** 使用 `question` 工具
-- ❌ **禁止** 使用 `task_batch` 和 `task_status` 工具
+- ❌ **禁止** 使用 `subagent_para` 和 `subagent_status` 工具
 - ❌ **禁止** 使用 `todowrite` 工具
 
 ### 【必须遵守】

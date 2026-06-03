@@ -78,6 +78,7 @@ def make_tool_result_block(
         success: bool = True,
         tool_call_id: Optional[str] = None,
         diff: Optional[str] = None,
+        echarts: Optional[str] = None,
 ) -> Dict[str, Any]:
     # 检测是否为子智能体任务（task tool）
     is_subagent = str(tool_name).lower() == "task"
@@ -94,6 +95,8 @@ def make_tool_result_block(
         block["tool_call_id"] = str(tool_call_id)
     if diff:
         block["diff"] = diff
+    if echarts:
+        block["echarts"] = echarts
     return block
 
 
@@ -127,6 +130,7 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
                             success=item.get("success", True),
                             tool_call_id=item.get("tool_call_id"),
                             diff=item.get("diff"),
+                            echarts=item.get("echarts"),
                         )
                     )
                 else:
@@ -270,6 +274,9 @@ def content_to_markdown(content: Any) -> str:
                 # diff 多行内容，直接嵌入
                 diff_escaped = _sanitize_result(str(diff_raw))
 
+            # 读取 echarts 字段（用于 DAG 图展示）
+            echarts_raw = block.get("echarts", "") or ""
+
             tool_lines = [
                 "<tool>",
                 f"name: {block.get('name', 'tool')}",
@@ -283,6 +290,10 @@ def content_to_markdown(content: Any) -> str:
             # 保留 tool_call_id 用于差异对比功能
             if tool_call_id:
                 tool_lines.append(f"tool_call_id: {tool_call_id}")
+            # echarts 图表：嵌入 tool 块内部，由 _render_tool_block_content 渲染
+            if echarts_raw:
+                tool_lines.append(f"echarts:")
+                tool_lines.append(echarts_raw)
             tool_lines.append("</tool>")
             parts.append("\n".join(tool_lines))
     return "\n\n".join(part for part in parts if part).strip()
@@ -413,6 +424,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["diff"] = str(message.get("diff"))
         if message.get("anchors"):
             normalized["anchors"] = str(message.get("anchors"))
+        if message.get("echarts"):
+            normalized["echarts"] = str(message.get("echarts"))
         return normalized
 
     normalized["content"] = content_to_text(message.get("content", ""))

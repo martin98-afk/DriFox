@@ -189,7 +189,7 @@ class UIEngine(BaseEngine):
             elif tool_name == "websearch":
                 query = arguments.get("query", "")
                 return perm_resolver.resolve(tool_name, query)
-            elif tool_name == "task_batch":
+            elif tool_name == "subagent_para":
                 tasks = arguments.get("tasks", [])
                 if tasks and len(tasks) > 0:
                     first_agent = tasks[0].get("agent", "")

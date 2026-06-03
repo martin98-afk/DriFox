@@ -35,6 +35,7 @@ from app.constants import PARAM_SCHEMA
 from app.core.conversation.config import PermissionCache
 from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
 from app.core.provider_profile import get_provider_profile
+from app.core.model_capabilities import get_model_capabilities
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
@@ -372,7 +373,13 @@ class OpenAIChatWorker(QThread):
             event: 事件类型
             *args, **kwargs: 事件数据
         """
-        self._event_bus.emit(event, *args, **kwargs)
+        # 修复：cleanup() 会把 self._event_bus 置为 None 以断开闭包引用，
+        # 而 ThreadPoolExecutor 子线程仍可能在并行工具执行结束后调用本方法，
+        # 此处需做 None 保护，避免 'NoneType' object has no attribute 'emit'。
+        bus = self._event_bus
+        if bus is None:
+            return
+        bus.emit(event, *args, **kwargs)
 
     def _emit_with_callback(self, signal_name: str, signal, *args) -> None:
         """发射信号并尝试直接回调（已废弃，推荐使用 _emit_via_event_bus）
@@ -384,19 +391,24 @@ class OpenAIChatWorker(QThread):
             signal: Qt 信号对象（保留用于向后兼容）
             *args: 传递给回调/信号的参数
         """
-        # 映射 signal_name 到 WorkerEvent
-        event = self._signal_name_to_event(signal_name)
-        if event:
-            self._emit_via_event_bus(event, *args)
+        try:
+            # 映射 signal_name 到 WorkerEvent
+            event = self._signal_name_to_event(signal_name)
+            if event:
+                self._emit_via_event_bus(event, *args)
 
-        # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
-        # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
-        # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
-        if signal is not None:
-            try:
-                signal.emit(*args)
-            except (AttributeError, RuntimeError, TypeError) as e:
-                logger.debug(f"[Signal] PyQt信号发射失败 {signal_name}: {e}")
+            # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
+            # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
+            # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
+            if signal is not None:
+                try:
+                    signal.emit(*args)
+                except (AttributeError, RuntimeError, TypeError) as e:
+                    logger.debug(f"[Signal] PyQt信号发射失败 {signal_name}: {e}")
+        except Exception as e:
+            # 兜底：cleanup() 后子线程调用本方法可能命中各类 None 资源，
+            # 这里吞掉而非向上抛，避免阻断并行工具结果的处理路径。
+            logger.debug(f"[Signal] _emit_with_callback 兜底 {signal_name}: {e}")
 
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
         """将 signal name 映射到 WorkerEvent"""
@@ -559,7 +571,14 @@ class OpenAIChatWorker(QThread):
         缓存结果，只在配置变化时重新构建。
         """
         # 检查是否需要更新缓存
-        config_key = str(self.llm_config.get("API_KEY", "")) + str(self.llm_config.get("API_URL", ""))
+        # 缓存键必须包含所有影响 extra_body 的参数，否则改思考模式等不会生效
+        sig_parts = [
+            str(self.llm_config.get(k, ""))
+            for k in ("API_KEY", "API_URL", "模型名称",
+                      "思考模式", "思考等级", "思考预算",
+                      "温度", "top_p", "最大Token", "max_new_tokens")
+        ]
+        config_key = "|".join(sig_parts)
 
         if self._cached_api_config is not None and self._cached_api_config.get("_config_key") == config_key:
             # 缓存有效，返回基础配置（messages 和 tools 每次不同，需要单独设置）
@@ -583,7 +602,10 @@ class OpenAIChatWorker(QThread):
             skip_params.update({"temperature", "top_p"})
 
         for cn_key, value in self.llm_config.items():
-            if cn_key in ["API_KEY", "API_URL", "模型名称", "系统提示", "启用技能"]:
+            if cn_key in {"API_KEY", "API_URL", "API_BASE", "认证方式", "模型名称",
+                          "系统提示", "启用技能",
+                          "name", "provider_name", "config_id", "display_name",
+                          "_suffix_index", "备注", "获取地址", "模型列表"}:
                 continue
             # 从 PARAM_SCHEMA 查找 API 参数名
             meta = PARAM_SCHEMA.get(cn_key, {})
@@ -601,27 +623,36 @@ class OpenAIChatWorker(QThread):
         if max_tokens is not None:
             extra_body["max_tokens"] = self._cap_max_output_tokens(model, max_tokens)
 
-        # 处理服务商特有的思考模式参数
-        profile = get_provider_profile(self.llm_config)
-        provider_family = profile["family"]
+        # 处理思考模式（通用逻辑，不再按 family 硬编码）
+        thinking_mode = self.llm_config.get("思考模式")
+        if thinking_mode is not None:
+            # 优先从 MODEL_CAPABILITIES 获取 thinking_param，回退到 provider_profile
+            caps = get_model_capabilities(model)
+            t_param = None
+            enable_value = "enabled"  # 大多数模型用 "enabled"
+            if caps:
+                t_param = caps.get("thinking_param")
+                enable_value = caps.get("thinking_enable_value", "enabled")
+            if not t_param:
+                profile = get_provider_profile(self.llm_config)
+                t_param = profile.get("thinking_param")
 
-        if provider_family == "deepseek":
-            thinking_mode = self.llm_config.get("思考模式")
             if thinking_mode is True:
-                extra_body["thinking"] = {"type": "enabled"}
-                # reasoning_effort 由映射自动流入，无需额外处理
-            elif thinking_mode is False:
-                extra_body["thinking"] = {"type": "disabled"}
-                # API 要求：关闭思考时不能传 reasoning_effort
+                if t_param == "thinking":
+                    extra_body["thinking"] = {"type": enable_value}
+                    # 用 thinking 控制的模型不支持同时传 reasoning_effort
+                    extra_body.pop("reasoning_effort", None)
+                elif t_param == "thinking_budget":
+                    budget = self.llm_config.get("思考预算", 4096)
+                    extra_body["thinking_budget"] = budget
+                # reasoning_effort 由 思考等级 的 api_param 映射自动流入
+            else:  # False - 关闭思考
+                if t_param == "thinking":
+                    extra_body["thinking"] = {"type": "disabled"}
+                elif t_param == "thinking_budget":
+                    extra_body.pop("thinking_budget", None)
+                # 关闭思考时必须移除 reasoning_effort
                 extra_body.pop("reasoning_effort", None)
-
-        elif provider_family == "zhipu":
-            thinking_mode = self.llm_config.get("思考模式")
-            if thinking_mode is True:
-                extra_body["thinking"] = {"type": "enabled"}
-            elif thinking_mode is False:
-                extra_body["thinking"] = {"type": "disabled"}
-            # 智谱AI 不支持 reasoning_effort，已有映射不会注入
 
         # 处理认证
         auth_headers = None
@@ -999,6 +1030,7 @@ class OpenAIChatWorker(QThread):
                     "timestamp": item.get("timestamp", now_ts),
                     "diff": item.get("diff"),
                     "anchors": item.get("anchors"),
+                    "echarts": item.get("echarts"),
                 }
 
         # 预防性修复：过滤掉没有对应 tool 结果的 tool_call
@@ -1301,6 +1333,7 @@ class OpenAIChatWorker(QThread):
             "model": cached_config["model"],
             "messages": sanitized,
             "stream": cached_config["stream"],
+            "parallel_tool_calls": True,  # 显式启用并行工具调用（OpenAI 2024-08+ 默认就是 True，显式传更稳；非 OpenAI provider 多为 OpenAI 兼容 API，会忽略未知参数）
         }
         # 添加 extra_body
         if cached_config.get("extra_body"):
@@ -2324,6 +2357,7 @@ class OpenAIChatWorker(QThread):
             "round_id": round_id,
             "diff": getattr(result_obj, "diff", None) if result_obj else None,
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
+            "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
         }
 
     def _execute_one_tool_parallel(self, tool_name, tool_call_id, arguments, round_id, idx):

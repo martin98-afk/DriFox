@@ -286,13 +286,15 @@ class PermissionResolver:
     def _glob_match(self, text: str, pattern: str) -> bool:
         return fnmatch.fnmatch(text, pattern)
 
+
 class AgentManager:
     """Agent/Skill 管理器（全局单例，跨窗口共享）"""
 
     _instance = None
 
     @classmethod
-    def get_instance(cls, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None) -> "AgentManager":
+    def get_instance(cls, agents_dir: Optional[str] = None,
+                     hook_manager: Optional[HookManager] = None) -> "AgentManager":
         """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
         if cls._instance is None:
             cls._instance = cls(agents_dir, hook_manager)
@@ -624,9 +626,9 @@ class AgentManager:
         if not agents:
             return ""
 
-        lines = ["## Available Subagents\n可直接使用的子智能体列表："]
+        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para和subagent_dag使用)："]
         for a in agents:
-            lines.append(f"- **{a.name}**: {a.description}")
+            lines.append(f"- **{a.name}**: {a.description[:300]}")
 
         return "\n".join(lines)
 
@@ -650,7 +652,7 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=self._builtin_tools)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        forbidden_tools = {"question", "task_batch", "task_status"}
+        forbidden_tools = {"question", "subagent_para", "subagent_status", "subagent_dag"}
         if is_subagent_call:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
@@ -681,7 +683,7 @@ class AgentManager:
             agent_name: 智能体名称
             base_prompt: 基础提示词（通常为 skill 内容）
             is_subagent_call: 是否为子智能体调用上下文。
-                - True: 主智能体通过 task_batch 调用子智能体（子智能体看到的是任务描述，不是完整上下文）
+                - True: 主智能体通过 subagent_para 调用子智能体（子智能体看到的是任务描述，不是完整上下文）
                 - False: 主智能体自身运行，或子智能体独立运行
         """
         agent = self.get_agent(agent_name)
@@ -694,13 +696,19 @@ class AgentManager:
 - 这是一个代码工作台，不是普通闲聊窗口。
 - 优先围绕"相关文件、实施动作、验证方式、剩余风险"组织输出。
 - 回答要像工程师交付，不要像客服聊天。
+
+### 工具调用并行原则
+- 对于**互相独立**的任务（如同时读取多个文件、多个 grep 查询、多个 webfetch、并行启动后台任务），请在**一次响应中并行发出**所有 tool_call，不要拆成多轮串行调用。
+- 串行的典型场景：依赖前一步结果（如 grep → read → edit；先探测再决策）。
+- 并行的典型场景：一次性扫描多个文件、批量查询、并行启动多个后台任务、批量读写无依赖文件。
+- 多轮对话的体感优化：能在同一轮完成的事，就不要让用户多等 N×(LLM 延迟)。
 """.strip()
 
         # 子智能体额外约束
         subagent_constraints = """
 ## 子智能体约束
 - 【禁止】使用 `question` 工具（需要用户交互，不支持）
-- 【禁止】使用 `task_batch` 和 `task_status` 工具（子智能体不能再发布子智能体）
+- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）
 - 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）
 - 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认
 - 【必须】独立完成任务，不需要主智能体介入
@@ -718,16 +726,21 @@ class AgentManager:
 - 当你预测到用户接下来可能需要的帮助时，请按以下格式给出追问清单（放在回复末尾）：
   - [问题描述1](ask)
   - [问题描述2](ask)
-  
+
 ### 文件引用规范
 - 当你想要引用某个本地存在的文件时，请按以下格式引用：
   - [文件名](file|文件路径)
   - [文件夹名](file|文件夹路径)
+
+### 消息渲染能力
+- 支持 Markdown 渲染、代码高亮
+- 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）
+- 工具卡片的 diff 差异对比会自动渲染，无需手动处理
 """.strip()
 
         # 【核心修复】根据 is_subagent_call 区分调用上下文
         # 场景1: 主智能体自身运行（primary mode，is_subagent_call=False）
-        # 场景2: 主智能体通过 task_batch 调用子智能体（子智能体看到任务描述，is_subagent_call=True）
+        # 场景2: 主智能体通过 subagent_para 调用子智能体（子智能体看到任务描述，is_subagent_call=True）
         # 场景3: 子智能体独立运行（subagent mode，is_subagent_call=False）
 
         if is_subagent_call:
@@ -767,7 +780,7 @@ Use the tools available to you based on your permissions.
 当收到格式为 `[后台任务状态]` 的用户消息时，表示子智能体任务回调通知。
 消息中包含本次完成的任务列表（任务名、任务ID）。
 你应该：
-1. 使用 task_status 工具，传入消息中提到的任务ID，获取详细结果
+1. 使用 subagent_status 工具，传入消息中提到的任务ID，获取详细结果
 2. 根据结果评估完成情况
 3. 输出总结或后续建议（如有需要）
 
@@ -776,20 +789,20 @@ Use the tools available to you based on your permissions.
     def get_enabled_skills_content(self, enabled_skills: List[str]) -> str:
         """获取已启用的技能内容"""
         from app.utils.utils import get_local_skills
-        
+
         if not enabled_skills:
             return ""
-        
+
         all_skills = get_local_skills()
         result_parts = [
             "\n\n## 偏好技能\n以下是部分用户偏好的智能体技能，如果以下技能不能满足用户需求，可以使用 `list_skills` 技能加载完整技能列表：\n"
         ]
-        
+
         for skill in all_skills:
             if skill["name"] in enabled_skills:
                 display_name = skill.get("qualified_name", skill["name"])
                 result_parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
-        
+
         return "\n".join(result_parts) if len(result_parts) > 1 else ""
 
     def get_agent_config(self, agent_name: str) -> Dict[str, Any]:

@@ -502,8 +502,9 @@ _TOOL_ICON_MAP = {
     "webfetch": "🌐",
     # 子智能体任务
     "task": "🤖",
-    "task_batch": "🤖",
-    "task_status": "🤖",
+    "subagent_para": "🤖",
+    "subagent_status": "🤖",
+    "subagent_dag": "🔗",
     # 技能工具
     "skill": "⚡",
     "list_skills": "⚡",
@@ -522,6 +523,7 @@ def render_tool_block(
     collapsed: bool = False,
     tool_call_id: str = None,
     diff: str = None,
+    echarts: str = None,
 ) -> str:
     """渲染工具块，参数横向表格展示（左列参数名，右列结果值）"""
 
@@ -529,7 +531,7 @@ def render_tool_block(
     is_mcp_tool = tool_name.startswith("mcp__") or tool_name == "mcp_list_servers"
 
     # 检测是否为子智能体任务（特殊渲染逻辑）
-    is_sub_agent_task = tool_name in ("task", "task_batch")
+    is_sub_agent_task = tool_name in ("task", "subagent_para", "subagent_dag")
 
     # 状态图标
     status_html = ""
@@ -641,19 +643,36 @@ def render_tool_block(
             </div>
         </div>"""
     
-    # 有 diff 时：跳过参数表格，直接显示 diff；并根据 diff 大小决定折叠
+    # ── ECharts 图表区 ──
+    echarts_html = ""
+    if echarts:
+        try:
+            import base64 as _b64
+            b64_json = _b64.b64encode(echarts.encode("utf-8")).decode("ascii")
+            chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
+            echarts_html = f'''
+            <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>'''
+        except Exception:
+            pass
+
+    # 有 echarts 或 diff 时：跳过参数表格，直接显示图表/差异
     DIFF_AUTO_COLLAPSE_LINES = 20
-    if diff and diff_line_count > 0:
-        collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES  # 小diff默认打开，大diff自动关闭
+    if echarts or (diff and diff_line_count > 0):
+        if echarts:
+            collapsed = False  # 有图表时默认展开
+        else:
+            collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
         expanded_content = f"""
         <div class="tool-expanded-content">
+            {echarts_html}
             {diff_html}
         </div>"""
     else:
-        # 无 diff 时：显示参数表格
+        # 无 echarts 且无 diff 时：显示参数表格
         unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
         expanded_content = f"""
         <div class="tool-expanded-content">
+            {echarts_html}
             {unified_table_html}
             {diff_html}
         </div>"""

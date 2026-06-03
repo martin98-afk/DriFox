@@ -12,7 +12,8 @@ permission:
   question: deny
   todowrite: deny
   todoread: deny
-  task_batch: deny
+  subagent_para: deny
+  subagent_dag: deny
   "*": allow
 ---
 

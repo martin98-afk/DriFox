@@ -263,6 +263,8 @@ class Settings(QConfig):
     llm_temperature = ConfigItem("LLM", "Temperature", 0.7, RangeValidator(0, 1))
     # 保存的免费/自定义服务商配置
     llm_saved_providers = ConfigItem("LLM", "SavedProviders",{})
+    # 按模型名覆盖的参数（最大Token、温度、思考相关等），key=模型名
+    llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
     llm_selected_model = ConfigItem("LLM", "SelectedModel", "")
     # 启用的技能列表

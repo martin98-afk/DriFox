@@ -92,6 +92,37 @@ background:
 - `input_focus_border`: 聚焦边框色（使用 accent）
 - `input_placeholder`: 占位文字色 `rgba(r, g, b, 0.4)`
 
+#### 4.5 输入框发光（halo cascade + glow preset）
+
+输入框聚焦时会沿整个胶囊轮廓一次性绘制两层向内发光（halo cascade），可独立调色 + 强度：
+
+- `input_focus_border`: 聚焦边框 + 发光色，halo 自动跟随此色
+- `input_glow_primary_alpha` / `input_glow_primary_blur`: 主光（紧致核心），alpha 高、blur 小；设为 0 即关闭
+- `input_glow_ambient_alpha` / `input_glow_ambient_blur`: 环境光（弥散底层），alpha 较低、blur 较大
+- `input_glow_unfocused_ambient_alpha` / `input_glow_unfocused_ambient_blur`: 失焦态环境光；默认 0=失焦完全关闭，调大则保留"持续呼吸"的微光
+
+##### 4.5.1 发光预设（推荐写法）
+
+主题最简洁的做法是直接指定 `input_glow_preset`，由 DriFox 一次性填回 6 个发光强度 token。**预设只控制发光强度，不管颜色** —— 颜色由本主题的 `input_focus_border` 决定。这样主题可以自由组合"颜色 + 强度"，例如辐射绿 + ember 强度。
+
+预设有 4 档：
+
+| 预设 | 风格（强度） | 适用 |
+|------|------|------|
+| `subtle`   | halo 最克制（聚焦 35/18，失焦 0），失焦完全关 | 追求低调 |
+| `breath`   | halo 中等（聚焦 65/30，失焦 38/30），失焦保留微光 | 奢华感最强（"由弱到强"焦点切换） |
+| `platinum` | halo 适中（聚焦 55/26，失焦 0），失焦关 | 冷峻现代 |
+| `ember`    | halo 偏强（聚焦 70/30，失焦 18/20），四档中最亮 | 喜欢高调观感 |
+
+写法示例：
+```yaml
+colors:
+  input_focus_border: "#35f78a"   # 辐射绿（颜色由主题决定）
+  input_glow_preset: "ember"      # ember 强度
+```
+
+> 💡 预设**不会**覆盖 `input_focus_border`，只覆盖 6 个 `input_glow_*` token。如需在预设基础上微调某个强度参数，请先复制预设的 6 个数值到对应 token 后**删除** `input_glow_preset` 行。
+
 #### 5. 实时交互卡片
 - `realtime_border`: 边框（用 accent 或相近色）
 - `realtime_accent`: 强调色（accent 的亮化版）

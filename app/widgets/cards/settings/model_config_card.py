@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 模型配置卡片 - 优化布局，有变化自动保存
+
+布局策略（set_config 渲染时）：
+  1. 字段按 PARAM_SCHEMA.order 排序
+  2. 字段按功能分组（_FIELD_GROUPS）：上下文 / 思考 / 采样
+  3. 每组有 subtle 标题，组间额外间距
+  4. 标签最小宽度 80px，右边控件对齐
+  5. 渲染完后根据字段数估算内容高度，调整父 BaseSettingsCard 的高度
 """
 import webbrowser
 
@@ -16,7 +23,32 @@ from qfluentwidgets import (
     ComboBox, )
 
 from app.constants import PARAM_SCHEMA
+from app.utils.design_tokens import Colors
+from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
+
+
+# =============================================================================
+# 字段分组：定义显示顺序与分类
+# key 在哪个元组里就归到哪个组；不在任何组里的会归到"其他"（一般不会出现）
+# =============================================================================
+_FIELD_GROUPS = [
+    ("上下文", ("最大Token", "上下文长度")),
+    ("思考",   ("思考模式", "思考预算", "思考等级")),
+    ("采样",   ("温度", "temp", "top_p", "max_new_tokens")),
+]
+
+# =============================================================================
+# 高度估算（px）
+# =============================================================================
+_FIELD_ROW_HEIGHT = 34        # 每个字段行（label + widget）
+_GROUP_HEADER_HEIGHT = 22     # 分组标题
+_GROUP_SPACING = 14           # 组间额外间距
+_CONTENT_PADDING = 12         # 内容区上下内边距
+_CARD_HEADER_HEIGHT = 30      # BaseSettingsCard 头部（图标+标题+关闭）
+_MIN_CARD_HEIGHT = 240        # 卡片最小高度
+_MAX_CARD_HEIGHT = 460        # 卡片最大高度
+_LABEL_MIN_WIDTH = 80         # 标签最小宽度（让控件对齐）
 
 
 class ModelConfigCard(QWidget):
@@ -37,8 +69,8 @@ class ModelConfigCard(QWidget):
 
     def _setup_ui(self):
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(4, 0, 4, 0)
-        self.layout.setSpacing(3)
+        self.layout.setContentsMargins(8, 8, 8, 8)
+        self.layout.setSpacing(6)
 
     def _clear_layout(self, layout):
         """递归清理 layout"""
@@ -49,6 +81,27 @@ class ModelConfigCard(QWidget):
             elif child.layout():
                 self._clear_layout(child.layout())
 
+    # ------------------------------------------------------------------
+    # 字段分组
+    # ------------------------------------------------------------------
+    def _group_items(self, items):
+        """按 _FIELD_GROUPS 顺序分组，未匹配的归到"其他"组"""
+        used_keys = set()
+        groups = []
+        for group_name, group_keys in _FIELD_GROUPS:
+            group_items = [it for it in items if it[1] in group_keys]
+            for it in group_items:
+                used_keys.add(it[1])
+            if group_items:
+                groups.append((group_name, group_items))
+        ungrouped = [it for it in items if it[1] not in used_keys]
+        if ungrouped:
+            groups.append(("其他", ungrouped))
+        return groups
+
+    # ------------------------------------------------------------------
+    # 渲染
+    # ------------------------------------------------------------------
     def set_config(self, title: str, config: dict):
         self.config = config.copy()
         self.current_provider = title
@@ -63,21 +116,84 @@ class ModelConfigCard(QWidget):
             "display_name", "_suffix_index",
         }
 
+        # 收集要渲染的字段：[(order, key, value, meta), ...]
+        items = []
+        seen_display_names = set()
         for key, value in config.items():
             if key in skip_keys:
                 continue
             meta = PARAM_SCHEMA.get(key, {})
-            ui_type = meta.get("ui_type") or self._infer_fallback_type(key, value)
-            widget = self._create_widget(key, ui_type, value, meta)
+            if meta.get("hide_in_card"):
+                continue
             display_name = meta.get("display_name", key)
-            label = BodyLabel(f"{display_name}：", self)
-            hlayout = QHBoxLayout()
-            hlayout.setContentsMargins(0, 0, 0, 0)
-            hlayout.setSpacing(8)
-            hlayout.addWidget(label, 0)
-            hlayout.addWidget(widget, 1)
-            self.layout.addLayout(hlayout)
-            self._widgets[key] = (label, widget)
+            if display_name in seen_display_names:
+                continue
+            seen_display_names.add(display_name)
+            order = meta.get("order", 999)
+            items.append((order, key, value, meta))
+
+        items.sort(key=lambda x: x[0])
+        groups = self._group_items(items)
+
+        # 渲染各组
+        is_first_group = True
+        for group_name, group_items in groups:
+            if not group_items:
+                continue
+            if not is_first_group:
+                self.layout.addSpacing(_GROUP_SPACING)
+            is_first_group = False
+
+            # 分组标题
+            header = BodyLabel(group_name, self)
+            header.setStyleSheet(
+                f"color: {Colors.TEXT_SECONDARY}; "
+                f"font-size: 11px; font-weight: 600; "
+                f"padding: 0 0 4px 2px;"
+            )
+            self.layout.addWidget(header)
+
+            # 字段行
+            for _order, key, value, meta in group_items:
+                ui_type = meta.get("ui_type") or self._infer_fallback_type(key, value)
+                widget = self._create_widget(key, ui_type, value, meta)
+                display_name = meta.get("display_name", key)
+                label = BodyLabel(f"{display_name}：", self)
+                label.setMinimumWidth(_LABEL_MIN_WIDTH)
+                hlayout = QHBoxLayout()
+                hlayout.setContentsMargins(0, 0, 0, 0)
+                hlayout.setSpacing(8)
+                hlayout.addWidget(label, 0)
+                hlayout.addWidget(widget, 1)
+                self.layout.addLayout(hlayout)
+                self._widgets[key] = (label, widget)
+
+        # 估算内容高度并调整父 BaseSettingsCard 的高度
+        self._adjust_parent_height(items, groups)
+
+    def _adjust_parent_height(self, items, groups):
+        """根据字段数和组数估算高度，向上找 BaseSettingsCard 并 setFixedHeight"""
+        field_count = len(items)
+        non_empty_groups = [g for _, g in groups if g]
+        group_count = len(non_empty_groups)
+        group_separator_count = max(0, group_count - 1)
+
+        content_height = (
+            _CONTENT_PADDING * 2
+            + group_count * _GROUP_HEADER_HEIGHT
+            + field_count * _FIELD_ROW_HEIGHT
+            + group_separator_count * _GROUP_SPACING
+        )
+        card_height = _CARD_HEADER_HEIGHT + content_height
+        card_height = max(_MIN_CARD_HEIGHT, min(_MAX_CARD_HEIGHT, card_height))
+
+        # 沿父链向上找 BaseSettingsCard
+        parent = self.parentWidget()
+        while parent:
+            if isinstance(parent, BaseSettingsCard):
+                parent.setFixedHeight(int(card_height))
+                break
+            parent = parent.parentWidget()
 
     def _infer_fallback_type(self, key: str, value) -> str:
         """对 schema 未收录的键做启发式猜测"""

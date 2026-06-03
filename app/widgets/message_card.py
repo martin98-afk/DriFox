@@ -18,6 +18,7 @@ MessageCard - 消息卡片组件
 import base64
 import hashlib
 import math
+import os
 import random
 import re
 import time
@@ -47,7 +48,7 @@ from PyQt5.QtGui import (
     QLinearGradient,
     QPainterPath,
 )
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -245,7 +246,31 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
     def replacer(match):
         lang = (match.group(1) or "").replace("language-", "").strip()
         code_content_raw = match.group(2) or ""
-        # --- 优化后的代码块逻辑 ---
+
+        # ===== ECharts 代码块：渲染为交互式图表 =====
+        if lang == "echarts":
+            try:
+                # 解码 HTML 实体
+                json_text = (
+                    code_content_raw.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", '"')
+                )
+                # 验证 JSON 合法性
+                json.loads(json_text)
+                # base64 编码防止 HTML 属性转义问题
+                b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
+                chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
+                return f'''
+                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
+                '''
+            except Exception:
+                # JSON 解析失败，降级为普通代码块
+                pass
+
+        # --- 普通代码块处理 ---
         try:
             copy_text = (
                 code_content_raw.replace("&lt;", "<")
@@ -569,6 +594,18 @@ def _render_tool_block_content(content: str) -> str:
             diff_content = diff_after[:diff_next.start()].strip()
         else:
             diff_content = diff_after.strip()
+
+    # ========== 解析 echarts（可选字段，仅 subagent_dag 有）==========
+    echarts_content = ""
+    echarts_start = content.find("\necharts:")
+    if echarts_start != -1:
+        echarts_after = content[echarts_start + 9:]
+        # echarts JSON 持续到末尾或下一个字段
+        echarts_next = _NEXT_FIELD_PATTERN.search(echarts_after)
+        if echarts_next:
+            echarts_content = echarts_after[:echarts_next.start()].strip()
+        else:
+            echarts_content = echarts_after.strip()
     if result_start >= 0:
         result_after = content[result_start + 7:]  # 跳过 "result:"
         # 找到 result 内容的结束位置（下一个字段之前）
@@ -641,7 +678,7 @@ def _render_tool_block_content(content: str) -> str:
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
     return render_tool_block(
         tool_name, args_dict, tool_result, tool_success, collapsed=True,
-        tool_call_id=tool_call_id, diff=diff_content
+        tool_call_id=tool_call_id, diff=diff_content, echarts=echarts_content
     )
 
 
@@ -964,7 +1001,8 @@ def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
         md = get_markdown_instance()
         md.reset()
         html_content = md.convert(processed_md)
-        return _wrap_code_blocks_with_copy_button_web(html_content)
+        html_content = _wrap_code_blocks_with_copy_button_web(html_content)
+        return html_content
     except Exception:
         return f"<pre>{escape(raw_md)}</pre>"
 
@@ -1051,6 +1089,45 @@ def _inject_context_links(md_text: str) -> str:
         return f'<span class="context-tag" data-type="{action}" data-content="{escape(content)}" data-action="{action}">{content}</span>'
 
     return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
+
+
+def _resolve_image_src(html_content: str) -> str:
+    """
+    将 HTML 中的图片 src 相对路径转为绝对 file:/// 路径。
+    
+    检测 <img src="相对路径"> 中的 src，如果路径是相对路径且本地文件存在，
+    则转换为 file:/// 绝对路径，确保 QWebEngineView 能正常加载。
+    已存在的绝对路径（http/https/file/data/qrc）跳过处理。
+    """
+    _img_src_pattern = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
+    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def _replacer(match):
+        prefix = match.group(1)
+        src = match.group(2)
+        suffix = match.group(3)
+
+        # 跳过已经是绝对 URL 或 data URI 的 src
+        if src.startswith(('http://', 'https://', 'file://', 'data:',
+                           'qrc:/', '#', 'blob:')):
+            return match.group(0)
+
+        # 尝试解析为绝对路径
+        if os.path.isabs(src):
+            # 已经是绝对路径，直接检查文件是否存在
+            candidate = os.path.normpath(src)
+        else:
+            # 相对路径：以项目根目录为基准拼接
+            candidate = os.path.normpath(os.path.join(_project_root, src))
+
+        if os.path.isfile(candidate):
+            # 本地文件存在，转为 file:/// 路径
+            file_url = QUrl.fromLocalFile(candidate).toString()
+            return f'{prefix}{file_url}{suffix}'
+
+        return match.group(0)
+
+    return _img_src_pattern.sub(_replacer, html_content)
 
 
 # ======== WebViewer ========
@@ -1206,6 +1283,12 @@ class CodeWebViewer(QWebEngineView):
 
         self._page = ConsoleMonitorPage(self)
         self.setPage(self._page)
+
+        # 启用本地文件访问，支持 markdown 图片显示
+        ws = self.settings()
+        ws.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
+        ws.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
+
         # 透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.page().setBackgroundColor(Qt.transparent)
@@ -1438,7 +1521,7 @@ class CodeWebViewer(QWebEngineView):
             )
 
         cdn_libs = """
-        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
         """
 
         scrollbar_css = """
@@ -1524,6 +1607,15 @@ class CodeWebViewer(QWebEngineView):
 
                 #content-placeholder {{ color: var(--text); }}
                 #content-placeholder * {{ color: inherit; }}
+                /* 图片自适应卡片宽度 */
+                #content-placeholder img {{
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: 8px;
+                    display: block;
+                    margin: 8px 0;
+                    object-fit: contain;
+                }}
                 h1, h2, h3, h4, h5, h6 {{ color: #FFFFFF !important; font-weight: 700; letter-spacing: 0.01em; }}
                 h1 {{ font-size: 1.45em; margin: 12px 0 8px; }}
                 h2 {{ font-size: 1.25em; margin: 10px 0 6px; }}
@@ -1920,7 +2012,6 @@ class CodeWebViewer(QWebEngineView):
                     flex: 1;
                     padding: 0 10px;
                     white-space: pre-wrap;
-                    overflow-x: auto;
                     min-width: 0;
                 }}
                 .tool-diff-inline .diff-add {{
@@ -2101,6 +2192,22 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 0 10px 10px 0;
                     color: var(--text-secondary) !important;
                 }}
+
+                /* ===== ECharts 图表容器 ===== */
+                .echarts-container {{
+                    width: 100%;
+                    min-height: 300px;
+                    height: auto;
+                    margin: 12px 0;
+                    border-radius: 10px;
+                    background: rgba(22, 27, 34, 0.6);
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                }}
+
+                /* 内容区图片可点击打开 */
+                #content-placeholder img {{
+                    cursor: pointer;
+                }}
             </style>
         </head>
         <body>
@@ -2240,7 +2347,27 @@ class CodeWebViewer(QWebEngineView):
                             }}
                         }});
 
-                        if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise();
+                        // 初始化 ECharts 图表
+                        if (window.echarts) {{
+                            document.querySelectorAll('.echarts-container').forEach(function(el) {{
+                                try {{
+                                    var jsonB64 = el.getAttribute('data-echarts-json');
+                                    if (!jsonB64 || el._echartInited) return;
+                                    // atob() 默认按 ISO-8859-1 解码字节串，会破坏 UTF-8 中文。
+                                    // 用 TextDecoder('utf-8') 还原为正确字符串后再 JSON.parse，避免 mojibake。
+                                    var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
+                                    var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
+                                    var chart = echarts.init(el, 'dark');
+                                    chart.setOption(option);
+                                    el._echartInited = true;
+                                    // 卡片 resize 时自适应
+                                    var _ro = new ResizeObserver(function() {{ chart.resize(); }});
+                                    _ro.observe(el);
+                                }} catch(e) {{
+                                    console.error('ECharts init error:', e);
+                                }}
+                            }});
+                        }}
 
                         // 自动滚动到 body 底部（流式时新内容在底部）
                         // setTimeout 确保 Qt WebEngine 在 innerHTML 替换后完成布局再滚动
@@ -2303,6 +2430,14 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         return;
                     }}
+                    // 图片点击 → 系统默认程序打开
+                    const img = e.target.closest('#content-placeholder img');
+                    if (img) {{
+                        e.stopPropagation();
+                        e.preventDefault();
+                        console.log('pywebview_action:open_url:' + img.src);
+                        return;
+                    }}
                     const link = e.target.closest('a');
                     if (link) {{
                         console.log('pywebview_action:link_found:' + link.href);
@@ -2350,7 +2485,9 @@ class CodeWebViewer(QWebEngineView):
         </body>
         </html>
         """
-        self.setHtml(html, QUrl(""))
+        # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.setHtml(html, QUrl.fromLocalFile(_project_root + "/"))
 
     def append_chunk(self, text: str):
         if not text:
@@ -2419,10 +2556,13 @@ class CodeWebViewer(QWebEngineView):
 
         if not self._streaming:
             # 非流式模式：直接渲染，所有 <think> 都是已完成的
-            return _render_markdown_to_html_cached(
+            html_content = _render_markdown_to_html_cached(
                 raw_md,
                 "",
             )
+            # 将图片相对路径转为绝对 file:/// 路径
+            html_content = _resolve_image_src(html_content)
+            return html_content
 
         # 流式模式：仅在最后一个块是 reasoning 时，去掉其闭合标签
         # 判断标准：markdown 以 </think> 结尾（说明最后一个块恰好是 reasoning）
@@ -2443,6 +2583,9 @@ class CodeWebViewer(QWebEngineView):
             md.reset()
             html_content = md.convert(processed_md)
             html_content = _wrap_code_blocks_with_copy_button_web(html_content)
+
+            # 将图片相对路径转为绝对 file:/// 路径
+            html_content = _resolve_image_src(html_content)
 
             # 流式模式：追加字数统计显示
             if self._streaming:
@@ -4061,6 +4204,7 @@ class MessageCard(SimpleCardWidget):
             success: bool = True,
             tool_call_id: str = None,
             diff: str = None,
+            echarts: str = None,
     ):
         self._content_data.append(
             make_tool_result_block(
@@ -4070,6 +4214,7 @@ class MessageCard(SimpleCardWidget):
                 success=success,
                 tool_call_id=tool_call_id,
                 diff=diff,
+                echarts=echarts,
             )
         )
         # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算
@@ -4087,6 +4232,7 @@ class MessageCard(SimpleCardWidget):
                 collapsed=True,
                 tool_call_id=tool_call_id,
                 diff=diff,
+                echarts=echarts,
             )
             safe_html = json.dumps(block_html).decode('utf-8')
             js_code = f"""

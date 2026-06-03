@@ -755,7 +755,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "task_batch",
+            "name": "subagent_para",
             "description": "",  # filled dynamically below
             "parameters": {
                 "type": "object",
@@ -795,7 +795,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "task_status",
+            "name": "subagent_status",
             "description": "查询子智能体任务状态。task_ids 不传时只能查一次刚完成的任务；指定 task_id 始终能查到。",
             "parameters": {
                 "type": "object",
@@ -840,6 +840,63 @@ TOOL_SCHEMAS = [
             "name": "list_skills",
             "description": "列出所有可用的本地技能，包括内置技能和用户安装的技能。当需要了解有哪些技能可用时可调用此工具。",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "subagent_dag",
+            "description": "批量分发子智能体任务组成 DAG 工作流（有向无环图）。支持节点间依赖关系定义，系统自动按拓扑排序分批并行执行，下游节点自动获取上游节点结果。\n\n【同步执行】调用本工具后会等待所有节点执行完成再返回结果，不需要额外查询。\n\n【依赖解析】系统根据 edges 计算拓扑排序，入度为0的节点并行执行，完成后自动将结果注入下游节点的 context。\n\n【失败处理】如果某个节点执行失败，依赖它的下游节点自动标记为 skipped，不会执行。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nodes": {
+                        "type": "array",
+                        "description": "工作流节点列表",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "节点唯一标识（如 'step1', 'analyze', 'build'），供 edges 引用",
+                                },
+                                "agent": {
+                                    "type": "string",
+                                    "description": "子智能体名称",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "该节点的任务描述",
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": "额外上下文信息（可选），将追加到自动注入的上游结果之后",
+                                },
+                            },
+                            "required": ["id", "agent", "description"],
+                        },
+                    },
+                    "edges": {
+                        "type": "array",
+                        "description": "节点间的依赖关系。例如 [{\"from\": \"step1\", \"to\": \"step2\"}] 表示 step2 依赖 step1",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": {
+                                    "type": "string",
+                                    "description": "上游节点 ID",
+                                },
+                                "to": {
+                                    "type": "string",
+                                    "description": "下游节点 ID",
+                                },
+                            },
+                            "required": ["from", "to"],
+                        },
+                    },
+                },
+                "required": ["nodes", "edges"],
+            },
         },
     },
     {
@@ -920,23 +977,32 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     # Make a copy to avoid modifying the original
     schemas = [s.copy() for s in TOOL_SCHEMAS]
 
-    # 动态生成 task_batch 工具描述
-    task_batch_desc = (
-        f"批量分发多个子智能体任务（并行执行）。无需等待子智能体结果，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，发布完任务后可以继续自身任务。"
-        f"收到通知后使用 task_status 获取结果。"
+    # 动态生成 subagent_para 工具描述
+    subagent_para_desc = (
+        f"批量分发多个子智能体任务（并行执行）。**调用本工具后绝对不能主动停下来等待结果**——子智能体在后台异步运行，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，届时再使用 subagent_status 获取结果。\n\n"
+        f"【强制行为】调用 subagent_para 返回后，你必须二选一：\n"
+        f"1. 继续调用其他工具执行下一步工作（例如启动其他并行子任务、处理剩余工作）；\n"
+        f"2. 如果所有任务已派发完毕、不再有工具可调，直接停止调用工具并输出总结，结束本轮循环。\n\n"
+        f"【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
     )
     if subagent_names:
-        subagent_list = ", ".join(subagent_names)
-        task_batch_desc += f"\n\n可用子智能体: {subagent_list}"
+        subagent_para_desc += (
+            "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
+        )
 
-    # Update the task_batch schema with dynamic content
+    # Update the subagent_para schema
     for schema in schemas:
-        if schema["function"]["name"] == "task_batch":
-            schema["function"]["description"] = task_batch_desc
+        if schema["function"]["name"] == "subagent_para":
+            schema["function"]["description"] = subagent_para_desc
+            break
+
+    # 更新 subagent_dag 工具描述
+    for schema in schemas:
+        if schema["function"]["name"] == "subagent_dag":
             if subagent_names:
-                schema["function"]["parameters"]["properties"]["tasks"]["items"][
-                    "properties"
-                ]["agent"]["description"] += f" (可选：{', '.join(subagent_names)})"
+                schema["function"]["description"] += (
+                    "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
+                )
             break
 
     # 动态注入 MCP 工具 schema

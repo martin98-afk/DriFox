@@ -117,8 +117,5 @@ colors:
   branch_label_border: rgba(183, 146, 255, 0.3)
   window_bg: rgba(183, 146, 255, 0.04)
 
-  # ── 输入卡双层 halo ──
-  input_glow_primary_blur: 16
-  input_glow_primary_alpha: 220
-  input_glow_ambient_blur: 48
-  input_glow_ambient_alpha: 72
+  # ── 输入卡发光预设 ──
+  input_glow_preset: "platinum"
