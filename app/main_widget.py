@@ -201,16 +201,6 @@ class OpenAIChatToolWindow(ToolWindow):
     _question_floating_widget = None
     _question_tool_call_id = None
     _todo_was_visible_before_system: bool = False  # 打开系统卡片前todo的可见状态
-    # 全屏卡片：打开时隐藏消息列表并 stretch 填满剩余空间
-    _FULLSCREEN_CARDS = frozenset({"settings", "history", "memory", "auto_loop_config", "model_selector"})
-    _FULLSCREEN_WIDGET_MAP = {
-        "settings": "_settings_popup",
-        "history": "_history_card",
-        "memory": "_memory_card",
-        "auto_loop_config": "_auto_loop_config_card",
-        "model_selector": "_model_selector_card",
-    }
-    _TOP_CONTAINER_CARDS = frozenset({"settings"})
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = (
         False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
@@ -736,6 +726,24 @@ class OpenAIChatToolWindow(ToolWindow):
             # 创建新的窗口实例
             new_instance = OpenAIChatToolWindow(valid_homepage)
 
+            # ── 多窗口隔离：把源窗口的项目上下文原样复制给新窗口 ──
+            # 必须在 __init__ 跑完之后立刻覆盖,否则新窗口会从全局 cfg 读到
+            # 最近一次 _on_project_selected 写入的"当前最新选择的项目",
+            # 导致分支/复制窗口错位显示项目名。
+            new_instance._current_project = self._current_project
+            new_instance._current_workdir = dict(self._current_workdir)  # 浅拷贝防共享
+            new_instance.backend._current_project = self._current_project
+            if new_instance.backend.tool_executor:
+                new_instance.backend.tool_executor.set_current_project(self._current_project)
+            if hasattr(new_instance, "_project_label"):
+                new_instance._project_label.setText(self._current_project)
+            # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
+            if hasattr(new_instance, "_refresh_project_branch_style"):
+                new_instance._refresh_project_branch_style()
+            if hasattr(new_instance, "_update_branch"):
+                new_instance._update_branch()
+            # ──────────────────────────────────────────────────
+
             # 如果是分支模式，传递当前会话的消息
             if branch:
                 current_session = self.session_manager.get_current_session()
@@ -746,6 +754,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._branch_session_data = {
                         "messages": branch_messages,
                         "name": branch_name,
+                        "project": self._current_project,  # 记录源项目，便于历史分组/检索
                     }
                 # 分支模式不跳过历史恢复，而是使用传入的分支数据
                 new_instance._skip_restore_history = (
@@ -974,10 +983,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if obj == self and event.type() == event.Type.Resize:
             if hasattr(self, "_bg_label") and self._bg_label is not None:
                 self._bg_label.resize(self.size())
-            # 全屏卡片跟随窗口调整大小
-            if hasattr(self, '_saved_card_states') and self._saved_card_states:
-                for card_id in list(self._saved_card_states.keys()):
-                    self._recalc_fullscreen_height(card_id)
         # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
         # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
         if event.type() == event.Type.Resize and obj in (
@@ -1134,6 +1139,8 @@ class OpenAIChatToolWindow(ToolWindow):
         session.topic_summary = (
             name  # 同步 topic_summary，避免 _display_current_session 覆盖 title_edit
         )
+        # 记录分支所属项目(走 metadata 而非新增字段,保持核心数据模型不变)
+        session.metadata["project"] = self._current_project
         self._current_session_id = session.session_id
 
         # 清空聊天区域
@@ -3336,10 +3343,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._input_card.setMaximumHeight(0)
             self.setUpdatesEnabled(True)
             self._input_card.update()
-
-        # 全屏模式：隐藏消息列表并让卡片 stretch 填满
-        if card_id in self._FULLSCREEN_CARDS:
-            self._enable_fullscreen_mode(card_id)
 
     def _do_hide_input_area(self):
         """保留向后兼容 — 已在 _on_system_card_opened 同步执行 setVisible(False)
@@ -9239,8 +9242,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新记忆卡片的项目
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             self._memory_card_popup.set_project(project)
-            # 自动切换到项目笔记tab（触发头部标签和内容同步切换）
-            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
             # 切换项目时自动同步工作目录
             self._sync_working_directory()
         # 刷新历史面板
@@ -9248,6 +9249,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 自动弹出长期记忆卡片
         if not self._memory_card.isVisible():
             self._toggle_memory_card()
+        # 卡片弹出后，再切换到项目笔记标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
+        if hasattr(self, "_memory_card") and self._memory_card:
+            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
         # 自动触发新建会话
         self._create_new_session()
 

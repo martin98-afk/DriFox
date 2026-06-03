@@ -286,13 +286,15 @@ class PermissionResolver:
     def _glob_match(self, text: str, pattern: str) -> bool:
         return fnmatch.fnmatch(text, pattern)
 
+
 class AgentManager:
     """Agent/Skill 管理器（全局单例，跨窗口共享）"""
 
     _instance = None
 
     @classmethod
-    def get_instance(cls, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None) -> "AgentManager":
+    def get_instance(cls, agents_dir: Optional[str] = None,
+                     hook_manager: Optional[HookManager] = None) -> "AgentManager":
         """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
         if cls._instance is None:
             cls._instance = cls(agents_dir, hook_manager)
@@ -724,12 +726,12 @@ class AgentManager:
 - 当你预测到用户接下来可能需要的帮助时，请按以下格式给出追问清单（放在回复末尾）：
   - [问题描述1](ask)
   - [问题描述2](ask)
-  
+
 ### 文件引用规范
 - 当你想要引用某个本地存在的文件时，请按以下格式引用：
   - [文件名](file|文件路径)
   - [文件夹名](file|文件夹路径)
-  
+
 ### 消息渲染能力
 - 支持 Markdown 渲染、代码高亮
 - 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）
@@ -787,20 +789,20 @@ Use the tools available to you based on your permissions.
     def get_enabled_skills_content(self, enabled_skills: List[str]) -> str:
         """获取已启用的技能内容"""
         from app.utils.utils import get_local_skills
-        
+
         if not enabled_skills:
             return ""
-        
+
         all_skills = get_local_skills()
         result_parts = [
             "\n\n## 偏好技能\n以下是部分用户偏好的智能体技能，如果以下技能不能满足用户需求，可以使用 `list_skills` 技能加载完整技能列表：\n"
         ]
-        
+
         for skill in all_skills:
             if skill["name"] in enabled_skills:
                 display_name = skill.get("qualified_name", skill["name"])
                 result_parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
-        
+
         return "\n".join(result_parts) if len(result_parts) > 1 else ""
 
     def get_agent_config(self, agent_name: str) -> Dict[str, Any]:
