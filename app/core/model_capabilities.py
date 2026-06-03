@@ -83,12 +83,12 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "source": "models.dev", "note": "Moonshot Kimi K2.6，2026-04-20/21 发布；API 用 thinking:enabled/disabled",
     },
     "glm-5": {
-        "context_limit": 202752, "supports_thinking": True, "thinking_param": "thinking",
-        "source": "models.dev", "note": "智谱 GLM-5，2026-02-11 发布，interleaved reasoning_content",
+        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "models.dev", "note": "智谱 GLM-5，2026-02-12 发布，200K 上下文，interleaved reasoning_content",
     },
     "glm-5.1": {
-        "context_limit": 202752, "supports_thinking": True, "thinking_param": "thinking",
-        "source": "models.dev", "note": "智谱 GLM-5.1，2026-03-27 发布",
+        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "models.dev", "note": "智谱 GLM-5.1，2026-03-27/28 发布，200K 上下文",
     },
     "mimo-v2.5-pro": {
         "context_limit": 1000000,
@@ -153,11 +153,11 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
     "gpt-3.5-turbo":   {"context_limit": 16385,                         "source": "openai_official"},
 
     # ========== Anthropic Claude ==========
-    "claude-sonnet-4-20250514": {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official"},
-    "claude-3-5-sonnet-latest": {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official"},
-    "claude-3-5-haiku-latest":  {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official"},
-    "claude-3-opus-latest":     {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official"},
-    "claude-3-haiku-latest":    {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official"},
+    "claude-sonnet-4-20250514": {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude Sonnet 4，支持 extended thinking"},
+    "claude-3-5-sonnet-latest": {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude 3.5 Sonnet，支持 extended thinking"},
+    "claude-3-5-haiku-latest":  {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude 3.5 Haiku，支持 extended thinking"},
+    "claude-3-opus-latest":     {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude 3 Opus，支持 extended thinking"},
+    "claude-3-haiku-latest":    {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official", "note": "Claude 3 Haiku，**不支持** extended thinking（轻量型号，定位快速低成本）"},
 
     # ========== Google Gemini ==========
     "gemini-2.5-pro-preview-06-05": {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},

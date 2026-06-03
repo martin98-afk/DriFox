@@ -121,11 +121,11 @@ PROVIDER_CAPABILITIES = {
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": True,
-        "supports_thinking": False,
-        "thinking_param": None,
+        "supports_thinking": True,
+        "thinking_param": "thinking",         # extra_body.thinking = {type: enabled|disabled|adaptive}
     },
     "openai": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 16384,
         "absolute_limit": 65536,
         "supports_vision": True,
@@ -137,8 +137,8 @@ PROVIDER_CAPABILITIES = {
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": True,
-        "supports_thinking": False,
-        "thinking_param": None,
+        "supports_thinking": True,
+        "thinking_param": "thinking_budget",  # generationConfig.thinkingBudget / extra_body.thinking_budget
     },
     "dashscope": {
         "context_limit": 1000000,
@@ -149,7 +149,7 @@ PROVIDER_CAPABILITIES = {
         "thinking_param": None,
     },
     "zhipu": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": True,
@@ -167,7 +167,7 @@ PROVIDER_CAPABILITIES = {
         "reasoning_effort_param": "reasoning_effort",
     },
     "groq": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": False,
@@ -192,7 +192,7 @@ PROVIDER_CAPABILITIES = {
         "reasoning_effort_param": None,
     },
     "baidu_qianfan": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": False,
@@ -200,7 +200,7 @@ PROVIDER_CAPABILITIES = {
         "thinking_param": None,
     },
     "ollama": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": True,
@@ -216,7 +216,7 @@ PROVIDER_CAPABILITIES = {
         "thinking_param": None,
     },
     "lmstudio": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": True,
@@ -224,7 +224,7 @@ PROVIDER_CAPABILITIES = {
         "thinking_param": None,
     },
     "custom": {
-        "context_limit": 128000,
+        "context_limit": 200000,
         "max_output_tokens": 8192,
         "absolute_limit": 65536,
         "supports_vision": False,

@@ -1332,6 +1332,7 @@ class OpenAIChatWorker(QThread):
             "model": cached_config["model"],
             "messages": sanitized,
             "stream": cached_config["stream"],
+            "parallel_tool_calls": True,  # 显式启用并行工具调用（OpenAI 2024-08+ 默认就是 True，显式传更稳；非 OpenAI provider 多为 OpenAI 兼容 API，会忽略未知参数）
         }
         # 添加 extra_body
         if cached_config.get("extra_body"):

@@ -65,6 +65,10 @@ class SendableTextEdit(TextEdit):
         self.send_btn.clicked.connect(self._on_send_click)
         self.send_btn.setDisabled(True)
         self._apply_send_btn_style()
+        # 立即把按钮放到输入框右下角，避免首次显示落在 (0, 0)（即
+        # 视觉上的"左边"），再等 resizeEvent → debounce timer 异步
+        # 触发后跳回右下角造成的"过一会才到右边"。
+        self._position_send_button()
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_slash_trigger_check)
 
