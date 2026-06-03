@@ -936,6 +936,7 @@ class SubAgentManager(QObject):
 
         # 4. 启动入度为0的节点
         ready_nodes = [nid for nid in node_map if dag_state["in_degree"][nid] == 0]
+        logger.info(f"[DAG] 初始启动: dag_id={dag_id}, total_nodes={len(nodes)}, ready={ready_nodes}, edges={edges}")
         for nid in ready_nodes:
             self._start_dag_node(dag_id, nid)
 
@@ -1046,6 +1047,8 @@ class SubAgentManager(QObject):
         node["_status"] = "running"
         executor.start()
 
+        logger.info(f"[DAG] 节点已启动: dag_id={dag_id}, nid={nid}, agent={node.get('agent')}, task_id={task_id}")
+
         self._save_task_to_store(task_id, node["agent"], node["description"], "running", session_id=task_session_id)
         self.task_started.emit(task_id, node["agent"], node["description"])
 
@@ -1058,6 +1061,7 @@ class SubAgentManager(QObject):
         """
         dag_state = self._dag_states.get(dag_id)
         if not dag_state:
+            logger.warning(f"[DAG] _on_dag_node_finished: dag_state 已为空! dag_id={dag_id}, nid={nid}")
             return
         node_map = dag_state["node_map"]
         node = node_map[nid]
@@ -1068,6 +1072,7 @@ class SubAgentManager(QObject):
         node["_status"] = "failed" if error else "completed"
         node["_result"] = result
         node["_error"] = error or ""
+        logger.info(f"[DAG] 节点完成: dag_id={dag_id}, nid={nid}, status={node['_status']}, has_downstream={bool(dag_state['adj'].get(nid))}")
 
         # 检查下游节点
         self._check_dag_downstream(dag_id, nid)
@@ -1094,6 +1099,7 @@ class SubAgentManager(QObject):
         """
         dag_state = self._dag_states.get(dag_id)
         if not dag_state:
+            logger.warning(f"[DAG] _on_dag_node_error: dag_state 已为空! dag_id={dag_id}, nid={nid}, error={error}")
             return
         node_map = dag_state["node_map"]
         node = node_map[nid]
@@ -1101,6 +1107,7 @@ class SubAgentManager(QObject):
         node["_status"] = "failed"
         node["_result"] = ""
         node["_error"] = error or "节点执行失败"
+        logger.info(f"[DAG] 节点出错: dag_id={dag_id}, nid={nid}, error={error}")
 
         # 写入 _finished_tasks（此路径没有 UI 回调，必须手动写）
         self._finished_tasks[task_id] = {
@@ -1129,11 +1136,17 @@ class SubAgentManager(QObject):
         """DAG 节点完成后，检查并启动下游节点"""
         dag_state = self._dag_states.get(dag_id)
         if not dag_state:
+            logger.warning(f"[DAG] _check_dag_downstream: dag_state 已为空! dag_id={dag_id}, nid={nid}")
             return
+        neighbors = list(dag_state["adj"].get(nid, []))
+        logger.info(f"[DAG] 检查下游: dag_id={dag_id}, nid={nid}, downstream_nodes={neighbors}")
         for neighbor in dag_state["adj"][nid]:
             dag_state["upstream_results"][neighbor].append({"from": nid})
             dag_state["in_degree"][neighbor] -= 1
-            if dag_state["in_degree"][neighbor] == 0:
+            new_degree = dag_state["in_degree"][neighbor]
+            logger.info(f"[DAG]   下游 {neighbor}: in_degree -> {new_degree}")
+            if new_degree == 0:
+                logger.info(f"[DAG]   启动下游节点: {neighbor}")
                 self._start_dag_node(dag_id, neighbor)
 
     def _build_dag_echarts_json(self, nodes: List[Dict], edges: List[Dict], node_map: Dict) -> str:

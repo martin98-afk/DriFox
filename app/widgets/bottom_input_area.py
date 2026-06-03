@@ -15,7 +15,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPainterPath, QPen,
 )
-from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
 from qfluentwidgets import FluentIcon, ComboBox
 from qfluentwidgets import TextEdit, TransparentToolButton
@@ -1061,20 +1061,30 @@ class SendableTextEdit(TextEdit):
         try:
             super().focusOutEvent(event)
             self._animate_glow(0, 0, 200)
-            # 失焦时关闭命令卡片：用户点击输入框外 → 焦点离开输入框 → 卡片消失。
-            # 这是修复命令卡片"消失/显示反向"bug 的核心：
-            #   - 旧逻辑在 mousePressEvent 中 dismiss（错）：点输入框内也被关
-            #   - 这里改为在失焦时 dismiss（对）：点输入框外才被关
-            # 兼容性说明：CommandCard 的所有子 widget 默认 focusPolicy=NoFocus，
-            # 点击它们不会夺走 SendableTextEdit 的焦点，因此本 dismiss 不会
-            # 误伤"点击卡片内项"的场景。若将来 CommandCard 引入 focusable 子
-            # 控件导致用户点不到项，可在此加 QTimer 延迟 + hasFocus() 复检。
-            card = self._get_card()
-            if card and card.is_card_visible:
-                card.dismiss()
-                self.slashDismissed.emit()
+            # 延迟检查失焦后的焦点去向：点击 CommandCard 项时焦点可能短暂转移，
+            # 这里用 0ms 延迟等焦点稳定后再判断焦点是否在命令卡片子树中。
+            # 若焦点在卡片内 → 保持卡片可见；若焦点在外（真正失焦）→ 关闭卡片。
+            QTimer.singleShot(0, self._deferred_focus_check_dismiss)
         except Exception:
             pass
+
+    def _deferred_focus_check_dismiss(self):
+        """失焦延迟检查：若焦点仍在输入框或在命令卡片内，不关闭卡片"""
+        card = self._get_card()
+        if not card or not card.is_card_visible:
+            return
+        focused = QApplication.focusWidget()
+        if focused is self:
+            return
+        # 检查焦点是否在命令卡片子树内
+        if focused:
+            p = focused
+            while p:
+                if p is card:
+                    return
+                p = p.parent()
+        card.dismiss()
+        self.slashDismissed.emit()
 
     def _ensure_cursor_visible(self):
         cursor = self.textCursor()
