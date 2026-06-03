@@ -3534,12 +3534,20 @@ class OpenAIChatToolWindow(ToolWindow):
         was_in_top = (original_container is target_container)
 
         # 保存原始约束用于恢复
+        main_layout = self.layout()
+        saved_margins = main_layout.contentsMargins()
         self._saved_card_states[card_id] = {
             "card_min_h": card.minimumHeight(),
             "card_max_h": card.maximumHeight(),
             "original_container": original_container,
             "was_in_top": was_in_top,
+            "layout_top_margin": saved_margins.top(),
         }
+
+        # 临时把主 layout 顶部 margin 设为 0（默认 1px），让 top 容器贴顶、消除卡片上方 1px 遗留空间
+        main_layout.setContentsMargins(
+            saved_margins.left(), 0, saved_margins.right(), saved_margins.bottom()
+        )
 
         # 1. 如果原本不在 top，reparent 到 top 容器（同步 _cards dict）
         if not was_in_top:
@@ -3553,14 +3561,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self.chat_scroll_area.setVisible(False)
         self._bottom_input_container.setVisible(False)
 
+        # 隐藏输入框发光效果（以 self 为 parent 的独立 widget，全屏时不该覆盖卡片）
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
+
         # 4. 解除 top 容器高度限制，让卡片占满
         target_container.setMinimumHeight(0)
         target_container.setMaximumHeight(16777215)
 
-        # 5. 用 top 容器在 widget 中的实际 Y 位置精确计算可用高度
+        # 5. 直接用 self.height() 减 toolbar 高度：主 layout 顶部 margin 已临时为 0，
+        #    top 容器从 Y=0 开始，卡片底部贴 toolbar 上沿即可。
         toolbar_h = 36
-        top_y = target_container.y()
-        available_h = self.height() - top_y - toolbar_h - 2
+        available_h = self.height() - toolbar_h - 2
         if available_h < 100:
             available_h = 100
 
@@ -3589,6 +3601,20 @@ class OpenAIChatToolWindow(ToolWindow):
             # 3. 解除 top 容器 maxHeight 限制（让 _do_expand 重新计算）
             self._top_card_container.setMinimumHeight(0)
             self._top_card_container.setMaximumHeight(16777215)
+
+            # 恢复主 layout 顶部 margin（如果本次保存过）
+            if "layout_top_margin" in state:
+                margins = self.layout().contentsMargins()
+                self.layout().setContentsMargins(
+                    margins.left(),
+                    state["layout_top_margin"],
+                    margins.right(),
+                    margins.bottom(),
+                )
+
+        # 恢复输入框发光效果
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
 
         self._saved_card_states.clear()
         # 4. 恢复消息列表和输入区
