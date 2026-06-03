@@ -86,12 +86,12 @@ class TaskTools:
         except Exception as e:
             return ToolResult(False, error=f"Todo read error: {str(e)}")
 
-    def task_execute_batch(
+    def subagent_para_execute(
             self, tasks: List[Dict], share_context: bool = False,
             session_id: str = "", sub_agent_manager=None
     ) -> ToolResult:
         """
-        批量执行子智能体任务（并行）。
+        批量分发多个子智能体任务（并行执行）。
 
         Args:
             tasks: List[Dict], 每个任务包含:
@@ -149,10 +149,10 @@ class TaskTools:
             )
 
         except Exception as e:
-            logger.error(f"[Task] task_execute_batch exception: {e}")
+            logger.error(f"[Task] subagent_para_execute exception: {e}")
             return ToolResult(False, error=f"批量任务启动失败: {str(e)}")
 
-    def task_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True,
+    def subagent_status(self, task_ids: str = None, with_log: bool = False, with_result: bool = True,
                      session_id: str = "", sub_agent_manager=None) -> ToolResult:
         """
         查询任务状态。

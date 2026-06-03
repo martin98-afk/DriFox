@@ -7959,7 +7959,7 @@ class OpenAIChatToolWindow(ToolWindow):
         total = len(batch_tasks)
         failed = sum(1 for t in batch_tasks if not t["success"])
 
-        # 生成任务列表（包含任务名和ID，方便LLM用task_status查询）
+        # 生成任务列表（包含任务名和ID，方便LLM用subagent_status查询）
         task_lines = []
         for t in batch_tasks:
             status_icon = "✅" if t["success"] else "❌"
@@ -7978,7 +7978,7 @@ class OpenAIChatToolWindow(ToolWindow):
 本次完成的任务：
 {task_list_text}
 
-请使用 task_status 工具查询以上任务的详细结果。"""
+请使用 subagent_status 工具查询以上任务的详细结果。"""
 
         is_currently_streaming = (
             self.backend.chat_engine and self.backend.chat_engine.is_streaming

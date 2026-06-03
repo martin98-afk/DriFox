@@ -7,8 +7,8 @@ permission:
   question: deny
   todowrite: deny
   todoread: deny
-  task_batch: deny
-  task_status: deny
+  subagent_para: deny
+  subagent_status: deny
   read_project_note: deny
   edit_project_note: deny
 hidden: true

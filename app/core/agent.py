@@ -650,7 +650,7 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=self._builtin_tools)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        forbidden_tools = {"question", "task_batch", "task_status"}
+        forbidden_tools = {"question", "subagent_para", "subagent_status"}
         if is_subagent_call:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
@@ -681,7 +681,7 @@ class AgentManager:
             agent_name: 智能体名称
             base_prompt: 基础提示词（通常为 skill 内容）
             is_subagent_call: 是否为子智能体调用上下文。
-                - True: 主智能体通过 task_batch 调用子智能体（子智能体看到的是任务描述，不是完整上下文）
+                - True: 主智能体通过 subagent_para 调用子智能体（子智能体看到的是任务描述，不是完整上下文）
                 - False: 主智能体自身运行，或子智能体独立运行
         """
         agent = self.get_agent(agent_name)
@@ -706,7 +706,7 @@ class AgentManager:
         subagent_constraints = """
 ## 子智能体约束
 - 【禁止】使用 `question` 工具（需要用户交互，不支持）
-- 【禁止】使用 `task_batch` 和 `task_status` 工具（子智能体不能再发布子智能体）
+- 【禁止】使用 `subagent_para` 和 `subagent_status` 工具（子智能体不能再发布子智能体）
 - 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）
 - 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认
 - 【必须】独立完成任务，不需要主智能体介入
@@ -738,7 +738,7 @@ class AgentManager:
 
         # 【核心修复】根据 is_subagent_call 区分调用上下文
         # 场景1: 主智能体自身运行（primary mode，is_subagent_call=False）
-        # 场景2: 主智能体通过 task_batch 调用子智能体（子智能体看到任务描述，is_subagent_call=True）
+        # 场景2: 主智能体通过 subagent_para 调用子智能体（子智能体看到任务描述，is_subagent_call=True）
         # 场景3: 子智能体独立运行（subagent mode，is_subagent_call=False）
 
         if is_subagent_call:
@@ -778,7 +778,7 @@ Use the tools available to you based on your permissions.
 当收到格式为 `[后台任务状态]` 的用户消息时，表示子智能体任务回调通知。
 消息中包含本次完成的任务列表（任务名、任务ID）。
 你应该：
-1. 使用 task_status 工具，传入消息中提到的任务ID，获取详细结果
+1. 使用 subagent_status 工具，传入消息中提到的任务ID，获取详细结果
 2. 根据结果评估完成情况
 3. 输出总结或后续建议（如有需要）
 

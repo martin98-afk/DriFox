@@ -306,7 +306,7 @@ class ToolExecutor:
         if result is not None:
             context["result_success"] = result.success
             # 确保 content 为字符串，防止 dict/list 等非字符串类型切片报错
-            # 例如 task_batch 返回的 content 是 dict
+            # 例如 subagent_para 返回的 content 是 dict
             content = result.content
             if not isinstance(content, str):
                 if content is not None:
@@ -421,9 +421,9 @@ class ToolExecutor:
         "read_project_note": [],
         "todowrite": ["todos"],
         "todoread": [],
-        "task_batch": ["tasks"],
+        "subagent_para": ["tasks"],
         "task_wait": ["task_ids"],
-        "task_status": [],
+        "subagent_status": [],
         "skill": ["name"],
         "list_skills": [],
         "question": ["questions"]
@@ -621,15 +621,15 @@ class ToolExecutor:
                 args.get("offset", 1),
                 args.get("limit", 500)),
             "todoread": lambda: self._builtin_tools.todo_read(),
-            "task_batch": lambda: (
-                lambda tasks_val: self._builtin_tools.task_execute_batch(
+            "subagent_para": lambda: (
+                lambda tasks_val: self._builtin_tools.subagent_para_execute(
                     orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
                     args.get("share_context", False),
                     session_id=local_session_id,
                     sub_agent_manager=self._sub_agent_manager,
                 )
             )(args.get("tasks", [])),
-            "task_status": lambda: self._builtin_tools.task_status(
+            "subagent_status": lambda: self._builtin_tools.subagent_status(
                 args.get("task_ids"),
                 args.get("with_log", False),
                 args.get("with_result", True),
@@ -660,7 +660,7 @@ class ToolExecutor:
             try:
                 result = executor()
                 # ========== 工具执行后的有效性检查（防御性）==========
-                # 对于耗时操作（bash、task_batch），执行期间 UI 可能被关闭
+                # 对于耗时操作（bash、subagent_batch），执行期间 UI 可能被关闭
                 if not self.is_valid():
                     logger.warning(f"[ToolExecutor] ToolExecutor became invalid after tool execution: {tool_name}")
                     # 结果可能已被 UI 关闭中断，标记为不完整
@@ -727,7 +727,7 @@ class ToolExecutor:
 
     def set_sub_agent_manager(self, sub_agent_manager):
         """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
-        # 实例级引用：task_batch/task_status lambda 使用此引用来路由到正确的窗口
+        # 实例级引用：subagent_para/subagent_status lambda 使用此引用来路由到正确的窗口
         self._sub_agent_manager = sub_agent_manager
         # 共享 BuiltinTools 回退：供旧代码路径兼容
         if self._builtin_tools:

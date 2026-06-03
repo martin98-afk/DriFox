@@ -18,8 +18,8 @@ class PermissionStrategy(Enum):
 # 只在 INTERACTIVE 策略下可用
 INTERACTIVE_ONLY_TOOLS = frozenset({
     "question",       # 交互式提问，需要用户选择
-    "task_batch",     # 发布子智能体任务，需要后续交互查询
-    "task_status",    # 查询子智能体任务状态，配合 task_batch 使用
+    "subagent_para",     # 批量分发子智能体任务，需要后续交互查询
+    "subagent_status",   # 查询子智能体任务状态，配合 subagent_para 使用
     "todowrite",      # 待办事项管理，纯交互式工具
     "edit_project_note",
     "read_project_note"

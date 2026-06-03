@@ -755,7 +755,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "task_batch",
+            "name": "subagent_para",
             "description": "",  # filled dynamically below
             "parameters": {
                 "type": "object",
@@ -795,7 +795,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "task_status",
+            "name": "subagent_status",
             "description": "查询子智能体任务状态。task_ids 不传时只能查一次刚完成的任务；指定 task_id 始终能查到。",
             "parameters": {
                 "type": "object",
@@ -920,22 +920,22 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     # Make a copy to avoid modifying the original
     schemas = [s.copy() for s in TOOL_SCHEMAS]
 
-    # 动态生成 task_batch 工具描述
-    task_batch_desc = (
-        f"批量分发多个子智能体任务（并行执行）。**调用本工具后绝对不能主动停下来等待结果**——子智能体在后台异步运行，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，届时再使用 task_status 获取结果。\n\n"
-        f"【强制行为】调用 task_batch 返回后，你必须二选一：\n"
+    # 动态生成 subagent_para 工具描述
+    subagent_para_desc = (
+        f"批量分发多个子智能体任务（并行执行）。**调用本工具后绝对不能主动停下来等待结果**——子智能体在后台异步运行，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，届时再使用 subagent_status 获取结果。\n\n"
+        f"【强制行为】调用 subagent_para 返回后，你必须二选一：\n"
         f"1. 继续调用其他工具执行下一步工作（例如启动其他并行子任务、处理剩余工作）；\n"
         f"2. 如果所有任务已派发完毕、不再有工具可调，直接停止调用工具并输出总结，结束本轮循环。\n\n"
-        f"【禁止】只调用一次 task_batch 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
+        f"【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
     )
     if subagent_names:
         subagent_list = ", ".join(subagent_names)
-        task_batch_desc += f"\n\n可用子智能体: {subagent_list}"
+        subagent_para_desc += f"\n\n可用子智能体: {subagent_list}"
 
-    # Update the task_batch schema with dynamic content
+    # Update the subagent_para schema with dynamic content
     for schema in schemas:
-        if schema["function"]["name"] == "task_batch":
-            schema["function"]["description"] = task_batch_desc
+        if schema["function"]["name"] == "subagent_para":
+            schema["function"]["description"] = subagent_para_desc
             if subagent_names:
                 schema["function"]["parameters"]["properties"]["tasks"]["items"][
                     "properties"

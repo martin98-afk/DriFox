@@ -78,7 +78,7 @@ class SubAgentExecutor(QThread):
             agent_manager: Any,
             tool_executor: Any = None,
             parent_context: str = "",
-            is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 task_batch）
+            is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 subagent_para）
             max_iterations: int = 30,  # 最大迭代次数，默认 30
     ):
         super().__init__()
@@ -277,7 +277,7 @@ class SubAgentExecutor(QThread):
                 return
 
             # 子智能体被调用时 is_subagent_call=True，此时应该使用 subagent_constraints
-            # 用于区分"主智能体通过 task_batch 调用子智能体"的情况
+            # 用于区分"主智能体通过 subagent_para 调用子智能体"的情况
             system_prompt = self.agent_manager.get_agent_system_prompt(
                 self.agent_name, is_subagent_call=self.is_subagent_call
             )

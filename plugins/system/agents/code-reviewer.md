@@ -8,7 +8,7 @@ permission:
   edit: deny
   multi_edit: deny
   write: deny
-  task_batch: deny
+  subagent_para: deny
   "*": allow
 ---
 

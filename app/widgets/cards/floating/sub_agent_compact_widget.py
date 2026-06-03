@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-子智能体紧凑型悬浮框 - task_batch 触发时自动弹出
+子智能体紧凑型悬浮框 - subagent_para 触发时自动弹出
 类似 ToolFloatingWidget 的风格：每行一个子智能体，显示旋转图标 + agent名 + 任务描述
 与 SubAgentFloatingWidget（详细日志面板）完全独立
 """
