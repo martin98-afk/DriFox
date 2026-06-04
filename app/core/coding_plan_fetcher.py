@@ -226,6 +226,89 @@ def _fetch_volcengine_ark(config: dict) -> Optional[Dict[str, Any]]:
 register("火山方舟", _fetch_volcengine_ark)
 
 
+# ── MiniMax 获取器 ─────────────────────────────────
+
+def _fetch_minimax(config: dict) -> Optional[Dict[str, Any]]:
+    """从 www.minimaxi.com 获取 MiniMax Token Plan 用量。
+
+    使用服务商的 API_KEY（Bearer token）直接请求，不需要额外配置。
+    API 返回 coding plan 的滚动/每周剩余额度，自动换算为用量百分比。
+    """
+    api_key = (config.get("API_KEY", "") or "").strip()
+    if not api_key:
+        return None
+
+    url = "https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            raw = resp.read().decode(charset, errors="replace")
+    except Exception:
+        return None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    base_resp = data.get("base_resp", {})
+    if base_resp.get("status_code", -1) != 0:
+        return None
+
+    model_remains = data.get("model_remains", [])
+    if not model_remains:
+        return None
+
+    result = {"rolling": None, "weekly": None, "monthly": None}
+
+    for item in model_remains:
+        model_name = item.get("model_name", "")
+        if model_name != "general":
+            continue
+
+        # ── 滚动限额（5h rolling window） ──
+        interval_status = item.get("current_interval_status", 3)
+        if interval_status == 1:  # 1 = 有限额
+            remaining_pct = item.get("current_interval_remaining_percent", 0)
+            usage_pct = max(0, min(100, 100 - remaining_pct))
+            remains_ms = item.get("remains_time", 0)
+            reset_sec = max(0, int(remains_ms / 1000))
+            if reset_sec > 0:
+                result["rolling"] = {"percent": usage_pct, "reset_sec": reset_sec}
+
+        # ── 每周限额 ──
+        weekly_status = item.get("current_weekly_status", 3)
+        if weekly_status == 1:  # 1 = 有限额
+            weekly_remaining_pct = item.get("current_weekly_remaining_percent", 0)
+            weekly_usage_pct = max(0, min(100, 100 - weekly_remaining_pct))
+            weekly_remains_ms = item.get("weekly_remains_time", 0)
+            weekly_reset_sec = max(0, int(weekly_remains_ms / 1000))
+            if weekly_reset_sec > 0:
+                result["weekly"] = {"percent": weekly_usage_pct, "reset_sec": weekly_reset_sec}
+        # weekly 无限额时保持 None
+
+        # ── 月限额：该接口没有月度数据 ──
+        break  # 只处理 "general" 一条
+
+    if any(v is not None for v in result.values()):
+        return result
+    return None
+
+
+register("MiniMax", _fetch_minimax)
+
+
 # ── 异步包装 ────────────────────────────────────────
 
 def fetch_async(
