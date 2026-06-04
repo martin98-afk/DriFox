@@ -85,7 +85,7 @@ class UpdateChecker(QWidget):
         """检查更新入口"""
         # 安全检查：确保 parent 仍然有效（C++ 对象未删除）
         parent = self.parent_widget()
-        if parent is None or not self.isVisible():
+        if parent is None:
             return
 
         self.async_checker = AsyncUpdateChecker(self)
@@ -126,7 +126,7 @@ class UpdateChecker(QWidget):
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
             duration=-1,
-            parent=self.parent or self,
+            parent=self.parent_widget() or self,
         )
 
         # 创建按钮容器（水平布局）
@@ -202,7 +202,7 @@ class UpdateChecker(QWidget):
 
         # 显示下载进度对话框
         self.progress_dialog = QProgressDialog(
-            "正在下载新版本...", "取消", 0, 100, self.parent or self
+            "正在下载新版本...", "取消", 0, 100, self.parent_widget() or self
         )
         self.progress_dialog.setWindowTitle("软件更新")
         self.progress_dialog.setWindowModality(Qt.WindowModal)
@@ -229,7 +229,7 @@ class UpdateChecker(QWidget):
             if system == "windows"
             else "新版本已下载，是否立即关闭程序并自动升级？"
         )
-        msg_box = MessageBox(title, content, self.parent or self)
+        msg_box = MessageBox(title, content, self.parent_widget() or self)
         msg_box.yesButton.setText(self.tr("现在安装"))
         msg_box.cancelButton.setText(self.tr("稍后手动安装"))
 
@@ -321,7 +321,7 @@ class UpdateChecker(QWidget):
             content,
             position=InfoBarPosition.BOTTOM,
             duration=2000,
-            parent=self.parent or self,
+            parent=self.parent_widget() or self,
         )
 
     def _compare_versions(self, v1, v2):
