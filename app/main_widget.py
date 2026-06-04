@@ -3037,15 +3037,21 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         if not result:
-            logger.debug("[CodingPlan] 无数据，隐藏圆环（等待下次触发）")
+            logger.debug("[CodingPlan] 无数据，隐藏圆环（停止定时器）")
             ring.clear()
+            t = getattr(self, "_coding_plan_refresh_timer", None)
+            if t:
+                t.stop()
             return
         rolling = result.get("rolling")
         weekly = result.get("weekly")
         monthly = result.get("monthly")
         if not rolling and not weekly and not monthly:
-            logger.debug("[CodingPlan] 三层均为空，隐藏")
+            logger.debug("[CodingPlan] 三层均为空，隐藏（停止定时器）")
             ring.clear()
+            t = getattr(self, "_coding_plan_refresh_timer", None)
+            if t:
+                t.stop()
             return
         logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
         ring.set_usage(

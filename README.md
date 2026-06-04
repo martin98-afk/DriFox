@@ -29,21 +29,26 @@
 
 ### 核心特性
 
-| 特性              | 说明                                               |
-|-----------------|--------------------------------------------------|
-| 🎯 **极简界面**     | 仅一个悬浮置顶对话框，随开随用                                  |
-| 🔀 **分支会话**     | 问题分叉，多个窗口并行探索不同答案，互不干扰                           |
-| 🔄 **会话并行**     | 多窗口并行处理不同任务，会话管理+历史追踪                            |
-| 🌲 **Git Worktree** | 直接管理 git worktree，并行开发互不干扰                             |
-| 📊 **上下文压缩**    | 智能 Token 预算控制，长对话自动摘要压缩                          |
-| 🧠 **长记忆**      | 越用越懂你的偏好、习惯、禁忌                                   |
-| 🔌 **Hook 系统**  | 可扩展的事件钩子系统，支持在特定事件触发自定义脚本                        |
-| 🌐 **MCP 系统**   | Model Context Protocol 支持，连接任意 MCP Server 扩展工具能力 |
-| 🧩 **Skill 系统** | 支持自动检测 系统.agents、.drifox文件夹下的 Skill 模块，并自带有常用技能  |
-| 🛠️ **代码工具**    | 30+ 工具：读、写、搜索、执行、diff                            |
-| 🔌 **多模型**      | OpenAI / Claude / DeepSeek / MiniMax / 通义 等随时切换  |
-| 🛡️ **穿透模式**    | 悬浮窗口可穿透点击，不阻断其他应用                                |
-| 🚀 **自动更新**     | 自动检查新版本，随时保持更新                                   |
+| 特性 | 说明 |
+|------|------|
+| 🎯 **极简界面** | 仅一个悬浮置顶对话框，随开随用 |
+| 🔀 **分支会话** | 问题分叉，多个窗口并行探索不同答案，互不干扰 |
+| 🔄 **会话并行** | 多窗口并行处理不同任务，会话管理+历史追踪 |
+| 🌲 **Git Worktree** | 直接管理 git worktree，并行开发互不干扰 |
+| 🧠 **长记忆** | 越用越懂你的偏好、习惯、禁忌 |
+| 📊 **上下文压缩** | 智能 Token 预算控制，长对话自动摘要压缩 |
+| 📈 **交互式图表** | 支持 ````echarts` 代码块渲染交互式 ECharts 图表，可缩放、悬停、高亮 |
+| 🖼️ **图片渲染** | Markdown 图片、HTML `<img>` 标签原生渲染，本地图片自动解析为绝对路径 |
+| 🔗 **SubAgent DAG** | 有向无环图编排子智能体，自动拓扑排序，并行执行无依赖节点，实时可视化 |
+| 🤖 **多智能体并行** | 20+ 子智能体同时执行，独立 LLM 循环+工具环境，实时状态监控 |
+| 🧩 **插件系统** | 革命性插件架构，33+ 即装即用插件，颠覆原有系统能力边界 |
+| 🔌 **Hook 系统** | 可扩展的事件钩子系统，支持在特定事件触发自定义脚本 |
+| 🌐 **MCP 系统** | Model Context Protocol 支持，连接任意 MCP Server 扩展工具能力 |
+| 🧩 **Skill 系统** | 支持自动检测系统 Agent、Skill 模块，自带有 20+ 常用技能 |
+| 🛠️ **代码工具** | 35+ 工具：读、写、搜索、执行、diff、ECharts 图表等 |
+| 🔌 **多模型** | OpenAI / Claude / DeepSeek / MiniMax / 通义 等随时切换 |
+| 🛡️ **穿透模式** | 悬浮窗口可穿透点击，不阻断其他应用 |
+| 🚀 **自动更新** | 自动检查新版本，随时保持更新 |
 
 ---
 
@@ -160,6 +165,144 @@ DriFox 内置智能的上下文压缩系统，确保长对话不会超出 Token 
 
 ---
 
+### 交互式图表渲染
+
+DriFox 的消息卡片原生支持 **ECharts 交互式图表** 渲染。当 AI 输出 ````echarts` 代码块时，会直接渲染为可交互的图表，支持缩放、悬停、高亮、拖拽等操作。
+
+![高级MD样式显示](images/高级md样式显示.png)
+
+| 特性 | 说明 |
+|------|------|
+| 🎨 **ECharts 代码块** | ````echarts {json} ```` 自动渲染为交互式图表 |
+| 🔄 **暗色主题** | 内置 ECharts dark 主题，与界面风格统一 |
+| 🖱️ **交互操作** | 缩放、拖拽、悬停 Tooltip、邻接高亮 |
+| 📊 **图表类型** | 折线图、柱状图、饼图、散点图、关系图(力导向)、雷达图等 |
+| 🔗 **DAG 工作流图** | SubAgent DAG 执行时自动生成力导向节点图，实时反映执行状态 |
+| 📐 **自适应布局** | ResizeObserver 自动适配窗口大小变化 |
+| 🌏 **中文支持** | TextDecoder 解码确保中文标签正常显示 |
+
+**使用方式（AI 自动输出）：**
+```markdown
+组件配置结果如下：
+```echarts
+{
+  "title": { "text": "性能对比", "left": "center" },
+  "xAxis": { "data": ["A", "B", "C"] },
+  "yAxis": {},
+  "series": [{ "type": "bar", "data": [120, 200, 150] }]
+}
+```
+
+图表将自动渲染为交互式柱状图/折线图/关系图等。
+
+**应用场景：**
+- DAG 工作流可视化：子智能体节点图实时展示执行状态（待执行/运行中/已完成/失败/跳过）
+- Token 用量分析：上下文压缩前后的用量对比
+- 代码统计分析：文件变更行数、模块覆盖率等
+- 数据对比：AI 生成各类统计图表的即时展示
+
+---
+
+### 图片与富媒体显示
+
+DriFox 的消息卡片支持丰富的图片与富媒体渲染能力，让 AI 回复中的图片内容可以直接展示。
+
+| 特性 | 说明 |
+|------|------|
+| 📷 **Markdown 图片** | 支持 `![alt](path)` 语法，本地图片自动解析为绝对路径 |
+| 🖼️ **HTML 图片** | `<img>` 标签原生渲染，支持相对/绝对路径、HTTP/HTTPS/Data URI |
+| 🔗 **路径自动解析** | 相对路径自动转为 `file:///` 绝对路径，确保 QWebEngineView 正常加载 |
+| 🌐 **远程图片** | 支持 HTTP/HTTPS 网络图片直链加载 |
+| 🎨 **背景自定义** | 支持从主题配置加载背景图片（PNG/JPG/WebP） |
+| 🧩 **多模态支持** | 上下文压缩智能处理历史图片，避免重复发送 base64 大负载 |
+| 📎 **Gateway 图片发送** | 消息网关模式下自动提取 Markdown 图片并发送到目标平台（钉钉/飞书/Discord 等） |
+
+**支持的图片格式：**
+- PNG, JPG/JPEG, GIF, WebP, BMP
+
+**工作机制：**
+```
+AI 回复包含 ![图](images/chart.png)
+    → backend._extract_markdown_images() 提取图片路径
+    → _resolve_image_src() 将相对路径转为 file:/// 绝对路径
+    → QWebEngineView 加载渲染
+
+Gateway 模式下：
+    → 提取本地图片 → adapter.send_image() → 平台原生发送
+```
+
+---
+
+### 子智能体 DAG 工作流
+
+DriFox 支持通过 **DAG（有向无环图）** 编排多个子智能体，自动拓扑排序，并行执行无依赖节点，并实时生成可视化工作流图。
+
+![SubAgent DAG](images/subagent_dag.png)
+
+| 特性 | 说明 |
+|------|------|
+| 🔗 **DAG 编排** | 定义 nodes + edges，支持 Pipeline / Fan-out / Hybrid 三种拓扑模式 |
+| 🔄 **自动拓扑排序** | 入度为 0 的节点自动并行启动，完成后级联触发下游 |
+| 🧠 **结果自动注入** | 下游节点 context 中自动注入所有上游节点的执行结果 |
+| ⚡ **并行执行** | 无依赖关系的节点同时运行，互不干扰 |
+| 🎯 **智能体自动匹配** | 按任务类型描述自动选择合适的子智能体 |
+| 📊 **实时可视化** | ECharts 力导向图实时展示节点状态（颜色编码） |
+| 🛡️ **环检测** | 自动检测环路，防止死循环 |
+| ❌ **级联失败** | 上游失败 → 下游自动 skip，不浪费算力 |
+| 🔍 **结果追溯** | 每个节点独立可查询，通过 subagent_status 获取详细日志 |
+
+**状态颜色编码：**
+
+| 状态 | 颜色 | 说明 |
+|------|------|------|
+| ⏳ **pending** | 黄色 | 等待执行 |
+| 🔵 **running** | 蓝色 | 正在执行中 |
+| ✅ **completed** | 绿色 | 执行成功完成 |
+| ❌ **failed** | 红色 | 执行失败 |
+| ⏭️ **skipped** | 灰色 | 因上游失败自动跳过 |
+
+**支持的 DAG 拓扑模式：**
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **Pipeline** | 严格的串行链 | A → B → C，依赖关系明确 |
+| **Fan-out** | 先并行再汇聚 | 多路探索 → 汇总分析 |
+| **Hybrid** | 分支 + 汇合点混合 | 复杂任务：分析 → 多路实现 → 审查汇总 |
+
+**执行流程：**
+```
+1. AI 分析任务 → 标记依赖 → 设计拓扑
+2. 调用 subagent_dag(nodes=[...], edges=[...])
+3. SubAgentManager 验证 DAG（节点存在性 + 环检测）
+4. 入度为 0 的节点并行启动（独立 QThread + LLM 调用 + 工具环境）
+5. 节点完成后自动更新 ECharts 节点图状态
+6. 级联检查下游 → 入度为 0 时启动
+7. 全部完成 → 清理状态 → 汇总结果
+```
+
+**示例：**
+```python
+# AI 自动生成 DAG 调用
+subagent_dag(
+    nodes=[
+        {"id": "plan", "agent": "plan", "description": "分析需求制定方案"},
+        {"id": "explore_1", "agent": "explore", "description": "研究模块A"},
+        {"id": "explore_2", "agent": "explore", "description": "研究模块B"},
+        {"id": "build", "agent": "build", "description": "编码实现"},
+        {"id": "review", "agent": "code-reviewer", "description": "代码审查"},
+    ],
+    edges=[
+        {"from": "plan", "to": "explore_1"},
+        {"from": "plan", "to": "explore_2"},
+        {"from": "explore_1", "to": "build"},
+        {"from": "explore_2", "to": "build"},
+        {"from": "build", "to": "review"},
+    ]
+)
+```
+
+---
+
 ### Hook 系统
 
 DriFox 支持通过可视化界面配置和管理 Hook 事件钩子。
@@ -240,6 +383,145 @@ npx -y @modelcontextprotocol/server-google-maps
 
 ---
 
+### 插件系统
+
+DriFox 的 **插件系统（Plugin System）** 是其能力扩展的核心基石，从根本上颠覆了原生系统的功能边界。插件架构将**命令、智能体、技能、主题、Hooks、MCP 配置**等所有扩展能力统一纳入插件化治理，实现"即装即用、热插拔、可组合"。
+
+#### 架构总览
+
+```
+项目根目录/
+├── plugins/
+│   └── system/              # 系统内置插件（打包在 exe 中）
+│       ├── .drifox-plugin/
+│       │   └── plugin.json   # 插件清单（声明组件）
+│       ├── commands/         # 系统命令（/explore, /plan, /dag 等）
+│       ├── agents/           # 系统智能体（explore, build, review 等）
+│       ├── skills/           # 系统技能（brainstorming, tdd 等）
+│       ├── themes/           # 系统主题
+│       ├── hooks/            # 系统 Hooks
+│       └── .mcp.json         # 默认 MCP 配置
+│
+├── .drifox/
+│   └── plugins/              # 用户安装的第三方插件（33+ 个）
+│       ├── superclaude/      # 18 个专业子智能体（架构师/审计师等）
+│       ├── feature-dev/      # 功能开发全流程（code-architect/explorer）
+│       ├── code-review/      # 代码审查增强
+│       ├── code-simplifier/  # 代码简化重构
+│       ├── hookify/          # 行为钩子系统
+│       ├── pyright-lsp/      # Python 语言服务器
+│       ├── rust-analyzer-lsp/# Rust 语言服务器
+│       ├── github/           # GitHub MCP 集成
+│       ├── playwright/       # 浏览器自动化 MCP
+│       ├── security-guidance/# 安全审计指导
+│       ├── user-custom/      # 用户自定义配置（MCP/Hooks）
+│       └── ...               # 33+ 插件持续增长
+```
+
+#### 核心机制
+
+| 机制 | 说明 |
+|------|------|
+| 🧩 **统一插件化** | 命令、Agent、Skill、主题、Hook、MCP 全部以插件形式管理，系统不与任何组件紧耦合 |
+| 📦 **双源发现** | 扫描 `plugins/system/`（系统）和 `.drifox/plugins/`（用户），用户插件自动覆盖同名系统插件 |
+| 🔖 **清单驱动** | 每个插件含 `.drifox-plugin/plugin.json`，声明含有的组件类型 |
+| 🔄 **热插拔** | 启用/禁用插件无需重启，运行时 `rescan()` 检测新增/移除，各子系统自动重载 |
+| 🏷️ **命名空间隔离** | 用户插件添加命名空间前缀（如 `/my-plugin:command`），避免冲突 |
+| 🧬 **兼容 Claude** | 兼容 `.claude-plugin/plugin.json` 格式，无缝迁移现有生态插件 |
+| ⚙️ **MCP 配置合并** | 多个插件各自的 `.mcp.json` 自动合并去重，同名策略高阶覆盖低阶 |
+
+#### 插件生命周期
+
+```
+发现 (scan_plugins) → 注册 (PluginInfo) → 启用 (enable_plugin)
+    → 各子系统查询 (get_plugin_dirs) → 运行时重扫 (rescan) → 禁用 (disable_plugin)
+```
+
+- **初始化时**：PluginManager 扫描系统 + 用户插件目录，构建插件映射表
+- **运行时重扫**：检测新增/移除的插件目录，`rescan()` 返回 change set
+- **热重载**：启用/禁用插件立即反映到命令列表、Agent 列表、MCP 配置等
+
+#### 插件能做什么
+
+| 组件 | 说明 | 示例 |
+|------|------|------|
+| **commands/** | 自定义命令，`/xxx` 形式触发 | `/explore`、`/plan`、`/dag` |
+| **agents/** | 新增子智能体角色 | `architecture-critic`、`security-auditor`、`deep-research` |
+| **skills/** | 安装技能模块 | `@brainstorming`、`@tdd`、`@diagnose` |
+| **themes/** | 主题样式文件 | 深色主题、自定义配色 |
+| **hooks/** | 事件钩子脚本 | SessionStart、PreToolUse 等 6 种事件 |
+| **.mcp.json** | MCP 服务器配置 | GitHub、Playwright、数据库等 |
+
+#### 已安装插件精选（33+）
+
+**语言服务器类：**
+| 插件 | 说明 |
+|------|------|
+| pyright-lsp | Python 类型检查与代码分析 |
+| rust-analyzer-lsp | Rust 语言服务器 |
+| jdtls-lsp | Java 语言服务器 |
+| typescript-lsp | TypeScript/JavaScript 语言服务器 |
+| gopls-lsp | Go 语言服务器 |
+| csharp-lsp | C# 语言服务器 |
+| kotlin-lsp | Kotlin 语言服务器 |
+| ruby-lsp | Ruby 语言服务器 |
+| php-lsp | PHP 语言服务器 |
+| lua-lsp | Lua 语言服务器 |
+| clangd-lsp | C/C++ 语言服务器 |
+
+**开发增强类：**
+| 插件 | 说明 |
+|------|------|
+| **superclaude** | 18 个专业子智能体：backend-architect、frontend-architect、deep-research-agent、security-engineer、performance-engineer、quality-engineer、refactoring-expert、pm-agent、root-cause-analyst、devops-architect、system-architect、learning-guide、python-expert、security-auditor、technical-writer、socratic-mentor、requirements-analyst、code-reviewer |
+| **feature-dev** | 功能开发全流程：code-architect（架构设计）、code-explorer（代码探索）、code-reviewer（审查）|
+| **code-review** | 代码审查增强（commands + hooks） |
+| **code-simplifier** | 专注于代码简化和重构的智能体 |
+| **code-modernization** | 代码现代化：architecture-critic、legacy-analyst、security-auditor、business-rules-extractor、test-engineer |
+| **hookify** | 可视化行为钩子编辑器，分析对话→自动生成 Hook |
+| **security-guidance** | 安全编码指导与 OWASP 检查 |
+| **commit-commands** | Git 提交辅助命令 |
+| **mcp-server-dev** | MCP 服务器开发工具包 |
+| **mcp-tunnels** | MCP 隧道连接管理 |
+| **plugin-dev** | 插件开发脚手架（agents + commands + skills）|
+| **skill-creator** | 技能创建向导 |
+| **session-report** | 会话报告生成技能 |
+| **ralph-loop** | 自定义执行循环模式 |
+| **playground/sandbox** | 实验性功能沙盒 |
+
+**MCP 集成类：**
+| 插件 | 说明 |
+|------|------|
+| github | GitHub API MCP 服务器 |
+| playwright | 浏览器自动化 MCP 服务器 |
+
+#### 工作原理
+
+```
+用户安装插件 → PluginManager 扫描发现
+    → 解析 plugin.json → 注册组件路径
+    → 各子系统按需查询：
+        ├── CommandManager.get_command_files() → 加载所有插件的命令
+        ├── AgentManager 扫描 agents/ → 注册新的子智能体
+        ├── SkillManager 扫描 skills/ → 技能可被 @技能名 触发
+        ├── ThemeManager 扫描 themes/ → 新增主题选项
+        ├── HookManager 加载 hooks/ → 事件触发
+        └── MCP 配置合并 → 所有 .mcp.json 合并为一个列表
+```
+
+**命名空间规则：**
+```
+系统插件命令：  /explore, /plan, /dag         （短名称）
+用户插件命令：  /my-plugin:custom-command      （命名空间前缀，避免冲突）
+用户智能体：    自动追加命名空间到描述中
+用户技能：      通过 @技能名 触发，同名时用户覆盖系统
+```
+
+**插件与技能的关系：**
+- **插件（Plugin）** 是容器，可以包含命令、Agent、技能、主题、Hooks、MCP 配置
+- **技能（Skill）** 是插件的一种组件类型，存放在 `skills/` 目录下
+
+---
+
 ### 浮动窗口特性
 
 | 特性 | 说明 |
@@ -253,41 +535,62 @@ npx -y @modelcontextprotocol/server-google-maps
 ## 核心架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     DriFox 架构                         │
-├─────────────────────────────────────────────────────────┤
-│  UI 层                                                  │
-│  ├── ToolPopupDialog – 浮动窗口容器（穿透/透明）         │
-│  ├── OpenAIChatToolWindow – 主聊天窗口                  │
-│  ├── MessageCard – 消息卡片渲染                         │
-│  ├── DiffViewer – 代码差异对比视图                      │
-│  ├── SegmentWidget – 分段任务窗口                       │
-│  ├── HookSettingCard – Hook 设置卡片                    │
-│  ├── MCPListSettingCard – MCP Server 配置卡片            │
-│  └── BottomInputArea – 底部输入区                      │
-├─────────────────────────────────────────────────────────┤
-│  引擎层                                                  │
-│  ├── ChatEngine – 对话上下文组装与 LLM 调用              │
-│  ├── ContextBuilder – 消息规范化与系统提示注入          │
-│  ├── ToolExecutor – 工具执行（文件/终端/网络）          │
-│  ├── AgentManager – Agent 定义加载与切换                │
-│  ├── HistoryCompactor – 上下文压缩                       │
-│  ├── SubAgentExecutor – 子智能体并行执行                │
-│  └── HookManager – Hook 生命周期管理与事件触发          │
-├─────────────────────────────────────────────────────────┤
-│  存储层                                                  │
-│  ├── SessionManager – 会话管理                          │
-│  ├── MemoryManager – 长期记忆（SQLite）                 │
-│  ├── HistoryManager – 归档与检索                        │
-│  └── SessionStore – SQLite 持久化                       │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       DriFox 架构                               │
+├─────────────────────────────────────────────────────────────────┤
+│  UI 层                                                          │
+│  ├── ToolPopupDialog – 浮动窗口容器（穿透/透明）                │
+│  ├── OpenAIChatToolWindow – 主聊天窗口                          │
+│  ├── MessageCard – 消息卡片渲染（Markdown/代码高亮/ECharts/图片)│
+│  ├── DiffViewer (QWebEngineView) – 代码差异对比视图             │
+│  ├── SegmentWidget – 分段任务窗口                               │
+│  ├── SubAgentCompactFloatingWidget – 子智能体运行状态悬浮框     │
+│  ├── HookSettingCard – Hook 设置卡片                            │
+│  ├── MCPListSettingCard – MCP Server 配置卡片                   │
+│  ├── ContextUsageRing – 上下文用量环形图                        │
+│  ├── CodingPlanRing – 套餐用量三层环图                          │
+│  └── BottomInputArea – 底部输入区                              │
+├─────────────────────────────────────────────────────────────────┤
+│  渲染层                                                         │
+│  ├── render_helpers – 工具块 HTML 渲染（参数表格/diff/ECharts）│
+│  ├── message_content – 消息内容格式化与 echarts 字段序列化      │
+│  ├── diff_viewer – Git 风格差异 HTML 生成器                     │
+│  ├── _resolve_image_src – 图片相对路径→绝对路径自动解析         │
+│  └── ECharts 5 (CDN) – 交互式图表（DAG节点图/统计图）          │
+├─────────────────────────────────────────────────────────────────┤
+│  引擎层                                                         │
+│  ├── ChatEngine – 对话上下文组装与 LLM 调用                     │
+│  ├── ContextBuilder – 消息规范化与系统提示注入                 │
+│  ├── ToolExecutor – 工具执行（文件/终端/网络/子智能体/DAG）    │
+│  ├── AgentManager – Agent 定义加载与切换（含插件扩展）         │
+│  ├── PluginManager（单例）– 插件发现/热插拔/资源查询           │
+│  │   ├── scan_plugins – 系统+用户双源扫描                     │
+│  │   ├── rescan – 运行时热重载，检测新增/移除                   │
+│  │   ├── get_plugin_dirs – 向各子系统提供组件路径               │
+│  │   ├── get_mcp_servers – 多插件 MCP 配置合并                 │
+│  │   └── enable/disable – 插件启用/禁用持久化                  │
+│  ├── HistoryCompactor – 上下文压缩（含图片多模态处理）         │
+│  ├── SubAgentManager – 子智能体 DAG 编排与执行引擎              │
+│  │   ├── execute_dag – DAG 验证+拓扑排序+并行启动              │
+│  │   ├── SubAgentExecutor – 单子智能体 QThread 执行器          │
+│  │   └── _build_dag_echarts_json – DAG 节点图生成              │
+│  ├── HookManager – Hook 生命周期管理与事件触发                  │
+│  └── Gateway – 多平台消息网关（含图片发送）                    │
+├─────────────────────────────────────────────────────────────────┤
+│  存储层                                                         │
+│  ├── SessionManager – 会话管理                                 │
+│  ├── MemoryManager – 长期记忆（SQLite）                        │
+│  ├── HistoryManager – 归档与检索                               │
+│  ├── SubAgentLogRepository – 子智能体日志持久化                │
+│  └── SessionStore – SQLite 持久化                              │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Agent 系统
 
-采用 **Primary / Subagent / Hidden** 三层设计，通过 Markdown + YAML frontmatter 定义：
+采用 **Primary / Subagent / Hidden** 三层设计，通过 Markdown + YAML frontmatter 定义。Agent 可通过 **DAG 工作流** 编排，自动拓扑排序、并行执行、结果注入。
 
 | 类型 | Agent | 说明 |
 |------|-------|------|
@@ -296,9 +599,20 @@ npx -y @modelcontextprotocol/server-google-maps
 | **Primary** | `code-reviewer` | 代码审查 |
 | **Subagent** | `explore` | 代码库探索 |
 | **Subagent** | `general` | 通用任务并行执行 |
+| **Subagent** | `architecture-critic` | 架构评审（反向验证） |
+| **Subagent** | `security-auditor` | 安全审计（OWASP） |
+| **Subagent** | `test-engineer` | 测试用例编写 |
+| **Subagent** | `legacy-analyst` | 遗留代码分析 |
+| **Subagent** | `business-rules-extractor` | 业务规则提取 |
+| **Subagent** | `root-cause-analyst` | 根因分析 |
+| **Subagent** | `code-simplifier` | 代码简化重构 |
+| **Subagent** | `deep-research` | 深度研究分析 |
+| **Subagent** | `backend-architect` | 后端架构设计 |
+| **Subagent** | `frontend-architect` | 前端架构设计 |
 | **Hidden** | `summary` | 信息总结 |
 | **Hidden** | `compaction` | 上下文压缩 |
 | **Hidden** | `title` | 会话标题生成 |
+| **Hidden** | `auto_loop` | 自动循环模式 |
 
 ### Agent 定义示例
 
@@ -317,28 +631,29 @@ permission:
 
 ---
 
-## 工具系统（30+）
+## 工具系统（35+）
 
 ### 内置工具
 
 | 类别 | 工具 |
 |------|------|
-| **文件** | read, write, edit, multiedit, patch, grep, glob, list, diff |
-| **执行** | bash, run_verify |
+| **文件** | read, write, edit, multi_edit, patch, grep, glob, list, diff |
+| **执行** | bash, bg_start, bg_stop, bg_logs, bg_list |
 | **网络** | webfetch, websearch |
 | **代码** | get_diagnostics |
 | **记忆** | memory_save, memory_search, memory_list |
-| **任务** | todowrite, todoread, task, task_batch, task_wait, skill |
+| **任务** | todowrite, todoread, task, task_batch, task_wait, skill, list_skills |
+| **子智能体** | subagent_para（并行分发）, subagent_dag（DAG 工作流）, subagent_status（状态查询）|
 | **MCP** | `mcp__server__tool` — 连接 MCP Server 后自动出现 |
-| **其他** | scan_repo, stage_files, ask_question |
+| **其他** | scan_repo, stage_files, question, read_project_note, edit_project_note |
 
 ---
 
 ## Skills 系统
 
-Skills 是扩展 AI 能力的可安装模块，每个 Skill 包含 `SKILL.md` 定义工作流程。
+Skills 是扩展 AI 能力的可安装模块，每个 Skill 包含 `SKILL.md` 定义工作流程。Skill 可作为**插件组件**，由插件系统的 `skills/` 目录提供；也支持通过 `.drifox/skills/<name>/` 直接安装。
 
-### 内置 Skills (18个)
+### 内置 Skills (20+)
 
 | Skill | 功能 | 触发条件 |
 |-------|------|----------|
@@ -373,7 +688,7 @@ skill-name/
 
 ### 自定义 Skill
 
-在 `.drifox/skills/<name>/` 下添加 Skill，使用 `@技能名` 触发。
+在 `.drifox/skills/<name>/` 或安装在插件 `skills/` 目录下添加 Skill，使用 `/技能名` 触发。
 
 ---
 
@@ -414,46 +729,15 @@ skill-name/
 
 | 功能 | 说明 | 状态 |
 |------|------|------|
-| 🧩 **多窗口粘合** | 窗口组管理，多个窗口粘合后可一起拖动一起管理 | 🔜 开发中 |
+| 🧩 **多窗口粘合** | 窗口组管理，多个窗口粘合后可一起拖动一起管理 | ✅ 已实现 |
 | 🌲 **Git Worktree** | 直接管理 git worktree，并行开发互不干扰 | ✅ 已实现 |
+| 📈 **交互式图表渲染** | 支持 ````echarts` 代码块渲染交互式 ECharts 图表 | ✅ 已实现 |
+| 🖼️ **图片与富媒体显示** | Markdown/HTML 图片原生渲染，本地图片路径自动解析 | ✅ 已实现 |
+| 🔗 **SubAgent DAG 工作流** | 有向无环图编排子智能体，拓扑排序+并行执行+实时可视化 | ✅ 已实现 |
+| 🤖 **多智能体并行** | 20+ 子智能体并行执行，独立 LLM 循环+工具环境 | ✅ 已实现 |
+| 📊 **上下文用量环形图** | 实时显示 Token 占用比例和缓存命中率的环形可视化 | ✅ 已实现 |
 
 ---
-
-## 开发者指南
-
-### 自定义 Agent
-
-在 `app/agents/` 创建 `.md` 文件：
-
-```markdown
----
-name: my_agent
-mode: primary
-permission:
-  read: allow
-  bash: ask
----
-# My Agent
-你的描述...
-```
-
-### 自定义 Skill
-
-使用 `@skill-creator` 开始创建流程。
-
-### 工具注册
-
-在 `app/tools/` 的对应模块中添加工具函数：
-
-```python
-# app/tools/file_tools.py
-from app.tools import register_tool
-
-@register_tool
-def my_tool(arg1: str) -> ToolResult:
-    """工具说明"""
-    return ToolResult(success=True, data="result")
-```
 
 ### Issue 格式
 
@@ -478,33 +762,61 @@ def my_tool(arg1: str) -> ToolResult:
 
 ```
 DriFox/
-├── main.py                    # 运行入口
-├── requirements.txt           # 依赖
+├── main.py                       # 运行入口
+├── requirements.txt              # 依赖
+├── plugins/
+│   └── system/                   # 系统内置插件（打包在 exe 中）
+│       ├── .drifox-plugin/       # 插件清单
+│       ├── commands/             # 系统命令（/explore, /plan 等）
+│       ├── agents/               # 系统智能体（explore, build 等）
+│       ├── skills/               # 系统技能（tdd, brainstorming 等）
+│       ├── themes/               # 系统主题（11 个主题）
+│       ├── hooks/                # 系统 Hooks
+│       └── .mcp.json             # 默认 MCP 配置
 ├── app/
-│   ├── main_widget.py         # 主窗口
-│   ├── side_dock_area.py      # 浮动窗口管理
-│   ├── agents/                # Agent 定义
-│   ├── skills/                # Skills 定义
-│   ├── tools/                 # 工具实现
+│   ├── main_widget.py            # 主窗口
+│   ├── side_dock_area.py         # 浮动窗口管理
+│   ├── core/                     # 核心引擎
+│   │   ├── plugin_manager.py     # 插件系统（单例，发现/热插拔/MCP合并）
+│   │   ├── chat_engine.py        # 对话引擎
+│   │   ├── context_builder.py    # 上下文构建
+│   │   ├── history_compactor.py  # 上下文压缩
+│   │   ├── hook_manager.py       # 事件钩子系统
+│   │   ├── agent_manager.py      # Agent 管理
+│   │   ├── memory_manager.py     # 长期记忆
+│   │   ├── command_manager.py    # 命令系统
+│   │   ├── backend.py            # 后端初始化/热更新引擎
+│   │   └── workers/              # 后台工作线程
+│   │       ├── subagent_worker.py # 子智能体 + DAG 执行引擎
+│   │       └── chat_worker.py    # 对话工作线程
+│   ├── tools/                    # 工具实现（35+ 工具）
 │   │   ├── file_tools.py
 │   │   ├── terminal_tools.py
 │   │   ├── web_tools.py
-│   │   ├── task_tools.py
-│   │   └── diagnostics_tools.py
-│   ├── core/                  # 核心引擎
-│   │   ├── chat_engine.py
-│   │   ├── context_builder.py
-│   │   ├── history_compactor.py
-│   │   ├── agent_manager.py
-│   │   ├── memory_manager.py
-│   │   └── hook_manager.py
-│   ├── widgets/               # UI 组件
-│   └── utils/                 # 工具模块
-├── .drifox/                   # 应用数据
-├── docs/
-│   ├── adr/                  # 架构决策记录
-│   └── superpowers/          # 扩展能力规格
-└── images/                   # 图片资源
+│   │   ├── task_tools.py         # subagent_para/dag/status
+│   │   ├── mcp_tools.py          # MCP 工具适配
+│   │   └── result.py             # ToolResult 数据类
+│   ├── widgets/                  # UI 组件
+│   │   ├── message_card.py       # 消息卡片（Markdown/ECharts/图片）
+│   │   ├── render_helpers.py     # HTML 渲染辅助
+│   │   ├── context_usage_ring.py # 上下文用量环形图
+│   │   ├── coding_plan_ring.py   # 套餐用量环图
+│   │   ├── cards/floating/       # 悬浮 UI 组件
+│   │   └── cards/settings/       # 设置面板卡片
+│   └── utils/                    # 工具模块
+│       ├── diff_viewer.py        # 差异对比查看器
+│       ├── git_worktree.py       # Git Worktree 管理
+│       └── config.py             # 配置管理
+├── .drifox/                      # 应用数据
+│   ├── plugins/                  # 用户安装的第三方插件（33+）
+│   │   ├── superclaude/          # 18 个子智能体框架
+│   │   ├── feature-dev/          # 功能开发全流程
+│   │   ├── pyright-lsp/          # Python 语言服务器
+│   │   └── ...                   # 更多插件
+│   ├── sessions.db               # SQLite 数据库
+│   ├── skills/                   # 用户自定义技能
+│   └── backups/                  # 增量备份
+└── images/                       # 图片资源
 ```
 
 ---
@@ -515,13 +827,26 @@ DriFox/
 |------|------|
 | PyQt5 | GUI 框架 |
 | PyQt-Fluent-Widgets | Fluent Design 组件库 |
+| PyQtWebEngine | HTML/Markdown/ECharts/图片渲染 |
+| ECharts 5 | 交互式图表（消息卡片 + DAG 图） |
 | Loguru | 日志系统 |
 | SQLite | 会话与记忆持久化 |
 | OpenAI Python Client | LLM API 调用 |
+| watchfiles | 插件目录热更新监听 |
+| markdown + Pygments | Markdown → HTML + 代码高亮 |
+| orjson | 高性能 JSON 序列化 |
 
 ---
 
 ## 更新日志
+
+### v0.2.0 (2026)
+- 🧩 **插件系统**：革命性架构，33+ 即装即用插件，PluginManager 热插拔引擎
+- 📈 交互式图表渲染：支持 ````echarts` 代码块渲染交互式 ECharts 图表
+- 🖼️ 图片与富媒体显示：Markdown/HTML 图片原生渲染，本地路径自动解析
+- 🔗 SubAgent DAG 工作流：有向无环图编排子智能体，拓扑排序+并行执行+实时可视化
+- 🤖 多智能体并行：20+ 子智能体并行执行，独立 LLM 循环+工具环境
+- 📊 上下文用量环形图：实时显示 Token 占用比例和缓存命中率
 
 ### v0.1.9 (2025)
 - ✨ Git Worktree：内置 worktree 管理，支持分支树展示/切换/新建/删除
