@@ -13,6 +13,7 @@
 import asyncio  # 用于 AsyncUpdateChecker
 import os
 import sys
+import weakref
 
 import httpx
 import orjson as json
