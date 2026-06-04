@@ -2299,8 +2299,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._duplicate_window(branch=False)
         elif command_name == "branch":
             self._duplicate_window(branch=True)
-        elif command_name == "compact":
-            self._trigger_context_compaction()
         elif command_name == "remember":
             self._remember_to_memory(args)
 
