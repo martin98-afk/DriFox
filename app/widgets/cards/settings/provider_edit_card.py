@@ -151,8 +151,8 @@ class ProviderEditCard(QWidget):
         """)
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(4, 2, 4, 2)
-        main_layout.setSpacing(3)
+        main_layout.setContentsMargins(4, 6, 4, 6)
+        main_layout.setSpacing(6)
 
         # 连接配置区域
         # 服务商名称行
@@ -302,34 +302,69 @@ class ProviderEditCard(QWidget):
         config_name_row.addWidget(self.configNameEdit, 1)
         main_layout.addLayout(config_name_row)
 
-        # ── OpenCode 套餐查询额外配置（可选） ────────────────
-        self._opencode_section = QWidget()
-        opencode_layout = QVBoxLayout(self._opencode_section)
-        opencode_layout.setContentsMargins(4, 6, 0, 4)
-        opencode_layout.setSpacing(6)
+        # ── 套餐用量查询额外配置（可选） ────────────────
+        self._extra_config_section = QWidget()
+        extra_layout = QVBoxLayout(self._extra_config_section)
+        extra_layout.setContentsMargins(4, 2, 0, 4)
+        extra_layout.setSpacing(6)
 
-        for key, label, placeholder in [
-            ("server_id", "Server ID:", "opencode.ai/_server 请求中的 X-Server-Id"),
-            ("cookie", "Cookie:", "oc_locale=zh; auth=Fe26.2**... （从浏览器复制完整的 Cookie 值）"),
-            ("workspace_id", "Workspace ID:", "wrk_xxxxxxxxxxxx （无需可留空）"),
-        ]:
-            row = QHBoxLayout()
-            lbl = BodyLabel(label)
-            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row.addWidget(lbl)
-            editor = LineEdit()
-            editor.setPlaceholderText(placeholder)
-            existing = self.provider_info.get(key, "")
-            if existing:
-                editor.setText(existing)
-            setattr(self, f"{key}_edit", editor)
-            row.addWidget(editor, 1)
-            opencode_layout.addLayout(row)
+        # 小标题
+        section_title = BodyLabel("套餐用量查询（可选）")
+        extra_layout.addWidget(section_title)
 
-        main_layout.addWidget(self._opencode_section)
+        # 所有可能的额外字段定义（按服务商显示不同组合）
+        # 注意：不同组如果共享同一配置 key（如 "cookie"），内部 key 需加前缀避免冲突
+        self._extra_field_defs = {
+            "opencode": [
+                ("opencode_server_id", "Server ID:", "opencode.ai/_server 请求中的 X-Server-Id"),
+                ("opencode_cookie", "Cookie:", "oc_locale=zh; auth=Fe26.2**... （从浏览器复制完整的 Cookie 值）"),
+                ("opencode_workspace_id", "Workspace ID:", "wrk_xxxxxxxxxxxx （无需可留空）"),
+            ],
+            "火山方舟": [
+                ("volc_cookie", "Cookie:", "console.volcengine.com 浏览器 Cookie（完整值）"),
+                ("volc_csrf_token", "CSRF Token:", "x-csrf-token（从请求头复制）"),
+                ("volc_x_web_id", "X-Web-ID:", "x-web-id（可选）"),
+            ],
+        }
+
+        # 内部 key → 实际存储的配置 key 映射
+        self._extra_key_map = {
+            "opencode_server_id": "server_id",
+            "opencode_cookie": "cookie",
+            "opencode_workspace_id": "workspace_id",
+            "volc_cookie": "cookie",
+            "volc_csrf_token": "csrf_token",
+            "volc_x_web_id": "x_web_id",
+        }
+
+        # 记录每个字段属于哪个组，以及对应的行 widget
+        self._extra_field_rows: dict = {}  # internal_key -> QWidget (row container)
+        self._field_to_group: dict = {}    # internal_key -> group name
+
+        for group_name, fields in self._extra_field_defs.items():
+            for internal_key, label, placeholder in fields:
+                config_key = self._extra_key_map.get(internal_key, internal_key)
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                lbl = BodyLabel(label)
+                lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                row_layout.addWidget(lbl)
+                editor = LineEdit()
+                editor.setPlaceholderText(placeholder)
+                existing = self.provider_info.get(config_key, "")
+                if existing:
+                    editor.setText(existing)
+                setattr(self, f"{internal_key}_edit", editor)
+                row_layout.addWidget(editor, 1)
+                extra_layout.addWidget(row_widget)
+                self._extra_field_rows[internal_key] = row_widget
+                self._field_to_group[internal_key] = group_name
+
+        main_layout.addWidget(self._extra_config_section)
 
         # 初始可见性由当前服务商决定
-        self._update_opencode_visibility()
+        self._update_extra_config_visibility()
 
         # 保存按钮已移到 BaseSettingsCard 标题栏，信号由外部连接
 
@@ -423,15 +458,35 @@ class ProviderEditCard(QWidget):
             if self.modelCombo.count() > 0:
                 self.modelCombo.setCurrentIndex(0)
             self.modelCombo.blockSignals(False)
-        self._update_opencode_visibility()
+        self._update_extra_config_visibility()
 
-    def _update_opencode_visibility(self):
-        """根据当前服务商名称显示/隐藏 OpenCode 套餐配置区"""
-        if not hasattr(self, "_opencode_section"):
+    def _update_extra_config_visibility(self):
+        """根据当前服务商名称显示/隐藏套餐配置区"""
+        if not hasattr(self, "_extra_config_section"):
             return
         provider = self.nameCombo.currentText() if self.is_new else self.provider_name
         is_opencode = "opencode" in provider.lower()
-        self._opencode_section.setVisible(is_opencode)
+        is_volc = "火山方舟" in provider
+
+        # 先全部隐藏
+        for row_widget in self._extra_field_rows.values():
+            row_widget.setVisible(False)
+
+        # 确定当前组
+        if is_opencode:
+            group = "opencode"
+        elif is_volc:
+            group = "火山方舟"
+        else:
+            group = None
+
+        if group:
+            for internal_key, _, _ in self._extra_field_defs.get(group, []):
+                row = self._extra_field_rows.get(internal_key)
+                if row:
+                    row.setVisible(True)
+
+        self._extra_config_section.setVisible(group is not None)
 
     def _open_help_url(self, name: str):
         """打开帮助链接"""
@@ -523,16 +578,16 @@ class ProviderEditCard(QWidget):
         existing_config_id = self.provider_info.get("config_id", "")
         # 先提取套餐用量额外字段（在覆盖 self.provider_info 之前）
         extra_fields = {}
-        for extra_key in ("server_id", "cookie", "workspace_id"):
-            editor = getattr(self, f"{extra_key}_edit", None)
+        for internal_key, config_key in self._extra_key_map.items():
+            editor = getattr(self, f"{internal_key}_edit", None)
             if editor is not None:
                 val = editor.text().strip()
                 if val:
-                    extra_fields[extra_key] = val
+                    extra_fields[config_key] = val
             else:
-                old_val = self.provider_info.get(extra_key, "")
+                old_val = self.provider_info.get(config_key, "")
                 if old_val:
-                    extra_fields[extra_key] = old_val
+                    extra_fields[config_key] = old_val
         self.provider_info = {
             "API_URL": self.apiUrlCombo.currentText().strip(),
             "API_KEY": self.apiKeyEdit.text().strip(),

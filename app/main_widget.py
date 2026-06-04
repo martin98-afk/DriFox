@@ -2982,23 +2982,33 @@ class OpenAIChatToolWindow(ToolWindow):
             ring.clear()
             return
 
-        has_server_id = bool((config.get("server_id", "") or "").strip())
-        has_cookie = bool((config.get("cookie", "") or "").strip())
-        has_workspace_id = bool((config.get("workspace_id", "") or "").strip())
+        # 检查该服务商是否有注册的获取器
+        from app.core.coding_plan_fetcher import get as get_fetcher
 
-        # 当前服务商根本没配这些字段 → 直接隐藏，停止旧定时器
-        if not has_server_id or not has_cookie:
+        fetcher = get_fetcher(provider_name)
+        if not fetcher:
+            # 按 family 回退匹配
+            from app.core.coding_plan_fetcher import _fetchers
+            for registered_name in _fetchers:
+                if registered_name in provider_name:
+                    fetcher = _fetchers[registered_name]
+                    break
+
+        if not fetcher:
+            # 没有注册获取器 → 不显示
             ring.clear()
             t = getattr(self, "_coding_plan_refresh_timer", None)
             if t:
                 t.stop()
             return
 
+        # 交给 fetcher 自己判断所需字段是否齐全
+        # 简单传空值让 fetcher 返回 None 即可
+
         logger.debug(
             f"[CodingPlan] provider={provider_name}, "
             f"config_id={config_id[:20]}..., "
-            f"has_extra_fields: server_id={has_server_id}, "
-            f"cookie={has_cookie}, workspace_id={has_workspace_id}"
+            f"fetcher={fetcher.__name__}"
         )
 
         self._coding_plan_last_ts = now
@@ -3019,10 +3029,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 校验当前服务商是否仍有套餐配置（防止获取途中用户切换了服务商）
         config_id = getattr(self, "_current_provider_name", "")
         config = self._valid_configs.get(config_id, {})
-        has_config = bool((config.get("server_id", "") or "").strip()) and bool(
-            (config.get("cookie", "") or "").strip()
-        )
-        if not has_config:
+        provider_name = config.get("provider_name", "")
+        from app.core.coding_plan_fetcher import get as get_fetcher
+        fetcher = get_fetcher(provider_name)
+        if not fetcher:
             ring.clear()
             return
 

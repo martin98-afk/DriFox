@@ -11,6 +11,7 @@
 如需添加新服务商，只需实现一个 fetcher 函数并 register()。
 """
 import json
+import time
 import urllib.request
 import urllib.parse
 import re
@@ -138,6 +139,91 @@ def _parse_js(raw: str) -> Dict[str, Any]:
 # 注册内置获取器
 register("OpenCode Zen", _fetch_opencode_go)
 register("OpenCode Go", _fetch_opencode_go)
+
+
+# ── 火山方舟获取器 ────────────────────────────────
+
+def _fetch_volcengine_ark(config: dict) -> Optional[Dict[str, Any]]:
+    """从 console.volcengine.com 获取火山方舟套餐用量。
+
+    需要在服务商配置中额外填写：
+    - cookie: 浏览器 Cookie（完整值）
+    - csrf_token: x-csrf-token
+    - x_web_id: x-web-id
+    """
+    cookie = (config.get("cookie", "") or "").strip()
+    csrf_token = (config.get("csrf_token", "") or "").strip()
+    x_web_id = (config.get("x_web_id", "") or "").strip()
+
+    if not cookie or not csrf_token:
+        return None
+
+    url = "https://console.volcengine.com/api/top/ark/cn-beijing/2024-01-01/GetCodingPlanUsage?"
+    headers = {
+        "Content-Type": "application/json",
+        "Cookie": cookie,
+        "x-csrf-token": csrf_token,
+        "Origin": "https://console.volcengine.com",
+        "Referer": "https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh",
+    }
+    if x_web_id:
+        headers["x-web-id"] = x_web_id
+
+    body = b"{}"
+
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            raw = resp.read().decode(charset, errors="replace")
+    except Exception:
+        return None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    result_data = data.get("Result", {})
+    quota_list = result_data.get("QuotaUsage", [])
+    if not quota_list:
+        return None
+
+    now = int(time.time())
+    result = {"rolling": None, "weekly": None, "monthly": None}
+
+    level_map = {
+        "session": "rolling",
+        "weekly": "weekly",
+        "monthly": "monthly",
+    }
+
+    for item in quota_list:
+        level = item.get("Level", "")
+        key = level_map.get(level)
+        if not key:
+            continue
+        pct = item.get("Percent")
+        reset_ts = item.get("ResetTimestamp")
+        if pct is not None and reset_ts is not None and reset_ts > 0:
+            result[key] = {
+                "percent": max(0, min(100, round(pct))),
+                "reset_sec": max(0, reset_ts - now),
+            }
+
+    if any(v is not None for v in result.values()):
+        return result
+    return None
+
+
+register("火山方舟", _fetch_volcengine_ark)
 
 
 # ── 异步包装 ────────────────────────────────────────
