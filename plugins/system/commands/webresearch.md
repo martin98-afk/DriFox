@@ -38,202 +38,367 @@ argument-hint:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{TITLE} — DriFox 研究报告</title>
 <style>
+/* ===========================================
+   DriFox Research Report — Modern Style
+   风格定位：Premium Minimal · 高端极简
+   =========================================== */
+
 /* ===== 基础重置 ===== */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 16px; -webkit-font-smoothing: antialiased; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  color: #1a1a2e;
-  background: #f5f6fa;
-  line-height: 1.7;
-  padding: 2rem 1rem;
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  color:#0a0a14;
+  background:#f6f6f4;
+  line-height:1.7;
+  padding:3rem 1.25rem;
+  font-feature-settings:"ss01","cv11";
 }
 
 /* ===== 报告容器 ===== */
-.report {
-  max-width: 900px;
-  margin: 0 auto;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-  overflow: hidden;
+.report{
+  max-width:920px;margin:0 auto;
+  background:#fff;
+  border-radius:20px;
+  box-shadow:
+    0 1px 2px rgba(10,10,20,.04),
+    0 24px 48px -12px rgba(10,10,20,.12),
+    0 12px 24px -8px rgba(10,10,20,.06);
+  overflow:hidden;
+  border:1px solid #ececec;
 }
 
-/* ===== 页眉 ===== */
-.report-header {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-  color: #fff;
-  padding: 2.5rem 3rem;
+/* ===== 页眉（封面区） ===== */
+.report-header{
+  position:relative;
+  background:
+    radial-gradient(at 18% 8%, rgba(99,102,241,.32) 0px, transparent 50%),
+    radial-gradient(at 82% 92%, rgba(236,72,153,.22) 0px, transparent 50%),
+    linear-gradient(135deg,#0a0a14 0%,#15152a 50%,#1c1c38 100%);
+  color:#fff;
+  padding:3.5rem 3rem 3rem;
+  overflow:hidden;
 }
-.report-header h1 {
-  font-size: 1.8rem;
-  font-weight: 700;
-  margin-bottom: 0.5rem;
-  line-height: 1.3;
+.report-header::before{
+  content:"";position:absolute;inset:0;
+  background-image:
+    linear-gradient(rgba(255,255,255,.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.05) 1px,transparent 1px);
+  background-size:32px 32px;
+  -webkit-mask-image:radial-gradient(ellipse 80% 60% at 50% 30%,#000 0%,transparent 70%);
+  mask-image:radial-gradient(ellipse 80% 60% at 50% 30%,#000 0%,transparent 70%);
+  pointer-events:none;
 }
-.report-header .meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem 1.5rem;
-  font-size: 0.85rem;
-  opacity: 0.85;
-  margin-top: 0.75rem;
+.report-header > *{position:relative;z-index:1}
+.report-header .eyebrow{
+  display:inline-flex;align-items:center;gap:.55rem;
+  font-size:.72rem;font-weight:600;letter-spacing:.18em;
+  text-transform:uppercase;opacity:.72;
+  margin-bottom:1.1rem;
 }
-.report-header .meta span { display: inline-flex; align-items: center; gap: 0.35rem; }
-.report-header .meta .badge {
-  display: inline-block;
-  padding: 0.15rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  background: rgba(255,255,255,0.15);
+.report-header .eyebrow::before{
+  content:"";width:24px;height:1px;background:currentColor;
+}
+.report-header h1{
+  font-family:Georgia,"Noto Serif SC","Source Han Serif SC","Songti SC",serif;
+  font-size:2.4rem;font-weight:600;
+  line-height:1.22;letter-spacing:-.02em;
+  text-wrap:balance;
+  margin-bottom:1.4rem;
+  max-width:36ch;
+}
+.report-header .meta{
+  display:flex;flex-wrap:wrap;gap:.5rem;
+  font-size:.82rem;
+}
+.report-header .meta span{
+  display:inline-flex;align-items:center;gap:.4rem;
+  padding:.38rem .85rem;
+  background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.14);
+  border-radius:999px;
+  font-weight:500;
+  backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);
+}
+.report-header .meta .badge{
+  background:rgba(255,255,255,.16);
+  border-color:rgba(255,255,255,.28);
+  font-weight:600;
+  letter-spacing:.04em;
 }
 
 /* ===== 正文 ===== */
-.report-body { padding: 2rem 3rem 3rem; }
+.report-body{padding:3rem 3.5rem 3.5rem}
 
-/* ===== 摘要 / 执行摘要 ===== */
-.exec-summary {
-  background: #f0f4ff;
-  border-left: 4px solid #0f3460;
-  padding: 1.25rem 1.5rem;
-  border-radius: 0 8px 8px 0;
-  margin-bottom: 2rem;
+/* ===== 执行摘要 ===== */
+.exec-summary{
+  position:relative;
+  background:linear-gradient(135deg,#f5f3ff 0%,#fdf4ff 100%);
+  border:1px solid #ede9fe;
+  padding:1.5rem 1.75rem;
+  border-radius:12px;
+  margin-bottom:2.75rem;
+  font-size:1.05rem;line-height:1.72;
+  overflow:hidden;
 }
-.exec-summary p { margin: 0; color: #2d3748; }
+.exec-summary::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;
+  width:3px;
+  background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+}
+.exec-summary p{margin:0;color:#374151}
+.exec-summary p + p{margin-top:.7rem}
 
 /* ===== 标题层级 ===== */
-.report-body h2 {
-  font-size: 1.35rem;
-  font-weight: 700;
-  color: #1a1a2e;
-  margin: 2rem 0 1rem;
-  padding-bottom: 0.4rem;
-  border-bottom: 2px solid #e2e8f0;
+.report-body h2{
+  font-family:Georgia,"Noto Serif SC","Source Han Serif SC","Songti SC",serif;
+  font-size:1.7rem;font-weight:600;
+  color:#0a0a14;
+  margin:2.75rem 0 1.1rem;
+  padding-bottom:.75rem;
+  letter-spacing:-.01em;
+  position:relative;
 }
-.report-body h3 {
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: #2d3748;
-  margin: 1.5rem 0 0.75rem;
+.report-body h2::after{
+  content:"";position:absolute;left:0;bottom:0;
+  width:36px;height:2px;
+  background:linear-gradient(90deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+  border-radius:2px;
+}
+.report-body h2:first-child{margin-top:0}
+.report-body h3{
+  font-size:1.15rem;font-weight:600;
+  color:#0a0a14;
+  margin:2rem 0 .8rem;
+  letter-spacing:-.005em;
+  display:flex;align-items:center;gap:.65rem;
+}
+.report-body h3::before{
+  content:"";flex:none;
+  width:7px;height:7px;
+  background:linear-gradient(135deg,#6366f1,#8b5cf6);
+  border-radius:2px;
+  transform:rotate(45deg);
 }
 
 /* ===== 段落与文本 ===== */
-.report-body p { margin: 0 0 1rem; color: #4a5568; }
-.report-body p:last-child { margin-bottom: 0; }
+.report-body p{margin:0 0 1.1rem;color:#40414a;font-size:1rem}
+.report-body p:last-child{margin-bottom:0}
+.report-body strong{color:#0a0a14;font-weight:600}
 
 /* ===== 链接 ===== */
-.report-body a {
-  color: #2563eb;
-  text-decoration: none;
-  border-bottom: 1px solid transparent;
-  transition: border-color 0.15s;
+.report-body a{
+  color:#6366f1;text-decoration:none;
+  background-image:linear-gradient(currentColor,currentColor);
+  background-size:100% 1px;background-repeat:no-repeat;background-position:0 100%;
+  transition:color .15s;
 }
-.report-body a:hover { border-bottom-color: #2563eb; }
+.report-body a:hover{color:#8b5cf6}
 
-/* ===== 引用来源标记 ===== */
-.source-tag {
-  display: inline-block;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: #2563eb;
-  background: #eff6ff;
-  padding: 0.1rem 0.45rem;
-  border-radius: 4px;
-  margin-left: 0.15rem;
-  cursor: help;
-  vertical-align: super;
-  line-height: 1.2;
+/* ===== 引用源标记 ===== */
+.source-tag{
+  display:inline-block;
+  font-size:.65rem;font-weight:700;
+  color:#fff;
+  background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+  padding:.1rem .42rem;
+  border-radius:4px;
+  margin-left:.2rem;
+  vertical-align:super;line-height:1.3;
+  letter-spacing:.04em;text-transform:uppercase;
+  font-variant-numeric:tabular-nums;
 }
 
-/* ===== 推断 / 不确定性标注 ===== */
-.callout {
-  margin: 1rem 0;
-  padding: 1rem 1.25rem;
-  border-radius: 8px;
-  font-size: 0.9rem;
+/* ===== 推断 / 不确定性 / 信息 标注 ===== */
+.callout{
+  margin:1.5rem 0;
+  padding:1.1rem 1.4rem;
+  border-radius:10px;
+  font-size:.93rem;line-height:1.65;
+  border:1px solid;
+  position:relative;
 }
-.callout-infer {
-  background: #fffbeb;
-  border-left: 4px solid #f59e0b;
-  color: #92400e;
-}
-.callout-uncertainty {
-  background: #fef2f2;
-  border-left: 4px solid #ef4444;
-  color: #991b1b;
-}
-.callout-info {
-  background: #ecfdf5;
-  border-left: 4px solid #10b981;
-  color: #065f46;
-}
+.callout strong{display:block;font-weight:600;margin-bottom:.4rem;font-size:.85rem;letter-spacing:.02em}
+.callout p{margin:0}
+.callout p + p{margin-top:.5rem}
+.callout-infer{background:#fffbeb;border-color:#fde68a;color:#78350f}
+.callout-uncertainty{background:#fef2f2;border-color:#fecaca;color:#7f1d1d}
+.callout-info{background:#ecfdf5;border-color:#a7f3d0;color:#064e3b}
 
 /* ===== 引用源列表 ===== */
-.ref-list { list-style: none; padding: 0; }
-.ref-list li {
-  padding: 0.5rem 0;
-  border-bottom: 1px solid #f0f0f0;
-  font-size: 0.9rem;
-  color: #4a5568;
+.ref-list{list-style:none;padding:0;display:grid;gap:.6rem}
+.ref-list li{
+  position:relative;
+  padding:.9rem 1rem .9rem 3.4rem;
+  background:#fff;
+  border:1px solid #ececec;
+  border-radius:10px;
+  font-size:.92rem;color:#40414a;
+  transition:border-color .2s,box-shadow .2s,transform .2s;
 }
-.ref-list li:last-child { border-bottom: none; }
-.ref-list .ref-index {
-  display: inline-block;
-  width: 1.5rem;
-  height: 1.5rem;
-  line-height: 1.5rem;
-  text-align: center;
-  background: #e2e8f0;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  margin-right: 0.5rem;
-  color: #1a1a2e;
+.ref-list li:hover{
+  border-color:#c7d2fe;
+  box-shadow:0 1px 2px rgba(10,10,20,.04),0 6px 16px rgba(99,102,241,.10);
+  transform:translateY(-1px);
+}
+.ref-list .ref-index{
+  position:absolute;left:.85rem;top:50%;
+  transform:translateY(-50%);
+  display:inline-flex;align-items:center;justify-content:center;
+  width:1.85rem;height:1.85rem;
+  background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+  color:#fff;
+  border-radius:7px;
+  font-size:.75rem;font-weight:700;
+  font-variant-numeric:tabular-nums;
+  box-shadow:0 2px 6px rgba(99,102,241,.25);
 }
 
 /* ===== Todo 追踪（Deep 模式时使用） ===== */
-.todo-track {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1.5rem;
+.todo-track{
+  background:linear-gradient(135deg,#f8fafc 0%,#f1f5f9 100%);
+  border:1px solid #e2e8f0;
+  border-radius:10px;
+  padding:1.1rem 1.4rem;
+  margin-bottom:2rem;
 }
-.todo-track h4 { font-size: 0.85rem; color: #64748b; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.5px; }
-.todo-track ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.todo-track li {
-  display: inline-flex; align-items: center; gap: 0.3rem;
-  font-size: 0.8rem;
-  padding: 0.2rem 0.6rem;
-  border-radius: 999px;
-  background: #e2e8f0;
-  color: #475569;
+.todo-track h4{
+  font-size:.72rem;font-weight:600;
+  color:#64748b;
+  margin-bottom:.7rem;
+  text-transform:uppercase;letter-spacing:.12em;
 }
-.todo-track .done { background: #d1fae5; color: #065f46; text-decoration: line-through; }
+.todo-track ul{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:.45rem}
+.todo-track li{
+  display:inline-flex;align-items:center;gap:.4rem;
+  font-size:.82rem;font-weight:500;
+  padding:.3rem .75rem;
+  border-radius:999px;
+  background:#fff;
+  color:#475569;
+  border:1px solid #e2e8f0;
+}
+.todo-track li::before{content:"○";color:#94a3b8;font-size:.9rem}
+.todo-track .done{background:#f0fdf4;color:#166534;border-color:#bbf7d0}
+.todo-track .done::before{content:"●";color:#10b981}
+
+/* ===== 列表（除 ref-list 外） ===== */
+.report-body ul:not(.ref-list){padding-left:1.4rem;margin:0 0 1.1rem}
+.report-body ul:not(.ref-list) li{margin:.35rem 0;color:#40414a}
+.report-body ul:not(.ref-list) li::marker{color:#6366f1;font-weight:700}
+
+/* ===== 表格 ===== */
+.report-body table{
+  width:100%;border-collapse:collapse;
+  margin:1.5rem 0;font-size:.9rem;
+  border:1px solid #e5e5e5;
+  border-radius:10px;overflow:hidden;
+}
+.report-body th,.report-body td{
+  padding:.75rem 1rem;text-align:left;
+  border-bottom:1px solid #f3f3f2;
+}
+.report-body th{
+  background:#fafafa;
+  font-weight:600;color:#0a0a14;
+  font-size:.78rem;
+  text-transform:uppercase;letter-spacing:.06em;
+}
+.report-body tr:last-child td{border-bottom:none}
+.report-body tr:hover td{background:#fafafa}
+
+/* ===== 行内代码 & 代码块 ===== */
+.report-body code{
+  font-family:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  font-size:.85em;
+  background:#f5f5f4;
+  border:1px solid #ebebeb;
+  padding:.1rem .4rem;
+  border-radius:5px;
+  color:#1a1a1a;
+}
+.report-body pre{
+  background:#0a0a14;color:#e5e5e5;
+  padding:1.25rem 1.5rem;
+  border-radius:10px;
+  overflow-x:auto;
+  font-size:.85rem;line-height:1.6;
+  margin:1.25rem 0;
+}
+.report-body pre code{background:none;border:none;padding:0;color:inherit}
+
+/* ===== 引用块 ===== */
+.report-body blockquote{
+  border-left:3px solid #6366f1;
+  padding:.75rem 0 .75rem 1.25rem;
+  margin:1.5rem 0;
+  color:#737380;font-style:italic;
+}
 
 /* ===== 页脚 ===== */
-.report-footer {
-  padding: 1.25rem 3rem;
-  border-top: 1px solid #e2e8f0;
-  font-size: 0.8rem;
-  color: #94a3b8;
-  text-align: center;
+.report-footer{
+  padding:1.5rem 3.5rem;
+  border-top:1px solid #ececec;
+  font-size:.78rem;color:#94a3b8;
+  text-align:center;background:#fafafa;
+  display:flex;align-items:center;justify-content:center;gap:.75rem;flex-wrap:wrap;
+}
+.report-footer::before,.report-footer::after{
+  content:"";flex:0 0 24px;height:1px;background:#e5e5e5;
 }
 
 /* ===== 响应式 ===== */
-@media (max-width: 640px) {
-  body { padding: 0.5rem; }
-  .report-header { padding: 1.5rem 1.25rem; }
-  .report-header h1 { font-size: 1.35rem; }
-  .report-body { padding: 1.25rem 1.25rem 2rem; }
-  .report-footer { padding: 1rem 1.25rem; }
+@media (max-width:720px){
+  body{padding:.5rem}
+  .report-header{padding:2.25rem 1.5rem 1.75rem}
+  .report-header h1{font-size:1.7rem}
+  .report-body{padding:1.75rem 1.5rem 2.25rem}
+  .report-footer{padding:1.25rem 1.5rem}
+  .report-body h2{font-size:1.4rem}
+}
+
+/* ===== 暗色模式 ===== */
+@media (prefers-color-scheme: dark){
+  body{background:#0a0a0f;color:#f5f5f5}
+  .report{
+    background:#14141c;border-color:#26262e;
+    box-shadow:0 1px 2px rgba(0,0,0,.4),0 24px 48px -12px rgba(0,0,0,.5);
+  }
+  .report-body p,.report-body ul:not(.ref-list) li{color:#d4d4d8}
+  .report-body h2,.report-body h3,.report-body strong,.report-body th{color:#f5f5f5}
+  .report-body code{background:#1d1d24;border-color:#26262e;color:#f5f5f5}
+  .report-body th,.report-footer,.report-body tr:hover td{background:#14141c}
+  .ref-list li{background:#14141c;border-color:#26262e}
+  .ref-list li:hover{border-color:#6366f1}
+  .exec-summary{background:linear-gradient(135deg,#1e1b3a 0%,#2a1a3a 100%);border-color:#3d2a5f}
+  .exec-summary p{color:#d4d4d8}
+  .todo-track{background:linear-gradient(135deg,#14141c 0%,#1a1a26 100%);border-color:#26262e}
+  .todo-track li{background:#1d1d24;color:#a3a3a3;border-color:#26262e}
+  .callout-infer{background:#2a1f0a;border-color:#5a3d10;color:#fde68a}
+  .callout-uncertainty{background:#2a1010;border-color:#5a1f1f;color:#fecaca}
+  .callout-info{background:#0a2a1a;border-color:#1f5a3d;color:#a7f3d0}
+  .callout strong{color:inherit}
+}
+
+/* ===== 打印样式（导出 PDF 友好） ===== */
+@media print{
+  body{background:#fff;padding:0}
+  .report{box-shadow:none;border:none;max-width:100%;border-radius:0}
+  .report-header{
+    background:#15152a !important;
+    -webkit-print-color-adjust:exact;print-color-adjust:exact;
+  }
+  .report-body{padding:1.5rem 2rem}
+  .ref-list li,.callout,.report-body h2{break-inside:avoid}
+  .ref-list li:hover{transform:none;box-shadow:none;border-color:#ececec}
 }
 </style>
 </head>
 <body>
 <div class="report">
   <div class="report-header">
+    <div class="eyebrow">DriFox 深度研究报告</div>
     <h1>{TITLE}</h1>
     <div class="meta">
       <span>📅 {TIMESTAMP}</span>

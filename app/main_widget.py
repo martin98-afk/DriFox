@@ -1481,6 +1481,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         FunctionCommandHandlers.register("subagents", self._handle_subagents_command)
 
+        # 注册 /compact 命令处理器（支持 --clear 参数）
+        FunctionCommandHandlers.register("compact", self._handle_compact_command)
+
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
@@ -2533,8 +2536,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return None
 
-    def _trigger_context_compaction(self):
-        """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
+    def _trigger_context_compaction(self, clear_after: bool = False, user_hint: str = ""):
+        """触发上下文压缩：调用 compaction 子智能体压缩当前对话
+
+        Args:
+            clear_after: 是否在子智能体执行成功后清空当前会话的所有历史消息
+            user_hint: 用户在 /compact 后提供的自由文本（已剥离 --clear 标记），
+                       会作为补充说明附加到子智能体的任务描述中
+        """
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
             InfoBar.warning(
@@ -2554,15 +2563,82 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
             return
+
+        # 拼接子智能体任务描述：默认任务 + 用户补充说明（如果有）
+        base_task = "请压缩当前对话上下文，生成工作摘要"
+        task_description = (
+            f"{base_task}。用户补充说明：{user_hint}" if user_hint else base_task
+        )
+
+        # 仅在需要清空时才挂接完成回调，避免污染正常 compact 流程
+        on_finished_cb = None
+        if clear_after:
+            on_finished_cb = lambda tid, result, _sid=session.session_id: \
+                self._on_compact_clear_finished(tid, result, _sid)
+
         sub_agent_mgr.execute_task(
             task_id=f"compact_{uuid.uuid4().hex[:8]}",
             agent_name="compaction",
-            task_description="请压缩当前对话上下文，生成工作摘要",
+            task_description=task_description,
             parent_context="",
             share_context=True,  # 接入主智能体完整上下文
-            on_finished=None,
+            on_finished=on_finished_cb,
             on_error=None,
+            session_id=session.session_id,  # 显式传 session_id，避免回退到 SubAgentManager 内部可能陈旧的值
         )
+
+    def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
+        """--clear 模式下，compaction 子智能体完成后的清空回调
+
+        仅在子智能体执行成功（无 _execution_error）时清空历史消息；
+        失败 / 取消时不清空，避免误删。
+
+        清空语义：**只清空触发压缩时的那个 session 的 messages，不创建新会话**。
+        - 保留 session 自身（session_id、name、topic_summary 均不变）
+        - 不展示欢迎卡片
+        - 不重置标题
+        - 即使用户在子智能体执行期间切换到了其他 session，原 session 仍会被清空；
+          UI 同步（清空聊天区域）仅在用户当前仍停留在原 session 时执行。
+
+        Args:
+            task_id: 子智能体任务 ID
+            result: 子智能体返回的摘要内容
+            session_id: 触发压缩时锁定的会话 ID（用于按 ID 找到原 session，不依赖 "current"）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 校验执行结果：仅在无错误时清空
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
+        if executor is None:
+            # 任务从未启动（agent 缺失 / mode 不允许 / 未进入 _running_tasks）— 不清空
+            return
+        execution_error = getattr(executor, "_execution_error", None)
+        if execution_error:
+            return
+
+        # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
+        # 避免用户在子智能体执行期间切换会话后误清空当前会话）
+        target_session = None
+        for s in self.session_manager.sessions:
+            if s.session_id == session_id:
+                target_session = s
+                break
+        if not target_session or not target_session.messages:
+            return
+
+        # 清空目标 session 的 messages（保留 session 自身，topic_summary / name 不变）
+        # 用 set_messages 而非 session.clear()，避免把 topic_summary 重置为 ""
+        target_session.set_messages([], preserve_compaction=False)
+        # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
+        self._session_card_cache.pop(target_session.session_id, None)
+
+        # 仅在用户仍停留在原 session 时才同步更新 UI
+        if self._current_session_id == session_id:
+            self._clear_chat_area()
+            self.node_preview.clear_nodes()
+            # 刷新上下文使用率指示器（清空后会回到 0%）
+            self._refresh_context_usage_indicator()
 
     def _remember_to_memory(self, content: str):
         """将内容存入长期记忆"""
@@ -7922,6 +7998,22 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
+
+    def _handle_compact_command(self, args: str):
+        """/compact 命令：触发上下文压缩
+
+        支持参数：
+        - --clear：压缩完成后清空当前会话的所有历史消息
+        - 自由文本：附加给压缩智能体的补充说明（焦点 / 输出形态 / 分析诉求等）
+
+        Args:
+            args: 命令后的参数字符串
+        """
+        # 解析 --clear 标记（仅匹配独立 flag，不吞并后续内容）
+        clear_after = bool(re.search(r'(?:^|\s)--clear(?=\s|$)', args or ""))
+        # 剥离 --clear 标记后，剩余文本作为给子智能体的补充说明
+        user_hint = re.sub(r'(?:^|\s)--clear(?=\s|$)', '', args or "").strip()
+        self._trigger_context_compaction(clear_after=clear_after, user_hint=user_hint)
 
     def _handle_subagents_command(self, args: str):
         """/subagents 命令：重新显示紧凑子智能体卡片"""
