@@ -136,7 +136,7 @@ class ContextUsageRing(QWidget):
             or self._cache_hits > 0
         )
         if has_data:
-            lines = ["", "━" * 8, "缓存统计"]
+            lines = ["", "━" * 12, "缓存统计"]
             lines.append(f"命中率: {self._cache_hit_rate:.1%}")
             if self._requests > 0:
                 per_req = self._cache_per_request_hit_rate

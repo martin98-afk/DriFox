@@ -309,6 +309,109 @@ def _fetch_minimax(config: dict) -> Optional[Dict[str, Any]]:
 register("MiniMax", _fetch_minimax)
 
 
+# ── OpenAI 获取器 ──────────────────────────────────
+
+def _fetch_openai(config: dict) -> Optional[Dict[str, Any]]:
+    """从 OpenAI 获取 API 用量信息。
+
+    OpenAI 是 Pay-as-you-go 模式，通过 dashboard/billing API 查询
+    用户设置的月度账单上限和已使用额度。
+
+    使用服务商的 API_KEY（Bearer token）直接请求，不需要额外配置。
+    需要账号已设置月度消费上限（hard_limit），否则无法计算百分比。
+
+    响应映射为 monthly 维度（按自然月重置）。
+    """
+    api_key = (config.get("API_KEY", "") or "").strip()
+    if not api_key:
+        return None
+
+    now = int(time.time())
+
+    # ── 1. 获取订阅信息（总额度） ──
+    sub_url = "https://api.openai.com/v1/dashboard/billing/subscription"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36"
+        ),
+    }
+
+    try:
+        req = urllib.request.Request(sub_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            raw = resp.read().decode(charset, errors="replace")
+    except Exception:
+        return None
+
+    try:
+        sub_data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    hard_limit_usd = sub_data.get("hard_limit_usd")
+    if not hard_limit_usd or hard_limit_usd <= 0:
+        # 没有设置月度消费上限，无法计算百分比
+        return None
+
+    # ── 2. 获取过去 ~30 天的用量 ──
+    import datetime
+    end_date = datetime.date.today() + datetime.timedelta(days=1)
+    start_date = end_date - datetime.timedelta(days=30)
+
+    usage_url = (
+        f"https://api.openai.com/v1/dashboard/billing/usage"
+        f"?start_date={start_date.isoformat()}&end_date={end_date.isoformat()}"
+    )
+
+    try:
+        req = urllib.request.Request(usage_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            raw = resp.read().decode(charset, errors="replace")
+    except Exception:
+        return None
+
+    try:
+        usage_data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    # total_usage 以美分为单位，需转为美元
+    total_usage_cents = usage_data.get("total_usage", 0)
+    if total_usage_cents is None:
+        return None
+
+    total_usage_usd = total_usage_cents / 100.0
+
+    # ── 3. 计算使用百分比 ──
+    usage_pct = max(0, min(100, round(total_usage_usd / hard_limit_usd * 100)))
+
+    # ── 4. 计算到月底的秒数作为重置时间 ──
+    import calendar
+    today = datetime.date.today()
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    end_of_month = datetime.datetime(
+        today.year, today.month, last_day, 23, 59, 59,
+        tzinfo=datetime.timezone.utc,
+    )
+    reset_sec = max(0, int(end_of_month.timestamp() - now))
+
+    result = {"rolling": None, "weekly": None, "monthly": None}
+    result["monthly"] = {"percent": usage_pct, "reset_sec": reset_sec}
+
+    if any(v is not None for v in result.values()):
+        return result
+    return None
+
+
+register("OpenAI", _fetch_openai)
+
+
 # ── 异步包装 ────────────────────────────────────────
 
 def fetch_async(
