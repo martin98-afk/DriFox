@@ -136,7 +136,7 @@ class ContextUsageRing(QWidget):
             or self._cache_hits > 0
         )
         if has_data:
-            lines = ["", "━" * 20, "缓存统计"]
+            lines = ["", "━" * 12, "缓存统计"]
             lines.append(f"命中率: {self._cache_hit_rate:.1%}")
             if self._requests > 0:
                 per_req = self._cache_per_request_hit_rate
@@ -213,11 +213,14 @@ class ContextUsageRing(QWidget):
             tooltip_width = 220
             tooltip_height = len(lines) * 20 + 16
 
-        top_right_global = self.mapToGlobal(self.rect().topRight())
-        top_left_global = self.mapToGlobal(self.rect().topLeft())
-        ring_left_x = top_left_global.x()
-        x = ring_left_x - tooltip_width + 30
-        y = top_right_global.y()
+        # 用窗口右沿定位：圆环在右上角，tooltip 显示在它左侧
+        window = self.window()
+        window_right = window.x() + window.width()
+        widget_top_global = self.mapToGlobal(QPoint(0, 0)).y()
+        # 限制定位用的宽度不超过 280px（避免字体度量高估导致偏左）
+        pos_width = min(tooltip_width, 280)
+        x = window_right - pos_width - 16
+        y = widget_top_global + 10
 
         screen = QApplication.desktop().screenGeometry(self)
         if x < screen.left():

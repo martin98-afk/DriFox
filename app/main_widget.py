@@ -135,6 +135,9 @@ from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.context_usage_ring import (
     ContextUsageRing,
 )
+from app.widgets.coding_plan_ring import (
+    CodingPlanRing,
+)
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
@@ -222,6 +225,8 @@ class OpenAIChatToolWindow(ToolWindow):
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
+    # 套餐用量查询结果桥接信号（后台线程 → 主线程）
+    _coding_plan_result_ready = pyqtSignal(object)
 
     def __init__(self, homepage):
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
@@ -288,6 +293,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
+        # 线程安全桥接：套餐用量查询结果回主线程
+        self._coding_plan_result_ready.connect(self._on_coding_plan_result)
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -1360,6 +1367,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.balance_display = BalanceDisplay(self)
         right_layout.addWidget(self.balance_display)
 
+        # 套餐用量同心圆（3层：5小时/每周/每月），仅 OpenCode Go 有数据时显示
+        self.coding_plan_ring = CodingPlanRing(self)
+        right_layout.addWidget(self.coding_plan_ring)
+
         # 上下文占用圆环
         self.context_usage_ring = ContextUsageRing(self)
         right_layout.addWidget(self.context_usage_ring)
@@ -1469,6 +1480,9 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.builtin_commands import FunctionCommandHandlers
 
         FunctionCommandHandlers.register("subagents", self._handle_subagents_command)
+
+        # 注册 /compact 命令处理器（支持 --clear 参数）
+        FunctionCommandHandlers.register("compact", self._handle_compact_command)
 
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
@@ -2285,8 +2299,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._duplicate_window(branch=False)
         elif command_name == "branch":
             self._duplicate_window(branch=True)
-        elif command_name == "compact":
-            self._trigger_context_compaction()
         elif command_name == "remember":
             self._remember_to_memory(args)
 
@@ -2522,8 +2534,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return None
 
-    def _trigger_context_compaction(self):
-        """触发上下文压缩：调用 compaction 子智能体压缩当前对话"""
+    def _trigger_context_compaction(self, clear_after: bool = False, user_hint: str = ""):
+        """触发上下文压缩：调用 compaction 子智能体压缩当前对话
+
+        Args:
+            clear_after: 是否在子智能体执行成功后清空当前会话的所有历史消息
+            user_hint: 用户在 /compact 后提供的自由文本（已剥离 --clear 标记），
+                       会作为补充说明附加到子智能体的任务描述中
+        """
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
             InfoBar.warning(
@@ -2543,15 +2561,82 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
             return
+
+        # 拼接子智能体任务描述：默认任务 + 用户补充说明（如果有）
+        base_task = "请压缩当前对话上下文，生成工作摘要"
+        task_description = (
+            f"{base_task}。用户补充说明：{user_hint}" if user_hint else base_task
+        )
+
+        # 仅在需要清空时才挂接完成回调，避免污染正常 compact 流程
+        on_finished_cb = None
+        if clear_after:
+            on_finished_cb = lambda tid, result, _sid=session.session_id: \
+                self._on_compact_clear_finished(tid, result, _sid)
+
         sub_agent_mgr.execute_task(
             task_id=f"compact_{uuid.uuid4().hex[:8]}",
             agent_name="compaction",
-            task_description="请压缩当前对话上下文，生成工作摘要",
+            task_description=task_description,
             parent_context="",
             share_context=True,  # 接入主智能体完整上下文
-            on_finished=None,
+            on_finished=on_finished_cb,
             on_error=None,
+            session_id=session.session_id,  # 显式传 session_id，避免回退到 SubAgentManager 内部可能陈旧的值
         )
+
+    def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
+        """--clear 模式下，compaction 子智能体完成后的清空回调
+
+        仅在子智能体执行成功（无 _execution_error）时清空历史消息；
+        失败 / 取消时不清空，避免误删。
+
+        清空语义：**只清空触发压缩时的那个 session 的 messages，不创建新会话**。
+        - 保留 session 自身（session_id、name、topic_summary 均不变）
+        - 不展示欢迎卡片
+        - 不重置标题
+        - 即使用户在子智能体执行期间切换到了其他 session，原 session 仍会被清空；
+          UI 同步（清空聊天区域）仅在用户当前仍停留在原 session 时执行。
+
+        Args:
+            task_id: 子智能体任务 ID
+            result: 子智能体返回的摘要内容
+            session_id: 触发压缩时锁定的会话 ID（用于按 ID 找到原 session，不依赖 "current"）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 校验执行结果：仅在无错误时清空
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
+        if executor is None:
+            # 任务从未启动（agent 缺失 / mode 不允许 / 未进入 _running_tasks）— 不清空
+            return
+        execution_error = getattr(executor, "_execution_error", None)
+        if execution_error:
+            return
+
+        # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
+        # 避免用户在子智能体执行期间切换会话后误清空当前会话）
+        target_session = None
+        for s in self.session_manager.sessions:
+            if s.session_id == session_id:
+                target_session = s
+                break
+        if not target_session or not target_session.messages:
+            return
+
+        # 清空目标 session 的 messages（保留 session 自身，topic_summary / name 不变）
+        # 用 set_messages 而非 session.clear()，避免把 topic_summary 重置为 ""
+        target_session.set_messages([], preserve_compaction=False)
+        # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
+        self._session_card_cache.pop(target_session.session_id, None)
+
+        # 仅在用户仍停留在原 session 时才同步更新 UI
+        if self._current_session_id == session_id:
+            self._clear_chat_area()
+            self.node_preview.clear_nodes()
+            # 刷新上下文使用率指示器（清空后会回到 0%）
+            self._refresh_context_usage_indicator()
 
     def _remember_to_memory(self, content: str):
         """将内容存入长期记忆"""
@@ -2938,6 +3023,123 @@ class OpenAIChatToolWindow(ToolWindow):
         provider_name = config.get("provider_name", "")
 
         balance_display.set_provider(provider_name, api_key)
+
+        # 同时刷新套餐用量显示
+        self._refresh_coding_plan()
+
+    def _refresh_coding_plan(self):
+        """刷新套餐用量同心圆（5小时/每周/每月）
+
+        按当前选中的服务商，从注册表中查找对应的获取器异步查询。
+        获取成功后自动安排 60 秒后再次刷新。
+        未注册该功能的服务商不会显示该圆环。
+        """
+        ring = getattr(self, "coding_plan_ring", None)
+        if not ring:
+            return
+
+        # 时间戳节流：2 秒内不重复请求（比 bool flag 更可靠，跨窗口/多路径安全）
+        now = time.monotonic()
+        last = getattr(self, "_coding_plan_last_ts", 0.0)
+        if now - last < 2.0:
+            return
+
+        config_id = getattr(self, "_current_provider_name", "")
+        if not config_id:
+            ring.clear()
+            return
+
+        config = self._valid_configs.get(config_id, {})
+        provider_name = config.get("provider_name", "")
+
+        if not provider_name:
+            ring.clear()
+            return
+
+        # 检查该服务商是否有注册的获取器
+        from app.core.coding_plan_fetcher import get as get_fetcher
+
+        fetcher = get_fetcher(provider_name)
+        if not fetcher:
+            # 按 family 回退匹配
+            from app.core.coding_plan_fetcher import _fetchers
+            for registered_name in _fetchers:
+                if registered_name in provider_name:
+                    fetcher = _fetchers[registered_name]
+                    break
+
+        if not fetcher:
+            # 没有注册获取器 → 不显示
+            ring.clear()
+            t = getattr(self, "_coding_plan_refresh_timer", None)
+            if t:
+                t.stop()
+            return
+
+        # 交给 fetcher 自己判断所需字段是否齐全
+        # 简单传空值让 fetcher 返回 None 即可
+
+        logger.debug(
+            f"[CodingPlan] provider={provider_name}, "
+            f"config_id={config_id[:20]}..., "
+            f"fetcher={fetcher.__name__}"
+        )
+
+        self._coding_plan_last_ts = now
+        from app.core.coding_plan_fetcher import fetch_async
+
+        def _on_result(result):
+            # 后台线程 → 通过信号桥接回主线程
+            self._coding_plan_result_ready.emit(result)
+
+        fetch_async(provider_name, config, _on_result)
+
+    def _on_coding_plan_result(self, result):
+        """主线程接收套餐用量查询结果"""
+        ring = getattr(self, "coding_plan_ring", None)
+        if not ring:
+            return
+
+        # 校验当前服务商是否仍有套餐配置（防止获取途中用户切换了服务商）
+        config_id = getattr(self, "_current_provider_name", "")
+        config = self._valid_configs.get(config_id, {})
+        provider_name = config.get("provider_name", "")
+        from app.core.coding_plan_fetcher import get as get_fetcher
+        fetcher = get_fetcher(provider_name)
+        if not fetcher:
+            ring.clear()
+            return
+
+        if not result:
+            logger.debug("[CodingPlan] 无数据，隐藏圆环（停止定时器）")
+            ring.clear()
+            t = getattr(self, "_coding_plan_refresh_timer", None)
+            if t:
+                t.stop()
+            return
+        rolling = result.get("rolling")
+        weekly = result.get("weekly")
+        monthly = result.get("monthly")
+        if not rolling and not weekly and not monthly:
+            logger.debug("[CodingPlan] 三层均为空，隐藏（停止定时器）")
+            ring.clear()
+            t = getattr(self, "_coding_plan_refresh_timer", None)
+            if t:
+                t.stop()
+            return
+        logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
+        ring.set_usage(
+            rolling=rolling,
+            weekly=weekly,
+            monthly=monthly,
+        )
+        # 60 秒后自动刷新（用单次 timer 防堆积）
+        t = getattr(self, "_coding_plan_refresh_timer", None)
+        if t is None:
+            self._coding_plan_refresh_timer = QTimer(self)
+            self._coding_plan_refresh_timer.setSingleShot(True)
+            self._coding_plan_refresh_timer.timeout.connect(self._refresh_coding_plan)
+        self._coding_plan_refresh_timer.start(60000)
 
     def _open_settings_popup(self):
         """打开设置卡片"""
@@ -7605,15 +7807,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
-                    # 提示词替换命令：替换 + 用 $ARGUMENTS 占位符替换
+                    # 提示词替换命令：替换 + 用 $ARGUMENT 占位符替换
                     user_text = cmd_result.replacement
                     if cmd_result.remainder:
-                        if "$ARGUMENTS$" in user_text:
+                        if "$ARGUMENTS" in user_text:
                             user_text = user_text.replace(
-                                "$ARGUMENTS$", cmd_result.remainder
+                                "$ARGUMENTS", cmd_result.remainder
                             )
                         else:
-                            # fallback: 无 $ARGUMENTS$ 时保留旧行为
+                            # fallback: 无 $ARGUMENTS 时保留旧行为
                             user_text = (
                                 f"{user_text}\n\n用户当前命令：{cmd_result.remainder}"
                             )
@@ -7794,6 +7996,22 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
+
+    def _handle_compact_command(self, args: str):
+        """/compact 命令：触发上下文压缩
+
+        支持参数：
+        - --clear：压缩完成后清空当前会话的所有历史消息
+        - 自由文本：附加给压缩智能体的补充说明（焦点 / 输出形态 / 分析诉求等）
+
+        Args:
+            args: 命令后的参数字符串
+        """
+        # 解析 --clear 标记（仅匹配独立 flag，不吞并后续内容）
+        clear_after = bool(re.search(r'(?:^|\s)--clear(?=\s|$)', args or ""))
+        # 剥离 --clear 标记后，剩余文本作为给子智能体的补充说明
+        user_hint = re.sub(r'(?:^|\s)--clear(?=\s|$)', '', args or "").strip()
+        self._trigger_context_compaction(clear_after=clear_after, user_hint=user_hint)
 
     def _handle_subagents_command(self, args: str):
         """/subagents 命令：重新显示紧凑子智能体卡片"""
