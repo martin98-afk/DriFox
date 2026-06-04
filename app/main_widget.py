@@ -2964,8 +2964,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
-        # 节流：已有请求在途中则跳过
-        if getattr(self, "_coding_plan_busy", False):
+        # 时间戳节流：2 秒内不重复请求（比 bool flag 更可靠，跨窗口/多路径安全）
+        now = time.monotonic()
+        last = getattr(self, "_coding_plan_last_ts", 0.0)
+        if now - last < 2.0:
             return
 
         config_id = getattr(self, "_current_provider_name", "")
@@ -2999,11 +3001,10 @@ class OpenAIChatToolWindow(ToolWindow):
             f"cookie={has_cookie}, workspace_id={has_workspace_id}"
         )
 
-        self._coding_plan_busy = True
+        self._coding_plan_last_ts = now
         from app.core.coding_plan_fetcher import fetch_async
 
         def _on_result(result):
-            self._coding_plan_busy = False
             # 后台线程 → 通过信号桥接回主线程
             self._coding_plan_result_ready.emit(result)
 
