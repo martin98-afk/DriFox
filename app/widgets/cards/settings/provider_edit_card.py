@@ -302,6 +302,35 @@ class ProviderEditCard(QWidget):
         config_name_row.addWidget(self.configNameEdit, 1)
         main_layout.addLayout(config_name_row)
 
+        # ── OpenCode 套餐查询额外配置（可选） ────────────────
+        self._opencode_section = QWidget()
+        opencode_layout = QVBoxLayout(self._opencode_section)
+        opencode_layout.setContentsMargins(4, 6, 0, 4)
+        opencode_layout.setSpacing(6)
+
+        for key, label, placeholder in [
+            ("server_id", "Server ID:", "opencode.ai/_server 请求中的 X-Server-Id"),
+            ("cookie", "Cookie:", "oc_locale=zh; auth=Fe26.2**... （从浏览器复制完整的 Cookie 值）"),
+            ("workspace_id", "Workspace ID:", "wrk_xxxxxxxxxxxx （无需可留空）"),
+        ]:
+            row = QHBoxLayout()
+            lbl = BodyLabel(label)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(lbl)
+            editor = LineEdit()
+            editor.setPlaceholderText(placeholder)
+            existing = self.provider_info.get(key, "")
+            if existing:
+                editor.setText(existing)
+            setattr(self, f"{key}_edit", editor)
+            row.addWidget(editor, 1)
+            opencode_layout.addLayout(row)
+
+        main_layout.addWidget(self._opencode_section)
+
+        # 初始可见性由当前服务商决定
+        self._update_opencode_visibility()
+
         # 保存按钮已移到 BaseSettingsCard 标题栏，信号由外部连接
 
         # 新建时调用一次初始化
@@ -394,6 +423,15 @@ class ProviderEditCard(QWidget):
             if self.modelCombo.count() > 0:
                 self.modelCombo.setCurrentIndex(0)
             self.modelCombo.blockSignals(False)
+        self._update_opencode_visibility()
+
+    def _update_opencode_visibility(self):
+        """根据当前服务商名称显示/隐藏 OpenCode 套餐配置区"""
+        if not hasattr(self, "_opencode_section"):
+            return
+        provider = self.nameCombo.currentText() if self.is_new else self.provider_name
+        is_opencode = "opencode" in provider.lower()
+        self._opencode_section.setVisible(is_opencode)
 
     def _open_help_url(self, name: str):
         """打开帮助链接"""
@@ -483,6 +521,18 @@ class ProviderEditCard(QWidget):
         existing_models = self.provider_info.get("模型列表", [])
         # 编辑场景下保留旧 config_id，让 main_widget 能据此判断 apikey 是否被改过
         existing_config_id = self.provider_info.get("config_id", "")
+        # 先提取套餐用量额外字段（在覆盖 self.provider_info 之前）
+        extra_fields = {}
+        for extra_key in ("server_id", "cookie", "workspace_id"):
+            editor = getattr(self, f"{extra_key}_edit", None)
+            if editor is not None:
+                val = editor.text().strip()
+                if val:
+                    extra_fields[extra_key] = val
+            else:
+                old_val = self.provider_info.get(extra_key, "")
+                if old_val:
+                    extra_fields[extra_key] = old_val
         self.provider_info = {
             "API_URL": self.apiUrlCombo.currentText().strip(),
             "API_KEY": self.apiKeyEdit.text().strip(),
@@ -498,6 +548,10 @@ class ProviderEditCard(QWidget):
             self.provider_info["模型列表"] = existing_models
         else:
             self.provider_info["模型列表"] = []
+
+        # 写入套餐用量额外字段
+        self.provider_info.update(extra_fields)
+
         self.saved.emit(provider_name, self.provider_info)
 
     def _on_cancel(self):

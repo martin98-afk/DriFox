@@ -135,6 +135,9 @@ from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.context_usage_ring import (
     ContextUsageRing,
 )
+from app.widgets.coding_plan_ring import (
+    CodingPlanRing,
+)
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
@@ -222,6 +225,8 @@ class OpenAIChatToolWindow(ToolWindow):
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
+    # 套餐用量查询结果桥接信号（后台线程 → 主线程）
+    _coding_plan_result_ready = pyqtSignal(object)
 
     def __init__(self, homepage):
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
@@ -288,6 +293,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
+        # 线程安全桥接：套餐用量查询结果回主线程
+        self._coding_plan_result_ready.connect(self._on_coding_plan_result)
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -1359,6 +1366,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 余额显示
         self.balance_display = BalanceDisplay(self)
         right_layout.addWidget(self.balance_display)
+
+        # 套餐用量同心圆（3层：5小时/每周/每月），仅 OpenCode Go 有数据时显示
+        self.coding_plan_ring = CodingPlanRing(self)
+        right_layout.addWidget(self.coding_plan_ring)
 
         # 上下文占用圆环
         self.context_usage_ring = ContextUsageRing(self)
@@ -2938,6 +2949,106 @@ class OpenAIChatToolWindow(ToolWindow):
         provider_name = config.get("provider_name", "")
 
         balance_display.set_provider(provider_name, api_key)
+
+        # 同时刷新套餐用量显示
+        self._refresh_coding_plan()
+
+    def _refresh_coding_plan(self):
+        """刷新套餐用量同心圆（5小时/每周/每月）
+
+        按当前选中的服务商，从注册表中查找对应的获取器异步查询。
+        获取成功后自动安排 60 秒后再次刷新。
+        未注册该功能的服务商不会显示该圆环。
+        """
+        ring = getattr(self, "coding_plan_ring", None)
+        if not ring:
+            return
+
+        # 节流：已有请求在途中则跳过
+        if getattr(self, "_coding_plan_busy", False):
+            return
+
+        config_id = getattr(self, "_current_provider_name", "")
+        if not config_id:
+            ring.clear()
+            return
+
+        config = self._valid_configs.get(config_id, {})
+        provider_name = config.get("provider_name", "")
+
+        if not provider_name:
+            ring.clear()
+            return
+
+        has_server_id = bool((config.get("server_id", "") or "").strip())
+        has_cookie = bool((config.get("cookie", "") or "").strip())
+        has_workspace_id = bool((config.get("workspace_id", "") or "").strip())
+
+        # 当前服务商根本没配这些字段 → 直接隐藏，停止旧定时器
+        if not has_server_id or not has_cookie:
+            ring.clear()
+            t = getattr(self, "_coding_plan_refresh_timer", None)
+            if t:
+                t.stop()
+            return
+
+        logger.debug(
+            f"[CodingPlan] provider={provider_name}, "
+            f"config_id={config_id[:20]}..., "
+            f"has_extra_fields: server_id={has_server_id}, "
+            f"cookie={has_cookie}, workspace_id={has_workspace_id}"
+        )
+
+        self._coding_plan_busy = True
+        from app.core.coding_plan_fetcher import fetch_async
+
+        def _on_result(result):
+            self._coding_plan_busy = False
+            # 后台线程 → 通过信号桥接回主线程
+            self._coding_plan_result_ready.emit(result)
+
+        fetch_async(provider_name, config, _on_result)
+
+    def _on_coding_plan_result(self, result):
+        """主线程接收套餐用量查询结果"""
+        ring = getattr(self, "coding_plan_ring", None)
+        if not ring:
+            return
+
+        # 校验当前服务商是否仍有套餐配置（防止获取途中用户切换了服务商）
+        config_id = getattr(self, "_current_provider_name", "")
+        config = self._valid_configs.get(config_id, {})
+        has_config = bool((config.get("server_id", "") or "").strip()) and bool(
+            (config.get("cookie", "") or "").strip()
+        )
+        if not has_config:
+            ring.clear()
+            return
+
+        if not result:
+            logger.debug("[CodingPlan] 无数据，隐藏圆环（等待下次触发）")
+            ring.clear()
+            return
+        rolling = result.get("rolling")
+        weekly = result.get("weekly")
+        monthly = result.get("monthly")
+        if not rolling and not weekly and not monthly:
+            logger.debug("[CodingPlan] 三层均为空，隐藏")
+            ring.clear()
+            return
+        logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
+        ring.set_usage(
+            rolling=rolling,
+            weekly=weekly,
+            monthly=monthly,
+        )
+        # 60 秒后自动刷新（用单次 timer 防堆积）
+        t = getattr(self, "_coding_plan_refresh_timer", None)
+        if t is None:
+            self._coding_plan_refresh_timer = QTimer(self)
+            self._coding_plan_refresh_timer.setSingleShot(True)
+            self._coding_plan_refresh_timer.timeout.connect(self._refresh_coding_plan)
+        self._coding_plan_refresh_timer.start(60000)
 
     def _open_settings_popup(self):
         """打开设置卡片"""
