@@ -240,24 +240,20 @@ class CodingPlanRing(QWidget):
         h = self.height()
         cx = w / 2.0
         cy = h / 2.0
-        margin = 2.5
-
-        # 三层弧的参数 (半径, 线宽)
-        ring_params = [
-            {"radius": 9.5, "stroke": 2.0, "key": "rolling"},
-            {"radius": 6.8, "stroke": 1.8, "key": "weekly"},
-            {"radius": 4.0, "stroke": 1.6, "key": "monthly"},
-        ]
 
         # 起点：12点钟方向 (90° in Qt = 90*16)
         start_angle = 90 * 16
+
+        # — 外层两个圆环（加粗） —
+        ring_params = [
+            {"radius": 9.5, "stroke": 3.0, "key": "rolling"},
+            {"radius": 6.5, "stroke": 2.5, "key": "weekly"},
+        ]
 
         for rp in ring_params:
             key = rp["key"]
             data = self._layers.get(key, {})
             pct = data.get("percent")
-
-            # 每个弧的 bounding rect
             r = rp["radius"]
             sw = rp["stroke"]
             rect = QRectF(cx - r, cy - r, r * 2, r * 2)
@@ -269,8 +265,7 @@ class CodingPlanRing(QWidget):
 
             # 用量弧
             if pct is not None and pct > 0:
-                # 找对应配置获取色调
-                base_hue = "#5aa9ff"  # default
+                base_hue = "#5aa9ff"
                 for cfg in LAYER_CONFIG:
                     if cfg["key"] == key:
                         base_hue = cfg["hue"]
@@ -280,5 +275,28 @@ class CodingPlanRing(QWidget):
                 ring_pen = QPen(ring_color, sw)
                 painter.setPen(ring_pen)
                 painter.drawArc(rect, start_angle, span)
+
+        # — 最内层：实心圆 + 扇形用量 —
+        inner_data = self._layers.get("monthly", {})
+        inner_pct = inner_data.get("percent")
+        ri = 4.5
+        inner_rect = QRectF(cx - ri, cy - ri, ri * 2, ri * 2)
+
+        # 背景实心圆
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._track_color)
+        painter.drawEllipse(inner_rect)
+
+        # 用量扇形
+        if inner_pct is not None and inner_pct > 0:
+            base_hue = "#5aa9ff"
+            for cfg in LAYER_CONFIG:
+                if cfg["key"] == "monthly":
+                    base_hue = cfg["hue"]
+                    break
+            inner_color = _rate_color(QColor(base_hue), inner_pct)
+            span = int(-360 * 16 * (inner_pct / 100.0))
+            painter.setBrush(inner_color)
+            painter.drawPie(inner_rect, start_angle, span)
 
         painter.end()
