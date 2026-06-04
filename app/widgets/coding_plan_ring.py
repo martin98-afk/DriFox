@@ -7,7 +7,7 @@
 只有数据可用时才显示。
 """
 from PyQt5.QtCore import Qt, QTimer, QPoint, QRectF
-from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics, QPainterPath
+from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics
 from PyQt5.QtWidgets import QWidget, QApplication, QToolTip
 
 from app.utils.design_tokens import _get_global_font, scale_font_size, Colors
@@ -130,7 +130,7 @@ class CodingPlanRing(QWidget):
             if pct is not None:
                 reset = data.get("reset_sec")
                 reset_str = self._format_reset(reset) if reset else "即将重置"
-                lines.append(f"{cfg['label']}: {pct}%  ·  {reset_str}")
+                lines.append(f"{cfg['label']}: {pct}% ({reset_str})")
         self._tooltip_lines = lines
 
     def _format_reset(self, sec: int) -> str:
@@ -200,10 +200,14 @@ class CodingPlanRing(QWidget):
             tooltip_width = 220
             tooltip_height = len(lines) * 20 + 16
 
-        top_right = self.mapToGlobal(self.rect().topRight())
-        top_left = self.mapToGlobal(self.rect().topLeft())
-        x = top_left.x() - tooltip_width + 30
-        y = top_right.y()
+        # 用窗口右沿定位：圆环在右上角，tooltip 显示在它左侧
+        window = self.window()
+        window_right = window.x() + window.width()
+        widget_top_global = self.mapToGlobal(QPoint(0, 0)).y()
+        # 限制定位用的宽度不超过 280px（避免字体度量高估导致偏左）
+        pos_width = min(tooltip_width, 280)
+        x = window_right - pos_width - 20
+        y = widget_top_global + 10
 
         screen = QApplication.desktop().screenGeometry(self)
         if x < screen.left():
