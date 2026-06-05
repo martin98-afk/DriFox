@@ -222,13 +222,13 @@ class ContextUsageRing(QWidget):
         x = window_right - pos_width - 16
         y = widget_top_global + 10
 
-        screen = QApplication.desktop().screenGeometry(self)
-        if x < screen.left():
-            x = screen.left() + 5
-        if y < screen.top():
-            y = screen.top() + 5
-        if y + tooltip_height > screen.bottom():
-            y = screen.bottom() - tooltip_height - 5
+        screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
+        if x < screen_geom.left():
+            x = screen_geom.left() + 5
+        if y < screen_geom.top():
+            y = screen_geom.top() + 5
+        if y + tooltip_height > screen_geom.bottom():
+            y = screen_geom.bottom() - tooltip_height - 5
 
         QToolTip.showText(QPoint(x, y), tooltip_text, self)
 

@@ -138,15 +138,15 @@ class TelegramAdapter(BasePlatformAdapter):
         if msg.text:
             msg_type = MessageType.COMMAND if msg.text.startswith('/') else MessageType.TEXT
         elif msg.photo:
-            msg_type = MessageType.PHOTO
+            msg_type = MessageType.IMAGE
         elif msg.video:
             msg_type = MessageType.VIDEO
         elif msg.voice:
-            msg_type = MessageType.VOICE
+            msg_type = MessageType.AUDIO
         elif msg.audio:
             msg_type = MessageType.AUDIO
         elif msg.document:
-            msg_type = MessageType.DOCUMENT
+            msg_type = MessageType.FILE
         else:
             msg_type = MessageType.TEXT
         

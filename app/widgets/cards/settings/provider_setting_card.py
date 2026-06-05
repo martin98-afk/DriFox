@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from loguru import logger
 import requests
 from PyQt5.QtCore import pyqtSignal, QSize, Qt, QRect
 from PyQt5.QtGui import QIcon, QPainter, QColor, QFont
@@ -76,9 +77,9 @@ def fetch_provider_models(
     last_error = ""
     for url in urls_to_try:
         try:
-            print(f"[ProviderEditDialog] Trying {url}")
+            logger.debug(f"[ProviderEditDialog] Trying {url}")
             response = requests.get(url, headers=headers, timeout=10)
-            print(f"[ProviderEditDialog] Response status: {response.status_code}")
+            logger.debug(f"[ProviderEditDialog] Response status: {response.status_code}")
 
             if response.status_code == 200:
                 data = response.json()
@@ -131,7 +132,7 @@ def fetch_provider_models(
             last_error = str(e)
 
     if last_error:
-        print(f"[ProviderEditDialog] All attempts failed. Last error: {last_error}")
+        logger.warning(f"[ProviderEditDialog] All attempts failed. Last error: {last_error}")
     return []
 
 

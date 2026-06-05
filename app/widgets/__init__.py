@@ -47,12 +47,11 @@ __all__ = [
     # 对话组件
     "SendableTextEdit",
     "ContextUsageRing",
+    "CodingPlanRing",
     "ConversationNodePreview",
     "MemoryCardContent",
     # 对话框
     "FileUndoPreviewDialog",
     # Gateway
-    "GatewaySettingsWidget",
-    "WeComSettingsCard",
-    "DingTalkSettingsCard",
+    "GatewaySettingCard",
 ]

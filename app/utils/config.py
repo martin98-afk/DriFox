@@ -88,7 +88,7 @@ class Settings(QConfig):
                 cls._config_loaded = True  # 标记配置成功加载
                 # 迁移旧格式的服务商配置
                 cls._migrate_saved_providers(cls._instance)
-            except:
+            except Exception:
                 logger.exception("无法加载配置文件")
                 cls._config_loaded = False
         return cls._instance
@@ -200,7 +200,7 @@ class Settings(QConfig):
         # deepcopy new value
         try:
             item.value = deepcopy(value) if copy else value
-        except:
+        except Exception:
             item.value = value
 
         if save:
