@@ -250,6 +250,23 @@ class _HistoryItemCard(SimpleCardWidget):
         self.current_indicator.setVisible(is_current)
         top_row.addWidget(self.current_indicator, 0, Qt.AlignTop)
 
+        # worktree 分支标记（仅非主分支显示）
+        self._branch_label = CaptionLabel("", self)
+        self._branch_label.setStyleSheet(f"""
+            CaptionLabel {{
+                color: {_tag_text};
+                background-color: {_tag_bg};
+                border-radius: 3px;
+                padding: 1px 5px;
+                font-size: {_caption_size - 1}px;
+                {_font_family}
+            }}
+        """)
+        self._branch_label.setVisible(bool(worktree_branch))
+        if worktree_branch:
+            self._branch_label.setText(f"🌿 {worktree_branch}")
+        top_row.addWidget(self._branch_label, 0, Qt.AlignTop)
+
         btn_container = QHBoxLayout()
         btn_container.setSpacing(2)
 
@@ -279,23 +296,6 @@ class _HistoryItemCard(SimpleCardWidget):
             f"color: {_accent_warm}; font-size: {_caption_size}px; {_font_family}" if is_current else f"color: {_text_secondary}; font-size: {_caption_size}px; {_font_family}"
         )
         bottom_row.addWidget(self.meta_label)
-
-        # worktree 分支标记（仅非主分支显示）
-        self._branch_label = CaptionLabel("", self)
-        self._branch_label.setStyleSheet(f"""
-            CaptionLabel {{
-                color: {_tag_text};
-                background-color: {_tag_bg};
-                border-radius: 3px;
-                padding: 1px 5px;
-                font-size: {_caption_size - 1}px;
-                {_font_family}
-            }}
-        """)
-        self._branch_label.setVisible(bool(worktree_branch))
-        if worktree_branch:
-            self._branch_label.setText(f"🌿 {worktree_branch}")
-        bottom_row.addWidget(self._branch_label)
 
         bottom_row.addStretch()
 

@@ -6190,12 +6190,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label.setText(session_project)
         self._refresh_project_branch_style()
 
-        # 自动切换到该会话关联的 worktree（如果存在且有效）
+        # 自动切换到该会话关联的 worktree
+        # 规则：会话有 worktree_path → 切到该 worktree
+        #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）
         worktree_path = session_record.get("worktree_path", "") or ""
-        if worktree_path and os.path.isdir(worktree_path):
+        current_wt = self._get_current_worktree_path()
+        if worktree_path and os.path.isdir(worktree_path) and worktree_path != current_wt:
             self._switch_to_worktree(worktree_path)
-        else:
-            # 不在 worktree 中则切换回主仓库（如果当前在 worktree 中）
+        elif not worktree_path and current_wt:
             self._restore_main_repo()
 
         self._display_current_session()
@@ -6897,6 +6899,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         idx,
                         session.messages,
                         **compaction_info,
+                    **worktree_kwargs,
                     )
                 else:
                     self.history_manager.save_session(
@@ -7727,12 +7730,14 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_project = session_project
             self._project_label.setText(session_project)
             self._refresh_project_branch_style()
-            # 自动切换到该会话关联的 worktree（如果存在且有效）
+            # 自动切换到该会话关联的 worktree
+            # 规则：会话有 worktree_path → 切到该 worktree
+            #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）
             worktree_path = session_record.get("worktree_path", "") or ""
-            if worktree_path and os.path.isdir(worktree_path):
+            current_wt = self._get_current_worktree_path()
+            if worktree_path and os.path.isdir(worktree_path) and worktree_path != current_wt:
                 self._switch_to_worktree(worktree_path)
-            else:
-                # 不在 worktree 中则切换回主仓库（如果当前在 worktree 中）
+            elif not worktree_path and current_wt:
                 self._restore_main_repo()
             self._display_current_session()
             self._hide_welcome_cards()
@@ -8656,6 +8661,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
+                **worktree_kwargs,
                 )
             else:
                 self.history_manager.save_session(
@@ -9508,40 +9514,37 @@ class OpenAIChatToolWindow(ToolWindow):
         return ""
 
     def _switch_to_worktree(self, worktree_path: str):
-        """切换到指定 worktree（模拟 memory_card._on_worktree_changed 的信号流）
+        """切换到指定 worktree，幂等——已在目标 worktree 中则跳过。
 
-        在加载会话时自动切换工作目录到该会话关联的 worktree。
-        Args:
-            worktree_path: worktree 的根目录绝对路径
+        加载会话时自动调用：会话关联了哪个 worktree，就切到哪个 worktree。
         """
         if not worktree_path or not os.path.isdir(worktree_path):
             return
         project = self._current_project
 
-        # 1. 通过 memory_manager 添加关键文档 + 设置工作目录
+        # 幂等：已在目标 worktree 中则跳过
+        if self._current_workdir.get(project) == worktree_path:
+            return
+
+        # 1. 通过 memory_manager 切换工作目录
         if self.backend and self.backend.memory_manager:
             mm = self.backend.memory_manager
-            # 记住 DB 中当前的工作目录（用户手动设定的根目录）
             db_wd = mm.get_working_directory(project)
-            # 添加为关键文档（标记 git_worktree，UI 显示时过滤）
             mm.add_key_document(project, worktree_path, "git_worktree")
-            # 设为工作目录（DB 写入：新窗口默认值 + 实例缓存更新）
             mm.set_working_directory(project, worktree_path)
-            # 恢复原有根目录的 is_working_dir 标记
             if db_wd and db_wd != worktree_path and db_wd != "clear":
                 mm.restore_working_directory_mark(project, db_wd)
 
-        # 2. 更新实例缓存 + 同步工具执行器 + 刷新分支标签（与 _on_working_dir_changed 一致）
+        # 2. 更新实例缓存 + 同步工具执行器 + 刷新分支标签
         self._current_workdir[project] = worktree_path
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(worktree_path)
         self._update_branch()
 
-        # 3. 同步记忆卡片的实例缓存 + 刷新关键文档列表（含 worktree 树）
+        # 3. 同步记忆卡片 UI
         try:
             if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
                 mc = self._memory_card_popup
-                # 同步 memory_card 的 _instance_workdir，确保 UI 使用正确的当前目录
                 mc._instance_workdir[project] = worktree_path
                 mc._load_key_documents()
         except Exception:
@@ -9553,10 +9556,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
     
     def _restore_main_repo(self):
-        """从 worktree 切换回主仓库（加载主仓库会话时使用）"""
+        """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
+
+        加载主仓库会话时自动调用：会话没有关联 worktree，说明属于主仓库。
+        """
         project = self._current_project
         current_wt = self._get_current_worktree_path()
         if not current_wt:
+            # 已不在 worktree 中，无需切换
             return
 
         from app.utils.git_worktree import GitWorktreeDetector
@@ -9564,6 +9571,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not main_repo or not os.path.isdir(main_repo):
             logger.warning(f"[MainWidget] 无法找到主仓库路径，跳过切换（当前 worktree: {current_wt}）")
             self._update_branch()
+            return
+
+        # 幂等：已回到主仓库则跳过
+        if self._current_workdir.get(project) == main_repo:
             return
 
         if self.backend and self.backend.memory_manager:
@@ -9584,7 +9595,7 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         logger.info(
-            f"[MainWidget] 已切换回主仓库: {main_repo}（项目: {project}）"
+            f"[MainWidget] 已自动切换回主仓库: {main_repo}（项目: {project}）"
         )
 
 
