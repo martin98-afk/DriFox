@@ -9,7 +9,7 @@
 from typing import List, Dict
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QMouseEvent, QFontMetrics
+from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QSizePolicy,
@@ -126,12 +126,26 @@ class CommandItemWidget(QWidget):
         else:
             self._shortcut_label.setVisible(False)
 
+        # 设置快捷键静态样式（只在创建时设置一次，避免每次导航都触发 setStyleSheet）
+        # 注意：_name_label 和 _desc_label 的样式在 _apply_style 中动态更新
+        self._shortcut_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_MUTED};
+                {get_font_family_css()} {font_size_css(10)};
+                background: rgba(128,128,128,0.1);
+                border-radius: 3px;
+                padding: 1px 5px;
+                font-weight: bold;
+            }}
+        """)
+
         self._apply_style()
         self._update_display()
 
     def _apply_style(self):
-        """应用当前状态的样式"""
-        Colors.refresh()
+        """应用当前状态的样式（仅更新变化的颜色，静态样式在 _setup_ui 中已设置）"""
+        # Colors.refresh() 不在此处调用——颜色在 show_card 时刷新一次即可
+        # 避免每次导航/悬停都读配置文件
 
         if self._selected:
             bg = Colors.REALTIME_TAG_BG
@@ -148,17 +162,7 @@ class CommandItemWidget(QWidget):
             }}
         """)
 
-        # 名称样式
-        fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_PRIMARY
-        self._name_label.setStyleSheet(f"""
-            QLabel {{
-                color: {fg};
-                {get_font_family_css()} {font_size_css(13)};
-                background: transparent;
-            }}
-        """)
-
-        # 描述样式
+        # 描述样式（选中时变亮）
         desc_fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_SECONDARY
         self._desc_label.setStyleSheet(f"""
             QLabel {{
@@ -200,6 +204,16 @@ class CommandItemWidget(QWidget):
                     background: transparent;
                 }}
             """)
+
+        # 名称样式
+        fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_PRIMARY
+        self._name_label.setStyleSheet(f"""
+            QLabel {{
+                color: {fg};
+                {get_font_family_css()} {font_size_css(13)};
+                background: transparent;
+            }}
+        """)
 
         # 快捷键标签样式：类键盘键帽风格，加粗
         shortcut = self._data.get("shortcut", "")
@@ -395,6 +409,7 @@ class CommandCard(QWidget):
         self._cache_dirty: bool = True                     # 缓存脏标记，热重载后置 True
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
+        self._last_selected_index = -1  # 上次选中索引，用于增量更新
         self._item_widgets: List[CommandItemWidget] = []
         self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
@@ -412,6 +427,7 @@ class CommandCard(QWidget):
         self._value_selection_param: str = ""     # 值选择对应的参数名（如 "--model="）
         self._value_widgets: List[QWidget] = []   # 值选择列表项
         self._selected_value_index: int = -1      # 值列表选中索引
+        self._last_selected_value_index: int = -1  # 上次值列表选中索引，用于增量更新
         self._data_provider: dict = {}            # 外部数据源（如 model_options）
         self.setVisible(False)
         self._setup_ui()
@@ -1045,18 +1061,29 @@ class CommandCard(QWidget):
 
     def _update_value_selection(self):
         """更新值列表选中高亮，滚动到可见"""
-        Colors.refresh()
-        for i, w in enumerate(self._value_widgets):
-            if i == self._selected_value_index:
-                w.setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
-            else:
-                w.setStyleSheet(f"""
+        # Colors.refresh() 不在导航路径中调用——颜色在 show_card 时刷新一次即可
+        old_idx = self._last_selected_value_index if hasattr(self, '_last_selected_value_index') else -1
+        new_idx = self._selected_value_index
+        self._last_selected_value_index = new_idx
+
+        # 只更新变化的项
+        if old_idx != new_idx:
+            if 0 <= old_idx < len(self._value_widgets):
+                self._value_widgets[old_idx].setStyleSheet(f"""
                     QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;
                              padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
                 """)
+            if 0 <= new_idx < len(self._value_widgets):
+                self._value_widgets[new_idx].setStyleSheet(f"""
+                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
+                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+                """)
+        elif 0 <= new_idx < len(self._value_widgets):
+            self._value_widgets[new_idx].setStyleSheet(f"""
+                QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
+                         padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+            """)
+
         # 滚动到可见
         if 0 <= self._selected_value_index < len(self._value_widgets):
             self._detail_value_scroll.ensureWidgetVisible(
@@ -1078,6 +1105,7 @@ class CommandCard(QWidget):
         self._value_selection_param = ""
         self._selected_param_index = -1
         self._selected_value_index = -1
+        self._last_selected_value_index = -1
         self._detail_container.setVisible(False)
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)
@@ -1163,8 +1191,9 @@ class CommandCard(QWidget):
         if len(self._filtered_items) > 0:
             self._selected_index = 0
             self._update_selection()
-            # 延迟滚动到顶部：等待布局完成后强制归零，避免初始渲染时 scroll 位置偏移
-            QTimer.singleShot(0, lambda: self._scroll_area.verticalScrollBar().setValue(0))
+            # 首次渲染时 scroll 位置已正确（item 0 在顶部），无需额外滚动
+            # 移除冗余的 QTimer.singleShot 滚动重置——_update_selection 中的
+            # ensureWidgetVisible(item[0]) 已确保 item 0 可见，且 item 0 就在顶部
 
     def _render(self, incremental: bool = False):
         """渲染当前筛选结果
@@ -1321,8 +1350,20 @@ class CommandCard(QWidget):
                 continue
         self._item_widgets = safe_widgets
 
-        for i, widget in enumerate(self._item_widgets):
-            widget.set_selected(i == self._selected_index)
+        old_idx = self._last_selected_index
+        new_idx = self._selected_index
+
+        # 只更新变化的 widget（旧选中取消 + 新选中激活）
+        if old_idx != new_idx:
+            if 0 <= old_idx < len(self._item_widgets):
+                self._item_widgets[old_idx].set_selected(False)
+            if 0 <= new_idx < len(self._item_widgets):
+                self._item_widgets[new_idx].set_selected(True)
+        elif 0 <= new_idx < len(self._item_widgets):
+            # 索引相同但需要刷新（如首次选中）
+            self._item_widgets[new_idx].set_selected(True)
+
+        self._last_selected_index = new_idx
 
         # 记录当前选中项的 display_type（用于 detail 模式显示/执行）
         if 0 <= self._selected_index < len(self._filtered_items):
@@ -1440,6 +1481,8 @@ class CommandCard(QWidget):
             query: 搜索查询
             incremental: 是否增量更新（默认开启，可提升流畅性）
         """
+        # 在入口刷新一次颜色，避免每个 widget 的 _apply_style 都读配置文件
+        Colors.refresh()
         was_detail = self._reset_detail_mode()  # 回到列表模式
         self._current_query = query
         self._refresh_data()

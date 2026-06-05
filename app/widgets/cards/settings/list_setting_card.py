@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QRadioButton,
 )
 from qfluentwidgets import (
+    CardWidget,
     ToolButton,
     FluentIcon,
     PushButton,
@@ -28,8 +29,9 @@ from qfluentwidgets import (
     MessageBox,
     ComboBox,
     PrimaryPushButton,
+    StrongBodyLabel,
 )
-from app.utils.design_tokens import Colors, ItemStyles, Sizes, ButtonStyles, font_size_css
+from app.utils.design_tokens import Colors, ItemStyles, Sizes, ButtonStyles, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
 
@@ -250,42 +252,66 @@ class PackageItem(QWidget):
         self.removeButton.clicked.connect(lambda: self.removed.emit(self))
 
 
-class SkillItem(QWidget):
-    """Skill item with enable switch"""
+class _ElidedLabel(QLabel):
+    """自动根据可用宽度省略文本的 QLabel"""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._full_text = text
+
+    def setText(self, text: str):
+        self._full_text = text
+        self._update_elided()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_elided()
+
+    def _update_elided(self):
+        fm = self.fontMetrics()
+        elided = fm.elidedText(self._full_text, Qt.ElideRight, self.width())
+        super().setText(elided)
+
+
+class SkillItem(CardWidget):
+    """Skill item with enable switch — 紧凑卡片风格，参考 MCPServerRow"""
 
     enabled_changed = pyqtSignal(str, bool)
 
     def __init__(self, name: str, description: str, is_enabled: bool, parent=None):
         super().__init__(parent=parent)
-        self.setStyleSheet("background-color: transparent;")
         self.name = name
-        self.hBoxLayout = QHBoxLayout(self)
-        self.nameLabel = QLabel(name, self)
-        self.descLabel = QLabel(description, self)
+        self._setup_ui(name, description, is_enabled)
+
+    def _setup_ui(self, name: str, description: str, is_enabled: bool):
         from qfluentwidgets import SwitchButton
         from app.utils.design_tokens import SwitchStyles
 
-        self.switch = SwitchButton(self)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setSpacing(8)
+
+        # 技能名称
+        name_label = StrongBodyLabel(name)
+        name_label.setFixedWidth(100)
+        layout.addWidget(name_label)
+
+        # 描述（自动省略）
+        desc_label = _ElidedLabel(description)
+        desc_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+        )
+        desc_label.setMinimumWidth(40)
+        layout.addWidget(desc_label, 1)
+
+        # 开关
+        self.switch = SwitchButton()
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(is_enabled)
-
-        self.nameLabel.setFixedWidth(140)
-        self.nameLabel.setObjectName("titleLabel")
-        self.nameLabel.setStyleSheet(f"font-weight: bold; {font_size_css(12)}; {get_font_family_css()}")
-        self.descLabel.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; {get_font_family_css()}")
-        self.descLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        self.setFixedHeight(53)
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.hBoxLayout.setContentsMargins(16, 0, 16, 0)
-        self.hBoxLayout.addWidget(self.nameLabel, 0, Qt.AlignLeft)
-        self.hBoxLayout.addWidget(self.descLabel, 1, Qt.AlignLeft)
-        self.hBoxLayout.addWidget(self.switch, 0, Qt.AlignRight)
-        self.hBoxLayout.setAlignment(Qt.AlignVCenter)
-
         self.switch.checkedChanged.connect(
-            lambda checked: self.enabled_changed.emit(self.name, checked)
+            lambda v: self.enabled_changed.emit(self.name, v)
         )
+        layout.addWidget(self.switch)
 
 
 class SkillListSettingCard(ExpandSettingCard):
@@ -407,10 +433,10 @@ class SkillListSettingCard(ExpandSettingCard):
         header_widget = QWidget(self.view)
         header_widget.setStyleSheet("background-color: transparent;")
         header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(16, 8, 16, 8)
+        header_layout.setContentsMargins(12, 6, 12, 6)
 
         header_title = QLabel("技能名称", header_widget)
-        header_title.setFixedWidth(140)
+        header_title.setFixedWidth(100)
         header_title.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )
@@ -419,7 +445,7 @@ class SkillListSettingCard(ExpandSettingCard):
         header_desc.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}")
 
         header_state = QLabel("启用", header_widget)
-        header_state.setFixedWidth(80)
+        header_state.setFixedWidth(50)
         header_state.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )
