@@ -784,7 +784,13 @@ Use the tools available to you based on your permissions.
 2. 根据结果评估完成情况
 3. 输出总结或后续建议（如有需要）
 
-不要在回复中重复消息内容，直接给出检查结果和建议。""".strip()
+不要在回复中重复消息内容，直接给出检查结果和建议。
+
+## 子智能体查询约定
+- subagent_status 返回的 status 可能是 running / finishing / finished / failed / unknown。
+- 对于 running / finishing（附带 `_hint` 字段），**不要重复调用 subagent_status 轮询结果**。
+  任务完成后系统会自动通过 `[后台任务状态]` 消息通知，届时再查询。
+- 仅在确实需要重新查看已完成任务的详情时，才按 task_id 显式查询。""".strip()
 
     def get_enabled_skills_content(self, enabled_skills: List[str]) -> str:
         """获取已启用的技能内容"""

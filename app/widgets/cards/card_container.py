@@ -9,16 +9,22 @@ from app.widgets.cards.card_manager import CardManager, ContainerType
 
 class CardContainer(QWidget):
     """通用卡片容器 - 每个容器只管理一个位置的卡片
-    
+
     功能：
     - 管理同位置多张卡片的显示/隐藏
     - 单卡片互斥：同一时间只显示一张
     - 动态展开/收起容器（放开/限制最大高度，让 Qt 自然布局）
     - 只响应自己容器内的卡片事件
     """
-    
+
     # 展开时放开最大高度限制，让 Qt 布局系统自动计算合适高度
     _EXPAND_MAX = 16777215
+
+    # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
+    # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
+    # 容器动画会与这些交互产生约一个动画时长的高度延迟 / 抖动。
+    # 声明后，容器高度会直接 snap 到目标值，不再走 QPropertyAnimation。
+    NO_ANIMATION_PROP = "noContainerAnimation"
 
     def __init__(self, container_type: ContainerType):
         super().__init__()
@@ -52,6 +58,16 @@ class CardContainer(QWidget):
     def _is_expanded(self) -> bool:
         """容器是否已展开"""
         return self.maximumHeight() >= self._EXPAND_MAX
+
+    def _should_skip_animation(self) -> bool:
+        """当前可见卡片中是否存在声明跳过容器动画的卡片
+
+        用于 resize 等高频高度变化场景，避免容器动画造成视觉延迟。
+        """
+        for w in self._cards.values():
+            if w.isVisible() and w.property(self.NO_ANIMATION_PROP):
+                return True
+        return False
 
     def _on_card_shown(self, card_id: str):
         """某张卡片被显示"""
@@ -99,8 +115,13 @@ class CardContainer(QWidget):
             self._expand_timer.start()
     
     def _do_expand(self):
-        """执行展开/折叠动画（200ms 缓动，OutCubic）"""
+        """执行展开/折叠动画（200ms 缓动，OutCubic）
+
+        若当前唯一可见卡片声明了 NO_ANIMATION_PROP（例如自带 resize 的 todo 卡片），
+        则跳过动画、直接 snap 到目标高度，避免容器高度在拖拽过程中滞后于卡片内容。
+        """
         has_visible = any(w.isVisible() for w in self._cards.values())
+        skip_anim = self._should_skip_animation()
 
         # 取消进行中的动画，避免叠加造成跳变
         if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
@@ -114,7 +135,7 @@ class CardContainer(QWidget):
         self.setMinimumHeight(0)
 
         if has_visible:
-            # ── 展开：从 0 高度动画到 layout 算出的自然高度 ──
+            # ── 展开：snap 或动画到 layout 算出的自然高度 ──
             # 先放开 maxHeight，让 layout 算出"展开后该有多高"
             self.setMaximumHeight(self._EXPAND_MAX)
             natural_h = self._layout.sizeHint().height()
@@ -125,14 +146,21 @@ class CardContainer(QWidget):
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
                 return
+            if skip_anim:
+                # 声明跳过动画：直接 snap，避免 resize / 拖拽期间高度延迟
+                self.setMaximumHeight(natural_h)
+                return
             self._animate_height(current_h, natural_h, on_finished=None)
         else:
-            # ── 折叠：从当前高度动画到 0，结束后锁定 maxHeight=0 ──
+            # ── 折叠：snap 或动画到 0，结束后锁定 maxHeight=0 ──
             # 折叠前 maxHeight 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实 height
             if self.maximumHeight() < self._EXPAND_MAX:
                 self.setMaximumHeight(self._EXPAND_MAX)
             current_h = self.height()
             if current_h <= 0:
+                self.setMaximumHeight(0)
+                return
+            if skip_anim:
                 self.setMaximumHeight(0)
                 return
             self._animate_height(
