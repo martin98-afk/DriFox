@@ -291,6 +291,29 @@ class GitWorktreeDetector:
         return info
 
     @staticmethod
+    def get_main_repo_path(worktree_path: str) -> Optional[str]:
+        """从 worktree 路径反查主仓库根目录
+
+        Worktree 的 .git 是一个文件，内容格式为：
+            gitdir: /path/to/main/.git/worktrees/name
+        （Windows: gitdir: D:/path/to/main/.git/worktrees/name）
+        通过向上三层即可得到主仓库根目录。
+        """
+        git_file = os.path.join(worktree_path, ".git")
+        if not os.path.isfile(git_file):
+            return None
+        try:
+            with open(git_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content.startswith("gitdir:"):
+                gitdir_path = content[7:].strip()
+                # .git/worktrees/name → .git/worktrees → .git → repo root
+                return os.path.dirname(os.path.dirname(os.path.dirname(gitdir_path)))
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def get_worktree_by_branch(worktrees: List[WorktreeInfo], branch: str) -> Optional[WorktreeInfo]:
         """根据分支名查找 worktree"""
         for wt in worktrees:

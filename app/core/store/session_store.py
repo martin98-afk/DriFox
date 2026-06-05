@@ -184,6 +184,7 @@ class SessionStore:
                     {"name": "project", "type": "TEXT", "default": "默认项目"},
                     {"name": "created_at", "type": "TEXT"},
                     {"name": "updated_at", "type": "TEXT"},
+                    {"name": "worktree_path", "type": "TEXT", "default": ""},
                 ])
 
                 # 创建记忆表
@@ -243,6 +244,7 @@ class SessionStore:
                 self._migrate_add_project_column()
                 self._migrate_remove_canvas_id()
                 self._migrate_add_user_edited_title_column()
+                self._migrate_add_worktree_path_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -332,6 +334,22 @@ class SessionStore:
                 logger.info("[SessionStore] user_edited_title 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] user_edited_title 列迁移失败(可能已存在): {e}")
+
+    def _migrate_add_worktree_path_column(self):
+        """迁移：添加 worktree_path 列（如果不存在）"""
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "worktree_path" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 worktree_path 列")
+                self._db.execute_sql(
+                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN worktree_path TEXT DEFAULT ''"
+                )
+                logger.info("[SessionStore] worktree_path 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] worktree_path 列迁移失败(可能已存在): {e}")
 
     @property
     def is_initialized(self) -> bool:

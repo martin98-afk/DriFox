@@ -251,6 +251,7 @@ class HistoryManager:
         compaction_cache: Dict = None,
         system_prompt: str = None,
         project: str = None,
+        worktree_path: str = None,
     ):
         """保存会话"""
         if not messages:
@@ -265,6 +266,7 @@ class HistoryManager:
             compaction_cache=compaction_cache,
             system_prompt=system_prompt,
             project=project,
+            worktree_path=worktree_path,
         )
         new_session_id = session_record["session_id"]
 
@@ -301,6 +303,7 @@ class HistoryManager:
         compaction_cache: Dict = None,
         system_prompt: str = None,
         project: str = None,
+        worktree_path: str = None,
     ) -> Dict:
         now = datetime.now()
         saved_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -332,6 +335,7 @@ class HistoryManager:
             "compaction_cache": dict(compaction_cache or {}),
             "system_prompt": system_prompt or "",
             "user_edited_title": False,
+            "worktree_path": worktree_path or "",
         }
 
     def get_current_title(self, index: int) -> str:
@@ -432,6 +436,7 @@ class HistoryManager:
                     "message_count": s.get("message_count", 0),
                     "preview": preview,
                     "user_edited_title": s.get("user_edited_title", False),
+                    "worktree_path": s.get("worktree_path", "") or "",
                 })
             return result
 
@@ -731,6 +736,7 @@ class HistoryManager:
         compaction_cache: Dict = None,
         system_prompt: str = None,
         project: str = None,
+        worktree_path: str = None,
     ):
         """更新会话"""
         if 0 <= index < len(self._history_sessions):
@@ -758,6 +764,7 @@ class HistoryManager:
                     else existing.get("system_prompt", "")
                 ),
                 project=project if project is not None else existing.get("project", "默认项目"),
+                worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
             )
             # 移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
             self._history_sessions.pop(index)
