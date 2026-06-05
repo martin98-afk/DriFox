@@ -791,7 +791,7 @@ class MemoryCardContent(QWidget):
         from PyQt5.QtCore import QTimer
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
-        self._auto_save_timer.setInterval(1000)  # 1秒后保存
+        self._auto_save_timer.setInterval(300)  # 300ms 去抖后保存
         self._auto_save_timer.timeout.connect(self._save_project_note)
         
         main_layout.addWidget(self.notes_editor, 1)
@@ -1168,24 +1168,34 @@ class MemoryCardContent(QWidget):
     # ==================== 项目笔记操作 ====================
 
     def _load_project_note(self):
-        """加载项目笔记"""
+        """加载项目笔记（从当前 workdir 的 AGENTS.md）"""
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
 
+        workdir = self._get_effective_workdir(self._current_project)
         self.project_name_label.setText(f"项目: {self._current_project}")
-        note = memory_mgr.get_or_create_project_note(self._current_project)
+        note = memory_mgr.get_or_create_project_note(
+            self._current_project, workdir=workdir
+        )
         content = note.get("content", "") if note else ""
+        # 临时阻止 textChanged 信号（避免去抖保存触发）
+        self.notes_editor.blockSignals(True)
         self.notes_editor.setPlainText(content)
+        self.notes_editor.blockSignals(False)
         self._update_notes_stats()
 
     def _save_project_note(self):
-        """保存项目笔记"""
+        """保存项目笔记（写入当前 workdir 的 AGENTS.md）"""
         memory_mgr = self._get_memory_manager()
         if memory_mgr:
+            workdir = self._get_effective_workdir(self._current_project)
             content = self.notes_editor.toPlainText()
-            memory_mgr.save_project_note(self._current_project, content)
-            self.projectNoteChanged.emit(self._current_project, content)
+            success = memory_mgr.save_project_note(
+                self._current_project, content, workdir=workdir
+            )
+            if success:
+                self.projectNoteChanged.emit(self._current_project, content)
 
     # ==================== 关键文档操作 ====================
 
