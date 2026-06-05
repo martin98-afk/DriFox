@@ -380,6 +380,12 @@ class SubAgentExecutor(QThread):
             )
             current_reasoning = reasoning_content
 
+            # 记录大模型生成内容（thinking + ai_response），排除工具调用结果
+            if current_reasoning:
+                self._add_log("thinking", current_reasoning)
+            if response_content:
+                self._add_log("ai_response", response_content)
+
             if self._is_cancelled:
                 return ""
 
@@ -627,7 +633,6 @@ class SubAgentExecutor(QThread):
                 return None
 
             self._tool_call_count += 1
-            self._add_log("tool_call", tool_name, {"args": arguments})
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
             QCoreApplication.processEvents()
 
@@ -635,7 +640,6 @@ class SubAgentExecutor(QThread):
             result_content = str(result) if result else ""
             success = getattr(result, "success", True) if result else False
 
-            self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
             QCoreApplication.processEvents()
 
