@@ -195,6 +195,12 @@ class MemoryManagerCore:
             return 0
         return self._key_documents_repo.clear_by_project(project)
 
+    def get_worktree_counts(self) -> Dict[str, int]:
+        """获取所有项目的 git worktree 数量"""
+        if not self._key_documents_repo:
+            return {}
+        return self._key_documents_repo.get_worktree_counts()
+
     def set_working_directory(self, project: str, file_path: str) -> bool:
         """设置项目的工作目录（互斥）"""
         if not self._key_documents_repo:

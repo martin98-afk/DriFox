@@ -129,6 +129,9 @@ from app.widgets.cards.settings.model_config_card import (
 from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
 )
+from app.widgets.cards.settings.project_selector_card import (
+    ProjectSelectorCardContent,
+)
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
@@ -148,7 +151,6 @@ from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
 )
-from app.widgets.project_selector_popup import ProjectSelectorPopup
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
     add_message_to_layout,
@@ -551,6 +553,16 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("hook_edit", self._hook_edit_card)
 
+        # 项目选择卡片（Top 容器，与 settings 同容器互斥）
+        mgr.register_card(
+            self._window_id,
+            ContainerType.TOP,
+            "project_selector",
+            self._project_selector_card,
+            system_card=True,
+        )
+        self._top_card_container.add_card("project_selector", self._project_selector_card)
+
         # ===== BottomCardContainer (chatscroll 下方) =====
         # Question: 强制覆盖所有其他卡片
         # Tool/SubAgent: 实时卡片
@@ -952,6 +964,27 @@ class OpenAIChatToolWindow(ToolWindow):
         self._initialization_in_progress = False
         logger.debug("[OpenAIChatToolWindow] Initialization complete")
 
+        # 启动子智能体日志自动清理（每6小时清理一次，保留14天）
+        self._start_subagent_log_cleanup()
+
+    def _start_subagent_log_cleanup(self):
+        """定期清理子智能体日志，避免无限堆积"""
+        self._do_clean_subagent_logs()
+        self._subagent_log_cleanup_timer = QTimer(self)
+        self._subagent_log_cleanup_timer.setInterval(6 * 60 * 60 * 1000)  # 6小时
+        self._subagent_log_cleanup_timer.timeout.connect(self._do_clean_subagent_logs)
+        self._subagent_log_cleanup_timer.start()
+
+    def _do_clean_subagent_logs(self):
+        """执行子智能体日志清理（保留14天）"""
+        try:
+            if self.backend and self.backend.session_store:
+                deleted = self.backend.session_store.clear_old_subagent_tasks(14)
+                if deleted > 0:
+                    logger.info(f"[Cleanup] 已清理 {deleted} 条子智能体日志（保留14天）")
+        except Exception as e:
+            logger.warning(f"[Cleanup] 子智能体日志清理异常: {e}")
+
     def _safe_timer_call(self, func):
         """安全执行 QTimer.singleShot 回调，在 widget 已销毁时自动跳过
 
@@ -1288,9 +1321,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label = QLabel(self._current_project, self)
         self._project_label.setCursor(Qt.PointingHandCursor)
         self._project_label.mousePressEvent = self._on_project_label_clicked
-        self._project_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._project_label.customContextMenuRequested.connect(self._show_context_menu)
-        self._project_label.setToolTip("点击切换项目 · 右键更多操作")
+        self._project_label.setToolTip("点击切换项目")
         pb_layout.addWidget(self._project_label)
 
         # 分支分隔符（三角箭头，面包屑风格）
@@ -1695,6 +1726,31 @@ class OpenAIChatToolWindow(ToolWindow):
             "model_selector", self._model_selector_card
         )
 
+        # 项目选择卡片（Top 卡片，与 settings 同容器）
+        self._project_selector_card = BaseSettingsCard("", "", self)
+        self._project_selector_card.setFixedHeight(300)
+        self._project_selector_card_content = ProjectSelectorCardContent()
+        self._project_selector_card_content.projectSelected.connect(
+            self._on_project_selected
+        )
+        self._project_selector_card_content.newProjectCreated.connect(
+            self._on_new_project_created
+        )
+        self._project_selector_card_content.archiveProject.connect(
+            self._on_archive_project
+        )
+
+        self._project_selector_card.content_layout.addWidget(
+            self._project_selector_card_content
+        )
+        self._project_selector_card.setVisible(False)
+        self._project_selector_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("project_selector", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+
         # AutoLoop 配置卡片
         from app.widgets.cards.settings.auto_loop_card import (
             AutoLoopConfigCard,
@@ -1749,6 +1805,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "provider_edit",
             "mcp_edit",
             "hook_edit",
+            "project_selector",
         ):
             self._card_manager.on_card_shown(
                 self._window_id, _cid, lambda cid: self._on_system_card_opened(cid)
@@ -4529,8 +4586,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_model_selector_card"):
             self._model_selector_card.refresh_style()
             self._update_model_selector_header()
-        if hasattr(self, "_project_selector_popup") and self._project_selector_popup:
-            self._project_selector_popup.refresh_style()
+        if hasattr(self, "_project_selector_card_content"):
+            self._project_selector_card_content.refresh_style()
+        if hasattr(self, "_project_selector_card"):
+            self._project_selector_card.refresh_style()
         # 刷新记忆卡片主题
         if hasattr(self, "_memory_card_popup") and hasattr(
             self._memory_card_popup, "refresh_style"
@@ -9095,9 +9154,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._refresh_project_branch_style()
 
     def _on_project_label_clicked(self, event):
-        """项目标签点击 - 显示项目选择 popup"""
+        """项目标签点击 - 切换项目选择卡片"""
         event.accept()
-        self._show_project_selector_popup()
+        self._toggle_project_selector_card()
 
     def _refresh_branch_widget_style(self):
         """刷新分支按钮的文字样式"""
@@ -9228,26 +9287,53 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self, "_memory_card") and self._memory_card:
                 self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
 
-    def _show_project_selector_popup(self):
-        """显示项目选择弹窗"""
-        if hasattr(self, "_project_selector_popup") and self._project_selector_popup:
-            self._project_selector_popup.close()
-            self._project_selector_popup.deleteLater()
+    def _toggle_project_selector_card(self):
+        """切换项目选择卡片的显示"""
+        self._card_manager.toggle_card("project_selector", self._window_id)
+        if self._card_manager.is_card_visible("project_selector", self._window_id):
+            # 加载项目数据
+            projects = (
+                self.history_manager.get_projects()
+                if self.history_manager
+                else ["默认项目"]
+            )
+            # 确保当前项目在列表中（新建项目可能还没有会话/文档记录）
+            if self._current_project not in projects:
+                projects.insert(0, self._current_project)
 
-        projects = (
-            self.history_manager.get_projects()
-            if self.history_manager
-            else ["默认项目"]
-        )
-        self._project_selector_popup = ProjectSelectorPopup(
-            projects=projects, current_project=self._current_project, parent=self
-        )
-        self._project_selector_popup.projectSelected.connect(self._on_project_selected)
-        self._project_selector_popup.newProjectCreated.connect(
-            self._on_new_project_created
-        )
-        self._project_selector_popup.archiveProject.connect(self._on_archive_project)
-        self._project_selector_popup.show_at(self._project_label)
+            # 获取每个项目的会话数和 worktree 数
+            meta_map = self._build_project_meta_map(projects)
+
+            self._project_selector_card_content.set_projects_data(
+                projects, self._current_project, meta_map
+            )
+            # 更新卡片标题
+            self._project_selector_card.set_title_text(
+                f"📁 {self._current_project}"
+            )
+
+    def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
+        """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
+
+        会话数使用 history_manager.get_history_list() 获取（与历史卡片查询方式一致），
+        该方法会先调用 _deduplicate_history_sessions() 去重，避免重复计数。
+        """
+        meta_map: Dict[str, Dict[str, int]] = {p: {"sessions": 0, "worktrees": 0} for p in projects}
+        try:
+            # 会话数：与历史卡片查询方式一致（先去重再过滤）
+            if self.history_manager:
+                for proj in projects:
+                    sessions = self.history_manager.get_history_list(proj)
+                    meta_map[proj]["sessions"] = len(sessions)
+            # 工作目录数
+            if self.backend and self.backend.memory_manager:
+                worktree_counts = self.backend.memory_manager.get_worktree_counts()
+                for p, c in worktree_counts.items():
+                    if p in meta_map:
+                        meta_map[p]["worktrees"] = c
+        except Exception as e:
+            logger.warning(f"[MainWidget] 获取项目元数据异常: {e}")
+        return meta_map
 
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
@@ -9277,6 +9363,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._refresh_history_toggle_panel()
         # 自动触发新建会话，避免原会话与切换后的项目不匹配
         self._create_new_session()
+        # 隐藏项目选择卡片
+        self._card_manager.hide_card("project_selector", self._window_id)
 
     def _on_new_project_created(self, project: str):
         """新建项目后"""
@@ -9303,37 +9391,78 @@ class OpenAIChatToolWindow(ToolWindow):
             self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
         # 自动触发新建会话
         self._create_new_session()
+        # 隐藏项目选择卡片
+        self._card_manager.hide_card("project_selector", self._window_id)
 
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
         if not self.history_manager:
             return
 
-        # 后端执行归档
+        # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
         count = self.history_manager.archive_project(project_name)
 
-        if count > 0:
-            # 如果归档的是当前项目，切换到默认项目
-            if project_name == self._current_project:
-                default_project = "默认项目"
-                self._current_project = default_project
-                self.backend._current_project = default_project
-                self._project_label.setText(default_project)
-                self._refresh_project_branch_style()
-                self._update_branch()
-                # 保存到配置
-                self.cfg.current_project.value = default_project
-                self.cfg.save()
-                # 创建新会话
-                self._create_new_session()
+        # 无论是否有会话，都清理该项目关联的关键文档和笔记
+        # 必须彻底清理三张表，否则 UNION 查询会让已归档项目"复活"
+        cleanup_ok = True
+        if self.backend and self.backend.memory_manager:
+            mm = self.backend.memory_manager
+            # 清理关键文档
+            if mm._key_documents_repo:
+                try:
+                    deleted = mm.clear_key_documents(project_name)
+                    if deleted == 0:
+                        # 可能是没有文档，也可能是清理失败，验证一下
+                        remaining = mm._key_documents_repo.get_all_projects()
+                        if project_name in remaining:
+                            logger.warning(
+                                f"[Archive] key_documents 清理失败: {project_name} 仍在表中"
+                            )
+                            cleanup_ok = False
+                except Exception as e:
+                    logger.error(f"[Archive] 清理关键文档异常: {e}")
+                    cleanup_ok = False
             else:
-                # 更新当前项目过滤
-                self._current_history_project = self._current_project
-                self._refresh_history_toggle_panel()
+                logger.warning("[Archive] _key_documents_repo 未初始化，跳过关键文档清理")
+            # 清理旧版项目笔记（SQLite）
+            if mm._legacy_project_notes_repo:
+                try:
+                    mm._legacy_project_notes_repo.delete(project_name)
+                except Exception as e:
+                    logger.error(f"[Archive] 清理旧版项目笔记异常: {e}")
+                    cleanup_ok = False
+            else:
+                logger.warning("[Archive] _legacy_project_notes_repo 未初始化，跳过笔记清理")
+        else:
+            logger.warning(
+                f"[Archive] backend/memory_manager 不可用，无法清理 {project_name} 的关联数据"
+            )
+            cleanup_ok = False
 
-            # 刷新历史面板
-            self._history_popup_card.refreshRequested.emit()
+        if not cleanup_ok:
+            logger.warning(
+                f"[Archive] {project_name} 的关联数据可能未完全清理，下次打开卡片时可能重现"
+            )
 
+        # 如果归档的是当前项目，切换到默认项目
+        if project_name == self._current_project:
+            default_project = "默认项目"
+            self._current_project = default_project
+            self.backend._current_project = default_project
+            self._project_label.setText(default_project)
+            self._refresh_project_branch_style()
+            self._update_branch()
+            self.cfg.current_project.value = default_project
+            self.cfg.save()
+            self._create_new_session()
+        else:
+            self._current_history_project = self._current_project
+            self._refresh_history_toggle_panel()
+
+        # 刷新历史面板
+        self._history_popup_card.refreshRequested.emit()
+
+        if count > 0:
             InfoBar.success(
                 "归档成功",
                 f"已归档项目「{project_name}」的 {count} 个会话",
@@ -9342,12 +9471,29 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
         else:
-            InfoBar.warning(
-                "归档失败",
-                f"项目「{project_name}」没有可归档的会话",
+            InfoBar.success(
+                "归档成功",
+                f"已移除项目「{project_name}」（无会话）",
                 parent=self,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
+            )
+
+        # 刷新项目选择卡片的列表
+        if hasattr(self, "_project_selector_card_content"):
+            projects = (
+                self.history_manager.get_projects()
+                if self.history_manager
+                else ["默认项目"]
+            )
+            # 确保刚归档的项目不在列表中（兜底，防止残留数据导致复活）
+            if project_name in projects:
+                projects.remove(project_name)
+            if self._current_project not in projects:
+                projects.insert(0, self._current_project)
+            meta_map = self._build_project_meta_map(projects)
+            self._project_selector_card_content.set_projects_data(
+                projects, self._current_project, meta_map
             )
 
     def _on_memory_tab_changed(self, tab_id: str):
@@ -9818,65 +9964,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _create_context_menu(self):
         self._context_menu_actions = {}
-
-    def _show_context_menu(self, pos=None):
-        from PyQt5.QtWidgets import QMenu
-
-        menu = QMenu(self)
-        export_action = menu.addAction("导出对话记录")
-        export_action.triggered.connect(self._export_conversation)
-        clear_action = menu.addAction("清空当前对话")
-        clear_action.triggered.connect(self._clear_current_conversation)
-        # 从项目标签位置弹出
-        if hasattr(self, "_project_label") and self._project_label.isVisible():
-            menu.exec_(
-                self._project_label.mapToGlobal(self._project_label.rect().bottomLeft())
-            )
-        else:
-            menu.exec_(pos)
-
-    def _export_conversation(self):
-        session = self.session_manager.get_current_session()
-        if not session or not session.messages:
-            InfoBar.warning(
-                "无法导出",
-                "当前没有对话内容",
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "导出对话",
-            f"对话_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-            "Markdown Files (*.md);;Text Files (*.txt)",
-        )
-        if not file_path:
-            return
-        try:
-            content = export_messages_to_markdown(session.messages)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            InfoBar.success(
-                "导出成功",
-                f"已保存到: {file_path}",
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
-        except Exception as e:
-            InfoBar.error(
-                "导出失败", str(e), parent=self, position=InfoBarPosition.BOTTOM
-            )
-
-    def _clear_current_conversation(self):
-        self._create_new_session()
-        InfoBar.success(
-            "已清空",
-            "开始新的对话",
-            parent=self,
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
-        )
 
     # ================================================================
     #  AutoLoop 相关方法
