@@ -133,6 +133,13 @@ def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) 
     except Exception:
         pass
 
+    # 3. worktree 分支名匹配（目录名作为分支名）
+    worktree_path = session.get("worktree_path", "") or ""
+    if worktree_path:
+        branch_name = os.path.basename(worktree_path.rstrip("/\\"))
+        if search_lower in branch_name.lower():
+            return True
+
     return False
 
 
@@ -243,13 +250,6 @@ class _HistoryItemCard(SimpleCardWidget):
         self.title_edit.editingFinished.connect(self._finish_edit)
         top_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
 
-        self.current_indicator = CaptionLabel("🔥 活跃中", self)
-        self.current_indicator.setStyleSheet(
-            f"font-size: {_caption_size}px; " + ItemStyles.tag() + _font_family
-        )
-        self.current_indicator.setVisible(is_current)
-        top_row.addWidget(self.current_indicator, 0, Qt.AlignTop)
-
         # worktree 分支标记（仅非主分支显示）
         self._branch_label = CaptionLabel("", self)
         self._branch_label.setStyleSheet(f"""
@@ -335,7 +335,6 @@ class _HistoryItemCard(SimpleCardWidget):
         # 活跃状态变化 → 需重设样式
         if self._is_current != is_current:
             self._is_current = is_current
-            self.current_indicator.setVisible(is_current)
             Colors.refresh()
             if is_current:
                 self.setStyleSheet(f"""
@@ -988,7 +987,7 @@ class HistoryCard(QWidget):
                     header = _SectionHeader(section_name, count, self)
                     self._cached_headers[section_name] = header
                 else:
-                    header.setText(f"{section_name} ({count})")
+                    header.setText(f"{section_name} ({count})" if count else section_name)
                 layout.insertWidget(layout.count() - 1, header)
 
             elif item_type == 'spacer':
