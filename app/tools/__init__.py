@@ -260,7 +260,8 @@ class BuiltinTools(QObject):
             return ToolResult(False, error="Memory manager not available")
 
         project = getattr(self, "_current_project", "默认项目") or "默认项目"
-        note = self._memory_manager.get_project_note(project)
+        workdir = str(self.workdir) if self.workdir else None
+        note = self._memory_manager.get_project_note(project, workdir=workdir)
         old_text = note.get("content", "") if note else ""
 
         if not old_text:
@@ -273,7 +274,7 @@ class BuiltinTools(QObject):
             )
 
         new_text = old_text.replace(oldString, newString, 1)
-        success = self._memory_manager.save_project_note(project, new_text)
+        success = self._memory_manager.save_project_note(project, new_text, workdir=workdir)
         if not success:
             return ToolResult(False, error="保存项目笔记失败")
 
@@ -310,7 +311,8 @@ class BuiltinTools(QObject):
             return ToolResult(False, error="Memory manager not available")
 
         project = getattr(self, "_current_project", "默认项目") or "默认项目"
-        note = self._memory_manager.get_project_note(project)
+        workdir = str(self.workdir) if self.workdir else None
+        note = self._memory_manager.get_project_note(project, workdir=workdir)
         full_content = note.get("content", "") if note else ""
 
         if not full_content:
