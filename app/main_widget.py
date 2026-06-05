@@ -121,7 +121,7 @@ from app.widgets.cards.settings.mcp_setting_card import (
 )
 from app.widgets.cards.settings.memory_card import (
     MemoryCardContent,
-    TAB_PROJECT_NOTES,
+    TAB_KEY_DOCUMENTS,
 )
 from app.widgets.cards.settings.model_config_card import (
     ModelConfigCard,
@@ -9298,9 +9298,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 自动弹出长期记忆卡片
         if not self._memory_card.isVisible():
             self._toggle_memory_card()
-        # 卡片弹出后，再切换到项目笔记标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
+        # 卡片弹出后，再切换到关键文档标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
         if hasattr(self, "_memory_card") and self._memory_card:
-            self._memory_card.set_current_tab(TAB_PROJECT_NOTES)
+            self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
         # 自动触发新建会话
         self._create_new_session()
 
