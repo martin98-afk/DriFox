@@ -8875,13 +8875,15 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         if getattr(self, "_is_destroyed", False):
             return
-        # 隐藏输入框 + 工具栏，让用户专注看问题
+        # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(False)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(False)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
@@ -8897,11 +8899,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._card_manager.hide_card("question", self._window_id)
-        # 恢复输入框 + 工具栏
+        # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(True)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(True)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -8936,11 +8940,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._card_manager.hide_card("question", self._window_id)
-        # 恢复输入框 + 工具栏
+        # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(True)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(True)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
 
         if self._pending_permission_tool_call_id:
@@ -9001,11 +9007,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
-        # 隐藏输入框 + 工具栏，让用户专注看问题
+        # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(False)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(False)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
         # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
         self._card_manager.show_card("question", self._window_id)
         self._question_floating_widget.setUpdatesEnabled(False)
@@ -9315,16 +9323,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
 
-        会话数使用 history_manager.get_history_list() 获取（与历史卡片查询方式一致），
-        该方法会先调用 _deduplicate_history_sessions() 去重，避免重复计数。
+        会话数使用 session_store.get_session_counts()（COUNT DISTINCT session_id 去重），
+        工作目录数使用 memory_manager.get_worktree_counts()。
         """
         meta_map: Dict[str, Dict[str, int]] = {p: {"sessions": 0, "worktrees": 0} for p in projects}
         try:
-            # 会话数：与历史卡片查询方式一致（先去重再过滤）
-            if self.history_manager:
-                for proj in projects:
-                    sessions = self.history_manager.get_history_list(proj)
-                    meta_map[proj]["sessions"] = len(sessions)
+            # 会话数（SQL COUNT DISTINCT session_id 去重统计）
+            if self.backend and self.backend.session_store:
+                session_counts = self.backend.session_store.get_session_counts()
+                for p, c in session_counts.items():
+                    if p in meta_map:
+                        meta_map[p]["sessions"] = c
             # 工作目录数
             if self.backend and self.backend.memory_manager:
                 worktree_counts = self.backend.memory_manager.get_worktree_counts()
@@ -9402,46 +9411,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
         count = self.history_manager.archive_project(project_name)
 
-        # 无论是否有会话，都清理该项目关联的关键文档和笔记
-        # 必须彻底清理三张表，否则 UNION 查询会让已归档项目"复活"
-        cleanup_ok = True
-        if self.backend and self.backend.memory_manager:
-            mm = self.backend.memory_manager
-            # 清理关键文档
-            if mm._key_documents_repo:
-                try:
-                    deleted = mm.clear_key_documents(project_name)
-                    if deleted == 0:
-                        # 可能是没有文档，也可能是清理失败，验证一下
-                        remaining = mm._key_documents_repo.get_all_projects()
-                        if project_name in remaining:
-                            logger.warning(
-                                f"[Archive] key_documents 清理失败: {project_name} 仍在表中"
-                            )
-                            cleanup_ok = False
-                except Exception as e:
-                    logger.error(f"[Archive] 清理关键文档异常: {e}")
-                    cleanup_ok = False
-            else:
-                logger.warning("[Archive] _key_documents_repo 未初始化，跳过关键文档清理")
-            # 清理旧版项目笔记（SQLite）
-            if mm._legacy_project_notes_repo:
-                try:
-                    mm._legacy_project_notes_repo.delete(project_name)
-                except Exception as e:
-                    logger.error(f"[Archive] 清理旧版项目笔记异常: {e}")
-                    cleanup_ok = False
-            else:
-                logger.warning("[Archive] _legacy_project_notes_repo 未初始化，跳过笔记清理")
+        # 强制清理该项目在 SQLite 三张表中的所有数据（绕过 repo 层，直接 SQL 删除）
+        # 避免 key_documents/project_notes 残留数据导致 UNION 查询让项目"复活"
+        if self.backend and self.backend.session_store:
+            self.backend.session_store.force_cleanup_project(project_name)
         else:
             logger.warning(
-                f"[Archive] backend/memory_manager 不可用，无法清理 {project_name} 的关联数据"
-            )
-            cleanup_ok = False
-
-        if not cleanup_ok:
-            logger.warning(
-                f"[Archive] {project_name} 的关联数据可能未完全清理，下次打开卡片时可能重现"
+                f"[Archive] session_store 不可用，无法强制清理 {project_name} 的关联数据"
             )
 
         # 如果归档的是当前项目，切换到默认项目

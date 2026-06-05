@@ -272,18 +272,28 @@ class MemoryManagerCore:
         docs = self.get_key_documents(project)[:doc_limit]
         # 获取当前项目的工作目录（多窗口隔离：优先使用实例缓存值）
         wd_path = workdir_override if workdir_override is not None else self.get_working_directory(project)
+        has_root_doc = False
         if docs:
             for doc in docs:
                 file_name = doc.get("file_name", "")
                 file_path = doc.get("file_path", "")
                 is_wd = file_path == wd_path
                 if is_wd:
+                    has_root_doc = True
                     lines.append(f"- {file_name} （项目根目录）{file_path}")
                 else:
                     lines.append(f"- {file_name} ({file_path})")
         else:
             lines.append("- 暂无关键文档")
         lines.append("")
+
+        # 3.5 路径使用建议（仅当关键文档中存在项目根目录标记时）
+        if has_root_doc and wd_path:
+            lines.append("### 路径使用建议")
+            lines.append(f"- 项目根目录: {wd_path}")
+            lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
+            lines.append("- 根目录外：用绝对路径")
+            lines.append("")
 
         # 4. Worktree 上下文（仅当工作目录在 git 仓库中且有 worktree 时）
         if wd_path:
