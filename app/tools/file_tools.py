@@ -354,7 +354,7 @@ class FileTools:
                                     if len(results) >= 100:
                                         return ToolResult(True, content="\n".join(
                                             results) + "\n\n... (Too many matches, please refine your search pattern)")
-                    except:
+                    except Exception:
                         continue
 
             content = "\n".join(results) if results else "No matches found."

@@ -7,6 +7,7 @@ from qfluentwidgets import SimpleCardWidget, FluentIcon, TransparentToolButton
 
 from app.utils.design_tokens import Colors
 from app.utils.utils import get_unified_font
+from app.widgets.cards.card_container import CardContainer
 
 _MAX_VISIBLE_ITEMS = 5
 _MIN_SCROLL_HEIGHT = 60   # 拖拽时滚动区最小高度
@@ -106,6 +107,10 @@ class TodoFloatingWidget(SimpleCardWidget):
         self._todo_list = []
         self._item_height_px = 30  # 会被动态更新
         self._user_scroll_height = None  # 用户拖拽覆盖的高度，None=自适应
+        # 本卡片底部带 resize 拖拽把手，拖拽期间会高频 emit heightChanged。
+        # 容器的 200ms 展开/折叠动画会导致 resize 期间容器高度滞后于卡片实际高度。
+        # 因此声明跳过容器动画，让容器高度 snap 到目标值。
+        self.setProperty(CardContainer.NO_ANIMATION_PROP, True)
         self._setup_ui()
 
     def _setup_ui(self):

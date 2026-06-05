@@ -63,9 +63,6 @@ def main():
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
     from app.utils.utils import get_app_data_dir
-    from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-
-
     # 迁移旧版本数据（打包版从安装目录迁到用户 home 目录）
     from app.utils.utils import migrate_app_data_if_needed
     migrate_app_data_if_needed()

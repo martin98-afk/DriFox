@@ -3,6 +3,7 @@
 历史会话卡片 - 包含当前会话列表和归档会话列表
 """
 import datetime
+import os
 from typing import List, Dict, Optional
 
 from pypinyin import lazy_pinyin
@@ -132,6 +133,13 @@ def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) 
     except Exception:
         pass
 
+    # 3. worktree 分支名匹配（目录名作为分支名）
+    worktree_path = session.get("worktree_path", "") or ""
+    if worktree_path:
+        branch_name = os.path.basename(worktree_path.rstrip("/\\"))
+        if search_lower in branch_name.lower():
+            return True
+
     return False
 
 
@@ -150,6 +158,7 @@ class _HistoryItemCard(SimpleCardWidget):
         message_count: int,
         is_current: bool,
         preview: str = "",
+        worktree_branch: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -157,6 +166,7 @@ class _HistoryItemCard(SimpleCardWidget):
         self._is_current = is_current
         self._is_editing = False
         self._session_id = None  # 用于缓存匹配
+        self._worktree_branch = worktree_branch  # 保留用于后续更新
         self.setCursor(Qt.PointingHandCursor)
 
         # 批量读取颜色 token 和字体尺寸（避免多次 refresh/scale_font_size 的累积开销）
@@ -177,6 +187,8 @@ class _HistoryItemCard(SimpleCardWidget):
         _text_primary = Colors.TEXT_PRIMARY
         _accent_warm = Colors.ACCENT_WARM
         _text_secondary = Colors.TEXT_SECONDARY
+        _tag_bg = Colors.TAB_ACTIVE_BG
+        _tag_text = Colors.ACCENT_WARM
 
         if is_current:
             self.setStyleSheet(f"""
@@ -238,12 +250,22 @@ class _HistoryItemCard(SimpleCardWidget):
         self.title_edit.editingFinished.connect(self._finish_edit)
         top_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
 
-        self.current_indicator = CaptionLabel("🔥 活跃中", self)
-        self.current_indicator.setStyleSheet(
-            f"font-size: {_caption_size}px; " + ItemStyles.tag() + _font_family
-        )
-        self.current_indicator.setVisible(is_current)
-        top_row.addWidget(self.current_indicator, 0, Qt.AlignTop)
+        # worktree 分支标记（仅非主分支显示）
+        self._branch_label = CaptionLabel("", self)
+        self._branch_label.setStyleSheet(f"""
+            CaptionLabel {{
+                color: {_tag_text};
+                background-color: {_tag_bg};
+                border-radius: 3px;
+                padding: 1px 5px;
+                font-size: {_caption_size - 1}px;
+                {_font_family}
+            }}
+        """)
+        self._branch_label.setVisible(bool(worktree_branch))
+        if worktree_branch:
+            self._branch_label.setText(f"🌿 {worktree_branch}")
+        top_row.addWidget(self._branch_label, 0, Qt.AlignTop)
 
         btn_container = QHBoxLayout()
         btn_container.setSpacing(2)
@@ -268,7 +290,7 @@ class _HistoryItemCard(SimpleCardWidget):
         bottom_row.setSpacing(8)
 
         rel_time = format_relative_time(last_time)
-        meta_text = f"{rel_time} · {message_count} 轮对话 · "
+        meta_text = f"{rel_time} · {message_count} 轮对话"
         self.meta_label = CaptionLabel(meta_text, self)
         self.meta_label.setStyleSheet(
             f"color: {_accent_warm}; font-size: {_caption_size}px; {_font_family}" if is_current else f"color: {_text_secondary}; font-size: {_caption_size}px; {_font_family}"
@@ -299,7 +321,8 @@ class _HistoryItemCard(SimpleCardWidget):
 
     def update_data(
         self, index: int, title: str, last_time: str,
-        message_count: int, is_current: bool, preview: str = ""
+        message_count: int, is_current: bool, preview: str = "",
+        worktree_branch: str = ""
     ):
         """原地更新卡片数据，避免重建widget"""
         self._index = index
@@ -312,7 +335,6 @@ class _HistoryItemCard(SimpleCardWidget):
         # 活跃状态变化 → 需重设样式
         if self._is_current != is_current:
             self._is_current = is_current
-            self.current_indicator.setVisible(is_current)
             Colors.refresh()
             if is_current:
                 self.setStyleSheet(f"""
@@ -353,8 +375,16 @@ class _HistoryItemCard(SimpleCardWidget):
 
         # 元信息变化
         rel_time = format_relative_time(last_time)
-        meta_text = f"{rel_time} · {message_count} 轮对话 · "
+        meta_text = f"{rel_time} · {message_count} 轮对话"
         self.meta_label.setText(meta_text)
+
+        # worktree 分支变化
+        self._worktree_branch = worktree_branch
+        if worktree_branch:
+            self._branch_label.setText(f"🌿 {worktree_branch}")
+            self._branch_label.setVisible(True)
+        else:
+            self._branch_label.setVisible(False)
 
         # 预览变化
         self._ensure_preview_label(preview)
@@ -663,6 +693,9 @@ class HistoryCard(QWidget):
         # 拼音缓存：session_id → {"pinyin": str, "initials": str}
         self._pinyin_cache: Dict[str, Dict[str, str]] = {}
 
+        # worktree 分支名缓存：worktree_path → branch_name（避免重复调 git）
+        self._worktree_branch_cache: Dict[str, str] = {}
+
         # === 搜索防抖 ===
         from PyQt5.QtCore import QTimer
         self._search_debounce_timer = QTimer(self)
@@ -708,6 +741,28 @@ class HistoryCard(QWidget):
     def set_current_project(self, project: str):
         """设置当前过滤项目"""
         self._current_project = project
+
+    def _resolve_worktree_branch(self, worktree_path: str) -> str:
+        """从 worktree 路径解析分支名（带缓存）"""
+        if not worktree_path:
+            return ""
+        # 缓存命中
+        cached = self._worktree_branch_cache.get(worktree_path)
+        if cached is not None:
+            return cached
+        # 调用 git 获取分支名
+        try:
+            from app.utils.git_worktree import GitWorktreeDetector
+            branch = GitWorktreeDetector.get_current_branch(worktree_path)
+            if branch:
+                self._worktree_branch_cache[worktree_path] = branch
+                return branch
+        except Exception:
+            pass
+        # 兜底：用目录名作为显示
+        fallback = os.path.basename(worktree_path.rstrip("/\\"))
+        self._worktree_branch_cache[worktree_path] = fallback
+        return fallback
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本（带防抖 200ms）"""
@@ -932,7 +987,7 @@ class HistoryCard(QWidget):
                     header = _SectionHeader(section_name, count, self)
                     self._cached_headers[section_name] = header
                 else:
-                    header.setText(f"{section_name} ({count})")
+                    header.setText(f"{section_name} ({count})" if count else section_name)
                 layout.insertWidget(layout.count() - 1, header)
 
             elif item_type == 'spacer':
@@ -977,6 +1032,8 @@ class HistoryCard(QWidget):
     ) -> _HistoryItemCard:
         """获取或创建缓存的 _HistoryItemCard（增量复用关键）"""
         session_id = session.get("session_id", "")
+        worktree_path = session.get("worktree_path", "") or ""
+        worktree_branch = self._resolve_worktree_branch(worktree_path) if worktree_path else ""
         card = self._cached_cards.get(session_id)
 
         if card is not None:
@@ -988,6 +1045,7 @@ class HistoryCard(QWidget):
                 message_count=session.get("message_count", 0),
                 is_current=is_current,
                 preview=preview,
+                worktree_branch=worktree_branch,
             )
             # 确保信号连接正确（用新 index）
             try:
@@ -1014,6 +1072,7 @@ class HistoryCard(QWidget):
                 message_count=session.get("message_count", 0),
                 is_current=is_current,
                 preview=preview,
+                worktree_branch=worktree_branch,
                 parent=self,
             )
             card.sessionClicked.connect(self._on_card_clicked)

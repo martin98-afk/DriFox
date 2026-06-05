@@ -13,6 +13,7 @@ Gateway 通讯平台设置卡片
 """
 import threading
 
+from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
@@ -218,7 +219,7 @@ class PlatformStatusRow(CardWidget):
             from app.gateway.config import get_gateway_config
             get_gateway_config().set_platform_enabled(self._resolve_enum(), checked)
         except Exception as e:
-            print(f"[PlatformStatusRow] Save enabled error: {e}")
+            logger.warning(f"[PlatformStatusRow] Save enabled error: {e}")
         
         self.enabledChanged.emit(self._platform, checked)
         
@@ -652,4 +653,4 @@ class GatewaySettingCard(ExpandSettingCard):
                     except Exception:
                         pass
         except Exception as e:
-            print(f"[GatewaySettingCard] Refresh error: {e}")
+            logger.warning(f"[GatewaySettingCard] Refresh error: {e}")

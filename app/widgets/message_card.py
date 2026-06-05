@@ -279,7 +279,7 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
                 .replace("&#39;", "'")
                 .replace("&quot;", '"')
             )
-        except:
+        except Exception:
             copy_text = code_content_raw
 
         b64_copy = base64.b64encode(copy_text.encode("utf-8")).decode("ascii")
@@ -769,7 +769,7 @@ def _parse_json_partial(json_str: str) -> dict:
             obj_str = json_str[obj_start:i]
             try:
                 args[key] = json.loads(obj_str)
-            except:
+            except Exception:
                 args[key] = obj_str
         elif c == '[':
             arr_start = i
@@ -788,7 +788,7 @@ def _parse_json_partial(json_str: str) -> dict:
             arr_str = json_str[arr_start:i]
             try:
                 args[key] = json.loads(arr_str)
-            except:
+            except Exception:
                 args[key] = arr_str
         elif c.isdigit() or c == '-':
             num_str = c
@@ -798,7 +798,7 @@ def _parse_json_partial(json_str: str) -> dict:
                 i += 1
             try:
                 args[key] = float(num_str) if '.' in num_str else int(num_str)
-            except:
+            except Exception:
                 args[key] = num_str
         elif i + 4 <= n and json_str[i:i + 4] == 'true':
             args[key] = True
@@ -871,7 +871,7 @@ def _extract_args_by_regex(content: str) -> dict:
         result = json.loads(content)
         if isinstance(result, dict):
             return result
-    except:
+    except Exception:
         pass
 
     # 方法2: 找到 JSON 边界，尝试解析
@@ -883,7 +883,7 @@ def _extract_args_by_regex(content: str) -> dict:
             result = json.loads(json_str)
             if isinstance(result, dict):
                 return result
-        except:
+        except Exception:
             if end < 0:  # JSON 未闭合，尝试部分解析
                 args = _parse_json_partial(json_str)
                 if args:
@@ -1147,7 +1147,7 @@ class ConsoleMonitorPage(QWebEnginePage):
         elif msg.startswith("pywebview_height:"):
             try:
                 self.heightReported.emit(int(float(msg.split(":")[1])))
-            except:
+            except Exception:
                 pass
         elif msg.startswith("pywebview_action:"):
             if "context|||" in msg:
@@ -1156,7 +1156,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                     self.contextActionRequested.emit(
                         urllib.parse.unquote(parts[1]), urllib.parse.unquote(parts[2])
                     )
-                except:
+                except Exception:
                     pass
             elif "context_lost" in msg:
                 self._handle_context_lost()
@@ -1167,7 +1167,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                     from PyQt5.QtCore import QUrl
 
                     QDesktopServices.openUrl(QUrl(url_str))
-                except:
+                except Exception:
                     pass
             elif "open_file:" in msg:
                 # 处理打开文件/文件夹请求
@@ -1222,7 +1222,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                     self.codeActionRequested.emit(
                         base64.b64decode(p[2]).decode("utf-8"), p[1]
                     )
-                except:
+                except Exception:
                     pass
 
     def _handle_context_lost(self):
@@ -1340,7 +1340,7 @@ class CodeWebViewer(QWebEngineView):
             if self._markdown_text:
                 self._schedule_render(immediate=True)
         except Exception as e:
-            print(f"Context restore failed: {e}")
+            logger.warning(f"Context restore failed: {e}")
             # 恢复失败，请求重建
             self.needRecreate.emit()
 
@@ -4094,7 +4094,7 @@ class MessageCard(SimpleCardWidget):
                     vbar.setValue(vbar.value() - event.angleDelta().y() // 2)
                     event.accept()
                     return
-        except:
+        except Exception:
             pass
         super().wheelEvent(event)
 

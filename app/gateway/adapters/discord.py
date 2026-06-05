@@ -126,9 +126,9 @@ class DiscordAdapter(BasePlatformAdapter):
             msg_type = MessageType.COMMAND
         elif message.attachments:
             if any(a.content_type and a.content_type.startswith('image/') for a in message.attachments):
-                msg_type = MessageType.PHOTO
+                msg_type = MessageType.IMAGE
             else:
-                msg_type = MessageType.DOCUMENT
+                msg_type = MessageType.FILE
         else:
             msg_type = MessageType.TEXT
         

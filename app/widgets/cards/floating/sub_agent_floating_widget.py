@@ -622,7 +622,7 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         # 移除 Segment - SegmentedWidget 没有 removeItem，用 clearItems 代替
         try:
             self.segment_widget.clear()
-        except:
+        except Exception:
             pass
 
         # 清理标签和 segment items
@@ -655,7 +655,7 @@ class SubAgentFloatingWidget(SimpleCardWidget):
         # 清空所有 segment
         try:
             self.segment_widget.clear()
-        except:
+        except Exception:
             pass
 
         # 重置所有状态

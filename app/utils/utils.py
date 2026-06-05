@@ -28,6 +28,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QFont
 
 from app.utils.config import Settings
+from loguru import logger
 
 try:
     from pypinyin import pinyin, Style
@@ -586,7 +587,7 @@ def serialize_for_json(obj, large_list_threshold=1000):
     elif hasattr(obj, "serialize") and callable(getattr(obj, "serialize")):
         try:
             return obj.serialize()
-        except:
+        except Exception:
             return str(obj)
     else:
         # 其他类型：尝试转为字符串
@@ -705,10 +706,10 @@ class AsyncUpdateChecker(QThread):
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                print("GitHub API 响应:", resp.json())
+                logger.debug(f"GitHub API 响应: {resp.json()}")
                 return resp.json()
             else:
-                print("GitHub API 响应:", resp.text)
+                logger.debug(f"GitHub API 响应: {resp.text}")
                 self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
                 return None
 

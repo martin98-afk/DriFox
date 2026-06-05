@@ -4,6 +4,7 @@
 """
 import threading
 
+from loguru import logger
 import requests
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
@@ -104,7 +105,7 @@ def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_t
         except Exception as e:
             last_error = str(e)
 
-    print(f"[ProviderEditCard] All attempts failed. Last error: {last_error}")
+    logger.warning(f"[ProviderEditCard] All attempts failed. Last error: {last_error}")
     return []
 
 

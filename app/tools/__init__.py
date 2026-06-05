@@ -796,7 +796,12 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "subagent_status",
-            "description": "查询子智能体任务状态。task_ids 不传时只能查一次刚完成的任务；指定 task_id 始终能查到。",
+            "description": (
+                "查询子智能体任务状态。task_ids 不传时只能查一次刚完成的任务；指定 task_id 始终能查到。\n\n"
+                "**重要**：如果任务还在运行中（返回的 status 为 running/finishing 并附带 _hint），"
+                "**请勿重复调用本工具等待结果**——任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
+                "届时再调用本工具获取详细结果。轮询会导致 LLM 主流程卡死。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

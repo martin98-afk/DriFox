@@ -95,6 +95,7 @@ class SessionRepository:
             "message_count": d.get("message_count", 0),
             "created_at": d.get("created_at", ""),
             "updated_at": d.get("updated_at", ""),
+            "worktree_path": d.get("worktree_path", "") or "",
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
             "last_time": d.get("last_time") or (
@@ -137,14 +138,15 @@ class SessionRepository:
                 "compaction_cache": json.dumps(session.get("compaction_cache", {})).decode('utf-8'),
                 "message_count": session.get("message_count", 0),
                 "user_edited_title": user_edited,
+                "worktree_path": session.get("worktree_path", "") or "",
             }
 
             success, result = self._execute(f'''
                 INSERT OR REPLACE INTO {self.TABLE_NAME}
                 (session_id, title, project, messages, system_prompt,
                  compaction_state, compaction_cache, message_count, user_edited_title,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                 worktree_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             ''', (
@@ -157,6 +159,7 @@ class SessionRepository:
                 session_data["compaction_cache"],
                 session_data["message_count"],
                 session_data["user_edited_title"],
+                session_data["worktree_path"],
                 session_id,  # for coalesce
                 now,  # created_at default
                 now,  # updated_at

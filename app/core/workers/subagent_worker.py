@@ -1805,6 +1805,20 @@ class SubAgentManager(QObject):
             # 显式按 ID 查询始终返回完整结果（不应用 _already_queried 限制）
             # _already_queried 仅在 get_all_active_tasks_with_details 无条件返回时生效
 
+            # running / finishing：任务还没结束，注入 _hint 提醒调用方不要重复查询
+            if status in ("running"):
+                summary = task_data.get("summary", {}) or {}
+                elapsed = summary.get("elapsed_seconds", 0) or 0
+                tool_calls = summary.get("tool_call_count", 0) or 0
+                task_info["elapsed_seconds"] = elapsed
+                task_info["tool_call_count"] = tool_calls
+                task_info["_hint"] = (
+                    f"⏳ 该任务还在后台运行中（已用时 {elapsed}s，已调用 {tool_calls} 次工具）。"
+                    "**请勿重复调用 subagent_status 等待结果**——"
+                    "任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
+                    "届时再调用本工具获取详细结果。"
+                )
+
             # 是否包含结果
             if with_result:
                 result = task_data.get("result") or task_data.get("summary", {}).get("result", "")
@@ -1825,12 +1839,17 @@ class SubAgentManager(QObject):
         return ToolResult(True, content={"tasks": tasks_info})
 
     def get_all_active_tasks_with_details(self, with_log: bool = False, with_result: bool = True, session_id: str = None) -> ToolResult:
-        """获取当前会话已完成任务的详细状态（会话隔离）
+        """获取当前会话任务的详细状态（会话隔离），同时包含运行中与已完成。
 
         Args:
             with_log: 是否包含执行日志
             with_result: 是否包含执行结果
             session_id: 会话 ID，None 时使用 _current_session_id
+
+        Returns:
+            ToolResult: content={"tasks": [...]}
+                - finished 任务：按"会话内只查一次"策略返回完整 result/error
+                - running/finishing 任务：附带 _hint 提醒调用方不要重复查询
         """
         target_session = session_id or self._current_session_id
         tasks_info = []
@@ -1874,6 +1893,48 @@ class SubAgentManager(QObject):
                     task_entry["error"] = error
             if with_log:
                 logs = task_info.get("logs", [])
+                if logs:
+                    task_entry["logs"] = logs
+
+            tasks_info.append(task_entry)
+
+        # 补充：运行中的任务也一并返回，附带 _hint 提醒调用方不要重复轮询
+        for task_id, executor in self._running_tasks.items():
+            # 会话隔离
+            if target_session:
+                task_session = getattr(executor, "_task_session_id", "")
+                if task_session != target_session:
+                    continue
+
+            try:
+                summary = executor.get_summary() or {}
+            except Exception:
+                summary = {}
+            elapsed = summary.get("elapsed_seconds", 0) or 0
+            tool_calls = summary.get("tool_call_count", 0) or 0
+            status = "running" if executor.isRunning() else "finishing"
+
+            task_entry = {
+                "task_id": task_id,
+                "session_id": getattr(executor, "_task_session_id", ""),
+                "status": status,
+                "agent": summary.get("agent_name", ""),
+                "task_description": summary.get("task_description", ""),
+                "elapsed_seconds": elapsed,
+                "tool_call_count": tool_calls,
+                "_hint": (
+                    f"⏳ 该任务还在后台运行中（已用时 {elapsed}s，已调用 {tool_calls} 次工具）。"
+                    "**请勿重复调用 subagent_status 等待结果**——"
+                    "任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
+                    "届时再调用本工具获取详细结果。"
+                ) if status == "running" else "",
+            }
+
+            if with_log:
+                try:
+                    logs = executor.get_logs()
+                except Exception:
+                    logs = []
                 if logs:
                     task_entry["logs"] = logs
 

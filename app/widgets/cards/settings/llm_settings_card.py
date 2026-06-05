@@ -152,7 +152,7 @@ class ManualUpdateCard(SettingCard):
                 parent=self.parent_widget,
             ).show()
         except Exception as e:
-            print(f"_on_error error: {e}")
+            logger.error(f"_on_error error: {e}")
 
 
 class LLMSettingsCard(SystemCardFrame):
@@ -591,7 +591,7 @@ class LLMSettingsCard(SystemCardFrame):
         try:
             self.cfg.save_config()
         except Exception as e:
-            print(f"保存配置失败: {e}")
+            logger.error(f"保存配置失败: {e}")
 
     def _on_toggled(self, enabled: bool):
         """开机自启开关切换时：检查平台支持 + 更新注册表"""
