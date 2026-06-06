@@ -10018,15 +10018,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if interrupted_messages:
-            # 🛡️ Bug 修复：截断哨兵检查
-            # 场景：用户在流式中点撤销 → _on_stop_clicked 异步触发 finalize_stop
-            #      → _undo_from_message 同步继续截断 session.messages 并持久化
+            # 🛡️ Bug 修复：截断/恢复哨兵检查
+            # 场景：用户在流式中点撤销/恢复 → _persist_session_after_mutation 末尾
+            #      设置 _truncation_sentinel（标记"用户主动操作过会话"）
             #      → finalize_stop 在后台线程跑完后回调到主线程
-            #      → 若直接 set_messages(interrupted_messages)，会用 worker 收集的
-            #        "未截断" 序列覆盖回去，导致被撤销的旧消息复活到列表。
-            # 策略：比对 worker 返回的消息序列与当前 session.messages：
-            #      若哨兵显示当前会话发生过截断（messages_len 与哨兵一致或更短），
-            #      且 worker 序列更长，则丢弃覆盖（worker 序列包含已撤销内容）。
+            #      → worker 内部的 _current_session_messages 是启动时的**陈旧快照**，
+            #        不知道用户的截断/恢复操作；若直接覆盖会把已恢复的消息丢失。
+            # 策略：只要 sentinel 存在且 session 匹配，就丢弃 worker 覆盖。
+            #      不再依赖长度比较——恢复后 session 长度可能等于甚至超过 worker
+            #      长度，但内容已被用户修改，长度比较会漏判并导致消息丢失。
             current_session = self.session_manager.get_current_session()
             should_apply = True
             sentinel = self._truncation_sentinel
@@ -10034,10 +10034,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 sentinel
                 and current_session
                 and sentinel.get("session_id") == current_session.session_id
-                and len(interrupted_messages) > len(current_session.messages)
             ):
                 logger.warning(
-                    "[FinalizeStop] 检测到截断后到达的 finalize 回调，丢弃覆盖以保护撤销结果："
+                    "[FinalizeStop] 检测到截断/恢复后到达的 finalize 回调，丢弃覆盖以保护会话状态："
                     f"worker_len={len(interrupted_messages)}, current_len={len(current_session.messages)}, "
                     f"session_id={current_session.session_id[:8]}"
                 )
