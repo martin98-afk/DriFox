@@ -18,6 +18,7 @@ from app.core.store import (
     ProjectNotesRepository,
     KeyDocumentsRepository,
 )
+from app.core import project_notes_manager
 
 # ========== 兼容旧接口（已废弃，保持向后兼容）==========
 # 旧版 5 大类记忆已废弃，但 topic_summary.py 还在用
@@ -48,7 +49,8 @@ class MemoryManagerCore:
         
         # 三个仓储
         self._entry_memories_repo: Optional[MemoryRepository] = None
-        self._project_notes_repo: Optional[ProjectNotesRepository] = None
+        # 保留旧 SQLite 仓储仅用于一次性迁移（项目笔记改用 AGENTS.md 文件）
+        self._legacy_project_notes_repo: Optional[ProjectNotesRepository] = None
         self._key_documents_repo: Optional[KeyDocumentsRepository] = None
         
         # 初始化存储
@@ -64,7 +66,7 @@ class MemoryManagerCore:
                 
                 # 初始化三个仓储
                 self._entry_memories_repo = MemoryRepository(self._db_manager)
-                self._project_notes_repo = ProjectNotesRepository(self._db_manager)
+                self._legacy_project_notes_repo = ProjectNotesRepository(self._db_manager)
                 self._key_documents_repo = KeyDocumentsRepository(self._db_manager)
                 
                 return
@@ -77,11 +79,6 @@ class MemoryManagerCore:
     def entry_memories(self) -> MemoryRepository:
         """获取条目记忆仓储"""
         return self._entry_memories_repo
-
-    @property
-    def project_notes(self) -> ProjectNotesRepository:
-        """获取项目笔记仓储"""
-        return self._project_notes_repo
 
     @property
     def key_documents(self) -> KeyDocumentsRepository:
@@ -131,25 +128,46 @@ class MemoryManagerCore:
             return False
         return self._entry_memories_repo.save_all(memories)
 
-    # ==================== 项目笔记 API ====================
+    # ==================== 项目笔记 API（基于 AGENTS.md 文件） ====================
 
-    def get_project_note(self, project: str) -> Optional[Dict]:
-        """获取项目笔记"""
-        if not self._project_notes_repo:
+    def get_project_note(self, project: str, workdir: Optional[str] = None) -> Optional[Dict]:
+        """读取项目笔记（不创建）
+
+        Args:
+            project: 项目名
+            workdir: 当前工作目录（多窗口隔离，优先于 DB 读取）
+        """
+        workdir = workdir or self.get_working_directory(project)
+        if not workdir:
             return None
-        return self._project_notes_repo.get(project)
+        return project_notes_manager.get_note(workdir, project)
 
-    def save_project_note(self, project: str, content: str) -> bool:
-        """保存项目笔记"""
-        if not self._project_notes_repo:
+    def save_project_note(self, project: str, content: str, workdir: Optional[str] = None) -> bool:
+        """保存项目笔记
+
+        Args:
+            project: 项目名
+            content: Markdown 内容
+            workdir: 当前工作目录（多窗口隔离，优先于 DB 读取）
+        """
+        workdir = workdir or self.get_working_directory(project)
+        if not workdir:
             return False
-        return self._project_notes_repo.save(project, content)
+        return project_notes_manager.save_note(workdir, project, content)
 
-    def get_or_create_project_note(self, project: str) -> Dict:
-        """获取或创建项目笔记"""
-        if not self._project_notes_repo:
-            return {"id": "", "project": project, "content": "", "updated_at": ""}
-        return self._project_notes_repo.get_or_create(project)
+    def get_or_create_project_note(self, project: str, workdir: Optional[str] = None) -> Dict:
+        """读取或创建项目笔记（首次自动迁移/初始化默认模板）
+
+        Args:
+            project: 项目名
+            workdir: 当前工作目录（多窗口隔离，优先于 DB 读取）
+        """
+        workdir = workdir or self.get_working_directory(project)
+        if not workdir:
+            return {"project": project, "content": "", "path": ""}
+        return project_notes_manager.get_or_create_note(
+            workdir, project, legacy_repo=self._legacy_project_notes_repo
+        )
 
     # ==================== 关键文档 API ====================
 
@@ -176,6 +194,12 @@ class MemoryManagerCore:
         if not self._key_documents_repo:
             return 0
         return self._key_documents_repo.clear_by_project(project)
+
+    def get_worktree_counts(self) -> Dict[str, int]:
+        """获取所有项目的 git worktree 数量"""
+        if not self._key_documents_repo:
+            return {}
+        return self._key_documents_repo.get_worktree_counts()
 
     def set_working_directory(self, project: str, file_path: str) -> bool:
         """设置项目的工作目录（互斥）"""
@@ -233,10 +257,10 @@ class MemoryManagerCore:
             lines.append("- 暂无条目记忆")
         lines.append("")
 
-        # 2. 项目笔记
+        # 2. 项目笔记（从当前 workdir 读取，适配 worktree 多分支独立）
         lines.append("### 项目笔记")
         lines.append(f"[当前项目: {project}]")
-        note = self.get_project_note(project)
+        note = self.get_project_note(project, workdir=workdir_override)
         if note and note.get("content"):
             lines.append(note.get("content", ""))
         else:

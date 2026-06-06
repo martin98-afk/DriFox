@@ -325,3 +325,24 @@ class KeyDocumentsRepository:
         except Exception as e:
             logger.error(f"[KeyDocumentsRepository] count_by_project 异常: {e}")
             return 0
+
+    def get_worktree_counts(self) -> Dict[str, int]:
+        """获取所有项目的工作目录（git_worktree）数量"""
+        if not self.is_initialized:
+            return {}
+        try:
+            success, rows = self._execute(
+                f"SELECT project, COUNT(*) as cnt FROM {self.TABLE_NAME} "
+                f"WHERE added_by = 'git_worktree' GROUP BY project"
+            )
+            if success and rows:
+                result = {}
+                for row in rows:
+                    p = row[0] if isinstance(row, tuple) else row.get("project", "")
+                    c = row[1] if isinstance(row, tuple) else row.get("cnt", 0)
+                    result[p] = c
+                return result
+            return {}
+        except Exception as e:
+            logger.error(f"[KeyDocumentsRepository] get_worktree_counts 异常: {e}")
+            return {}

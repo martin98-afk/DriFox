@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QListWidgetItem,
     QFileDialog,
     QSizePolicy,
@@ -791,7 +792,7 @@ class MemoryCardContent(QWidget):
         from PyQt5.QtCore import QTimer
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
-        self._auto_save_timer.setInterval(1000)  # 1秒后保存
+        self._auto_save_timer.setInterval(300)  # 300ms 去抖后保存
         self._auto_save_timer.timeout.connect(self._save_project_note)
         
         main_layout.addWidget(self.notes_editor, 1)
@@ -820,8 +821,14 @@ class MemoryCardContent(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # 文档列表（支持拖拽）
-        self.docs_list = DocDropListWidget(self)  # 使用支持拖拽的列表
+        # 使用 QGridLayout 让提示文字叠加在拖拽区域背景上
+        docs_container = QWidget(widget)
+        docs_layout = QGridLayout(docs_container)
+        docs_layout.setContentsMargins(0, 0, 0, 0)
+        docs_layout.setSpacing(0)
+
+        # 文档列表（支持拖拽）- 始终显示，作为虚线拖拽区域背景
+        self.docs_list = DocDropListWidget(docs_container)  # 使用支持拖拽的列表
         self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.docs_list.setResizeMode(ListWidget.Adjust)
         Colors.refresh()
@@ -839,7 +846,22 @@ class MemoryCardContent(QWidget):
             }}
         """)
         self.docs_list.files_dropped.connect(self._on_files_dropped)
-        layout.addWidget(self.docs_list, 1)
+        docs_layout.addWidget(self.docs_list, 0, 0)
+
+        # 空列表提示（叠加在拖拽区域中央，文档列表为空时显示）
+        self._docs_empty_hint = BodyLabel("拖拽项目目录到此并选择设置为根目录即可开始项目开发", docs_container)
+        self._docs_empty_hint.setAlignment(Qt.AlignCenter)
+        self._docs_empty_hint.setWordWrap(True)
+        # 透明背景 + 不接收鼠标事件，保证拖拽事件能穿透到下方列表
+        self._docs_empty_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        Colors.refresh()
+        self._docs_empty_hint.setStyleSheet(
+            f"background: transparent; color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)} padding: 20px;"
+        )
+        self._docs_empty_hint.setVisible(False)
+        docs_layout.addWidget(self._docs_empty_hint, 0, 0, Qt.AlignCenter)
+
+        layout.addWidget(docs_container, 1)
 
         # 添加按钮（右对齐）
         add_btn_layout = QHBoxLayout()
@@ -1168,24 +1190,34 @@ class MemoryCardContent(QWidget):
     # ==================== 项目笔记操作 ====================
 
     def _load_project_note(self):
-        """加载项目笔记"""
+        """加载项目笔记（从当前 workdir 的 AGENTS.md）"""
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
 
+        workdir = self._get_effective_workdir(self._current_project)
         self.project_name_label.setText(f"项目: {self._current_project}")
-        note = memory_mgr.get_or_create_project_note(self._current_project)
+        note = memory_mgr.get_or_create_project_note(
+            self._current_project, workdir=workdir
+        )
         content = note.get("content", "") if note else ""
+        # 临时阻止 textChanged 信号（避免去抖保存触发）
+        self.notes_editor.blockSignals(True)
         self.notes_editor.setPlainText(content)
+        self.notes_editor.blockSignals(False)
         self._update_notes_stats()
 
     def _save_project_note(self):
-        """保存项目笔记"""
+        """保存项目笔记（写入当前 workdir 的 AGENTS.md）"""
         memory_mgr = self._get_memory_manager()
         if memory_mgr:
+            workdir = self._get_effective_workdir(self._current_project)
             content = self.notes_editor.toPlainText()
-            memory_mgr.save_project_note(self._current_project, content)
-            self.projectNoteChanged.emit(self._current_project, content)
+            success = memory_mgr.save_project_note(
+                self._current_project, content, workdir=workdir
+            )
+            if success:
+                self.projectNoteChanged.emit(self._current_project, content)
 
     # ==================== 关键文档操作 ====================
 
@@ -1298,6 +1330,10 @@ class MemoryCardContent(QWidget):
                 wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
                 self.docs_list.addItem(wt_item)
                 self.docs_list.setItemWidget(wt_item, wt_widget)
+
+        # 空列表时显示提示文字（叠加在拖拽区域背景上）
+        has_visible_items = self.docs_list.count() > 0
+        self._docs_empty_hint.setVisible(not has_visible_items)
 
     def _get_worktree_section_size(self, repo_info):
         """计算 worktree 树状组件的高度"""

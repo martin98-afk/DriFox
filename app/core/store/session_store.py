@@ -399,6 +399,12 @@ class SessionStore:
             return self._session_repo.get_projects()
         return ["默认项目"]
 
+    def get_session_counts(self) -> Dict[str, int]:
+        """获取所有项目的会话数量"""
+        if self._session_repo:
+            return self._session_repo.get_session_counts()
+        return {}
+
     def update_session_project(self, session_id: str, project: str) -> bool:
         """更新会话的项目归属"""
         if self._session_repo:
