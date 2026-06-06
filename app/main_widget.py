@@ -9451,10 +9451,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._project_selector_card_content.set_projects_data(
                 projects, self._current_project, meta_map
             )
-            # 更新卡片标题
-            self._project_selector_card.set_title_text(
-                f"📁 {self._current_project}"
-            )
+            # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
+            self._project_selector_card.set_title_text("📁 项目切换")
 
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
