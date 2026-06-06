@@ -501,7 +501,6 @@ _TOOL_ICON_MAP = {
     "websearch": "🌐",
     "webfetch": "🌐",
     # 子智能体任务
-    "task": "🤖",
     "subagent_para": "🤖",
     "subagent_status": "🤖",
     "subagent_dag": "🔗",
@@ -512,6 +511,8 @@ _TOOL_ICON_MAP = {
     "question": "❓",
     # 诊断工具
     "get_diagnostics": "🩺",
+    # 截图工具
+    "take_screenshot": "📸",
 }
 
 
