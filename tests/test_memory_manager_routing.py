@@ -93,3 +93,30 @@ class TestWorkdirSwitch:
         assert (workdir_b / "AGENTS.md").read_text(encoding="utf-8") == "# from sqlite (legacy)"
         # 6) A 下的文件保留,不主动删除
         assert (workdir_a / "AGENTS.md").read_text(encoding="utf-8") == "# A 的笔记"
+
+
+class TestReadPathRouting:
+    """get_project_note / save_project_note 的 workdir 路由"""
+
+    def test_get_returns_none_when_no_workdir_and_no_sqlite_record(self, patched_memory_manager):
+        mgr = patched_memory_manager
+        result = mgr.get_project_note("unknown")
+        assert result is None
+
+    def test_save_via_file_creates_agents_md(self, patched_memory_manager, tmp_workdir):
+        mgr = patched_memory_manager
+        mgr._key_documents_repo.get_working_directory.return_value = str(tmp_workdir)
+        assert mgr.save_project_note("demo", "# file content") is True
+        assert (tmp_workdir / "AGENTS.md").read_text(encoding="utf-8") == "# file content"
+        # 读回
+        note = mgr.get_project_note("demo")
+        assert note["content"] == "# file content"
+        assert note["path"] == str(tmp_workdir / "AGENTS.md")
+
+    def test_save_via_sqlite_creates_row(self, patched_memory_manager):
+        mgr = patched_memory_manager
+        assert mgr.save_project_note("demo", "# sqlite content") is True
+        # 读回
+        note = mgr.get_project_note("demo")
+        assert note["content"] == "# sqlite content"
+        assert note["path"] == ""  # 标记走 SQLite
