@@ -3,7 +3,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtWidgets import (QVBoxLayout, QLabel, QHBoxLayout,
                               QScrollArea, QSizePolicy, QWidget)
-from qfluentwidgets import SimpleCardWidget, FluentIcon, TransparentToolButton
+from qfluentwidgets import FluentIcon, TransparentToolButton
 
 from app.utils.design_tokens import Colors
 from app.utils.utils import get_unified_font
@@ -96,7 +96,7 @@ _SCROLL_AREA_STYLE = """
 """
 
 
-class TodoFloatingWidget(SimpleCardWidget):
+class TodoFloatingWidget(QWidget):
     """TODO 悬浮框组件"""
 
     closed = pyqtSignal()

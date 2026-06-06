@@ -8101,6 +8101,13 @@ class OpenAIChatToolWindow(ToolWindow):
             CardManager.get_instance().show_card("todo", self._window_id)
         else:
             self._todo_floating_widget.setVisible(False)
+            InfoBar.info(
+                "暂无待办事项",
+                "",
+                parent=self,
+                duration=1000,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     def _handle_subagents_command(self, args: str):
         """/subagents 命令：重新显示紧凑子智能体卡片"""
