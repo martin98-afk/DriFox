@@ -20,6 +20,7 @@ from app.tools.diagnostics_tools import DiagnosticsTools
 from app.tools.file_tools import FileTools
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult
+from app.tools.screenshot_tools import ScreenshotTools
 from app.tools.task_tools import TaskTools
 from app.tools.terminal_tools import TerminalTools
 from app.tools.web_tools import WebTools
@@ -85,6 +86,7 @@ class BuiltinTools(QObject):
         self._tools["terminal"] = TerminalTools(self)
         self._tools["task"] = TaskTools(self)
         self._tools["diagnostics"] = DiagnosticsTools(self)
+        self._tools["screenshot"] = ScreenshotTools(self)
 
         # Expose properties for backward compatibility
         self._file_tools = file_tools
@@ -92,6 +94,7 @@ class BuiltinTools(QObject):
         self._terminal_tools = self._tools["terminal"]
         self._task_tools = self._tools["task"]
         self._diagnostics_tools = self._tools["diagnostics"]
+        self._screenshot_tools = self._tools["screenshot"]
 
     @property
     def file_tools(self):
@@ -112,6 +115,10 @@ class BuiltinTools(QObject):
     @property
     def diagnostics_tools(self):
         return self._diagnostics_tools
+
+    @property
+    def screenshot_tools(self):
+        return self._screenshot_tools
 
     @property
     def mcp_manager(self):
@@ -606,6 +613,17 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_screenshot",
+            "description": "截取主屏幕全屏截图并保存为 PNG。无需额外依赖；macOS 可能需要屏幕录制权限，Linux Wayland 可能受系统限制。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },

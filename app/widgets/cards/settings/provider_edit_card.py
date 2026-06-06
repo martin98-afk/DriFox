@@ -125,6 +125,7 @@ class ProviderEditCard(QWidget):
         self.is_new = is_new
         self._original_info = (provider_info or {}).copy()
         self._fetched_models = []
+        self._auto_config_name = ""
         self._init_ui()
 
         # 连接信号
@@ -297,7 +298,8 @@ class ProviderEditCard(QWidget):
         else:
             # 新建时，默认使用服务商名称
             if self.is_new:
-                self.configNameEdit.setText(self.nameCombo.currentText())
+                self._auto_config_name = self.nameCombo.currentText()
+                self.configNameEdit.setText(self._auto_config_name)
             else:
                 self.configNameEdit.setText(self.provider_name)
         config_name_row.addWidget(self.configNameEdit, 1)
@@ -436,6 +438,11 @@ class ProviderEditCard(QWidget):
 
     def _on_provider_changed(self, name: str):
         """服务商变化时更新预设值"""
+        if self.is_new and hasattr(self, "configNameEdit"):
+            current_config_name = self.configNameEdit.text()
+            if not current_config_name.strip() or current_config_name == self._auto_config_name:
+                self.configNameEdit.setText(name)
+                self._auto_config_name = name
         if name in FREE_PROVIDERS:
             template = FREE_PROVIDERS[name]
             template_url = template.get("API_URL", "")

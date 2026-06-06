@@ -416,6 +416,7 @@ class ToolExecutor:
         "git_log": [],
         "git_diff": [],
         "get_diagnostics": ["path"],
+        "take_screenshot": [],
         "summarize_changes": ["text"],
         "edit_project_note": ["oldString", "newString"],
         "read_project_note": [],
@@ -611,6 +612,7 @@ class ToolExecutor:
             "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(
                 args.get("path", ""), args.get("language")
             ),
+            "take_screenshot": lambda: self._builtin_tools.take_screenshot(),
             "summarize_changes": lambda: self._builtin_tools.summarize_changes(
                 args.get("text", ""), args.get("limit", 1200)
             ),
