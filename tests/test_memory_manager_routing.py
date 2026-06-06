@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """memory_manager 层 workdir 路由测试"""
 
-import pytest
-
 
 class TestSqliteRouting:
     """无 workdir → 走 SQLite"""
