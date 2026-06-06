@@ -115,6 +115,9 @@ class OpenAIChatWorker(QThread):
         self._cached_api_config: Optional[Dict[str, Any]] = None  # 缓存的 API 配置
         self._max_param_retry_count = 10  # 最多重试10次（每收到一个 chunk 重试一次）
         self._cache_tracker = CacheHitRateTracker()  # 缓存命中率追踪器
+        # ========== 工具结果持久化 (懒加载, 按 session_id 隔离) ==========
+        self._result_persister: Optional["ToolResultPersister"] = None
+        self._last_persist_stats: Optional[Dict[str, Any]] = None
         # 同步设置模型名称，用于模型感知的成本计算
         model_name = str(self.llm_config.get("模型名称", "") or "")
         if model_name:
@@ -141,6 +144,30 @@ class OpenAIChatWorker(QThread):
         # tracemalloc 深度追踪（MEM_TRACE=1 时启用，用于定位单步大分配）
         self._mem_trace_enabled = os.environ.get('MEM_TRACE') == '1'
         self._mem_trace_snapshot = None
+
+    def _get_persister(self) -> Optional["ToolResultPersister"]:
+        """
+        懒加载工具结果持久化器 (按 session_id 隔离)
+
+        Returns:
+            ToolResultPersister 实例, 或 None (初始化失败时)
+        """
+        if self._result_persister is None:
+            try:
+                from app.core.tool_result_persister import ToolResultPersister
+                # 优先用 worker 当前 session_id, 兜底用 "default"
+                session_id = (
+                    getattr(self, "_current_session_id", None)
+                    or getattr(self, "session_id", None)
+                    or "default"
+                )
+                self._result_persister = ToolResultPersister(
+                    session_id=str(session_id)
+                )
+            except Exception as e:
+                logger.exception(f"[Persist] 初始化失败: {e}")
+                return None
+        return self._result_persister
 
     def _mem_take_trace(self):
         """在 before_api_call / after_api_call 之间采集 tracemalloc 快照"""
@@ -860,6 +887,19 @@ class OpenAIChatWorker(QThread):
                     tool_names=",".join(tool_names),
                     result_sizes=f"{tool_result_sizes // 1024}KB" if tool_result_sizes > 1024 else f"{tool_result_sizes}B",
                     msg_count=len(current_messages))
+
+                # ========== 工具结果持久化 (入口管控) ==========
+                # 借鉴 Claude Code: 单结果 > 50K 字符 / 消息级 > 200K 字符 -> 落盘
+                # 在 ToolExecutor 之后、消息拼接之前执行, 保护 Prompt Cache 前缀稳定
+                # 完全无 LLM API 调用, 失败时回退保留原结果
+                try:
+                    persister = self._get_persister()
+                    if persister and tool_results:
+                        tool_results, persist_stats = persister.process(tool_results)
+                        self._last_persist_stats = persist_stats.to_dict()
+                except Exception as e:
+                    logger.exception(f"[Persist] 持久化失败, 保留原结果: {e}")
+                    self._last_persist_stats = None
 
                 response_sequence = self._build_response_message_sequence(tool_results)
                 current_messages.extend(response_sequence)

@@ -416,7 +416,6 @@ class ToolExecutor:
         "git_log": [],
         "git_diff": [],
         "get_diagnostics": ["path"],
-        "take_screenshot": [],
         "summarize_changes": ["text"],
         "edit_project_note": ["oldString", "newString"],
         "read_project_note": [],
@@ -428,7 +427,12 @@ class ToolExecutor:
         "subagent_status": [],
         "skill": ["name"],
         "list_skills": [],
-        "question": ["questions"]
+        "question": ["questions"],
+        "read_persisted_output": ["file_path"],
+        # 桌面自动化 (mouse / keyboard / screenshot)
+        "mouse": ["action"],
+        "keyboard": ["action"],
+        "screenshot": [],
     }
 
     def execute(self, tool_name: str, args: dict, call_id: str = None) -> ToolResult:
@@ -612,7 +616,6 @@ class ToolExecutor:
             "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(
                 args.get("path", ""), args.get("language")
             ),
-            "take_screenshot": lambda: self._builtin_tools.take_screenshot(),
             "summarize_changes": lambda: self._builtin_tools.summarize_changes(
                 args.get("text", ""), args.get("limit", 1200)
             ),
@@ -654,6 +657,35 @@ class ToolExecutor:
             "mcp_list_servers": lambda: ToolResult(
                 True,
                 content=self._builtin_tools._mcp_manager.get_status()
+            ),
+            "read_persisted_output": lambda: (
+                self._builtin_tools.read_persisted_output(
+                    file_path=args.get("file_path", "")
+                )
+            ),
+            # ========== 桌面自动化 (AutomationTools) ==========
+            "mouse": lambda: self._builtin_tools.mouse(
+                action=args.get("action", ""),
+                x=int(args.get("x", 0) or 0),
+                y=int(args.get("y", 0) or 0),
+                button=args.get("button", "left"),
+                clicks=int(args.get("clicks", 1) or 1),
+                dx=int(args.get("dx", 0) or 0),
+                dy=int(args.get("dy", -1) if args.get("dy") is not None else -1),
+                duration=float(args.get("duration", 0) or 0),
+            ),
+            "keyboard": lambda: self._builtin_tools.keyboard(
+                action=args.get("action", ""),
+                text=args.get("text", "") or "",
+                key=args.get("key", "") or "",
+                keys=args.get("keys", "") or "",
+            ),
+            "screenshot": lambda: self._builtin_tools.screenshot(
+                path=args.get("path", "") or "",
+                region=(
+                    tuple(args.get("region", []))
+                    if args.get("region") else None
+                ),
             ),
         }
 

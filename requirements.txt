@@ -18,10 +18,17 @@ pygments
 requests
 orjson>=3.8.0
 pypinyin
+# 桌面自动化
+pynput>=1.7.6
+mss>=9.0.1
 mcp>=1.0.0
 
 # 插件热更新
 watchfiles>=1.0.0
+
+# 桌面自动化 (pynput + mss 组合, 替代 pyautogui, 体积减少 98%)
+pynput>=1.7.6
+mss>=9.0.1
 
 # Gateway 通讯平台依赖
 # 钉钉

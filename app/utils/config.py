@@ -272,6 +272,11 @@ class Settings(QConfig):
         "brainstorming", "writing-plans", "find-skills", "skill-creator", "git-commit", "minimax-image-understanding"])
     # 智能体完成通知
     llm_notify_enabled = ConfigItem("LLM", "NotifyEnabled", True, BoolValidator())
+    # 桌面自动化总开关 (mouse/keyboard/screenshot 3 工具)
+    # 默认禁用, 需用户在设置卡显式开启后才能被 LLM 调用
+    llm_desktop_automation_enabled = ConfigItem(
+        "LLM", "DesktopAutomationEnabled", True, BoolValidator()
+    )
     # 通知提示音类型
     llm_notify_sound = OptionsConfigItem(
         "LLM",
