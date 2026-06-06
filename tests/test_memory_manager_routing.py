@@ -49,3 +49,23 @@ class TestFileRoutingMigration:
         from app.core.project_notes_manager import INITIAL_TEMPLATE
         assert note["content"] == INITIAL_TEMPLATE
         assert (tmp_workdir / "AGENTS.md").exists()
+
+
+class TestFileExistsNotOverwritten:
+    """workdir 下 AGENTS.md 已存在 → 尊重原内容,不覆盖"""
+
+    def test_existing_agents_md_not_overwritten(self, patched_memory_manager, tmp_workdir):
+        mgr = patched_memory_manager
+        # 1) 预先在 workdir 放一份用户自定义 AGENTS.md
+        existing = "# 我的项目\n这是用户在文件里手写的笔记"
+        (tmp_workdir / "AGENTS.md").write_text(existing, encoding="utf-8")
+        # 2) SQLite 也有内容(理论上不应被使用)
+        mgr.save_project_note("demo", "# sqlite content (should be ignored)")
+        # 3) 模拟设置 workdir
+        mgr._key_documents_repo.get_working_directory.return_value = str(tmp_workdir)
+        # 4) 首次访问
+        note = mgr.get_or_create_project_note("demo")
+        # 5) 必须返回文件原内容,不是 sqlite
+        assert note["content"] == existing
+        # 6) 文件未被改写
+        assert (tmp_workdir / "AGENTS.md").read_text(encoding="utf-8") == existing
