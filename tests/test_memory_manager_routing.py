@@ -69,3 +69,27 @@ class TestFileExistsNotOverwritten:
         assert note["content"] == existing
         # 6) 文件未被改写
         assert (tmp_workdir / "AGENTS.md").read_text(encoding="utf-8") == existing
+
+
+class TestWorkdirSwitch:
+    """workdir 切换 A → B (B 无文件) → 从 SQLite 迁"""
+
+    def test_switching_workdir_triggers_migration_from_sqlite(self, patched_memory_manager, tmp_path):
+        mgr = patched_memory_manager
+        # 1) A workdir 下有文件(模拟切换前的工作状态)
+        workdir_a = tmp_path / "A"
+        workdir_a.mkdir()
+        (workdir_a / "AGENTS.md").write_text("# A 的笔记", encoding="utf-8")
+        # 2) SQLite 有内容(可能是另一个项目的旧笔记)
+        mgr.save_project_note("demo", "# from sqlite (legacy)")
+        # 3) 切换到 B workdir
+        workdir_b = tmp_path / "B"
+        workdir_b.mkdir()
+        mgr._key_documents_repo.get_working_directory.return_value = str(workdir_b)
+        # 4) 访问项目笔记
+        note = mgr.get_or_create_project_note("demo")
+        # 5) B 下应被写入迁移内容(SQLite 的旧值)
+        assert note["content"] == "# from sqlite (legacy)"
+        assert (workdir_b / "AGENTS.md").read_text(encoding="utf-8") == "# from sqlite (legacy)"
+        # 6) A 下的文件保留,不主动删除
+        assert (workdir_a / "AGENTS.md").read_text(encoding="utf-8") == "# A 的笔记"
