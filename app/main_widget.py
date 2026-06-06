@@ -1515,6 +1515,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注册 /compact 命令处理器（支持 --clear 参数）
         FunctionCommandHandlers.register("compact", self._handle_compact_command)
 
+        # 注册 /todos 命令处理器
+        FunctionCommandHandlers.register("todos", self._handle_todos_command)
+
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
@@ -8087,6 +8090,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 剥离 --clear 标记后，剩余文本作为给子智能体的补充说明
         user_hint = re.sub(r'(?:^|\s)--clear(?=\s|$)', '', args or "").strip()
         self._trigger_context_compaction(clear_after=clear_after, user_hint=user_hint)
+
+    def _handle_todos_command(self, args: str):
+        """/todos 命令：手动显示/刷新待办事项卡片"""
+        todos = self.backend.get_todos()
+        if todos:
+            self._todo_floating_widget.update_todos(todos)
+            # 确保卡片可见（update_todos 内部已处理自动显示，但通过 CardManager 确保容器展开）
+            from app.widgets.cards.card_manager import CardManager
+            CardManager.get_instance().show_card("todo", self._window_id)
+        else:
+            self._todo_floating_widget.setVisible(False)
 
     def _handle_subagents_command(self, args: str):
         """/subagents 命令：重新显示紧凑子智能体卡片"""

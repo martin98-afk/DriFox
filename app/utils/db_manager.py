@@ -97,7 +97,14 @@ class DatabaseManager:
         cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
         return cursor.fetchone()[0]
 
-    def execute_sql(self, sql: str, params: tuple = ()) -> Tuple[bool, str]:
+    def execute_sql(self, sql: str, params: tuple = ()) -> Tuple[bool, Any]:
+        """
+        执行 SQL 并返回 (success, result)。
+
+        result 类型取决于语句:
+          - SELECT / PRAGMA: List[Dict] （fetchall）
+          - INSERT / UPDATE / DELETE: int （cursor.rowcount）
+        """
         if not self._conn:
             return False, "未连接数据库"
         with self._lock:
@@ -110,7 +117,7 @@ class DatabaseManager:
                     rows = cursor.fetchall()
                     return True, [dict(row) for row in rows]
                 else:
-                    return True, f"影响行数: {cursor.rowcount}"
+                    return True, int(cursor.rowcount)
             except Exception as e:
                 self._conn.rollback()
                 return False, str(e)

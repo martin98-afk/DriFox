@@ -255,5 +255,5 @@ class SubAgentLogRepository:
             f'DELETE FROM "{self.TABLE_NAME}" WHERE updated_at < ?', (cutoff,)
         )
         if success and result:
-            return result[0] if isinstance(result[0], tuple) else result
+            return int(result)
         return 0

@@ -119,22 +119,22 @@ class TodoFloatingWidget(SimpleCardWidget):
         self._apply_style()
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 10, 6, 6)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(6, 6, 6, 4)
+        main_layout.setSpacing(3)
 
         # ---- 标题栏 ----
         header = QHBoxLayout()
-        header.setSpacing(10)
+        header.setSpacing(6)
 
         title_icon = QLabel("📋", self)
-        title_icon.setFont(get_unified_font(14))
+        title_icon.setFont(get_unified_font(12))
 
         title = QLabel("待办事项", self)
-        title.setFont(get_unified_font(11, True))
+        title.setFont(get_unified_font(10, True))
         title.setStyleSheet(f"color: {Colors.REALTIME_TEXT};")
 
         self.progress_label = QLabel("", self)
-        self.progress_label.setFont(get_unified_font(10, True))
+        self.progress_label.setFont(get_unified_font(9, True))
         self.progress_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; font-weight: bold;")
 
         header.addWidget(title_icon)
@@ -143,13 +143,13 @@ class TodoFloatingWidget(SimpleCardWidget):
         header.addStretch()
 
         self.close_btn = TransparentToolButton(FluentIcon.CLOSE)
-        self.close_btn.setFixedSize(24, 24)
+        self.close_btn.setFixedSize(20, 20)
         self.close_btn.clicked.connect(self._on_close)
         header.addWidget(self.close_btn)
 
         # ---- 内容滚动区 ----
         self.content_label = QLabel("暂无待办", self)
-        self.content_label.setFont(get_unified_font(10))
+        self.content_label.setFont(get_unified_font(9))
         self.content_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self.content_label.setWordWrap(True)
         self.content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -235,7 +235,7 @@ class TodoFloatingWidget(SimpleCardWidget):
     def _apply_style(self):
         Colors.refresh()
         self.setStyleSheet(f"""
-            CardWidget {{
+            TodoFloatingWidget {{
                 background-color: {Colors.REALTIME_BG};
                 border: 1px solid {Colors.REALTIME_BORDER};
                 border-radius: 10px;
@@ -263,12 +263,16 @@ class TodoFloatingWidget(SimpleCardWidget):
     # ---- 数据更新 ----
 
     def update_todos(self, todos):
-        """更新 TODO 列表显示（不自行控制可见性，由调用方决定）"""
+        """更新 TODO 列表显示（有内容时自动显示，空列表时隐藏）"""
         self._todo_list = todos or []
 
         if not self._todo_list:
             self.setVisible(False)
             return
+
+        # 如果有待办内容但卡片当前不可见，自动显示
+        if not self.isVisible():
+            self.setVisible(True)
 
         lines = []
         completed = 0
@@ -349,7 +353,7 @@ class TodoFloatingWidget(SimpleCardWidget):
             alpha = max(1, int(opacity * 255))
             bg = bg.rsplit(",", 1)[0] + f", {alpha})"
         self.setStyleSheet(f"""
-            CardWidget {{
+            TodoFloatingWidget {{
                 background-color: {bg};
                 border: 1px solid {Colors.REALTIME_BORDER};
                 border-radius: 10px;

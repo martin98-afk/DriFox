@@ -33,7 +33,7 @@ dist/
 *.spec
 check_format.py
 debug_*.py
-test_*.py
+/test_*.py
 *.json
 fixed_extractor.py
 various_test.py
