@@ -1906,6 +1906,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 初始化撤销删除缓存（只缓存一步）
         self._undo_delete_cache = {}
 
+        # 🛡️ Bug 修复：截断哨兵 — 记录最近一次 session 截断的关键信息，
+        # 用于在异步 finalize_stop / messages_updated 回调到达时识别"是否发生了截断"
+        # 结构：{"session_id": str, "messages_len": int, "set_at": float} 或 None
+        # 时机：撤销/删除消息触发的 _persist_session_after_mutation 末尾设置；
+        #       _on_finalize_complete 在覆盖 session.messages 前检查；
+        #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
+        self._truncation_sentinel = None
+
         # 初始化内置命令
         self._init_builtin_commands()
 
@@ -5893,9 +5901,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self.history_manager:
             # 使用辅助函数保存会话
+            # 🛡️ 传入 _current_project 作为兜底（仅当该会话从未在 SQLite/内存中出现过时生效）；
+            # 已存在的会话以原有 project 为准，避免被默认项目兜底覆盖。
             self._current_session_id = save_or_archive_session(
-                self.history_manager, session, self._current_session_id
+                self.history_manager, session, self._current_session_id,
+                project_fallback=self._current_project,
             )
+
+        # 🛡️ 记录截断哨兵：用于 _on_finalize_complete 识别"是否在异步 finalize 等待
+        # 期间发生过截断"，避免 worker 返回的旧消息序列复活已被撤销的内容。
+        self._truncation_sentinel = {
+            "session_id": session.session_id,
+            "messages_len": len(session.messages),
+            "set_at": time.time(),
+        }
 
     def _refresh_session_view_after_mutation(self):
         # 使用辅助函数刷新视图
@@ -8711,6 +8730,37 @@ class OpenAIChatToolWindow(ToolWindow):
             # 如果不支持余额查询，隐藏
             balance_display.setVisible(False)
 
+    def _resolve_session_project_fallback(
+        self, session_id: str, current_project: str
+    ) -> str:
+        """解析会话的项目归属兜底值：优先沿用已有归属，避免被默认项目覆盖。
+
+        策略：
+        1. 通过 history_manager 查询该 session_id 在内存/SQLite 中的现有 project
+        2. 查到非空值则沿用（保护"项目切换不影响老会话归属"）
+        3. 查不到则使用 current_project（仅适用于真正的新会话）
+
+        Args:
+            session_id: 会话 ID
+            current_project: 当前项目（兜底值）
+
+        Returns:
+            解析后的项目名
+        """
+        if not session_id or not self.history_manager:
+            return current_project
+        try:
+            existing = self.history_manager.get_session_by_session_id(session_id)
+            if existing:
+                existing_project = existing.get("project")
+                if existing_project:
+                    return existing_project
+        except Exception as e:
+            logger.warning(
+                f"[ProjectResolve] 查询已有项目归属失败: {e}, fallback={current_project}"
+            )
+        return current_project
+
     def _save_current_session_to_history(self):
         session = self.session_manager.get_current_session()
         saved_messages = list(session.messages or []) if session else []
@@ -8739,6 +8789,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 **worktree_kwargs,
                 )
             else:
+                # 🛡️ 内存中找不到（如老会话被 _history_limit=100 截断），
+                # 优先查询 SQLite 原有 project，避免被当前 _current_project 错误覆盖
+                resolved_project = self._resolve_session_project_fallback(
+                    self._current_session_id, self._current_project
+                )
                 self.history_manager.save_session(
                     saved_messages,
                     title=session_title,  # 使用已有的 topic_summary
@@ -8746,11 +8801,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
+                    project=resolved_project,
                     **worktree_kwargs,
                 )
                 self._current_session_id = session.session_id if session else None
         else:
+            # 🛡️ 新会话首次入库：用 _current_project；如果 session.session_id 在 SQLite
+            # 中已存在（极少见的跨窗口/恢复场景），优先沿用其原 project
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id if session else None, self._current_project
+            )
             self.history_manager.save_session(
                 saved_messages,
                 title=session_title,  # 使用已有的 topic_summary
@@ -8758,7 +8818,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
-                project=self._current_project,
+                project=resolved_project,
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id if session else None
@@ -9768,24 +9828,33 @@ class OpenAIChatToolWindow(ToolWindow):
                     **worktree_kwargs,
                 )
             else:
+                # 🛡️ 内存找不到（老会话被截断出 _history_limit）：
+                # 先查 SQLite 原 project，避免被当前 _current_project 覆盖
+                resolved_project = self._resolve_session_project_fallback(
+                    self._current_session_id, self._current_project
+                )
                 self.history_manager.save_session(
                     session.messages,
                     session_id=session.session_id,
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
+                    project=resolved_project,
                     **worktree_kwargs,
                 )
                 self._current_session_id = session.session_id
         else:
+            # 🛡️ 新会话：用 _current_project；若 session_id 在 SQLite 已存在则沿用原 project
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id, self._current_project
+            )
             self.history_manager.save_session(
                 session.messages,
                 session_id=session.session_id,
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
-                project=self._current_project,
+                project=resolved_project,
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id
@@ -9949,11 +10018,39 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if interrupted_messages:
-            self._on_messages_updated(interrupted_messages)
-            if self.history_manager:
-                self._save_current_session_to_history()
-                # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
-                self.history_manager.flush()
+            # 🛡️ Bug 修复：截断哨兵检查
+            # 场景：用户在流式中点撤销 → _on_stop_clicked 异步触发 finalize_stop
+            #      → _undo_from_message 同步继续截断 session.messages 并持久化
+            #      → finalize_stop 在后台线程跑完后回调到主线程
+            #      → 若直接 set_messages(interrupted_messages)，会用 worker 收集的
+            #        "未截断" 序列覆盖回去，导致被撤销的旧消息复活到列表。
+            # 策略：比对 worker 返回的消息序列与当前 session.messages：
+            #      若哨兵显示当前会话发生过截断（messages_len 与哨兵一致或更短），
+            #      且 worker 序列更长，则丢弃覆盖（worker 序列包含已撤销内容）。
+            current_session = self.session_manager.get_current_session()
+            should_apply = True
+            sentinel = self._truncation_sentinel
+            if (
+                sentinel
+                and current_session
+                and sentinel.get("session_id") == current_session.session_id
+                and len(interrupted_messages) > len(current_session.messages)
+            ):
+                logger.warning(
+                    "[FinalizeStop] 检测到截断后到达的 finalize 回调，丢弃覆盖以保护撤销结果："
+                    f"worker_len={len(interrupted_messages)}, current_len={len(current_session.messages)}, "
+                    f"session_id={current_session.session_id[:8]}"
+                )
+                should_apply = False
+            # 哨兵是一次性的，无论应用与否都清空
+            self._truncation_sentinel = None
+
+            if should_apply:
+                self._on_messages_updated(interrupted_messages)
+                if self.history_manager:
+                    self._save_current_session_to_history()
+                    # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
+                    self.history_manager.flush()
 
         # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()

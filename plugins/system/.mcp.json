@@ -32,7 +32,7 @@
         "@playwright/mcp@latest"
       ],
       "type": "stdio",
-      "enabled": false,
+      "enabled": true,
       "env": {},
       "url": "",
       "headers": {}
