@@ -47,7 +47,7 @@ class UndoDeleteCard(QWidget):
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setFixedHeight(40)
+        self.setFixedHeight(30)
 
         self._refresh_style()
 
@@ -78,7 +78,7 @@ class UndoDeleteCard(QWidget):
                 {get_font_family_css()} {font_size_css(13)};
                 font-weight: bold;
                 background: transparent;
-                padding: 4px 12px;
+                padding: 0px 4px;
                 border-radius: 4px;
             }}
             QLabel:hover {{

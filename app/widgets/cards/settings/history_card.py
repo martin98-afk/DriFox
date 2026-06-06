@@ -838,7 +838,7 @@ class HistoryCard(QWidget):
             item = layout.takeAt(0)
             if item.widget() and item.widget() != self:
                 if id(item.widget()) in cached_set:
-                    item.widget().setParent(None)
+                    item.widget().hide()
                 else:
                     item.widget().deleteLater()
 
@@ -989,23 +989,27 @@ class HistoryCard(QWidget):
                 else:
                     header.setText(f"{section_name} ({count})" if count else section_name)
                 layout.insertWidget(layout.count() - 1, header)
+                header.show()
 
             elif item_type == 'spacer':
                 # 从缓存池复用间隔线
                 spacer = self._cached_spacers.pop() if self._cached_spacers else QWidget()
                 spacer.setFixedHeight(8)
                 layout.insertWidget(layout.count() - 1, spacer)
+                spacer.show()
 
             elif item_type == 'session':
                 session, original_index, is_current = item[1], item[2], item[3]
                 preview = session.get("preview", "")
                 card = self._get_or_create_history_card(session, original_index, is_current, preview)
                 layout.insertWidget(layout.count() - 1, card)
+                card.show()
 
             elif item_type == 'archived':
                 session = item[1]
                 card = self._get_or_create_archived_card(session)
                 layout.insertWidget(layout.count() - 1, card)
+                card.show()
 
             elif item_type == 'empty':
                 text = item[1]

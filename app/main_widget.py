@@ -1746,6 +1746,42 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card.content_layout.addWidget(
             self._project_selector_card_content
         )
+        # ── 新建项目输入放到标题栏 ──
+        from PyQt5.QtWidgets import QLineEdit
+
+        Colors.refresh()
+        self._project_new_edit = QLineEdit(self._project_selector_card)
+        self._project_new_edit.setPlaceholderText("新建项目...")
+        self._project_new_edit.setFixedWidth(130)
+        self._project_new_edit.setFixedHeight(24)
+        self._project_new_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 2px 6px;
+                {font_size_css(11)}
+                {get_font_family_css()}
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {Colors.TEXT_ACCENT};
+            }}
+            QLineEdit::placeholder {{
+                color: {Colors.INPUT_PLACEHOLDER};
+            }}
+        """)
+        self._project_new_edit.returnPressed.connect(self._on_header_new_project)
+
+        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, self._project_selector_card)
+        self._project_new_btn.setFixedSize(24, 24)
+        self._project_new_btn.setToolTip("创建项目")
+        self._project_new_btn.clicked.connect(self._on_header_new_project)
+
+        # 插入到标题栏的额外按钮区（关闭按钮之前）
+        self._project_selector_card._extra_buttons_container.insertWidget(0, self._project_new_edit)
+        self._project_selector_card._extra_buttons_container.insertWidget(1, self._project_new_btn)
+
         self._project_selector_card.setVisible(False)
         self._project_selector_card.closed.connect(
             lambda: (
@@ -4601,6 +4637,25 @@ class OpenAIChatToolWindow(ToolWindow):
             self._project_selector_card_content.refresh_style()
         if hasattr(self, "_project_selector_card"):
             self._project_selector_card.refresh_style()
+        if hasattr(self, "_project_new_edit"):
+            Colors.refresh()
+            self._project_new_edit.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {Colors.HOVER_BG};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 4px;
+                    color: {Colors.TEXT_PRIMARY};
+                    padding: 2px 6px;
+                    {font_size_css(11)}
+                    {get_font_family_css()}
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid {Colors.TEXT_ACCENT};
+                }}
+                QLineEdit::placeholder {{
+                    color: {Colors.INPUT_PLACEHOLDER};
+                }}
+            """)
         # 刷新记忆卡片主题
         if hasattr(self, "_memory_card_popup") and hasattr(
             self._memory_card_popup, "refresh_style"
@@ -9455,6 +9510,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._create_new_session()
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
+
+    def _on_header_new_project(self):
+        """从标题栏新建项目按钮/回车触发"""
+        name = self._project_new_edit.text().strip()
+        if not name:
+            return
+        self._project_new_edit.clear()
+        self._on_new_project_created(name)
 
     def _on_new_project_created(self, project: str):
         """新建项目后"""

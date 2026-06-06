@@ -10,12 +10,14 @@
 """
 import os
 import re
+import threading
 import uuid
+from pathlib import Path
 import orjson as json
 
 from datetime import datetime
-from typing import List, Dict, Optional
-from PyQt5.QtCore import QTimer
+from typing import Any, Callable, List, Dict, Optional, Tuple
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 from loguru import logger
 
 from app.core.message_content import consolidate_messages, content_to_text
@@ -112,6 +114,180 @@ def sanitize_filename(name: str) -> str:
     return _SANITIZE_FILENAME_PATTERN.sub("_", name)
 
 
+# ============================================================
+# 异步归档扫描（性能优化）
+# ============================================================
+#
+# 历史问题：归档页（"项目一多"）卡顿的根因是主线程同步读取+解析 N 个
+# JSON 文件。即便 N=200 也会在慢盘/网络盘/AV 扫描场景下卡 0.5-2s。
+# 优化：把 glob + stat + 读 + 解析全部搬到后台 QRunnable，缓存按 mtime 失效，
+# 主线程仅接收最终 enriched_list 一次性渲染。
+#
+# request_id 机制：每次扫描自增 ID，主线程对比当前 ID 丢弃过期结果，
+# 防止快速来回切换 tab 导致旧数据覆盖新数据。
+
+
+def _build_archive_preview(messages: List[Dict], max_len: int = 50) -> str:
+    """从消息列表中提取归档预览文本（与 history_card.get_message_preview 等价，
+    保持单点定义以避免循环依赖）。"""
+    if not messages:
+        return ""
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if not content:
+            continue
+        if isinstance(content, list):
+            content = " ".join(
+                c.get("text", "") if isinstance(c, dict) else str(c) for c in content
+            )
+        return content[:max_len].strip() + ("..." if len(content) > max_len else "")
+    return ""
+
+
+class _ArchiveScanSignals(QObject):
+    """归档扫描 worker 信号：用于从后台线程回到主线程交付结果。"""
+
+    finished = pyqtSignal(int, list)  # request_id, enriched_list
+
+
+class _ArchiveScanTask(QRunnable):
+    """异步扫描归档目录的 QRunnable。
+
+    工作流程（在后台线程）：
+    1. listdir + stat 拿到所有归档文件的 mtime（不读内容）
+    2. 对比 self._cache，mtime 未变 → 复用缓存
+    3. mtime 变了或无缓存 → 打开 + json.loads + 提取 preview
+    4. 按 mtime 倒序排序后通过 signals.finished 发回主线程
+    """
+
+    def __init__(
+        self,
+        archive_dir: Path,
+        cache: Dict[str, Tuple[float, Dict]],
+        cache_lock: threading.Lock,
+        request_id: int,
+        signals: _ArchiveScanSignals,
+    ) -> None:
+        super().__init__()
+        self._archive_dir = archive_dir
+        self._cache = cache
+        self._cache_lock = cache_lock
+        self._request_id = request_id
+        self._signals = signals
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        try:
+            if not self._archive_dir.exists():
+                self._signals.finished.emit(self._request_id, [])
+                return
+
+            try:
+                files = list(self._archive_dir.glob("*.json"))
+            except Exception as e:
+                logger.warning(f"[ArchiveScan] 列出归档目录失败: {e}")
+                self._signals.finished.emit(self._request_id, [])
+                return
+
+            if not files:
+                self._signals.finished.emit(self._request_id, [])
+                return
+
+            # 阶段 1：批量取 mtime（只 stat，不读内容，AV 通常不拦）
+            mtimes: Dict[str, float] = {}
+            for fp in files:
+                fp_str = str(fp)
+                try:
+                    mtimes[fp_str] = os.path.getmtime(fp)
+                except OSError:
+                    mtimes[fp_str] = 0.0
+
+            enriched: List[Dict[str, Any]] = []
+            # 阶段 2：在锁内依次判断：命中缓存则复用，否则读+解析
+            for fp_str, mtime in mtimes.items():
+                fp_path = Path(fp_str)
+                info: Optional[Dict[str, Any]] = None
+                need_read = True
+                with self._cache_lock:
+                    cached = self._cache.get(fp_str)
+                    if cached and cached[0] == mtime:
+                        info = cached[1]
+                        need_read = False
+
+                if not need_read and info is not None:
+                    enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
+                    continue
+
+                # 缓存未命中或过期 → 读+解析（这是慢的部分，发生在后台线程）
+                parsed = self._read_and_parse(fp_path)
+                if parsed is None:
+                    continue
+                info = {
+                    "session_id": parsed.get("session_id", ""),
+                    "title": parsed.get("title", fp_path.stem[:50]),
+                    "last_time": parsed.get("last_time", ""),
+                    "message_count": parsed.get("message_count", 0),
+                    "preview": parsed.get("preview", ""),
+                    "project": parsed.get("project", ""),
+                }
+                with self._cache_lock:
+                    self._cache[fp_str] = (mtime, info)
+                enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
+
+            # 按修改时间倒序
+            enriched.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
+            self._signals.finished.emit(self._request_id, enriched)
+        except Exception as e:
+            logger.exception(f"[ArchiveScan] 扫描异常: {e}")
+            self._signals.finished.emit(self._request_id, [])
+
+    @staticmethod
+    def _enrich_from_info(
+        fp_str: str, fp_path: Path, mtime: float, info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return {
+            "path": fp_str,
+            "name": fp_path.name,
+            "session_id": info.get("session_id", ""),
+            "title": info.get("title", fp_path.stem[:50]),
+            "last_time": info.get("last_time", ""),
+            "message_count": info.get("message_count", 0),
+            "preview": info.get("preview", ""),
+            "project": info.get("project", ""),
+            "mtime": mtime,
+        }
+
+    @staticmethod
+    def _read_and_parse(fp_path: Path) -> Optional[Dict[str, Any]]:
+        """读取单个归档 JSON，提取卡片所需的轻量字段。"""
+        try:
+            with open(fp_path, "r", encoding="utf-8") as f:
+                data = json.loads(f.read())
+        except Exception as e:
+            logger.warning(f"[ArchiveScan] 读取失败: {fp_path}: {e}")
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        messages = data.get("messages", []) or []
+        msg_count = data.get(
+            "message_count",
+            len([m for m in messages if m.get("role") == "user"]),
+        )
+        last_time = data.get("last_time") or data.get("saved_at", "")
+        return {
+            "session_id": data.get("session_id", ""),
+            "title": data.get("title", fp_path.stem[:50]),
+            "last_time": last_time,
+            "message_count": msg_count,
+            "preview": _build_archive_preview(messages, 50),
+            "project": data.get("project", ""),
+        }
+
+
 class HistoryManager:
     """
     会话历史管理器（全局单例，跨窗口共享）
@@ -145,6 +321,19 @@ class HistoryManager:
 
         # 内存缓存
         self._history_sessions: List[Dict] = []
+
+        # === 异步归档扫描（性能优化）===
+        # _archive_meta_cache：file_path → (mtime, info_dict)
+        # 仅在后台 _ArchiveScanTask 线程内访问，访问路径都用 _archive_cache_lock 保护。
+        self._archive_meta_cache: Dict[str, Tuple[float, Dict]] = {}
+        self._archive_cache_lock = threading.Lock()
+        # 每次发起扫描自增；主线程接收结果时对比 _current_scan_request_id 丢弃过期数据。
+        self._current_scan_request_id: int = 0
+        # signals 必须在主线程创建（Qt 要求 QObject 的线程亲和性）。
+        self._archive_scan_signals = _ArchiveScanSignals()
+        self._archive_scan_signals.finished.connect(self._on_archive_scan_finished)
+        # 当前扫描对应的回调（仅主线程访问，无需锁）。
+        self._pending_archive_callback: Optional[Callable[[List[Dict]], None]] = None
 
         # 初始化存储
         self._init_storage()
@@ -644,14 +833,95 @@ class HistoryManager:
 
         return session
 
-    def get_archived_sessions(self) -> List[Dict]:
+    # ============================================================
+    # 归档扫描 API（异步，线程安全）
+    # ============================================================
+
+    def get_archived_session_count(self) -> int:
+        """快速获取归档文件数量（仅 glob，不读内容）。
+
+        用于在异步扫描期间显示骨架屏占位的初始数量。
         """
-        获取归档目录中的所有会话文件列表
+        if not self.archive_dir.exists():
+            return 0
+        try:
+            return sum(1 for _ in self.archive_dir.glob("*.json"))
+        except Exception:
+            return 0
+
+    def scan_archives_async(
+        self, callback: Callable[[List[Dict]], None]
+    ) -> int:
+        """异步扫描归档目录，结果通过 callback 在主线程交付。
+
+        - 全部 I/O + JSON 解析在后台 QRunnable 线程完成
+        - 已读取过的文件按 mtime 命中缓存，不会被重复打开
+        - 若在结果返回前再次调用，旧回调被新回调覆盖、request_id 自增，
+          旧结果会通过 request_id 校验自动丢弃
+
+        Args:
+            callback: 接收 enriched_list 的主线程回调
 
         Returns:
-            文件信息列表 [{'path': str, 'name': str, 'session_id': str, 'title': str}]
+            request_id（用于测试/调试追踪）
         """
-        archived_files = []
+        with self._archive_cache_lock:
+            self._current_scan_request_id += 1
+            request_id = self._current_scan_request_id
+
+        # 主线程内赋值，与 _on_archive_scan_finished 都在主线程执行，无竞争。
+        self._pending_archive_callback = callback
+
+        task = _ArchiveScanTask(
+            archive_dir=self.archive_dir,
+            cache=self._archive_meta_cache,
+            cache_lock=self._archive_cache_lock,
+            request_id=request_id,
+            signals=self._archive_scan_signals,
+        )
+        QThreadPool.globalInstance().start(task)
+        return request_id
+
+    def _on_archive_scan_finished(
+        self, request_id: int, enriched: List[Dict]
+    ) -> None:
+        """后台扫描完成的主线程回调（Qt signal handler）。"""
+        with self._archive_cache_lock:
+            current_id = self._current_scan_request_id
+        if request_id != current_id:
+            # 过期结果：用户已切换 tab 或重新触发扫描
+            logger.debug(
+                f"[HistoryManager] 丢弃过期归档扫描结果: req={request_id} current={current_id}"
+            )
+            return
+        callback = self._pending_archive_callback
+        self._pending_archive_callback = None
+        if callback is None:
+            return
+        try:
+            callback(enriched)
+        except Exception as e:
+            logger.exception(f"[HistoryManager] 归档扫描回调异常: {e}")
+
+    def invalidate_archive_cache(self, file_path: Optional[str] = None) -> None:
+        """失效归档元数据缓存。
+
+        Args:
+            file_path: 仅失效该路径；传 None 清空全部。
+        """
+        with self._archive_cache_lock:
+            if file_path is None:
+                self._archive_meta_cache.clear()
+            else:
+                self._archive_meta_cache.pop(file_path, None)
+
+    def get_archived_sessions(self) -> List[Dict]:
+        """同步获取归档列表（兼容旧调用方，UI 层请优先使用 scan_archives_async）。
+
+        该方法阻塞主线程：先调用 get_archived_session_count 提示归零，
+        实际读取仍走 N 次文件 I/O。仅在插件/测试场景下使用。
+        """
+        archived_files: List[Dict] = []
         if not self.archive_dir.exists():
             return archived_files
 
@@ -668,15 +938,13 @@ class HistoryManager:
                     })
                 except Exception:
                     logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
-                    # 跳过损坏的文件
                     continue
         except Exception:
             pass
 
-        # 按修改时间倒序排列（最新的在前）
         archived_files.sort(
             key=lambda x: os.path.getmtime(x["path"]),
-            reverse=True
+            reverse=True,
         )
         return archived_files
 

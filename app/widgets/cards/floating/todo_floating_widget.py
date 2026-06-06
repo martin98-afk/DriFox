@@ -308,9 +308,11 @@ class TodoFloatingWidget(QWidget):
                 content_style = f"color: {Colors.REALTIME_TEXT};"
 
             lines.append(
+                f'<p style="margin: 1px 0; padding-left: 3.5em; text-indent: -3.5em; line-height: 1.4;">'
                 f'<span style="color: {Colors.REALTIME_ACCENT}; font-weight: bold;">{status_icon}</span> '
                 f'<span style="color: {priority_color};">{priority_icon}</span> '
                 f'<span style="{content_style}">{content}</span>'
+                f'</p>'
             )
 
         total = len(self._todo_list)
@@ -327,7 +329,7 @@ class TodoFloatingWidget(QWidget):
             self.progress_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; font-weight: bold;")
 
         self.progress_label.setText(progress_text)
-        self.content_label.setText("<br>".join(lines))
+        self.content_label.setText("".join(lines))
 
         # 同步计算高度（确保在容器 _expand 之前设置好 scroll_area 约束）
         self._adjust_scroll_height()

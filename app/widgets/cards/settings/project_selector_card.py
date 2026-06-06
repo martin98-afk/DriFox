@@ -8,9 +8,9 @@ from typing import Dict
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QLineEdit, QSizePolicy, QFrame,
+    QScrollArea, QSizePolicy,
 )
-from qfluentwidgets import TransparentToolButton, FluentIcon
+from qfluentwidgets import TransparentToolButton
 
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
@@ -154,32 +154,6 @@ class ProjectSelectorCardContent(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        # ── 新建项目输入区域 ──
-        new_proj_layout = QHBoxLayout()
-        new_proj_layout.setSpacing(6)
-        new_proj_layout.setContentsMargins(4, 4, 4, 0)
-
-        self._new_project_edit = QLineEdit(self)
-        self._new_project_edit.setPlaceholderText("新建项目...")
-        self._new_project_edit.setInputMethodHints(Qt.ImhNoAutoUppercase)
-        self._apply_new_project_edit_style()
-        self._new_project_edit.returnPressed.connect(self._on_create_project)
-        new_proj_layout.addWidget(self._new_project_edit, 1)
-
-        self._add_btn = TransparentToolButton(FluentIcon.ADD, self)
-        self._add_btn.setFixedSize(28, 28)
-        self._add_btn.setToolTip("创建项目")
-        self._add_btn.clicked.connect(self._on_create_project)
-        new_proj_layout.addWidget(self._add_btn)
-
-        layout.addLayout(new_proj_layout)
-
-        # ── 分隔线 ──
-        sep = QFrame(self)
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet(f"background-color: {Colors.BORDER}; max-height: 1px; margin: 4px 0;")
-        layout.addWidget(sep)
-
         # ── 项目列表滚动区域 ──
         self._scroll_area = QScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
@@ -226,32 +200,9 @@ class ProjectSelectorCardContent(QWidget):
         self._scroll_area.setMaximumHeight(300)
         layout.addWidget(self._scroll_area, 1)
 
-    def _apply_new_project_edit_style(self):
-        """应用新建项目输入框样式"""
-        Colors.refresh()
-        self._new_project_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {Colors.CONTENT_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                padding: 5px 8px;
-                selection-background-color: {Colors.BORDER_ACCENT};
-                selection-color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(12)};
-            }}
-            QLineEdit:focus {{
-                border-color: {Colors.BORDER_ACCENT};
-            }}
-            QLineEdit::placeholder {{
-                color: {Colors.TEXT_MUTED};
-            }}
-        """)
-
     def refresh_style(self):
         """刷新主题样式"""
         Colors.refresh()
-        self._apply_new_project_edit_style()
 
     # ── 公有方法 ──────────────────────────────────────
 
@@ -374,15 +325,4 @@ class ProjectSelectorCardContent(QWidget):
         if reply == QMessageBox.Yes:
             self.archiveProject.emit(project_name)
 
-    def _on_create_project(self):
-        """创建新项目"""
-        name = self._new_project_edit.text().strip()
-        if not name:
-            return
 
-        if name not in self._projects:
-            self._projects.append(name)
-            self._refresh_project_list()
-            self._new_project_edit.clear()
-
-        self.newProjectCreated.emit(name)
