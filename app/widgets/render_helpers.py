@@ -512,7 +512,9 @@ _TOOL_ICON_MAP = {
     # 诊断工具
     "get_diagnostics": "🩺",
     # 截图工具
-    "take_screenshot": "📸",
+    "screenshot": "📸",
+    "mouse": "🖱️",
+    "keyboard": "⌨️",
 }
 
 

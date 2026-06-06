@@ -155,6 +155,60 @@ class FileTools:
         except Exception as e:
             return ToolResult(False, error=f"Read error: {str(e)}")
 
+    def read_persisted_output(self, file_path: str) -> ToolResult:
+        """
+        读取之前被持久化的工具结果完整内容
+
+        配合 app.core.tool_result_persister 使用:
+        当工具结果超 50K 字符时会被自动持久化到磁盘, 上文里只保留预览.
+        如果模型需要完整内容, 调用本工具读取.
+
+        Args:
+            file_path: 持久化时返回的文件绝对路径
+                       (形如 .drifox/projects/{session_id}/tool-results/xxx.txt)
+
+        Returns:
+            ToolResult: 包含完整内容
+        """
+        try:
+            from pathlib import Path
+            from app.utils.utils import get_app_data_dir
+
+            p = Path(file_path)
+            # 安全检查: 必须在 .drifox/projects/*/tool-results/ 下
+            # 防止任意文件读取
+            try:
+                allowed_root = (get_app_data_dir() / "projects").resolve()
+                p_resolved = p.resolve()
+                p_resolved.relative_to(allowed_root)  # 越界则抛 ValueError
+            except ValueError:
+                return ToolResult(
+                    False,
+                    error=(
+                        f"Access denied: {file_path} is outside the "
+                        f"tool-results directory."
+                    ),
+                )
+            if not p.exists() or p.suffix != ".txt":
+                return ToolResult(
+                    False,
+                    error=f"Persisted output not found: {file_path}",
+                )
+
+            content = p.read_text(encoding="utf-8", errors="replace")
+            # 二级软截断: 避免"恢复"时再爆 context
+            if len(content) > 200_000:
+                content = (
+                    content[:200_000]
+                    + f"\n\n[Truncated at 200,000 chars. "
+                    f"Full size on disk: {p.stat().st_size} bytes]"
+                )
+            return ToolResult(True, content=content)
+        except Exception as e:
+            return ToolResult(
+                False, error=f"Read persisted output error: {str(e)}"
+            )
+
     def write_file(self, path: str, content: str) -> ToolResult:
         """
         写入文件，自动创建中间目录

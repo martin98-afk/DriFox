@@ -7,20 +7,19 @@ and aggregates tools from separate tool modules, eliminating the need
 for manual method forwarding in a shallow facade.
 """
 
+import difflib
 from pathlib import Path
 from typing import Dict, List, Any
-import re
-import difflib
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from loguru import logger
 
+from app.tools.automation import AutomationTools
 # Import all tool modules
 from app.tools.diagnostics_tools import DiagnosticsTools
 from app.tools.file_tools import FileTools
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult
-from app.tools.screenshot_tools import ScreenshotTools
 from app.tools.task_tools import TaskTools
 from app.tools.terminal_tools import TerminalTools
 from app.tools.web_tools import WebTools
@@ -86,7 +85,7 @@ class BuiltinTools(QObject):
         self._tools["terminal"] = TerminalTools(self)
         self._tools["task"] = TaskTools(self)
         self._tools["diagnostics"] = DiagnosticsTools(self)
-        self._tools["screenshot"] = ScreenshotTools(self)
+        self._tools["automation"] = AutomationTools(self)
 
         # Expose properties for backward compatibility
         self._file_tools = file_tools
@@ -94,7 +93,7 @@ class BuiltinTools(QObject):
         self._terminal_tools = self._tools["terminal"]
         self._task_tools = self._tools["task"]
         self._diagnostics_tools = self._tools["diagnostics"]
-        self._screenshot_tools = self._tools["screenshot"]
+        self._automation_tools = self._tools["automation"]
 
     @property
     def file_tools(self):
@@ -115,10 +114,6 @@ class BuiltinTools(QObject):
     @property
     def diagnostics_tools(self):
         return self._diagnostics_tools
-
-    @property
-    def screenshot_tools(self):
-        return self._screenshot_tools
 
     @property
     def mcp_manager(self):
@@ -619,11 +614,88 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "take_screenshot",
-            "description": "截取主屏幕全屏截图并保存为 PNG。无需额外依赖；macOS 可能需要屏幕录制权限，Linux Wayland 可能受系统限制。",
+            "name": "screenshot",
+            "description": "截取屏幕并保存为 PNG 文件。支持全屏截图或指定区域截图。",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "输出 PNG 文件路径（可选，为空时自动生成到 .drifox/screenshots/ 目录）",
+                    },
+                    "region": {
+                        "type": "array",
+                        "description": "截取区域 (left, top, width, height)，如 [100, 200, 800, 600]；为空时截取主显示器全屏",
+                        "items": {"type": "integer"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mouse",
+            "description": "桌面鼠标操作。支持移动、单击、双击、右键、滚动、拖拽、查询当前位置。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["move", "click", "double_click", "right_click", "scroll", "drag", "position"],
+                        "description": "操作类型: move=移动, click=单击, double_click=双击, right_click=右键, scroll=滚动, drag=拖拽(从当前位置拖到 x,y), position=返回当前鼠标坐标及屏幕尺寸(无需 x,y; content 为 {x,y,screen_width,screen_height})",
+                    },
+                    "x": {"type": "integer", "description": "目标屏幕 X 坐标（像素）"},
+                    "y": {"type": "integer", "description": "目标屏幕 Y 坐标（像素）"},
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "鼠标按钮（默认 left）",
+                    },
+                    "clicks": {
+                        "type": "integer",
+                        "description": "点击次数（默认 1），double_click 固定为 2 次",
+                    },
+                    "dx": {"type": "integer", "description": "scroll 水平滚动量"},
+                    "dy": {"type": "integer", "description": "scroll 垂直滚动量（负值向上，正值向下）"},
+                    "duration": {
+                        "type": "number",
+                        "description": "move/drag 过渡时长（秒）；move 默认 0 瞬移，drag 默认 0.3",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "keyboard",
+            "description": "桌面键盘操作。支持打字、按单键、组合热键。需先在设置中开启桌面自动化。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["type", "press", "hotkey"],
+                        "description": "操作类型: type=输入文本, press=按单键, hotkey=组合热键",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "type 操作要输入的文本（支持 Unicode）",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "press 操作的单键名，如 enter, f5, ctrl_l, esc, tab",
+                    },
+                    "keys": {
+                        "type": "string",
+                        "description": "hotkey 操作的组合键，用 + 连接，如 ctrl+c, ctrl+shift+n",
+                    },
+                },
+                "required": ["action"],
             },
         },
     },
