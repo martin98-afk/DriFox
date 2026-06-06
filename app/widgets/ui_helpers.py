@@ -1073,44 +1073,71 @@ def save_or_archive_session(
     history_manager,
     session,
     current_session_id,
-    compaction_info=None
+    compaction_info=None,
+    project_fallback: str = None,
 ) -> str:
     """
     保存或归档会话
-    
+
     Args:
         history_manager: 历史管理器
         session: ChatSession 对象
         current_session_id: 当前会话 ID
         compaction_info: 压缩信息字典
-        
+        project_fallback: 项目归属兜底值（当该会话首次落库且无任何已知归属时使用）；
+            通常为 main_widget._current_project。**警告**：仅在已知会话从未保存过时
+            才会被采用——对已有 SQLite 记录的会话，永远沿用其原有 project，避免
+            "项目切换后老会话被错误划归新项目"或"被默认项目兜底覆盖"。
+
     Returns:
         新的会话 ID
     """
     if compaction_info is None:
         compaction_info = get_session_compaction_info(session)
-    
+
+    # 🛡️ 优先沿用会话已存在的 project 归属，避免被 "默认项目" 兜底覆盖
+    # 查询顺序：内存缓存 → SQLite。两者都没有则使用 project_fallback。
+    resolved_project = None
+    target_session_id = current_session_id or session.session_id
+    if target_session_id and history_manager:
+        try:
+            existing = history_manager.get_session_by_session_id(target_session_id)
+            if existing:
+                existing_project = existing.get("project")
+                # 仅当字段确实非空才采用（避免空字符串污染）
+                if existing_project:
+                    resolved_project = existing_project
+        except Exception:
+            # 查询失败不影响主流程，走 fallback
+            pass
+    if resolved_project is None:
+        resolved_project = project_fallback
+
+    save_kwargs = dict(compaction_info)
+    if resolved_project is not None:
+        save_kwargs["project"] = resolved_project
+
     if current_session_id is not None:
         idx = history_manager.find_index_by_session_id(current_session_id)
         if idx is not None:
             history_manager.update_session(
                 idx,
                 session.messages,
-                **compaction_info
+                **save_kwargs
             )
             return current_session_id
         else:
             history_manager.save_session(
                 session.messages,
                 session_id=session.session_id,
-                **compaction_info
+                **save_kwargs
             )
             return session.session_id
     else:
         history_manager.save_session(
             session.messages,
             session_id=session.session_id,
-            **compaction_info
+            **save_kwargs
         )
         return session.session_id
 

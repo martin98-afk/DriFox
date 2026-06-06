@@ -400,10 +400,41 @@ class SessionStore:
         return ["默认项目"]
 
     def get_session_counts(self) -> Dict[str, int]:
-        """获取所有项目的会话数量"""
+        """获取所有项目的会话数量（COUNT DISTINCT session_id 去重）"""
         if self._session_repo:
             return self._session_repo.get_session_counts()
         return {}
+
+    def force_cleanup_project(self, project_name: str) -> bool:
+        """强制清理项目的所有关联数据（绕过 repo 层，直接 SQL 删除三张表）
+
+        归档时调用此方法，确保 sessions、key_documents、project_notes
+        三张表中该项目的所有记录都被删除，避免 UNION 查询让已归档项目"复活"。
+        """
+        if not self._db or not self._db.is_connected:
+            logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
+            return False
+        try:
+            # 删除会话（直接 SQL，不经过 repo 层）
+            self._execute(
+                f'DELETE FROM sessions WHERE project = ?',
+                (project_name,)
+            )
+            # 删除关键文档
+            self._execute(
+                f'DELETE FROM key_documents WHERE project = ?',
+                (project_name,)
+            )
+            # 删除旧版项目笔记
+            self._execute(
+                f'DELETE FROM project_notes WHERE project = ?',
+                (project_name,)
+            )
+            logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")
+            return True
+        except Exception as e:
+            logger.error(f"[SessionStore] 强制清理项目 {project_name} 异常: {e}")
+            return False
 
     def update_session_project(self, session_id: str, project: str) -> bool:
         """更新会话的项目归属"""

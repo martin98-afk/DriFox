@@ -242,6 +242,9 @@ class _CustomInputCard(QWidget):
     activated = pyqtSignal()  # 用户主动点击选中时触发
     heightNeedsUpdate = pyqtSignal()  # 高度需要更新时触发
 
+    MAX_INPUT_HEIGHT = 180  # 输入框最大高度（与主输入框一致）
+    MIN_INPUT_HEIGHT = 32   # 输入框初始单行高度（一行文字 + 内边距）
+
     def __init__(self, multiple: bool = False, parent=None):
         super().__init__(parent)
         self._active = False
@@ -249,6 +252,7 @@ class _CustomInputCard(QWidget):
         self._multiple = multiple
         self._label_text = "输入自己的答案"
         self._desc_text = self.PLACEHOLDER
+        self._adjusting_height = False
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(44)
         self._setup_ui()
@@ -257,49 +261,130 @@ class _CustomInputCard(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        self._layout = QVBoxLayout(self)
+        # 关键：与选项卡片 _OptionRadioCard / _OptionCheckCard 完全相同的横向布局结构
+        # 让输入框的文字起始 x 坐标跟选项标题文字（12+18+10=40px）对齐
+        self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(12, 10, 12, 10)
-        self._layout.setSpacing(6)
-
-        header = QHBoxLayout()
-        header.setSpacing(10)
+        self._layout.setSpacing(10)
 
         self._icon = QLabel("□" if self._multiple else "○")
         self._icon.setFont(get_unified_font(13))
         self._icon.setFixedWidth(18)
-        self._icon.setAlignment(Qt.AlignCenter)
+        self._icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._layout.addWidget(self._icon, 0)
+
+        # 右侧：标题 + 描述/输入框（垂直布局）
+        self._right_layout = QVBoxLayout()
+        self._right_layout.setContentsMargins(0, 0, 0, 0)
+        self._right_layout.setSpacing(4)
 
         self._title_label = QLabel("输入自己的答案")
         self._title_label.setFont(get_unified_font(11, True))
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-
-        header.addWidget(self._icon, 0, Qt.AlignTop)
-        header.addWidget(self._title_label, 1)
-        self._layout.addLayout(header)
+        self._right_layout.addWidget(self._title_label)
 
         self._desc_label = QLabel(self.PLACEHOLDER)
         self._desc_label.setFont(get_unified_font(9))
         self._desc_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._layout.addWidget(self._desc_label)
+        self._right_layout.addWidget(self._desc_label)
 
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText(self.PLACEHOLDER)
         self._text_edit.setFont(get_unified_font(10))
-        self._text_edit.setMaximumHeight(80)
+        self._text_edit.setMaximumHeight(self.MAX_INPUT_HEIGHT)
+        self._text_edit.setMinimumHeight(self.MIN_INPUT_HEIGHT)
+        self._text_edit.setFixedHeight(self.MIN_INPUT_HEIGHT)
+        self._text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
+        # 兜底：即使 auto-grow 临时失效，垂直滚动条也能让用户看到溢出内容
+        self._text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._text_edit.setVisible(False)
         self._text_edit.textChanged.connect(self._on_text_changed)
+        self._text_edit.installEventFilter(self)  # 监听 Resize/Show，等布局完成后再算高度
         # 强制白色文字：Qt 样式表 color 对 QTextEdit 经常不生效，需用 QPalette
         pal = self._text_edit.palette()
         pal.setColor(QPalette.Text, QColor("#ffffff"))
         self._text_edit.setPalette(pal)
-        self._layout.addWidget(self._text_edit)
+        self._right_layout.addWidget(self._text_edit)
 
+        self._layout.addLayout(self._right_layout, 1)
         self._apply_style()
+
+    def eventFilter(self, obj, event):
+        """监听 _text_edit 的 Show 和 Resize 事件：布局完成后才计算高度
+
+        必须延迟到下一轮事件循环（QTimer.singleShot(0, ...)），
+        因为 Resize 事件触发时 viewport().width() 还没更新好。
+        """
+        if obj is self._text_edit and self._active:
+            if event.type() in (QEvent.Resize, QEvent.Show):
+                QTimer.singleShot(0, self._adjust_height_to_content)
+        return super().eventFilter(obj, event)
 
     def _on_text_changed(self):
         self._text_value = self._text_edit.toPlainText()
+        if self._active:
+            QTimer.singleShot(0, self._adjust_height_to_content)
+
+    def _adjust_height_to_content(self):
+        """根据内容自动调整输入框高度
+
+        双重计算策略：
+        1. 优先用 QTextDocument.documentSize()（最准确）
+        2. 如果 document 还没准备好，用 fontMetrics 估算（兜底）
+        3. 如果 viewport 宽度还没好，延迟 20ms 重试
+        """
+        if self._adjusting_height:
+            return
+        if not self._text_edit.isVisible():
+            return
+
+        viewport_width = self._text_edit.viewport().width()
+        if viewport_width <= 0:
+            # 布局未完成，延迟重试
+            QTimer.singleShot(20, self._adjust_height_to_content)
+            return
+
+        # ── 策略 1：QTextDocument.documentSize() ──
+        doc = self._text_edit.document()
+        doc.setTextWidth(viewport_width)
+        doc_height = int(doc.documentSize().height())
+
+        # ── 策略 2：fontMetrics 兜底估算 ──
+        # 如果 documentSize 返回 0（比如刚 setTextWidth 后还没重排），
+        # 用 fontMetrics 根据行数和字符宽度估算
+        if doc_height <= 0:
+            fm = self._text_edit.fontMetrics()
+            line_height = fm.lineSpacing()
+            avg_char_w = max(1, fm.averageCharWidth())
+            chars_per_line = max(1, viewport_width // avg_char_w)
+            text = self._text_edit.toPlainText()
+            if not text:
+                # 空文本：一行高度（光标占位）
+                doc_height = line_height
+            else:
+                total_lines = 0
+                for line in text.split('\n'):
+                    n = len(line)
+                    if n == 0:
+                        total_lines += 1
+                    else:
+                        total_lines += max(1, -(-n // chars_per_line))  # 向上取整
+                doc_height = total_lines * line_height
+
+        # padding：上下各 6px
+        total_height = doc_height + 12
+        new_height = max(self.MIN_INPUT_HEIGHT, min(self.MAX_INPUT_HEIGHT, total_height))
+
+        if self._text_edit.height() != new_height:
+            self._adjusting_height = True
+            try:
+                self._text_edit.setFixedHeight(new_height)
+                self._emit_height_update()
+            finally:
+                self._adjusting_height = False
 
     def set_active(self, active: bool):
         self._active = active
@@ -309,10 +394,12 @@ class _CustomInputCard(QWidget):
         self._desc_label.setVisible(not active)
         self._text_edit.setVisible(active)
         if active:
+            self._text_edit.setFixedHeight(self.MIN_INPUT_HEIGHT)
             self._text_edit.setFocus()
             if self._text_value:
                 self._text_edit.setPlainText(self._text_value)
-            # 延迟发出高度更新信号，确保布局完成
+            # 延迟到下一轮事件循环，等布局完成（viewport().width() > 0）后再算高度
+            QTimer.singleShot(0, self._adjust_height_to_content)
             QTimer.singleShot(10, self._emit_height_update)
         self._apply_style()
 
@@ -358,7 +445,11 @@ class _CustomInputCard(QWidget):
                 color: {Colors.REALTIME_TEXT};
                 border: 1px solid {te_border};
                 border-radius: 6px;
-                padding: 8px 10px;
+                /* 左右 padding 设为 0：让文字从 x=40px 开始，跟选项标题对齐 */
+                padding-top: 6px;
+                padding-bottom: 6px;
+                padding-left: 0px;
+                padding-right: 0px;
                 {get_font_family_css()} font-size: {font_size_css(10)};
             }}
             QTextEdit:focus {{ border-color: {Colors.REALTIME_ACCENT}; }}
@@ -411,21 +502,22 @@ class QuestionFloatingWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 4, 10, 4)
-        main_layout.setSpacing(3)
+        main_layout.setContentsMargins(10, 2, 10, 2)
+        main_layout.setSpacing(2)
 
         # ── 顶栏 ──
         self._header_widget = QWidget()
         self._header_widget.setCursor(Qt.PointingHandCursor)
+        self._header_widget.setFixedHeight(24)
         self._header_widget.installEventFilter(self)
         header = QHBoxLayout(self._header_widget)
-        header.setSpacing(8)
+        header.setSpacing(4)
         header.setContentsMargins(0, 0, 0, 0)
 
         self._collapse_btn = QPushButton()
         self._collapse_btn.setIcon(get_icon("折叠"))
-        self._collapse_btn.setIconSize(QSize(18, 18))
-        self._collapse_btn.setFixedSize(28, 28)
+        self._collapse_btn.setIconSize(QSize(16, 16))
+        self._collapse_btn.setFixedSize(24, 24)
         self._collapse_btn.setCursor(Qt.PointingHandCursor)
         self._collapse_btn.setToolTip("折叠问题")
         self._collapse_btn.setStyleSheet("""
@@ -433,7 +525,6 @@ class QuestionFloatingWidget(QWidget):
                 background: transparent;
                 border: none;
                 border-radius: 4px;
-                padding: 2px;
             }
             QPushButton:hover {
                 background: rgba(255,255,255,0.1);
@@ -526,7 +617,7 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         self._preview_btn = QPushButton("预览参数")
-        self._preview_btn.setFixedHeight(30)
+        self._preview_btn.setFixedHeight(26)
         self._preview_btn.setCursor(Qt.PointingHandCursor)
         self._preview_btn.setFont(get_unified_font(10))
         self._preview_btn.clicked.connect(self._on_preview)
@@ -537,7 +628,7 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         self._back_btn = QPushButton("返回")
-        self._back_btn.setFixedHeight(30)
+        self._back_btn.setFixedHeight(26)
         self._back_btn.setCursor(Qt.PointingHandCursor)
         self._back_btn.setFont(get_unified_font(10))
         self._back_btn.clicked.connect(self._on_back)
@@ -547,7 +638,7 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         self._next_btn = QPushButton("下一步")
-        self._next_btn.setFixedHeight(30)
+        self._next_btn.setFixedHeight(26)
         self._next_btn.setCursor(Qt.PointingHandCursor)
         self._next_btn.setFont(get_unified_font(10, True))
         self._next_btn.clicked.connect(self._on_next)

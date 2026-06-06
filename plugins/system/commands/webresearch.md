@@ -5,7 +5,7 @@ argument-hint:
   "[--quick]": "快速模式：1 次搜索 + 至多 1 次抓取"
   "[--deep]": "深度模式：3-5 跳多源调研 + TodoWrite 追踪"
   "[--html]": "HTML 报告模式：输出为带统一样式的 HTML 报告（配合 --save-to 使用）"
-  "[--save-to=]": "指定报告输出路径（默认 drifoxdocs/research_<topic>_<ts>.md，--html 时扩展名为 .html）"
+  "[--save-to=]": "指定报告输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）"
   "<query>": "研究主题（必填，搜索关键词或自然语言问题）"
 ---
 
@@ -22,7 +22,7 @@ argument-hint:
 | 无标志 | 默认 `--quick` | 兼容性好 |
 
 - **`<query>`** 是 `$ARGUMENTS` 中去掉所有 `--flag` 后的剩余文本
-- **`--save-to=PATH`** 自定义输出路径（相对工作目录或绝对路径）
+- **`--save-to=PATH`** 自定义输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）
 - **`--html`** 开启 HTML 报告模式，与 `--deep` 或 `--quick` 均可搭配；输出时将使用下方定义的统一 HTML 风格渲染报告
 - **未提供 query** → 报告"请提供研究主题"并停止，不进入搜索
 

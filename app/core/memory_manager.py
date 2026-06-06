@@ -49,8 +49,8 @@ class MemoryManagerCore:
         
         # 三个仓储
         self._entry_memories_repo: Optional[MemoryRepository] = None
-        # 保留旧 SQLite 仓储仅用于一次性迁移（项目笔记改用 AGENTS.md 文件）
-        self._legacy_project_notes_repo: Optional[ProjectNotesRepository] = None
+        # SQLite 仓储：用于 (1) 无 workdir 项目的笔记存储，(2) 一次性从历史数据迁出
+        self._sqlite_project_notes_repo: Optional[ProjectNotesRepository] = None
         self._key_documents_repo: Optional[KeyDocumentsRepository] = None
         
         # 初始化存储
@@ -66,7 +66,7 @@ class MemoryManagerCore:
                 
                 # 初始化三个仓储
                 self._entry_memories_repo = MemoryRepository(self._db_manager)
-                self._legacy_project_notes_repo = ProjectNotesRepository(self._db_manager)
+                self._sqlite_project_notes_repo = ProjectNotesRepository(self._db_manager)
                 self._key_documents_repo = KeyDocumentsRepository(self._db_manager)
                 
                 return
@@ -128,46 +128,64 @@ class MemoryManagerCore:
             return False
         return self._entry_memories_repo.save_all(memories)
 
-    # ==================== 项目笔记 API（基于 AGENTS.md 文件） ====================
+    # ==================== 项目笔记 API（按 workdir 路由：有走文件 / 无走 SQLite） ====================
 
     def get_project_note(self, project: str, workdir: Optional[str] = None) -> Optional[Dict]:
         """读取项目笔记（不创建）
 
-        Args:
-            project: 项目名
-            workdir: 当前工作目录（多窗口隔离，优先于 DB 读取）
+        路由：
+        - 有 workdir → 文件版（{workdir}/AGENTS.md）
+        - 无 workdir → SQLite 版（project_notes 表）
         """
         workdir = workdir or self.get_working_directory(project)
-        if not workdir:
+        if workdir:
+            return project_notes_manager.get_note(workdir, project)
+        # SQLite 路径
+        if not self._sqlite_project_notes_repo:
             return None
-        return project_notes_manager.get_note(workdir, project)
+        note = self._sqlite_project_notes_repo.get(project)
+        if not note:
+            return None
+        return {
+            "project": project,
+            "content": note.get("content", ""),
+            "path": "",
+        }
 
     def save_project_note(self, project: str, content: str, workdir: Optional[str] = None) -> bool:
         """保存项目笔记
 
-        Args:
-            project: 项目名
-            content: Markdown 内容
-            workdir: 当前工作目录（多窗口隔离，优先于 DB 读取）
+        路由：
+        - 有 workdir → 文件版
+        - 无 workdir → SQLite 版
         """
         workdir = workdir or self.get_working_directory(project)
-        if not workdir:
+        if workdir:
+            return project_notes_manager.save_note(workdir, project, content)
+        if not self._sqlite_project_notes_repo:
             return False
-        return project_notes_manager.save_note(workdir, project, content)
+        return self._sqlite_project_notes_repo.save(project, content)
 
     def get_or_create_project_note(self, project: str, workdir: Optional[str] = None) -> Dict:
-        """读取或创建项目笔记（首次自动迁移/初始化默认模板）
+        """读取或创建项目笔记
 
-        Args:
-            project: 项目名
-            workdir: 当前工作目录（多窗口隔离，优先于 DB 读取）
+        路由：
+        - 有 workdir → 文件版（首次访问自动从 SQLite 迁/写默认模板）
+        - 无 workdir → SQLite 版（首次访问自动用默认模板创建）
         """
         workdir = workdir or self.get_working_directory(project)
-        if not workdir:
+        if workdir:
+            return project_notes_manager.get_or_create_note(
+                workdir, project, legacy_repo=self._sqlite_project_notes_repo
+            )
+        if not self._sqlite_project_notes_repo:
             return {"project": project, "content": "", "path": ""}
-        return project_notes_manager.get_or_create_note(
-            workdir, project, legacy_repo=self._legacy_project_notes_repo
-        )
+        note = self._sqlite_project_notes_repo.get_or_create(project)
+        return {
+            "project": project,
+            "content": note.get("content", ""),
+            "path": "",
+        }
 
     # ==================== 关键文档 API ====================
 
@@ -272,18 +290,28 @@ class MemoryManagerCore:
         docs = self.get_key_documents(project)[:doc_limit]
         # 获取当前项目的工作目录（多窗口隔离：优先使用实例缓存值）
         wd_path = workdir_override if workdir_override is not None else self.get_working_directory(project)
+        has_root_doc = False
         if docs:
             for doc in docs:
                 file_name = doc.get("file_name", "")
                 file_path = doc.get("file_path", "")
                 is_wd = file_path == wd_path
                 if is_wd:
+                    has_root_doc = True
                     lines.append(f"- {file_name} （项目根目录）{file_path}")
                 else:
                     lines.append(f"- {file_name} ({file_path})")
         else:
             lines.append("- 暂无关键文档")
         lines.append("")
+
+        # 3.5 路径使用建议（仅当关键文档中存在项目根目录标记时）
+        if has_root_doc and wd_path:
+            lines.append("### 路径使用建议")
+            lines.append(f"- 项目根目录: {wd_path}")
+            lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
+            lines.append("- 根目录外：用绝对路径")
+            lines.append("")
 
         # 4. Worktree 上下文（仅当工作目录在 git 仓库中且有 worktree 时）
         if wd_path:

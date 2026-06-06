@@ -209,7 +209,7 @@ class FileOperationRepository:
         ''', (session_id, after_id))
 
         if success and result:
-            return result[0] if isinstance(result[0], tuple) else result
+            return int(result)
         return 0
 
     def delete_by_call_id(self, session_id: str, call_id: str) -> int:
@@ -232,7 +232,7 @@ class FileOperationRepository:
         ''', (session_id, call_id))
 
         if success and result:
-            return result[0] if isinstance(result[0], tuple) else result
+            return int(result)
         return 0
 
     def clear_session(self, session_id: str) -> Tuple[int, List[str]]:
@@ -269,6 +269,6 @@ class FileOperationRepository:
 
         deleted_count = 0
         if success and result:
-            deleted_count = result[0] if isinstance(result[0], tuple) else result
+            deleted_count = int(result)
 
         return deleted_count, backup_paths

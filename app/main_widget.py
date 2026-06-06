@@ -1515,6 +1515,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注册 /compact 命令处理器（支持 --clear 参数）
         FunctionCommandHandlers.register("compact", self._handle_compact_command)
 
+        # 注册 /todos 命令处理器
+        FunctionCommandHandlers.register("todos", self._handle_todos_command)
+
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
         self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
@@ -1743,6 +1746,42 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card.content_layout.addWidget(
             self._project_selector_card_content
         )
+        # ── 新建项目输入放到标题栏 ──
+        from PyQt5.QtWidgets import QLineEdit
+
+        Colors.refresh()
+        self._project_new_edit = QLineEdit(self._project_selector_card)
+        self._project_new_edit.setPlaceholderText("新建项目...")
+        self._project_new_edit.setFixedWidth(130)
+        self._project_new_edit.setFixedHeight(24)
+        self._project_new_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 2px 6px;
+                {font_size_css(11)}
+                {get_font_family_css()}
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {Colors.TEXT_ACCENT};
+            }}
+            QLineEdit::placeholder {{
+                color: {Colors.INPUT_PLACEHOLDER};
+            }}
+        """)
+        self._project_new_edit.returnPressed.connect(self._on_header_new_project)
+
+        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, self._project_selector_card)
+        self._project_new_btn.setFixedSize(24, 24)
+        self._project_new_btn.setToolTip("创建项目")
+        self._project_new_btn.clicked.connect(self._on_header_new_project)
+
+        # 插入到标题栏的额外按钮区（关闭按钮之前）
+        self._project_selector_card._extra_buttons_container.insertWidget(0, self._project_new_edit)
+        self._project_selector_card._extra_buttons_container.insertWidget(1, self._project_new_btn)
+
         self._project_selector_card.setVisible(False)
         self._project_selector_card.closed.connect(
             lambda: (
@@ -1902,6 +1941,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始化撤销删除缓存（只缓存一步）
         self._undo_delete_cache = {}
+
+        # 🛡️ Bug 修复：截断哨兵 — 记录最近一次 session 截断的关键信息，
+        # 用于在异步 finalize_stop / messages_updated 回调到达时识别"是否发生了截断"
+        # 结构：{"session_id": str, "messages_len": int, "set_at": float} 或 None
+        # 时机：撤销/删除消息触发的 _persist_session_after_mutation 末尾设置；
+        #       _on_finalize_complete 在覆盖 session.messages 前检查；
+        #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
+        self._truncation_sentinel = None
 
         # 初始化内置命令
         self._init_builtin_commands()
@@ -4590,6 +4637,25 @@ class OpenAIChatToolWindow(ToolWindow):
             self._project_selector_card_content.refresh_style()
         if hasattr(self, "_project_selector_card"):
             self._project_selector_card.refresh_style()
+        if hasattr(self, "_project_new_edit"):
+            Colors.refresh()
+            self._project_new_edit.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {Colors.HOVER_BG};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 4px;
+                    color: {Colors.TEXT_PRIMARY};
+                    padding: 2px 6px;
+                    {font_size_css(11)}
+                    {get_font_family_css()}
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid {Colors.TEXT_ACCENT};
+                }}
+                QLineEdit::placeholder {{
+                    color: {Colors.INPUT_PLACEHOLDER};
+                }}
+            """)
         # 刷新记忆卡片主题
         if hasattr(self, "_memory_card_popup") and hasattr(
             self._memory_card_popup, "refresh_style"
@@ -5890,9 +5956,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self.history_manager:
             # 使用辅助函数保存会话
+            # 🛡️ 传入 _current_project 作为兜底（仅当该会话从未在 SQLite/内存中出现过时生效）；
+            # 已存在的会话以原有 project 为准，避免被默认项目兜底覆盖。
             self._current_session_id = save_or_archive_session(
-                self.history_manager, session, self._current_session_id
+                self.history_manager, session, self._current_session_id,
+                project_fallback=self._current_project,
             )
+
+        # 🛡️ 记录截断哨兵：用于 _on_finalize_complete 识别"是否在异步 finalize 等待
+        # 期间发生过截断"，避免 worker 返回的旧消息序列复活已被撤销的内容。
+        self._truncation_sentinel = {
+            "session_id": session.session_id,
+            "messages_len": len(session.messages),
+            "set_at": time.time(),
+        }
 
     def _refresh_session_view_after_mutation(self):
         # 使用辅助函数刷新视图
@@ -8088,6 +8165,24 @@ class OpenAIChatToolWindow(ToolWindow):
         user_hint = re.sub(r'(?:^|\s)--clear(?=\s|$)', '', args or "").strip()
         self._trigger_context_compaction(clear_after=clear_after, user_hint=user_hint)
 
+    def _handle_todos_command(self, args: str):
+        """/todos 命令：手动显示/刷新待办事项卡片"""
+        todos = self.backend.get_todos()
+        if todos:
+            self._todo_floating_widget.update_todos(todos)
+            # 确保卡片可见（update_todos 内部已处理自动显示，但通过 CardManager 确保容器展开）
+            from app.widgets.cards.card_manager import CardManager
+            CardManager.get_instance().show_card("todo", self._window_id)
+        else:
+            self._todo_floating_widget.setVisible(False)
+            InfoBar.info(
+                "暂无待办事项",
+                "",
+                parent=self,
+                duration=1000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
     def _handle_subagents_command(self, args: str):
         """/subagents 命令：重新显示紧凑子智能体卡片"""
         sub_agent_mgr = self.backend.sub_agent_manager
@@ -8690,6 +8785,37 @@ class OpenAIChatToolWindow(ToolWindow):
             # 如果不支持余额查询，隐藏
             balance_display.setVisible(False)
 
+    def _resolve_session_project_fallback(
+        self, session_id: str, current_project: str
+    ) -> str:
+        """解析会话的项目归属兜底值：优先沿用已有归属，避免被默认项目覆盖。
+
+        策略：
+        1. 通过 history_manager 查询该 session_id 在内存/SQLite 中的现有 project
+        2. 查到非空值则沿用（保护"项目切换不影响老会话归属"）
+        3. 查不到则使用 current_project（仅适用于真正的新会话）
+
+        Args:
+            session_id: 会话 ID
+            current_project: 当前项目（兜底值）
+
+        Returns:
+            解析后的项目名
+        """
+        if not session_id or not self.history_manager:
+            return current_project
+        try:
+            existing = self.history_manager.get_session_by_session_id(session_id)
+            if existing:
+                existing_project = existing.get("project")
+                if existing_project:
+                    return existing_project
+        except Exception as e:
+            logger.warning(
+                f"[ProjectResolve] 查询已有项目归属失败: {e}, fallback={current_project}"
+            )
+        return current_project
+
     def _save_current_session_to_history(self):
         session = self.session_manager.get_current_session()
         saved_messages = list(session.messages or []) if session else []
@@ -8718,6 +8844,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 **worktree_kwargs,
                 )
             else:
+                # 🛡️ 内存中找不到（如老会话被 _history_limit=100 截断），
+                # 优先查询 SQLite 原有 project，避免被当前 _current_project 错误覆盖
+                resolved_project = self._resolve_session_project_fallback(
+                    self._current_session_id, self._current_project
+                )
                 self.history_manager.save_session(
                     saved_messages,
                     title=session_title,  # 使用已有的 topic_summary
@@ -8725,11 +8856,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
+                    project=resolved_project,
                     **worktree_kwargs,
                 )
                 self._current_session_id = session.session_id if session else None
         else:
+            # 🛡️ 新会话首次入库：用 _current_project；如果 session.session_id 在 SQLite
+            # 中已存在（极少见的跨窗口/恢复场景），优先沿用其原 project
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id if session else None, self._current_project
+            )
             self.history_manager.save_session(
                 saved_messages,
                 title=session_title,  # 使用已有的 topic_summary
@@ -8737,7 +8873,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
-                project=self._current_project,
+                project=resolved_project,
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id if session else None
@@ -8875,13 +9011,15 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         if getattr(self, "_is_destroyed", False):
             return
-        # 隐藏输入框 + 工具栏，让用户专注看问题
+        # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(False)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(False)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
@@ -8897,11 +9035,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._card_manager.hide_card("question", self._window_id)
-        # 恢复输入框 + 工具栏
+        # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(True)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(True)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -8936,11 +9076,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._card_manager.hide_card("question", self._window_id)
-        # 恢复输入框 + 工具栏
+        # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(True)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(True)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
 
         if self._pending_permission_tool_call_id:
@@ -9001,11 +9143,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
-        # 隐藏输入框 + 工具栏，让用户专注看问题
+        # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         if hasattr(self, "_bottom_input_container"):
             self._bottom_input_container.setVisible(False)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(False)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
         # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
         self._card_manager.show_card("question", self._window_id)
         self._question_floating_widget.setUpdatesEnabled(False)
@@ -9307,24 +9451,23 @@ class OpenAIChatToolWindow(ToolWindow):
             self._project_selector_card_content.set_projects_data(
                 projects, self._current_project, meta_map
             )
-            # 更新卡片标题
-            self._project_selector_card.set_title_text(
-                f"📁 {self._current_project}"
-            )
+            # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
+            self._project_selector_card.set_title_text("📁 项目切换")
 
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
 
-        会话数使用 history_manager.get_history_list() 获取（与历史卡片查询方式一致），
-        该方法会先调用 _deduplicate_history_sessions() 去重，避免重复计数。
+        会话数使用 session_store.get_session_counts()（COUNT DISTINCT session_id 去重），
+        工作目录数使用 memory_manager.get_worktree_counts()。
         """
         meta_map: Dict[str, Dict[str, int]] = {p: {"sessions": 0, "worktrees": 0} for p in projects}
         try:
-            # 会话数：与历史卡片查询方式一致（先去重再过滤）
-            if self.history_manager:
-                for proj in projects:
-                    sessions = self.history_manager.get_history_list(proj)
-                    meta_map[proj]["sessions"] = len(sessions)
+            # 会话数（SQL COUNT DISTINCT session_id 去重统计）
+            if self.backend and self.backend.session_store:
+                session_counts = self.backend.session_store.get_session_counts()
+                for p, c in session_counts.items():
+                    if p in meta_map:
+                        meta_map[p]["sessions"] = c
             # 工作目录数
             if self.backend and self.backend.memory_manager:
                 worktree_counts = self.backend.memory_manager.get_worktree_counts()
@@ -9366,6 +9509,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
 
+    def _on_header_new_project(self):
+        """从标题栏新建项目按钮/回车触发"""
+        name = self._project_new_edit.text().strip()
+        if not name:
+            return
+        self._project_new_edit.clear()
+        self._on_new_project_created(name)
+
     def _on_new_project_created(self, project: str):
         """新建项目后"""
         self._current_project = project
@@ -9402,46 +9553,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
         count = self.history_manager.archive_project(project_name)
 
-        # 无论是否有会话，都清理该项目关联的关键文档和笔记
-        # 必须彻底清理三张表，否则 UNION 查询会让已归档项目"复活"
-        cleanup_ok = True
-        if self.backend and self.backend.memory_manager:
-            mm = self.backend.memory_manager
-            # 清理关键文档
-            if mm._key_documents_repo:
-                try:
-                    deleted = mm.clear_key_documents(project_name)
-                    if deleted == 0:
-                        # 可能是没有文档，也可能是清理失败，验证一下
-                        remaining = mm._key_documents_repo.get_all_projects()
-                        if project_name in remaining:
-                            logger.warning(
-                                f"[Archive] key_documents 清理失败: {project_name} 仍在表中"
-                            )
-                            cleanup_ok = False
-                except Exception as e:
-                    logger.error(f"[Archive] 清理关键文档异常: {e}")
-                    cleanup_ok = False
-            else:
-                logger.warning("[Archive] _key_documents_repo 未初始化，跳过关键文档清理")
-            # 清理旧版项目笔记（SQLite）
-            if mm._legacy_project_notes_repo:
-                try:
-                    mm._legacy_project_notes_repo.delete(project_name)
-                except Exception as e:
-                    logger.error(f"[Archive] 清理旧版项目笔记异常: {e}")
-                    cleanup_ok = False
-            else:
-                logger.warning("[Archive] _legacy_project_notes_repo 未初始化，跳过笔记清理")
+        # 强制清理该项目在 SQLite 三张表中的所有数据（绕过 repo 层，直接 SQL 删除）
+        # 避免 key_documents/project_notes 残留数据导致 UNION 查询让项目"复活"
+        if self.backend and self.backend.session_store:
+            self.backend.session_store.force_cleanup_project(project_name)
         else:
             logger.warning(
-                f"[Archive] backend/memory_manager 不可用，无法清理 {project_name} 的关联数据"
-            )
-            cleanup_ok = False
-
-        if not cleanup_ok:
-            logger.warning(
-                f"[Archive] {project_name} 的关联数据可能未完全清理，下次打开卡片时可能重现"
+                f"[Archive] session_store 不可用，无法强制清理 {project_name} 的关联数据"
             )
 
         # 如果归档的是当前项目，切换到默认项目
@@ -9771,24 +9889,33 @@ class OpenAIChatToolWindow(ToolWindow):
                     **worktree_kwargs,
                 )
             else:
+                # 🛡️ 内存找不到（老会话被截断出 _history_limit）：
+                # 先查 SQLite 原 project，避免被当前 _current_project 覆盖
+                resolved_project = self._resolve_session_project_fallback(
+                    self._current_session_id, self._current_project
+                )
                 self.history_manager.save_session(
                     session.messages,
                     session_id=session.session_id,
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
-                    project=self._current_project,
+                    project=resolved_project,
                     **worktree_kwargs,
                 )
                 self._current_session_id = session.session_id
         else:
+            # 🛡️ 新会话：用 _current_project；若 session_id 在 SQLite 已存在则沿用原 project
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id, self._current_project
+            )
             self.history_manager.save_session(
                 session.messages,
                 session_id=session.session_id,
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
-                project=self._current_project,
+                project=resolved_project,
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id
@@ -9952,11 +10079,38 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if interrupted_messages:
-            self._on_messages_updated(interrupted_messages)
-            if self.history_manager:
-                self._save_current_session_to_history()
-                # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
-                self.history_manager.flush()
+            # 🛡️ Bug 修复：截断/恢复哨兵检查
+            # 场景：用户在流式中点撤销/恢复 → _persist_session_after_mutation 末尾
+            #      设置 _truncation_sentinel（标记"用户主动操作过会话"）
+            #      → finalize_stop 在后台线程跑完后回调到主线程
+            #      → worker 内部的 _current_session_messages 是启动时的**陈旧快照**，
+            #        不知道用户的截断/恢复操作；若直接覆盖会把已恢复的消息丢失。
+            # 策略：只要 sentinel 存在且 session 匹配，就丢弃 worker 覆盖。
+            #      不再依赖长度比较——恢复后 session 长度可能等于甚至超过 worker
+            #      长度，但内容已被用户修改，长度比较会漏判并导致消息丢失。
+            current_session = self.session_manager.get_current_session()
+            should_apply = True
+            sentinel = self._truncation_sentinel
+            if (
+                sentinel
+                and current_session
+                and sentinel.get("session_id") == current_session.session_id
+            ):
+                logger.warning(
+                    "[FinalizeStop] 检测到截断/恢复后到达的 finalize 回调，丢弃覆盖以保护会话状态："
+                    f"worker_len={len(interrupted_messages)}, current_len={len(current_session.messages)}, "
+                    f"session_id={current_session.session_id[:8]}"
+                )
+                should_apply = False
+            # 哨兵是一次性的，无论应用与否都清空
+            self._truncation_sentinel = None
+
+            if should_apply:
+                self._on_messages_updated(interrupted_messages)
+                if self.history_manager:
+                    self._save_current_session_to_history()
+                    # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
+                    self.history_manager.flush()
 
         # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()
