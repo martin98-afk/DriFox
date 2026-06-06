@@ -3,7 +3,7 @@
 桌面自动化工具集 - 轻量级键鼠操控 (pynput + mss)
 
 3 个核心工具, 统一管理:
-  1. mouse       - 鼠标操作 (move/click/double_click/right_click/scroll/drag)
+  1. mouse       - 鼠标操作 (move/click/double_click/right_click/scroll/drag/position)
   2. keyboard    - 键盘操作 (type/press/hotkey)
   3. screenshot  - 截屏 (全屏 / 指定区域 / 默认输出到 .drifox/screenshots/)
 
@@ -44,7 +44,10 @@ except ImportError:
 # ============ 工具枚举与映射 ============
 _MOUSE_ACTIONS = frozenset({
     "move", "click", "double_click", "right_click", "scroll", "drag",
+    "position",
 })
+# 不需要 (x, y) 入参的 action: 跳过 _validate_xy 检查
+_MOUSE_ACTIONS_NO_COORD = frozenset({"position"})
 _KEYBOARD_ACTIONS = frozenset({"type", "press", "hotkey"})
 
 # 单键字符串 -> pynput Key 枚举的映射 (常用键, 其它走 Key[key] 动态查)
@@ -91,8 +94,49 @@ class AutomationTools:
         self._kb = _kb_module.Controller() if (_HAS_PYNPUT and _kb_module) else None
         self._emergency_stopped = False
         self._stop_listener = None
+        # 显示器信息懒加载缓存; 分辨率运行期几乎不变, 不必每次重新探测
+        self._screen_info_cache: Optional[dict] = None
         # 注册紧急停止热键 (Ctrl+Alt+Esc)
         self._register_emergency_stop()
+
+    def _get_screen_info(self) -> dict:
+        """获取主显示器尺寸 + 全部显示器列表 (mss 未装时返回空 dict)
+
+        Returns:
+            {
+                "primary": {"width": int, "height": int},
+                "monitors": [{"left", "top", "width", "height"}, ...],
+            }
+            或 {} (mss 不可用 / 探测失败)
+        """
+        if self._screen_info_cache is not None:
+            return self._screen_info_cache
+        if not _HAS_MSS:
+            self._screen_info_cache = {}
+            return self._screen_info_cache
+        try:
+            with mss.mss() as sct:
+                # mss.monitors[0] = 全屏拼接, [1:] = 各物理显示器
+                primary = sct.monitors[1]
+                self._screen_info_cache = {
+                    "primary": {
+                        "width": int(primary["width"]),
+                        "height": int(primary["height"]),
+                    },
+                    "monitors": [
+                        {
+                            "left": int(m["left"]),
+                            "top": int(m["top"]),
+                            "width": int(m["width"]),
+                            "height": int(m["height"]),
+                        }
+                        for m in sct.monitors[1:]
+                    ],
+                }
+        except Exception as e:
+            logger.warning(f"[Automation] 获取屏幕信息失败: {e}")
+            self._screen_info_cache = {}
+        return self._screen_info_cache
 
     # ============== 安全闸门 ==============
 
@@ -171,15 +215,17 @@ class AutomationTools:
         """统一的鼠标操作入口
 
         Args:
-            action:  move | click | double_click | right_click | scroll | drag
-            x, y:    目标屏幕坐标 (左上角原点, 单位像素)
+            action:  move | click | double_click | right_click | scroll | drag | position
+            x, y:    目标屏幕坐标 (左上角原点, 单位像素); position 时忽略
             button:  left | right | middle  (默认 left)
             clicks:  click 操作的次数 (默认 1)
             dx, dy:  scroll 时滚动量 (dx 水平, dy 垂直, 默认 -1 向下)
-            duration: move 操作的过渡时长 (秒), 0 表示瞬移
+            duration: move/drag 过渡时长 (秒); move 默认 0 瞬移, drag 默认 0.3
 
         Returns:
-            ToolResult
+            ToolResult; position 操作的 content 为
+            {"x": int, "y": int, "screen_width": int, "screen_height": int}
+            (多显示器时附加 "monitors": [{left,top,width,height}, ...])
         """
         if (err := self._check_enabled()):
             return err
@@ -188,11 +234,31 @@ class AutomationTools:
                 False,
                 error=f"Unknown action: {action!r}. Valid: {sorted(_MOUSE_ACTIONS)}",
             )
-        if (err := self._validate_xy(x, y)):
-            return err
+        # position 不需要坐标; 其它 action 仍须校验
+        if action not in _MOUSE_ACTIONS_NO_COORD:
+            if (err := self._validate_xy(x, y)):
+                return err
 
         log_extra = f"@({x},{y}) button={button}"
         try:
+            if action == "position":
+                cur_x, cur_y = self._mouse.position
+                cur_x, cur_y = int(cur_x), int(cur_y)
+                result = {"x": cur_x, "y": cur_y}
+                # 附带屏幕信息: 让 LLM 能判断鼠标的相对位置
+                screen = self._get_screen_info()
+                if screen:
+                    result["screen_width"] = screen["primary"]["width"]
+                    result["screen_height"] = screen["primary"]["height"]
+                    # 多显示器场景才暴露 monitors 列表, 避免单屏冗余
+                    if len(screen.get("monitors", [])) > 1:
+                        result["monitors"] = screen["monitors"]
+                logger.info(
+                    f"[Automation] mouse position -> ({cur_x}, {cur_y}) "
+                    f"screen={result.get('screen_width')}x{result.get('screen_height')}"
+                )
+                return ToolResult(True, content=result)
+
             if action == "move":
                 self._do_move(x, y, duration)
                 return ToolResult(True, content=f"Mouse moved to ({x}, {y})")
@@ -222,14 +288,20 @@ class AutomationTools:
                 return ToolResult(True, content=f"Scrolled at ({x}, {y}) dx={dx} dy={dy}")
 
             if action == "drag":
-                # drag 用 (x, y) 作为目标, dx/dy 作为源偏移
+                # drag 语义: 从当前位置按住左键, 平滑移动到 (x, y), 然后释放
+                # 必须有过渡时长, 瞬移 + press/release 会被多数 UI 识别为单击而非拖拽
                 start = self._mouse.position
                 target = (x, y)
-                self._mouse.position = target
+                effective_duration = duration if duration > 0 else 0.3
                 self._mouse.press(Button.left)
-                self._mouse.release(Button.left)
+                try:
+                    self._do_move(x, y, effective_duration)
+                finally:
+                    # 无论移动过程是否异常, 都必须释放, 避免鼠标卡在按下状态
+                    self._mouse.release(Button.left)
                 logger.info(
-                    f"[Automation] mouse drag from {start} -> {target} (注: 简单 press/release, 不追踪轨迹)"
+                    f"[Automation] mouse drag {start} -> {target} "
+                    f"duration={effective_duration}s"
                 )
                 return ToolResult(True, content=f"Dragged from {start} to {target}")
 

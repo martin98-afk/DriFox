@@ -638,14 +638,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "mouse",
-            "description": "桌面鼠标操作。支持移动、单击、双击、右键、滚动、拖拽。",
+            "description": "桌面鼠标操作。支持移动、单击、双击、右键、滚动、拖拽、查询当前位置。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["move", "click", "double_click", "right_click", "scroll", "drag"],
-                        "description": "操作类型: move=移动, click=单击, double_click=双击, right_click=右键, scroll=滚动, drag=拖拽",
+                        "enum": ["move", "click", "double_click", "right_click", "scroll", "drag", "position"],
+                        "description": "操作类型: move=移动, click=单击, double_click=双击, right_click=右键, scroll=滚动, drag=拖拽(从当前位置拖到 x,y), position=返回当前鼠标坐标及屏幕尺寸(无需 x,y; content 为 {x,y,screen_width,screen_height})",
                     },
                     "x": {"type": "integer", "description": "目标屏幕 X 坐标（像素）"},
                     "y": {"type": "integer", "description": "目标屏幕 Y 坐标（像素）"},
@@ -662,10 +662,10 @@ TOOL_SCHEMAS = [
                     "dy": {"type": "integer", "description": "scroll 垂直滚动量（负值向上，正值向下）"},
                     "duration": {
                         "type": "number",
-                        "description": "移动过渡时长（秒），0 表示瞬移",
+                        "description": "move/drag 过渡时长（秒）；move 默认 0 瞬移，drag 默认 0.3",
                     },
                 },
-                "required": ["action", "x", "y"],
+                "required": ["action"],
             },
         },
     },
