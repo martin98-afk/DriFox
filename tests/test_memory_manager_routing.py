@@ -120,3 +120,21 @@ class TestReadPathRouting:
         note = mgr.get_project_note("demo")
         assert note["content"] == "# sqlite content"
         assert note["path"] == ""  # 标记走 SQLite
+
+
+class TestPromptIntegration:
+    """format_memories_for_prompt 应该自动按 workdir 走对应存储"""
+
+    def test_prompt_includes_sqlite_note_when_no_workdir(self, patched_memory_manager):
+        mgr = patched_memory_manager
+        mgr.save_project_note("demo", "# my sqlite note")
+        text = mgr.format_memories_for_prompt(project="demo")
+        assert "my sqlite note" in text
+
+    def test_prompt_includes_file_note_when_workdir_set(self, patched_memory_manager, tmp_workdir):
+        mgr = patched_memory_manager
+        mgr._key_documents_repo.get_working_directory.return_value = str(tmp_workdir)
+        # 写文件(get_or_create 触发的也是文件路径)
+        mgr.save_project_note("demo", "# my file note")
+        text = mgr.format_memories_for_prompt(project="demo", workdir_override=str(tmp_workdir))
+        assert "my file note" in text
