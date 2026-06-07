@@ -13,10 +13,8 @@ import uuid
 import orjson as json
 import sip
 
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
-
 from PyQt5.QtCore import (
     QTimer,
     pyqtSignal,
@@ -29,7 +27,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QApplication,
     QWidget,
-    QFileDialog,
     QGraphicsOpacityEffect,
     QLabel,
     QPushButton,
@@ -65,8 +62,8 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.command_manager import CommandManager, CommandType
+from app.core.model_capabilities import apply_model_defaults
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -135,11 +132,11 @@ from app.widgets.cards.settings.project_selector_card import (
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
-from app.widgets.context_usage_ring import (
-    ContextUsageRing,
-)
 from app.widgets.coding_plan_ring import (
     CodingPlanRing,
+)
+from app.widgets.context_usage_ring import (
+    ContextUsageRing,
 )
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
@@ -1735,7 +1732,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 项目选择卡片（Top 卡片，与 settings 同容器）
         self._project_selector_card = BaseSettingsCard("", "", self)
-        self._project_selector_card.setFixedHeight(300)
+        self._project_selector_card.setFixedHeight(350)
         self._project_selector_card_content = ProjectSelectorCardContent()
         self._project_selector_card_content.projectSelected.connect(
             self._on_project_selected
@@ -1756,7 +1753,8 @@ class OpenAIChatToolWindow(ToolWindow):
         Colors.refresh()
         self._project_new_edit = QLineEdit(self._project_selector_card)
         self._project_new_edit.setPlaceholderText("新建项目...")
-        self._project_new_edit.setFixedWidth(130)
+        self._project_new_edit.setMaximumWidth(200)
+        self._project_new_edit.setMinimumWidth(100)
         self._project_new_edit.setFixedHeight(24)
         self._project_new_edit.setStyleSheet(f"""
             QLineEdit {{
@@ -9469,9 +9467,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 获取每个项目的会话数和 worktree 数
             meta_map = self._build_project_meta_map(projects)
+            # 获取每个项目的根目录（用于卡片显示）
+            root_dir_map = self._build_project_root_dir_map(projects)
 
             self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map
+                projects, self._current_project, meta_map, root_dir_map
             )
             # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
             self._project_selector_card.set_title_text("📁 项目切换")
@@ -9499,6 +9499,22 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] 获取项目元数据异常: {e}")
         return meta_map
+
+    def _build_project_root_dir_map(self, projects: List[str]) -> Dict[str, str]:
+        """构建项目根目录映射 {项目名: 根目录路径}（未设置的项目不会出现）
+
+        根目录来源于关键文档中标记为"工作目录"的文件夹（每个项目最多 1 个）。
+        """
+        root_dir_map: Dict[str, str] = {}
+        try:
+            if self.backend and self.backend.memory_manager:
+                for p in projects:
+                    wd = self.backend.memory_manager.get_working_directory(p)
+                    if wd:
+                        root_dir_map[p] = wd
+        except Exception as e:
+            logger.warning(f"[MainWidget] 获取项目根目录异常: {e}")
+        return root_dir_map
 
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
@@ -9632,8 +9648,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._current_project not in projects:
                 projects.insert(0, self._current_project)
             meta_map = self._build_project_meta_map(projects)
+            root_dir_map = self._build_project_root_dir_map(projects)
             self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map
+                projects, self._current_project, meta_map, root_dir_map
             )
 
     def _on_memory_tab_changed(self, tab_id: str):
