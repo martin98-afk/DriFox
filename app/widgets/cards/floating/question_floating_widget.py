@@ -332,7 +332,7 @@ class _CustomInputCard(QWidget):
         """根据内容自动调整输入框高度
 
         双重计算策略：
-        1. 优先用 QTextDocument.documentSize()（最准确）
+        1. 优先用 QTextDocument.size()（最准确）
         2. 如果 document 还没准备好，用 fontMetrics 估算（兜底）
         3. 如果 viewport 宽度还没好，延迟 20ms 重试
         """
@@ -347,13 +347,13 @@ class _CustomInputCard(QWidget):
             QTimer.singleShot(20, self._adjust_height_to_content)
             return
 
-        # ── 策略 1：QTextDocument.documentSize() ──
+        # ── 策略 1：QTextDocument.size() ──
         doc = self._text_edit.document()
         doc.setTextWidth(viewport_width)
-        doc_height = int(doc.documentSize().height())
+        doc_height = int(doc.size().height())
 
         # ── 策略 2：fontMetrics 兜底估算 ──
-        # 如果 documentSize 返回 0（比如刚 setTextWidth 后还没重排），
+        # 如果 size() 返回 0（比如刚 setTextWidth 后还没重排），
         # 用 fontMetrics 根据行数和字符宽度估算
         if doc_height <= 0:
             fm = self._text_edit.fontMetrics()
