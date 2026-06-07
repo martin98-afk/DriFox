@@ -20,6 +20,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QThreadPool,
     Qt,
+    QEvent,
 )
 from PyQt5.QtGui import QPixmap, QColor
 from PyQt5.QtWidgets import (
@@ -76,6 +77,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
+    AttachmentChip,
     InputGlowUnderlay,
     SendableTextEdit,
 )
@@ -1034,6 +1036,29 @@ class OpenAIChatToolWindow(ToolWindow):
             getattr(self, "_bottom_input_container", None),
         ):
             self._position_input_glow_underlay()
+
+        # 拖拽文件到扩展区域（输入卡空白区 / 附件行 / 消息列表）→ 添加 AttachmentChip
+        if obj in (
+            getattr(self, "_input_card", None),
+            getattr(self, "_attach_container", None),
+        ):
+            etype = event.type()
+            if etype == QEvent.DragEnter:
+                if event.mimeData().hasUrls():
+                    event.acceptProposedAction()
+                    return True
+            elif etype == QEvent.Drop:
+                paths = []
+                if event.mimeData().hasUrls():
+                    for url in event.mimeData().urls():
+                        local_path = url.toLocalFile()
+                        if local_path and os.path.isfile(local_path):
+                            paths.append(local_path)
+                if paths:
+                    self._on_files_dropped(paths)
+                    event.acceptProposedAction()
+                    return True
+
         return super().eventFilter(obj, event)
 
     def _connect_opacity_signal(self):
@@ -1560,6 +1585,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background: transparent;")
+        self.chat_container.setAcceptDrops(True)
+        self.chat_container.installEventFilter(self)
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setContentsMargins(6, 6, 6, 6)
         self.chat_layout.setSpacing(8)
@@ -1877,6 +1904,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
         self._input_card = QWidget(self._bottom_input_container)
         self._input_card.setObjectName("_input_card")
+        self._input_card.setAcceptDrops(True)
+        self._input_card.installEventFilter(self)
         card_layout = QVBoxLayout(self._input_card)
         card_layout.setContentsMargins(2, 2, 2, 2)
         card_layout.setSpacing(0)
@@ -1892,6 +1921,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 把 _input_card 移入 wrapper
         self._input_card.setParent(self._input_card_wrapper)
         wrapper_layout.addWidget(self._input_card)
+
+        # 附件预览行（拖拽/粘贴文件时显示 AttachmentChip）
+        self._attach_container = QWidget(self._input_card)
+        self._attach_container.setVisible(False)
+        self._attach_container.setAcceptDrops(True)
+        self._attach_container.installEventFilter(self)
+        self._attach_layout = QHBoxLayout(self._attach_container)
+        self._attach_layout.setContentsMargins(12, 6, 12, 2)
+        self._attach_layout.setSpacing(6)
+        self._attach_layout.addStretch()
+        self._attachments: list[str] = []
+        card_layout.addWidget(self._attach_container)
 
         # 输入框（融入卡片，无边框）
         self.input_area = SendableTextEdit(self._input_card)
@@ -1911,6 +1952,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.slashTriggered.connect(self._on_slash_triggered)
         self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         self.input_area.slashShowHint.connect(self._on_slash_show_hint)
+        self.input_area.files_dropped.connect(self._on_files_dropped)
         card_layout.addWidget(self.input_area)
 
         # 加载输入历史
@@ -7927,6 +7969,54 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+    # ==================== 附件管理 ====================
+
+    def _on_files_dropped(self, paths: list[str]):
+        """文件拖入/粘贴 → 添加 AttachmentChip"""
+        for p in paths:
+            if p not in self._attachments:
+                self._attachments.append(p)
+                chip = AttachmentChip(p, self._attach_container)
+                chip.removed.connect(lambda path=p: self._remove_attachment(path))
+                # 插入到 stretch 之前
+                self._attach_layout.insertWidget(
+                    self._attach_layout.count() - 1, chip
+                )
+        self._attach_container.setVisible(bool(self._attachments))
+
+    def _remove_attachment(self, path: str):
+        """移除指定附件"""
+        if path in self._attachments:
+            self._attachments.remove(path)
+            # 清理对应的 chip widget
+            for i in range(self._attach_layout.count()):
+                item = self._attach_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), AttachmentChip):
+                    if item.widget().filepath == path:
+                        item.widget().deleteLater()
+                        break
+        self._attach_container.setVisible(bool(self._attachments))
+
+    def _clear_attachments(self):
+        """清空所有附件"""
+        self._attachments.clear()
+        while self._attach_layout.count() > 1:
+            item = self._attach_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._attach_container.hide()
+
+    def _build_user_text_with_attachments(self, user_text: str) -> str:
+        """将附件文件路径拼接到用户文本末尾"""
+        if not self._attachments:
+            return user_text
+        parts = [user_text]
+        for p in self._attachments:
+            parts.append(p)
+        return "\n".join(parts)
+
+    # ==================== 发送消息 ====================
+
     def send_preset_question(self, question: str):
         if not isinstance(question, str) or not question.strip():
             return
@@ -7949,8 +8039,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if not user_text:
             user_text = self.input_area.toPlainText().strip()
 
-        if not user_text:
+        if not user_text and not self._attachments:
             return
+
+        # 纯附件无文字时给一个占位文本
+        if not user_text:
+            user_text = ""
 
         # ---- 记录输入到历史 ----
         self._record_input_history(user_text)
@@ -7968,6 +8062,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 case CommandType.FUNCTION:
                     # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
                     self.input_area.clear()
+                    self._clear_attachments()
                     # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
                     self.input_area.toggle_send_button(True)
                     self._execute_command(cmd_result.command_name, cmd_result.remainder)
@@ -8011,6 +8106,10 @@ class OpenAIChatToolWindow(ToolWindow):
                         user_text = f"加载这个智能体技能：@{skill_name}"
         # ---- 技能替换结束 ----
 
+        # ---- 拼接附件路径到用户文本 ----
+        if self._attachments:
+            user_text = self._build_user_text_with_attachments(user_text)
+
         # 非函数命令：检查是否正在流式输出
         if self._is_streaming:
             self._on_stop_clicked()
@@ -8030,6 +8129,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hide_welcome_cards()
 
         self.input_area.clear()
+        self._clear_attachments()
         self._append_user_message(user_text)
 
         assistant_card = self._append_assistant_message(

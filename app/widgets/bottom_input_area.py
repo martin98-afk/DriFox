@@ -1,10 +1,12 @@
 # 大模型输入框
 import math
 import os
-import re
+import tempfile
+import uuid
+from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QMimeData
 from PyQt5.QtGui import (
     QInputMethodEvent,
     QKeyEvent,
@@ -13,18 +15,17 @@ from PyQt5.QtGui import (
     QColor,
     QTextCharFormat,
     QPainter,
-    QPainterPath, QPen,
+    QPainterPath,
+    QPen,
+    QImage,
 )
 from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
-from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
-from qfluentwidgets import FluentIcon, ComboBox
+from PyQt5.QtWidgets import QShortcut, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel
+from qfluentwidgets import FluentIcon, ComboBox, IconWidget
 from qfluentwidgets import TextEdit, TransparentToolButton
 
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
-
-# 预编译正则表达式
-_FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
 
 class SendableTextEdit(TextEdit):
@@ -38,6 +39,7 @@ class SendableTextEdit(TextEdit):
     slashTriggered = pyqtSignal(str)  # 检测到 / 触发，携带查询文本
     slashDismissed = pyqtSignal()  # / 触发结束
     slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
+    files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -799,107 +801,46 @@ class SendableTextEdit(TextEdit):
             return  # 不调用 super，阻止 IME 提交 、
         super().inputMethodEvent(event)
 
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:
+        """允许拖放/粘贴图片和文件"""
+        if source.hasImage() or source.hasUrls():
+            return True
+        return super().canInsertFromMimeData(source)
+
     def insertFromMimeData(self, source):
-        """重写以处理拖放的文本格式化和高亮"""
+        """重写以处理拖放和粘贴 —— 文件/图片走附件芯片，纯文本走默认"""
         try:
-            # 首先检查是否是真正的文件拖拽（通过 URLs）
-            is_file_drop = False
-            file_paths = []  # 收集所有拖入的文件路径
+            file_paths = []
 
+            # 拖放/粘贴本地文件
             if source.hasUrls():
-                urls = source.urls()
-                if urls:
-                    file_paths = [
-                        url.toLocalFile() for url in urls if url.toLocalFile()
-                    ]
-                    is_file_drop = True
-            elif source.hasText():
-                text = source.text()
+                for url in source.urls():
+                    local_path = url.toLocalFile()
+                    if local_path and os.path.isfile(local_path):
+                        file_paths.append(local_path)
 
-                # 文本内容拖入：逐行解析文件路径
-                # 只有实际存在的路径才被认为是文件
-                if "file:/" in text:
-                    try:
-                        lines = text.split("\n")
-                        for line in lines:
-                            path = _FILE_PREFIX_PATTERN.sub("", line)
-                            if path and os.path.exists(path):
-                                file_paths.append(path)
-                        if file_paths:
-                            is_file_drop = True
-                    except Exception:
-                        pass
-                elif "\n" in text:
-                    try:
-                        lines = text.split("\n")
-                        for line in lines:
-                            if line and os.path.isabs(line) and os.path.exists(line):
-                                file_paths.append(line)
-                        if file_paths:
-                            is_file_drop = True
-                    except Exception:
-                        pass
+            # 粘贴剪贴板图片 → 保存到临时文件
+            if source.hasImage() and not file_paths:
+                img = source.imageData()
+                if isinstance(img, QImage) and not img.isNull():
+                    tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    name = f"paste_{uuid.uuid4().hex[:8]}.png"
+                    path = str(tmp_dir / name)
+                    img.save(path)
+                    file_paths.append(path)
 
-            if is_file_drop and file_paths:
-                try:
-                    # 保存默认格式
-                    cursor = self.textCursor()
-                    default_format = QTextCharFormat()  # 创建干净的默认格式
+            if file_paths:
+                self.files_dropped.emit(file_paths)
+                return
 
-                    # 先插入一个空格占位符，用默认格式
-                    cursor.insertText(" ", default_format)
-
-                    # 准备要插入的文件路径文本——所有文件
-                    insert_text = "\n".join([f"路径: {p}" for p in file_paths])
-
-                    # 记录文件路径的起始位置
-                    path_start = cursor.position()
-
-                    # 插入文件路径文本
-                    cursor.insertText(insert_text)
-
-                    # 记录文件路径的结束位置
-                    path_end = cursor.position()
-
-                    # 高亮显示拖入的文件路径
-                    cursor.setPosition(path_start)
-                    cursor.setPosition(path_end, QTextCursor.KeepAnchor)
-
-                    # 创建高亮格式 - 使用和技能一样的金色
-                    highlight_format = QTextCharFormat()
-                    highlight_format.setForeground(QColor("#C9A85C"))
-                    highlight_format.setFontWeight(700)
-                    cursor.setCharFormat(highlight_format)
-
-                    # 最后再插入一个空格，用默认格式
-                    cursor.setPosition(path_end)
-                    cursor.clearSelection()
-                    cursor.insertText(" ", default_format)
-
-                    # 确保光标在最后，使用默认格式
-                    final_pos = cursor.position()
-                    cursor.setPosition(final_pos)
-                    cursor.setCharFormat(default_format)
-                    self.setTextCursor(cursor)
-
-                    # 确保输入框有焦点
-                    self.setFocus(Qt.OtherFocusReason)
-
-                    return
-                except Exception:
-                    # 如果文件路径插入失败，回退到默认处理
-                    pass
-
-            # 其他情况使用默认处理
+            # 纯文本 → 默认处理
             super().insertFromMimeData(source)
 
-        except Exception as e:
-            # 捕获所有异常，确保应用不会崩溃
+        except Exception:
             try:
-                # 发生任何错误时，回退到默认处理
                 super().insertFromMimeData(source)
             except Exception:
-                # 最后的保障
                 pass
 
     def _setup_glow_effect(self):
@@ -1270,3 +1211,99 @@ class InputGlowUnderlay(QWidget):
                 r,
                 r,
             )
+
+
+class AttachmentChip(QFrame):
+    """附件标签块：显示文件类型图标 + 文件名 + 删除按钮，响应式圆角矩形"""
+
+    removed = pyqtSignal(str)  # file path
+
+    # 文件扩展名 → FluentIcon 映射
+    _FILE_ICON_MAP: dict[tuple[str, ...], FluentIcon] = {
+        # 代码
+        (".py", ".pyw", ".pyx"): FluentIcon.CODE,
+        (".js", ".jsx", ".mjs", ".cjs"): FluentIcon.CODE,
+        (".ts", ".tsx"): FluentIcon.CODE,
+        (".html", ".htm", ".css", ".scss", ".less"): FluentIcon.CODE,
+        (".java", ".kt", ".kts"): FluentIcon.CODE,
+        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): FluentIcon.CODE,
+        (".cs"): FluentIcon.CODE,
+        (".go", ".rs", ".rb", ".php"): FluentIcon.CODE,
+        (".swift", ".m", ".mm"): FluentIcon.CODE,
+        (".sql"): FluentIcon.CODE,
+        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): FluentIcon.COMMAND_PROMPT,
+        # 图片
+        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): FluentIcon.IMAGE_EXPORT,
+        # 视频
+        (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"): FluentIcon.VIDEO,
+        # 音频
+        (".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"): FluentIcon.MUSIC,
+        # 压缩包
+        (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): FluentIcon.ZIP_FOLDER,
+        # 文档/数据
+        (".pdf"): FluentIcon.DOCUMENT,
+        (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): FluentIcon.DOCUMENT,
+        (".txt", ".md", ".rst", ".log"): FluentIcon.DOCUMENT,
+        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): FluentIcon.DOCUMENT,
+        (".csv", ".tsv"): FluentIcon.DOCUMENT,
+    }
+
+    def __init__(self, filepath: str, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+        self._setup_ui()
+
+    @staticmethod
+    def _get_file_icon(filepath: str) -> FluentIcon:
+        """根据文件扩展名返回对应的 FluentIcon"""
+        ext = os.path.splitext(filepath)[1].lower()
+        for exts, icon in AttachmentChip._FILE_ICON_MAP.items():
+            if ext in exts:
+                return icon
+        return FluentIcon.DOCUMENT
+
+    def _setup_ui(self):
+        Colors.refresh()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 2, 4, 2)
+        layout.setSpacing(5)
+
+        # 文件类型图标
+        self._icon_widget = IconWidget(self)
+        self._icon_widget.setIcon(self._get_file_icon(self.filepath))
+        self._icon_widget.setFixedSize(16, 16)
+        layout.addWidget(self._icon_widget)
+
+        # 文件名
+        name = os.path.basename(self.filepath)
+        if len(name) > 22:
+            name = name[:19] + "..."
+
+        self._label = QLabel(name, self)
+        self._label.setStyleSheet(
+            f"color: {Colors.INPUT_TEXT}; font-size: 12px; background: transparent; border: none; padding: 0;"
+        )
+        layout.addWidget(self._label)
+
+        # 删除按钮
+        close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        close_btn.setFixedSize(16, 16)
+        close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
+        layout.addWidget(close_btn)
+
+        # 整体样式：QFrame 的 border-radius 渲染更可靠，:hover 伪态支持更好
+        border_color = Colors.INPUT_BORDER
+        self.setFixedHeight(28)
+        self.setStyleSheet(
+            f"""
+            AttachmentChip {{
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid {border_color};
+                border-radius: 14px;
+            }}
+            AttachmentChip:hover {{
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(255, 255, 255, 0.25);
+            }}
+            """
+        )
