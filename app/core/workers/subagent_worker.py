@@ -141,25 +141,27 @@ class SubAgentExecutor(QThread):
     def provide_answer(self, answer: str):
         self._pending_answer = answer
 
-    def _build_inherited_context(self, agent, history_messages: List[Dict]) -> str:
+    def _build_inherited_context(self, agent, history_messages: List[Dict]) -> List[Dict]:
         """
         基于 context budget 构建主智能体历史上下文注入。
 
         策略：
         1. 获取模型 context budget（token 数）
-        2. 按比例（默认 60%）计算上下文注入的最大字符数
-        3. 从最新消息向前填充，优先保留完整消息
-        4. 总字符数达到上限后停止，最后一条消息可截断
+        2. 按比例计算可用 token
+        3. 从最新消息向前填充，保持每条消息完整（不截断内容）
+        4. 将消息作为原始 message 对象返回（保留 role/content），
+           以支持 API provider 的 prompt caching
+        5. 超出 budget 时整条消息丢弃（不截断内容）
 
         Args:
             agent: Agent 配置对象
             history_messages: 主智能体的历史消息列表
 
         Returns:
-            格式化后的历史上下文字符串（含标题），无内容时返回空字符串
+            保留原始格式的消息列表（List[Dict]），无内容时返回空列表
         """
         if not history_messages:
-            return ""
+            return []
 
         # 获取预算比例（优先从 agent 配置读取）
         budget_ratio = getattr(
@@ -170,17 +172,13 @@ class SubAgentExecutor(QThread):
 
         # 计算可用 token 预算
         budget_tokens = _compute_context_budget(self.llm_config)
+        max_context_tokens = int(budget_tokens * budget_ratio)
+        if max_context_tokens <= 0:
+            return []
 
-        # 按比例分配字符数（标记语言中 1 token ≈ 4 字符）
-        HEADER_OVERHEAD = 60  # 预留给标题和格式的开销
-        max_context_chars = int(budget_tokens * budget_ratio * CHARS_PER_TOKEN)
-        max_context_chars -= HEADER_OVERHEAD
-        if max_context_chars <= 0:
-            return ""
-
-        # 从最新消息向前填充
-        history_lines = []
-        remaining_chars = max_context_chars
+        # 从最新消息向前填充，保持消息完整
+        selected_messages = []
+        remaining_tokens = max_context_tokens
 
         for msg in reversed(history_messages):
             role = msg.get("role", "user")
@@ -188,40 +186,43 @@ class SubAgentExecutor(QThread):
             if role == "tool":
                 continue
 
+            # 预估消息的 token 数
             content = msg.get("content", "")
             if isinstance(content, list):
-                content = "".join(
+                # multimodal 内容（图文混合），只从 text 部分估算
+                content_text = "".join(
                     c.get("text", "") for c in content if isinstance(c, dict)
                 )
-            if not content:
+            elif isinstance(content, str):
+                content_text = content
+            else:
+                content_text = str(content) if content else ""
+
+            # 无内容的消息跳过
+            if not content_text and not isinstance(content, list):
                 continue
 
-            line_prefix = f"**{role}**: "
-            line = f"{line_prefix}{content}"
-            line_len = len(line)
+            # token 数估算（1 token ≈ 4 字符，+4 角色开销）
+            msg_tokens = max(1, len(content_text) // CHARS_PER_TOKEN) + 4
 
-            if line_len <= remaining_chars:
-                # 完整消息放得下
-                history_lines.append(line)
-                remaining_chars -= line_len + 1  # +1 换行符
-                continue
-
-            # 完整放不下，尝试截断内容
-            trunc_target = remaining_chars - len(line_prefix) - 3  # -3 给 "..."
-            if trunc_target > 20:
-                history_lines.append(
-                    f"{line_prefix}{content[:trunc_target]}..."
-                )
-            # 无论是否截断，都停止填充更多消息
-            break
-
-        if not history_lines:
-            return ""
+            if msg_tokens <= remaining_tokens:
+                # 完整消息放得下，保留原始格式
+                clean_msg = {"role": role}
+                if isinstance(content, list):
+                    clean_msg["content"] = content  # 保留 multimodal 原始格式
+                elif isinstance(content, str):
+                    clean_msg["content"] = content
+                else:
+                    clean_msg["content"] = str(content) if content else ""
+                selected_messages.append(clean_msg)
+                remaining_tokens -= msg_tokens
+            else:
+                # 放不下则停止（不截断内容）
+                break
 
         # 翻转回正序
-        history_lines.reverse()
-
-        return "\n\n## 主智能体历史上下文\n" + "\n".join(history_lines)
+        selected_messages.reverse()
+        return selected_messages
 
     def _add_log(self, log_type: str, content: str, extra: dict = None):
         """记录日志"""
@@ -283,8 +284,8 @@ class SubAgentExecutor(QThread):
             )
             tools = self.agent_manager.get_agent_tools_schema(self.agent_name, is_subagent_call=self.is_subagent_call)
 
-            # 基于 context budget 构建主智能体历史上下文注入
-            history_section = ""
+            # 基于 context budget 构建主智能体历史上下文注入（返回消息对象列表）
+            inherited_messages = []
             if agent.inherit_history and getattr(self, '_get_history_messages', None):
                 try:
                     history_messages = self._get_history_messages() or []
@@ -293,7 +294,7 @@ class SubAgentExecutor(QThread):
                         if agent.inherit_history_count is not None:
                             history_messages = history_messages[-agent.inherit_history_count:]
 
-                        history_section = self._build_inherited_context(
+                        inherited_messages = self._build_inherited_context(
                             agent, history_messages
                         )
                 except Exception as e:
@@ -302,10 +303,18 @@ class SubAgentExecutor(QThread):
             # 过滤父智能体上下文中的 <tool> 和 <think> 标签，避免污染子智能体的工具调用格式
             sanitized_context = _TOOL_TAG_PATTERN.sub("", self.parent_context)
             sanitized_context = _THINKING_PATTERN.sub("", sanitized_context)
-            messages = [
-                {"role": "system", "content": history_section + F"## 父智能体说明\n{sanitized_context}\n\n" + system_prompt},
-                {"role": "user", "content": f"## 子任务\n{self.task_description}"}
-            ]
+
+            # 构建子智能体消息列表（4层结构，实现 prompt caching）
+            messages = []
+            # Layer 1: 继承的主智能体消息（原始 message 格式，完整保留 role/content）
+            #          相同前缀可被 API provider 缓存，提升后续调用性能
+            messages.extend(inherited_messages)
+            # Layer 2: 父智能体说明
+            messages.append({"role": "system", "content": f"## 父智能体说明\n{sanitized_context}"})
+            # Layer 3: 子智能体提示词（作为最后一条 system 消息，权重最高）
+            messages.append({"role": "system", "content": system_prompt})
+            # Layer 4: 子任务
+            messages.append({"role": "user", "content": f"## 子任务\n{self.task_description}"})
 
             self._add_log("progress", f"开始执行子任务: {self.agent_name}")
             self.progress_updated.emit(self.task_id, f"开始执行子任务: {self.agent_name}")
