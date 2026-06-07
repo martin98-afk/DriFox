@@ -242,9 +242,18 @@ class PermissionResolver:
         # 遍历所有 key 的别名变体，保证匹配
         for config in (self._global, self._config):
             tool_config = self._get_any_key(config, tool)
-            if isinstance(tool_config, str):
+            if tool_config == {}:
+                # 【修复】_get_any_key 返回 {} 表示该 tool 在 config 中没有具体规则。
+                # 此时收集通配符 `*` 配置作为兜底（_get_any_key 不处理通配符 key），
+                # 解决 `permission: {"*": "deny"}` 这类配置被静默吞掉的问题。
+                # 关键：必须在"非空 dict"分支之前判断，否则空 dict 会被当作嵌套规则处理。
+                if "*" in config and not isinstance(config["*"], dict):
+                    rules.append(("*", config["*"]))
+            elif isinstance(tool_config, str):
+                # 字符串值：该 tool 的精确规则
                 rules.append(("*", tool_config))
             elif isinstance(tool_config, dict):
+                # 非空 dict 值：嵌套 pattern 规则
                 for k, v in tool_config.items():
                     rules.append((k, v))
 

@@ -755,6 +755,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 new_instance.backend.tool_executor.set_current_project(self._current_project)
             if hasattr(new_instance, "_project_label"):
                 new_instance._project_label.setText(self._current_project)
+
+            # ── 同步工作目录到新窗口的记忆卡片（确保关键文档正确识别当前工作目录）──
+            if hasattr(new_instance, "_memory_card_popup") and new_instance._memory_card_popup:
+                for proj, wd in self._current_workdir.items():
+                    if wd:
+                        new_instance._memory_card_popup._instance_workdir[proj] = wd
+            # ──────────────────────────────────────────────────
+
             # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
             if hasattr(new_instance, "_refresh_project_branch_style"):
                 new_instance._refresh_project_branch_style()
@@ -9671,6 +9679,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if workdir:
                 self._current_workdir[project] = workdir
         self.backend.tool_executor.set_workdir(workdir or None)
+
+        # 同步到记忆卡片的实例缓存（确保关键文档能感知到当前工作目录）
+        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+            self._memory_card_popup._instance_workdir[project] = workdir or ""
+
         from loguru import logger
 
         logger.info(
