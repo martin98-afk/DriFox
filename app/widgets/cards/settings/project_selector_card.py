@@ -21,36 +21,61 @@ class ProjectItem(QWidget):
     clicked = pyqtSignal(str)
     archiveClicked = pyqtSignal(str)
 
+    # 根目录路径最大显示字符数（超过则中间省略）
+    _ROOT_DIR_MAX_CHARS = 60
+    # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
+    _SINGLE_LINE_HEIGHT = 30
+    _DOUBLE_LINE_HEIGHT = 44
+
     def __init__(self, name: str, is_current: bool = False, parent=None):
         super().__init__(parent)
         self._name = name
         self._is_current = is_current
         self._session_count = 0
         self._worktree_count = 0
-        self.setFixedHeight(36)
+        self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 4, 0)
+        # 上下边距 0、单行 30px：紧凑布局，让项目之间视觉密度更高
+        layout.setContentsMargins(10, 0, 4, 0)
         layout.setSpacing(6)
 
         # 项目图标
         icon_label = QLabel("📁", self)
         icon_label.setStyleSheet(f"font-size: {scale_font_size(14)}px;")
+        icon_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(icon_label)
+
+        # 中间：项目名 + 根目录（垂直布局）
+        text_vbox = QVBoxLayout()
+        text_vbox.setContentsMargins(0, 0, 0, 0)
+        text_vbox.setSpacing(0)
+        text_vbox.setAlignment(Qt.AlignVCenter)
 
         # 项目名
         self._name_label = QLabel(self._name, self)
         self._apply_name_style()
-        layout.addWidget(self._name_label, 1)
+        text_vbox.addWidget(self._name_label)
+
+        # 项目根目录（默认隐藏：未设置时由 set_root_dir 保持隐藏）
+        self._root_dir_label = QLabel("", self)
+        self._root_dir_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
+        self._root_dir_label.hide()
+        text_vbox.addWidget(self._root_dir_label)
+
+        layout.addLayout(text_vbox, 1)
 
         # 元数据（会话数 · 工作目录数），灰色小字
         self._meta_label = QLabel("", self)
         self._meta_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
         )
+        self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
         # 当前项目指示
@@ -59,6 +84,7 @@ class ProjectItem(QWidget):
             check_label.setStyleSheet(
                 f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;"
             )
+            check_label.setAlignment(Qt.AlignVCenter)
             layout.addWidget(check_label)
 
         # 归档按钮（默认隐藏）
@@ -79,6 +105,15 @@ class ProjectItem(QWidget):
         self._archive_btn.setToolTip("归档此项目")
         self._archive_btn.hide()
         layout.addWidget(self._archive_btn)
+
+    @classmethod
+    def _elide_middle(cls, text: str) -> str:
+        """中间省略保留首尾"""
+        if len(text) <= cls._ROOT_DIR_MAX_CHARS:
+            return text
+        head = cls._ROOT_DIR_MAX_CHARS // 3
+        tail = cls._ROOT_DIR_MAX_CHARS - head - 3  # 3 = len("...")
+        return f"{text[:head]}...{text[-tail:]}"
 
     def _apply_name_style(self):
         Colors.refresh()
@@ -113,6 +148,22 @@ class ProjectItem(QWidget):
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
         )
 
+    def set_root_dir(self, root_dir: str):
+        """设置项目根目录路径（空字符串/None 则隐藏根目录行）"""
+        if not root_dir:
+            # 切换回单行高度，与未设置根目录的项目保持紧凑
+            self._root_dir_label.hide()
+            self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
+            return
+        Colors.refresh()
+        self._root_dir_label.setText(self._elide_middle(root_dir))
+        self._root_dir_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
+        self._root_dir_label.setToolTip(root_dir)  # tooltip 展示完整路径
+        self._root_dir_label.show()
+        self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
+
     def enterEvent(self, event):
         self._name_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)};"
@@ -146,13 +197,14 @@ class ProjectSelectorCardContent(QWidget):
         self._projects: list = []
         self._current_project: str = ""
         self._meta_map: Dict[str, Dict[str, int]] = {}
+        self._root_dir_map: Dict[str, str] = {}
         self._setup_ui()
 
     def _setup_ui(self):
         Colors.refresh()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
 
         # ── 项目列表滚动区域 ──
         self._scroll_area = QScrollArea(self)
@@ -193,11 +245,12 @@ class ProjectSelectorCardContent(QWidget):
         self._content_widget.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content_widget)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(2)
+        # 项目之间用 1px 细缝：避免 0 完全相连导致看不出分隔，又比 2px 紧凑
+        self._content_layout.setSpacing(1)
 
         self._scroll_area.setWidget(self._content_widget)
-        self._scroll_area.setMinimumHeight(50)
-        self._scroll_area.setMaximumHeight(300)
+        self._scroll_area.setMinimumHeight(40)
+        self._scroll_area.setMaximumHeight(280)
         layout.addWidget(self._scroll_area, 1)
 
     def refresh_style(self):
@@ -207,17 +260,20 @@ class ProjectSelectorCardContent(QWidget):
     # ── 公有方法 ──────────────────────────────────────
 
     def set_projects_data(self, projects: list, current_project: str,
-                          meta_map: Dict[str, Dict[str, int]] = None):
+                          meta_map: Dict[str, Dict[str, int]] = None,
+                          root_dir_map: Dict[str, str] = None):
         """设置项目列表数据
 
         Args:
             projects: 项目名列表
             current_project: 当前项目名
             meta_map: {project: {"sessions": int, "worktrees": int}} 可选元数据
+            root_dir_map: {project: root_dir_path} 可选根目录映射
         """
         self._projects = list(projects)
         self._current_project = current_project
         self._meta_map = meta_map or {}
+        self._root_dir_map = root_dir_map or {}
         self._refresh_project_list()
 
     def _refresh_project_list(self):
@@ -238,6 +294,8 @@ class ProjectSelectorCardContent(QWidget):
                 session_count=meta.get("sessions", 0),
                 worktree_count=meta.get("worktrees", 0),
             )
+            # 设置根目录（空字符串时 ProjectItem 内部隐藏该行）
+            item.set_root_dir(self._root_dir_map.get(proj_name, ""))
             item.clicked.connect(self._on_project_item_clicked)
             item.archiveClicked.connect(self._on_archive_clicked)
             self._content_layout.addWidget(item)

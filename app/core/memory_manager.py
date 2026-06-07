@@ -214,7 +214,10 @@ class MemoryManagerCore:
         return self._key_documents_repo.clear_by_project(project)
 
     def get_worktree_counts(self) -> Dict[str, int]:
-        """获取所有项目的 git worktree 数量"""
+        """获取所有项目的工作目录数量
+
+        计数规则：工作目录数 = 主仓库(1 if is_working_dir=1) + 所有 git worktree 数
+        """
         if not self._key_documents_repo:
             return {}
         return self._key_documents_repo.get_worktree_counts()

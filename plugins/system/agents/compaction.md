@@ -8,7 +8,6 @@ inherit_history: true
 inherit_history_count: 300
 inherit_history_max_chars: 500
 permission:
-  read: allow
   "*": deny
 ---
 

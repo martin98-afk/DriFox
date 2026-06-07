@@ -327,13 +327,25 @@ class KeyDocumentsRepository:
             return 0
 
     def get_worktree_counts(self) -> Dict[str, int]:
-        """获取所有项目的工作目录（git_worktree）数量"""
+        """获取所有项目的工作目录数量
+
+        计数规则：工作目录数 = 主仓库(1 if is_working_dir=1) + 所有 git worktree 数
+        - 项目有 is_working_dir=1 的根目录时，至少计 1（主仓库）
+        - 加上所有 added_by='git_worktree' 的 worktree
+        - 没有根目录时返回 0（不显示）
+        """
         if not self.is_initialized:
             return {}
         try:
+            # MAX(is_working_dir) 对非 worktree 记录取 1（主仓库），
+            # SUM(worktree) 对所有 worktree 记录各计 1
             success, rows = self._execute(
-                f"SELECT project, COUNT(*) as cnt FROM {self.TABLE_NAME} "
-                f"WHERE added_by = 'git_worktree' GROUP BY project"
+                f"SELECT project, "
+                f"(MAX(CASE WHEN added_by != 'git_worktree' THEN is_working_dir ELSE 0 END) + "
+                f" SUM(CASE WHEN added_by = 'git_worktree' THEN 1 ELSE 0 END)) as cnt "
+                f"FROM {self.TABLE_NAME} "
+                f"WHERE is_working_dir = 1 OR added_by = 'git_worktree' "
+                f"GROUP BY project"
             )
             if success and rows:
                 result = {}

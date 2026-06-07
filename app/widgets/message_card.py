@@ -2739,6 +2739,12 @@ class CodeWebViewer(QWebEngineView):
         copy_action = menu.addAction(get_icon("复制"), "复制")
         copy_action.triggered.connect(self._copy_to_clipboard)
 
+        menu.addSeparator()
+
+        # 导出
+        export_action = menu.addAction("导出")
+        export_action.triggered.connect(self._export_message)
+
         menu.exec_(self.mapToGlobal(pos))
 
     def _request_view_diff(self):
@@ -2757,6 +2763,102 @@ class CodeWebViewer(QWebEngineView):
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(self._markdown_text or "")
+
+    def _export_message(self):
+        """导出消息为 Markdown 或 HTML 文件"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出消息",
+            "",
+            "Markdown (*.md);;HTML (*.html)"
+        )
+
+        if not file_path:
+            return
+
+        content = self._markdown_text or ""
+
+        try:
+            is_html = selected_filter and "HTML" in selected_filter
+            if is_html or file_path.lower().endswith('.html'):
+                if not file_path.lower().endswith('.html'):
+                    file_path += '.html'
+                html_content = self._convert_md_to_html(content)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+            else:
+                if not file_path.lower().endswith('.md'):
+                    file_path += '.md'
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
+            logger.info(f"消息已导出到: {file_path}")
+            self._show_save_success(file_path)
+        except Exception as e:
+            logger.error(f"导出失败: {e}")
+            self._show_save_error(str(e))
+
+    def _convert_md_to_html(self, markdown_text: str) -> str:
+        """将 Markdown 文本转换为独立 HTML 页面"""
+        from markdown import Markdown
+        md = Markdown(extensions=['fenced_code', 'codehilite', 'tables'])
+        body_html = md.convert(markdown_text)
+
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>消息导出</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }}
+        pre {{ background: #f5f5f5; padding: 12px; border-radius: 6px; overflow-x: auto; }}
+        code {{ background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; }}
+        img {{ max-width: 100%; }}
+        blockquote {{ border-left: 4px solid #ddd; margin-left: 0; padding-left: 16px; color: #666; }}
+        h1, h2, h3, h4 {{ margin-top: 24px; }}
+    </style>
+</head>
+<body>
+{body_html}
+</body>
+</html>"""
+
+    def _show_save_success(self, file_path: str):
+        """显示保存成功提示"""
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            main_window = self.window()
+            if main_window:
+                InfoBar.success(
+                    "文件已导出",
+                    file_path,
+                    duration=3000,
+                    parent=main_window,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception:
+            pass
+
+    def _show_save_error(self, error_msg: str):
+        """显示保存失败提示"""
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            main_window = self.window()
+            if main_window:
+                InfoBar.error(
+                    "导出失败",
+                    error_msg,
+                    duration=3000,
+                    parent=main_window,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception:
+            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3019,6 +3121,12 @@ class PlainTextViewer(QWidget):
         copy_action = menu.addAction(get_icon("复制"), "复制")
         copy_action.triggered.connect(lambda: self._copy_to_clipboard())
 
+        menu.addSeparator()
+
+        # 导出
+        export_action = menu.addAction("导出")
+        export_action.triggered.connect(lambda: self._export_message())
+
         # 撤销
         undo_action = menu.addAction(get_icon("撤销"), "撤销到这里")
         undo_action.triggered.connect(lambda: self._request_undo())
@@ -3036,6 +3144,94 @@ class PlainTextViewer(QWidget):
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(self._text)
+
+    def _export_message(self):
+        """导出消息为 Markdown 或 HTML 文件"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出消息",
+            "",
+            "Markdown (*.md);;HTML (*.html)"
+        )
+
+        if not file_path:
+            return
+
+        content = self._text or ""
+
+        try:
+            is_html = selected_filter and "HTML" in selected_filter
+            if is_html or file_path.lower().endswith('.html'):
+                if not file_path.lower().endswith('.html'):
+                    file_path += '.html'
+                html_content = self._convert_text_to_html(content)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+            else:
+                if not file_path.lower().endswith('.md'):
+                    file_path += '.md'
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
+            logger.info(f"消息已导出到: {file_path}")
+            self._show_save_success(file_path)
+        except Exception as e:
+            logger.error(f"导出失败: {e}")
+            self._show_save_error(str(e))
+
+    def _convert_text_to_html(self, text: str) -> str:
+        """将纯文本转换为独立 HTML 页面"""
+        import html as html_mod
+        escaped = html_mod.escape(text)
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>消息导出</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }}
+        pre {{ background: #f5f5f5; padding: 16px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }}
+    </style>
+</head>
+<body>
+<pre>{escaped}</pre>
+</body>
+</html>"""
+
+    def _show_save_success(self, file_path: str):
+        """显示保存成功提示"""
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            main_window = self.window()
+            if main_window:
+                InfoBar.success(
+                    "文件已导出",
+                    file_path,
+                    duration=3000,
+                    parent=main_window,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception:
+            pass
+
+    def _show_save_error(self, error_msg: str):
+        """显示保存失败提示"""
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            main_window = self.window()
+            if main_window:
+                InfoBar.error(
+                    "导出失败",
+                    error_msg,
+                    duration=3000,
+                    parent=main_window,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception:
+            pass
 
     def _request_undo(self):
         """请求撤销 - 通知父组件"""

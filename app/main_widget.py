@@ -13,10 +13,8 @@ import uuid
 import orjson as json
 import sip
 
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
-
 from PyQt5.QtCore import (
     QTimer,
     pyqtSignal,
@@ -29,7 +27,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QApplication,
     QWidget,
-    QFileDialog,
     QGraphicsOpacityEffect,
     QLabel,
     QPushButton,
@@ -65,8 +62,8 @@ from app.core import (
     get_user_round_ranges,
     TopicSummaryTask,
 )
-from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.command_manager import CommandManager, CommandType
+from app.core.model_capabilities import apply_model_defaults
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -135,11 +132,11 @@ from app.widgets.cards.settings.project_selector_card import (
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
-from app.widgets.context_usage_ring import (
-    ContextUsageRing,
-)
 from app.widgets.coding_plan_ring import (
     CodingPlanRing,
+)
+from app.widgets.context_usage_ring import (
+    ContextUsageRing,
 )
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
@@ -755,6 +752,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 new_instance.backend.tool_executor.set_current_project(self._current_project)
             if hasattr(new_instance, "_project_label"):
                 new_instance._project_label.setText(self._current_project)
+
+            # ── 同步工作目录到新窗口的记忆卡片（确保关键文档正确识别当前工作目录）──
+            if hasattr(new_instance, "_memory_card_popup") and new_instance._memory_card_popup:
+                for proj, wd in self._current_workdir.items():
+                    if wd:
+                        new_instance._memory_card_popup._instance_workdir[proj] = wd
+            # ──────────────────────────────────────────────────
+
             # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
             if hasattr(new_instance, "_refresh_project_branch_style"):
                 new_instance._refresh_project_branch_style()
@@ -1507,16 +1512,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
 
-        # 注册 /subagents 命令处理器
-        from app.core.builtin_commands import FunctionCommandHandlers
-
-        FunctionCommandHandlers.register("subagents", self._handle_subagents_command)
-
-        # 注册 /compact 命令处理器（支持 --clear 参数）
-        FunctionCommandHandlers.register("compact", self._handle_compact_command)
-
-        # 注册 /todos 命令处理器
-        FunctionCommandHandlers.register("todos", self._handle_todos_command)
+        # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
+        self._function_command_handlers = {
+            "subagents": self._handle_subagents_command,
+            "compact": self._handle_compact_command,
+            "todos": self._handle_todos_command,
+        }
 
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
@@ -1731,7 +1732,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 项目选择卡片（Top 卡片，与 settings 同容器）
         self._project_selector_card = BaseSettingsCard("", "", self)
-        self._project_selector_card.setFixedHeight(300)
+        self._project_selector_card.setFixedHeight(350)
         self._project_selector_card_content = ProjectSelectorCardContent()
         self._project_selector_card_content.projectSelected.connect(
             self._on_project_selected
@@ -1752,7 +1753,8 @@ class OpenAIChatToolWindow(ToolWindow):
         Colors.refresh()
         self._project_new_edit = QLineEdit(self._project_selector_card)
         self._project_new_edit.setPlaceholderText("新建项目...")
-        self._project_new_edit.setFixedWidth(130)
+        self._project_new_edit.setMaximumWidth(200)
+        self._project_new_edit.setMinimumWidth(100)
         self._project_new_edit.setFixedHeight(24)
         self._project_new_edit.setStyleSheet(f"""
             QLineEdit {{
@@ -2388,9 +2390,16 @@ class OpenAIChatToolWindow(ToolWindow):
             command_name: 命令名（不含 /）
             args: 命令后的参数字符串
         """
+        # 多窗口隔离：优先使用当前窗口自己的处理器
+        handlers = getattr(self, "_function_command_handlers", {})
+        handler = handlers.get(command_name)
+        if handler:
+            handler(args)
+            return
+
         from app.core.builtin_commands import FunctionCommandHandlers
 
-        # 优先使用动态注册的处理器
+        # 回退到全局注册的处理器（兼容旧代码路径）
         handler = FunctionCommandHandlers.get(command_name)
         if handler:
             handler(args)
@@ -7721,6 +7730,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_bottom_timer.start()
 
     def _do_scroll_to_bottom(self):
+        # 窗口已销毁时跳过：避免 QTimer 回调在 closeEvent 之后访问已释放的 chat_scroll_area
+        if getattr(self, "_is_destroyed", False):
+            return
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
@@ -7744,6 +7756,10 @@ class OpenAIChatToolWindow(ToolWindow):
         Args:
             retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
         """
+        # 窗口已销毁时跳过：避免 QTimer.singleShot 回调在 closeEvent 之后
+        # 访问已释放的 chat_scroll_area 触发 RuntimeError
+        if getattr(self, "_is_destroyed", False):
+            return
         # 如果用户已经主动滚离底部，不再强制拉回
         if self._user_intentionally_away_from_bottom:
             return
@@ -7758,6 +7774,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(300, self._ensure_at_bottom)
 
     def _maintain_bottom_anchor(self):
+        # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
+        # 访问已释放的 chat_scroll_area 触发 RuntimeError
+        if getattr(self, "_is_destroyed", False):
+            return
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
             self._suppress_scroll_sync_count = 0
@@ -9447,9 +9467,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 获取每个项目的会话数和 worktree 数
             meta_map = self._build_project_meta_map(projects)
+            # 获取每个项目的根目录（用于卡片显示）
+            root_dir_map = self._build_project_root_dir_map(projects)
 
             self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map
+                projects, self._current_project, meta_map, root_dir_map
             )
             # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
             self._project_selector_card.set_title_text("📁 项目切换")
@@ -9477,6 +9499,22 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] 获取项目元数据异常: {e}")
         return meta_map
+
+    def _build_project_root_dir_map(self, projects: List[str]) -> Dict[str, str]:
+        """构建项目根目录映射 {项目名: 根目录路径}（未设置的项目不会出现）
+
+        根目录来源于关键文档中标记为"工作目录"的文件夹（每个项目最多 1 个）。
+        """
+        root_dir_map: Dict[str, str] = {}
+        try:
+            if self.backend and self.backend.memory_manager:
+                for p in projects:
+                    wd = self.backend.memory_manager.get_working_directory(p)
+                    if wd:
+                        root_dir_map[p] = wd
+        except Exception as e:
+            logger.warning(f"[MainWidget] 获取项目根目录异常: {e}")
+        return root_dir_map
 
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
@@ -9610,8 +9648,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._current_project not in projects:
                 projects.insert(0, self._current_project)
             meta_map = self._build_project_meta_map(projects)
+            root_dir_map = self._build_project_root_dir_map(projects)
             self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map
+                projects, self._current_project, meta_map, root_dir_map
             )
 
     def _on_memory_tab_changed(self, tab_id: str):
@@ -9671,6 +9710,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if workdir:
                 self._current_workdir[project] = workdir
         self.backend.tool_executor.set_workdir(workdir or None)
+
+        # 同步到记忆卡片的实例缓存（确保关键文档能感知到当前工作目录）
+        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+            self._memory_card_popup._instance_workdir[project] = workdir or ""
+
         from loguru import logger
 
         logger.info(
@@ -9935,6 +9979,16 @@ class OpenAIChatToolWindow(ToolWindow):
     def closeEvent(self, event):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
+
+        # 显式停止滚动相关 timer，避免在 closeEvent 之后还触发滚动回调
+        # 访问已删除的 chat_scroll_area（守卫是第二道防线）
+        for timer_attr in ("_scroll_bottom_timer", "_bottom_anchor_timer"):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
 
         # 从全局实例列表中移除
         try:
