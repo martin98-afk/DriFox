@@ -698,6 +698,9 @@ class QuestionFloatingWidget(QWidget):
         if self._collapsed:
             self._toggle_collapse()
         self._render_current()
+        # 强制几何重新计算，确保 _options_container 的 sizeHint 反映最新内容
+        # 避免 CardContainer._do_expand 读到过期的 sizeHint 而跳过展开
+        self.updateGeometry()
         QTimer.singleShot(0, self.heightChanged.emit)
 
     def clear(self):
@@ -950,6 +953,9 @@ class QuestionFloatingWidget(QWidget):
             self.setUpdatesEnabled(False)
             self._render_current()
             self.setUpdatesEnabled(True)
+            # 内容变更后强制几何重新计算，确保容器高度同步更新
+            self.updateGeometry()
+            QTimer.singleShot(0, self.heightChanged.emit)
 
     def _on_next(self):
         self._save_current_answer()
@@ -959,6 +965,9 @@ class QuestionFloatingWidget(QWidget):
             self.setUpdatesEnabled(False)
             self._render_current()
             self.setUpdatesEnabled(True)
+            # 内容变更后强制几何重新计算，确保容器高度同步更新
+            self.updateGeometry()
+            QTimer.singleShot(0, self.heightChanged.emit)
         else:
             self._build_and_emit_answer()
 
