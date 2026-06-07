@@ -1515,16 +1515,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
 
-        # 注册 /subagents 命令处理器
-        from app.core.builtin_commands import FunctionCommandHandlers
-
-        FunctionCommandHandlers.register("subagents", self._handle_subagents_command)
-
-        # 注册 /compact 命令处理器（支持 --clear 参数）
-        FunctionCommandHandlers.register("compact", self._handle_compact_command)
-
-        # 注册 /todos 命令处理器
-        FunctionCommandHandlers.register("todos", self._handle_todos_command)
+        # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
+        self._function_command_handlers = {
+            "subagents": self._handle_subagents_command,
+            "compact": self._handle_compact_command,
+            "todos": self._handle_todos_command,
+        }
 
         self._tool_floating_widget = ToolFloatingWidget(self)
         self._tool_floating_widget.setVisible(False)
@@ -2396,9 +2392,16 @@ class OpenAIChatToolWindow(ToolWindow):
             command_name: 命令名（不含 /）
             args: 命令后的参数字符串
         """
+        # 多窗口隔离：优先使用当前窗口自己的处理器
+        handlers = getattr(self, "_function_command_handlers", {})
+        handler = handlers.get(command_name)
+        if handler:
+            handler(args)
+            return
+
         from app.core.builtin_commands import FunctionCommandHandlers
 
-        # 优先使用动态注册的处理器
+        # 回退到全局注册的处理器（兼容旧代码路径）
         handler = FunctionCommandHandlers.get(command_name)
         if handler:
             handler(args)
@@ -7729,6 +7732,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_bottom_timer.start()
 
     def _do_scroll_to_bottom(self):
+        # 窗口已销毁时跳过：避免 QTimer 回调在 closeEvent 之后访问已释放的 chat_scroll_area
+        if getattr(self, "_is_destroyed", False):
+            return
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
@@ -7752,6 +7758,10 @@ class OpenAIChatToolWindow(ToolWindow):
         Args:
             retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
         """
+        # 窗口已销毁时跳过：避免 QTimer.singleShot 回调在 closeEvent 之后
+        # 访问已释放的 chat_scroll_area 触发 RuntimeError
+        if getattr(self, "_is_destroyed", False):
+            return
         # 如果用户已经主动滚离底部，不再强制拉回
         if self._user_intentionally_away_from_bottom:
             return
@@ -7766,6 +7776,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(300, self._ensure_at_bottom)
 
     def _maintain_bottom_anchor(self):
+        # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
+        # 访问已释放的 chat_scroll_area 触发 RuntimeError
+        if getattr(self, "_is_destroyed", False):
+            return
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
             self._suppress_scroll_sync_count = 0
@@ -9948,6 +9962,16 @@ class OpenAIChatToolWindow(ToolWindow):
     def closeEvent(self, event):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
+
+        # 显式停止滚动相关 timer，避免在 closeEvent 之后还触发滚动回调
+        # 访问已删除的 chat_scroll_area（守卫是第二道防线）
+        for timer_attr in ("_scroll_bottom_timer", "_bottom_anchor_timer"):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
 
         # 从全局实例列表中移除
         try:
