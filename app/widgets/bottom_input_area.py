@@ -39,6 +39,8 @@ class SendableTextEdit(TextEdit):
     slashTriggered = pyqtSignal(str)  # 检测到 / 触发，携带查询文本
     slashDismissed = pyqtSignal()  # / 触发结束
     slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
+    atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
+    atDismissed = pyqtSignal()  # @ 触发结束
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
 
     def __init__(self, parent=None):
@@ -69,6 +71,7 @@ class SendableTextEdit(TextEdit):
         self._apply_send_btn_style()
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_slash_trigger_check)
+        self.textChanged.connect(self._on_at_trigger_check)
 
         # 关闭 qfluentwidgets TextEdit 焦点时的底部高亮
         if hasattr(self, "layer"):
@@ -87,6 +90,11 @@ class SendableTextEdit(TextEdit):
         # 命令卡片引用（由 main_widget 注入）
         self._command_card_ref = None
         self._slash_trigger_pos = -1  # / 触发位置
+
+        # 文件提及卡片引用（由 main_widget 注入）
+        self._file_mention_card_ref = None
+        self._at_trigger_pos = -1  # @ 触发位置
+        self._ime_composing = False  # IME 输入法组合状态
 
         # 卡片选中项：供 execute() 按选中类型执行
         self._card_selected_name: Optional[str] = None
@@ -149,6 +157,15 @@ class SendableTextEdit(TextEdit):
     def _get_card(self):
         """获取命令卡片引用"""
         return self._command_card_ref
+
+    def set_file_mention_card(self, card):
+        """注入文件提及卡片引用（由 main_widget 创建并注册）"""
+        self._file_mention_card_ref = card
+        card.dismissed.connect(self._on_card_dismissed)
+
+    def _get_file_mention_card(self):
+        """获取文件提及卡片引用"""
+        return self._file_mention_card_ref
 
     def _on_slash_trigger_check(self):
         """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流
@@ -289,6 +306,93 @@ class SendableTextEdit(TextEdit):
         self._slash_throttle_timer.stop()
         self._pending_slash_query = ""
         self._slash_trigger_count = 0
+
+    # ==================== @ 文件提及触发检测 ====================
+
+    def _on_at_trigger_check(self):
+        """检测 @ 触发——在文本中任意位置的 @ 触发文件提及卡片
+
+        规则：
+        - @ 必须处于单词边界（前面是空格/换行/制表符/文本开头）
+        - query = @ 到光标之间的文本（不含换行）
+        - 若 query 含换行 → 关闭卡片
+        - 若 @ 前后无合法 query 区间 → 关闭卡片
+        - IME 组合输入中跳过检测，避免打断中文输入法
+        """
+        if self._ime_composing:
+            return
+
+        try:
+            text = self.toPlainText()
+            cursor = self.textCursor()
+            cursor_pos = cursor.position()
+
+            if cursor_pos < 0 or cursor_pos > len(text):
+                return
+
+            text_before_cursor = text[:cursor_pos]
+
+            # 从光标向前找最后一个合法 @
+            at_pos = -1
+            for i in range(cursor_pos - 1, -1, -1):
+                ch = text_before_cursor[i]
+                if ch == '@':
+                    # 检查是否为单词边界
+                    if i == 0 or text_before_cursor[i - 1] in (' ', '\n', '\t', '\r'):
+                        at_pos = i
+                        break
+                    else:
+                        # 非单词边界（如 email@domain），不触发
+                        break
+                elif ch in ('\n', '\r'):
+                    # 遇到换行则停止向前搜索
+                    break
+
+            file_card = self._get_file_mention_card()
+
+            if at_pos < 0:
+                # 没有找到合法 @ → 关闭卡片
+                self._at_trigger_pos = -1
+                if file_card and file_card.is_card_visible:
+                    file_card.dismiss()
+                    self.atDismissed.emit()
+                return
+
+            query = text_before_cursor[at_pos + 1:]
+
+            # 换行 → 关闭
+            if '\n' in query:
+                self._at_trigger_pos = -1
+                if file_card and file_card.is_card_visible:
+                    file_card.dismiss()
+                    self.atDismissed.emit()
+                return
+
+            self._at_trigger_pos = at_pos
+            self.atTriggered.emit(query)
+
+        except Exception:
+            pass
+
+    def insert_file_mention(self, file_path: str):
+        """将 @ 提及文本替换为空（选中文件后由 main_widget 调用）
+
+        用户选中文件后，移除输入框中的 @query 文本。
+        main_widget 随后会创建 AttachmentChip。
+        """
+        cursor = self.textCursor()
+        cursor_pos = cursor.position()
+        trigger_pos = self._at_trigger_pos
+
+        if trigger_pos >= 0:
+            cursor.setPosition(trigger_pos)
+            cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
+            cursor.insertText("")
+
+        self._at_trigger_pos = -1
+        self.setFocus(Qt.OtherFocusReason)
+
+    # ==================== 命令文本插入 ====================
 
     def insert_command_text(self, item_name: str):
         """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""
@@ -726,14 +830,11 @@ class SendableTextEdit(TextEdit):
                 if card.select_next():
                     event.accept()
                     return
-                # 未处理则继续往下走，让按键透传到输入框
             elif event.key() == Qt.Key_Up:
                 if card.select_prev():
                     event.accept()
                     return
-                # 未处理则继续往下走，让按键透传到输入框
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
-                # detail 模式：Tab 触发参数选中，Enter 走正常发送
                 if card.is_detail_mode and event.key() == Qt.Key_Tab:
                     card.select_current()
                     event.accept()
@@ -745,6 +846,27 @@ class SendableTextEdit(TextEdit):
             elif event.key() == Qt.Key_Escape:
                 card.dismiss()
                 self.slashDismissed.emit()
+                event.accept()
+                return
+
+        # 文件提及卡片可见时，优先处理导航
+        file_card = self._get_file_mention_card()
+        if file_card and file_card.is_card_visible and not in_history_mode:
+            if event.key() == Qt.Key_Down:
+                if file_card.select_next():
+                    event.accept()
+                    return
+            elif event.key() == Qt.Key_Up:
+                if file_card.select_prev():
+                    event.accept()
+                    return
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                file_card.select_current()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Escape:
+                file_card.dismiss()
+                self.atDismissed.emit()
                 event.accept()
                 return
 
@@ -794,7 +916,16 @@ class SendableTextEdit(TextEdit):
 
         中文输入法在输入 / 时会提交 、，这绕过了 keyPressEvent 的拦截。
         通过重写 inputMethodEvent 在 IME 提交阶段拦截、并替换为 /。
+
+        同时追踪 IME 组合状态（preedit），组合进行中时跳过 @ 检测，
+        避免每次按键触发卡片刷新打断输入法。
         """
+        # 追踪 IME 组合状态
+        if event.preeditString():
+            self._ime_composing = True
+        else:
+            self._ime_composing = False
+
         if self.textCursor().position() == 0 and event.commitString() == "、":
             cursor = self.textCursor()
             cursor.insertText("/")
@@ -994,6 +1125,7 @@ class SendableTextEdit(TextEdit):
         try:
             super().focusInEvent(event)
             self._animate_glow(25, 180, 250)
+            self._ime_composing = False  # 重新获得焦点时重置 IME 组合状态
             QTimer.singleShot(0, self._ensure_cursor_visible)
         except Exception:
             pass
@@ -1010,22 +1142,34 @@ class SendableTextEdit(TextEdit):
             pass
 
     def _deferred_focus_check_dismiss(self):
-        """失焦延迟检查：若焦点仍在输入框或在命令卡片内，不关闭卡片"""
-        card = self._get_card()
-        if not card or not card.is_card_visible:
-            return
+        """失焦延迟检查：若焦点仍在输入框或在卡片内，不关闭卡片"""
         focused = QApplication.focusWidget()
         if focused is self:
             return
-        # 检查焦点是否在命令卡片子树内
-        if focused:
-            p = focused
-            while p:
-                if p is card:
-                    return
-                p = p.parent()
-        card.dismiss()
-        self.slashDismissed.emit()
+
+        # 检查命令卡片
+        card = self._get_card()
+        if card and card.is_card_visible:
+            if focused:
+                p = focused
+                while p:
+                    if p is card:
+                        return
+                    p = p.parent()
+            card.dismiss()
+            self.slashDismissed.emit()
+
+        # 检查文件提及卡片
+        file_card = self._get_file_mention_card()
+        if file_card and file_card.is_card_visible:
+            if focused:
+                p = focused
+                while p:
+                    if p is file_card:
+                        return
+                    p = p.parent()
+            file_card.dismiss()
+            self.atDismissed.emit()
 
     def _ensure_cursor_visible(self):
         cursor = self.textCursor()

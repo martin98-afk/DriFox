@@ -88,6 +88,7 @@ from app.widgets.cards import (
     BottomCardContainer,
 )
 from app.widgets.cards.floating.command_card import CommandCard
+from app.widgets.cards.floating.file_mention_card import FileMentionCard
 from app.widgets.cards.floating.question_floating_widget import (
     QuestionFloatingWidget,
 )
@@ -1952,6 +1953,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.slashTriggered.connect(self._on_slash_triggered)
         self.input_area.slashDismissed.connect(self._on_slash_dismissed)
         self.input_area.slashShowHint.connect(self._on_slash_show_hint)
+        self.input_area.atTriggered.connect(self._on_at_triggered)
+        self.input_area.atDismissed.connect(self._on_at_dismissed)
         self.input_area.files_dropped.connect(self._on_files_dropped)
         card_layout.addWidget(self.input_area)
 
@@ -1972,6 +1975,19 @@ class OpenAIChatToolWindow(ToolWindow):
             suppress_others=["tool", "sub_agent", "sub_agent_compact"],
         )
         self._bottom_card_container.add_card("command", self._command_card)
+
+        # 文件提及卡片（输入 @ 时显示文件列表）
+        self._file_mention_card = FileMentionCard(self._bottom_input_container)
+        self._file_mention_card.setVisible(False)
+        self.input_area.set_file_mention_card(self._file_mention_card)
+        self._file_mention_card.fileSelected.connect(self._on_file_mention_selected)
+        mgr.register_card(
+            self._window_id,
+            ContainerType.BOTTOM,
+            "file_mention",
+            self._file_mention_card,
+        )
+        self._bottom_card_container.add_card("file_mention", self._file_mention_card)
 
         # 撤销删除卡片
         self._undo_delete_card = UndoDeleteCard(self._bottom_input_container)
@@ -2870,6 +2886,74 @@ class OpenAIChatToolWindow(ToolWindow):
         # 切换到 detail 模式（按选中类型显示对应 hint）
         card.show_command_detail(cmd_name, selected_type, data_provider=data_provider)
         # 把焦点还给输入框
+        self.input_area.setFocus(Qt.OtherFocusReason)
+
+    # ========== 文件提及卡片处理 ==========
+
+    def _get_current_workdir(self) -> str:
+        """获取当前工作目录（项目根目录）"""
+        # 优先从实例缓存获取
+        project = getattr(self, "_current_project", "")
+        if project and hasattr(self, "_current_workdir") and self._current_workdir:
+            if project in self._current_workdir:
+                return self._current_workdir[project]
+        # 降级：尝试从 tool_executor 获取
+        try:
+            workdir = self.backend.tool_executor.get_workdir()
+            if workdir:
+                return workdir
+        except Exception:
+            pass
+        return ""
+
+    def _on_at_triggered(self, query: str):
+        """输入框 @ 触发 - 更新文件提及卡片并显示"""
+        if not hasattr(self, "_file_mention_card"):
+            return
+
+        workdir = self._get_current_workdir()
+        if not workdir:
+            return
+
+        card = self._file_mention_card
+        # 先让 CardManager 展开容器
+        self._card_manager.show_card("file_mention", self._window_id)
+        # 显示文件列表
+        card.show_card(workdir, query)
+        # 把焦点还给输入框
+        self.input_area.setFocus(Qt.OtherFocusReason)
+
+    def _on_at_dismissed(self):
+        """输入框 @ 触发结束 - 隐藏文件提及卡片"""
+        if not hasattr(self, "_file_mention_card"):
+            return
+        self._file_mention_card.dismiss()
+        self._card_manager.hide_card("file_mention", self._window_id)
+
+    def _on_file_mention_selected(self, file_path: str):
+        """文件被选中 - 添加为 attachment chip，移除 @ 文本"""
+        if not hasattr(self, "_file_mention_card"):
+            return
+        # 关闭卡片
+        self._file_mention_card.dismiss()
+        self._card_manager.hide_card("file_mention", self._window_id)
+
+        # 移除输入框中的 @query 文本
+        self.input_area.insert_file_mention(file_path)
+
+        # 添加到附件列表（复用拖拽文件的 chip 机制）
+        if file_path not in self._attachments:
+            self._attachments.append(file_path)
+            from app.widgets.bottom_input_area import AttachmentChip
+
+            chip = AttachmentChip(file_path, self._attach_container)
+            chip.removed.connect(lambda path=file_path: self._remove_attachment(path))
+            self._attach_layout.insertWidget(
+                self._attach_layout.count() - 1, chip
+            )
+        self._attach_container.setVisible(bool(self._attachments))
+
+        # 聚焦输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
 
     def _get_all_model_options_flat(self) -> list:
@@ -9790,6 +9874,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         # 工作目录变更后刷新分支标签
         self._update_branch()
+        # 工作目录变更后使文件提及卡片缓存失效
+        if hasattr(self, "_file_mention_card"):
+            self._file_mention_card.invalidate_cache()
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
