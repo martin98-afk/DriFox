@@ -175,15 +175,18 @@ def build_assistant_content(
 
 
 def append_text_block(content: Any, text: Any) -> List[Dict[str, Any]]:
-    blocks = ensure_content_blocks(content)
     text_value = str(text or "")
     if not text_value:
-        return blocks
+        return ensure_content_blocks(content)
 
-    if blocks and blocks[-1].get("type") == "text":
-        blocks[-1]["text"] = str(blocks[-1].get("text", "")) + text_value
-    else:
-        blocks.append(make_text_block(text_value))
+    # 性能优化：如果 content 已是 list 且末尾为 text block，就地追加避免重建列表
+    # 流式输出时高频调用，避免每次复制全部 block
+    if isinstance(content, list) and content and isinstance(content[-1], dict) and content[-1].get("type") == "text":
+        content[-1]["text"] = str(content[-1].get("text", "")) + text_value
+        return content
+
+    blocks = ensure_content_blocks(content)
+    blocks.append(make_text_block(text_value))
     return blocks
 
 
@@ -211,7 +214,9 @@ def content_to_markdown(content: Any) -> str:
         return content
 
     parts: List[str] = []
-    for block in ensure_content_blocks(content):
+    # 性能优化：content 已为 list 时跳过 ensure_content_blocks 二次拷贝
+    blocks = content if isinstance(content, list) else ensure_content_blocks(content)
+    for block in blocks:
         block_type = block.get("type")
         if block_type == "reasoning":
             # 思考内容：输出为 <think> 标签，由渲染器 _inject_think_cards 处理

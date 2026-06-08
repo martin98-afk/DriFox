@@ -2579,6 +2579,10 @@ class CodeWebViewer(QWebEngineView):
             text_clean = text.replace("<think>", "").replace("</think>", "")
             if not text_clean:
                 return
+            # 内存优化：超长 chunk 截断增量推送，避免单次 JS 调用传输过大数据
+            # 全量渲染最终会提供完整格式化后的内容
+            if len(text_clean) > 2000:
+                text_clean = text_clean[:2000] + "\n\n..."
             escaped = escape(text_clean)
             js = f"""
             (function() {{
@@ -2669,16 +2673,19 @@ class CodeWebViewer(QWebEngineView):
             return
 
         # 动态渲染间隔：内容越大渲染越稀疏，减轻 UI 压力
+        # 流式模式下 _append_text_incremental 已在 JS 侧即时显示文本，
+        # 全量渲染仅用于保证 markdown 格式正确（代码块、思考块等），
+        # 因此间隔可以大幅放宽以避免不必要的全量重渲染。
         if self._streaming:
             content_len = len(self._markdown_text)
-            if content_len > 50000:
-                interval = 200
-            elif content_len > 20000:
-                interval = 100
-            elif content_len > 5000:
-                interval = 60
+            if content_len > 100000:
+                interval = 1500
+            elif content_len > 50000:
+                interval = 800
+            elif content_len > 10000:
+                interval = 400
             else:
-                interval = 30
+                interval = 200
         else:
             interval = 40
 
@@ -2714,13 +2721,14 @@ class CodeWebViewer(QWebEngineView):
                 fresh_md = self._lazy_markdown_cb()
                 _tcb = (_t.time() - _tcb0) * 1000
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
-                if fresh_md == self._last_rendered_markdown:
+                # 流式模式下跳过全量字符串比较（内容持续增长，比较浪费）
+                if not self._streaming and fresh_md == self._last_rendered_markdown:
                     if not self._height_report_pending:
                         self._height_report_pending = True
                         self._resize_timer.start()
                     return
                 self._markdown_text = fresh_md
-            elif self._markdown_text == self._last_rendered_markdown:
+            elif not self._streaming and self._markdown_text == self._last_rendered_markdown:
                 if not self._height_report_pending:
                     self._height_report_pending = True
                     self._resize_timer.start()
@@ -2733,7 +2741,8 @@ class CodeWebViewer(QWebEngineView):
             html_content = self._render_markdown_to_html(self._markdown_text)
             _tr = (_t.time() - _tr0) * 1000
             self._last_rendered_markdown = self._markdown_text
-            if html_content == self._last_rendered_html:
+            # 流式模式下跳过全量 HTML 字符串比较（内容持续增长，比较浪费）
+            if not self._streaming and html_content == self._last_rendered_html:
                 if not self._height_report_pending:
                     self._height_report_pending = True
                     self._resize_timer.start()
@@ -2749,6 +2758,8 @@ class CodeWebViewer(QWebEngineView):
             _tjs0 = _t.time()
             self.page().runJavaScript(js_code)
             _tjs = (_t.time() - _tjs0) * 1000
+            # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
+            self._last_rendered_html = None
             _total = (_t.time() - _t0) * 1000
         except RuntimeError:
             pass
@@ -2756,6 +2767,11 @@ class CodeWebViewer(QWebEngineView):
     def finish_streaming(self):
         self._streaming = False
         self._schedule_render(immediate=True)
+
+    def _cleanup_render_cache(self):
+        """清理渲染缓存，降低内存占用（流式完成后调用）"""
+        self._last_rendered_html = None
+        self._lazy_markdown_cb = None
 
     def get_plain_text(self) -> str:
         return self._markdown_text
@@ -4600,6 +4616,9 @@ class MessageCard(SimpleCardWidget):
 
         try:
             # 对新内容进行转义和代码块清理
+            # 内存优化：超长 thinking chunk 截断，避免单次 JS 调用传输过大数据
+            if len(new_text) > 3000:
+                new_text = new_text[:3000] + "\n\n..."
             escaped = escape(new_text)
             escaped = _CODE_BLOCK_REMOVE_PATTERN.sub("", escaped)
             escaped = escaped.replace("`", "").replace("\r\n", " ").replace("\n", " ")
@@ -4668,6 +4687,8 @@ class MessageCard(SimpleCardWidget):
         try:
             if self.viewer is not None and hasattr(self.viewer, 'finish_streaming'):
                 self.viewer.finish_streaming()
+                if hasattr(self.viewer, '_cleanup_render_cache'):
+                    self.viewer._cleanup_render_cache()
         except RuntimeError:
             pass
         self.stop_streaming_anim()
