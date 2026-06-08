@@ -503,6 +503,15 @@ _THINK_TAGS = [
                "unit test", "integration test", "test case"),
     },
     {
+        "tag": "版本控制",
+        "priority": 2,
+        "cn": ("提交", "合并", "分支", "版本", "仓库", "推送",
+               "拉取", "回滚", "冲突", "PR", "rebase", "stash",
+               "git", "commit", "merge"),
+        "en": ("commit", "push", "merge", "rebase", "branch",
+               "stash", "cherry-pick", "checkout", "git"),
+    },
+    {
         "tag": "代码实现",
         "priority": 2,
         "cn": ("实现", "代码", "函数", "接口", "编写", "调用"),
@@ -549,16 +558,32 @@ _COMMON_WORDS = frozenset(
 
 
 def _pattern_weight(p: str) -> float:
-    """计算模式的权重：越长越具体→权重越高"""
-    if " " in p:          # 英文短语（含空格）→ 非常具体
+    """计算模式的权重：越长越具体→权重越高
+
+    中文按字长分档，英文按单词长度分档，避免"commit"等英文词权重过高。
+    """
+    if " " in p:          # 多词短语（英文短语或中文带空格）
         return 3.0
-    if len(p) >= 4:       # 中文4字以上 → 非常具体
-        return 3.0
-    if len(p) == 3:       # 3字 → 比较具体
-        return 2.0
-    if p in _COMMON_WORDS:  # 高频常见词 → 权重低
-        return 0.5
-    return 1.0
+
+    # 判断是否含中文
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in p)
+
+    if has_cjk:
+        # 中文权重：按字长分档
+        if len(p) >= 4:
+            return 3.0
+        if len(p) == 3:
+            return 2.0
+        if p in _COMMON_WORDS:
+            return 1.0  # 常见词单独不够(1<2)，搭配一个就够(1+1≥2)
+        return 1.0
+    else:
+        # 英文权重：按单词长度分档
+        if len(p) >= 6:    # commit, cherry, coverage
+            return 2.0
+        if len(p) >= 4:    # push, merge, test, auth
+            return 1.5
+        return 1.0
 
 
 def _classify_think_tag(content: str) -> str:
@@ -1947,7 +1972,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .table-scroll-wrapper > table th,
                 .table-scroll-wrapper > table td {{
-                    white-space: nowrap;
+                    white-space: normal;
+                    word-break: break-word;
                 }}
                 /* 继承 wrapper 内部表格的行样式 */
                 .table-scroll-wrapper > table th {{
@@ -1962,6 +1988,9 @@ class CodeWebViewer(QWebEngineView):
                     padding: 8px 12px;
                     border-bottom: 1px solid var(--border);
                     color: var(--text-secondary) !important;
+                    max-height: 3.8em;
+                    overflow-y: auto;
+                    vertical-align: top;
                 }}
                 .table-scroll-wrapper > table tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
                 .table-scroll-wrapper > table tr:hover {{ background: rgba(255, 255, 255, 0.05); }}
