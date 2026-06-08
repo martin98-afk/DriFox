@@ -19,6 +19,8 @@ from PyQt5.QtWidgets import (
     QScrollArea, QFrame, QSizePolicy,
 )
 
+from app.widgets.elided_label import _ElidedLabel
+
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
 
@@ -116,32 +118,15 @@ class FileMentionItemWidget(QWidget):
         """)
         layout.addWidget(self._icon_label)
 
-        # 文件名标签
-        self._name_label = QLabel()
-        self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        # 名称静态样式——创建时设置一次，避免每次选择/悬停都触发布局重算
-        self._name_label.setStyleSheet(f"""
+        # 相对路径标签（ElidedLabel，自动省略防止超出可见区域）
+        rel = self._data.get("relative_path", "")
+        self._path_label = _ElidedLabel(rel)
+        self._path_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._path_label.setMinimumWidth(0)
+        self._path_label.setStyleSheet(f"""
             QLabel {{
                 color: {Colors.TEXT_PRIMARY};
                 {get_font_family_css()} {font_size_css(13)};
-                background: transparent;
-            }}
-        """)
-        layout.addWidget(self._name_label)
-
-        # 相对路径标签（省略）
-        rel = self._data.get("relative_path", "")
-        self._path_label = QLabel(rel)
-        self._path_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._path_label.setMinimumWidth(0)
-        self._path_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        # 路径静态样式——创建时设置一次
-        self._path_label.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_SECONDARY};
-                {get_font_family_css()} {font_size_css(10)};
                 background: transparent;
             }}
         """)
@@ -171,23 +156,9 @@ class FileMentionItemWidget(QWidget):
         """)
 
     def _update_display(self):
-        """更新名称显示（含查询高亮）"""
-        name = self._data["name"]
-        query = self._query
-
-        if query:
-            lower_text = name.lower()
-            lower_query = query.lower()
-            idx = lower_text.find(lower_query)
-            if idx >= 0:
-                html = name[:idx]
-                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{name[idx:idx + len(query)]}</span>'
-                html += name[idx + len(query):]
-                self._name_label.setText(html)
-            else:
-                self._name_label.setText(name)
-        else:
-            self._name_label.setText(name)
+        """更新路径显示（_ElidedLabel 自动处理省略）"""
+        rel = self._data.get("relative_path", "")
+        self._path_label.setText(rel)
 
     def update_data(self, file_data: Dict[str, str], query: str):
         """更新 widget 数据并刷新显示（用于回收复用）
@@ -199,9 +170,7 @@ class FileMentionItemWidget(QWidget):
         # 更新 emoji（类型可能变化）
         emoji = self._get_file_emoji(file_data["path"], file_data.get("type", ""))
         self._icon_label.setText(emoji)
-        # 更新路径
-        self._path_label.setText(file_data.get("relative_path", ""))
-        # 更新名称显示
+        # 更新路径显示
         self._update_display()
 
     def set_selected(self, selected: bool):
