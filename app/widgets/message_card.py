@@ -2818,10 +2818,8 @@ class CodeWebViewer(QWebEngineView):
         copy_action = menu.addAction(get_icon("复制"), "复制")
         copy_action.triggered.connect(self._copy_to_clipboard)
 
-        menu.addSeparator()
-
         # 导出
-        export_action = menu.addAction("导出")
+        export_action = menu.addAction(get_icon("导入"), "导出")
         export_action.triggered.connect(self._export_message)
 
         menu.exec_(self.mapToGlobal(pos))
@@ -3201,11 +3199,6 @@ class PlainTextViewer(QWidget):
         copy_action.triggered.connect(lambda: self._copy_to_clipboard())
 
         menu.addSeparator()
-
-        # 导出
-        export_action = menu.addAction("导出")
-        export_action.triggered.connect(lambda: self._export_message())
-
         # 撤销
         undo_action = menu.addAction(get_icon("撤销"), "撤销到这里")
         undo_action.triggered.connect(lambda: self._request_undo())
