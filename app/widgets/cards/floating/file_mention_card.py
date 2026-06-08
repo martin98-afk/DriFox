@@ -281,7 +281,7 @@ class FileMentionCard(QWidget):
         layout.addWidget(self._scroll_area)
 
     def set_root_dir(self, root_dir: str):
-        """设置根目录并刷新文件列表缓存"""
+        """设置根目录"""
         if root_dir != self._root_dir:
             self._root_dir = root_dir
             self._cache_dirty = True
@@ -289,6 +289,21 @@ class FileMentionCard(QWidget):
     def invalidate_cache(self):
         """使缓存失效，下次 show 时重建"""
         self._cache_dirty = True
+
+    def ensure_cache(self, root_dir: str):
+        """确保文件缓存已就绪（预扫描），不阻塞 UI
+
+        在下列时机调用：
+        - main_widget 初始化完成后
+        - 工作目录变更时
+
+        这样用户第一次按 @ 时缓存已就绪，过滤即时完成。
+        """
+        if not root_dir:
+            return
+        self.set_root_dir(root_dir)
+        if self._cache_dirty:
+            self._scan_files()
 
     # 总是忽略的目录名（不区分大小写匹配）
     _IGNORED_DIRS: Set[str] = {
@@ -397,64 +412,69 @@ class FileMentionCard(QWidget):
         return ignored
 
     def _scan_files(self):
-        """扫描根目录下的文件（递归，最多 500 项）"""
+        """扫描根目录下的文件（全递归，最多 2000 项）
+
+        使用 os.scandir — Python 最快目录遍历 API（C 实现，
+        不创建 Path 对象）。忽略 .gitignore 和内置忽略规则。
+        只在缓存脏时调用一次，后续 @ 即时过滤。
+        """
         self._file_cache = []
         if not self._root_dir or not os.path.isdir(self._root_dir):
             return
 
-        root = Path(self._root_dir)
-        gitignore_patterns = self._parse_gitignore(root)
+        gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
+        max_items = 2000
 
-        max_items = 500
         try:
-            for entry in sorted(root.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                if len(self._file_cache) >= max_items:
-                    break
-                rel = entry.relative_to(root).as_posix()
-
-                # 检查是否被忽略
-                if self._is_ignored(rel, entry.is_dir(), gitignore_patterns):
-                    continue
-
-                item = {
-                    "name": entry.name,
-                    "path": str(entry.resolve()),
-                    "relative_path": rel,
-                    "type": "dir" if entry.is_dir() else "file",
-                }
-                self._file_cache.append(item)
-
-                # 对目录递归一层（再深入会太多）
-                if entry.is_dir() and len(self._file_cache) < max_items:
-                    try:
-                        for sub in sorted(entry.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                            if len(self._file_cache) >= max_items:
-                                break
-                            sub_rel = sub.relative_to(root).as_posix()
-
-                            # 子项也检查忽略
-                            if self._is_ignored(sub_rel, sub.is_dir(), gitignore_patterns):
-                                continue
-
-                            sub_item = {
-                                "name": sub.name,
-                                "path": str(sub.resolve()),
-                                "relative_path": sub_rel,
-                                "type": "dir" if sub.is_dir() else "file",
-                            }
-                            self._file_cache.append(sub_item)
-                    except PermissionError:
-                        pass
-        except PermissionError:
+            # 递归扫描——无深度限制，忽略目录不进入
+            self._scan_dir(self._root_dir, "", gitignore_patterns, max_items)
+        except Exception:
             pass
+
+        # 一次性排序（目录优先，同名不区分大小写）
+        self._file_cache.sort(
+            key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower())
+        )
         self._cache_dirty = False
 
-    def load_items(self, query: str = ""):
-        """根据 query 筛选并渲染列表"""
-        # 需要刷新缓存时重新扫描
-        if self._cache_dirty:
-            self._scan_files()
+    def _scan_dir(self, dirpath: str, rel_prefix: str,
+                  gitignore_patterns: List[str], max_items: int):
+        """递归扫描单层目录（os.scandir 实现）"""
+        try:
+            with os.scandir(dirpath) as it:
+                for entry in it:
+                    if len(self._file_cache) >= max_items:
+                        return
 
+                    name = entry.name
+                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+
+                    # 检查是否被忽略
+                    if self._is_ignored(rel, is_dir, gitignore_patterns):
+                        continue
+
+                    item = {
+                        "name": name,
+                        "path": entry.path,
+                        "relative_path": rel,
+                        "type": "dir" if is_dir else "file",
+                    }
+                    self._file_cache.append(item)
+
+                    # 递归子目录
+                    if is_dir:
+                        self._scan_dir(entry.path, rel,
+                                       gitignore_patterns, max_items)
+        except PermissionError:
+            pass
+
+    def load_items(self, query: str = ""):
+        """根据 query 即时筛选并渲染列表
+
+        假设缓存已就绪（由 ensure_cache / _scan_files 预先填充），
+        此处仅做 O(n) 子串匹配 + O(k) widget 创建，无 I/O。
+        """
         query = query.strip().lower()
         self._current_query = query
 
@@ -468,9 +488,7 @@ class FileMentionCard(QWidget):
                 or q_lower in item["relative_path"].lower()
             ]
 
-        # 排序：目录在前，文件在后，同类型按名称
-        self._filtered_items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
-
+        # 缓存已排序，筛选结果保持顺序
         self._render()
 
         if self._filtered_items:
@@ -556,12 +574,18 @@ class FileMentionCard(QWidget):
     def show_card(self, root_dir: str = "", query: str = ""):
         """加载并显示卡片
 
-        无参调用（被 CardManager 调用）：沿用上次的 root_dir 和 query，
-        使卡片可见。带参调用则加载指定目录和查询。
+        无参调用（被 CardManager 调用）：沿用上次的 root_dir 和 query。
+        带参调用则加载指定目录和查询。
+
+        性能保证：缓存应在 show_card 前由 ensure_cache 预填充，
+        此方法仅做 O(n) 过滤和 O(k) widget 创建。
         """
         Colors.refresh()
         if root_dir:
             self.set_root_dir(root_dir)
+            # 缓存未就绪时同步扫描（应急路径）
+            if self._cache_dirty:
+                self._scan_files()
         self._current_query = query if root_dir else self._current_query
         self.load_items(query if root_dir else self._current_query)
         has_items = len(self._filtered_items) > 0

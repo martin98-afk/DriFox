@@ -1989,6 +1989,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("file_mention", self._file_mention_card)
 
+        # 预缓存文件列表：延迟到事件循环空闲后执行，不阻塞 UI 初始化
+        QTimer.singleShot(200, self._ensure_file_mention_cache)
+
         # 撤销删除卡片
         self._undo_delete_card = UndoDeleteCard(self._bottom_input_container)
         self._undo_delete_card.setVisible(False)
@@ -2907,7 +2910,11 @@ class OpenAIChatToolWindow(ToolWindow):
         return ""
 
     def _on_at_triggered(self, query: str):
-        """输入框 @ 触发 - 更新文件提及卡片并显示"""
+        """输入框 @ 触发 - 更新文件提及卡片并显示
+
+        性能保证：缓存已在 ensure_cache 中预填充，
+        show_card 仅做 O(n) 内存过滤，无 I/O。
+        """
         if not hasattr(self, "_file_mention_card"):
             return
 
@@ -2916,12 +2923,22 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         card = self._file_mention_card
+        # 确保缓存就绪（防御性：异步预缓存可能尚未完成）
+        card.ensure_cache(workdir)
         # 先让 CardManager 展开容器
         self._card_manager.show_card("file_mention", self._window_id)
-        # 显示文件列表
+        # 显示文件列表（此时缓存已就绪，即时过滤）
         card.show_card(workdir, query)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
+
+    def _ensure_file_mention_cache(self):
+        """延迟预缓存文件列表（UI 初始化完成后调用）"""
+        if not hasattr(self, "_file_mention_card"):
+            return
+        workdir = self._get_current_workdir()
+        if workdir:
+            self._file_mention_card.ensure_cache(workdir)
 
     def _on_at_dismissed(self):
         """输入框 @ 触发结束 - 隐藏文件提及卡片"""
@@ -9874,9 +9891,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         # 工作目录变更后刷新分支标签
         self._update_branch()
-        # 工作目录变更后使文件提及卡片缓存失效
-        if hasattr(self, "_file_mention_card"):
-            self._file_mention_card.invalidate_cache()
+        # 工作目录变更后重扫文件列表（预缓存，下次 @ 即时显示）
+        if hasattr(self, "_file_mention_card") and file_path:
+            self._file_mention_card.ensure_cache(file_path)
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
