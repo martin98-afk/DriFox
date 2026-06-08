@@ -5217,6 +5217,11 @@ class OpenAIChatToolWindow(ToolWindow):
     def _recycle_out_of_view_batches(self):
         """回收超出可视缓冲区范围的批次UI，只保留数据，节省内存
         同时确保当前可视范围内的批次都已经懒渲染完成
+
+        防闪烁设计：
+        - 回收前记录滚动位置，回收上方卡片后补偿偏移量，防止视口跳动
+        - 使用 delete_widgets_from_layout 立即从布局移除，避免延迟导致高度突变
+        - 跳过当前流式输出中的卡片
         """
         if self._is_virtual_recycling or len(self._batch_cards) == 0:
             return
@@ -5251,9 +5256,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
-            # 先收集需要回收的卡片ID，用于清理懒渲染队列
             recycled_card_ids = set()
-            # 回收前面超出缓冲区的批次
+
+            # ── 收集上方（历史方向）需要回收的卡片 ──
+            above_widgets = []
+            above_removed_height = 0
             for batch_idx in range(0, active_start):
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
@@ -5262,32 +5269,39 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     if cards:
                         for card in cards:
-                            recycled_card_ids.add(id(card))
-                            if isinstance(card, MessageCard) and self._is_widget_alive(
-                                card
-                            ):
-                                card.cleanup()
-                                card.deleteLater()
+                            if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                                above_removed_height += card.height()
+                                recycled_card_ids.add(id(card))
+                                above_widgets.append(card)
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
 
-            # 回收后面超出缓冲区的批次
+            # ── 收集下方（未来方向）需要回收的卡片 ──
+            below_widgets = []
             for batch_idx in range(active_end, len(self._batch_cards)):
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
-                    # 如果批次包含当前流式输出的助手卡片，跳过整个批次
                     if cards and self._current_assistant_card in cards:
                         continue
                     if cards:
                         for card in cards:
-                            recycled_card_ids.add(id(card))
-                            if isinstance(card, MessageCard) and self._is_widget_alive(
-                                card
-                            ):
-                                card.cleanup()
-                                card.deleteLater()
+                            if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                                recycled_card_ids.add(id(card))
+                                below_widgets.append(card)
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+
+            # ── 执行回收（从布局移除 + deleteLater）──
+            if above_widgets:
+                # 滚动位置补偿：回收上方卡片后，容器高度减少，需同步降低滚动值
+                scroll_bar = self.chat_scroll_area.verticalScrollBar()
+                old_scroll = scroll_bar.value()
+                delete_widgets_from_layout(above_widgets, self.chat_layout)
+                # 补偿滚动值：减去已移除的上方卡片总高度
+                scroll_bar.setValue(max(0, old_scroll - above_removed_height))
+
+            if below_widgets:
+                delete_widgets_from_layout(below_widgets, self.chat_layout)
 
             # 从懒渲染队列中移除已回收的卡片，避免对已销毁的 widget 调用 ensure_rendered
             if recycled_card_ids:
@@ -7005,8 +7019,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_chat_scrolled(self, value):
         """聊天区域滚动时，触发虚拟滚动回收并通知所有 MessageCard 更新浮动头"""
-        pass
-        # self._virtual_scroll_timer.start()
+        self._virtual_scroll_timer.start()
         # for card in self.findChildren(MessageCard):
         #     card._scroll_position_changed(value)
 
