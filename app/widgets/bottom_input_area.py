@@ -1,10 +1,12 @@
 # 大模型输入框
 import math
 import os
-import re
+import tempfile
+import uuid
+from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QMimeData
 from PyQt5.QtGui import (
     QInputMethodEvent,
     QKeyEvent,
@@ -13,18 +15,17 @@ from PyQt5.QtGui import (
     QColor,
     QTextCharFormat,
     QPainter,
-    QPainterPath, QPen,
+    QPainterPath,
+    QPen,
+    QImage,
 )
 from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
-from PyQt5.QtWidgets import QShortcut, QWidget, QVBoxLayout
-from qfluentwidgets import FluentIcon, ComboBox
+from PyQt5.QtWidgets import QShortcut, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel
+from qfluentwidgets import FluentIcon, ComboBox, IconWidget
 from qfluentwidgets import TextEdit, TransparentToolButton
 
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
-
-# 预编译正则表达式
-_FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
 
 class SendableTextEdit(TextEdit):
@@ -38,6 +39,9 @@ class SendableTextEdit(TextEdit):
     slashTriggered = pyqtSignal(str)  # 检测到 / 触发，携带查询文本
     slashDismissed = pyqtSignal()  # / 触发结束
     slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
+    atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
+    atDismissed = pyqtSignal()  # @ 触发结束
+    files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -67,6 +71,7 @@ class SendableTextEdit(TextEdit):
         self._apply_send_btn_style()
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_slash_trigger_check)
+        self.textChanged.connect(self._on_at_trigger_check)
 
         # 关闭 qfluentwidgets TextEdit 焦点时的底部高亮
         if hasattr(self, "layer"):
@@ -85,6 +90,11 @@ class SendableTextEdit(TextEdit):
         # 命令卡片引用（由 main_widget 注入）
         self._command_card_ref = None
         self._slash_trigger_pos = -1  # / 触发位置
+
+        # 文件提及卡片引用（由 main_widget 注入）
+        self._file_mention_card_ref = None
+        self._at_trigger_pos = -1  # @ 触发位置
+        self._ime_composing = False  # IME 输入法组合状态
 
         # 卡片选中项：供 execute() 按选中类型执行
         self._card_selected_name: Optional[str] = None
@@ -148,6 +158,15 @@ class SendableTextEdit(TextEdit):
         """获取命令卡片引用"""
         return self._command_card_ref
 
+    def set_file_mention_card(self, card):
+        """注入文件提及卡片引用（由 main_widget 创建并注册）"""
+        self._file_mention_card_ref = card
+        card.dismissed.connect(self._on_card_dismissed)
+
+    def _get_file_mention_card(self):
+        """获取文件提及卡片引用"""
+        return self._file_mention_card_ref
+
     def _on_slash_trigger_check(self):
         """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流
 
@@ -156,6 +175,10 @@ class SendableTextEdit(TextEdit):
         - `/cmd `（有空格，且 cmd 是已知命令）→ detail 模式（显示参数提示）
         - `/xxx `（有空格，但 xxx 不是已知命令）→ 关闭卡片
         """
+        # IME 组合输入中跳过检测，避免打断中文输入法
+        if self._ime_composing:
+            return
+
         # 历史浏览模式下，如果当前历史项以 / 开头，阻止命令卡片触发
         if self._suppress_slash_trigger:
             self._suppress_slash_trigger = False
@@ -287,6 +310,93 @@ class SendableTextEdit(TextEdit):
         self._slash_throttle_timer.stop()
         self._pending_slash_query = ""
         self._slash_trigger_count = 0
+
+    # ==================== @ 文件提及触发检测 ====================
+
+    def _on_at_trigger_check(self):
+        """检测 @ 触发——在文本中任意位置的 @ 触发文件提及卡片
+
+        规则：
+        - @ 必须处于单词边界（前面是空格/换行/制表符/文本开头）
+        - query = @ 到光标之间的文本（不含换行）
+        - 若 query 含换行 → 关闭卡片
+        - 若 @ 前后无合法 query 区间 → 关闭卡片
+        - IME 组合输入中跳过检测，避免打断中文输入法
+        """
+        if self._ime_composing:
+            return
+
+        try:
+            text = self.toPlainText()
+            cursor = self.textCursor()
+            cursor_pos = cursor.position()
+
+            if cursor_pos < 0 or cursor_pos > len(text):
+                return
+
+            text_before_cursor = text[:cursor_pos]
+
+            # 从光标向前找最后一个合法 @
+            at_pos = -1
+            for i in range(cursor_pos - 1, -1, -1):
+                ch = text_before_cursor[i]
+                if ch == '@':
+                    # 检查是否为单词边界
+                    if i == 0 or text_before_cursor[i - 1] in (' ', '\n', '\t', '\r'):
+                        at_pos = i
+                        break
+                    else:
+                        # 非单词边界（如 email@domain），不触发
+                        break
+                elif ch in ('\n', '\r'):
+                    # 遇到换行则停止向前搜索
+                    break
+
+            file_card = self._get_file_mention_card()
+
+            if at_pos < 0:
+                # 没有找到合法 @ → 关闭卡片
+                self._at_trigger_pos = -1
+                if file_card and file_card.is_card_visible:
+                    file_card.dismiss()
+                    self.atDismissed.emit()
+                return
+
+            query = text_before_cursor[at_pos + 1:]
+
+            # 换行 → 关闭
+            if '\n' in query:
+                self._at_trigger_pos = -1
+                if file_card and file_card.is_card_visible:
+                    file_card.dismiss()
+                    self.atDismissed.emit()
+                return
+
+            self._at_trigger_pos = at_pos
+            self.atTriggered.emit(query)
+
+        except Exception:
+            pass
+
+    def insert_file_mention(self, file_path: str):
+        """将 @ 提及文本替换为空（选中文件后由 main_widget 调用）
+
+        用户选中文件后，移除输入框中的 @query 文本。
+        main_widget 随后会创建 AttachmentChip。
+        """
+        cursor = self.textCursor()
+        cursor_pos = cursor.position()
+        trigger_pos = self._at_trigger_pos
+
+        if trigger_pos >= 0:
+            cursor.setPosition(trigger_pos)
+            cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
+            cursor.insertText("")
+
+        self._at_trigger_pos = -1
+        self.setFocus(Qt.OtherFocusReason)
+
+    # ==================== 命令文本插入 ====================
 
     def insert_command_text(self, item_name: str):
         """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""
@@ -724,14 +834,11 @@ class SendableTextEdit(TextEdit):
                 if card.select_next():
                     event.accept()
                     return
-                # 未处理则继续往下走，让按键透传到输入框
             elif event.key() == Qt.Key_Up:
                 if card.select_prev():
                     event.accept()
                     return
-                # 未处理则继续往下走，让按键透传到输入框
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
-                # detail 模式：Tab 触发参数选中，Enter 走正常发送
                 if card.is_detail_mode and event.key() == Qt.Key_Tab:
                     card.select_current()
                     event.accept()
@@ -743,6 +850,27 @@ class SendableTextEdit(TextEdit):
             elif event.key() == Qt.Key_Escape:
                 card.dismiss()
                 self.slashDismissed.emit()
+                event.accept()
+                return
+
+        # 文件提及卡片可见时，优先处理导航
+        file_card = self._get_file_mention_card()
+        if file_card and file_card.is_card_visible and not in_history_mode:
+            if event.key() == Qt.Key_Down:
+                if file_card.select_next():
+                    event.accept()
+                    return
+            elif event.key() == Qt.Key_Up:
+                if file_card.select_prev():
+                    event.accept()
+                    return
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                file_card.select_current()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Escape:
+                file_card.dismiss()
+                self.atDismissed.emit()
                 event.accept()
                 return
 
@@ -792,114 +920,62 @@ class SendableTextEdit(TextEdit):
 
         中文输入法在输入 / 时会提交 、，这绕过了 keyPressEvent 的拦截。
         通过重写 inputMethodEvent 在 IME 提交阶段拦截、并替换为 /。
+
+        同时追踪 IME 组合状态（preedit），组合进行中时跳过 @ 检测，
+        避免每次按键触发卡片刷新打断输入法。
         """
+        # 追踪 IME 组合状态
+        if event.preeditString():
+            self._ime_composing = True
+        else:
+            self._ime_composing = False
+
         if self.textCursor().position() == 0 and event.commitString() == "、":
             cursor = self.textCursor()
             cursor.insertText("/")
             return  # 不调用 super，阻止 IME 提交 、
         super().inputMethodEvent(event)
 
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:
+        """允许拖放/粘贴图片和文件"""
+        if source.hasImage() or source.hasUrls():
+            return True
+        return super().canInsertFromMimeData(source)
+
     def insertFromMimeData(self, source):
-        """重写以处理拖放的文本格式化和高亮"""
+        """重写以处理拖放和粘贴 —— 文件/图片走附件芯片，纯文本走默认"""
         try:
-            # 首先检查是否是真正的文件拖拽（通过 URLs）
-            is_file_drop = False
-            file_paths = []  # 收集所有拖入的文件路径
+            file_paths = []
 
+            # 拖放/粘贴本地文件
             if source.hasUrls():
-                urls = source.urls()
-                if urls:
-                    file_paths = [
-                        url.toLocalFile() for url in urls if url.toLocalFile()
-                    ]
-                    is_file_drop = True
-            elif source.hasText():
-                text = source.text()
+                for url in source.urls():
+                    local_path = url.toLocalFile()
+                    if local_path and os.path.exists(local_path):
+                        file_paths.append(local_path)
 
-                # 文本内容拖入：逐行解析文件路径
-                # 只有实际存在的路径才被认为是文件
-                if "file:/" in text:
-                    try:
-                        lines = text.split("\n")
-                        for line in lines:
-                            path = _FILE_PREFIX_PATTERN.sub("", line)
-                            if path and os.path.exists(path):
-                                file_paths.append(path)
-                        if file_paths:
-                            is_file_drop = True
-                    except Exception:
-                        pass
-                elif "\n" in text:
-                    try:
-                        lines = text.split("\n")
-                        for line in lines:
-                            if line and os.path.isabs(line) and os.path.exists(line):
-                                file_paths.append(line)
-                        if file_paths:
-                            is_file_drop = True
-                    except Exception:
-                        pass
+            # 粘贴剪贴板图片 → 保存到临时文件
+            if source.hasImage() and not file_paths:
+                img = source.imageData()
+                if isinstance(img, QImage) and not img.isNull():
+                    tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    name = f"paste_{uuid.uuid4().hex[:8]}.png"
+                    path = str(tmp_dir / name)
+                    img.save(path)
+                    file_paths.append(path)
 
-            if is_file_drop and file_paths:
-                try:
-                    # 保存默认格式
-                    cursor = self.textCursor()
-                    default_format = QTextCharFormat()  # 创建干净的默认格式
+            if file_paths:
+                self.files_dropped.emit(file_paths)
+                return
 
-                    # 先插入一个空格占位符，用默认格式
-                    cursor.insertText(" ", default_format)
-
-                    # 准备要插入的文件路径文本——所有文件
-                    insert_text = "\n".join([f"路径: {p}" for p in file_paths])
-
-                    # 记录文件路径的起始位置
-                    path_start = cursor.position()
-
-                    # 插入文件路径文本
-                    cursor.insertText(insert_text)
-
-                    # 记录文件路径的结束位置
-                    path_end = cursor.position()
-
-                    # 高亮显示拖入的文件路径
-                    cursor.setPosition(path_start)
-                    cursor.setPosition(path_end, QTextCursor.KeepAnchor)
-
-                    # 创建高亮格式 - 使用和技能一样的金色
-                    highlight_format = QTextCharFormat()
-                    highlight_format.setForeground(QColor("#C9A85C"))
-                    highlight_format.setFontWeight(700)
-                    cursor.setCharFormat(highlight_format)
-
-                    # 最后再插入一个空格，用默认格式
-                    cursor.setPosition(path_end)
-                    cursor.clearSelection()
-                    cursor.insertText(" ", default_format)
-
-                    # 确保光标在最后，使用默认格式
-                    final_pos = cursor.position()
-                    cursor.setPosition(final_pos)
-                    cursor.setCharFormat(default_format)
-                    self.setTextCursor(cursor)
-
-                    # 确保输入框有焦点
-                    self.setFocus(Qt.OtherFocusReason)
-
-                    return
-                except Exception:
-                    # 如果文件路径插入失败，回退到默认处理
-                    pass
-
-            # 其他情况使用默认处理
+            # 纯文本 → 默认处理
             super().insertFromMimeData(source)
 
-        except Exception as e:
-            # 捕获所有异常，确保应用不会崩溃
+        except Exception:
             try:
-                # 发生任何错误时，回退到默认处理
                 super().insertFromMimeData(source)
             except Exception:
-                # 最后的保障
                 pass
 
     def _setup_glow_effect(self):
@@ -1053,6 +1129,7 @@ class SendableTextEdit(TextEdit):
         try:
             super().focusInEvent(event)
             self._animate_glow(25, 180, 250)
+            self._ime_composing = False  # 重新获得焦点时重置 IME 组合状态
             QTimer.singleShot(0, self._ensure_cursor_visible)
         except Exception:
             pass
@@ -1069,22 +1146,34 @@ class SendableTextEdit(TextEdit):
             pass
 
     def _deferred_focus_check_dismiss(self):
-        """失焦延迟检查：若焦点仍在输入框或在命令卡片内，不关闭卡片"""
-        card = self._get_card()
-        if not card or not card.is_card_visible:
-            return
+        """失焦延迟检查：若焦点仍在输入框或在卡片内，不关闭卡片"""
         focused = QApplication.focusWidget()
         if focused is self:
             return
-        # 检查焦点是否在命令卡片子树内
-        if focused:
-            p = focused
-            while p:
-                if p is card:
-                    return
-                p = p.parent()
-        card.dismiss()
-        self.slashDismissed.emit()
+
+        # 检查命令卡片
+        card = self._get_card()
+        if card and card.is_card_visible:
+            if focused:
+                p = focused
+                while p:
+                    if p is card:
+                        return
+                    p = p.parent()
+            card.dismiss()
+            self.slashDismissed.emit()
+
+        # 检查文件提及卡片
+        file_card = self._get_file_mention_card()
+        if file_card and file_card.is_card_visible:
+            if focused:
+                p = focused
+                while p:
+                    if p is file_card:
+                        return
+                    p = p.parent()
+            file_card.dismiss()
+            self.atDismissed.emit()
 
     def _ensure_cursor_visible(self):
         cursor = self.textCursor()
@@ -1270,3 +1359,101 @@ class InputGlowUnderlay(QWidget):
                 r,
                 r,
             )
+
+
+class AttachmentChip(QFrame):
+    """附件标签块：显示文件类型图标 + 文件名 + 删除按钮，响应式圆角矩形"""
+
+    removed = pyqtSignal(str)  # file path
+
+    # 文件扩展名 → FluentIcon 映射
+    _FILE_ICON_MAP: dict[tuple[str, ...], FluentIcon] = {
+        # 代码
+        (".py", ".pyw", ".pyx"): FluentIcon.CODE,
+        (".js", ".jsx", ".mjs", ".cjs"): FluentIcon.CODE,
+        (".ts", ".tsx"): FluentIcon.CODE,
+        (".html", ".htm", ".css", ".scss", ".less"): FluentIcon.CODE,
+        (".java", ".kt", ".kts"): FluentIcon.CODE,
+        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): FluentIcon.CODE,
+        (".cs"): FluentIcon.CODE,
+        (".go", ".rs", ".rb", ".php"): FluentIcon.CODE,
+        (".swift", ".m", ".mm"): FluentIcon.CODE,
+        (".sql"): FluentIcon.CODE,
+        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): FluentIcon.COMMAND_PROMPT,
+        # 图片
+        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): FluentIcon.IMAGE_EXPORT,
+        # 视频
+        (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"): FluentIcon.VIDEO,
+        # 音频
+        (".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"): FluentIcon.MUSIC,
+        # 压缩包
+        (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): FluentIcon.ZIP_FOLDER,
+        # 文档/数据
+        (".pdf"): FluentIcon.DOCUMENT,
+        (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): FluentIcon.DOCUMENT,
+        (".txt", ".md", ".rst", ".log"): FluentIcon.DOCUMENT,
+        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): FluentIcon.DOCUMENT,
+        (".csv", ".tsv"): FluentIcon.DOCUMENT,
+    }
+
+    def __init__(self, filepath: str, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+        self._setup_ui()
+
+    @staticmethod
+    def _get_file_icon(filepath: str) -> FluentIcon:
+        """根据文件扩展名返回对应的 FluentIcon"""
+        if os.path.isdir(filepath):
+            return FluentIcon.FOLDER
+        ext = os.path.splitext(filepath)[1].lower()
+        for exts, icon in AttachmentChip._FILE_ICON_MAP.items():
+            if ext in exts:
+                return icon
+        return FluentIcon.DOCUMENT
+
+    def _setup_ui(self):
+        Colors.refresh()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 2, 4, 2)
+        layout.setSpacing(5)
+
+        # 文件类型图标
+        self._icon_widget = IconWidget(self)
+        self._icon_widget.setIcon(self._get_file_icon(self.filepath))
+        self._icon_widget.setFixedSize(16, 16)
+        layout.addWidget(self._icon_widget)
+
+        # 文件名
+        name = os.path.basename(self.filepath)
+        if len(name) > 22:
+            name = name[:19] + "..."
+
+        self._label = QLabel(name, self)
+        self._label.setStyleSheet(
+            f"color: {Colors.INPUT_TEXT}; font-size: 12px; background: transparent; border: none; padding: 0;"
+        )
+        layout.addWidget(self._label)
+
+        # 删除按钮
+        close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        close_btn.setFixedSize(16, 16)
+        close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
+        layout.addWidget(close_btn)
+
+        # 整体样式：QFrame 的 border-radius 渲染更可靠，:hover 伪态支持更好
+        border_color = Colors.INPUT_BORDER
+        self.setFixedHeight(28)
+        self.setStyleSheet(
+            f"""
+            AttachmentChip {{
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid {border_color};
+                border-radius: 14px;
+            }}
+            AttachmentChip:hover {{
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(255, 255, 255, 0.25);
+            }}
+            """
+        )

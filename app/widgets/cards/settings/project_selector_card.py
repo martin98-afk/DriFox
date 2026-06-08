@@ -14,6 +14,7 @@ from qfluentwidgets import TransparentToolButton
 
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
 
 class ProjectItem(QWidget):
@@ -21,8 +22,6 @@ class ProjectItem(QWidget):
     clicked = pyqtSignal(str)
     archiveClicked = pyqtSignal(str)
 
-    # 根目录路径最大显示字符数（超过则中间省略）
-    _ROOT_DIR_MAX_CHARS = 60
     # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
     _SINGLE_LINE_HEIGHT = 30
     _DOUBLE_LINE_HEIGHT = 44
@@ -61,7 +60,8 @@ class ProjectItem(QWidget):
         text_vbox.addWidget(self._name_label)
 
         # 项目根目录（默认隐藏：未设置时由 set_root_dir 保持隐藏）
-        self._root_dir_label = QLabel("", self)
+        # 使用 _ElidedLabel 根据可用宽度自动省略长路径
+        self._root_dir_label = _ElidedLabel("", self)
         self._root_dir_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
         )
@@ -106,15 +106,6 @@ class ProjectItem(QWidget):
         self._archive_btn.hide()
         layout.addWidget(self._archive_btn)
 
-    @classmethod
-    def _elide_middle(cls, text: str) -> str:
-        """中间省略保留首尾"""
-        if len(text) <= cls._ROOT_DIR_MAX_CHARS:
-            return text
-        head = cls._ROOT_DIR_MAX_CHARS // 3
-        tail = cls._ROOT_DIR_MAX_CHARS - head - 3  # 3 = len("...")
-        return f"{text[:head]}...{text[-tail:]}"
-
     def _apply_name_style(self):
         Colors.refresh()
         if self._is_current:
@@ -156,7 +147,7 @@ class ProjectItem(QWidget):
             self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
             return
         Colors.refresh()
-        self._root_dir_label.setText(self._elide_middle(root_dir))
+        self._root_dir_label.setText(root_dir)
         self._root_dir_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
         )

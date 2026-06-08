@@ -138,7 +138,10 @@ class CardContainer(QWidget):
             # ── 展开：snap 或动画到 layout 算出的自然高度 ──
             # 先放开 maxHeight，让 layout 算出"展开后该有多高"
             self.setMaximumHeight(self._EXPAND_MAX)
-            natural_h = self._layout.sizeHint().height()
+            natural_h = max(
+                self._layout.sizeHint().height(),
+                self._layout.minimumSize().height(),
+            )
             if natural_h <= 0:
                 # 兜底：layout 没算出高度，直接放开
                 return

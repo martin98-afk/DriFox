@@ -1650,6 +1650,7 @@ class CodeWebViewer(QWebEngineView):
                 /* 优化：紧凑的段落间距 */
                 p {{ margin: 8px 0; }}
 
+                /* ── 原生 <table> 样式（保留 display:table，自动拉伸填满） ── */
                 table:not(.code-table) {{
                     width: 100%;
                     border-collapse: collapse;
@@ -1676,6 +1677,58 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 table:not(.code-table) tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
                 table:not(.code-table) tr:hover {{ background: rgba(255, 255, 255, 0.05); }}
+
+                /* ── 表格滚动容器（JS 在 updateContent 中自动包裹每个 <table>） ── */
+                .table-scroll-wrapper {{
+                    overflow-x: auto;
+                    overflow-y: hidden;
+                    margin: 10px 0;
+                    border: 1px solid var(--border);
+                    border-radius: 10px;
+                }}
+                .table-scroll-wrapper::-webkit-scrollbar {{
+                    height: 8px;
+                }}
+                .table-scroll-wrapper::-webkit-scrollbar-thumb {{
+                    background: var(--border);
+                    border-radius: 4px;
+                }}
+                .table-scroll-wrapper::-webkit-scrollbar-thumb:hover {{
+                    background: var(--border-strong);
+                }}
+                .table-scroll-wrapper::-webkit-scrollbar-track {{
+                    background: transparent;
+                }}
+                .table-scroll-wrapper > table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    background: transparent;
+                    font-family: '{font_family}', sans-serif;
+                    font-size: {body_font_size}px;
+                    margin: 0;
+                    border: none !important;
+                    border-radius: 0 !important;
+                }}
+                .table-scroll-wrapper > table th,
+                .table-scroll-wrapper > table td {{
+                    white-space: nowrap;
+                }}
+                /* 继承 wrapper 内部表格的行样式 */
+                .table-scroll-wrapper > table th {{
+                    background: rgba(255, 255, 255, 0.04);
+                    padding: 8px 12px;
+                    text-align: left;
+                    font-weight: 600;
+                    color: #fff !important;
+                    border-bottom: 1px solid var(--border-strong);
+                }}
+                .table-scroll-wrapper > table td {{
+                    padding: 8px 12px;
+                    border-bottom: 1px solid var(--border);
+                    color: var(--text-secondary) !important;
+                }}
+                .table-scroll-wrapper > table tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
+                .table-scroll-wrapper > table tr:hover {{ background: rgba(255, 255, 255, 0.05); }}
 
                 .context-tag {{
                     display: inline-block;
@@ -2326,6 +2379,16 @@ class CodeWebViewer(QWebEngineView):
                         }});
 
                         container.innerHTML = newHtml;
+
+                        // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
+                        container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                            // 已被包裹则跳过（如多次调用 updateContent）
+                            if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
+                            var wrapper = document.createElement('div');
+                            wrapper.className = 'table-scroll-wrapper';
+                            table.parentNode.insertBefore(wrapper, table);
+                            wrapper.appendChild(table);
+                        }});
 
                         // 恢复展开状态并移除骨架屏动画
                         container.querySelectorAll('.think-content').forEach(content => {{
