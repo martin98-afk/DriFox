@@ -222,6 +222,7 @@ class FileMentionCard(QWidget):
         self._file_cache: List[Dict[str, str]] = []
         self._cache_dirty = True
         self._async_pending = False  # 异步扫描进行中标志，防重复调度
+        self._last_query = ""  # 上次过滤的 query，用于增量剪枝
 
         # ---- 防抖计时器：合并连续快速敲键的筛选调用 ----
         self._filter_timer = QTimer(self)
@@ -366,6 +367,56 @@ class FileMentionCard(QWidget):
         '.pyc', '.pyo', '.so', '.dll', '.dylib',
         '.egg-info', '.whl',
     }
+
+    @staticmethod
+    def _fuzzy_match(text: str, query: str) -> bool:
+        """fuzzy 匹配：query 的字符按顺序出现在 text 中即可
+
+        例如 "rqrmnts" 可匹配 "requirements" → r→q→r→m→n→t→s 均在 "requirements" 中按序出现。
+        适用于拼写不精确但字符顺序正确的场景。
+        """
+        q_idx = 0
+        q_len = len(query)
+        for ch in text:
+            if ch == query[q_idx]:
+                q_idx += 1
+                if q_idx == q_len:
+                    return True
+        return False
+
+    @staticmethod
+    def _score_item(item: Dict[str, str], query: str) -> int:
+        """根据匹配质量对单个 item 评分，0 表示不匹配
+
+        得分梯度（确保唯一语义层级）：
+          100 = 完全匹配
+          80  = 文件名前缀匹配
+          60  = 文件名子串匹配
+          55  = 路径子串匹配（优先级低于文件名子串）
+          40  = 文件名 fuzzy 匹配
+          35  = 路径 fuzzy 匹配
+          0   = 不匹配
+        """
+        name_lower = item["name"].lower()
+        rel_lower = item["relative_path"].lower()
+
+        # 完全一致
+        if query == name_lower:
+            return 100
+        # 前缀匹配
+        if name_lower.startswith(query):
+            return 80
+        # 子串匹配（文件名优先于完整路径）
+        if query in name_lower:
+            return 60
+        if query in rel_lower:
+            return 55
+        # fuzzy 匹配
+        if FileMentionCard._fuzzy_match(name_lower, query):
+            return 40
+        if FileMentionCard._fuzzy_match(rel_lower, query):
+            return 35
+        return 0
 
     @staticmethod
     def _parse_gitignore(root: Path) -> List[str]:
@@ -524,51 +575,6 @@ class FileMentionCard(QWidget):
         except PermissionError:
             pass
 
-    def load_items(self, query: str = ""):
-        """根据 query 筛选列表（延时渲染，防抖合并快速敲键）
-
-        假设缓存已就绪（由 ensure_cache / _scan_files 预先填充），
-        此处仅做 O(n) 子串匹配，无 I/O 且无 widget 创建。
-        实际渲染由防抖定时器触发，连续快速敲键只执行最后一次。
-        """
-        query = query.strip().lower()
-        self._current_query = query
-
-        if not query:
-            self._filtered_items = list(self._file_cache)
-        else:
-            q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._file_cache
-                if q_lower in item["name"].lower()
-                or q_lower in item["relative_path"].lower()
-            ]
-
-        # 防抖调度：取消上一次，重新计时
-        self._pending_filter_query = query
-        self._filter_timer.stop()
-        self._filter_timer.start()
-
-    def _do_filter_and_render(self):
-        """防抖定时器超时后执行实际的筛选和增量渲染"""
-        query = self._pending_filter_query
-
-        if not query:
-            self._filtered_items = list(self._file_cache)
-        else:
-            q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._file_cache
-                if q_lower in item["name"].lower()
-                or q_lower in item["relative_path"].lower()
-            ]
-
-        self._render_incremental()
-
-        if self._filtered_items:
-            self._selected_index = 0
-            self._update_selection()
-
     def _render_incremental(self):
         """增量渲染——复用现有 widget，避免反复创建/销毁
 
@@ -633,9 +639,13 @@ class FileMentionCard(QWidget):
         """根据 query 即时筛选并防抖渲染
 
         假设缓存已就绪（由 ensure_cache / _scan_files 预先填充），
-        此处仅做 O(n) 子串匹配，无 I/O。
-        筛选结果立即可用（用于 show_card 判断是否可见），
+        此处仅做 O(n) 评分过滤 + fuzzy 匹配，无 I/O。
+        筛选结果按匹配质量排序（完全匹配 > 前缀 > 子串 > fuzzy），
         实际 widget 渲染由 20ms 防抖定时器触发，快速敲键只执行最后一次。
+
+        增量剪枝：当用户连续追加字符时（'re' → 'req'），
+        新结果是旧结果的子集，直接在上次 _filtered_items 上过滤，
+        避免全量遍历 500 项 _file_cache。
         """
         query = query.strip().lower()
         self._current_query = query
@@ -644,12 +654,21 @@ class FileMentionCard(QWidget):
             self._filtered_items = list(self._file_cache)
         else:
             q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._file_cache
-                if q_lower in item["name"].lower()
-                or q_lower in item["relative_path"].lower()
+            # 增量剪枝：新 query 是上次 query 的扩展 → 在上次结果上继续过滤
+            if self._last_query and query.startswith(self._last_query):
+                source = self._filtered_items
+            else:
+                source = self._file_cache
+            # 评分过滤：fuzzy 匹配 + 按匹配质量排序
+            scored = [
+                (item, self._score_item(item, q_lower))
+                for item in source
             ]
+            scored = [(item, s) for item, s in scored if s > 0]
+            scored.sort(key=lambda x: -x[1])  # 高得分在前
+            self._filtered_items = [item for item, _ in scored]
 
+        self._last_query = query
         # 防抖调度渲染
         self._filter_timer.stop()
         self._filter_timer.start()

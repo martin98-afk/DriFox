@@ -389,6 +389,7 @@ class CommandCard(QWidget):
         self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
         self._current_query = ""
+        self._last_query = ""  # 上次过滤的 query，用于增量剪枝
         self._current_selected_type: str = ""  # 当前选中项的 display_type（用于 detail 模式）
 
         # Detail mode：匹配到完整命令 + 空格后显示参数提示
@@ -1137,38 +1138,45 @@ class CommandCard(QWidget):
         self._cache_dirty = False
 
     def load_items(self, query: str = "", incremental: bool = False):
-        """根据 query 筛选并渲染列表
+        """根据 query 筛选并渲染列表（增量剪枝）
 
         Args:
             query: 搜索查询
             incremental: 是否增量更新（保留已有 widget，重用匹配项）
+
+        增量剪枝：连续输入时在上次结果上继续过滤，避免全量遍历。
         """
         query = query.strip().lower()
 
         if not query:
             self._filtered_items = list(self._all_items)
+            self._last_query = ""
         else:
-            # 连续子串匹配（不区分大小写）
             q_lower = query.lower()
+            # 增量剪枝：新 query 是上次的扩展 → 在上次结果上继续过滤
+            if self._last_query and query.startswith(self._last_query):
+                source = self._filtered_items
+            else:
+                source = self._all_items
             self._filtered_items = [
-                item for item in self._all_items
+                item for item in source
                 if q_lower in item["name"].lower()
                 or q_lower in item.get("display_name", item["name"]).lower()
                 or q_lower in item["description"].lower()
             ]
 
         # 排序：命令和技能在前，智能体在后，同类型按名称排序
+        # 增量剪枝时 source 来自已排序的 _filtered_items，子集维持相对顺序，但全量场景必须有此排序
         sort_order = {"command": 0, "skill": 1, "agent": 2}
         self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
+
+        self._last_query = query
 
         self._render(incremental=incremental)
 
         if len(self._filtered_items) > 0:
             self._selected_index = 0
             self._update_selection()
-            # 首次渲染时 scroll 位置已正确（item 0 在顶部），无需额外滚动
-            # 移除冗余的 QTimer.singleShot 滚动重置——_update_selection 中的
-            # ensureWidgetVisible(item[0]) 已确保 item 0 可见，且 item 0 就在顶部
 
     def _render(self, incremental: bool = False):
         """渲染当前筛选结果
