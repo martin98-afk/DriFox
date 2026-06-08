@@ -816,7 +816,7 @@ class SendableTextEdit(TextEdit):
             if source.hasUrls():
                 for url in source.urls():
                     local_path = url.toLocalFile()
-                    if local_path and os.path.isfile(local_path):
+                    if local_path and os.path.exists(local_path):
                         file_paths.append(local_path)
 
             # 粘贴剪贴板图片 → 保存到临时文件
@@ -1256,6 +1256,8 @@ class AttachmentChip(QFrame):
     @staticmethod
     def _get_file_icon(filepath: str) -> FluentIcon:
         """根据文件扩展名返回对应的 FluentIcon"""
+        if os.path.isdir(filepath):
+            return FluentIcon.FOLDER
         ext = os.path.splitext(filepath)[1].lower()
         for exts, icon in AttachmentChip._FILE_ICON_MAP.items():
             if ext in exts:

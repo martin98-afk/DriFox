@@ -1052,7 +1052,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if event.mimeData().hasUrls():
                     for url in event.mimeData().urls():
                         local_path = url.toLocalFile()
-                        if local_path and os.path.isfile(local_path):
+                        if local_path and os.path.exists(local_path):
                             paths.append(local_path)
                 if paths:
                     self._on_files_dropped(paths)
