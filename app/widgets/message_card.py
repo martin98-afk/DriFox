@@ -607,11 +607,6 @@ _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而�
                           "总结一下", "也就是说", "最终")
 
 
-_CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
-                          "总的来说", "建议", "推荐", "结论是", "答案是",
-                          "总结一下", "也就是说", "最终")
-
-
 def _render_think_block(content: str, completed: bool = True) -> str:
     expanded = not completed
 

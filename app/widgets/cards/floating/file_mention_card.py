@@ -26,7 +26,7 @@ from app.utils.design_tokens import Colors, font_size_css
 
 
 ITEM_HEIGHT = 36
-MAX_VISIBLE_ITEMS = 10
+MAX_VISIBLE_ITEMS = 8
 
 
 class FileMentionItemWidget(QWidget):
