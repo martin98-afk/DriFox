@@ -255,6 +255,8 @@ class OpenAIChatToolWindow(ToolWindow):
             get_model_config=self._get_current_model_config,
             workdir=str(Path(__file__).parent.parent.parent),
         )
+        # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
+        self.backend.set_subagent_model_resolver(self._resolve_subagent_model_config)
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         self.backend._current_project = self._current_project
@@ -265,6 +267,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.history_manager = self.backend.history_manager
         self.session_store = self.backend.session_store
         self.session_manager = self.backend.session_manager
+        # 初始化 /subagents --model= 参数描述（反映已持久化的默认模型）
+        self._update_subagents_param_description()
         self._session_card_cache: Dict[str, Dict[str, Any]] = {}
         self._current_history_project: Optional[str] = None  # 当前历史面板项目过滤
         self._welcome_card_cache: Dict[str, MessageCard] = {}
@@ -8455,13 +8459,110 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _handle_subagents_command(self, args: str):
-        """/subagents 命令：重新显示紧凑子智能体卡片"""
+        """/subagents 命令：管理子智能体任务和默认模型
+
+        参数：
+          无参数    → 显示运行中的子智能体任务（紧凑卡片）
+          --detail  → 显示子智能体详细日志面板
+          --model=X → 设置子智能体默认模型
+          --reset   → 清空子智能体默认模型设置
+        """
+        import re
+        from app.utils.config import Settings
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        args = (args or "").strip()
+
+        # ---- --reset：清空默认模型设置 ----
+        if args == "--reset":
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_subagent_default_model, "", save=True)
+            InfoBar.success(
+                title="已重置",
+                content="子智能体默认模型已清空，将使用主智能体模型",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            # 更新命令卡参数描述
+            self._update_subagents_param_description()
+            return
+
+        # ---- --model=xxx：设置默认模型 ----
+        model_match = re.match(r'^--model=(.+)$', args)
+        if model_match:
+            model_value = model_match.group(1).strip()
+            if not model_value:
+                InfoBar.warning(
+                    title="参数错误",
+                    content="--model= 后需要指定模型名或服务商:模型名",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 复用现有模型解析逻辑
+            llm_config = self._resolve_subagent_model_config(model_value)
+            if llm_config is None:
+                # _resolve_subagent_model_config 内部已弹出错误提示
+                return
+
+            # 保存显示名
+            provider_display = llm_config.get("provider_name", "")
+            model_display = llm_config.get("模型名称", model_value)
+            display_value = f"{provider_display}:{model_display}" if provider_display else model_display
+
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_subagent_default_model, display_value, save=True)
+
+            if provider_display:
+                info_text = f"{provider_display} - {model_display}"
+            else:
+                info_text = model_display
+
+            InfoBar.success(
+                title="默认模型已设置",
+                content=f"子智能体默认模型: {info_text}",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            # 更新命令卡参数描述
+            self._update_subagents_param_description()
+            return
+
+        # ---- --detail：显示详细日志面板 ----
+        if args == "--detail":
+            sub_agent_mgr = self.backend.sub_agent_manager
+            running_tasks = sub_agent_mgr._running_tasks
+
+            if not running_tasks:
+                InfoBar.warning(
+                    title="暂无子智能体任务",
+                    content="当前没有正在执行的子智能体任务",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            detailed = self._sub_agent_floating_widget
+            # 确保面板已填充数据
+            if not detailed._batch_started:
+                detailed.clear()
+                for task_id, executor in running_tasks.items():
+                    detailed.add_task(task_id, executor.agent_name, executor.task_description)
+                detailed._batch_started = True
+
+            self._card_manager.show_card("sub_agent", self._window_id)
+            return
+
+        # ---- 无参数：显示紧凑卡片（原行为）----
         sub_agent_mgr = self.backend.sub_agent_manager
         running_tasks = sub_agent_mgr._running_tasks
 
         if not running_tasks:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
             InfoBar.warning(
                 title="暂无运行中的子智能体",
                 content="当前没有正在执行的子智能体任务",
@@ -8479,6 +8580,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
+
+    def _update_subagents_param_description(self):
+        """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
+        from app.utils.config import Settings
+        from app.core.command_manager import CommandManager, CommandType
+
+        cfg = Settings.get_instance()
+        saved = cfg.llm_subagent_default_model.value or ""
+
+        cmd_mgr = CommandManager.get_instance()
+        entries = cmd_mgr._commands.get("subagents", {})
+        for cmd_type, cmd_def in entries.items():
+            for param in cmd_def.parameters:
+                if param.name == "--model=":
+                    if saved:
+                        param.description = f"当前默认: {saved} | 设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                    else:
+                        param.description = "设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                    break
 
     def _on_sub_agent_task_started(
         self, task_id: str, agent_name: str, task_description: str

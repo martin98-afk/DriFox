@@ -267,6 +267,8 @@ class Settings(QConfig):
     llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
     llm_selected_model = ConfigItem("LLM", "SelectedModel", "")
+    # 子智能体默认模型（用于 subagent_para / subagent_dag，空字符串表示使用主模型）
+    llm_subagent_default_model = ConfigItem("LLM", "SubagentDefaultModel", "")
     # 启用的技能列表
     llm_enabled_skills = ConfigItem("LLM", "EnabledSkills", [
         "brainstorming", "writing-plans", "find-skills", "skill-creator", "git-commit", "minimax-image-understanding"])

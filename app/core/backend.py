@@ -317,10 +317,23 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] GatewayEngine 创建完成")
         
         # 创建 SubAgentManager（管理子智能体任务）
+        # 使用包装的 get_llm_config：优先使用子智能体默认模型，回退到主模型
+        self._subagent_model_resolver: Optional[Callable] = None  # 由 main_widget 设置
+
+        def _get_subagent_llm_config():
+            from app.utils.config import Settings
+            cfg = Settings.get_instance()
+            saved = cfg.llm_subagent_default_model.value
+            if saved and self._subagent_model_resolver:
+                resolved = self._subagent_model_resolver(saved)
+                if resolved:
+                    return resolved
+            return get_model_config()
+
         self._sub_agent_manager = SubAgentManager(
             agent_manager=self._agent_manager,
             tool_executor=self._tool_executor,
-            get_llm_config=get_model_config,
+            get_llm_config=_get_subagent_llm_config,
         )
         self._sub_agent_manager.set_session_store(self._session_store)
         # 设置给 ToolExecutor，让工具能访问子智能体
@@ -362,6 +375,15 @@ class ChatBackend(QObject):
         if self._chat_engine:
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
+
+    def set_subagent_model_resolver(self, resolver: Callable[[str], Optional[Dict]]):
+        """设置子智能体默认模型解析回调
+
+        Args:
+            resolver: 接收 model_value 字符串，返回完整模型配置 dict 或 None
+                      由 main_widget._resolve_subagent_model_config 提供
+        """
+        self._subagent_model_resolver = resolver
 
     # ========== 插件系统初始化 ==========
 
