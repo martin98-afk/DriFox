@@ -156,40 +156,38 @@ class FileMentionItemWidget(QWidget):
         """)
 
     @staticmethod
-    def _best_highlight_query(text: str, query: str) -> str:
-        """从多关键字 query 中提取最适合高亮的关键字
+    def _all_highlight_queries(text: str, query: str) -> List[str]:
+        """从多关键字 query 中提取所有能匹配到 text 的关键字
 
-        多关键字含 |& 时代理找不到完整匹配，提取单个可子串匹配的关键字。
-        例如 text="config.json", query="doc|config&json" → "config"
-        fuzzy 匹配无子串对应时返回空字符串（不尝试高亮）。
+        返回列表可用于 _ElidedLabel.setHighlights()。
         """
         if not query or not text:
-            return ""
+            return []
         text_lower = text.lower()
-        # 先试试完整 query（不含 |& 时直接命中）
+        found = []
+        # 先找完整 query
         if query.lower() in text_lower:
-            return query
-        # 按 | 拆 OR，按 & 拆 AND，找第一个子串匹配
+            found.append(query)
+            return found
+        # 按 | & 拆解
         for or_term in query.split('|'):
             or_term = or_term.strip()
             if not or_term:
                 continue
-            if or_term.lower() in text_lower:
-                return or_term
             for and_part in or_term.split('&'):
                 and_part = and_part.strip()
-                if and_part and and_part.lower() in text_lower:
-                    return and_part
-        return ""
+                if and_part and and_part.lower() in text_lower and and_part not in found:
+                    found.append(and_part)
+        return found
 
     def _update_display(self):
-        """更新路径显示（_ElidedLabel 自动处理省略，含搜索高亮）"""
+        """更新路径显示（_ElidedLabel 自动处理省略，含多关键字高亮）"""
         rel = self._data.get("relative_path", "")
         self._path_label.setText(rel)
         if self._query:
-            hl_query = self._best_highlight_query(rel, self._query)
-            if hl_query:
-                self._path_label.setHighlight(hl_query, Colors.SEND_BTN_START)
+            hls = self._all_highlight_queries(rel, self._query)
+            if hls:
+                self._path_label.setHighlights(hls, Colors.SEND_BTN_START)
 
     def update_data(self, file_data: Dict[str, str], query: str):
         """更新 widget 数据并刷新显示（用于回收复用）

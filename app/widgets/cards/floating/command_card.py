@@ -201,30 +201,26 @@ class CommandItemWidget(QWidget):
             """)
 
     @staticmethod
-    def _best_highlight_query(text: str, query: str) -> str:
-        """从多关键字 query 中提取最适合高亮的关键字
-
-        多关键字含 |& 时代理找不到完整匹配，提取单个可子串匹配的关键字。
-        """
+    def _all_highlight_queries(text: str, query: str) -> List[str]:
+        """从多关键字 query 中提取所有能匹配到 text 的关键字"""
         if not query or not text:
-            return ""
+            return []
         text_lower = text.lower()
         if query.lower() in text_lower:
-            return query
+            return [query]
+        found = []
         for or_term in query.split('|'):
             or_term = or_term.strip()
             if not or_term:
                 continue
-            if or_term.lower() in text_lower:
-                return or_term
             for and_part in or_term.split('&'):
                 and_part = and_part.strip()
-                if and_part and and_part.lower() in text_lower:
-                    return and_part
-        return ""
+                if and_part and and_part.lower() in text_lower and and_part not in found:
+                    found.append(and_part)
+        return found
 
     def _update_display(self):
-        """更新名称显示（含查询高亮）
+        """更新名称显示（含多关键字查询高亮）
 
         注意：display_text 中的 & < > " 等字符须 html.escape，
         否则混入 HTML 会破坏渲染导致卡片消失。
@@ -235,27 +231,43 @@ class CommandItemWidget(QWidget):
         display_text = f"/{display_name}" if item_type == "command" else display_name
         query = self._query
 
-        # 先 HTML 转义纯文本部分，之后安全检查高亮子串也在 escape 后的字符串中定位
+        # 先 HTML 转义纯文本，防止 & 等字符破坏 HTML 渲染
         safe_text = html.escape(display_text)
 
         if query:
-            hl_query = self._best_highlight_query(display_text, query)
-            if hl_query:
-                # hl_query 可能含 & 等字符，需 escape 后在 safe_text 中定位
-                escaped_hl = html.escape(hl_query)
+            hls = self._all_highlight_queries(display_text, query)
+            if hls:
+                # 在 safe_text（已 escape）中定位每个关键字，从原文一次构建 HTML
                 lower_safe = safe_text.lower()
-                lower_hl = escaped_hl.lower()
-                idx = lower_safe.find(lower_hl)
-                if idx >= 0:
-                    before = safe_text[:idx]
-                    match = safe_text[idx:idx + len(escaped_hl)]
-                    after = safe_text[idx + len(escaped_hl):]
-                    html_text = (
-                        f'<span>{before}'
-                        f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{match}</span>'
-                        f'{after}</span>'
-                    )
-                    self._name_label.setText(html_text)
+                spans = []
+                for hl in hls:
+                    escaped_hl = html.escape(hl)
+                    lower_hl = escaped_hl.lower()
+                    idx = lower_safe.find(lower_hl)
+                    if idx >= 0:
+                        spans.append((idx, idx + len(escaped_hl)))
+                if spans:
+                    spans.sort()
+                    merged = [spans[0]]
+                    for s in spans[1:]:
+                        if s[0] <= merged[-1][1]:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], s[1]))
+                        else:
+                            merged.append(s)
+                    # 从 safe_text 一次构建：普通部分直接拼接，匹配部分加 <span>
+                    parts = []
+                    pos = 0
+                    for start, end in merged:
+                        if pos < start:
+                            parts.append(safe_text[pos:start])
+                        parts.append(
+                            f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">'
+                            f'{safe_text[start:end]}</span>'
+                        )
+                        pos = end
+                    if pos < len(safe_text):
+                        parts.append(safe_text[pos:])
+                    self._name_label.setText(''.join(parts))
                 else:
                     self._name_label.setText(safe_text)
             else:
@@ -263,13 +275,13 @@ class CommandItemWidget(QWidget):
         else:
             self._name_label.setText(safe_text)
 
-        # 描述标签也应用搜索高亮（_ElidedLabel 自动处理省略+高亮）
+        # 描述标签也应用多关键字搜索高亮
         desc = self._data.get("description", "")
         self._desc_label.setText(desc)
         if query:
-            hl_query = self._best_highlight_query(desc, query)
-            if hl_query:
-                self._desc_label.setHighlight(hl_query, Colors.SEND_BTN_START)
+            hls = self._all_highlight_queries(desc, query)
+            if hls:
+                self._desc_label.setHighlights(hls, Colors.SEND_BTN_START)
 
     def set_selected(self, selected: bool):
         """设置选中状态"""
@@ -1209,18 +1221,19 @@ class CommandCard(QWidget):
 
     @staticmethod
     def _parse_type_filter(query: str):
-        """从 query 中提取 type:xxx 过滤器
+        """从 query 中提取 type:xxx 或 #xxx 过滤器
 
         例如：
           "type:skill tdd"      → ({"skill"}, "tdd")
-          "type:agent"           → ({"agent"}, "")
-          "type:cmd find"        → ({"command"}, "find")
+          "#agent"               → ({"agent"}, "")
+          "#cmd find"            → ({"command"}, "find")
+          "type:skill|type:agent" → ({"skill","agent"}, "")
           "find"                 → (None, "find")
 
         支持简写：cmd→command
         支持 OR：type:skill|type:agent → {"skill","agent"}
         """
-        if not query or 'type:' not in query:
+        if not query:
             return None, query
 
         type_set = set()
@@ -1234,6 +1247,9 @@ class CommandCard(QWidget):
                     t = t.strip()
                     if t in type_map:
                         type_set.add(type_map[t])
+            elif token.startswith('#') and token[1:] in type_map:
+                # #skill, #agent, #prompt, #cmd 简写
+                type_set.add(type_map[token[1:]])
             else:
                 clean_tokens.append(token)
 
@@ -1248,10 +1264,11 @@ class CommandCard(QWidget):
 
         支持类别过滤：
           type:skill            → 只显示技能
-          type:agent            → 只显示智能体
-          type:prompt           → 只显示提示词
-          type:cmd              → 只显示命令
-          type:skill tdd        → 只显示名/描述含 "tdd" 的技能
+          #skill                → 同上（简写）
+          #agent                → 只显示智能体
+          #prompt               → 只显示提示词
+          #cmd                  → 只显示命令
+          #skill tdd            → 只显示名/描述含 "tdd" 的技能
           type:skill|type:agent → 显示技能或智能体
 
         Args:

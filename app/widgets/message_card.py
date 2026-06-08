@@ -187,8 +187,8 @@ WELCOME_TIPS = [
 
     # ===== 命令卡片类别过滤 =====
     "💡 / 命令搜索支持 | 和 & 多关键字：/find|search&replace 组合查找",
-    "💡 / 命令支持类别过滤：type:skill 只看技能、type:agent 只看智能体",
-    "💡 / 命令还可组合：type:skill tdd 搜索名含「tdd」的技能",
+    "💡 / 命令支持类别过滤：#skill 只看技能、#agent 只看智能体",
+    "💡 / 命令还可组合：#skill tdd 搜索名含「tdd」的技能",
     "💡 / 命令类别可多选：type:skill|type:agent 显示技能和智能体",
 ]
 
@@ -387,7 +387,7 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
-def _get_think_preview(content: str, max_length: int = 80) -> str:
+def _get_think_preview(content: str, max_length: int = 120) -> str:
     """智能生成思考内容折叠框的预览文本
 
     策略:
@@ -461,12 +461,170 @@ def _get_think_preview(content: str, max_length: int = 80) -> str:
     return flat[:max_length].rstrip("，,、") + "..."
 
 
+# ── 思考折叠框标签分类系统（加权） ──
+# 标签定义：tag=显示名, priority=平局优先级, cn=中文模式, en=英文模式
+# 权重规则：短语(≥4中字/含空格)权值3, 3字权值2, 常见普通词权值0.5, 其他1
+_THINK_TAGS = [
+    {
+        "tag": "问题分析",
+        "priority": 3,
+        "cn": ("问题出在", "原因在于", "关键问题", "核心问题",
+               "需要分析", "需要理解", "需要考虑",
+               "问题", "分析", "理解", "排查"),
+        "en": ("problem", "issue", "analyze", "understand",
+               "root cause", "what went wrong", "why"),
+    },
+    {
+        "tag": "方案设计",
+        "priority": 2,
+        "cn": ("设计方案", "实现方案", "架构设计",
+               "方案", "设计", "架构", "策略", "规划"),
+        "en": ("solution", "design", "approach", "strategy",
+               "architecture", "plan to", "propose to"),
+    },
+    {
+        "tag": "知识探索",
+        "priority": 2,
+        "cn": ("探索", "研究", "了解", "学习", "查阅", "参考",
+               "知识", "概念", "原理", "定义", "资料", "文献",
+               "查询", "搜索", "调查"),
+        "en": ("explore", "research", "learn", "study",
+               "concept", "definition", "principle",
+               "reference", "knowledge", "investigate"),
+    },
+    {
+        "tag": "代码验证",
+        "priority": 2,
+        "cn": ("验证", "测试", "检查", "检测", "调试", "断言",
+               "校验", "确认", "用例", "覆盖", "回归",
+               "边界条件", "测试用例", "单元测试", "集成测试"),
+        "en": ("test", "verify", "validate", "check",
+               "debug", "assert", "coverage", "regression",
+               "unit test", "integration test", "test case"),
+    },
+    {
+        "tag": "代码实现",
+        "priority": 2,
+        "cn": ("实现", "代码", "函数", "接口", "编写", "调用"),
+        "en": ("implement", "function", "interface", "method",
+               "write code", "call the", "define"),
+    },
+    {
+        "tag": "错误修复",
+        "priority": 2,
+        "cn": ("错误", "异常", "报错", "修复", "崩溃"),
+        "en": ("error", "exception", "bug", "crash", "fix the",
+               "failed", "failure", "broken"),
+    },
+    {
+        "tag": "性能优化",
+        "priority": 2,
+        "cn": ("性能", "优化", "速度", "效率", "延迟", "瓶颈"),
+        "en": ("performance", "optimize", "speed", "efficiency",
+               "latency", "bottleneck", "slow"),
+    },
+    {
+        "tag": "安全合规",
+        "priority": 2,
+        "cn": ("安全", "权限", "漏洞", "风险", "加密", "认证"),
+        "en": ("security", "permission", "auth", "vulnerability",
+               "encrypt", "risk", "compliance"),
+    },
+]
+# 结论标记（中英文，优先级最高）
+_CONCLUSION_MARKERS = (
+    "因此", "所以", "综上", "综上所述", "总而言之",
+    "总的来说", "建议", "推荐", "结论是", "答案是",
+    "总结一下", "也就是说", "最终",
+    "therefore", "in conclusion", "overall",
+    "the answer is", "the solution is",
+    "i recommend", "i suggest", "so the answer",
+)
+# 常见高频词（权值0.5，避免误触）
+_COMMON_WORDS = frozenset(
+    ("问题", "分析", "代码", "方案", "设计", "安全", "性能",
+     "实现", "错误", "优化", "检查", "考虑", "需要", "处理",
+     "解决", "使用", "支持", "提供", "操作")
+)
+
+
+def _pattern_weight(p: str) -> float:
+    """计算模式的权重：越长越具体→权重越高"""
+    if " " in p:          # 英文短语（含空格）→ 非常具体
+        return 3.0
+    if len(p) >= 4:       # 中文4字以上 → 非常具体
+        return 3.0
+    if len(p) == 3:       # 3字 → 比较具体
+        return 2.0
+    if p in _COMMON_WORDS:  # 高频常见词 → 权重低
+        return 0.5
+    return 1.0
+
+
+def _classify_think_tag(content: str) -> str:
+    """对思考内容进行分类，返回预定义标签名，空=不显示
+
+    加权计分：短语权重高，常见词权重低，避免高频词误触。
+    最低 2.0 分才显示标签。
+    """
+    text = content.strip()[:500]
+    if not text:
+        return ""
+
+    text_lower = text.lower()
+
+    # ── 结论优先检测 ──
+    for marker in _CONCLUSION_MARKERS:
+        if marker in text or marker in text_lower:
+            return "结论"
+
+    # ── 标签加权计分（去重） ──
+    best_tag = ""
+    best_score = 0.0
+    best_priority = -1
+
+    for tag_def in _THINK_TAGS:
+        matches = [p for p in tag_def["cn"] if p in text]
+        matches += [p for p in tag_def["en"] if p in text_lower]
+
+        # 去重：长模式优先，子串不计
+        uniq = []
+        for p in sorted(set(matches), key=len, reverse=True):
+            if not any(p in u for u in uniq):
+                uniq.append(p)
+
+        score = sum(_pattern_weight(p) for p in uniq)
+        if score > best_score or (score == best_score and tag_def["priority"] > best_priority):
+            best_score = score
+            best_tag = tag_def["tag"]
+            best_priority = tag_def["priority"]
+
+    return best_tag if best_score >= 2.0 else ""
+
+
+_CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
+                          "总的来说", "建议", "推荐", "结论是", "答案是",
+                          "总结一下", "也就是说", "最终")
+
+
+_CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
+                          "总的来说", "建议", "推荐", "结论是", "答案是",
+                          "总结一下", "也就是说", "最终")
+
+
 def _render_think_block(content: str, completed: bool = True) -> str:
-    status_text = "💡" if completed else "🧠"
     expanded = not completed
 
-    # 智能预览：优先完整句子边界，80字内
-    content_preview = _get_think_preview(content)
+    # ── 标签分类（完成时才分类，流式过程只显示💡） ──
+    if completed:
+        tag = _classify_think_tag(content)
+        status_text = f"💡 {escape(tag)}" if tag else "💡"
+    else:
+        status_text = "💡"
+        tag = ""  # 流式不分类
+
+    # ── 预览：完成时结论句+累加，流式时简单截断 ──
+    preview = _get_think_preview(content)
 
     block_seed = f"{content}|{completed}"
     block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
@@ -484,7 +642,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(content_preview)}</span>
+        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
     </button>
     <div class="cm-collapsible__body"{body_style}>
         <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content}</div>
@@ -499,11 +657,16 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     1. 不执行代码块处理（_strip_code_blocks），直接转义
     2. 不生成 block_key hash（节省计算）
     """
-    status_text = "💡" if completed else "🧠"
     expanded = not completed
 
-    # 智能预览
-    content_preview = _get_think_preview(content)
+    # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
+    if completed:
+        tag = _classify_think_tag(content)
+        status_text = f"💡 {escape(tag)}" if tag else "💡"
+        preview = _get_think_preview(content)
+    else:
+        status_text = "💡"
+        preview = _get_think_preview(content)
 
     expanded_attr = "true" if expanded else "false"
     body_style = ' style="height:auto; opacity:1;"' if expanded else ""
@@ -518,7 +681,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(content_preview)}</span>
+        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
     </button>
     <div class="cm-collapsible__body"{body_style}>
         <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>
