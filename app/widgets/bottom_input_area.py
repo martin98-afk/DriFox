@@ -430,10 +430,11 @@ class SendableTextEdit(TextEdit):
             pass
 
     def insert_file_mention(self, file_path: str):
-        """将 @ 提及文本替换为空（选中文件后由 main_widget 调用）
+        """将 @ 提及文本替换为 [[basename]] 占位符（选中文件后由 main_widget 调用）
 
-        用户选中文件后，移除输入框中的 @query 文本。
+        用户选中文件后，移除输入框中的 @query 文本并插入 [[basename]] 占位符。
         main_widget 随后会创建 AttachmentChip。
+        发送时 _build_user_text_with_attachments 会将 [[basename]] 替换为完整路径。
         """
         cursor = self.textCursor()
         cursor_pos = cursor.position()
@@ -442,7 +443,8 @@ class SendableTextEdit(TextEdit):
         if trigger_pos >= 0:
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
-            cursor.insertText("")
+            basename = os.path.basename(file_path)
+            cursor.insertText(f"[[{basename}]] ")
 
         self._cancel_at_throttle()
         self._at_trigger_pos = -1
@@ -1019,6 +1021,11 @@ class SendableTextEdit(TextEdit):
 
             if file_paths:
                 self.files_dropped.emit(file_paths)
+                # 在光标位置插入 [[basename]] 占位符（发送时替换为完整路径）
+                cursor = self.textCursor()
+                for fp in file_paths:
+                    basename = os.path.basename(fp)
+                    cursor.insertText(f"[[{basename}]] ")
                 return
 
             # 纯文本 → 默认处理
