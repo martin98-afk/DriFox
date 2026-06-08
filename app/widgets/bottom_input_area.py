@@ -1421,7 +1421,7 @@ class AttachmentChip(QFrame):
         # 文件类型图标
         self._icon_widget = IconWidget(self)
         self._icon_widget.setIcon(self._get_file_icon(self.filepath))
-        self._icon_widget.setFixedSize(16, 16)
+        self._icon_widget.setFixedSize(14, 14)
         layout.addWidget(self._icon_widget)
 
         # 文件名
@@ -1437,7 +1437,7 @@ class AttachmentChip(QFrame):
 
         # 删除按钮
         close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
-        close_btn.setFixedSize(16, 16)
+        close_btn.setFixedSize(10, 10)
         close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
         layout.addWidget(close_btn)
 

@@ -1929,8 +1929,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._attach_container.setAcceptDrops(True)
         self._attach_container.installEventFilter(self)
         self._attach_layout = QHBoxLayout(self._attach_container)
-        self._attach_layout.setContentsMargins(12, 6, 12, 2)
-        self._attach_layout.setSpacing(6)
+        self._attach_layout.setContentsMargins(6, 6, 6, 0)
+        self._attach_layout.setSpacing(3)
         self._attach_layout.addStretch()
         self._attachments: list[str] = []
         card_layout.addWidget(self._attach_container)
