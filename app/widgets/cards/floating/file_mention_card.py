@@ -326,13 +326,39 @@ class FileMentionCard(QWidget):
         if self._cache_dirty:
             QTimer.singleShot(0, self._scan_files)
 
-    # 总是忽略的目录名（不区分大小写匹配）
+    # 总是忽略的目录名（不区分大小写精确匹配）
     _IGNORED_DIRS: Set[str] = {
         '.git', '.idea', '.vscode', '.venv', 'venv', 'env',
         '__pycache__', 'build', 'dist', 'node_modules',
         '.svn', '.hg', '.bzr',
         '.mypy_cache', '.pytest_cache', '.ruff_cache',
         '.drifox',  # 项目数据目录
+        # 构建输出目录
+        'target',  # Rust cargo build
+        'bin', 'obj',  # C#/.NET 构建
+        # 前端框架构建缓存
+        '.next', '.nuxt',
+        # 基础设施构建缓存
+        '.serverless', '.terraform',
+        # 测试覆盖率报告
+        'coverage', 'htmlcov', '.coverage',
+        # 日志/临时文件
+        'logs', 'log', 'tmp', 'temp',
+        # 第三方依赖目录
+        'vendor',  # Go/PHP
+        'Pods',    # CocoaPods
+        'Carthage',  # Carthage
+        '.gradle',  # Gradle 缓存
+        # Python 测试
+        '.tox',
+        # Python 包目录
+        'site-packages', 'lib', 'lib64',
+    }
+
+    # 模糊匹配忽略的目录模式（fnmatch 通配符，不区分大小写）
+    _IGNORED_DIR_PATTERNS: Set[str] = {
+        '*venv*',        # 匹配 venv, .venv, myvenv, venv38, .venv38 等虚拟环境目录
+        '*.egg-info*',   # Python egg-info 元数据目录
     }
 
     # 总是忽略的扩展名
@@ -374,18 +400,26 @@ class FileMentionCard(QWidget):
         """检查相对路径是否被忽略
 
         规则：
-        1. 检查是否命中 always-ignored 目录名
-        2. 检查是否命中 always-ignored 扩展名
-        3. 检查 .gitignore 模式
+        1. 检查是否命中 always-ignored 目录名（精确匹配）
+        2. 检查是否命中 always-ignored 目录模式（fnmatch 通配符匹配）
+        3. 检查是否命中 always-ignored 扩展名
+        4. 检查 .gitignore 模式
         """
         path_parts = rel_path.replace('\\', '/').split('/')
         name = path_parts[-1]
         name_lower = name.lower()
 
-        # 1. 始终忽略的目录/文件
+        # 1. 始终忽略的目录名（精确匹配）
         for part in path_parts:
             if part.lower() in FileMentionCard._IGNORED_DIRS:
                 return True
+
+        # 1b. 始终忽略的目录模式（fnmatch 通配符匹配）
+        for part in path_parts:
+            part_lower = part.lower()
+            for pattern in FileMentionCard._IGNORED_DIR_PATTERNS:
+                if fnmatch.fnmatch(part_lower, pattern):
+                    return True
 
         # 2. 始终忽略的扩展名
         if not is_dir:

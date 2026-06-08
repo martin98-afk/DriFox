@@ -267,8 +267,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.history_manager = self.backend.history_manager
         self.session_store = self.backend.session_store
         self.session_manager = self.backend.session_manager
-        # 初始化 /subagents --model= 参数描述（反映已持久化的默认模型）
-        self._update_subagents_param_description()
         self._session_card_cache: Dict[str, Dict[str, Any]] = {}
         self._current_history_project: Optional[str] = None  # 当前历史面板项目过滤
         self._welcome_card_cache: Dict[str, MessageCard] = {}
@@ -2019,6 +2017,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始化内置命令
         self._init_builtin_commands()
+        # （此时命令已注册）更新 /subagents --model= 参数描述
+        self._update_subagents_param_description()
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
@@ -8522,10 +8522,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 info_text = model_display
 
             InfoBar.success(
-                title="默认模型已设置",
-                content=f"子智能体默认模型: {info_text}",
+                title="子智能体模型设置",
+                content=f"{info_text}",
                 parent=self,
-                duration=4000,
+                duration=2000,
                 position=InfoBarPosition.BOTTOM,
             )
             # 更新命令卡参数描述
