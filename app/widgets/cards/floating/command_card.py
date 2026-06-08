@@ -8,6 +8,7 @@
 """
 from typing import List, Dict
 
+import html
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
@@ -199,36 +200,76 @@ class CommandItemWidget(QWidget):
                 }}
             """)
 
+    @staticmethod
+    def _best_highlight_query(text: str, query: str) -> str:
+        """从多关键字 query 中提取最适合高亮的关键字
+
+        多关键字含 |& 时代理找不到完整匹配，提取单个可子串匹配的关键字。
+        """
+        if not query or not text:
+            return ""
+        text_lower = text.lower()
+        if query.lower() in text_lower:
+            return query
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            if or_term.lower() in text_lower:
+                return or_term
+            for and_part in or_term.split('&'):
+                and_part = and_part.strip()
+                if and_part and and_part.lower() in text_lower:
+                    return and_part
+        return ""
+
     def _update_display(self):
-        """更新名称显示（含查询高亮）"""
+        """更新名称显示（含查询高亮）
+
+        注意：display_text 中的 & < > " 等字符须 html.escape，
+        否则混入 HTML 会破坏渲染导致卡片消失。
+        """
         name = self._data["name"]
-        # 优先使用 display_name（跨类型重名时加后缀），否则回退到 name
         display_name = self._data.get("display_name", name)
-        # 命令需要加 / 前缀，技能和智能体直接显示名称
         item_type = self._data["type"]
         display_text = f"/{display_name}" if item_type == "command" else display_name
         query = self._query
 
+        # 先 HTML 转义纯文本部分，之后安全检查高亮子串也在 escape 后的字符串中定位
+        safe_text = html.escape(display_text)
+
         if query:
-            # 连续子串匹配高亮（匹配原始 name + display_name，高亮 display_text）
-            lower_text = display_text.lower()
-            lower_query = query.lower()
-            idx = lower_text.find(lower_query)
-            if idx >= 0:
-                html = display_text[:idx]
-                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_text[idx:idx + len(query)]}</span>'
-                html += display_text[idx + len(query):]
-                self._name_label.setText(html)
+            hl_query = self._best_highlight_query(display_text, query)
+            if hl_query:
+                # hl_query 可能含 & 等字符，需 escape 后在 safe_text 中定位
+                escaped_hl = html.escape(hl_query)
+                lower_safe = safe_text.lower()
+                lower_hl = escaped_hl.lower()
+                idx = lower_safe.find(lower_hl)
+                if idx >= 0:
+                    before = safe_text[:idx]
+                    match = safe_text[idx:idx + len(escaped_hl)]
+                    after = safe_text[idx + len(escaped_hl):]
+                    html_text = (
+                        f'<span>{before}'
+                        f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{match}</span>'
+                        f'{after}</span>'
+                    )
+                    self._name_label.setText(html_text)
+                else:
+                    self._name_label.setText(safe_text)
             else:
-                self._name_label.setText(display_text)
+                self._name_label.setText(safe_text)
         else:
-            self._name_label.setText(display_text)
+            self._name_label.setText(safe_text)
 
         # 描述标签也应用搜索高亮（_ElidedLabel 自动处理省略+高亮）
         desc = self._data.get("description", "")
         self._desc_label.setText(desc)
         if query:
-            self._desc_label.setHighlight(query, Colors.SEND_BTN_START)
+            hl_query = self._best_highlight_query(desc, query)
+            if hl_query:
+                self._desc_label.setHighlight(hl_query, Colors.SEND_BTN_START)
 
     def set_selected(self, selected: bool):
         """设置选中状态"""
@@ -1137,36 +1178,118 @@ class CommandCard(QWidget):
         self._all_items_cache = list(self._all_items)
         self._cache_dirty = False
 
+    @staticmethod
+    def _matches_multi(item: Dict[str, str], query: str) -> bool:
+        """多关键字匹配：| = OR, & = AND
+
+        例如 query="find|search&replace" 表示匹配包含 "find"
+        或同时包含 "search" 与 "replace" 的项。
+        空 query 返回 True（无过滤）。
+        尾部 &（如 "find&"）自动忽略空 AND 部分，不会导致全不匹配。
+        """
+        if not query:
+            return True
+        text = (
+            item["name"] + " "
+            + item.get("display_name", item["name"]) + " "
+            + item["description"]
+        ).lower()
+
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            # 过滤空 AND 部分：让 "find&" 等价于 "find"（用户还在打字中）
+            and_parts = [p.strip() for p in or_term.split('&') if p.strip()]
+            if not and_parts:
+                continue
+            if all(part in text for part in and_parts):
+                return True
+        return False
+
+    @staticmethod
+    def _parse_type_filter(query: str):
+        """从 query 中提取 type:xxx 过滤器
+
+        例如：
+          "type:skill tdd"      → ({"skill"}, "tdd")
+          "type:agent"           → ({"agent"}, "")
+          "type:cmd find"        → ({"command"}, "find")
+          "find"                 → (None, "find")
+
+        支持简写：cmd→command
+        支持 OR：type:skill|type:agent → {"skill","agent"}
+        """
+        if not query or 'type:' not in query:
+            return None, query
+
+        type_set = set()
+        clean_tokens = []
+        type_map = {'cmd': 'command', 'skill': 'skill', 'agent': 'agent', 'prompt': 'prompt'}
+
+        for token in query.split():
+            if token.startswith('type:'):
+                tf = token[5:].strip()
+                for t in tf.split('|'):
+                    t = t.strip()
+                    if t in type_map:
+                        type_set.add(type_map[t])
+            else:
+                clean_tokens.append(token)
+
+        return type_set if type_set else None, ' '.join(clean_tokens)
+
     def load_items(self, query: str = "", incremental: bool = False):
-        """根据 query 筛选并渲染列表（增量剪枝）
+        """根据 query 筛选并渲染列表（多关键字 + 类别过滤 + 增量剪枝）
+
+        支持多关键字语法：
+          key1|key2  → OR（含 key1 或 key2）
+          key1&key2  → AND（同时含 key1 与 key2）
+
+        支持类别过滤：
+          type:skill            → 只显示技能
+          type:agent            → 只显示智能体
+          type:prompt           → 只显示提示词
+          type:cmd              → 只显示命令
+          type:skill tdd        → 只显示名/描述含 "tdd" 的技能
+          type:skill|type:agent → 显示技能或智能体
 
         Args:
             query: 搜索查询
-            incremental: 是否增量更新（保留已有 widget，重用匹配项）
+            incremental: 是否增量更新
 
-        增量剪枝：连续输入时在上次结果上继续过滤，避免全量遍历。
+        增量剪枝：连续追加字符时在上次结果上继续过滤。
+        含 | 时不剪枝（OR 可能扩大结果集）。
         """
         query = query.strip().lower()
 
-        if not query:
-            self._filtered_items = list(self._all_items)
+        # 提取类别过滤器
+        type_filter, text_query = self._parse_type_filter(query)
+
+        if not text_query:
+            # 纯类别过滤（无文本搜索）
+            if type_filter:
+                self._filtered_items = [item for item in self._all_items if item["type"] in type_filter]
+            else:
+                self._filtered_items = list(self._all_items)
             self._last_query = ""
         else:
-            q_lower = query.lower()
-            # 增量剪枝：新 query 是上次的扩展 → 在上次结果上继续过滤
-            if self._last_query and query.startswith(self._last_query):
-                source = self._filtered_items
-            else:
-                source = self._all_items
+            # 增量剪枝：仅当新 query 是上次的扩展且不含 |
+            can_prune = (
+                self._last_query
+                and query.startswith(self._last_query)
+                and '|' not in query
+            )
+            source = self._filtered_items if can_prune else self._all_items
             self._filtered_items = [
                 item for item in source
-                if q_lower in item["name"].lower()
-                or q_lower in item.get("display_name", item["name"]).lower()
-                or q_lower in item["description"].lower()
+                if self._matches_multi(item, text_query)
             ]
+            # 文本匹配后再按类别过滤
+            if type_filter:
+                self._filtered_items = [item for item in self._filtered_items if item["type"] in type_filter]
 
-        # 排序：命令和技能在前，智能体在后，同类型按名称排序
-        # 增量剪枝时 source 来自已排序的 _filtered_items，子集维持相对顺序，但全量场景必须有此排序
+        # 排序：命令/技能在前，智能体在后，同类型按名称
         sort_order = {"command": 0, "skill": 1, "agent": 2}
         self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
 

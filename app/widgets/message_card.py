@@ -179,6 +179,17 @@ WELCOME_TIPS = [
     "💡 /compact 手动触发上下文压缩，减少 Token 消耗",
     "💡 输入 / 还会显示从 agents 目录加载的自定义智能体命令",
     "💡 智能体命令加 `--subagent + 任务描述` 可在子智能体中执行任务",
+
+    # ===== 文件提及卡片 =====
+    "💡 输入 @ 可浏览项目文件，↑/↓ 导航，Enter 选中文件快速引用",
+    "💡 @ 文件搜索支持 | 和 & 多关键字：@doc|config&json 组合筛选文件",
+    "💡 @ 文件搜索支持模糊匹配：输入 rqrmnts 也能找到 requirements.txt",
+
+    # ===== 命令卡片类别过滤 =====
+    "💡 / 命令搜索支持 | 和 & 多关键字：/find|search&replace 组合查找",
+    "💡 / 命令支持类别过滤：type:skill 只看技能、type:agent 只看智能体",
+    "💡 / 命令还可组合：type:skill tdd 搜索名含「tdd」的技能",
+    "💡 / 命令类别可多选：type:skill|type:agent 显示技能和智能体",
 ]
 
 # ======== 欢迎卡片欢迎语 ========
@@ -376,14 +387,86 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
+def _get_think_preview(content: str, max_length: int = 80) -> str:
+    """智能生成思考内容折叠框的预览文本
+
+    策略:
+      1. 有换行 → 取前2个非空行（有更多行时加...）
+      2. 累加完整句子直到铺满预览（短句自动合并）
+      3. 反向句子边界回退
+      4. 词边界/硬截断兜底
+
+    规则: 预览未到文本结尾时自动追加省略号，到结尾则不加
+    """
+    if not content:
+        return ""
+
+    text = content.strip()
+    if not text:
+        return ""
+
+    def _is_full(preview_len: int) -> bool:
+        """预览长度是否已覆盖完整内容（忽略空白、换行差异）"""
+        norm_text = len(text.replace(" ", "").replace("\n", ""))
+        norm_preview = preview_len  # 预览已是不含格式的纯内容长度
+        return norm_preview >= norm_text
+
+    # ── 策略1: 有换行结构，取前2个非空行 ──
+    if "\n" in text:
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if lines:
+            first_line = lines[0]
+            if len(lines) >= 2:
+                two_lines = f"{first_line} | {lines[1]}"
+                if len(two_lines) <= max_length:
+                    return two_lines if _is_full(len(two_lines)) else two_lines + "..."
+            if len(first_line) <= max_length:
+                return first_line if _is_full(len(first_line)) else first_line + "..."
+
+    # ── 展平为单行做后续处理 ──
+    flat = text.replace("\n", " ")
+    if len(flat) <= max_length:
+        return flat
+
+    # ── 策略2: 累加完整句子（短句自动合并） ──
+    end_chars = set("。！？.!?；;")
+    sentence_ends = [i + 1 for i, ch in enumerate(flat) if ch in end_chars]
+
+    if sentence_ends:
+        # 找到最后一个不超过 max_length 的句子边界
+        best_end = 0
+        for end_pos in sentence_ends:
+            if end_pos <= max_length:
+                best_end = end_pos
+            else:
+                break
+
+        if best_end > 0:
+            preview = flat[:best_end]
+            if _is_full(best_end):
+                return preview
+            return preview + "..."
+
+    # ── 策略3: 反向从 max_length 往前找句子边界 ──
+    for i in range(max_length, 0, -1):
+        if flat[i - 1] in end_chars:
+            return flat[:i] + "..."
+
+    # ── 策略4: 词边界（最后一个空白/逗号） ──
+    for i in range(max_length, 0, -1):
+        if flat[i - 1] in " ，,、；;：:":
+            return flat[:i].rstrip("，,、") + "..."
+
+    # ── 兜底: 硬截断 ──
+    return flat[:max_length].rstrip("，,、") + "..."
+
+
 def _render_think_block(content: str, completed: bool = True) -> str:
-    status_text = "💡 思考过程" if completed else "🧠 正在思考..."
+    status_text = "💡" if completed else "🧠"
     expanded = not completed
 
-    max_preview = 40
-    content_preview = content.strip().replace("\n", " ")[:max_preview]
-    if len(content.strip().replace("\n", " ")) > max_preview:
-        content_preview += "..."
+    # 智能预览：优先完整句子边界，80字内
+    content_preview = _get_think_preview(content)
 
     block_seed = f"{content}|{completed}"
     block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
@@ -415,17 +498,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     与 _render_think_block 的区别：
     1. 不执行代码块处理（_strip_code_blocks），直接转义
     2. 不生成 block_key hash（节省计算）
-    3. 预览文本截取更简单
     """
-    status_text = "💡 思考过程" if completed else "🧠 正在思考..."
+    status_text = "💡" if completed else "🧠"
     expanded = not completed
 
-    # 预览文本：简单截取前50字符
-    max_preview = 50
-    if len(content) > max_preview:
-        content_preview = content[:max_preview].replace("\n", " ") + "..."
-    else:
-        content_preview = content.replace("\n", " ")
+    # 智能预览
+    content_preview = _get_think_preview(content)
 
     expanded_attr = "true" if expanded else "false"
     body_style = ' style="height:auto; opacity:1;"' if expanded else ""

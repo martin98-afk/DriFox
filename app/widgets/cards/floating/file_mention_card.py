@@ -155,12 +155,41 @@ class FileMentionItemWidget(QWidget):
             }}
         """)
 
+    @staticmethod
+    def _best_highlight_query(text: str, query: str) -> str:
+        """从多关键字 query 中提取最适合高亮的关键字
+
+        多关键字含 |& 时代理找不到完整匹配，提取单个可子串匹配的关键字。
+        例如 text="config.json", query="doc|config&json" → "config"
+        fuzzy 匹配无子串对应时返回空字符串（不尝试高亮）。
+        """
+        if not query or not text:
+            return ""
+        text_lower = text.lower()
+        # 先试试完整 query（不含 |& 时直接命中）
+        if query.lower() in text_lower:
+            return query
+        # 按 | 拆 OR，按 & 拆 AND，找第一个子串匹配
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            if or_term.lower() in text_lower:
+                return or_term
+            for and_part in or_term.split('&'):
+                and_part = and_part.strip()
+                if and_part and and_part.lower() in text_lower:
+                    return and_part
+        return ""
+
     def _update_display(self):
         """更新路径显示（_ElidedLabel 自动处理省略，含搜索高亮）"""
         rel = self._data.get("relative_path", "")
         self._path_label.setText(rel)
         if self._query:
-            self._path_label.setHighlight(self._query, Colors.SEND_BTN_START)
+            hl_query = self._best_highlight_query(rel, self._query)
+            if hl_query:
+                self._path_label.setHighlight(hl_query, Colors.SEND_BTN_START)
 
     def update_data(self, file_data: Dict[str, str], query: str):
         """更新 widget 数据并刷新显示（用于回收复用）
@@ -635,17 +664,42 @@ class FileMentionCard(QWidget):
             visible = min(item_count, MAX_VISIBLE_ITEMS)
             self.setFixedHeight(visible * ITEM_HEIGHT)
 
-    def load_items(self, query: str = ""):
-        """根据 query 即时筛选并防抖渲染
+    @staticmethod
+    def _matches_multi(item: Dict[str, str], query: str) -> bool:
+        """多关键字匹配：| = OR, & = AND
 
-        假设缓存已就绪（由 ensure_cache / _scan_files 预先填充），
-        此处仅做 O(n) 评分过滤 + fuzzy 匹配，无 I/O。
-        筛选结果按匹配质量排序（完全匹配 > 前缀 > 子串 > fuzzy），
-        实际 widget 渲染由 20ms 防抖定时器触发，快速敲键只执行最后一次。
+        例如 query="doc|config&json" 表示匹配文件名/路径包含 "doc"
+        或同时包含 "config" 与 "json" 的项。
+        尾部 &（如 "config&"）自动忽略空 AND 部分，不会导致全不匹配。
+        """
+        if not query:
+            return True
+        text = (item["name"] + " " + item["relative_path"]).lower()
+
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            # 过滤空 AND 部分：让 "config&" 等价于 "config"
+            and_parts = [p.strip() for p in or_term.split('&') if p.strip()]
+            if not and_parts:
+                continue
+            if all(part in text for part in and_parts):
+                return True
+        return False
+
+    def load_items(self, query: str = ""):
+        """根据 query 即时筛选并防抖渲染（多关键字 + 增量剪枝 + fuzzy）
+
+        支持多关键字语法：
+          key1|key2  → OR（含 key1 或 key2）
+          key1&key2  → AND（同时含 key1 与 key2）
+          不含 |& 时沿用原有 fuzzy 评分排序。
 
         增量剪枝：当用户连续追加字符时（'re' → 'req'），
         新结果是旧结果的子集，直接在上次 _filtered_items 上过滤，
         避免全量遍历 500 项 _file_cache。
+        注意：含 | 时不剪枝（OR 可能扩大结果集）。
         """
         query = query.strip().lower()
         self._current_query = query
@@ -654,19 +708,29 @@ class FileMentionCard(QWidget):
             self._filtered_items = list(self._file_cache)
         else:
             q_lower = query.lower()
-            # 增量剪枝：新 query 是上次 query 的扩展 → 在上次结果上继续过滤
-            if self._last_query and query.startswith(self._last_query):
-                source = self._filtered_items
+            # 增量剪枝：含 | 时不剪枝（OR 可能扩大结果集）
+            can_prune = (
+                self._last_query
+                and query.startswith(self._last_query)
+                and '|' not in query
+            )
+            source = self._filtered_items if can_prune else self._file_cache
+
+            if '|' in query or '&' in query:
+                # 多关键字模式：布尔匹配，保持原有 dir→name 排序
+                self._filtered_items = [
+                    item for item in source
+                    if self._matches_multi(item, query)
+                ]
             else:
-                source = self._file_cache
-            # 评分过滤：fuzzy 匹配 + 按匹配质量排序
-            scored = [
-                (item, self._score_item(item, q_lower))
-                for item in source
-            ]
-            scored = [(item, s) for item, s in scored if s > 0]
-            scored.sort(key=lambda x: -x[1])  # 高得分在前
-            self._filtered_items = [item for item, _ in scored]
+                # 单关键字模式：fuzzy 评分 + 排序
+                scored = [
+                    (item, self._score_item(item, q_lower))
+                    for item in source
+                ]
+                scored = [(item, s) for item, s in scored if s > 0]
+                scored.sort(key=lambda x: -x[1])
+                self._filtered_items = [item for item, _ in scored]
 
         self._last_query = query
         # 防抖调度渲染
