@@ -8109,6 +8109,19 @@ class OpenAIChatToolWindow(ToolWindow):
                         break
         self._attach_container.setVisible(bool(self._attachments))
 
+        # 清理输入框中对应的 [[basename]] 占位符
+        try:
+            basename = os.path.basename(path)
+            placeholder = f"[[{basename}]]"
+            current = self.input_area.toPlainText()
+            if placeholder in current:
+                new_text = current.replace(placeholder, "")
+                # 清理多余空格
+                new_text = new_text.replace("  ", " ").strip()
+                self.input_area.setPlainText(new_text)
+        except Exception:
+            pass
+
     def _clear_attachments(self):
         """清空所有附件"""
         self._attachments.clear()
@@ -8119,13 +8132,39 @@ class OpenAIChatToolWindow(ToolWindow):
         self._attach_container.hide()
 
     def _build_user_text_with_attachments(self, user_text: str) -> str:
-        """将附件文件路径拼接到用户文本末尾"""
+        """将附件文件路径拼接到用户文本末尾，支持 [[basename]] 内联占位符替换
+
+        文本中出现 [[filename.ext]] 占位符的 → 替换为完整路径（精确定位）
+        未出现占位符的附件 → 照旧拼接到末尾（优雅降级）
+        残留的 [[xxx]] 不匹配任何附件 → 自动清除
+        """
         if not self._attachments:
-            return user_text
-        parts = [user_text]
+            # 无附件时，清除文本中残留的 [[...]] 占位符
+            return re.sub(r'\[\[[^\]]*\]\]', '', user_text).replace("  ", " ").strip()
+
+        # 第一轮：替换文本中出现的 [[basename]] 占位符
+        # 同名文件使用 count=1 左到右逐次替换，每个附件占一个 [[basename]]
+        referenced = set()
         for p in self._attachments:
-            parts.append(p)
-        return "\n".join(parts)
+            basename = os.path.basename(p)
+            placeholder = f"[[{basename}]]"
+            if placeholder in user_text:
+                user_text = user_text.replace(placeholder, p, 1)
+                referenced.add(p)
+
+        # 第二轮：未在文本中引用的附件拼到末尾
+        remaining = [p for p in self._attachments if p not in referenced]
+        if remaining:
+            parts = [user_text]
+            for p in remaining:
+                parts.append(p)
+            user_text = "\n".join(parts)
+
+        # 第三轮：清除残留的 [[xxx]] 占位符（不匹配任何附件）
+        user_text = re.sub(r'\[\[[^\]]*\]\]', '', user_text)
+        user_text = user_text.replace("  ", " ").strip()
+
+        return user_text
 
     # ==================== 发送消息 ====================
 

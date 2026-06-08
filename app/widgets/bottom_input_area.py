@@ -18,6 +18,8 @@ from PyQt5.QtGui import (
     QPainterPath,
     QPen,
     QImage,
+    QFont,
+    QSyntaxHighlighter,
 )
 from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel
@@ -87,6 +89,9 @@ class SendableTextEdit(TextEdit):
 
         self._setup_keyboard_shortcuts()
 
+        # [[filename]] 占位符高亮
+        self._placeholder_highlighter = PlaceholderHighlighter(self.document())
+
         # 命令卡片引用（由 main_widget 注入）
         self._command_card_ref = None
         self._slash_trigger_pos = -1  # / 触发位置
@@ -102,13 +107,21 @@ class SendableTextEdit(TextEdit):
             None  # display_type: command/prompt/agent/skill
         )
 
-        # 节流相关
+        # 节流相关：/ 命令触发
         self._slash_throttle_timer = QTimer(self)
         self._slash_throttle_timer.setSingleShot(True)
         self._slash_throttle_timer.timeout.connect(self._on_slash_throttle_timeout)
         self._pending_slash_query = ""
         self._last_slash_trigger_time = 0  # 上次触发时间（毫秒）
         self._slash_trigger_count = 0  # 快速触发计数
+
+        # 节流相关：@ 文件提及触发（与 / 共用逻辑，分开状态独立追踪）
+        self._at_throttle_timer = QTimer(self)
+        self._at_throttle_timer.setSingleShot(True)
+        self._at_throttle_timer.timeout.connect(self._on_at_throttle_timeout)
+        self._pending_at_query = ""
+        self._last_at_trigger_time = 0  # 上次 @ 触发时间（毫秒）
+        self._at_trigger_count = 0  # @ 快速触发计数
 
         # 输入历史浏览
         self._history_list: list = []  # 最近输入历史（最新在前）
@@ -311,6 +324,46 @@ class SendableTextEdit(TextEdit):
         self._pending_slash_query = ""
         self._slash_trigger_count = 0
 
+    # ==================== @ 文件提及节流 ====================
+
+    def _apply_at_throttle(self, query: str):
+        """@ 触发节流：快速输入时降低 / 命令卡片触发频率"""
+        import time
+
+        current_ms = int(time.time() * 1000)
+        time_delta = (
+            current_ms - self._last_at_trigger_time
+            if self._last_at_trigger_time > 0
+            else 1000
+        )
+        self._last_at_trigger_time = current_ms
+
+        # 判断输入速度：小于 150ms 认为快速输入
+        is_fast_input = time_delta < 150 and self._at_trigger_count > 0
+
+        if is_fast_input:
+            self._at_trigger_count += 1
+            self._pending_at_query = query
+            # 文件缓存已就绪时，渲染约 1-2ms → 低延迟节流
+            throttle_delay = 20
+            self._at_throttle_timer.stop()
+            self._at_throttle_timer.start(throttle_delay)
+        else:
+            self._at_trigger_count = 0
+            # 正常速度：直接发射
+            self.atTriggered.emit(query)
+
+    def _on_at_throttle_timeout(self):
+        """@ 节流定时器超时：发射最终的 query"""
+        if self._at_trigger_pos >= 0:
+            self.atTriggered.emit(self._pending_at_query)
+
+    def _cancel_at_throttle(self):
+        """取消 @ 节流定时器"""
+        self._at_throttle_timer.stop()
+        self._pending_at_query = ""
+        self._at_trigger_count = 0
+
     # ==================== @ 文件提及触发检测 ====================
 
     def _on_at_trigger_check(self):
@@ -356,6 +409,7 @@ class SendableTextEdit(TextEdit):
 
             if at_pos < 0:
                 # 没有找到合法 @ → 关闭卡片
+                self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
                     file_card.dismiss()
@@ -366,6 +420,7 @@ class SendableTextEdit(TextEdit):
 
             # 换行 → 关闭
             if '\n' in query:
+                self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
                     file_card.dismiss()
@@ -373,16 +428,18 @@ class SendableTextEdit(TextEdit):
                 return
 
             self._at_trigger_pos = at_pos
-            self.atTriggered.emit(query)
+            # 使用节流发射（合并快速敲键，只发最后一次）
+            self._apply_at_throttle(query)
 
         except Exception:
             pass
 
     def insert_file_mention(self, file_path: str):
-        """将 @ 提及文本替换为空（选中文件后由 main_widget 调用）
+        """将 @ 提及文本替换为 [[basename]] 占位符（选中文件后由 main_widget 调用）
 
-        用户选中文件后，移除输入框中的 @query 文本。
+        用户选中文件后，移除输入框中的 @query 文本并插入 [[basename]] 占位符。
         main_widget 随后会创建 AttachmentChip。
+        发送时 _build_user_text_with_attachments 会将 [[basename]] 替换为完整路径。
         """
         cursor = self.textCursor()
         cursor_pos = cursor.position()
@@ -391,8 +448,10 @@ class SendableTextEdit(TextEdit):
         if trigger_pos >= 0:
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
-            cursor.insertText("")
+            basename = os.path.basename(file_path)
+            cursor.insertText(f"[[{basename}]] ")
 
+        self._cancel_at_throttle()
         self._at_trigger_pos = -1
         self.setFocus(Qt.OtherFocusReason)
 
@@ -967,6 +1026,11 @@ class SendableTextEdit(TextEdit):
 
             if file_paths:
                 self.files_dropped.emit(file_paths)
+                # 在光标位置插入 [[basename]] 占位符（发送时替换为完整路径）
+                cursor = self.textCursor()
+                for fp in file_paths:
+                    basename = os.path.basename(fp)
+                    cursor.insertText(f"[[{basename}]] ")
                 return
 
             # 纯文本 → 默认处理
@@ -1361,6 +1425,22 @@ class InputGlowUnderlay(QWidget):
             )
 
 
+class PlaceholderHighlighter(QSyntaxHighlighter):
+    """[[filename]] 占位符语法高亮：输入框中的 [[...]] 标记高亮显示"""
+
+    def __init__(self, document):
+        super().__init__(document)
+        self._fmt = QTextCharFormat()
+        self._fmt.setForeground(QColor(201, 168, 92))  # 金色，与主题色一致
+        self._fmt.setFontWeight(QFont.Bold)
+
+    def highlightBlock(self, text: str):
+        import re
+
+        for match in re.finditer(r'\[\[[^\]]*\]\]', text):
+            self.setFormat(match.start(), match.end() - match.start(), self._fmt)
+
+
 class AttachmentChip(QFrame):
     """附件标签块：显示文件类型图标 + 文件名 + 删除按钮，响应式圆角矩形"""
 
@@ -1457,3 +1537,6 @@ class AttachmentChip(QFrame):
             }}
             """
         )
+
+        # 悬浮 tooltip 显示完整路径
+        self.setToolTip(self.filepath)
