@@ -18,49 +18,7 @@ from PyQt5.QtWidgets import (
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.utils.design_tokens import Colors, font_size_css
 from app.core.command_manager import CommandManager, CommandType, CommandParameter
-
-
-class _ElidedLabel(QLabel):
-    """自动根据可用宽度省略文本的 QLabel（中间省略）"""
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__(text, parent)
-        self._full_text = text
-        self._was_elided = False
-        # 防止布局根据文本内容自动扩展宽度，确保宽度由父布局决定
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-
-    def setText(self, text: str):
-        self._full_text = text
-        self._update_elided()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_elided()
-
-    def _update_elided(self):
-        w = self.width()
-        if w <= 0:
-            # 还没布局完成（width=0），先显示完整文本，等 resizeEvent 时再省略
-            if self.text() != self._full_text:
-                super().setText(self._full_text)
-            self._was_elided = False
-            return
-        fm = self.fontMetrics()
-        elided = fm.elidedText(self._full_text, Qt.ElideMiddle, w)
-        # 只在文本变化时更新，避免触发不必要的 updateGeometry → 布局重算
-        if self.text() != elided:
-            super().setText(elided)
-        self._was_elided = elided != self._full_text
-
-    def update_full_text(self, text: str):
-        """更新完整文本并重新省略"""
-        self._full_text = text
-        self._update_elided()
-
-    @property
-    def was_elided(self) -> bool:
-        return self._was_elided
+from app.widgets.elided_label import _ElidedLabel
 
 
 
@@ -265,6 +223,12 @@ class CommandItemWidget(QWidget):
                 self._name_label.setText(display_text)
         else:
             self._name_label.setText(display_text)
+
+        # 描述标签也应用搜索高亮（_ElidedLabel 自动处理省略+高亮）
+        desc = self._data.get("description", "")
+        self._desc_label.setText(desc)
+        if query:
+            self._desc_label.setHighlight(query, Colors.SEND_BTN_START)
 
     def set_selected(self, selected: bool):
         """设置选中状态"""

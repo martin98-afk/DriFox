@@ -156,9 +156,11 @@ class FileMentionItemWidget(QWidget):
         """)
 
     def _update_display(self):
-        """更新路径显示（_ElidedLabel 自动处理省略）"""
+        """更新路径显示（_ElidedLabel 自动处理省略，含搜索高亮）"""
         rel = self._data.get("relative_path", "")
         self._path_label.setText(rel)
+        if self._query:
+            self._path_label.setHighlight(self._query, Colors.SEND_BTN_START)
 
     def update_data(self, file_data: Dict[str, str], query: str):
         """更新 widget 数据并刷新显示（用于回收复用）
