@@ -18,6 +18,8 @@ from PyQt5.QtGui import (
     QPainterPath,
     QPen,
     QImage,
+    QFont,
+    QSyntaxHighlighter,
 )
 from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QShortcut, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel
@@ -86,6 +88,9 @@ class SendableTextEdit(TextEdit):
         self._send_btn_debounce_timer.timeout.connect(self._position_send_button)
 
         self._setup_keyboard_shortcuts()
+
+        # [[filename]] 占位符高亮
+        self._placeholder_highlighter = PlaceholderHighlighter(self.document())
 
         # 命令卡片引用（由 main_widget 注入）
         self._command_card_ref = None
@@ -1420,6 +1425,22 @@ class InputGlowUnderlay(QWidget):
             )
 
 
+class PlaceholderHighlighter(QSyntaxHighlighter):
+    """[[filename]] 占位符语法高亮：输入框中的 [[...]] 标记高亮显示"""
+
+    def __init__(self, document):
+        super().__init__(document)
+        self._fmt = QTextCharFormat()
+        self._fmt.setForeground(QColor(201, 168, 92))  # 金色，与主题色一致
+        self._fmt.setFontWeight(QFont.Bold)
+
+    def highlightBlock(self, text: str):
+        import re
+
+        for match in re.finditer(r'\[\[[^\]]*\]\]', text):
+            self.setFormat(match.start(), match.end() - match.start(), self._fmt)
+
+
 class AttachmentChip(QFrame):
     """附件标签块：显示文件类型图标 + 文件名 + 删除按钮，响应式圆角矩形"""
 
@@ -1516,3 +1537,6 @@ class AttachmentChip(QFrame):
             }}
             """
         )
+
+        # 悬浮 tooltip 显示完整路径
+        self.setToolTip(self.filepath)

@@ -2950,7 +2950,7 @@ class CodeWebViewer(QWebEngineView):
 
     def wheelEvent(self, event: QWheelEvent):
         # 获取滚动条（向上找 QScrollArea）
-        scroll_area = self.parent().parent().parent.chat_scroll_area
+        scroll_area = self.parent().parent()._parent.chat_scroll_area
         if scroll_area:
             vbar = scroll_area.verticalScrollBar()
             if vbar and vbar.minimum() != vbar.maximum():
@@ -3350,7 +3350,7 @@ class MessageCard(SimpleCardWidget):
             model_name: str = None,
     ):
         super().__init__(parent)
-        self.parent = parent
+        self._parent = parent
         self.role = role
         self.model_name = model_name
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
@@ -4351,7 +4351,7 @@ class MessageCard(SimpleCardWidget):
 
     def wheelEvent(self, event: QWheelEvent):
         try:
-            scroll_area = self.parent.chat_scroll_area
+            scroll_area = self._parent.chat_scroll_area
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
                 if (

@@ -8143,12 +8143,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return re.sub(r'\[\[[^\]]*\]\]', '', user_text).replace("  ", " ").strip()
 
         # 第一轮：替换文本中出现的 [[basename]] 占位符
+        # 同名文件使用 count=1 左到右逐次替换，每个附件占一个 [[basename]]
         referenced = set()
         for p in self._attachments:
             basename = os.path.basename(p)
             placeholder = f"[[{basename}]]"
             if placeholder in user_text:
-                user_text = user_text.replace(placeholder, p)
+                user_text = user_text.replace(placeholder, p, 1)
                 referenced.add(p)
 
         # 第二轮：未在文本中引用的附件拼到末尾
