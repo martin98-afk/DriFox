@@ -18,7 +18,6 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QSizePolicy,
 )
-from qfluentwidgets import FluentIcon, IconWidget
 
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
@@ -33,27 +32,46 @@ class FileMentionItemWidget(QWidget):
 
     clicked = pyqtSignal()
 
-    # 文件扩展名 → FluentIcon 映射（复用 AttachmentChip 的映射）
-    _FILE_ICON_MAP = {
+    # 扩展名 → emoji 映射（复用 memory_card 的风格，比 IconWidget 轻量无数倍）
+    _EMOJI_MAP = {
         # 代码
-        (".py", ".pyw", ".pyx"): FluentIcon.CODE,
-        (".js", ".jsx", ".mjs", ".cjs"): FluentIcon.CODE,
-        (".ts", ".tsx"): FluentIcon.CODE,
-        (".html", ".htm", ".css", ".scss", ".less"): FluentIcon.CODE,
-        (".java", ".kt", ".kts"): FluentIcon.CODE,
-        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): FluentIcon.CODE,
-        (".cs"): FluentIcon.CODE,
-        (".go", ".rs", ".rb", ".php"): FluentIcon.CODE,
-        (".swift", ".m", ".mm"): FluentIcon.CODE,
-        (".sql"): FluentIcon.CODE,
-        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): FluentIcon.COMMAND_PROMPT,
-        # 图片
-        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): FluentIcon.IMAGE_EXPORT,
+        '.py': '🐍', '.pyw': '🐍', '.pyx': '🐍',
+        '.js': '🟨', '.jsx': '⚛️', '.mjs': '🟨', '.cjs': '🟨',
+        '.ts': '🔷', '.tsx': '⚛️',
+        '.html': '🌐', '.htm': '🌐',
+        '.css': '🎨', '.scss': '🎨', '.less': '🎨',
+        '.java': '☕',
+        '.go': '🐹',
+        '.rs': '🦀',
+        '.rb': '💎',
+        '.php': '🐘',
+        '.swift': '🍎',
+        '.kt': '🤖',
+        '.c': '🔶', '.cpp': '🔶', '.h': '🔶', '.hpp': '🔶',
+        '.cs': '🔷',
+        '.sql': '🗃️',
+        '.sh': '💻', '.bash': '💻', '.zsh': '💻', '.ps1': '💻', '.cmd': '💻',
         # 文档
-        (".txt", ".md", ".rst", ".log"): FluentIcon.DOCUMENT,
-        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): FluentIcon.DOCUMENT,
-        (".csv", ".tsv"): FluentIcon.DOCUMENT,
-        (".pdf"): FluentIcon.DOCUMENT,
+        '.md': '📝', '.rst': '📝',
+        '.txt': '📄', '.log': '📄',
+        '.json': '🔧', '.xml': '🔧',
+        '.yaml': '🔧', '.yml': '🔧',
+        '.toml': '🔧', '.ini': '🔧', '.cfg': '🔧', '.conf': '🔧',
+        '.csv': '📊', '.tsv': '📊',
+        '.pdf': '📕',
+        # 图片
+        '.png': '🖼️', '.jpg': '🖼️', '.jpeg': '🖼️',
+        '.gif': '🖼️', '.bmp': '🖼️', '.svg': '🖼️',
+        '.webp': '🖼️', '.ico': '🖼️',
+        # 视频
+        '.mp4': '🎬', '.avi': '🎬', '.mov': '🎬', '.mkv': '🎬',
+        '.webm': '🎬', '.flv': '🎬', '.m4v': '🎬',
+        # 音频
+        '.mp3': '🎵', '.wav': '🎵', '.flac': '🎵', '.aac': '🎵',
+        '.ogg': '🎵', '.wma': '🎵', '.m4a': '🎵',
+        # 压缩包
+        '.zip': '📦', '.rar': '📦', '.7z': '📦',
+        '.tar': '📦', '.gz': '📦', '.bz2': '📦', '.xz': '📦', '.zst': '📦',
     }
 
     def __init__(self, file_data: Dict[str, str], query: str, parent=None):
@@ -67,29 +85,26 @@ class FileMentionItemWidget(QWidget):
         self._setup_ui()
 
     @staticmethod
-    def _get_file_icon(filepath: str) -> FluentIcon:
-        """根据文件扩展名返回对应的 FluentIcon"""
+    def _get_file_emoji(filepath: str) -> str:
+        """根据文件路径返回对应的 emoji 图标"""
         if os.path.isdir(filepath):
-            return FluentIcon.FOLDER
+            return "📁"
         ext = os.path.splitext(filepath)[1].lower()
-        for exts, icon in FileMentionItemWidget._FILE_ICON_MAP.items():
-            if ext in exts:
-                return icon
-        return FluentIcon.DOCUMENT
+        return FileMentionItemWidget._EMOJI_MAP.get(ext, "📄")
 
     def _setup_ui(self):
         self.setAttribute(Qt.WA_StyledBackground, True)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 12, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
-        # 文件类型图标
-        self._icon = IconWidget(self)
-        self._icon.setIcon(self._get_file_icon(self._data["path"]))
-        self._icon.setFixedSize(16, 16)
-        self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self._icon)
+        # 文件类型 emoji（QLabel 一文本，零 QWidget 开销）
+        self._icon_label = QLabel(self._get_file_emoji(self._data["path"]))
+        self._icon_label.setFixedWidth(20)
+        self._icon_label.setAlignment(Qt.AlignCenter)
+        self._icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self._icon_label)
 
         # 文件名标签
         self._name_label = QLabel()
@@ -103,6 +118,7 @@ class FileMentionItemWidget(QWidget):
         self._path_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._path_label.setMinimumWidth(0)
+        self._path_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self._path_label, 1)
 
         self._apply_style()
@@ -121,6 +137,14 @@ class FileMentionItemWidget(QWidget):
                 background-color: {bg};
                 border: none;
                 border-radius: 4px;
+            }}
+        """)
+
+        # 图标 emoji 标签样式
+        self._icon_label.setStyleSheet(f"""
+            QLabel {{
+                background: transparent;
+                {get_font_family_css()} {font_size_css(14)};
             }}
         """)
 
@@ -209,6 +233,7 @@ class FileMentionCard(QWidget):
         self._root_dir: str = ""
         self._file_cache: List[Dict[str, str]] = []
         self._cache_dirty = True
+        self._async_pending = False  # 异步扫描进行中标志，防重复调度
 
         self.setVisible(False)
         self._setup_ui()
@@ -291,19 +316,20 @@ class FileMentionCard(QWidget):
         self._cache_dirty = True
 
     def ensure_cache(self, root_dir: str):
-        """确保文件缓存已就绪（预扫描），不阻塞 UI
+        """确保文件缓存已就绪（异步预扫描）
 
         在下列时机调用：
         - main_widget 初始化完成后
         - 工作目录变更时
 
-        这样用户第一次按 @ 时缓存已就绪，过滤即时完成。
+        扫描在下一轮事件循环执行，不阻塞 UI。
+        用户按 @ 时若扫描未完成，show_card 也会自动触发异步扫描。
         """
         if not root_dir:
             return
         self.set_root_dir(root_dir)
         if self._cache_dirty:
-            self._scan_files()
+            QTimer.singleShot(0, self._scan_files)
 
     # 总是忽略的目录名（不区分大小写匹配）
     _IGNORED_DIRS: Set[str] = {
@@ -423,7 +449,7 @@ class FileMentionCard(QWidget):
             return
 
         gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
-        max_items = 2000
+        max_items = 500
 
         try:
             # 递归扫描——无深度限制，忽略目录不进入
@@ -496,7 +522,11 @@ class FileMentionCard(QWidget):
             self._update_selection()
 
     def _render(self):
-        """渲染当前筛选结果"""
+        """渲染当前筛选结果
+        
+        创建全部 _filtered_items 的 widget 以支持滚动，
+        _file_cache 自动限制在 MAX_CACHE_ITEMS 以内，总量可控。
+        """
         # 清除旧 widget
         for w in self._item_widgets:
             try:
@@ -572,22 +602,52 @@ class FileMentionCard(QWidget):
             self.dismiss()
 
     def show_card(self, root_dir: str = "", query: str = ""):
-        """加载并显示卡片
+        """加载并显示卡片（始终不阻塞 UI）
 
-        无参调用（被 CardManager 调用）：沿用上次的 root_dir 和 query。
+        无参调用（被 CardManager 调用）：仅使卡片可见，不做任何 I/O。
         带参调用则加载指定目录和查询。
 
-        性能保证：缓存应在 show_card 前由 ensure_cache 预填充，
-        此方法仅做 O(n) 过滤和 O(k) widget 创建。
+        关键设计：
+        - 缓存就绪 → 即时 O(n) 过滤 + O(k) widget 创建
+        - 缓存未就绪 → 立即显示空卡片，QTimer 延迟扫描，
+          扫描完成后自动刷新显示。
+        - 绝不阻塞 UI 线程。
         """
         Colors.refresh()
+        if not root_dir and not self._root_dir:
+            # CardManager 纯可视性调用，尚无根目录 → 仅显示空白卡片
+            self._visible = True
+            self.setVisible(True)
+            self.updateGeometry()
+            return
         if root_dir:
-            self.set_root_dir(root_dir)
-            # 缓存未就绪时同步扫描（应急路径）
-            if self._cache_dirty:
-                self._scan_files()
+            if root_dir != self._root_dir:
+                self._root_dir = root_dir
+                self._cache_dirty = True
         self._current_query = query if root_dir else self._current_query
-        self.load_items(query if root_dir else self._current_query)
+
+        if self._cache_dirty and not self._async_pending:
+            # 🚀 立即显示卡片（哪怕为空），异步扫描
+            self._visible = True
+            self.setVisible(True)
+            self.updateGeometry()
+            self._pending_query = self._current_query
+            self._async_pending = True
+            QTimer.singleShot(0, self._async_scan_and_refresh)
+            return
+
+        # 缓存就绪 → 即时过滤，无 I/O
+        self.load_items(self._current_query)
+        has_items = len(self._filtered_items) > 0
+        self._visible = has_items
+        self.setVisible(has_items)
+        self.updateGeometry()
+
+    def _async_scan_and_refresh(self):
+        """异步扫描完成后刷新显示"""
+        self._async_pending = False
+        self._scan_files()
+        self.load_items(self._pending_query)
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)

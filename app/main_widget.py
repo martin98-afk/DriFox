@@ -2923,11 +2923,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         card = self._file_mention_card
-        # 确保缓存就绪（防御性：异步预缓存可能尚未完成）
-        card.ensure_cache(workdir)
         # 先让 CardManager 展开容器
         self._card_manager.show_card("file_mention", self._window_id)
-        # 显示文件列表（此时缓存已就绪，即时过滤）
+        # 显示文件列表（show_card 内部处理缓存：就绪则即时，否则异步扫）
         card.show_card(workdir, query)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
