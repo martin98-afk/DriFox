@@ -175,6 +175,10 @@ class SendableTextEdit(TextEdit):
         - `/cmd `（有空格，且 cmd 是已知命令）→ detail 模式（显示参数提示）
         - `/xxx `（有空格，但 xxx 不是已知命令）→ 关闭卡片
         """
+        # IME 组合输入中跳过检测，避免打断中文输入法
+        if self._ime_composing:
+            return
+
         # 历史浏览模式下，如果当前历史项以 / 开头，阻止命令卡片触发
         if self._suppress_slash_trigger:
             self._suppress_slash_trigger = False

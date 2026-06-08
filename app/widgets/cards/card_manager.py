@@ -170,13 +170,15 @@ class CardManager:
             logger.debug(f"[CardManager] question 已显示，跳过显示 {card_id}（question 强制覆盖所有）")
             return
         
-        # ---- 命令卡片保护：流式对话中，除 question/system 外不打断 command 卡片 ----
-        # command 卡片正在显示时，其他非 question 且非系统配置的卡片不应将其隐藏
-        if card_id not in ("command", "question"):
-            if self.is_card_visible("command", window_id):
-                if card_id not in win_data.get("system_cards", set()):
-                    logger.debug(f"[CardManager] command 卡片可见，跳过显示 {card_id}（仅 question/系统卡片可打断）")
-                    return
+        # ---- 优先卡片保护：流式对话中，除 question/system 外不打断优先卡片 ----
+        # command/file_mention 卡片正在显示时，其他非优先非 question 卡片不应将其覆盖
+        priority_cards = {"command", "file_mention"}
+        if card_id not in priority_cards | {"question"}:
+            for pc in priority_cards:
+                if self.is_card_visible(pc, window_id):
+                    if card_id not in win_data.get("system_cards", set()):
+                        logger.debug(f"[CardManager] {pc} 卡片可见，跳过显示 {card_id}（仅 question/系统卡片可打断）")
+                        return
         
         # 系统卡片：窗口内互斥（隐藏所有其他系统卡片）
         if card_id in win_data["system_cards"]:
