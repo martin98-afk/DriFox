@@ -748,15 +748,28 @@ class FileMentionCard(QWidget):
         # 缓存就绪 → 即时过滤，无 I/O
         self.load_items(self._current_query)
         has_items = len(self._filtered_items) > 0
+        # 🎯 立即设置高度，不等防抖定时器
+        # 第一次打开时无旧 widget 残留，不立即 setFixedHeight 则高度为 0
+        if has_items:
+            visible = min(len(self._filtered_items), MAX_VISIBLE_ITEMS)
+            self.setFixedHeight(visible * ITEM_HEIGHT)
+        else:
+            self.setFixedHeight(0)
         self._visible = has_items
         self.setVisible(has_items)
         self.updateGeometry()
 
     def _async_scan_and_refresh(self):
-        """异步扫描完成后刷新显示"""
+        """异步扫描完成后立即渲染（跳过防抖）
+
+        扫描本身已异步耗时（50-200ms），完成后直接渲染，不再等 20ms 防抖。
+        """
         self._async_pending = False
         self._scan_files()
+        self._current_query = self._pending_query
         self.load_items(self._pending_query)
+        self._filter_timer.stop()  # 取消防抖
+        self._do_filter_and_render()  # 立即渲染
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)
