@@ -364,8 +364,8 @@ class CommandManager:
                 remainder=remainder,
             )
 
-        # PROMPT / AGENT：检查 --subagent 参数（仅 AGENT 支持）
-        if cmd.type == CommandType.AGENT and remainder:
+        # PROMPT / AGENT：检查 --subagent 参数
+        if cmd.type in (CommandType.AGENT, CommandType.PROMPT) and remainder:
             subagent_match = remainder.find("--subagent")
             if subagent_match >= 0:
                 # 解析 --subagent 参数
@@ -377,28 +377,50 @@ class CommandManager:
                     self._parse_subagent_flags(after_subagent)
                 )
 
-                # 找到下一个 -- 参数的位置（从任务描述中分离后续 -- 参数）
-                next_flag_match = re.search(r"(?:^|\s)(--)", text_for_task)
-                if next_flag_match:
-                    split_pos = next_flag_match.start(1)
-                    subagent_task = text_for_task[:split_pos].strip()
-                    remainder_after_subagent = text_for_task[split_pos:].strip()
+                if cmd.type == CommandType.AGENT:
+                    # AGENT 命令：用自己作为子智能体执行
+                    # 找到下一个 -- 参数的位置（从任务描述中分离后续 -- 参数）
+                    next_flag_match = re.search(r"(?:^|\s)(--)", text_for_task)
+                    if next_flag_match:
+                        split_pos = next_flag_match.start(1)
+                        subagent_task = text_for_task[:split_pos].strip()
+                        remainder_after_subagent = text_for_task[split_pos:].strip()
+                    else:
+                        subagent_task = text_for_task.strip()
+                        remainder_after_subagent = ""
+
+                    # 重新组装 remainder
+                    parts = [p for p in (before_subagent, remainder_after_subagent) if p]
+                    remainder = " ".join(parts)
+
+                    return CommandResult(
+                        type=CommandType.SUBAGENT,
+                        command_name=cmd_name,
+                        subagent_task=subagent_task,
+                        subagent_with_context=subagent_with_context,
+                        subagent_model_value=subagent_model_value,
+                        remainder=remainder,
+                    )
                 else:
-                    subagent_task = text_for_task.strip()
-                    remainder_after_subagent = ""
+                    # PROMPT 命令：使用统一任务执行智能体（task-executor）
+                    # 合并所有用户参数（--subagent 之前 + 移除 --with-context/--model= 之后）
+                    user_params_parts = [p for p in (before_subagent, text_for_task) if p]
+                    user_params = " ".join(user_params_parts) if user_params_parts else ""
 
-                # 重新组装 remainder
-                parts = [p for p in (before_subagent, remainder_after_subagent) if p]
-                remainder = " ".join(parts)
+                    # 构造子智能体任务：命令提示词 + 用户参数
+                    task = f"请执行 /{cmd_name} 命令。"
+                    task += f"\n\n命令提示词：\n---\n{cmd.prompt_text}\n---"
+                    if user_params:
+                        task += f"\n\n用户参数：\n{user_params}"
 
-                return CommandResult(
-                    type=CommandType.SUBAGENT,
-                    command_name=cmd_name,
-                    subagent_task=subagent_task,
-                    subagent_with_context=subagent_with_context,
-                    subagent_model_value=subagent_model_value,
-                    remainder=remainder,
-                )
+                    return CommandResult(
+                        type=CommandType.SUBAGENT,
+                        command_name="task-executor",
+                        subagent_task=task,
+                        subagent_with_context=subagent_with_context,
+                        subagent_model_value=subagent_model_value,
+                        remainder="",
+                    )
 
         # 正常的 PROMPT / AGENT 提示词替换
         return CommandResult(

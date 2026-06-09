@@ -22,8 +22,11 @@ function 类型仅使用 frontmatter，内容可为空
 对于 function 类型命令的执行，由 main_widget.py 调用 FunctionCommandHandlers.get(name) 获取处理器。
 """
 
+import json
+import time
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, List, Tuple
+from hashlib import md5
 
 import yaml
 from loguru import logger
@@ -66,6 +69,176 @@ class FunctionCommandHandlers:
     def has(cls, name: str) -> bool:
         """检查是否有该命令的处理器"""
         return name in cls._handlers
+
+
+# ============================================================
+# 解析结果缓存（避免每次启动重解析 60+ .md 文件）
+# ============================================================
+
+_CACHE_VERSION = 1
+_cache_disabled = False  # 调试用，设为 True 跳过缓存
+
+
+def _get_cache_dir() -> Path:
+    """获取缓存目录"""
+    from app.utils.utils import get_app_data_dir
+    cache_dir = get_app_data_dir() / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _get_cache_file() -> Path:
+    return _get_cache_dir() / "commands_cache.json"
+
+
+def _collect_all_source_files() -> List[Tuple[str, float]]:
+    """收集所有命令和智能体文件的 (绝对路径, mtime) 列表
+    
+    用于生成 cache_key：任一文件变更即触发重新解析。
+    """
+    files: List[Tuple[str, float]] = []
+    seen: set = set()
+
+    for src in _get_command_sources():
+        abspath = str(src.resolve())
+        if abspath not in seen:
+            seen.add(abspath)
+            try:
+                mtime = src.stat().st_mtime
+            except OSError:
+                mtime = 0
+            files.append((abspath, mtime))
+
+    for src in _get_agent_files():
+        abspath = str(src.resolve())
+        if abspath not in seen:
+            seen.add(abspath)
+            try:
+                mtime = src.stat().st_mtime
+            except OSError:
+                mtime = 0
+            files.append((abspath, mtime))
+
+    files.sort(key=lambda x: x[0])  # 稳定排序保证一致性
+    return files
+
+
+def _compute_cache_key(files: List[Tuple[str, float]]) -> str:
+    """根据文件路径和修改时间计算缓存 key"""
+    h = md5()
+    h.update(str(_CACHE_VERSION).encode())
+    for path, mtime in files:
+        h.update(f"{path}:{mtime}\n".encode())
+    return h.hexdigest()
+
+
+def _try_load_cache(key: str) -> Optional[dict]:
+    """尝试加载缓存，key 不匹配时返回 None"""
+    if _cache_disabled:
+        return None
+    cache_file = _get_cache_file()
+    if not cache_file.exists():
+        return None
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        if data.get("cache_key") == key:
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _save_cache(key: str, commands: list, agents: list):
+    """保存缓存"""
+    try:
+        data = {
+            "cache_key": key,
+            "version": _CACHE_VERSION,
+            "ts": time.time(),
+            "commands": commands,
+            "agents": agents,
+        }
+        cache_file = _get_cache_file()
+        cache_file.write_text(
+            json.dumps(data, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"[BuiltinCommands] 缓存写入失败: {e}")
+
+
+def _serialize_params(params: list) -> list:
+    """将 CommandParameter 列表序列化为可 JSON 序列化的 dict 列表"""
+    result = []
+    for p in params:
+        if hasattr(p, 'name'):
+            result.append({
+                "name": p.name,
+                "description": getattr(p, 'description', ''),
+                "param_type": getattr(p, 'param_type', 'flag'),
+                "required": getattr(p, 'required', False),
+            })
+        elif isinstance(p, dict):
+            result.append({
+                "name": p.get("name", ""),
+                "description": p.get("description", ""),
+                "param_type": p.get("param_type", "flag"),
+                "required": p.get("required", False),
+            })
+        else:
+            result.append({"name": str(p), "description": "", "param_type": "flag", "required": False})
+    return result
+
+
+def _deserialize_params(params: list) -> list:
+    """从 JSON 反序列化 CommandParameter 列表"""
+    result = []
+    for p in params:
+        result.append(CommandParameter(
+            name=p.get("name", ""),
+            description=p.get("description", ""),
+            param_type=p.get("param_type", "flag"),
+            required=p.get("required", False),
+        ))
+    return result
+
+
+def _register_from_cached_commands(cmd_mgr: CommandManager, cached_commands: list) -> int:
+    """从缓存数据注册命令，返回注册数"""
+    count = 0
+    for cmd in cached_commands:
+        cmd_mgr.register(
+            name=cmd["name"],
+            command_type=_parse_command_type(cmd["type"]),
+            description=cmd.get("description", ""),
+            argument_hint=cmd.get("argument_hint", ""),
+            prompt_text=cmd.get("prompt_text", ""),
+            parameters=_deserialize_params(cmd.get("parameters", [])),
+            shortcut=cmd.get("shortcut", ""),
+        )
+        count += 1
+    return count
+
+
+def _register_from_cached_agents(cmd_mgr: CommandManager, cached_agents: list) -> int:
+    """从缓存数据注册智能体命令，返回注册数"""
+    agent_params = [
+        CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）", required=False),
+        CommandParameter("--with-context", "传递当前会话历史给子智能体", required=False),
+        CommandParameter("--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False),
+        CommandParameter("<task-desc>", "子智能体任务描述", param_type="positional", required=False),
+    ]
+    count = 0
+    for ag in cached_agents:
+        cmd_mgr.register(
+            name=ag["name"],
+            command_type=CommandType.AGENT,
+            description=ag.get("description", ""),
+            prompt_text=ag.get("prompt_text", ""),
+            parameters=agent_params,
+        )
+        count += 1
+    return count
 
 
 # ============================================================
@@ -237,7 +410,11 @@ _registered = False  # 模块级标志，避免多窗口重复注册
 
 
 def register_all_commands():
-    """注册所有内置命令：动态加载 app/commands/ 目录 + agents 目录智能体"""
+    """注册所有内置命令：动态加载 app/commands/ 目录 + agents 目录智能体
+
+    支持缓存加速：首次启动时解析所有 .md 文件并缓存结果，
+    后续启动若文件未变更则直接加载缓存，避免重复 YAML 解析和文件 IO。
+    """
     global _registered
     if _registered:
         return
@@ -248,13 +425,53 @@ def register_all_commands():
     for name in list(cmd_mgr.get_command_names()):
         cmd_mgr.unregister(name)
 
-    # ---- 加载命令：优先从 PluginManager，回退到 app/commands/ ----
+    # ---- 尝试从缓存加载 ----
+    source_files = _collect_all_source_files()
+    cache_key = _compute_cache_key(source_files)
+    cached = _try_load_cache(cache_key)
+
+    if cached is not None:
+        # 缓存命中：直接注册，跳过文件解析
+        cmd_count = _register_from_cached_commands(cmd_mgr, cached.get("commands", []))
+        agent_count = _register_from_cached_agents(cmd_mgr, cached.get("agents", []))
+        logger.info(
+            f"[BuiltinCommands] 缓存命中，注册 {cmd_count} 命令 + {agent_count} 智能体"
+        )
+        _registered = True
+        return
+
+    # ---- 缓存未命中：逐文件解析 ----
+    t0 = time.perf_counter()
     commands = _load_commands_from_plugins(cmd_mgr)
+    agents = _register_builtin_agents_as_commands(cmd_mgr)
+    elapsed = time.perf_counter() - t0
 
-    # ---- 加载智能体命令：优先从 PluginManager，回退到 app/agents/ ----
-    _register_builtin_agents_as_commands(cmd_mgr)
+    logger.info(
+        f"[BuiltinCommands] 解析注册完成: {len(commands)} 命令 + {len(agents)} 智能体 "
+        f"({elapsed*1000:.0f}ms)"
+    )
 
-    logger.info(f"[BuiltinCommands] Registered {len(commands)} commands + agents")
+    # ---- 写回缓存 ----
+    serialized_commands = []
+    for cmd in commands:
+        serialized_commands.append({
+            "name": cmd["name"],
+            "type": cmd["type"],
+            "description": cmd.get("description", ""),
+            "argument_hint": cmd.get("argument_hint", ""),
+            "prompt_text": cmd.get("prompt_text", ""),
+            "parameters": _serialize_params(cmd.get("parameters", [])),
+            "shortcut": cmd.get("shortcut", ""),
+        })
+    serialized_agents = []
+    for ag in agents:
+        serialized_agents.append({
+            "name": ag["name"],
+            "description": ag.get("description", ""),
+            "prompt_text": ag.get("prompt_text", ""),
+        })
+    _save_cache(cache_key, serialized_commands, serialized_agents)
+
     _registered = True
 
 
@@ -269,11 +486,40 @@ def reload_all_commands():
     for name in list(cmd_mgr.get_command_names()):
         cmd_mgr.unregister(name)
 
-    # 重新注册
+    # 重新注册（重新解析 + 更新缓存）
+    t0 = time.perf_counter()
     commands = _load_commands_from_plugins(cmd_mgr)
-    _register_builtin_agents_as_commands(cmd_mgr)
+    agents = _register_builtin_agents_as_commands(cmd_mgr)
+    elapsed = time.perf_counter() - t0
 
-    logger.info(f"[BuiltinCommands] Reloaded {len(commands)} commands + agents")
+    logger.info(
+        f"[BuiltinCommands] Reloaded {len(commands)} commands + {len(agents)} agents "
+        f"({elapsed*1000:.0f}ms)"
+    )
+
+    # 重新生成缓存（写回最新解析结果）
+    source_files = _collect_all_source_files()
+    cache_key = _compute_cache_key(source_files)
+    serialized_commands = []
+    for cmd in commands:
+        serialized_commands.append({
+            "name": cmd["name"],
+            "type": cmd["type"],
+            "description": cmd.get("description", ""),
+            "argument_hint": cmd.get("argument_hint", ""),
+            "prompt_text": cmd.get("prompt_text", ""),
+            "parameters": _serialize_params(cmd.get("parameters", [])),
+            "shortcut": cmd.get("shortcut", ""),
+        })
+    serialized_agents = []
+    for ag in agents:
+        serialized_agents.append({
+            "name": ag["name"],
+            "description": ag.get("description", ""),
+            "prompt_text": ag.get("prompt_text", ""),
+        })
+    _save_cache(cache_key, serialized_commands, serialized_agents)
+
     _registered = True
 
 
@@ -389,12 +635,17 @@ def _generate_tool_restriction_text(meta: dict) -> str:
     return ("\n".join(lines) + "\n\n") if lines else ""
 
 
-def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
-    """加载智能体命令：优先 PluginManager 路径，回退到 app/agents/"""
+def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
+    """加载智能体命令：优先 PluginManager 路径，回退到 app/agents/
+    
+    Returns:
+        已注册的智能体元数据列表，供缓存使用
+    """
     agent_files = _get_agent_files()
+    registered: List[dict] = []
     if not agent_files:
         logger.warning("[BuiltinCommands] No agent files found from any source")
-        return
+        return registered
 
     # 所有智能体命令共享的参数定义
     agent_params = [
@@ -440,9 +691,16 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager):
             )
             logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
                         f"{' (with tool restrictions)' if restriction_text else ''}")
+            registered.append({
+                "name": md_file.stem,
+                "description": description,
+                "prompt_text": enhanced_body,
+            })
 
         except Exception as e:
             logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")
+
+    return registered
 
 
 # ============================================================

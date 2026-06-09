@@ -1511,7 +1511,7 @@ class AttachmentChip(QFrame):
 
         self._label = QLabel(name, self)
         self._label.setStyleSheet(
-            f"color: {Colors.INPUT_TEXT}; font-size: 12px; background: transparent; border: none; padding: 0;"
+            f"color: {Colors.INPUT_TEXT}; {get_font_family_css()} {font_size_css(12)} background: transparent; border: none; padding: 0;"
         )
         layout.addWidget(self._label)
 

@@ -2,8 +2,9 @@
 description: 深度网络研究，支持快速查询与多跳调研，自动降级到 DriFox 原生 Web 工具
 type: prompt
 argument-hint:
-  "[--quick]": "快速模式：1 次搜索 + 至多 1 次抓取"
-  "[--deep]": "深度模式：3-5 跳多源调研 + TodoWrite 追踪"
+  "[--quick]": "快速模式：1 次搜索 + 至多 1 次抓取（事实查询、定义）"
+  "[--thorough]": "深度模式：3 跳多源调研 + TodoWrite 追踪（多源验证、对比分析）"
+  "[--deep]": "极深模式：5 跳多源调研 + 主题漂移监测（学术综述、技术深挖）"
   "[--html]": "HTML 报告模式：输出为带统一样式的 HTML 报告（配合 --save-to 使用）"
   "[--save-to=]": "指定报告输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）"
   "<query>": "研究主题（必填，搜索关键词或自然语言问题）"
@@ -15,11 +16,12 @@ argument-hint:
 
 `$ARGUMENTS` 是用户输入的完整字符串（不含 `/research` 前缀）。
 
-| 模式 | 行为 | 适用场景 |
-|------|------|----------|
-| `--quick` | 单次 `search_web` + 至多 1 次 `fetch_web` 深入 | 事实查询、定义、API 用法 |
-| `--deep` | `todo_write` 3-5 任务规划 → 多次 `search_web` 并行 → 选择性 `fetch_web` → 综合分析 | 概念对比、趋势分析、技术选型 |
-| 无标志 | 默认 `--quick` | 兼容性好 |
+| 模式 | 行为 | 抓取预算 | 适用场景 |
+|------|------|----------|----------|
+| `--quick` | 1 跳：单次 `search_web` + 至多 1 次 `fetch_web` 深入 | ≤1 页 | 事实查询、定义、API 用法 |
+| `--thorough` | 3 跳：`todo_write` 3-5 任务规划 → 1 次 `search_web` 选种 → 2 跳链接发现 + 抓取 | ≤6 页 | 多源验证、对比分析 |
+| `--deep` | 5 跳：同上 + 4 跳链接发现 + 抓取 + 主题漂移监测 | ≤15 页 | 学术综述、技术深挖、争议性主题 |
+| 无标志 | 默认 `--quick` | ≤1 页 | 兼容性好 |
 
 - **`<query>`** 是 `$ARGUMENTS` 中去掉所有 `--flag` 后的剩余文本
 - **`--save-to=PATH`** 自定义输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）
@@ -381,6 +383,82 @@ body{
   .callout strong{color:inherit}
 }
 
+/* ===== 探索路径（Deep/Thorough 模式） ===== */
+.exploration-path{
+  margin-top:2.75rem;
+  padding-top:2rem;
+  border-top:1px solid #ececec;
+}
+.path-stats{
+  display:flex;flex-wrap:wrap;gap:.5rem;
+  margin:1rem 0 1.5rem;
+}
+.path-stats .stat{
+  display:inline-flex;align-items:center;
+  padding:.4rem .9rem;
+  background:#ecfdf5;
+  border:1px solid #a7f3d0;
+  border-radius:999px;
+  font-size:.82rem;
+  color:#064e3b;
+  font-weight:500;
+}
+.path-stats .stat strong{
+  color:#047857;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+  margin:0 .15rem;
+}
+.hop-timeline{
+  list-style:none;padding:0;
+  position:relative;
+  padding-left:2.5rem;
+}
+.hop-timeline::before{
+  content:"";position:absolute;
+  left:.9rem;top:.5rem;bottom:.5rem;
+  width:2px;
+  background:linear-gradient(180deg,#10b981 0%,#6366f1 100%);
+}
+.hop-timeline > li{
+  position:relative;
+  margin-bottom:1.5rem;
+  padding-bottom:1.5rem;
+  border-bottom:1px dashed #e5e5e5;
+}
+.hop-timeline > li:last-child{
+  margin-bottom:0;padding-bottom:0;border-bottom:none;
+}
+.hop-num{
+  position:absolute;left:-2.5rem;top:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:1.85rem;height:1.85rem;
+  background:linear-gradient(135deg,#10b981 0%,#059669 100%);
+  color:#fff;
+  border-radius:50%;
+  font-size:.78rem;font-weight:700;
+  box-shadow:0 2px 6px rgba(16,185,129,.3);
+  z-index:1;
+}
+.hop-action{
+  display:block;
+  font-size:.85rem;font-weight:600;
+  color:#0a0a14;
+  margin-bottom:.55rem;
+}
+.hop-timeline ul{
+  list-style:none;padding:0;margin:0;
+  display:flex;flex-direction:column;gap:.4rem;
+}
+.hop-timeline ul li{
+  font-size:.88rem;color:#40414a;
+  padding:.5rem .75rem;
+  background:#f8fafc;
+  border-radius:6px;
+  border-left:2px solid #10b981;
+}
+.hop-timeline ul li::before{content:none}
+
 /* ===== 打印样式（导出 PDF 友好） ===== */
 @media print{
   body{background:#fff;padding:0}
@@ -437,6 +515,14 @@ body{
 - `⚠️ 推断` → `<div class="callout callout-infer"><strong>🔮 推断</strong><p>...</p></div>`
 - 普通 `[事实](url)` → `<a href="url">事实</a>` 紧跟 `<sup class="source-tag">源</sup>`
 - Deep 模式的 todo 追踪 → `<div class="todo-track">...</div>`
+- Deep/Thorough 模式的「探索路径」 → `<section class="exploration-path">` 包裹：
+  - 标题用 `<h2>🔍 探索路径</h2>`
+  - 统计区用 `<div class="path-stats">` 含 4 个 `<span class="stat">`
+  - 遍历轨迹用 `<ol class="hop-timeline">`，每跳是 `<li>`：
+    - 跳数徽章 `<span class="hop-num">跳 N</span>`
+    - 跳说明 `<span class="hop-action">...</span>`
+    - 抓取页面列表 `<ul><li><a>...</a> → 关键信息: ...</li></ul>`
+  - 触发漂移停止时，附加 `<blockquote>` 用 ⚠ 标记
 
 ### 3. 工具后端降级策略
 
@@ -462,25 +548,163 @@ body{
 4. 如未指定 --save-to，提供写入建议
 ```
 
-### 5. Deep 模式流程
+### 5. Deep / Thorough 模式流程（多跳链接遍历）
+
+**所有跳的共性规则**：
 
 ```
-1. todo_write(规划 3-5 个并行子任务)：
-   例：["搜集核心概念定义", "搜集最新 2026 实践", "搜集对比方案", "搜集反例/陷阱"]
-2. 对每个子任务并行 search_web（一次性 3-5 个调用）
-3. 评估结果质量：
-   - 关键来源（政府/官方/学术）→ fetch_web 深读
-   - 低权威来源 → 仅引用 snippet
-4. 二次搜索（可选）：发现信息缺口时补搜 1-2 次
-5. 综合分析，输出报告
-6. 写入 --save-to 指定的路径，或默认路径
-   - 目录不存在则用 create_dir 工具创建（或 write_file 触发自动创建）
-   - 使用 write_file 工具
-   - 指定 --html 时，文件扩展名为 .html，内容使用下方 HTML 模板渲染
-   - 未指定 --html 时，文件扩展名为 .md，输出 Markdown 格式
+- 同跳内多个 fetch_web 可以并行调用（节省时间）
+- 跳间必须串行（跳 N 的目标选择依赖跳 N-1 的抓取内容）
+- 每跳上限 3 页（thorough 共 3 跳、deep 共 5 跳）
+- 总抓取预算：thorough ≤6 页、deep ≤15 页
+- 抓取预算耗尽、候选池为空、主题漂移超 60% — 任一触发即停止遍历进入综合
 ```
 
-### 6. 证据与不确定性
+**阶段 A：规划**（仅 deep / thorough）
+
+```
+1. 解析 $ARGUMENTS，识别 --deep / --thorough / --html / --save-to / query
+2. todo_write([3-5 个子主题规划]):
+   例：
+   - "子主题1: 核心概念定义"
+   - "子主题2: 最新 2026 实践"
+   - "子主题3: 对比方案"
+   - "子主题4: 反例/陷阱"
+   - "[探索图] 主题聚焦: <query>"
+   - "[探索图] 已抓: []"
+   - "[探索图] 待抓: []"
+   - "[探索图] 主题偏离度: 0%"
+   - "[跳1] 选 3 个种子（来自 search_web top 10）"
+   - "[跳2] 评估候选池 + 选 3 个"
+   - "[跳3] 评估候选池 + 选 3 个"
+   - "[跳4] 评估候选池 + 选 3 个"（仅 deep）
+   - "[跳5] 评估候选池 + 选 3 个"（仅 deep）
+   - "[综合] 写报告 + 探索路径"
+3. search_web(query, num_results=10) → 拿到 top 10 个种子 URL
+4. LLM 从 top 10 选 3 个进入跳 1（按来源权威性 + 与 query 相关性）
+```
+
+**阶段 B：跳 1（种子抓取）**
+
+```
+5. 并行 fetch_web(url1), fetch_web(url2), fetch_web(url3) ← 跳 1 可以并行
+6. 从 3 个页面 markdown 中正则提取所有 [text](url) 形式的链接 → 候选池
+7. 输出实时进度（见第 6 节格式）:
+   "✓ 跳 1/5 · 已抓 3 页 · 发现 47 个候选链接"
+8. todo_write 更新探索图：已抓列表 + 待抓列表（从候选池筛 top 3）
+```
+
+**阶段 C：跳 2-N（链接发现 + 抓取，每跳流程相同）**
+
+```
+9.  LLM 应用硬规则过滤候选池（见第 5.1 节）
+10. LLM 自主决策选 top 3（见第 5.2 节引导 prompt）
+11. todo_write 更新探索图
+12. 并行 fetch_web 选中的 3 个
+13. 提取新链接 → 加入候选池
+14. LLM 自评主题偏离度（见第 5.3 节）
+15. 输出实时进度
+16. 偏离度 > 60% → 跳到阶段 D
+    偏离度 30-60% → todo 标注 "⚠ 主题漂移警告"，继续下一跳
+    偏离度 < 30% → 继续下一跳
+17. 跳完最后一跳 / 预算耗尽 / 漂移停止 → 阶段 D
+```
+
+**阶段 D：综合 + 写报告**
+
+```
+18. 综合所有抓取页面写主体报告（执行摘要 / 主体发现 / 引用源 / 不确定性）
+19. 追加「探索路径」章节（见第 7、8 节）
+20. --save-to 写入指定路径或默认 docs/research/research_<topic>_<ts>.{md,html}
+21. --html 时使用统一 HTML 模板渲染
+```
+
+#### 5.1 链接选择硬规则（必须执行，顺序应用）
+
+```
+硬规则 1 — 去重:
+  剔除所有已抓过的 URL（跨跳记忆，状态在 todo 中维护）
+
+硬规则 2 — 域名限频:
+  同一 apex domain 最多保留 2 个未抓 URL
+  例：抓了 example.com/a 后，example.com/b 仍可抓，example.com/c 被剔除
+
+硬规则 3 — 模式过滤:
+  剔除以下模式:
+  - *.pdf, *.zip, *.docx, *.doc, *.xlsx, *.pptx
+  - mailto:*, javascript:*, tel:*
+  - 纯 #anchor 链接（fragment-only）
+  - 包含 "login", "signup", "logout", "cart", "checkout" 的 URL
+
+硬规则 4 — 路径深度限制:
+  URL 路径段（按 / 分割）≤ 5
+  例：/a/b/c 允许，/a/b/c/d/e/f 拒绝
+  理由：过深的 URL 往往是搜索页、分页、无限滚动
+
+硬规则 5 — 关键词匹配（候选池超限时）:
+  若过滤后候选池仍 > 15 个，保留:
+  a) 最近一跳页面中提及的链接（出现位置越靠前越优先）
+  b) 与原始 query 共享 ≥2 个关键词的链接
+  仍超限则按 (a) 截断
+```
+
+#### 5.2 LLM 自主决策引导 prompt
+
+在硬规则过滤后的池子里调用 LLM：
+
+```
+"从以下候选链接中选 3 个最值得下一跳抓取的。
+ 评判标准（按优先级）:
+ 1. 与原始主题『{query}』的相关性（最优先）
+ 2. 是否包含其他来源未覆盖的独特视角/数据/案例
+ 3. 来源权威性（学术/官方/一线工程师博客 > 聚合站/营销内容）
+ 4. 内容深度（深度文章 > 列表/科普）
+
+ 选完后对每个 URL 写一句『关键信息』，用于报告「探索路径」章节。
+ 关键信息格式: 这个页面会贡献什么当前未覆盖的内容（10-30 字）。"
+```
+
+#### 5.3 主题漂移监测
+
+```
+每跳完成后，LLM 自评:
+  偏离度 = (本跳新学到的内容中与原始 query 弱相关的内容比例) × 100
+
+阈值:
+  < 30%：  正常推进
+  30-60%： 在 todo 中标注「⚠ 主题漂移警告，下一跳收紧选择标准」并继续
+  > 60%：  停止遍历，跳到阶段 D 写报告，报告「探索路径」末尾说明:
+           "在跳 N 触发主题漂移上限（{实际偏离度}%）。
+            已学到的核心信息: X, Y, Z。
+            未深入的子主题: A, B（如需可重新查询）。"
+
+漂移评估是 LLM 自评，不是硬计算，因为「相关性」本质是语义判断。
+```
+
+### 6. 实时进度输出格式（仅 deep / thorough）
+
+quick 模式不输出（避免噪音）。deep / thorough 模式在每跳完成后立即输出当前进度（不进最终报告）：
+
+```
+[Deep 模式 · 5 跳研究] 主题: RAG vs Fine-tuning 选型
+  ✓ 跳 1/5 · 已抓 3 页 · 发现 47 个候选链接
+  ✓ 跳 2/5 · 已抓 6 页 · 发现 23 个候选链接 · 主题偏离度 12%
+  ⚠ 跳 3/5 · 已抓 9 页 · 发现 12 个候选链接 · 主题偏离度 38% (警告：已收紧选择)
+  ○ 跳 4/5 · 进行中...
+  ✓ 跳 5/5 · 已抓 14 页 · 主题偏离度 18% · 触发综合阶段
+```
+
+**符号约定**：
+- `✓` 完成且无警告
+- `⚠` 完成但有漂移警告
+- `○` 进行中
+- `✗` 该跳全部抓取失败
+
+**触发条件**：
+- 每跳 fetch_web 全部返回后立即输出
+- 漂移 >60% 触发停止时，最后一行用 `✗ 停止：主题漂移超限 (67%)`
+
+### 7. 证据与不确定性
 
 **每个事实陈述必须带源 URL**。**没有源就不写。**
 
@@ -494,7 +718,7 @@ body{
 ⚠️ 推断：基于 [...上下文...]，可能结论为 [...](理由)
 ```
 
-### 7. 输出格式
+### 8. 输出格式
 
 **Quick 模式**（直接回复）：
 
@@ -542,6 +766,29 @@ HTML 内容遵循统一风格模板：
 ## 引用源
 1. ...
 
+## 🔍 探索路径
+
+**总抓取**: 14 页 | **完成跳数**: 5/5 | **主题偏离度**: 18% | **耗时**: 4m 12s
+
+### 遍历轨迹
+
+**跳 1** — 从 search_web 选 3 个种子
+- [a.com/article-1](url) → 关键信息: RAG 的 3 个核心优势
+- [b.org/paper-2](url) → 关键信息: Fine-tuning 的算力成本
+- [c.io/blog-3](url) → 关键信息: 2026 年新趋势 hybrid 方案
+
+**跳 2** — 基于跳 1 候选池选 3 个
+- [d.com/post-4](url) → 关键信息: ...
+- [e.org/article-5](url) → 关键信息: ...
+- [f.io/blog-6](url) → 关键信息: ...
+
+**跳 3** — ...
+- ...
+
+（如触发漂移停止，附加）:
+> ⚠ 在跳 3 触发主题漂移上限（67%），已停止遍历。
+> 已学到的核心信息: X, Y, Z。未深入的子主题: A, B（如需可重新查询）。
+
 ## 不确定性
 - [已知不知道的]
 ```
@@ -552,20 +799,34 @@ HTML 内容遵循统一风格模板：
 - `## 主体发现` → `<h2>主体发现</h2>`，子节使用 `<h3>`
 - 每个 `[事实](url)` → `<a href="url">事实</a><sup class="source-tag">源</sup>`
 - `## 引用源` → `<h2>引用源</h2>` + `<ul class="ref-list">`
+- `## 🔍 探索路径` → `<section class="exploration-path">`（见第 2 节追加的转换规则）
+- 跳数徽章、统计 pill、timeline 列表：按 CSS 类名对应渲染
 - `## 不确定性` → `<div class="callout callout-uncertainty">`
 - `⚠️ 推断` → `<div class="callout callout-infer">`
 - Todo 追踪信息 → `<div class="todo-track">`（如有）
 
-### 8. 边界
+### 9. 边界
 
 **会做**：
 - 主动降级到现有可用工具
 - 为每个事实附来源
 - 尊重用户指定的输出路径
 - 用 `todo_write` 跟踪 deep 模式任务
+- 严格遵守每跳 ≤3 页、总抓取预算（thorough 6、deep 15）
+- 任何 fetch_web 失败不静默吞掉，要在 todo 和报告中可见
+- 主题漂移警告必须在 todo 和报告「探索路径」中都体现
+- thorough / deep 模式必带「探索路径」章节
+- 引用源数量在 thorough / deep 模式无上限（来自实际抓取的页面）
+- quick 模式行为完全保持现状（不输出探索路径、不维护 todo 探索图）
 
 **不会做**：
 - 在没有源的情况下编造数据
 - 执行搜索以外的副作用（除非用户明确 --save-to）
 - 反复重试失败的搜索（最多 2 次补搜）
 - 修改项目代码、运行构建、提交 Git
+- 不在 deep 模式中并行 search_web 多个 query（保持 1 次 search + 多跳抓的范式）
+- 不抓 PDF/视频/播客（只抓 HTML）
+- 不主动翻墙/绕开反爬
+- 不在没抓到任何内容时"编造"——直接报错退出
+- 不修改 quick 模式的核心行为（1 跳逻辑保持现状）
+- 不引入新的工具（仍只用 search_web / fetch_web / todo_write / write_file）

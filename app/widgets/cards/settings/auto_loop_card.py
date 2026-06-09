@@ -399,6 +399,9 @@ class AutoLoopRunningCard(QFrame):
         # 当前阶段：planning / executing / completed
         self._current_phase = "preparing"
 
+        # 声明跳过容器展开/折叠动画（自带彩虹动画，避免容器动画抖动）
+        self.setProperty("noContainerAnimation", True)
+
         self._build_ui()
 
     def _refresh_theme_style(self):
@@ -478,7 +481,7 @@ class AutoLoopRunningCard(QFrame):
             background: rgba(0,0,0,0.15);
             border-radius: 6px;
         """)
-        self._task_label.setWordWrap(False)
+        self._task_label.setWordWrap(True)
         layout.addWidget(self._task_label)
 
         # ---- 信息区（两行布局）----
@@ -488,21 +491,9 @@ class AutoLoopRunningCard(QFrame):
         status_layout.setContentsMargins(12, 10, 12, 10)
         status_layout.setSpacing(8)
 
-        # 第一行：迭代 | 耗时 | Token + 进度条 + 百分比
+        # 第一行：耗时 | Token + 进度条 + 百分比
         row1 = QHBoxLayout()
         row1.setSpacing(20)
-
-        # 迭代
-        iter_w = QWidget()
-        iter_layout = QHBoxLayout(iter_w)
-        iter_layout.setContentsMargins(0, 0, 0, 0)
-        iter_layout.setSpacing(6)
-        iter_layout.addWidget(QLabel("📚"))
-        self._iter_label = QLabel("0 / 0")
-        Colors.refresh()
-        self._iter_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
-        iter_layout.addWidget(self._iter_label)
-        row1.addWidget(iter_w)
 
         # 耗时
         time_w = QWidget()
@@ -671,18 +662,20 @@ class AutoLoopRunningCard(QFrame):
                 self._time_label.setText(f"{m}分{s}秒")
 
     def append_log(self, text: str):
-        """追加一行日志到可视化区域（单行滚动）"""
+        """追加一行日志到可视化区域（单行滚动，带时间戳）"""
         timestamp = time.strftime("%H:%M:%S")
         self._log_label.setText(f"[{timestamp}] {text}")
         self._log_label.repaint()
 
+    def update_log(self, text: str):
+        """流式更新日志内容（不添加时间戳，用于实时内容预览）"""
+        self._log_label.setText(text)
+        self._log_label.repaint()
+
     def set_task(self, task: str):
-        """设置任务目标显示（显示前60字）"""
+        """设置任务目标显示（完整显示，自动换行）"""
         if task:
-            preview = task[:60]
-            if len(task) > 60:
-                preview += "..."
-            self._task_label.setText(f"🎯 {preview}")
+            self._task_label.setText(f"🎯 {task}")
         else:
             self._task_label.setText("🎯 <未设置>")
 
@@ -728,15 +721,12 @@ class AutoLoopRunningCard(QFrame):
         注意：token 更新由 update_tokens() 专门处理，避免竞争条件导致显示被覆盖。
         这个方法只更新迭代、时间、状态。
         """
-        iteration = progress.get("iteration", 0)
-        max_iter = progress.get("max_iterations", 0)
         elapsed = progress.get("elapsed_str", "0秒")
         state = progress.get("state", "")
         current_step = progress.get("current_step", 0)
         total_steps = progress.get("total_steps", 0)
         phase = progress.get("phase", "")
 
-        self._iter_label.setText(f"{iteration} / {max_iter}")
         self._time_label.setText(elapsed)
         if total_steps > 0:
             self._step_label.setText(f"步骤 {current_step}/{total_steps}")
@@ -750,7 +740,7 @@ class AutoLoopRunningCard(QFrame):
             self._phase_label.setText(phase_text[phase])
 
         if state == "running":
-            self._status_label.setText(f"▶ 第 {iteration} 轮进行中...")
+            self._status_label.setText("▶ 进行中...")
         elif state == "completed":
             self._status_label.setText("✅ 已完成")
         elif state == "stopped":

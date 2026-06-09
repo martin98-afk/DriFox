@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import List, Dict, Set
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QFileSystemWatcher
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -26,7 +26,7 @@ from app.utils.design_tokens import Colors, font_size_css
 
 
 ITEM_HEIGHT = 36
-MAX_VISIBLE_ITEMS = 10
+MAX_VISIBLE_ITEMS = 8
 
 
 class FileMentionItemWidget(QWidget):
@@ -155,12 +155,39 @@ class FileMentionItemWidget(QWidget):
             }}
         """)
 
+    @staticmethod
+    def _all_highlight_queries(text: str, query: str) -> List[str]:
+        """从多关键字 query 中提取所有能匹配到 text 的关键字
+
+        返回列表可用于 _ElidedLabel.setHighlights()。
+        """
+        if not query or not text:
+            return []
+        text_lower = text.lower()
+        found = []
+        # 先找完整 query
+        if query.lower() in text_lower:
+            found.append(query)
+            return found
+        # 按 | & 拆解
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            for and_part in or_term.split('&'):
+                and_part = and_part.strip()
+                if and_part and and_part.lower() in text_lower and and_part not in found:
+                    found.append(and_part)
+        return found
+
     def _update_display(self):
-        """更新路径显示（_ElidedLabel 自动处理省略，含搜索高亮）"""
+        """更新路径显示（_ElidedLabel 自动处理省略，含多关键字高亮）"""
         rel = self._data.get("relative_path", "")
         self._path_label.setText(rel)
         if self._query:
-            self._path_label.setHighlight(self._query, Colors.SEND_BTN_START)
+            hls = self._all_highlight_queries(rel, self._query)
+            if hls:
+                self._path_label.setHighlights(hls, Colors.SEND_BTN_START)
 
     def update_data(self, file_data: Dict[str, str], query: str):
         """更新 widget 数据并刷新显示（用于回收复用）
@@ -221,7 +248,25 @@ class FileMentionCard(QWidget):
         self._root_dir: str = ""
         self._file_cache: List[Dict[str, str]] = []
         self._cache_dirty = True
+        self._gitignore_patterns: List[str] = []  # .gitignore 模式缓存
         self._async_pending = False  # 异步扫描进行中标志，防重复调度
+        self._last_query = ""  # 上次过滤的 query，用于增量剪枝
+
+        # ---- 文件系统监视器：本地新增/删除文件时自动标记缓存失效 ----
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_directory_changed)
+        self._watched_dirs: Set[str] = set()
+        self._scanning = False  # 扫描进行中标志，防止自身扫描触发目录变化信号
+
+        # ---- 目录快照：记录每个目录下的文件名集合，用于增量 diff ----
+        self._dir_snapshots: Dict[str, Set[str]] = {}
+
+        # ---- 增量更新防抖计时器：合并连续文件系统事件 ----
+        self._incr_timer = QTimer(self)
+        self._incr_timer.setSingleShot(True)
+        self._incr_timer.setInterval(200)  # 200ms 覆盖 IDE 批量创建/删除
+        self._incr_timer.timeout.connect(self._do_incremental_update)
+        self._changed_dirs: Set[str] = set()
 
         # ---- 防抖计时器：合并连续快速敲键的筛选调用 ----
         self._filter_timer = QTimer(self)
@@ -305,6 +350,195 @@ class FileMentionCard(QWidget):
         if root_dir != self._root_dir:
             self._root_dir = root_dir
             self._cache_dirty = True
+            self._update_fs_watcher()
+
+    def _update_fs_watcher(self):
+        """重置文件系统监视器：移除旧路径，监视新根目录
+
+        切换项目/根目录时，同时清理旧快照和监视器，避免累积泄漏。
+        """
+        if self._watched_dirs:
+            self._fs_watcher.removePaths(list(self._watched_dirs))
+            self._watched_dirs.clear()
+        self._dir_snapshots.clear()
+        if self._root_dir and os.path.isdir(self._root_dir):
+            self._watched_dirs.add(self._root_dir)
+            self._fs_watcher.addPath(self._root_dir)
+
+    def _on_directory_changed(self, path: str):
+        """目录内容变化 → 收集变化目录，启动防抖定时器，到期后增量更新缓存
+
+        排除自身扫描期间触发的信号（某些平台 os.scandir 读目录时可能触发事件）。
+        """
+        if self._scanning:
+            return
+        self._changed_dirs.add(path)
+        self._incr_timer.start()
+
+    def _do_incremental_update(self):
+        """防抖定时器超时后执行增量更新：处理所有累积的变化目录"""
+        dirs = self._changed_dirs.copy()
+        self._changed_dirs.clear()
+
+        if not self._root_dir or not os.path.isdir(self._root_dir):
+            return
+
+        any_change = False
+        for d in dirs:
+            if self._incremental_update_one(d):
+                any_change = True
+
+        if any_change:
+            self._sort_file_cache()
+            # 如果卡片当前可见，即时刷新显示
+            if self._visible:
+                self.load_items(self._current_query)
+
+    def _get_rel_prefix(self, abs_path: str) -> str:
+        """根据根目录计算绝对路径对应的相对路径前缀"""
+        if not self._root_dir:
+            return ""
+        try:
+            rel = os.path.relpath(abs_path, self._root_dir)
+            if rel == ".":
+                return ""
+            return rel.replace("\\", "/")
+        except ValueError:
+            return ""
+
+    def _sort_file_cache(self):
+        """重新排序文件缓存（目录优先，同名不区分大小写）"""
+        self._file_cache.sort(
+            key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower())
+        )
+
+    def _incremental_update_one(self, changed_dir: str) -> bool:
+        """增量处理单个变化目录：diff 快照后增删缓存条目
+
+        返回 True 表示有实际变化（新增或删除），False 表示无变化。
+        """
+        old_names = self._dir_snapshots.get(changed_dir, set())
+        rel_prefix = self._get_rel_prefix(changed_dir)
+        new_names: Set[str] = set()
+        changed = False
+
+        try:
+            with os.scandir(changed_dir) as it:
+                for entry in it:
+                    name = entry.name
+                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+
+                    if self._is_ignored(rel, is_dir, self._gitignore_patterns):
+                        continue
+
+                    new_names.add(name)
+
+                    if name not in old_names:
+                        # ---- 新增条目 ----
+                        item = {
+                            "name": name,
+                            "path": entry.path,
+                            "relative_path": rel,
+                            "type": "dir" if is_dir else "file",
+                        }
+                        self._file_cache.append(item)
+                        changed = True
+
+                        if is_dir:
+                            # 新目录：递归扫描子文件 + 注册监视
+                            self._incremental_scan_new_dir(entry.path, rel)
+        except (PermissionError, FileNotFoundError, OSError):
+            # 目录可能已被删除
+            new_names = set()
+
+        # ---- 删除条目 ----
+        removed = old_names - new_names
+        for name in removed:
+            rel = f"{rel_prefix}/{name}" if rel_prefix else name
+            # 移除缓存中以此路径为前缀的所有条目
+            prefix = rel if rel.endswith("/") else rel + "/"
+            before = len(self._file_cache)
+            self._file_cache = [
+                item for item in self._file_cache
+                if item["relative_path"] != rel
+                and not item["relative_path"].startswith(prefix)
+            ]
+            if len(self._file_cache) < before:
+                changed = True
+
+            # 清理快照和监视器
+            self._cleanup_deleted_path(rel)
+
+        # 更新快照
+        self._dir_snapshots[changed_dir] = new_names
+        return changed
+
+    def _incremental_scan_new_dir(self, dirpath: str, rel_prefix: str):
+        """递归扫描新创建的目录：填满缓存、快照、监视器
+
+        与 _scan_dir 一致地用 max_items=500 防止大目录导致缓存膨胀失控。
+        """
+        # 注册监视器
+        if dirpath not in self._watched_dirs:
+            self._watched_dirs.add(dirpath)
+            self._fs_watcher.addPath(dirpath)
+
+        # 记录快照
+        max_items = 2000
+        names: Set[str] = set()
+        try:
+            with os.scandir(dirpath) as it:
+                for entry in it:
+                    if len(self._file_cache) >= max_items:
+                        break
+
+                    name = entry.name
+                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+
+                    if self._is_ignored(rel, is_dir, self._gitignore_patterns):
+                        continue
+
+                    names.add(name)
+                    item = {
+                        "name": name,
+                        "path": entry.path,
+                        "relative_path": rel,
+                        "type": "dir" if is_dir else "file",
+                    }
+                    self._file_cache.append(item)
+
+                    if is_dir:
+                        self._incremental_scan_new_dir(entry.path, rel)
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        self._dir_snapshots[dirpath] = names
+
+    def _cleanup_deleted_path(self, rel_path: str):
+        """清理已删除路径相关的快照和监视器"""
+        prefix = rel_path if rel_path.endswith("/") else rel_path + "/"
+        # 清理快照
+        keys_to_remove = []
+        for watched_path in list(self._dir_snapshots):
+            # 用 _get_rel_prefix 判断是否在已删除路径下
+            item_rel = self._get_rel_prefix(watched_path)
+            if item_rel == rel_path or item_rel.startswith(prefix):
+                keys_to_remove.append(watched_path)
+        for k in keys_to_remove:
+            del self._dir_snapshots[k]
+
+        # 清理监视器
+        watcher_paths_to_remove = []
+        for wp in list(self._watched_dirs):
+            wp_rel = self._get_rel_prefix(wp)
+            if wp_rel == rel_path or wp_rel.startswith(prefix):
+                watcher_paths_to_remove.append(wp)
+        if watcher_paths_to_remove:
+            self._fs_watcher.removePaths(watcher_paths_to_remove)
+            for wp in watcher_paths_to_remove:
+                self._watched_dirs.discard(wp)
 
     def invalidate_cache(self):
         """使缓存失效，下次 show 时重建"""
@@ -326,13 +560,39 @@ class FileMentionCard(QWidget):
         if self._cache_dirty:
             QTimer.singleShot(0, self._scan_files)
 
-    # 总是忽略的目录名（不区分大小写匹配）
+    # 总是忽略的目录名（不区分大小写精确匹配）
     _IGNORED_DIRS: Set[str] = {
         '.git', '.idea', '.vscode', '.venv', 'venv', 'env',
         '__pycache__', 'build', 'dist', 'node_modules',
         '.svn', '.hg', '.bzr',
         '.mypy_cache', '.pytest_cache', '.ruff_cache',
         '.drifox',  # 项目数据目录
+        # 构建输出目录
+        'target',  # Rust cargo build
+        'bin', 'obj',  # C#/.NET 构建
+        # 前端框架构建缓存
+        '.next', '.nuxt',
+        # 基础设施构建缓存
+        '.serverless', '.terraform',
+        # 测试覆盖率报告
+        'coverage', 'htmlcov', '.coverage',
+        # 日志/临时文件
+        'logs', 'log', 'tmp', 'temp',
+        # 第三方依赖目录
+        'vendor',  # Go/PHP
+        'Pods',    # CocoaPods
+        'Carthage',  # Carthage
+        '.gradle',  # Gradle 缓存
+        # Python 测试
+        '.tox',
+        # Python 包目录
+        'site-packages', 'lib', 'lib64',
+    }
+
+    # 模糊匹配忽略的目录模式（fnmatch 通配符，不区分大小写）
+    _IGNORED_DIR_PATTERNS: Set[str] = {
+        '*venv*',        # 匹配 venv, .venv, myvenv, venv38, .venv38 等虚拟环境目录
+        '*.egg-info*',   # Python egg-info 元数据目录
     }
 
     # 总是忽略的扩展名
@@ -340,6 +600,56 @@ class FileMentionCard(QWidget):
         '.pyc', '.pyo', '.so', '.dll', '.dylib',
         '.egg-info', '.whl',
     }
+
+    @staticmethod
+    def _fuzzy_match(text: str, query: str) -> bool:
+        """fuzzy 匹配：query 的字符按顺序出现在 text 中即可
+
+        例如 "rqrmnts" 可匹配 "requirements" → r→q→r→m→n→t→s 均在 "requirements" 中按序出现。
+        适用于拼写不精确但字符顺序正确的场景。
+        """
+        q_idx = 0
+        q_len = len(query)
+        for ch in text:
+            if ch == query[q_idx]:
+                q_idx += 1
+                if q_idx == q_len:
+                    return True
+        return False
+
+    @staticmethod
+    def _score_item(item: Dict[str, str], query: str) -> int:
+        """根据匹配质量对单个 item 评分，0 表示不匹配
+
+        得分梯度（确保唯一语义层级）：
+          100 = 完全匹配
+          80  = 文件名前缀匹配
+          60  = 文件名子串匹配
+          55  = 路径子串匹配（优先级低于文件名子串）
+          40  = 文件名 fuzzy 匹配
+          35  = 路径 fuzzy 匹配
+          0   = 不匹配
+        """
+        name_lower = item["name"].lower()
+        rel_lower = item["relative_path"].lower()
+
+        # 完全一致
+        if query == name_lower:
+            return 100
+        # 前缀匹配
+        if name_lower.startswith(query):
+            return 80
+        # 子串匹配（文件名优先于完整路径）
+        if query in name_lower:
+            return 60
+        if query in rel_lower:
+            return 55
+        # fuzzy 匹配
+        if FileMentionCard._fuzzy_match(name_lower, query):
+            return 40
+        if FileMentionCard._fuzzy_match(rel_lower, query):
+            return 35
+        return 0
 
     @staticmethod
     def _parse_gitignore(root: Path) -> List[str]:
@@ -374,18 +684,26 @@ class FileMentionCard(QWidget):
         """检查相对路径是否被忽略
 
         规则：
-        1. 检查是否命中 always-ignored 目录名
-        2. 检查是否命中 always-ignored 扩展名
-        3. 检查 .gitignore 模式
+        1. 检查是否命中 always-ignored 目录名（精确匹配）
+        2. 检查是否命中 always-ignored 目录模式（fnmatch 通配符匹配）
+        3. 检查是否命中 always-ignored 扩展名
+        4. 检查 .gitignore 模式
         """
         path_parts = rel_path.replace('\\', '/').split('/')
         name = path_parts[-1]
         name_lower = name.lower()
 
-        # 1. 始终忽略的目录/文件
+        # 1. 始终忽略的目录名（精确匹配）
         for part in path_parts:
             if part.lower() in FileMentionCard._IGNORED_DIRS:
                 return True
+
+        # 1b. 始终忽略的目录模式（fnmatch 通配符匹配）
+        for part in path_parts:
+            part_lower = part.lower()
+            for pattern in FileMentionCard._IGNORED_DIR_PATTERNS:
+                if fnmatch.fnmatch(part_lower, pattern):
+                    return True
 
         # 2. 始终忽略的扩展名
         if not is_dir:
@@ -433,7 +751,7 @@ class FileMentionCard(QWidget):
         return ignored
 
     def _scan_files(self):
-        """扫描根目录下的文件（全递归，最多 2000 项）
+        """扫描根目录下的文件（全递归，最多 2000 项，常量定义在调用处）
 
         使用 os.scandir — Python 最快目录遍历 API（C 实现，
         不创建 Path 对象）。忽略 .gitignore 和内置忽略规则。
@@ -443,24 +761,36 @@ class FileMentionCard(QWidget):
         if not self._root_dir or not os.path.isdir(self._root_dir):
             return
 
-        gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
-        max_items = 500
-
+        self._scanning = True
         try:
-            # 递归扫描——无深度限制，忽略目录不进入
-            self._scan_dir(self._root_dir, "", gitignore_patterns, max_items)
-        except Exception:
-            pass
+            gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
+            self._gitignore_patterns = gitignore_patterns
+            max_items = 2000
 
-        # 一次性排序（目录优先，同名不区分大小写）
-        self._file_cache.sort(
-            key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower())
-        )
-        self._cache_dirty = False
+            try:
+                # 递归扫描——无深度限制，忽略目录不进入
+                self._scan_dir(self._root_dir, "", gitignore_patterns, max_items)
+            except Exception:
+                pass
+
+            # 一次性排序（目录优先，同名不区分大小写）
+            self._sort_file_cache()
+            self._cache_dirty = False
+        finally:
+            self._scanning = False
 
     def _scan_dir(self, dirpath: str, rel_prefix: str,
                   gitignore_patterns: List[str], max_items: int):
-        """递归扫描单层目录（os.scandir 实现）"""
+        """递归扫描单层目录（os.scandir 实现）
+
+        同时将扫描到的目录注册到文件系统监视器，以便实时检测新增/删除文件。
+        """
+        # 将当前目录加入文件系统监视器（去重）
+        if dirpath not in self._watched_dirs:
+            self._watched_dirs.add(dirpath)
+            self._fs_watcher.addPath(dirpath)
+
+        names: Set[str] = set()
         try:
             with os.scandir(dirpath) as it:
                 for entry in it:
@@ -475,6 +805,7 @@ class FileMentionCard(QWidget):
                     if self._is_ignored(rel, is_dir, gitignore_patterns):
                         continue
 
+                    names.add(name)
                     item = {
                         "name": name,
                         "path": entry.path,
@@ -487,53 +818,10 @@ class FileMentionCard(QWidget):
                     if is_dir:
                         self._scan_dir(entry.path, rel,
                                        gitignore_patterns, max_items)
+
+            self._dir_snapshots[dirpath] = names
         except PermissionError:
             pass
-
-    def load_items(self, query: str = ""):
-        """根据 query 筛选列表（延时渲染，防抖合并快速敲键）
-
-        假设缓存已就绪（由 ensure_cache / _scan_files 预先填充），
-        此处仅做 O(n) 子串匹配，无 I/O 且无 widget 创建。
-        实际渲染由防抖定时器触发，连续快速敲键只执行最后一次。
-        """
-        query = query.strip().lower()
-        self._current_query = query
-
-        if not query:
-            self._filtered_items = list(self._file_cache)
-        else:
-            q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._file_cache
-                if q_lower in item["name"].lower()
-                or q_lower in item["relative_path"].lower()
-            ]
-
-        # 防抖调度：取消上一次，重新计时
-        self._pending_filter_query = query
-        self._filter_timer.stop()
-        self._filter_timer.start()
-
-    def _do_filter_and_render(self):
-        """防抖定时器超时后执行实际的筛选和增量渲染"""
-        query = self._pending_filter_query
-
-        if not query:
-            self._filtered_items = list(self._file_cache)
-        else:
-            q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._file_cache
-                if q_lower in item["name"].lower()
-                or q_lower in item["relative_path"].lower()
-            ]
-
-        self._render_incremental()
-
-        if self._filtered_items:
-            self._selected_index = 0
-            self._update_selection()
 
     def _render_incremental(self):
         """增量渲染——复用现有 widget，避免反复创建/销毁
@@ -595,13 +883,42 @@ class FileMentionCard(QWidget):
             visible = min(item_count, MAX_VISIBLE_ITEMS)
             self.setFixedHeight(visible * ITEM_HEIGHT)
 
-    def load_items(self, query: str = ""):
-        """根据 query 即时筛选并防抖渲染
+    @staticmethod
+    def _matches_multi(item: Dict[str, str], query: str) -> bool:
+        """多关键字匹配：| = OR, & = AND
 
-        假设缓存已就绪（由 ensure_cache / _scan_files 预先填充），
-        此处仅做 O(n) 子串匹配，无 I/O。
-        筛选结果立即可用（用于 show_card 判断是否可见），
-        实际 widget 渲染由 20ms 防抖定时器触发，快速敲键只执行最后一次。
+        例如 query="doc|config&json" 表示匹配文件名/路径包含 "doc"
+        或同时包含 "config" 与 "json" 的项。
+        尾部 &（如 "config&"）自动忽略空 AND 部分，不会导致全不匹配。
+        """
+        if not query:
+            return True
+        text = (item["name"] + " " + item["relative_path"]).lower()
+
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            # 过滤空 AND 部分：让 "config&" 等价于 "config"
+            and_parts = [p.strip() for p in or_term.split('&') if p.strip()]
+            if not and_parts:
+                continue
+            if all(part in text for part in and_parts):
+                return True
+        return False
+
+    def load_items(self, query: str = ""):
+        """根据 query 即时筛选并防抖渲染（多关键字 + 增量剪枝 + fuzzy）
+
+        支持多关键字语法：
+          key1|key2  → OR（含 key1 或 key2）
+          key1&key2  → AND（同时含 key1 与 key2）
+          不含 |& 时沿用原有 fuzzy 评分排序。
+
+        增量剪枝：当用户连续追加字符时（'re' → 'req'），
+        新结果是旧结果的子集，直接在上次 _filtered_items 上过滤，
+        避免全量遍历 500 项 _file_cache。
+        注意：含 | 时不剪枝（OR 可能扩大结果集）。
         """
         query = query.strip().lower()
         self._current_query = query
@@ -610,12 +927,31 @@ class FileMentionCard(QWidget):
             self._filtered_items = list(self._file_cache)
         else:
             q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._file_cache
-                if q_lower in item["name"].lower()
-                or q_lower in item["relative_path"].lower()
-            ]
+            # 增量剪枝：含 | 时不剪枝（OR 可能扩大结果集）
+            can_prune = (
+                self._last_query
+                and query.startswith(self._last_query)
+                and '|' not in query
+            )
+            source = self._filtered_items if can_prune else self._file_cache
 
+            if '|' in query or '&' in query:
+                # 多关键字模式：布尔匹配，保持原有 dir→name 排序
+                self._filtered_items = [
+                    item for item in source
+                    if self._matches_multi(item, query)
+                ]
+            else:
+                # 单关键字模式：fuzzy 评分 + 排序
+                scored = [
+                    (item, self._score_item(item, q_lower))
+                    for item in source
+                ]
+                scored = [(item, s) for item, s in scored if s > 0]
+                scored.sort(key=lambda x: -x[1])
+                self._filtered_items = [item for item, _ in scored]
+
+        self._last_query = query
         # 防抖调度渲染
         self._filter_timer.stop()
         self._filter_timer.start()
@@ -624,6 +960,11 @@ class FileMentionCard(QWidget):
         """防抖定时器超时后执行增量渲染"""
         self._render_incremental()
         if self._filtered_items:
+            # 强制重置 _last_selected_index 为 -1，确保 _update_selection 总能生效
+            # 因为 _render_incremental 可能创建了新 widget，而 _last_selected_index
+            # 若仍为 0（上次选中值），会导致 old_idx == new_idx 守卫条件跳过，
+            # 新 widget 的 index 0 得不到选中状态。
+            self._last_selected_index = -1
             self._selected_index = 0
             self._update_selection()
         # 无匹配项时清除残留 widget

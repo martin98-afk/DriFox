@@ -6,6 +6,8 @@ ElidedLabel - 自动根据可用宽度省略文本的 QLabel（中间省略）
 """
 import html
 
+from typing import List
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel, QSizePolicy
 
@@ -21,6 +23,7 @@ class _ElidedLabel(QLabel):
         super().__init__(text, parent)
         self._full_text = text
         self._hl_query = ""
+        self._hl_queries: List[str] = []  # 多关键字高亮
         self._hl_color = ""
         # 防止布局根据文本内容自动扩展宽度，确保宽度由父布局决定
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -29,6 +32,7 @@ class _ElidedLabel(QLabel):
         """设置完整文本，同时清除高亮"""
         self._full_text = text
         self._hl_query = ""
+        self._hl_queries = []
         self._hl_color = ""
         self._update_elided()
 
@@ -40,6 +44,19 @@ class _ElidedLabel(QLabel):
             color: 高亮颜色（CSS 格式，如 "#FF6600"）
         """
         self._hl_query = query
+        self._hl_queries = [query]  # 单关键字时列表只有一项
+        self._hl_color = color
+        self._update_elided()
+
+    def setHighlights(self, queries: List[str], color: str):
+        """设置多关键字搜索高亮：每个匹配部分都用 <span> 高亮
+
+        Args:
+            queries: 搜索关键词列表（不区分大小写匹配）
+            color: 高亮颜色
+        """
+        self._hl_queries = list(queries)
+        self._hl_query = queries[0] if queries else ""  # 主查询用于省略锚定
         self._hl_color = color
         self._update_elided()
 
@@ -66,19 +83,40 @@ class _ElidedLabel(QLabel):
             return
 
         # 应用高亮（如果 elided 中有匹配）
-        if self._hl_query and self._hl_color:
+        if self._hl_queries and self._hl_color:
+            # 对所有高亮 query 依次查找，合并重叠区间后一次性构建 HTML
             lower_elided = elided.lower()
-            lower_query = self._hl_query.lower()
-            idx = lower_elided.find(lower_query)
-            if idx >= 0:
-                before = html.escape(elided[:idx])
-                match = html.escape(elided[idx:idx + len(self._hl_query)])
-                after = html.escape(elided[idx + len(self._hl_query):])
-                html_text = (
-                    f'<span>{before}'
-                    f'<span style="color: {self._hl_color}; font-weight: bold;">{match}</span>'
-                    f'{after}</span>'
-                )
+            spans = []
+            for q in self._hl_queries:
+                if not q:
+                    continue
+                lower_q = q.lower()
+                idx = lower_elided.find(lower_q)
+                if idx >= 0:
+                    spans.append((idx, idx + len(q)))
+            # 合并重叠/相邻区间
+            if spans:
+                spans.sort()
+                merged = [spans[0]]
+                for s in spans[1:]:
+                    if s[0] <= merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(merged[-1][1], s[1]))
+                    else:
+                        merged.append(s)
+                # 从原文一次构建：普通部分 escape，匹配部分加 <span>
+                parts = []
+                pos = 0
+                for start, end in merged:
+                    if pos < start:
+                        parts.append(html.escape(elided[pos:start]))
+                    parts.append(
+                        f'<span style="color: {self._hl_color}; font-weight: bold;">'
+                        f'{html.escape(elided[start:end])}</span>'
+                    )
+                    pos = end
+                if pos < len(elided):
+                    parts.append(html.escape(elided[pos:]))
+                html_text = ''.join(parts)
                 if self.text() != html_text:
                     super().setText(html_text)
                 return

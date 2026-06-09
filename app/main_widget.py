@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import ctypes
 import gc
+import heapq
 import os
 import re
 import subprocess
@@ -255,6 +256,8 @@ class OpenAIChatToolWindow(ToolWindow):
             get_model_config=self._get_current_model_config,
             workdir=str(Path(__file__).parent.parent.parent),
         )
+        # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
+        self.backend.set_subagent_model_resolver(self._resolve_subagent_model_config)
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         self.backend._current_project = self._current_project
@@ -315,7 +318,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
-        self._lazy_card_timer_active = False  # 懒渲染定时器是否已激活，防止重复调度
+        self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：增加防抖时间减少卡顿
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
@@ -1200,6 +1203,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 切换会话前彻底清理卡片
         self._cache_current_session_cards()
+        # 清空批量渲染索引，防止虚拟滚动定时器触发的回收访问已移出布局的旧卡片
+        self._batch_cards = []
+        self._message_batch = []
+        self._visible_batch_start = 0
+        self._visible_batch_end = 0
+        self._virtual_scroll_timer.stop()
         # 只重置会话状态，保留 tool_executor（分支后还需要执行工具）
         if self.backend.tool_executor:
             self.backend.reset_session_state()
@@ -2015,6 +2024,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始化内置命令
         self._init_builtin_commands()
+        # （此时命令已注册）更新 /subagents --model= 参数描述
+        self._update_subagents_param_description()
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
@@ -5075,6 +5086,13 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         self._cache_current_session_cards()
+        # 清空批量渲染索引，避免虚拟滚动定时器触发时遍历到已移出布局的旧卡片产生虚假警告
+        self._batch_cards = []
+        self._message_batch = []
+        self._visible_batch_start = 0
+        self._visible_batch_end = 0
+        # 停止虚拟滚动定时器，防止 processEvents 或其他时机触发回收旧卡片
+        self._virtual_scroll_timer.stop()
         session = self.backend.create_session()
         self._current_session_id = session.session_id
         self._history_preview_messages = None
@@ -5575,10 +5593,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 }
             )
 
-        # 最多消息的会话（按消息数量排序，取前3）
-        top_sessions = sorted(
-            history_list, key=lambda x: x.get("message_count", 0), reverse=True
-        )[:3]
+        # 最多消息的会话（取前3）
+        top_sessions = heapq.nlargest(
+            3, history_list, key=lambda x: x.get("message_count", 0)
+        )
         top_by_count = []
         for session in top_sessions:
             top_by_count.append(
@@ -5881,9 +5899,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if id(card) not in existing_ids:
                 self._pending_lazy_cards.append(card)
                 existing_ids.add(id(card))
-        if pending_lazy_cards and not self._lazy_card_timer_active:
-            self._lazy_card_timer_active = True
-            QTimer.singleShot(0, self._process_next_lazy_card)
+        if pending_lazy_cards and not self._lazy_batch_timer_active:
+            self._lazy_batch_timer_active = True
+            QTimer.singleShot(0, self._process_next_lazy_batch)
 
     def _get_rendered_message_cards(self) -> List[MessageCard]:
         def is_user_or_assistant(widget):
@@ -5891,24 +5909,40 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return collect_message_cards_from_layout(self.chat_layout, is_user_or_assistant)
 
-    def _process_next_lazy_card(self):
-        """分批处理懒渲染卡片，每次处理一个卡片并触发滚动
-        关键：每次渲染完成后立即同步滚动，不依赖定时器延迟
+    def _process_next_lazy_batch(self):
+        """批量懒渲染：每次处理 BATCH_SIZE 个卡片，减少 WebEngine 创建开销
+
+        批量处理期间合并 heightChanged 信号，批次完成后统一触发布局更新和滚底。
+        BATCH_SIZE 默认 5，可通过 self._lazy_batch_size 调整。
         """
+        BATCH_SIZE = getattr(self, '_lazy_batch_size', 5)
+
         if not self._pending_lazy_cards:
-            # 所有懒渲染完成
             self._loading_session = False
-            self._lazy_card_timer_active = False
+            self._lazy_batch_timer_active = False
             return
 
-        card = self._pending_lazy_cards.pop(0)
-        # 检查卡片是否仍然有效且未被回收
-        if self._is_widget_alive(card) and not getattr(card, "_lazy_rendered", False):
+        # 取出当前批次（最多 BATCH_SIZE 个）
+        batch = []
+        while self._pending_lazy_cards and len(batch) < BATCH_SIZE:
+            card = self._pending_lazy_cards.pop(0)
+            if self._is_widget_alive(card) and not getattr(card, "_lazy_rendered", False):
+                batch.append(card)
+
+        if not batch:
+            # 没有需要渲染的有效卡片，继续下一批
+            if self._pending_lazy_cards:
+                QTimer.singleShot(0, self._process_next_lazy_batch)
+            else:
+                self._loading_session = False
+                self._lazy_batch_timer_active = False
+            return
+
+        # 批量渲染所有卡片
+        for card in batch:
             card.ensure_rendered()
 
-        # 每次渲染完一个卡片后立即同步滚动到底部，无论加载多慢都生效
-        # 直接设置滚动条值，不依赖定时器
-        # 关键修复：首次强制滚底后，只在用户未主动滚上去时才继续滚底
+        # 批次全部渲染完成，统一更新滚动
         if self._loading_session:
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             if (
@@ -5918,12 +5952,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
-        # 继续处理下一个，使用 QTimer 异步调度释放事件循环
+        # 继续处理下一批
         if self._pending_lazy_cards:
-            QTimer.singleShot(0, self._process_next_lazy_card)
+            QTimer.singleShot(0, self._process_next_lazy_batch)
         else:
             self._loading_session = False
-            self._lazy_card_timer_active = False
+            self._lazy_batch_timer_active = False
 
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
@@ -6179,7 +6213,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 0, lambda: self._add_chat_widget(w)
             ),
         )
-        self.title_edit.setText("新对话")
 
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):
@@ -8214,14 +8247,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
                     self.input_area.clear()
                     self._clear_attachments()
-                    # ⚠️ _on_send_click 已把按钮切为 STOP，函数/子智能体不流式，需恢复
-                    self.input_area.toggle_send_button(True)
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
+                    if not self._is_streaming:
+                        self.input_area.toggle_send_button(True)
                     self._execute_command(cmd_result.command_name, cmd_result.remainder)
                     return
                 case CommandType.SUBAGENT:
                     # 子智能体命令：触发子智能体任务，不替换提示词
-                    # ⚠️ _on_send_click 已把按钮切为 STOP，子智能体不流式，需恢复
-                    self.input_area.toggle_send_button(True)
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
+                    if not self._is_streaming:
+                        self.input_area.toggle_send_button(True)
                     self._execute_subagent_task(
                         cmd_result.command_name,
                         cmd_result.subagent_task,
@@ -8231,13 +8266,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
                     # 提示词替换命令：替换 + 用 $ARGUMENT 占位符替换
-                    user_text = cmd_result.replacement
-                    if cmd_result.remainder:
-                        # fallback: 无 $ARGUMENTS 时保留旧行为
-                        user_text = (
-                            f"{user_text}\n\n$ARGUMENTS：{cmd_result.remainder}"
-                        )
-                    # 提示词命令需要发送消息，按现有逻辑处理
+                    user_text = (f"严格按照以下命令规范执行：{cmd_result.replacement}\n\n"
+                                 f"$ARGUMENTS：{cmd_result.remainder or '无用户参数'}")
         # ---- 内置命令拦截结束 ----
 
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
@@ -8455,13 +8485,110 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _handle_subagents_command(self, args: str):
-        """/subagents 命令：重新显示紧凑子智能体卡片"""
+        """/subagents 命令：管理子智能体任务和默认模型
+
+        参数：
+          无参数    → 显示运行中的子智能体任务（紧凑卡片）
+          --detail  → 显示子智能体详细日志面板
+          --model=X → 设置子智能体默认模型
+          --reset   → 清空子智能体默认模型设置
+        """
+        import re
+        from app.utils.config import Settings
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        args = (args or "").strip()
+
+        # ---- --reset：清空默认模型设置 ----
+        if args == "--reset":
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_subagent_default_model, "", save=True)
+            InfoBar.success(
+                title="已重置",
+                content="子智能体默认模型已清空，将使用主智能体模型",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            # 更新命令卡参数描述
+            self._update_subagents_param_description()
+            return
+
+        # ---- --model=xxx：设置默认模型 ----
+        model_match = re.match(r'^--model=(.+)$', args)
+        if model_match:
+            model_value = model_match.group(1).strip()
+            if not model_value:
+                InfoBar.warning(
+                    title="参数错误",
+                    content="--model= 后需要指定模型名或服务商:模型名",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 复用现有模型解析逻辑
+            llm_config = self._resolve_subagent_model_config(model_value)
+            if llm_config is None:
+                # _resolve_subagent_model_config 内部已弹出错误提示
+                return
+
+            # 保存显示名
+            provider_display = llm_config.get("provider_name", "")
+            model_display = llm_config.get("模型名称", model_value)
+            display_value = f"{provider_display}:{model_display}" if provider_display else model_display
+
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_subagent_default_model, display_value, save=True)
+
+            if provider_display:
+                info_text = f"{provider_display} - {model_display}"
+            else:
+                info_text = model_display
+
+            InfoBar.success(
+                title="子智能体模型设置",
+                content=f"{info_text}",
+                parent=self,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            # 更新命令卡参数描述
+            self._update_subagents_param_description()
+            return
+
+        # ---- --detail：显示详细日志面板 ----
+        if args == "--detail":
+            sub_agent_mgr = self.backend.sub_agent_manager
+            running_tasks = sub_agent_mgr._running_tasks
+
+            if not running_tasks:
+                InfoBar.warning(
+                    title="暂无子智能体任务",
+                    content="当前没有正在执行的子智能体任务",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            detailed = self._sub_agent_floating_widget
+            # 确保面板已填充数据
+            if not detailed._batch_started:
+                detailed.clear()
+                for task_id, executor in running_tasks.items():
+                    detailed.add_task(task_id, executor.agent_name, executor.task_description)
+                detailed._batch_started = True
+
+            self._card_manager.show_card("sub_agent", self._window_id)
+            return
+
+        # ---- 无参数：显示紧凑卡片（原行为）----
         sub_agent_mgr = self.backend.sub_agent_manager
         running_tasks = sub_agent_mgr._running_tasks
 
         if not running_tasks:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
             InfoBar.warning(
                 title="暂无运行中的子智能体",
                 content="当前没有正在执行的子智能体任务",
@@ -8479,6 +8606,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
+
+    def _update_subagents_param_description(self):
+        """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
+        from app.utils.config import Settings
+        from app.core.command_manager import CommandManager, CommandType
+
+        cfg = Settings.get_instance()
+        saved = cfg.llm_subagent_default_model.value or ""
+
+        cmd_mgr = CommandManager.get_instance()
+        entries = cmd_mgr._commands.get("subagents", {})
+        for cmd_type, cmd_def in entries.items():
+            for param in cmd_def.parameters:
+                if param.name == "--model=":
+                    if saved:
+                        param.description = f"当前默认: {saved} | 设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                    else:
+                        param.description = "设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                    break
 
     def _on_sub_agent_task_started(
         self, task_id: str, agent_name: str, task_description: str
@@ -10553,6 +10699,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_loop_worker.log_signal.connect(
             self._on_auto_loop_log, Qt.QueuedConnection
         )
+        self._auto_loop_worker.log_update.connect(
+            self._on_auto_loop_log_update, Qt.QueuedConnection
+        )
         self._auto_loop_worker.phase_changed.connect(
             self._on_auto_loop_phase_changed, Qt.QueuedConnection
         )
@@ -10645,9 +10794,14 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _on_auto_loop_log(self, text: str):
-        """可视化日志更新"""
+        """离散日志更新（带时间戳的事件）"""
         if self._auto_loop_running_card:
             self._auto_loop_running_card.append_log(text)
+
+    def _on_auto_loop_log_update(self, text: str):
+        """流式日志更新（实时覆盖，无时间戳）"""
+        if self._auto_loop_running_card:
+            self._auto_loop_running_card.update_log(text)
 
     def _on_auto_loop_tokens_updated(self, total_tokens: int):
         """Token 实时更新 — 直接使用信号携带的值"""
@@ -10744,8 +10898,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_input_container.setVisible(False)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(False)
+        # 隐藏输入框的发光控件
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
+
+        # 窗口自适应缩小（聊天区和输入框隐藏后只保留运行卡片）
+        self.adjustSize()
 
         # 记录原有状态，用于解锁
         logger.info("[AutoLoop] UI locked")
@@ -10758,6 +10918,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_input_container.setVisible(True)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(True)
+        # 恢复输入框的发光控件
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 

@@ -651,8 +651,8 @@ class ToolPopupDialog(QDialog):
         self._lock_mode = False
         self._slider_desktop_pos = None
 
-        # 注册到全局 TrayManager（确保只有一个托盘图标）
-        TrayManager.get_instance().register_window(self)
+        # 延迟注册到 TrayManager——先让弹窗显示，再初始化托盘图标
+        QTimer.singleShot(0, lambda: TrayManager.get_instance().register_window(self))
 
         # 创建独立的锁定按钮（在穿透模式下仍可交互）
         self._lock_btn_widget = LockButtonWidget()

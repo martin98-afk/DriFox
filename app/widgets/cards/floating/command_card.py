@@ -8,6 +8,7 @@
 """
 from typing import List, Dict
 
+import html
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
@@ -199,36 +200,88 @@ class CommandItemWidget(QWidget):
                 }}
             """)
 
+    @staticmethod
+    def _all_highlight_queries(text: str, query: str) -> List[str]:
+        """从多关键字 query 中提取所有能匹配到 text 的关键字"""
+        if not query or not text:
+            return []
+        text_lower = text.lower()
+        if query.lower() in text_lower:
+            return [query]
+        found = []
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            for and_part in or_term.split('&'):
+                and_part = and_part.strip()
+                if and_part and and_part.lower() in text_lower and and_part not in found:
+                    found.append(and_part)
+        return found
+
     def _update_display(self):
-        """更新名称显示（含查询高亮）"""
+        """更新名称显示（含多关键字查询高亮）
+
+        注意：display_text 中的 & < > " 等字符须 html.escape，
+        否则混入 HTML 会破坏渲染导致卡片消失。
+        """
         name = self._data["name"]
-        # 优先使用 display_name（跨类型重名时加后缀），否则回退到 name
         display_name = self._data.get("display_name", name)
-        # 命令需要加 / 前缀，技能和智能体直接显示名称
         item_type = self._data["type"]
         display_text = f"/{display_name}" if item_type == "command" else display_name
         query = self._query
 
-        if query:
-            # 连续子串匹配高亮（匹配原始 name + display_name，高亮 display_text）
-            lower_text = display_text.lower()
-            lower_query = query.lower()
-            idx = lower_text.find(lower_query)
-            if idx >= 0:
-                html = display_text[:idx]
-                html += f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{display_text[idx:idx + len(query)]}</span>'
-                html += display_text[idx + len(query):]
-                self._name_label.setText(html)
-            else:
-                self._name_label.setText(display_text)
-        else:
-            self._name_label.setText(display_text)
+        # 先 HTML 转义纯文本，防止 & 等字符破坏 HTML 渲染
+        safe_text = html.escape(display_text)
 
-        # 描述标签也应用搜索高亮（_ElidedLabel 自动处理省略+高亮）
+        if query:
+            hls = self._all_highlight_queries(display_text, query)
+            if hls:
+                # 在 safe_text（已 escape）中定位每个关键字，从原文一次构建 HTML
+                lower_safe = safe_text.lower()
+                spans = []
+                for hl in hls:
+                    escaped_hl = html.escape(hl)
+                    lower_hl = escaped_hl.lower()
+                    idx = lower_safe.find(lower_hl)
+                    if idx >= 0:
+                        spans.append((idx, idx + len(escaped_hl)))
+                if spans:
+                    spans.sort()
+                    merged = [spans[0]]
+                    for s in spans[1:]:
+                        if s[0] <= merged[-1][1]:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], s[1]))
+                        else:
+                            merged.append(s)
+                    # 从 safe_text 一次构建：普通部分直接拼接，匹配部分加 <span>
+                    parts = []
+                    pos = 0
+                    for start, end in merged:
+                        if pos < start:
+                            parts.append(safe_text[pos:start])
+                        parts.append(
+                            f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">'
+                            f'{safe_text[start:end]}</span>'
+                        )
+                        pos = end
+                    if pos < len(safe_text):
+                        parts.append(safe_text[pos:])
+                    self._name_label.setText(''.join(parts))
+                else:
+                    self._name_label.setText(safe_text)
+            else:
+                self._name_label.setText(safe_text)
+        else:
+            self._name_label.setText(safe_text)
+
+        # 描述标签也应用多关键字搜索高亮
         desc = self._data.get("description", "")
         self._desc_label.setText(desc)
         if query:
-            self._desc_label.setHighlight(query, Colors.SEND_BTN_START)
+            hls = self._all_highlight_queries(desc, query)
+            if hls:
+                self._desc_label.setHighlights(hls, Colors.SEND_BTN_START)
 
     def set_selected(self, selected: bool):
         """设置选中状态"""
@@ -389,6 +442,7 @@ class CommandCard(QWidget):
         self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
         self._current_query = ""
+        self._last_query = ""  # 上次过滤的 query，用于增量剪枝
         self._current_selected_type: str = ""  # 当前选中项的 display_type（用于 detail 模式）
 
         # Detail mode：匹配到完整命令 + 空格后显示参数提示
@@ -499,6 +553,23 @@ class CommandCard(QWidget):
         self._detail_desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._detail_desc_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_desc_label)
+
+        # 位置参数提示（交互式参数列表上方显示，如 "<query> — 研究主题"）
+        self._detail_positional_hint = QLabel()
+        self._detail_positional_hint.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_ACCENT};
+                {get_font_family_css()} {font_size_css(11)};
+                background: rgba(128,128,128,0.06);
+                border-radius: 4px;
+                padding: 2px 8px;
+                margin: 0;
+            }}
+        """)
+        self._detail_positional_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._detail_positional_hint.setWordWrap(True)
+        self._detail_positional_hint.setVisible(False)
+        detail_layout.addWidget(self._detail_positional_hint)
 
         # 参数列表滚动区（有 parameters 时显示）
         self._detail_params_scroll = QScrollArea()
@@ -633,10 +704,21 @@ class CommandCard(QWidget):
             self._detail_hint_label.setVisible(False)
             self._detail_value_scroll.setVisible(False)
             self._build_param_widgets(cmd.parameters)
-            self._detail_params_scroll.setVisible(True)
-            # 初始选中第一项
-            self._selected_param_index = 0 if self._param_widgets else -1
-            self._update_param_selection()
+            # 位置参数提示：收集 positional 类型参数的描述显示在列表上方
+            positional_text = self._build_positional_hint(cmd.parameters)
+            if positional_text:
+                self._detail_positional_hint.setText(positional_text)
+                self._detail_positional_hint.setVisible(True)
+            else:
+                self._detail_positional_hint.setVisible(False)
+            # 有交互式参数项才显示参数滚动区
+            if self._param_widgets:
+                self._detail_params_scroll.setVisible(True)
+                self._selected_param_index = 0
+                self._update_param_selection()
+            else:
+                self._detail_params_scroll.setVisible(False)
+                self._selected_param_index = -1
         else:
             # 回退：静态 hint
             self._detail_params_scroll.setVisible(False)
@@ -685,18 +767,31 @@ class CommandCard(QWidget):
             desc_height = line_height
 
         # 计算参数列表/值列表/提示文本高度
+        pos_hint_height = 0
+
         if self._detail_has_params and not self._value_selection_mode:
             # 交互参数列表高度
             param_count = len(self._param_widgets)
             visible_params = sum(1 for w in self._param_widgets if w.isVisible())
             content_height = visible_params * ITEM_HEIGHT
-            self._detail_params_scroll.setFixedHeight(min(content_height, 4 * ITEM_HEIGHT))
-            content_height = min(content_height, 4 * ITEM_HEIGHT)
+            self._detail_params_scroll.setFixedHeight(min(content_height, 7 * ITEM_HEIGHT))
+            content_height = min(content_height, 7 * ITEM_HEIGHT)
             hint_height = 0
+            # 位置参数提示高度
+            if self._detail_positional_hint.isVisible():
+                fm_pos = self._detail_positional_hint.fontMetrics()
+                pos_line_height = fm_pos.lineSpacing()
+                pos_text = self._detail_positional_hint.text()
+                pos_width = fm_pos.horizontalAdvance(pos_text)
+                label_width = self._detail_positional_hint.width() or 1
+                if label_width <= 0:
+                    label_width = self.width() - 24
+                pos_line_count = max(1, (pos_width + label_width - 1) // label_width)
+                pos_hint_height = pos_line_height * pos_line_count + 4  # padding 2+2
         elif self._value_selection_mode:
             # 值选择列表高度
             value_count = len(self._value_widgets)
-            content_height = min(value_count * ITEM_HEIGHT, 4 * ITEM_HEIGHT)
+            content_height = min(value_count * ITEM_HEIGHT, 7 * ITEM_HEIGHT)
             self._detail_value_scroll.setFixedHeight(content_height)
             hint_height = 0
         else:
@@ -716,7 +811,7 @@ class CommandCard(QWidget):
                 hint_height = 0
             content_height = 0
 
-        total_height = v_margin + desc_height + spacing + hint_height + content_height
+        total_height = v_margin + desc_height + spacing + hint_height + content_height + pos_hint_height
         self.setFixedHeight(total_height)
 
     # ---- 参数列表交互 ----
@@ -740,6 +835,20 @@ class CommandCard(QWidget):
             w.clicked.connect(self._on_param_clicked)
             self._detail_params_layout.addWidget(w)
             self._param_widgets.append(w)
+
+    @staticmethod
+    def _build_positional_hint(params: list) -> str:
+        """提取 positional 类型参数的描述文本，供 detail 模式静态显示"""
+        parts = []
+        for p in params:
+            if p.param_type != "positional":
+                continue
+            if p.description:
+                text = f"{p.name} — {p.description}"
+            else:
+                text = p.name
+            parts.append(text)
+        return "  ·  ".join(parts)
 
     def _on_param_clicked(self):
         """参数项被点击"""
@@ -1081,6 +1190,7 @@ class CommandCard(QWidget):
         self._selected_param_index = -1
         self._selected_value_index = -1
         self._last_selected_value_index = -1
+        self._detail_positional_hint.setVisible(False)
         self._detail_container.setVisible(False)
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)
@@ -1136,39 +1246,136 @@ class CommandCard(QWidget):
         self._all_items_cache = list(self._all_items)
         self._cache_dirty = False
 
+    @staticmethod
+    def _matches_multi(item: Dict[str, str], query: str) -> bool:
+        """多关键字匹配：| = OR, & = AND
+
+        例如 query="find|search&replace" 表示匹配包含 "find"
+        或同时包含 "search" 与 "replace" 的项。
+        空 query 返回 True（无过滤）。
+        尾部 &（如 "find&"）自动忽略空 AND 部分，不会导致全不匹配。
+        """
+        if not query:
+            return True
+        text = (
+            item["name"] + " "
+            + item.get("display_name", item["name"]) + " "
+            + item["description"]
+        ).lower()
+
+        for or_term in query.split('|'):
+            or_term = or_term.strip()
+            if not or_term:
+                continue
+            # 过滤空 AND 部分：让 "find&" 等价于 "find"（用户还在打字中）
+            and_parts = [p.strip() for p in or_term.split('&') if p.strip()]
+            if not and_parts:
+                continue
+            if all(part in text for part in and_parts):
+                return True
+        return False
+
+    @staticmethod
+    def _parse_type_filter(query: str):
+        """从 query 中提取 type:xxx 或 #xxx 过滤器
+
+        例如：
+          "type:skill tdd"      → ({"skill"}, "tdd")
+          "#agent"               → ({"agent"}, "")
+          "#cmd find"            → ({"command"}, "find")
+          "type:skill|type:agent" → ({"skill","agent"}, "")
+          "find"                 → (None, "find")
+
+        支持简写：cmd→command
+        支持 OR：type:skill|type:agent → {"skill","agent"}
+        """
+        if not query:
+            return None, query
+
+        type_set = set()
+        clean_tokens = []
+        type_map = {'cmd': 'command', 'skill': 'skill', 'agent': 'agent', 'prompt': 'prompt'}
+
+        for token in query.split():
+            if token.startswith('type:'):
+                tf = token[5:].strip()
+                for t in tf.split('|'):
+                    t = t.strip()
+                    if t in type_map:
+                        type_set.add(type_map[t])
+            elif token.startswith('#') and token[1:] in type_map:
+                # #skill, #agent, #prompt, #cmd 简写
+                type_set.add(type_map[token[1:]])
+            else:
+                clean_tokens.append(token)
+
+        return type_set if type_set else None, ' '.join(clean_tokens)
+
     def load_items(self, query: str = "", incremental: bool = False):
-        """根据 query 筛选并渲染列表
+        """根据 query 筛选并渲染列表（多关键字 + 类别过滤 + 增量剪枝）
+
+        支持多关键字语法：
+          key1|key2  → OR（含 key1 或 key2）
+          key1&key2  → AND（同时含 key1 与 key2）
+
+        支持类别过滤：
+          type:skill            → 只显示技能
+          #skill                → 同上（简写）
+          #agent                → 只显示智能体
+          #prompt               → 只显示提示词
+          #cmd                  → 只显示命令
+          #skill tdd            → 只显示名/描述含 "tdd" 的技能
+          type:skill|type:agent → 显示技能或智能体
 
         Args:
             query: 搜索查询
-            incremental: 是否增量更新（保留已有 widget，重用匹配项）
+            incremental: 是否增量更新
+
+        增量剪枝：连续追加字符时在上次结果上继续过滤。
+        含 | 时不剪枝（OR 可能扩大结果集）。
         """
         query = query.strip().lower()
 
-        if not query:
-            self._filtered_items = list(self._all_items)
-        else:
-            # 连续子串匹配（不区分大小写）
-            q_lower = query.lower()
-            self._filtered_items = [
-                item for item in self._all_items
-                if q_lower in item["name"].lower()
-                or q_lower in item.get("display_name", item["name"]).lower()
-                or q_lower in item["description"].lower()
-            ]
+        # 提取类别过滤器
+        type_filter, text_query = self._parse_type_filter(query)
 
-        # 排序：命令和技能在前，智能体在后，同类型按名称排序
+        if not text_query:
+            # 纯类别过滤（无文本搜索）
+            if type_filter:
+                self._filtered_items = [item for item in self._all_items if item["type"] in type_filter]
+            else:
+                self._filtered_items = list(self._all_items)
+            self._last_query = ""
+        else:
+            # 增量剪枝：仅当新 query 是上次的扩展且不含 |
+            can_prune = (
+                self._last_query
+                and query.startswith(self._last_query)
+                and '|' not in query
+            )
+            source = self._filtered_items if can_prune else self._all_items
+            self._filtered_items = [
+                item for item in source
+                if self._matches_multi(item, text_query)
+            ]
+            # 文本匹配后再按类别过滤
+            if type_filter:
+                self._filtered_items = [item for item in self._filtered_items if item["type"] in type_filter]
+
+        # 排序：命令/技能在前，智能体在后，同类型按名称
         sort_order = {"command": 0, "skill": 1, "agent": 2}
         self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
+
+        self._last_query = query
 
         self._render(incremental=incremental)
 
         if len(self._filtered_items) > 0:
+            # 强制重置 _last_selected_index，确保新渲染的列表始终正确选中第一项
+            # 防止上次会话残留的选中索引导致 _update_selection 守卫条件异常
+            self._last_selected_index = -1
             self._selected_index = 0
             self._update_selection()
-            # 首次渲染时 scroll 位置已正确（item 0 在顶部），无需额外滚动
-            # 移除冗余的 QTimer.singleShot 滚动重置——_update_selection 中的
-            # ensureWidgetVisible(item[0]) 已确保 item 0 可见，且 item 0 就在顶部
 
     def _render(self, incremental: bool = False):
         """渲染当前筛选结果

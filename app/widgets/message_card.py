@@ -179,6 +179,17 @@ WELCOME_TIPS = [
     "💡 /compact 手动触发上下文压缩，减少 Token 消耗",
     "💡 输入 / 还会显示从 agents 目录加载的自定义智能体命令",
     "💡 智能体命令加 `--subagent + 任务描述` 可在子智能体中执行任务",
+
+    # ===== 文件提及卡片 =====
+    "💡 输入 @ 可浏览项目文件，↑/↓ 导航，Enter 选中文件快速引用",
+    "💡 @ 文件搜索支持 | 和 & 多关键字：@doc|config&json 组合筛选文件",
+    "💡 @ 文件搜索支持模糊匹配：输入 rqrmnts 也能找到 requirements.txt",
+
+    # ===== 命令卡片类别过滤 =====
+    "💡 / 命令搜索支持 | 和 & 多关键字：/find|search&replace 组合查找",
+    "💡 / 命令支持类别过滤：#skill 只看技能、#agent 只看智能体",
+    "💡 / 命令还可组合：#skill tdd 搜索名含「tdd」的技能",
+    "💡 / 命令类别可多选：type:skill|type:agent 显示技能和智能体",
 ]
 
 # ======== 欢迎卡片欢迎语 ========
@@ -376,14 +387,434 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
+def _get_think_preview(content: str, max_length: int = 160) -> str:
+    """智能生成思考内容折叠框的预览文本
+
+    新策略（结论优先）：
+      1. 检测结论标记 → 优先展示结论后的内容
+      2. 无结论时三段式采样：
+         - 首句（跳过过短 <10 字的）
+         - 中间代表性句（~40% 位置）
+         - 尾句（往往含总结性内容）
+      3. 保证最少 40 字，不够时向后扩展
+      4. 未到文本结尾时追加省略号
+    """
+    if not content:
+        return ""
+
+    text = content.strip()
+    if not text:
+        return ""
+
+    def _is_full(preview_len: int) -> bool:
+        """预览长度是否已覆盖完整内容（忽略空白、换行差异）"""
+        norm_text = len(text.replace(" ", "").replace("\n", ""))
+        return preview_len >= norm_text
+
+    # ── 策略1: 优先检测结论，展示结论内容 ──
+    for marker in _CONCLUSION_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            conclusion_text = text[idx:].replace("\n", " ").strip()
+            if len(conclusion_text) <= max_length:
+                return conclusion_text if _is_full(len(conclusion_text)) else conclusion_text + "..."
+            # 结论太长，截取到 max_length
+            for i in range(min(max_length, len(conclusion_text)), 0, -1):
+                if conclusion_text[i - 1] in "。！？.!?；;":
+                    return conclusion_text[:i]
+            return conclusion_text[:max_length] + "..."
+
+    # ── 策略2: 三段式采样 ──
+    # 展平文本
+    flat = text.replace("\n", " ")
+
+    # ── 检测是否英文为主（中文占比 < 30%） ──
+    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    is_english_heavy = cjk_count < len(text) * 0.3
+
+    if is_english_heavy:
+        # 英文为主的策略：按句尾标点+空格+大写字母分句
+        # 避免 1. / 2. / U.S. / v2.5 等被误判为句子边界
+        raw_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', flat)
+        # 清理空串和过短片段（纯粹的数字编号如 "1." 直接丢弃）
+        raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) >= 4]
+    else:
+        raw_sentences: List[str] = []
+        current = ""
+        for ch in flat:
+            current += ch
+            if ch in "。！？.!?；;":
+                s = current.strip()
+                if s:
+                    raw_sentences.append(s)
+                current = ""
+        if current.strip():
+            raw_sentences.append(current.strip())
+
+    # 合并连续短句（<8 字）到前一句或后一句
+    sentences: List[str] = []
+    buf = ""
+    for s in raw_sentences:
+        if not s:
+            continue
+        if len(s) < 8:
+            buf += s
+        else:
+            if buf:
+                sentences.append(buf + s)
+                buf = ""
+            else:
+                sentences.append(s)
+    if buf:
+        if sentences:
+            sentences[-1] += buf
+        else:
+            sentences.append(buf)
+
+    if not sentences:
+        # 没有有效句子，回退到简单截断
+        if len(flat) <= max_length:
+            return flat
+        for i in range(max_length, 0, -1):
+            if flat[i - 1] in " ，,、；;：:.":
+                return flat[:i].rstrip(" ，,、.") + "..."
+        return flat[:max_length] + "..."
+
+    # 选 3 句：首句 + 中间句(~40%) + 尾句
+    selected: List[str] = []
+    n = len(sentences)
+
+    # 首句
+    selected.append(sentences[0])
+
+    # 中间句（40% 位置，确保不与首尾重复）
+    mid_idx = max(1, int(n * 0.4))
+    if mid_idx < n - 1:  # 不在最后一句话
+        selected.append(sentences[mid_idx])
+
+    # 尾句
+    if n > 1 and sentences[-1] != sentences[0]:
+        if len(selected) < 2 or sentences[-1] != selected[-1]:
+            selected.append(sentences[-1])
+
+    preview = " ... ".join(selected)
+
+    # ── 保证最少 40 字 ──
+    if len(preview) < 40:
+        # 只有一句时直接展示全部（或截断到 max_length）
+        if n == 1:
+            full = sentences[0]
+            if len(full) <= max_length:
+                return full if _is_full(len(full)) else full + "..."
+            else:
+                preview = full[:max_length] + "..."
+        else:
+            # 向后扩展：取前几个句子直到 ≥40 字
+            extended = sentences[0]
+            for s in sentences[1:]:
+                if len(extended) >= 40:
+                    break
+                extended += " ... " + s
+            preview = extended
+
+    # 截断到 max_length
+    if len(preview) > max_length:
+        for i in range(max_length, 0, -1):
+            if preview[i - 1] in "。！？.!?；;":
+                preview = preview[:i]
+                break
+        else:
+            preview = preview[:max_length]
+
+    if _is_full(len(preview)):
+        return preview
+    return preview + "..."
+
+
+# ── 思考折叠框标签分类系统（加权） ──
+# 标签定义：tag=显示名, priority=平局优先级, cn=中文模式, en=英文模式
+# 权重规则：短语(≥4中字/含空格)权值3, 3字权值2, 常见普通词权值0.5, 其他1
+_THINK_TAGS = [
+    {
+        "tag": "分析",
+        "priority": 3,
+        "cn": ("问题出在", "原因在于", "关键问题", "核心问题",
+               "需要分析", "需要理解", "需要考虑",
+               "问题", "分析", "理解", "排查"),
+        "en": ("problem", "issue", "analyze", "understand",
+               "root cause", "what went wrong", "why"),
+    },
+    {
+        "tag": "设计",
+        "priority": 2,
+        "cn": ("设计方案", "实现方案", "架构设计",
+               "方案", "设计", "架构", "策略", "规划"),
+        "en": ("solution", "design", "approach", "strategy",
+               "architecture", "plan to", "propose to"),
+    },
+    {
+        "tag": "探索",
+        "priority": 2,
+        "cn": ("探索", "研究", "了解", "学习", "查阅", "参考",
+               "知识", "概念", "原理", "定义", "资料", "文献",
+               "查询", "搜索", "调查"),
+        "en": ("explore", "research", "learn", "study",
+               "concept", "definition", "principle",
+               "reference", "knowledge", "investigate"),
+    },
+    {
+        "tag": "验证",
+        "priority": 2,
+        "cn": ("验证", "测试", "检测", "调试", "断言",
+               "校验", "用例", "覆盖", "回归",
+               "边界条件", "测试用例", "单元测试", "集成测试"),
+        "en": ("test", "verify", "validate",
+               "debug", "assert", "coverage", "regression",
+               "unit test", "integration test", "test case"),
+    },
+    {
+        "tag": "版本",
+        "priority": 3,
+        "cn": ("版本控制", "仓库", "回滚", "PR",
+               "rebase", "stash", "cherry-pick",
+               "git bisect", "git blame", "git log"),
+        "en": ("rebase", "cherry-pick", "checkout",
+               "git bisect", "git blame", "git log",
+               "version control", "source control"),
+    },
+    {
+        "tag": "实现",
+        "priority": 2,
+        "cn": ("具体实现", "代码片段", "接口定义", "类型定义",
+               "模块结构", "类设计", "方法签名", "API设计"),
+        "en": ("implement the", "define the", "interface",
+               "method signature", "API design", "class definition",
+               "module structure"),
+    },
+    {
+        "tag": "修复",
+        "priority": 2,
+        "cn": ("错误", "异常", "报错", "修复", "崩溃",
+               "排查错误", "错误原因", "调试日志"),
+        "en": ("bug", "crash", "fix the",
+               "broken", "stack trace", "traceback",
+               "debugging the error"),
+    },
+    {
+        "tag": "优化",
+        "priority": 2,
+        "cn": ("性能", "优化", "速度", "效率", "延迟", "瓶颈"),
+        "en": ("performance", "optimize", "speed", "efficiency",
+               "latency", "bottleneck", "slow"),
+    },
+    {
+        "tag": "安全",
+        "priority": 2,
+        "cn": ("安全", "权限", "漏洞", "风险", "加密", "认证"),
+        "en": ("security", "permission", "auth", "vulnerability",
+               "encrypt", "risk", "compliance"),
+    },
+    {
+        "tag": "重构",
+        "priority": 2,
+        "cn": ("重构", "重写", "清理代码", "消除重复", "简化代码",
+               "代码整理", "提取方法", "模块拆分", "内联函数"),
+        "en": ("refactor", "cleanup", "simplify",
+               "extract method", "inline",
+               "split into", "restructure"),
+    },
+    {
+        "tag": "配置",
+        "priority": 2,
+        "cn": ("配置", "参数设置", "环境变量", "开关",
+               "配置文件", "config", "设置项", "调整参数",
+               "初始化配置", "dotenv"),
+        "en": ("configuration", "env var", "environment variable",
+               "setting", "parameter", "config file",
+               "dotenv", ".env"),
+    },
+    {
+        "tag": "审查",
+        "priority": 2,
+        "cn": ("审查", "review代码", "代码检查", "风格检查",
+               "lint", "代码质量", "检查规范", "静态分析"),
+        "en": ("code review", "lint", "code quality",
+               "inspect", "check style", "static analysis"),
+    },
+]
+# 结论标记（中英文，优先级最高）
+_CONCLUSION_MARKERS = (
+    "因此", "所以", "综上", "综上所述", "总而言之",
+    "总的来说", "建议", "推荐", "结论是", "答案是",
+    "总结一下", "也就是说", "最终",
+    "therefore", "in conclusion", "overall",
+    "the answer is", "the solution is",
+    "i recommend", "i suggest", "so the answer",
+)
+# 常见高频词（权值0.5，避免误触）
+_COMMON_WORDS = frozenset(
+    ("问题", "分析", "代码", "方案", "设计", "安全", "性能",
+     "实现", "错误", "优化", "检查", "考虑", "需要", "处理",
+     "解决", "使用", "支持", "提供", "操作")
+)
+
+
+def _pattern_weight(p: str, position: float = 0.5) -> float:
+    """计算模式的权重：越长越具体→权重越高，结尾区加权
+
+    Args:
+        p: 匹配到的模式字符串
+        position: 关键词在全文中的相对位置 (0.0=开头, 1.0=结尾)
+                  结尾 30% 区域 (≥0.7) 权重 ×1.5
+    """
+    base = 1.0
+
+    if " " in p:          # 多词短语（英文短语或中文带空格）
+        base = 3.0
+    else:
+        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in p)
+        if has_cjk:
+            if len(p) >= 4:
+                base = 3.0
+            elif len(p) == 3:
+                base = 2.0
+            elif p in _COMMON_WORDS:
+                base = 0.5
+        else:
+            # 英文权重
+            if len(p) >= 6:
+                base = 2.0
+            elif len(p) >= 4:
+                base = 1.5
+
+    # 位置加权：结尾 30% 区域权重 ×1.5
+    if position >= 0.7:
+        base *= 1.5
+
+    return base
+
+
+def _classify_think_tag(content: str) -> str:
+    """对思考内容进行分类，返回预定义标签名，空=不显示
+
+    改进要点：
+    - 分析窗口扩展为前 1500 + 尾部 500（覆盖结论区）
+    - 位置加权：结尾 30% 区域关键词权重 ×1.5
+    - 排他性：同词命中多标签时权重减半
+    - 阈值 3.0（关键词已清洗，阈值可提高）
+    """
+    content = content.strip()
+    if not content:
+        return ""
+
+    # ── 扩展分析窗口：前 1500 + 尾部 500 ──
+    head = content[:1500]
+    tail = content[-500:] if len(content) > 1500 else ""
+    # 合并去重：尾部可能与前部重叠
+    if tail and len(content) > 1500:
+        window = head + "\n" + tail
+    else:
+        window = head
+    window_lower = window.lower()
+
+    # ── 结论优先检测（全文中搜索） ──
+    full_lower = content.lower()
+    for marker in _CONCLUSION_MARKERS:
+        if marker in content or marker in full_lower:
+            return "结论"
+
+    # ── 计算每个关键词在窗口中的最佳位置 ──
+    def _find_position(pattern: str, text: str, text_lower: str) -> float:
+        """返回关键词在文本中的相对位置 (0~1)，找不到返回 -1"""
+        if any('\u4e00' <= c <= '\u9fff' for c in pattern):
+            idx = text.find(pattern)
+        else:
+            idx = text_lower.find(pattern)
+        if idx == -1:
+            return -1.0
+        total = max(len(text), 1)
+        return idx / total
+
+    # ── 统计所有标签命中（用于排他性计算） ──
+    all_matches: Dict[str, List[tuple]] = {}  # pattern -> [(tag_index, position)]
+
+    for ti, tag_def in enumerate(_THINK_TAGS):
+        for p in tag_def["cn"]:
+            pos = _find_position(p, window, window_lower)
+            if pos >= 0:
+                if p not in all_matches:
+                    all_matches[p] = []
+                all_matches[p].append((ti, pos))
+        for p in tag_def["en"]:
+            pos = _find_position(p, window, window_lower)
+            if pos >= 0:
+                if p not in all_matches:
+                    all_matches[p] = []
+                all_matches[p].append((ti, pos))
+
+    # ── 计算排他性权重 ──
+    def _exclusivity_multiplier(pattern: str) -> float:
+        """同词被多个标签匹配时减半"""
+        tags_hit = all_matches.get(pattern, [])
+        unique_tags = len(set(t for t, _ in tags_hit))
+        return 0.5 if unique_tags > 1 else 1.0
+
+    # ── 标签加权计分（去重 + 排他性） ──
+    best_tag = ""
+    best_score = 0.0
+    best_priority = -1
+
+    for tag_def in _THINK_TAGS:
+        matches_cn = [(p, _find_position(p, window, window_lower)) for p in tag_def["cn"]]
+        matches_en = [(p, _find_position(p, window, window_lower)) for p in tag_def["en"]]
+        matches_cn = [(p, pos) for p, pos in matches_cn if pos >= 0]
+        matches_en = [(p, pos) for p, pos in matches_en if pos >= 0]
+        all_hits = matches_cn + matches_en
+
+        if not all_hits:
+            continue
+
+        # 去重：长模式优先，子串不计；每个关键词取最佳位置
+        uniq: Dict[str, float] = {}
+        for p, pos in sorted(all_hits, key=lambda x: len(x[0]), reverse=True):
+            if not any(p in u for u in uniq):
+                if p not in uniq or pos > uniq[p]:
+                    uniq[p] = pos
+
+        # 加权计分：权重 × 排他性
+        score = sum(
+            _pattern_weight(p, position=pos) * _exclusivity_multiplier(p)
+            for p, pos in uniq.items()
+        )
+
+        if score > best_score or (
+            score == best_score and tag_def["priority"] > best_priority
+        ):
+            best_score = score
+            best_tag = tag_def["tag"]
+            best_priority = tag_def["priority"]
+
+    return best_tag if best_score >= 3.0 else ""
+
+
+_CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
+                          "总的来说", "建议", "推荐", "结论是", "答案是",
+                          "总结一下", "也就是说", "最终")
+
+
 def _render_think_block(content: str, completed: bool = True) -> str:
-    status_text = "💡 思考过程" if completed else "🧠 正在思考..."
     expanded = not completed
 
-    max_preview = 40
-    content_preview = content.strip().replace("\n", " ")[:max_preview]
-    if len(content.strip().replace("\n", " ")) > max_preview:
-        content_preview += "..."
+    # ── 标签分类（完成时才分类，流式过程只显示💡） ──
+    if completed:
+        tag = _classify_think_tag(content)
+        status_text = f"💡 {escape(tag)}" if tag else "💡"
+    else:
+        status_text = "💡"
+        tag = ""  # 流式不分类
+
+    # ── 预览：完成时结论句+累加，流式时简单截断 ──
+    preview = _get_think_preview(content)
 
     block_seed = f"{content}|{completed}"
     block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
@@ -401,7 +832,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(content_preview)}</span>
+        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
     </button>
     <div class="cm-collapsible__body"{body_style}>
         <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content}</div>
@@ -415,17 +846,17 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     与 _render_think_block 的区别：
     1. 不执行代码块处理（_strip_code_blocks），直接转义
     2. 不生成 block_key hash（节省计算）
-    3. 预览文本截取更简单
     """
-    status_text = "💡 思考过程" if completed else "🧠 正在思考..."
     expanded = not completed
 
-    # 预览文本：简单截取前50字符
-    max_preview = 50
-    if len(content) > max_preview:
-        content_preview = content[:max_preview].replace("\n", " ") + "..."
+    # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
+    if completed:
+        tag = _classify_think_tag(content)
+        status_text = f"💡 {escape(tag)}" if tag else "💡"
+        preview = _get_think_preview(content)
     else:
-        content_preview = content.replace("\n", " ")
+        status_text = "💡"
+        preview = _get_think_preview(content)
 
     expanded_attr = "true" if expanded else "false"
     body_style = ' style="height:auto; opacity:1;"' if expanded else ""
@@ -440,7 +871,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(content_preview)}</span>
+        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
     </button>
     <div class="cm-collapsible__body"{body_style}>
         <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>
@@ -1246,7 +1677,7 @@ class CodeWebViewer(QWebEngineView):
     MAX_WIDTH = 1800
     MAX_HEIGHT = 4000
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, light=False):
         super().__init__(parent)
         from typing import List
         self._markdown_text = ""
@@ -1255,6 +1686,7 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
+        self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         self._min_render_interval = 50
         self._height_report_pending = False
         self._context_lost = False  # 上下文丢失标志
@@ -1520,8 +1952,12 @@ class CodeWebViewer(QWebEngineView):
                 f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}'
             )
 
-        cdn_libs = """
+        if self._light_skeleton:
+            cdn_libs = ""
+        else:
+            cdn_libs = """
         <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"></script>
         """
 
         scrollbar_css = """
@@ -1711,7 +2147,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .table-scroll-wrapper > table th,
                 .table-scroll-wrapper > table td {{
-                    white-space: nowrap;
+                    white-space: normal;
+                    word-break: break-word;
                 }}
                 /* 继承 wrapper 内部表格的行样式 */
                 .table-scroll-wrapper > table th {{
@@ -1726,6 +2163,9 @@ class CodeWebViewer(QWebEngineView):
                     padding: 8px 12px;
                     border-bottom: 1px solid var(--border);
                     color: var(--text-secondary) !important;
+                    max-height: 3.8em;
+                    overflow-y: auto;
+                    vertical-align: top;
                 }}
                 .table-scroll-wrapper > table tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
                 .table-scroll-wrapper > table tr:hover {{ background: rgba(255, 255, 255, 0.05); }}
@@ -2246,6 +2686,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
+                {'' if self._light_skeleton else '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
                     width: 100%;
@@ -2256,6 +2697,7 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(22, 27, 34, 0.6);
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
+                '''}
 
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
@@ -2713,6 +3155,27 @@ class CodeWebViewer(QWebEngineView):
         try:
             if not self.page():
                 return
+
+            # ── 非流式模式（历史加载）：直接渲染，跳过所有增量比较逻辑 ──
+            if not self._streaming:
+                self._refresh_viewer_font_css()
+                # 如果有懒回调，执行一次获取最终 markdown
+                if self._lazy_markdown_cb:
+                    self._markdown_text = self._lazy_markdown_cb()
+                    self._lazy_markdown_cb = None
+                # 直接渲染并注入，跳过字符串比较（历史内容只渲染一次，不会重复）
+                html_content = self._render_markdown_to_html(self._markdown_text)
+                self._last_rendered_markdown = self._markdown_text
+                self._height_report_pending = True
+                js_code = (
+                    "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
+                    + f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                )
+                self._last_rendered_html = None
+                self.page().runJavaScript(js_code)
+                return
+
+            # ── 以下为流式模式（增量渲染） ──
             import time as _t
             _t0 = _t.time()
             # 懒加载：通过回调获取最新 markdown（避免每次 reasoning chunk 都调用 content_to_markdown）
@@ -2721,18 +3184,7 @@ class CodeWebViewer(QWebEngineView):
                 fresh_md = self._lazy_markdown_cb()
                 _tcb = (_t.time() - _tcb0) * 1000
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
-                # 流式模式下跳过全量字符串比较（内容持续增长，比较浪费）
-                if not self._streaming and fresh_md == self._last_rendered_markdown:
-                    if not self._height_report_pending:
-                        self._height_report_pending = True
-                        self._resize_timer.start()
-                    return
                 self._markdown_text = fresh_md
-            elif not self._streaming and self._markdown_text == self._last_rendered_markdown:
-                if not self._height_report_pending:
-                    self._height_report_pending = True
-                    self._resize_timer.start()
-                return
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
@@ -2741,13 +3193,6 @@ class CodeWebViewer(QWebEngineView):
             html_content = self._render_markdown_to_html(self._markdown_text)
             _tr = (_t.time() - _tr0) * 1000
             self._last_rendered_markdown = self._markdown_text
-            # 流式模式下跳过全量 HTML 字符串比较（内容持续增长，比较浪费）
-            if not self._streaming and html_content == self._last_rendered_html:
-                if not self._height_report_pending:
-                    self._height_report_pending = True
-                    self._resize_timer.start()
-                return
-
             self._last_rendered_html = html_content
             self._height_report_pending = True
             # 全量更新前清除已通过 JS 增量注入的工具块，避免重复
@@ -2841,15 +3286,41 @@ class CodeWebViewer(QWebEngineView):
         clipboard = QApplication.clipboard()
         clipboard.setText(self._markdown_text or "")
 
+    def _get_default_filename(self) -> str:
+        """生成默认导出文件名：会话名_时间戳"""
+        from datetime import datetime
+        session_name = "消息"
+        try:
+            # 沿父链向上查找主窗口（self.window() 返回 ToolPopupDialog，没有 session_manager）
+            parent_widget = self.parent()
+            while parent_widget is not None:
+                if hasattr(parent_widget, 'session_manager'):
+                    session = parent_widget.session_manager.get_current_session()
+                    if session:
+                        name = (session.topic_summary or session.name or "").strip()
+                        if name:
+                            session_name = name
+                    break
+                parent_widget = parent_widget.parent()
+        except Exception:
+            pass
+        # 移除文件名非法字符
+        invalid_chars = r'<>:"/\|?*'
+        for c in invalid_chars:
+            session_name = session_name.replace(c, '_')
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{session_name}_{ts}"
+
     def _export_message(self):
-        """导出消息为 Markdown 或 HTML 文件"""
+        """导出消息为 Markdown、HTML 或 PNG 图片文件"""
         from PyQt5.QtWidgets import QFileDialog
 
+        default_name = self._get_default_filename()
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "导出消息",
-            "",
-            "Markdown (*.md);;HTML (*.html)"
+            default_name,
+            "PNG 图片 (*.png);;Markdown (*.md);;HTML (*.html)"
         )
 
         if not file_path:
@@ -2858,24 +3329,271 @@ class CodeWebViewer(QWebEngineView):
         content = self._markdown_text or ""
 
         try:
-            is_html = selected_filter and "HTML" in selected_filter
-            if is_html or file_path.lower().endswith('.html'):
+            is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
+            if is_png:
+                if not file_path.lower().endswith('.png'):
+                    file_path += '.png'
+                self._export_as_image(file_path)
+            elif is_html or file_path.lower().endswith('.html'):
                 if not file_path.lower().endswith('.html'):
                     file_path += '.html'
                 html_content = self._convert_md_to_html(content)
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(html_content)
+                logger.info(f"消息已导出到: {file_path}")
+                self._show_save_success(file_path)
             else:
                 if not file_path.lower().endswith('.md'):
                     file_path += '.md'
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
-
-            logger.info(f"消息已导出到: {file_path}")
-            self._show_save_success(file_path)
+                logger.info(f"消息已导出到: {file_path}")
+                self._show_save_success(file_path)
         except Exception as e:
             logger.error(f"导出失败: {e}")
             self._show_save_error(str(e))
+
+    def _run_js_sync(self, js_code: str, timeout_ms: int = 2000) -> str:
+        """同步执行 JavaScript 并返回结果"""
+        from PyQt5.QtCore import QEventLoop, QTimer
+
+        page = self.page()
+        if not page:
+            return ""
+
+        result = [None]
+        loop = QEventLoop()
+
+        def callback(val):
+            result[0] = val
+            if loop.isRunning():
+                loop.quit()
+
+        page.runJavaScript(js_code, callback)
+        QTimer.singleShot(timeout_ms, lambda: loop.quit() if loop.isRunning() else None)
+        loop.exec_()
+
+        return result[0] or ""
+
+    def _get_card_bg_color(self) -> "QColor":
+        """沿父链查找 MessageCard，获取卡片背景色（强制实心化）
+
+        PyQt5 的 QColor() 字符串构造不支持 "rgba(r, g, b, a)" 格式
+        (isValid()=False)，需要手动解析提取 r/g/b 后用 QColor(r, g, b) 构造。
+        """
+        import re
+        from PyQt5.QtGui import QColor
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, '_theme') and isinstance(parent._theme, dict) and 'bg' in parent._theme:
+                bg = parent._theme['bg']
+                # 1. 先试标准颜色字符串（#hex、named color 等）
+                color = QColor(bg)
+                if color.isValid():
+                    color.setAlpha(255)
+                    return color
+                # 2. 兜底：手动解析 rgba(r, g, b[, a]) / rgb(r, g, b) 字符串
+                m = re.match(
+                    r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)',
+                    bg,
+                )
+                if m:
+                    return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                # 3. 主题色字符串无效且无法解析，跳出用兜底
+                break
+            parent = parent.parent()
+        # 兜底：暗色主题背景
+        return QColor("#2B2B2B")
+
+    def _compose_with_solid_bg(self, source: "QPixmap", width: int, height: int) -> "QPixmap":
+        """在 QPixmap 上填充实心卡片背景，再合成 source
+
+        Args:
+            source:  从 widget.grab() 拿到的 pixmap（可能含透明区）
+            width:   目标宽度
+            height:  目标高度
+
+        Returns:
+            填充实心卡片背景 + 绘制 source 的合成 pixmap
+        """
+        from PyQt5.QtGui import QPixmap, QPainter
+        if width <= 0 or height <= 0:
+            return source
+        result = QPixmap(width, height)
+        result.fill(self._get_card_bg_color())
+        if not source.isNull():
+            painter = QPainter(result)
+            painter.drawPixmap(0, 0, source)
+            painter.end()
+        return result
+
+    def _capture_full_content(self) -> "QPixmap":
+        """截取消息的完整内容为一张大图（实心背景 + 内容合成）
+
+        策略：临时解除 body max-height 限制并撑大视图到完整内容高度，
+        让全部内容一次性渲染可见，然后通过一次 grab() 截取整张图片，
+        最后用 QPixmap 主动填充实心卡片背景 + 合成 grab 结果。
+
+        相比原实现：
+        - 主动 QPixmap.fill 卡片色（实心），避免半透明 rgba 在 PNG 中呈现为黑
+        - 单次 200ms 等待 + processEvents() 强制布局（替代 400ms×2）
+        - grab(QRect) 显式指定区域，避免 setFixedHeight 后未生效导致漏抓
+        """
+        from PyQt5.QtCore import QEventLoop, QTimer, QRect, QPoint
+        from PyQt5.QtWidgets import QApplication
+        import json as json_mod
+
+        page = self.page()
+        view_w = self.width()
+        cur_h = self.height()
+
+        # 1. 获取完整内容高度
+        dims_raw = self._run_js_sync(
+            "JSON.stringify({sh: document.body.scrollHeight})"
+        )
+        if not dims_raw:
+            # 拿不到高度 → 兜底：直接 grab + 强制实心背景
+            return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
+
+        try:
+            scroll_h = json_mod.loads(dims_raw).get('sh', 0)
+        except Exception:
+            scroll_h = 0
+
+        # 2. 短消息：内容不超出 → 不展开
+        if scroll_h <= cur_h or scroll_h <= 0:
+            grabbed = self.grab()
+            return self._compose_with_solid_bg(
+                grabbed,
+                view_w,
+                max(cur_h, grabbed.height() if not grabbed.isNull() else cur_h),
+            )
+
+        # 3. 长消息：临时展开
+        old_styles = self._run_js_sync("""
+            var s = document.body.style;
+            JSON.stringify({maxHeight: s.maxHeight, overflowY: s.overflowY})
+        """)
+        self._run_js_sync("""
+            document.body.style.maxHeight = 'none';
+            document.body.style.overflowY = 'hidden';
+        """)
+
+        orig_height = self.height()
+        target_h = scroll_h + 20
+        self.setFixedHeight(target_h)
+        self.update()
+        # ★ 强制布局：让 setFixedHeight 真的撑大 widget
+        QApplication.processEvents()
+
+        self._run_js_sync("window.scrollTo(0, 0);")
+
+        # ★ 单次 200ms 等待（替代 400ms×2）
+        stable_loop = QEventLoop()
+        QTimer.singleShot(200, stable_loop.quit)
+        stable_loop.exec_()
+
+        # 4. 显式 grab 整个目标区域
+        full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
+
+        # 5. 合成：实心背景 + grab 内容
+        final_w = full_pix.width() if not full_pix.isNull() else view_w
+        final_h = max(target_h, full_pix.height() if not full_pix.isNull() else 0)
+        result = self._compose_with_solid_bg(full_pix, final_w, final_h)
+
+        # 6. 恢复视图和样式
+        self.setFixedHeight(orig_height)
+        if old_styles:
+            try:
+                prev = json_mod.loads(old_styles)
+                js_restore = f"""
+                    document.body.style.maxHeight = {json_mod.dumps(prev.get('maxHeight', ''))};
+                    document.body.style.overflowY = {json_mod.dumps(prev.get('overflowY', 'auto'))};
+                    window.scrollTo(0, 0);
+                """
+                self._run_js_sync(js_restore)
+            except Exception:
+                self._run_js_sync("window.scrollTo(0, 0);")
+
+        if result.isNull() or result.width() <= 0 or result.height() <= 0:
+            return self.grab()
+        return result
+
+    def _split_and_stitch(self, pixmap: "QPixmap", max_cols: int = 6) -> "QPixmap":
+        """将纵向长图均匀分段后水平拼接为宽高合理的矩形图
+
+        把 pixmap 按高度均匀切成 N 段，从左到右水平拼接。
+        N 的选择使最终拼接图的宽高比尽量接近 3:2。
+        """
+        from PyQt5.QtGui import QPixmap, QPainter
+
+        w = pixmap.width()
+        h = pixmap.height()
+        if w <= 0 or h <= 0:
+            return pixmap
+
+        # 计算最佳列数：使拼接后的宽高比接近目标比例
+        target_ratio = 1.5  # 3:2
+        best_cols = 1
+        best_diff = float('inf')
+
+        for cols in range(2, min(max_cols + 1, (h + w - 1) // w + 1)):
+            strip_h = h / cols
+            ratio = (cols * w) / strip_h
+            diff = abs(ratio - target_ratio)
+            if diff < best_diff:
+                best_diff = diff
+                best_cols = cols
+
+        if best_cols <= 1:
+            return pixmap
+
+        # 均匀切分（最后一段包含余量）
+        strip_h = h // best_cols
+        segments = []
+        for i in range(best_cols):
+            y = i * strip_h
+            if i == best_cols - 1:
+                seg = pixmap.copy(0, y, w, h - y)
+            else:
+                seg = pixmap.copy(0, y, w, strip_h)
+            if not seg.isNull():
+                segments.append(seg)
+
+        if len(segments) <= 1:
+            return pixmap
+
+        # 水平拼接
+        total_w = sum(s.width() for s in segments)
+        max_h = max(s.height() for s in segments)
+        result = QPixmap(total_w, max_h)
+        painter = QPainter(result)
+        x = 0
+        for seg in segments:
+            painter.drawPixmap(x, 0, seg)
+            x += seg.width()
+        painter.end()
+
+        return result
+
+    def _export_as_image(self, file_path: str):
+        """将当前消息内容导出为 PNG 图片（全内容截取 + 智能拼接）"""
+        from PyQt5.QtGui import QPixmap
+
+        # 1. 截取全内容大图
+        full = self._capture_full_content()
+        if full.isNull():
+            raise RuntimeError("截图生成失败，无法获取渲染内容")
+
+        # 2. 若内容超出视图高度，均匀分段后水平拼接为矩形图
+        if full.height() > full.width() * 1.5:
+            result = self._split_and_stitch(full)
+        else:
+            result = full
+
+        result.save(file_path, "PNG")
+        logger.info(f"消息已导出为图片: {file_path}")
+        self._show_save_success(file_path)
 
     def _convert_md_to_html(self, markdown_text: str) -> str:
         """将 Markdown 文本转换为独立 HTML 页面"""
@@ -3216,42 +3934,6 @@ class PlainTextViewer(QWidget):
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(self._text)
-
-    def _export_message(self):
-        """导出消息为 Markdown 或 HTML 文件"""
-        from PyQt5.QtWidgets import QFileDialog
-
-        file_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "导出消息",
-            "",
-            "Markdown (*.md);;HTML (*.html)"
-        )
-
-        if not file_path:
-            return
-
-        content = self._text or ""
-
-        try:
-            is_html = selected_filter and "HTML" in selected_filter
-            if is_html or file_path.lower().endswith('.html'):
-                if not file_path.lower().endswith('.html'):
-                    file_path += '.html'
-                html_content = self._convert_text_to_html(content)
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-            else:
-                if not file_path.lower().endswith('.md'):
-                    file_path += '.md'
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-
-            logger.info(f"消息已导出到: {file_path}")
-            self._show_save_success(file_path)
-        except Exception as e:
-            logger.error(f"导出失败: {e}")
-            self._show_save_error(str(e))
 
     def _convert_text_to_html(self, text: str) -> str:
         """将纯文本转换为独立 HTML 页面"""
@@ -3649,8 +4331,8 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = True
         elif self.role == "welcome":
-            # 欢迎卡片一开始就在可视区域，直接创建viewer不需要懒加载
-            self.viewer = CodeWebViewer(self)
+            # 欢迎卡片直接创建轻量 WebEngine（使用精简骨架，无 echarts CDN）
+            self.viewer = CodeWebViewer(self, light=True)
             self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
             self.viewer.codeActionRequested.connect(self.actionRequested.emit)
             self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
@@ -3658,7 +4340,6 @@ class MessageCard(SimpleCardWidget):
             self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
             self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
             self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
-            # WebEngine 上下文丢失处理
             self.viewer.contextLost.connect(self._on_webengine_context_lost)
             self.viewer.contextRestored.connect(self._on_webengine_context_restored)
             self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
