@@ -37,6 +37,9 @@ PROJECT_COLORS = [
 def get_project_color(name: str, alpha: int = 255) -> str:
     """根据项目名计算固定颜色（确定性哈希分配）
 
+    使用 zlib.crc32 替代内置 hash()，避免 Python 的
+    进程间随机化种子（PYTHONHASHSEED）导致每次启动颜色不一致。
+
     Args:
         name: 项目名
         alpha: 透明度 0-255
@@ -44,7 +47,8 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     Returns:
         RGBA 颜色字符串，如 "rgba(33, 139, 255, 255)"
     """
-    color_index = hash(name) % len(PROJECT_COLORS)
+    import zlib
+    color_index = zlib.crc32(name.encode("utf-8")) % len(PROJECT_COLORS)
     hex_color = PROJECT_COLORS[color_index]
     r = int(hex_color[1:3], 16)
     g = int(hex_color[3:5], 16)
