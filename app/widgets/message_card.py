@@ -3174,14 +3174,204 @@ class CodeWebViewer(QWebEngineView):
             logger.error(f"导出失败: {e}")
             self._show_save_error(str(e))
 
+    def _run_js_sync(self, js_code: str, timeout_ms: int = 2000) -> str:
+        """同步执行 JavaScript 并返回结果"""
+        from PyQt5.QtCore import QEventLoop, QTimer
+
+        page = self.page()
+        if not page:
+            return ""
+
+        result = [None]
+        loop = QEventLoop()
+
+        def callback(val):
+            result[0] = val
+            if loop.isRunning():
+                loop.quit()
+
+        page.runJavaScript(js_code, callback)
+        QTimer.singleShot(timeout_ms, lambda: loop.quit() if loop.isRunning() else None)
+        loop.exec_()
+
+        return result[0] or ""
+
+    def _get_card_bg_color(self) -> "QColor":
+        """沿父链查找 MessageCard，获取卡片背景色"""
+        from PyQt5.QtGui import QColor
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, '_theme') and isinstance(parent._theme, dict) and 'bg' in parent._theme:
+                return QColor(parent._theme['bg'])
+            parent = parent.parent()
+        # 兜底：暗色主题背景
+        return QColor("#2B2B2B")
+
+    def _capture_full_content(self) -> "QPixmap":
+        """截取消息的完整内容为一张大图
+
+        策略：临时解除 body max-height 限制并撑大视图到完整内容高度，
+        让全部内容一次性渲染可见，然后通过一次 grab() 截取整张图片，
+        避免逐段滚动截图在 WebEngine 合成上的不可靠性。
+
+        导出图片使用消息卡片的背景色（从父链 MessageCard._theme["bg"] 获取），
+        确保导出的 PNG 具有卡片渲染效果，而非透明背景。
+        """
+        from PyQt5.QtCore import QEventLoop, QTimer
+        from PyQt5.QtGui import QPixmap
+        import json as json_mod
+
+        page = self.page()
+        if not page:
+            return self.grab()
+
+        # ★ 获取卡片背景色，截取时临时使用，使导出图片具有消息卡片背景
+        card_bg = self._get_card_bg_color()
+        orig_bg = page.backgroundColor()
+        page.setBackgroundColor(card_bg)
+
+        try:
+            # 1. 获取完整内容高度
+            dims_raw = self._run_js_sync(
+                "JSON.stringify({sh: document.body.scrollHeight})"
+            )
+            if not dims_raw:
+                return self.grab()
+
+            dims = json_mod.loads(dims_raw)
+            scroll_h = dims.get('sh', 0)
+            cur_h = self.height()
+
+            # 2. 内容不超出视图 → 直接截图
+            if scroll_h <= cur_h or scroll_h <= 0:
+                return self.grab()
+
+            # 3. 临时解除 body 尺寸限制，让全部内容可见
+            old_styles = self._run_js_sync("""
+                var s = document.body.style;
+                JSON.stringify({
+                    maxHeight: s.maxHeight,
+                    overflowY: s.overflowY
+                })
+            """)
+            self._run_js_sync("""
+                document.body.style.maxHeight = 'none';
+                document.body.style.overflowY = 'hidden';
+            """)
+
+            # 4. 临时撑大视图高度到完整内容
+            orig_height = self.height()
+            self.setFixedHeight(scroll_h + 20)  # 加少许余量避免底部截断
+            self.update()
+
+            # 5. 滚动到顶部，确保截图从内容头部开始
+            self._run_js_sync("window.scrollTo(0, 0);")
+
+            # 6. 等待重新渲染稳定（含背景色变更 + 高度变更 + 滚动）
+            stable_loop = QEventLoop()
+            QTimer.singleShot(400, stable_loop.quit)
+            stable_loop.exec_()
+            QTimer.singleShot(400, stable_loop.quit)
+            stable_loop.exec_()
+
+            # 7. 一次性截取完整大图
+            full_pix = self.grab()
+
+            # 8. 恢复视图和样式
+            self.setFixedHeight(orig_height)
+            if old_styles:
+                try:
+                    prev = json_mod.loads(old_styles)
+                    js_restore = f"""
+                        document.body.style.maxHeight = {json_mod.dumps(prev.get('maxHeight', ''))};
+                        document.body.style.overflowY = {json_mod.dumps(prev.get('overflowY', 'auto'))};
+                        window.scrollTo(0, 0);
+                    """
+                    self._run_js_sync(js_restore)
+                except Exception:
+                    self._run_js_sync("window.scrollTo(0, 0);")
+
+            if full_pix.isNull() or full_pix.width() <= 0 or full_pix.height() <= 0:
+                return self.grab()
+
+            return full_pix
+        finally:
+            # ★ 恢复透明背景，不影响 UI 正常显示
+            page.setBackgroundColor(orig_bg)
+
+    def _split_and_stitch(self, pixmap: "QPixmap", max_cols: int = 6) -> "QPixmap":
+        """将纵向长图均匀分段后水平拼接为宽高合理的矩形图
+
+        把 pixmap 按高度均匀切成 N 段，从左到右水平拼接。
+        N 的选择使最终拼接图的宽高比尽量接近 3:2。
+        """
+        from PyQt5.QtGui import QPixmap, QPainter
+
+        w = pixmap.width()
+        h = pixmap.height()
+        if w <= 0 or h <= 0:
+            return pixmap
+
+        # 计算最佳列数：使拼接后的宽高比接近目标比例
+        target_ratio = 1.5  # 3:2
+        best_cols = 1
+        best_diff = float('inf')
+
+        for cols in range(2, min(max_cols + 1, (h + w - 1) // w + 1)):
+            strip_h = h / cols
+            ratio = (cols * w) / strip_h
+            diff = abs(ratio - target_ratio)
+            if diff < best_diff:
+                best_diff = diff
+                best_cols = cols
+
+        if best_cols <= 1:
+            return pixmap
+
+        # 均匀切分（最后一段包含余量）
+        strip_h = h // best_cols
+        segments = []
+        for i in range(best_cols):
+            y = i * strip_h
+            if i == best_cols - 1:
+                seg = pixmap.copy(0, y, w, h - y)
+            else:
+                seg = pixmap.copy(0, y, w, strip_h)
+            if not seg.isNull():
+                segments.append(seg)
+
+        if len(segments) <= 1:
+            return pixmap
+
+        # 水平拼接
+        total_w = sum(s.width() for s in segments)
+        max_h = max(s.height() for s in segments)
+        result = QPixmap(total_w, max_h)
+        painter = QPainter(result)
+        x = 0
+        for seg in segments:
+            painter.drawPixmap(x, 0, seg)
+            x += seg.width()
+        painter.end()
+
+        return result
+
     def _export_as_image(self, file_path: str):
-        """将当前消息内容导出为 PNG 图片"""
+        """将当前消息内容导出为 PNG 图片（全内容截取 + 智能拼接）"""
         from PyQt5.QtGui import QPixmap
 
-        pixmap = self.grab()
-        if pixmap.isNull():
+        # 1. 截取全内容大图
+        full = self._capture_full_content()
+        if full.isNull():
             raise RuntimeError("截图生成失败，无法获取渲染内容")
-        pixmap.save(file_path, "PNG")
+
+        # 2. 若内容超出视图高度，均匀分段后水平拼接为矩形图
+        if full.height() > full.width() * 1.5:
+            result = self._split_and_stitch(full)
+        else:
+            result = full
+
+        result.save(file_path, "PNG")
         logger.info(f"消息已导出为图片: {file_path}")
         self._show_save_success(file_path)
 
@@ -3517,12 +3707,6 @@ class PlainTextViewer(QWidget):
         delete_action = menu.addAction(get_icon("删除"), "删除")
         delete_action.triggered.connect(lambda: self._request_delete())
 
-        menu.addSeparator()
-
-        # 导出
-        export_action = menu.addAction(get_icon("导入"), "导出")
-        export_action.triggered.connect(self._export_message)
-
         menu.exec_(self.text_edit.mapToGlobal(pos))
 
     def _copy_to_clipboard(self):
@@ -3530,84 +3714,6 @@ class PlainTextViewer(QWidget):
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(self._text)
-
-    def _get_default_filename(self) -> str:
-        """生成默认导出文件名：会话名_时间戳"""
-        from datetime import datetime
-        session_name = "消息"
-        try:
-            # 沿父链向上查找主窗口（self.window() 返回 ToolPopupDialog，没有 session_manager）
-            parent_widget = self.parent()
-            while parent_widget is not None:
-                if hasattr(parent_widget, 'session_manager'):
-                    session = parent_widget.session_manager.get_current_session()
-                    if session:
-                        name = (session.topic_summary or session.name or "").strip()
-                        if name:
-                            session_name = name
-                    break
-                parent_widget = parent_widget.parent()
-        except Exception:
-            pass
-        # 移除文件名非法字符
-        invalid_chars = r'<>:"/\|?*'
-        for c in invalid_chars:
-            session_name = session_name.replace(c, '_')
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{session_name}_{ts}"
-
-    def _export_message(self):
-        """导出消息为 Markdown、HTML 或 PNG 图片文件"""
-        from PyQt5.QtWidgets import QFileDialog
-
-        default_name = self._get_default_filename()
-        file_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "导出消息",
-            default_name,
-            "PNG 图片 (*.png);;Markdown (*.md);;HTML (*.html)"
-        )
-
-        if not file_path:
-            return
-
-        content = self._text or ""
-
-        try:
-            is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
-            if is_png:
-                if not file_path.lower().endswith('.png'):
-                    file_path += '.png'
-                self._export_as_image(file_path)
-            elif is_html or file_path.lower().endswith('.html'):
-                if not file_path.lower().endswith('.html'):
-                    file_path += '.html'
-                html_content = self._convert_text_to_html(content)
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-                logger.info(f"消息已导出到: {file_path}")
-                self._show_save_success(file_path)
-            else:
-                if not file_path.lower().endswith('.md'):
-                    file_path += '.md'
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                logger.info(f"消息已导出到: {file_path}")
-                self._show_save_success(file_path)
-        except Exception as e:
-            logger.error(f"导出失败: {e}")
-            self._show_save_error(str(e))
-
-    def _export_as_image(self, file_path: str):
-        """将当前消息内容导出为 PNG 图片"""
-        from PyQt5.QtGui import QPixmap
-
-        pixmap = self.grab()
-        if pixmap.isNull():
-            raise RuntimeError("截图生成失败，无法获取渲染内容")
-        pixmap.save(file_path, "PNG")
-        logger.info(f"消息已导出为图片: {file_path}")
-        self._show_save_success(file_path)
 
     def _convert_text_to_html(self, text: str) -> str:
         """将纯文本转换为独立 HTML 页面"""

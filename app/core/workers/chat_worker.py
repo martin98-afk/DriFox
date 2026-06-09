@@ -865,6 +865,10 @@ class OpenAIChatWorker(QThread):
                         "content": self._pending_answer,
                         "success": True,
                     }
+                    # 发射 tool_result_received，让 UI 在助理卡片中渲染可折叠工具块
+                    result_obj = {"success": True, "content": self._pending_answer}
+                    self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                             q["tool_call_id"], "question", {}, result_obj)
                     response_sequence = self._build_response_message_sequence([question_result])
                     current_messages.extend(response_sequence)
                     current_session_messages.extend(response_sequence)

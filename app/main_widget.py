@@ -1202,6 +1202,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 切换会话前彻底清理卡片
         self._cache_current_session_cards()
+        # 清空批量渲染索引，防止虚拟滚动定时器触发的回收访问已移出布局的旧卡片
+        self._batch_cards = []
+        self._message_batch = []
+        self._visible_batch_start = 0
+        self._visible_batch_end = 0
+        self._virtual_scroll_timer.stop()
         # 只重置会话状态，保留 tool_executor（分支后还需要执行工具）
         if self.backend.tool_executor:
             self.backend.reset_session_state()
@@ -5079,6 +5085,13 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         self._cache_current_session_cards()
+        # 清空批量渲染索引，避免虚拟滚动定时器触发时遍历到已移出布局的旧卡片产生虚假警告
+        self._batch_cards = []
+        self._message_batch = []
+        self._visible_batch_start = 0
+        self._visible_batch_end = 0
+        # 停止虚拟滚动定时器，防止 processEvents 或其他时机触发回收旧卡片
+        self._virtual_scroll_timer.stop()
         session = self.backend.create_session()
         self._current_session_id = session.session_id
         self._history_preview_messages = None

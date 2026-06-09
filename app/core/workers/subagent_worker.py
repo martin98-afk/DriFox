@@ -1776,14 +1776,14 @@ class SubAgentManager(QObject):
 
     def get_tasks_status_with_details(self, task_ids: List[str], with_log: bool = False,
                                       with_result: bool = True, session_id: str = None) -> ToolResult:
-        """获取指定任务的详细状态（会话隔离）
-        
+        """获取指定任务的详细状态（按 task_id 精确查询，无会话限制）
+
+        与 get_all_active_tasks_with_details 不同，本方法用于按 explicit task_id
+        查询特定任务，因此不执行会话隔离。只要 task_id 存在就能查到结果。
+
         Args:
-            session_id: 可选，传入时优先使用（解决跨会话查询问题），
-                        不传时回退到 self._current_session_id
+            session_id: 保留参数（不再用于会话隔离），兼容历史调用方
         """
-        # 优先使用传入的 session_id，避免跨会话污染
-        effective_session = session_id if session_id else self._current_session_id
         tasks_info = []
         for tid in task_ids:
             task_data = self.get_task_logs(tid)
@@ -1792,19 +1792,6 @@ class SubAgentManager(QObject):
                     "task_id": tid,
                     "status": "unknown",
                     "agent": "",
-                })
-                continue
-
-            # 会话隔离：检查任务是否属于当前会话
-            task_session = task_data.get("session_id", "")
-            # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
-            if effective_session and task_session != effective_session:
-                # 任务属于其他会话，返回 unknown（不泄露其他会话的任务信息）
-                tasks_info.append({
-                    "task_id": tid,
-                    "status": "unknown",
-                    "agent": "",
-                    "_reason": "任务属于其他会话",
                 })
                 continue
 
