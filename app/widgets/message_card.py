@@ -3107,15 +3107,41 @@ class CodeWebViewer(QWebEngineView):
         clipboard = QApplication.clipboard()
         clipboard.setText(self._markdown_text or "")
 
+    def _get_default_filename(self) -> str:
+        """生成默认导出文件名：会话名_时间戳"""
+        from datetime import datetime
+        session_name = "消息"
+        try:
+            # 沿父链向上查找主窗口（self.window() 返回 ToolPopupDialog，没有 session_manager）
+            parent_widget = self.parent()
+            while parent_widget is not None:
+                if hasattr(parent_widget, 'session_manager'):
+                    session = parent_widget.session_manager.get_current_session()
+                    if session:
+                        name = (session.topic_summary or session.name or "").strip()
+                        if name:
+                            session_name = name
+                    break
+                parent_widget = parent_widget.parent()
+        except Exception:
+            pass
+        # 移除文件名非法字符
+        invalid_chars = r'<>:"/\|?*'
+        for c in invalid_chars:
+            session_name = session_name.replace(c, '_')
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{session_name}_{ts}"
+
     def _export_message(self):
-        """导出消息为 Markdown 或 HTML 文件"""
+        """导出消息为 Markdown、HTML 或 PNG 图片文件"""
         from PyQt5.QtWidgets import QFileDialog
 
+        default_name = self._get_default_filename()
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "导出消息",
-            "",
-            "Markdown (*.md);;HTML (*.html)"
+            default_name,
+            "PNG 图片 (*.png);;Markdown (*.md);;HTML (*.html)"
         )
 
         if not file_path:
@@ -3124,24 +3150,40 @@ class CodeWebViewer(QWebEngineView):
         content = self._markdown_text or ""
 
         try:
-            is_html = selected_filter and "HTML" in selected_filter
-            if is_html or file_path.lower().endswith('.html'):
+            is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
+            if is_png:
+                if not file_path.lower().endswith('.png'):
+                    file_path += '.png'
+                self._export_as_image(file_path)
+            elif is_html or file_path.lower().endswith('.html'):
                 if not file_path.lower().endswith('.html'):
                     file_path += '.html'
                 html_content = self._convert_md_to_html(content)
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(html_content)
+                logger.info(f"消息已导出到: {file_path}")
+                self._show_save_success(file_path)
             else:
                 if not file_path.lower().endswith('.md'):
                     file_path += '.md'
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
-
-            logger.info(f"消息已导出到: {file_path}")
-            self._show_save_success(file_path)
+                logger.info(f"消息已导出到: {file_path}")
+                self._show_save_success(file_path)
         except Exception as e:
             logger.error(f"导出失败: {e}")
             self._show_save_error(str(e))
+
+    def _export_as_image(self, file_path: str):
+        """将当前消息内容导出为 PNG 图片"""
+        from PyQt5.QtGui import QPixmap
+
+        pixmap = self.grab()
+        if pixmap.isNull():
+            raise RuntimeError("截图生成失败，无法获取渲染内容")
+        pixmap.save(file_path, "PNG")
+        logger.info(f"消息已导出为图片: {file_path}")
+        self._show_save_success(file_path)
 
     def _convert_md_to_html(self, markdown_text: str) -> str:
         """将 Markdown 文本转换为独立 HTML 页面"""
@@ -3475,6 +3517,12 @@ class PlainTextViewer(QWidget):
         delete_action = menu.addAction(get_icon("删除"), "删除")
         delete_action.triggered.connect(lambda: self._request_delete())
 
+        menu.addSeparator()
+
+        # 导出
+        export_action = menu.addAction(get_icon("导入"), "导出")
+        export_action.triggered.connect(self._export_message)
+
         menu.exec_(self.text_edit.mapToGlobal(pos))
 
     def _copy_to_clipboard(self):
@@ -3483,15 +3531,41 @@ class PlainTextViewer(QWidget):
         clipboard = QApplication.clipboard()
         clipboard.setText(self._text)
 
+    def _get_default_filename(self) -> str:
+        """生成默认导出文件名：会话名_时间戳"""
+        from datetime import datetime
+        session_name = "消息"
+        try:
+            # 沿父链向上查找主窗口（self.window() 返回 ToolPopupDialog，没有 session_manager）
+            parent_widget = self.parent()
+            while parent_widget is not None:
+                if hasattr(parent_widget, 'session_manager'):
+                    session = parent_widget.session_manager.get_current_session()
+                    if session:
+                        name = (session.topic_summary or session.name or "").strip()
+                        if name:
+                            session_name = name
+                    break
+                parent_widget = parent_widget.parent()
+        except Exception:
+            pass
+        # 移除文件名非法字符
+        invalid_chars = r'<>:"/\|?*'
+        for c in invalid_chars:
+            session_name = session_name.replace(c, '_')
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{session_name}_{ts}"
+
     def _export_message(self):
-        """导出消息为 Markdown 或 HTML 文件"""
+        """导出消息为 Markdown、HTML 或 PNG 图片文件"""
         from PyQt5.QtWidgets import QFileDialog
 
+        default_name = self._get_default_filename()
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "导出消息",
-            "",
-            "Markdown (*.md);;HTML (*.html)"
+            default_name,
+            "PNG 图片 (*.png);;Markdown (*.md);;HTML (*.html)"
         )
 
         if not file_path:
@@ -3500,24 +3574,40 @@ class PlainTextViewer(QWidget):
         content = self._text or ""
 
         try:
-            is_html = selected_filter and "HTML" in selected_filter
-            if is_html or file_path.lower().endswith('.html'):
+            is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
+            if is_png:
+                if not file_path.lower().endswith('.png'):
+                    file_path += '.png'
+                self._export_as_image(file_path)
+            elif is_html or file_path.lower().endswith('.html'):
                 if not file_path.lower().endswith('.html'):
                     file_path += '.html'
                 html_content = self._convert_text_to_html(content)
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(html_content)
+                logger.info(f"消息已导出到: {file_path}")
+                self._show_save_success(file_path)
             else:
                 if not file_path.lower().endswith('.md'):
                     file_path += '.md'
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
-
-            logger.info(f"消息已导出到: {file_path}")
-            self._show_save_success(file_path)
+                logger.info(f"消息已导出到: {file_path}")
+                self._show_save_success(file_path)
         except Exception as e:
             logger.error(f"导出失败: {e}")
             self._show_save_error(str(e))
+
+    def _export_as_image(self, file_path: str):
+        """将当前消息内容导出为 PNG 图片"""
+        from PyQt5.QtGui import QPixmap
+
+        pixmap = self.grab()
+        if pixmap.isNull():
+            raise RuntimeError("截图生成失败，无法获取渲染内容")
+        pixmap.save(file_path, "PNG")
+        logger.info(f"消息已导出为图片: {file_path}")
+        self._show_save_success(file_path)
 
     def _convert_text_to_html(self, text: str) -> str:
         """将纯文本转换为独立 HTML 页面"""
