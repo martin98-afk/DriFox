@@ -383,6 +383,82 @@ body{
   .callout strong{color:inherit}
 }
 
+/* ===== 探索路径（Deep/Thorough 模式） ===== */
+.exploration-path{
+  margin-top:2.75rem;
+  padding-top:2rem;
+  border-top:1px solid #ececec;
+}
+.path-stats{
+  display:flex;flex-wrap:wrap;gap:.5rem;
+  margin:1rem 0 1.5rem;
+}
+.path-stats .stat{
+  display:inline-flex;align-items:center;
+  padding:.4rem .9rem;
+  background:#ecfdf5;
+  border:1px solid #a7f3d0;
+  border-radius:999px;
+  font-size:.82rem;
+  color:#064e3b;
+  font-weight:500;
+}
+.path-stats .stat strong{
+  color:#047857;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+  margin:0 .15rem;
+}
+.hop-timeline{
+  list-style:none;padding:0;
+  position:relative;
+  padding-left:2.5rem;
+}
+.hop-timeline::before{
+  content:"";position:absolute;
+  left:.9rem;top:.5rem;bottom:.5rem;
+  width:2px;
+  background:linear-gradient(180deg,#10b981 0%,#6366f1 100%);
+}
+.hop-timeline > li{
+  position:relative;
+  margin-bottom:1.5rem;
+  padding-bottom:1.5rem;
+  border-bottom:1px dashed #e5e5e5;
+}
+.hop-timeline > li:last-child{
+  margin-bottom:0;padding-bottom:0;border-bottom:none;
+}
+.hop-num{
+  position:absolute;left:-2.5rem;top:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:1.85rem;height:1.85rem;
+  background:linear-gradient(135deg,#10b981 0%,#059669 100%);
+  color:#fff;
+  border-radius:50%;
+  font-size:.78rem;font-weight:700;
+  box-shadow:0 2px 6px rgba(16,185,129,.3);
+  z-index:1;
+}
+.hop-action{
+  display:block;
+  font-size:.85rem;font-weight:600;
+  color:#0a0a14;
+  margin-bottom:.55rem;
+}
+.hop-timeline ul{
+  list-style:none;padding:0;margin:0;
+  display:flex;flex-direction:column;gap:.4rem;
+}
+.hop-timeline ul li{
+  font-size:.88rem;color:#40414a;
+  padding:.5rem .75rem;
+  background:#f8fafc;
+  border-radius:6px;
+  border-left:2px solid #10b981;
+}
+.hop-timeline ul li::before{content:none}
+
 /* ===== 打印样式（导出 PDF 友好） ===== */
 @media print{
   body{background:#fff;padding:0}
@@ -439,6 +515,14 @@ body{
 - `⚠️ 推断` → `<div class="callout callout-infer"><strong>🔮 推断</strong><p>...</p></div>`
 - 普通 `[事实](url)` → `<a href="url">事实</a>` 紧跟 `<sup class="source-tag">源</sup>`
 - Deep 模式的 todo 追踪 → `<div class="todo-track">...</div>`
+- Deep/Thorough 模式的「探索路径」 → `<section class="exploration-path">` 包裹：
+  - 标题用 `<h2>🔍 探索路径</h2>`
+  - 统计区用 `<div class="path-stats">` 含 4 个 `<span class="stat">`
+  - 遍历轨迹用 `<ol class="hop-timeline">`，每跳是 `<li>`：
+    - 跳数徽章 `<span class="hop-num">跳 N</span>`
+    - 跳说明 `<span class="hop-action">...</span>`
+    - 抓取页面列表 `<ul><li><a>...</a> → 关键信息: ...</li></ul>`
+  - 触发漂移停止时，附加 `<blockquote>` 用 ⚠ 标记
 
 ### 3. 工具后端降级策略
 
