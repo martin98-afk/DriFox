@@ -425,20 +425,37 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
             return conclusion_text[:max_length] + "..."
 
     # ── 策略2: 三段式采样 ──
-    # 展平文本，按句分割
+    # 展平文本，按句分割，连续短句合并
     flat = text.replace("\n", " ")
-    # 提取所有有意义的句子（长度 ≥ 8）
-    sentences: List[str] = []
+    raw_sentences: List[str] = []
     current = ""
     for ch in flat:
         current += ch
         if ch in "。！？.!?；;":
-            s = current.strip()
-            if len(s) >= 8:
-                sentences.append(s)
+            raw_sentences.append(current.strip())
             current = ""
-    if current.strip() and len(current.strip()) >= 8:
-        sentences.append(current.strip())
+    if current.strip():
+        raw_sentences.append(current.strip())
+
+    # 合并连续短句（<8 字）到前一句或后一句
+    sentences: List[str] = []
+    buf = ""
+    for s in raw_sentences:
+        if not s:
+            continue
+        if len(s) < 8:
+            buf += s
+        else:
+            if buf:
+                sentences.append(buf + s)
+                buf = ""
+            else:
+                sentences.append(s)
+    if buf:
+        if sentences:
+            sentences[-1] += buf
+        else:
+            sentences.append(buf)
 
     if not sentences:
         # 没有有效句子，回退到简单截断
@@ -470,13 +487,21 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
 
     # ── 保证最少 40 字 ──
     if len(preview) < 40:
-        # 向后扩展：取前几个句子直到 ≥40 字
-        extended = sentences[0]
-        for s in sentences[1:]:
-            if len(extended) >= 40:
-                break
-            extended += " ... " + s
-        preview = extended
+        # 只有一句时直接展示全部（或截断到 max_length）
+        if n == 1:
+            full = sentences[0]
+            if len(full) <= max_length:
+                return full if _is_full(len(full)) else full + "..."
+            else:
+                preview = full[:max_length] + "..."
+        else:
+            # 向后扩展：取前几个句子直到 ≥40 字
+            extended = sentences[0]
+            for s in sentences[1:]:
+                if len(extended) >= 40:
+                    break
+                extended += " ... " + s
+            preview = extended
 
     # 截断到 max_length
     if len(preview) > max_length:
@@ -634,9 +659,8 @@ def _classify_think_tag(content: str) -> str:
     改进要点：
     - 分析窗口扩展为前 1500 + 尾部 500（覆盖结论区）
     - 位置加权：结尾 30% 区域关键词权重 ×1.5
-    - 归一化分数：score / √(标签关键词数)，防止词多占优
     - 排他性：同词命中多标签时权重减半
-    - 阈值提升到 2.5
+    - 阈值 3.0（关键词已清洗，阈值可提高）
     """
     content = content.strip()
     if not content:
@@ -694,12 +718,10 @@ def _classify_think_tag(content: str) -> str:
         unique_tags = len(set(t for t, _ in tags_hit))
         return 0.5 if unique_tags > 1 else 1.0
 
-    # ── 标签加权计分（去重 + 归一化 + 排他性） ──
+    # ── 标签加权计分（去重 + 排他性） ──
     best_tag = ""
     best_score = 0.0
     best_priority = -1
-
-    import math as _math
 
     for tag_def in _THINK_TAGS:
         matches_cn = [(p, _find_position(p, window, window_lower)) for p in tag_def["cn"]]
@@ -724,18 +746,14 @@ def _classify_think_tag(content: str) -> str:
             for p, pos in uniq.items()
         )
 
-        # 归一化：除以 sqrt(标签关键词总数)
-        tag_kw_count = len(tag_def["cn"]) + len(tag_def["en"])
-        normalized = score / _math.sqrt(max(tag_kw_count, 1))
-
-        if normalized > best_score or (
-            normalized == best_score and tag_def["priority"] > best_priority
+        if score > best_score or (
+            score == best_score and tag_def["priority"] > best_priority
         ):
-            best_score = normalized
+            best_score = score
             best_tag = tag_def["tag"]
             best_priority = tag_def["priority"]
 
-    return best_tag if best_score >= 2.5 else ""
+    return best_tag if best_score >= 3.0 else ""
 
 
 _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
@@ -3346,97 +3364,119 @@ class CodeWebViewer(QWebEngineView):
         # 兜底：暗色主题背景
         return QColor("#2B2B2B")
 
+    def _compose_with_solid_bg(self, source: "QPixmap", width: int, height: int) -> "QPixmap":
+        """在 QPixmap 上填充实心卡片背景，再合成 source
+
+        Args:
+            source:  从 widget.grab() 拿到的 pixmap（可能含透明区）
+            width:   目标宽度
+            height:  目标高度
+
+        Returns:
+            填充实心卡片背景 + 绘制 source 的合成 pixmap
+        """
+        from PyQt5.QtGui import QPixmap, QPainter
+        if width <= 0 or height <= 0:
+            return source
+        result = QPixmap(width, height)
+        result.fill(self._get_card_bg_color())
+        if not source.isNull():
+            painter = QPainter(result)
+            painter.drawPixmap(0, 0, source)
+            painter.end()
+        return result
+
     def _capture_full_content(self) -> "QPixmap":
-        """截取消息的完整内容为一张大图
+        """截取消息的完整内容为一张大图（实心背景 + 内容合成）
 
         策略：临时解除 body max-height 限制并撑大视图到完整内容高度，
         让全部内容一次性渲染可见，然后通过一次 grab() 截取整张图片，
-        避免逐段滚动截图在 WebEngine 合成上的不可靠性。
+        最后用 QPixmap 主动填充实心卡片背景 + 合成 grab 结果。
 
-        导出图片使用消息卡片的背景色（从父链 MessageCard._theme["bg"] 获取），
-        确保导出的 PNG 具有卡片渲染效果，而非透明背景。
+        相比原实现：
+        - 主动 QPixmap.fill 卡片色（实心），避免半透明 rgba 在 PNG 中呈现为黑
+        - 单次 200ms 等待 + processEvents() 强制布局（替代 400ms×2）
+        - grab(QRect) 显式指定区域，避免 setFixedHeight 后未生效导致漏抓
         """
-        from PyQt5.QtCore import QEventLoop, QTimer
-        from PyQt5.QtGui import QPixmap
+        from PyQt5.QtCore import QEventLoop, QTimer, QRect, QPoint
+        from PyQt5.QtWidgets import QApplication
         import json as json_mod
 
         page = self.page()
-        if not page:
-            return self.grab()
+        view_w = self.width()
+        cur_h = self.height()
 
-        # ★ 获取卡片背景色，截取时临时使用，使导出图片具有消息卡片背景
-        card_bg = self._get_card_bg_color()
-        orig_bg = page.backgroundColor()
-        page.setBackgroundColor(card_bg)
+        # 1. 获取完整内容高度
+        dims_raw = self._run_js_sync(
+            "JSON.stringify({sh: document.body.scrollHeight})"
+        )
+        if not dims_raw:
+            # 拿不到高度 → 兜底：直接 grab + 强制实心背景
+            return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
 
         try:
-            # 1. 获取完整内容高度
-            dims_raw = self._run_js_sync(
-                "JSON.stringify({sh: document.body.scrollHeight})"
+            scroll_h = json_mod.loads(dims_raw).get('sh', 0)
+        except Exception:
+            scroll_h = 0
+
+        # 2. 短消息：内容不超出 → 不展开
+        if scroll_h <= cur_h or scroll_h <= 0:
+            grabbed = self.grab()
+            return self._compose_with_solid_bg(
+                grabbed,
+                view_w,
+                max(cur_h, grabbed.height() if not grabbed.isNull() else cur_h),
             )
-            if not dims_raw:
-                return self.grab()
 
-            dims = json_mod.loads(dims_raw)
-            scroll_h = dims.get('sh', 0)
-            cur_h = self.height()
+        # 3. 长消息：临时展开
+        old_styles = self._run_js_sync("""
+            var s = document.body.style;
+            JSON.stringify({maxHeight: s.maxHeight, overflowY: s.overflowY})
+        """)
+        self._run_js_sync("""
+            document.body.style.maxHeight = 'none';
+            document.body.style.overflowY = 'hidden';
+        """)
 
-            # 2. 内容不超出视图 → 直接截图
-            if scroll_h <= cur_h or scroll_h <= 0:
-                return self.grab()
+        orig_height = self.height()
+        target_h = scroll_h + 20
+        self.setFixedHeight(target_h)
+        self.update()
+        # ★ 强制布局：让 setFixedHeight 真的撑大 widget
+        QApplication.processEvents()
 
-            # 3. 临时解除 body 尺寸限制，让全部内容可见
-            old_styles = self._run_js_sync("""
-                var s = document.body.style;
-                JSON.stringify({
-                    maxHeight: s.maxHeight,
-                    overflowY: s.overflowY
-                })
-            """)
-            self._run_js_sync("""
-                document.body.style.maxHeight = 'none';
-                document.body.style.overflowY = 'hidden';
-            """)
+        self._run_js_sync("window.scrollTo(0, 0);")
 
-            # 4. 临时撑大视图高度到完整内容
-            orig_height = self.height()
-            self.setFixedHeight(scroll_h + 20)  # 加少许余量避免底部截断
-            self.update()
+        # ★ 单次 200ms 等待（替代 400ms×2）
+        stable_loop = QEventLoop()
+        QTimer.singleShot(200, stable_loop.quit)
+        stable_loop.exec_()
 
-            # 5. 滚动到顶部，确保截图从内容头部开始
-            self._run_js_sync("window.scrollTo(0, 0);")
+        # 4. 显式 grab 整个目标区域
+        full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
 
-            # 6. 等待重新渲染稳定（含背景色变更 + 高度变更 + 滚动）
-            stable_loop = QEventLoop()
-            QTimer.singleShot(400, stable_loop.quit)
-            stable_loop.exec_()
-            QTimer.singleShot(400, stable_loop.quit)
-            stable_loop.exec_()
+        # 5. 合成：实心背景 + grab 内容
+        final_w = full_pix.width() if not full_pix.isNull() else view_w
+        final_h = max(target_h, full_pix.height() if not full_pix.isNull() else 0)
+        result = self._compose_with_solid_bg(full_pix, final_w, final_h)
 
-            # 7. 一次性截取完整大图
-            full_pix = self.grab()
+        # 6. 恢复视图和样式
+        self.setFixedHeight(orig_height)
+        if old_styles:
+            try:
+                prev = json_mod.loads(old_styles)
+                js_restore = f"""
+                    document.body.style.maxHeight = {json_mod.dumps(prev.get('maxHeight', ''))};
+                    document.body.style.overflowY = {json_mod.dumps(prev.get('overflowY', 'auto'))};
+                    window.scrollTo(0, 0);
+                """
+                self._run_js_sync(js_restore)
+            except Exception:
+                self._run_js_sync("window.scrollTo(0, 0);")
 
-            # 8. 恢复视图和样式
-            self.setFixedHeight(orig_height)
-            if old_styles:
-                try:
-                    prev = json_mod.loads(old_styles)
-                    js_restore = f"""
-                        document.body.style.maxHeight = {json_mod.dumps(prev.get('maxHeight', ''))};
-                        document.body.style.overflowY = {json_mod.dumps(prev.get('overflowY', 'auto'))};
-                        window.scrollTo(0, 0);
-                    """
-                    self._run_js_sync(js_restore)
-                except Exception:
-                    self._run_js_sync("window.scrollTo(0, 0);")
-
-            if full_pix.isNull() or full_pix.width() <= 0 or full_pix.height() <= 0:
-                return self.grab()
-
-            return full_pix
-        finally:
-            # ★ 恢复透明背景，不影响 UI 正常显示
-            page.setBackgroundColor(orig_bg)
+        if result.isNull() or result.width() <= 0 or result.height() <= 0:
+            return self.grab()
+        return result
 
     def _split_and_stitch(self, pixmap: "QPixmap", max_cols: int = 6) -> "QPixmap":
         """将纵向长图均匀分段后水平拼接为宽高合理的矩形图
