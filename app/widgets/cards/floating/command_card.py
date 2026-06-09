@@ -554,6 +554,23 @@ class CommandCard(QWidget):
         self._detail_desc_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_desc_label)
 
+        # 位置参数提示（交互式参数列表上方显示，如 "<query> — 研究主题"）
+        self._detail_positional_hint = QLabel()
+        self._detail_positional_hint.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_ACCENT};
+                {get_font_family_css()} {font_size_css(11)};
+                background: rgba(128,128,128,0.06);
+                border-radius: 4px;
+                padding: 2px 8px;
+                margin: 0;
+            }}
+        """)
+        self._detail_positional_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._detail_positional_hint.setWordWrap(True)
+        self._detail_positional_hint.setVisible(False)
+        detail_layout.addWidget(self._detail_positional_hint)
+
         # 参数列表滚动区（有 parameters 时显示）
         self._detail_params_scroll = QScrollArea()
         self._detail_params_scroll.setWidgetResizable(True)
@@ -687,10 +704,21 @@ class CommandCard(QWidget):
             self._detail_hint_label.setVisible(False)
             self._detail_value_scroll.setVisible(False)
             self._build_param_widgets(cmd.parameters)
-            self._detail_params_scroll.setVisible(True)
-            # 初始选中第一项
-            self._selected_param_index = 0 if self._param_widgets else -1
-            self._update_param_selection()
+            # 位置参数提示：收集 positional 类型参数的描述显示在列表上方
+            positional_text = self._build_positional_hint(cmd.parameters)
+            if positional_text:
+                self._detail_positional_hint.setText(positional_text)
+                self._detail_positional_hint.setVisible(True)
+            else:
+                self._detail_positional_hint.setVisible(False)
+            # 有交互式参数项才显示参数滚动区
+            if self._param_widgets:
+                self._detail_params_scroll.setVisible(True)
+                self._selected_param_index = 0
+                self._update_param_selection()
+            else:
+                self._detail_params_scroll.setVisible(False)
+                self._selected_param_index = -1
         else:
             # 回退：静态 hint
             self._detail_params_scroll.setVisible(False)
@@ -739,6 +767,8 @@ class CommandCard(QWidget):
             desc_height = line_height
 
         # 计算参数列表/值列表/提示文本高度
+        pos_hint_height = 0
+
         if self._detail_has_params and not self._value_selection_mode:
             # 交互参数列表高度
             param_count = len(self._param_widgets)
@@ -747,6 +777,17 @@ class CommandCard(QWidget):
             self._detail_params_scroll.setFixedHeight(min(content_height, 7 * ITEM_HEIGHT))
             content_height = min(content_height, 7 * ITEM_HEIGHT)
             hint_height = 0
+            # 位置参数提示高度
+            if self._detail_positional_hint.isVisible():
+                fm_pos = self._detail_positional_hint.fontMetrics()
+                pos_line_height = fm_pos.lineSpacing()
+                pos_text = self._detail_positional_hint.text()
+                pos_width = fm_pos.horizontalAdvance(pos_text)
+                label_width = self._detail_positional_hint.width() or 1
+                if label_width <= 0:
+                    label_width = self.width() - 24
+                pos_line_count = max(1, (pos_width + label_width - 1) // label_width)
+                pos_hint_height = pos_line_height * pos_line_count + 4  # padding 2+2
         elif self._value_selection_mode:
             # 值选择列表高度
             value_count = len(self._value_widgets)
@@ -770,7 +811,7 @@ class CommandCard(QWidget):
                 hint_height = 0
             content_height = 0
 
-        total_height = v_margin + desc_height + spacing + hint_height + content_height
+        total_height = v_margin + desc_height + spacing + hint_height + content_height + pos_hint_height
         self.setFixedHeight(total_height)
 
     # ---- 参数列表交互 ----
@@ -794,6 +835,20 @@ class CommandCard(QWidget):
             w.clicked.connect(self._on_param_clicked)
             self._detail_params_layout.addWidget(w)
             self._param_widgets.append(w)
+
+    @staticmethod
+    def _build_positional_hint(params: list) -> str:
+        """提取 positional 类型参数的描述文本，供 detail 模式静态显示"""
+        parts = []
+        for p in params:
+            if p.param_type != "positional":
+                continue
+            if p.description:
+                text = f"{p.name} — {p.description}"
+            else:
+                text = p.name
+            parts.append(text)
+        return "  ·  ".join(parts)
 
     def _on_param_clicked(self):
         """参数项被点击"""
@@ -1135,6 +1190,7 @@ class CommandCard(QWidget):
         self._selected_param_index = -1
         self._selected_value_index = -1
         self._last_selected_value_index = -1
+        self._detail_positional_hint.setVisible(False)
         self._detail_container.setVisible(False)
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)

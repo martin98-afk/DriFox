@@ -8237,12 +8237,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
                     # 提示词替换命令：替换 + 用 $ARGUMENT 占位符替换
-                    user_text = cmd_result.replacement
+                    user_text = f"严格按照以下命令规范执行：{cmd_result.replacement}\n\n"
                     if cmd_result.remainder:
                         # fallback: 无 $ARGUMENTS 时保留旧行为
-                        user_text = (
-                            f"{user_text}\n\n$ARGUMENTS：{cmd_result.remainder}"
-                        )
+                        user_text += f"$ARGUMENTS：{cmd_result.remainder}"
                     # 提示词命令需要发送消息，按现有逻辑处理
         # ---- 内置命令拦截结束 ----
 
