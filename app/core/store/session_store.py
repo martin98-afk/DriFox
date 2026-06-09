@@ -35,6 +35,7 @@ class SessionStore:
     TABLE_NAME = "sessions"
     MEMORIES_TABLE = "memories"
     DB_FILENAME = "sessions.db"
+    _CLEAN_SHUTDOWN_FLAG = "clean_shutdown.flag"
 
     _instance: Optional["SessionStore"] = None
 
@@ -72,6 +73,16 @@ class SessionStore:
         
         self._init_schema()
 
+    @classmethod
+    def mark_clean_shutdown(cls):
+        """标记数据库正常关闭，下次启动跳过完整性检查"""
+        try:
+            from app.utils.utils import get_app_data_dir
+            flag_path = Path(get_app_data_dir()) / cls._CLEAN_SHUTDOWN_FLAG
+            flag_path.write_text("1", encoding="utf-8")
+        except Exception:
+            pass
+
     def _check_and_repair_database(self):
         """检查并修复损坏的 SQLite 数据库
         
@@ -84,12 +95,24 @@ class SessionStore:
         1. 先尝试执行 PRAGMA wal_checkpoint(TRUNCATE) 同步 WAL
         2. 删除不匹配的 WAL/SHM 文件（如果存在）
         3. 执行 VACUUM 重建数据库
+        
+        优化：如果上次正常关闭，跳过耗时较长的 PRAGMA integrity_check
         """
         if not self._db or not self._db.is_connected:
             logger.warning("[SessionStore] 数据库未连接，跳过检查")
             return
         
         db_path = Path(self._db.db_path)
+        
+        # 检查是否为正常关闭后的首次启动
+        clean_shutdown = False
+        try:
+            flag_path = Path(get_app_data_dir()) / self._CLEAN_SHUTDOWN_FLAG
+            if flag_path.exists():
+                clean_shutdown = True
+                flag_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         
         try:
             # 检查 WAL 模式
@@ -119,6 +142,11 @@ class SessionStore:
                                 logger.info(f"[SessionStore] 已删除损坏的 {p[1]} 文件")
                             except Exception as e2:
                                 logger.warning(f"[SessionStore] 无法删除 {p[1]} 文件: {e2}")
+            
+            # 正常关闭后跳过完整行检查（PRAGMA integrity_check 在数据库较大时较慢）
+            if clean_shutdown:
+                logger.debug("[SessionStore] 上次正常关闭，跳过完整性检查")
+                return
             
             # 尝试执行完整性检查
             try:

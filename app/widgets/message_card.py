@@ -1783,6 +1783,7 @@ class CodeWebViewer(QWebEngineView):
 
         cdn_libs = """
         <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"></script>
         """
 
         scrollbar_css = """

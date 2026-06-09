@@ -739,6 +739,11 @@ class FileMentionCard(QWidget):
         """防抖定时器超时后执行增量渲染"""
         self._render_incremental()
         if self._filtered_items:
+            # 强制重置 _last_selected_index 为 -1，确保 _update_selection 总能生效
+            # 因为 _render_incremental 可能创建了新 widget，而 _last_selected_index
+            # 若仍为 0（上次选中值），会导致 old_idx == new_idx 守卫条件跳过，
+            # 新 widget 的 index 0 得不到选中状态。
+            self._last_selected_index = -1
             self._selected_index = 0
             self._update_selection()
         # 无匹配项时清除残留 widget

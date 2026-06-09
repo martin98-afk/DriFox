@@ -203,11 +203,8 @@ def main():
             window.showNormal()
 
     def _show_popup():
-        # TrayManager 懒初始化（首次访问时才创建 QSystemTrayIcon）
-        from app.tray_manager import TrayManager
-        TrayManager.get_instance()
-
         # ToolPopupDialog 构造（包含 QSettings 读取、布局构建）
+        # 注：TrayManager 已由 ToolPopupDialog 延迟初始化，不再在此处创建
         from app.tool_popup import ToolPopupDialog
         popup = ToolPopupDialog(chat_window, None)
         popup.setWindowTitle("Drifox")
@@ -223,6 +220,9 @@ def main():
 
     # 应用退出时清理单实例资源（共享内存 + IPC 服务器）
     app.aboutToQuit.connect(_guard.cleanup)
+    # 标记数据库正常关闭，下次启动跳过完整性检查
+    from app.core.store.session_store import SessionStore
+    app.aboutToQuit.connect(SessionStore.mark_clean_shutdown)
 
     # 等 chat_window.__init__ 完成后再创建弹窗
     QTimer.singleShot(0, _show_popup)
