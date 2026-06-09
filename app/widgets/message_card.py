@@ -387,16 +387,17 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
-def _get_think_preview(content: str, max_length: int = 120) -> str:
+def _get_think_preview(content: str, max_length: int = 160) -> str:
     """智能生成思考内容折叠框的预览文本
 
-    策略:
-      1. 有换行 → 取前2个非空行（有更多行时加...）
-      2. 累加完整句子直到铺满预览（短句自动合并）
-      3. 反向句子边界回退
-      4. 词边界/硬截断兜底
-
-    规则: 预览未到文本结尾时自动追加省略号，到结尾则不加
+    新策略（结论优先）：
+      1. 检测结论标记 → 优先展示结论后的内容
+      2. 无结论时三段式采样：
+         - 首句（跳过过短 <10 字的）
+         - 中间代表性句（~40% 位置）
+         - 尾句（往往含总结性内容）
+      3. 保证最少 40 字，不够时向后扩展
+      4. 未到文本结尾时追加省略号
     """
     if not content:
         return ""
@@ -408,57 +409,87 @@ def _get_think_preview(content: str, max_length: int = 120) -> str:
     def _is_full(preview_len: int) -> bool:
         """预览长度是否已覆盖完整内容（忽略空白、换行差异）"""
         norm_text = len(text.replace(" ", "").replace("\n", ""))
-        norm_preview = preview_len  # 预览已是不含格式的纯内容长度
-        return norm_preview >= norm_text
+        return preview_len >= norm_text
 
-    # ── 策略1: 有换行结构，取前2个非空行 ──
-    if "\n" in text:
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
-        if lines:
-            first_line = lines[0]
-            if len(lines) >= 2:
-                two_lines = f"{first_line} | {lines[1]}"
-                if len(two_lines) <= max_length:
-                    return two_lines if _is_full(len(two_lines)) else two_lines + "..."
-            if len(first_line) <= max_length:
-                return first_line if _is_full(len(first_line)) else first_line + "..."
+    # ── 策略1: 优先检测结论，展示结论内容 ──
+    for marker in _CONCLUSION_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            conclusion_text = text[idx:].replace("\n", " ").strip()
+            if len(conclusion_text) <= max_length:
+                return conclusion_text if _is_full(len(conclusion_text)) else conclusion_text + "..."
+            # 结论太长，截取到 max_length
+            for i in range(min(max_length, len(conclusion_text)), 0, -1):
+                if conclusion_text[i - 1] in "。！？.!?；;":
+                    return conclusion_text[:i]
+            return conclusion_text[:max_length] + "..."
 
-    # ── 展平为单行做后续处理 ──
+    # ── 策略2: 三段式采样 ──
+    # 展平文本，按句分割
     flat = text.replace("\n", " ")
-    if len(flat) <= max_length:
-        return flat
+    # 提取所有有意义的句子（长度 ≥ 8）
+    sentences: List[str] = []
+    current = ""
+    for ch in flat:
+        current += ch
+        if ch in "。！？.!?；;":
+            s = current.strip()
+            if len(s) >= 8:
+                sentences.append(s)
+            current = ""
+    if current.strip() and len(current.strip()) >= 8:
+        sentences.append(current.strip())
 
-    # ── 策略2: 累加完整句子（短句自动合并） ──
-    end_chars = set("。！？.!?；;")
-    sentence_ends = [i + 1 for i, ch in enumerate(flat) if ch in end_chars]
+    if not sentences:
+        # 没有有效句子，回退到简单截断
+        if len(flat) <= max_length:
+            return flat
+        for i in range(max_length, 0, -1):
+            if flat[i - 1] in " ，,、；;：:":
+                return flat[:i].rstrip("，,、") + "..."
+        return flat[:max_length] + "..."
 
-    if sentence_ends:
-        # 找到最后一个不超过 max_length 的句子边界
-        best_end = 0
-        for end_pos in sentence_ends:
-            if end_pos <= max_length:
-                best_end = end_pos
-            else:
+    # 选 3 句：首句 + 中间句(~40%) + 尾句
+    selected: List[str] = []
+    n = len(sentences)
+
+    # 首句
+    selected.append(sentences[0])
+
+    # 中间句（40% 位置，确保不与首尾重复）
+    mid_idx = max(1, int(n * 0.4))
+    if mid_idx < n - 1:  # 不在最后一句话
+        selected.append(sentences[mid_idx])
+
+    # 尾句
+    if n > 1 and sentences[-1] != sentences[0]:
+        if len(selected) < 2 or sentences[-1] != selected[-1]:
+            selected.append(sentences[-1])
+
+    preview = " ... ".join(selected)
+
+    # ── 保证最少 40 字 ──
+    if len(preview) < 40:
+        # 向后扩展：取前几个句子直到 ≥40 字
+        extended = sentences[0]
+        for s in sentences[1:]:
+            if len(extended) >= 40:
                 break
+            extended += " ... " + s
+        preview = extended
 
-        if best_end > 0:
-            preview = flat[:best_end]
-            if _is_full(best_end):
-                return preview
-            return preview + "..."
+    # 截断到 max_length
+    if len(preview) > max_length:
+        for i in range(max_length, 0, -1):
+            if preview[i - 1] in "。！？.!?；;":
+                preview = preview[:i]
+                break
+        else:
+            preview = preview[:max_length]
 
-    # ── 策略3: 反向从 max_length 往前找句子边界 ──
-    for i in range(max_length, 0, -1):
-        if flat[i - 1] in end_chars:
-            return flat[:i] + "..."
-
-    # ── 策略4: 词边界（最后一个空白/逗号） ──
-    for i in range(max_length, 0, -1):
-        if flat[i - 1] in " ，,、；;：:":
-            return flat[:i].rstrip("，,、") + "..."
-
-    # ── 兜底: 硬截断 ──
-    return flat[:max_length].rstrip("，,、") + "..."
+    if _is_full(len(preview)):
+        return preview
+    return preview + "..."
 
 
 # ── 思考折叠框标签分类系统（加权） ──
@@ -495,35 +526,40 @@ _THINK_TAGS = [
     {
         "tag": "代码验证",
         "priority": 2,
-        "cn": ("验证", "测试", "检查", "检测", "调试", "断言",
-               "校验", "确认", "用例", "覆盖", "回归",
+        "cn": ("验证", "测试", "检测", "调试", "断言",
+               "校验", "用例", "覆盖", "回归",
                "边界条件", "测试用例", "单元测试", "集成测试"),
-        "en": ("test", "verify", "validate", "check",
+        "en": ("test", "verify", "validate",
                "debug", "assert", "coverage", "regression",
                "unit test", "integration test", "test case"),
     },
     {
         "tag": "版本控制",
-        "priority": 2,
-        "cn": ("提交", "合并", "分支", "版本", "仓库", "推送",
-               "拉取", "回滚", "冲突", "PR", "rebase", "stash",
-               "git", "commit", "merge"),
-        "en": ("commit", "push", "merge", "rebase", "branch",
-               "stash", "cherry-pick", "checkout", "git"),
+        "priority": 3,
+        "cn": ("版本控制", "仓库", "回滚", "PR",
+               "rebase", "stash", "cherry-pick",
+               "git bisect", "git blame", "git log"),
+        "en": ("rebase", "cherry-pick", "checkout",
+               "git bisect", "git blame", "git log",
+               "version control", "source control"),
     },
     {
         "tag": "代码实现",
         "priority": 2,
-        "cn": ("实现", "代码", "函数", "接口", "编写", "调用"),
-        "en": ("implement", "function", "interface", "method",
-               "write code", "call the", "define"),
+        "cn": ("具体实现", "代码片段", "接口定义", "类型定义",
+               "模块结构", "类设计", "方法签名", "API设计"),
+        "en": ("implement the", "define the", "interface",
+               "method signature", "API design", "class definition",
+               "module structure"),
     },
     {
         "tag": "错误修复",
         "priority": 2,
-        "cn": ("错误", "异常", "报错", "修复", "崩溃"),
-        "en": ("error", "exception", "bug", "crash", "fix the",
-               "failed", "failure", "broken"),
+        "cn": ("错误", "异常", "报错", "修复", "崩溃",
+               "排查错误", "错误原因", "调试日志"),
+        "en": ("bug", "crash", "fix the",
+               "broken", "stack trace", "traceback",
+               "debugging the error"),
     },
     {
         "tag": "性能优化",
@@ -557,74 +593,149 @@ _COMMON_WORDS = frozenset(
 )
 
 
-def _pattern_weight(p: str) -> float:
-    """计算模式的权重：越长越具体→权重越高
+def _pattern_weight(p: str, position: float = 0.5) -> float:
+    """计算模式的权重：越长越具体→权重越高，结尾区加权
 
-    中文按字长分档，英文按单词长度分档，避免"commit"等英文词权重过高。
+    Args:
+        p: 匹配到的模式字符串
+        position: 关键词在全文中的相对位置 (0.0=开头, 1.0=结尾)
+                  结尾 30% 区域 (≥0.7) 权重 ×1.5
     """
+    base = 1.0
+
     if " " in p:          # 多词短语（英文短语或中文带空格）
-        return 3.0
-
-    # 判断是否含中文
-    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in p)
-
-    if has_cjk:
-        # 中文权重：按字长分档
-        if len(p) >= 4:
-            return 3.0
-        if len(p) == 3:
-            return 2.0
-        if p in _COMMON_WORDS:
-            return 1.0  # 常见词单独不够(1<2)，搭配一个就够(1+1≥2)
-        return 1.0
+        base = 3.0
     else:
-        # 英文权重：按单词长度分档
-        if len(p) >= 6:    # commit, cherry, coverage
-            return 2.0
-        if len(p) >= 4:    # push, merge, test, auth
-            return 1.5
-        return 1.0
+        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in p)
+        if has_cjk:
+            if len(p) >= 4:
+                base = 3.0
+            elif len(p) == 3:
+                base = 2.0
+            elif p in _COMMON_WORDS:
+                base = 0.5
+        else:
+            # 英文权重
+            if len(p) >= 6:
+                base = 2.0
+            elif len(p) >= 4:
+                base = 1.5
+
+    # 位置加权：结尾 30% 区域权重 ×1.5
+    if position >= 0.7:
+        base *= 1.5
+
+    return base
 
 
 def _classify_think_tag(content: str) -> str:
     """对思考内容进行分类，返回预定义标签名，空=不显示
 
-    加权计分：短语权重高，常见词权重低，避免高频词误触。
-    最低 2.0 分才显示标签。
+    改进要点：
+    - 分析窗口扩展为前 1500 + 尾部 500（覆盖结论区）
+    - 位置加权：结尾 30% 区域关键词权重 ×1.5
+    - 归一化分数：score / √(标签关键词数)，防止词多占优
+    - 排他性：同词命中多标签时权重减半
+    - 阈值提升到 2.5
     """
-    text = content.strip()[:500]
-    if not text:
+    content = content.strip()
+    if not content:
         return ""
 
-    text_lower = text.lower()
+    # ── 扩展分析窗口：前 1500 + 尾部 500 ──
+    head = content[:1500]
+    tail = content[-500:] if len(content) > 1500 else ""
+    # 合并去重：尾部可能与前部重叠
+    if tail and len(content) > 1500:
+        window = head + "\n" + tail
+    else:
+        window = head
+    window_lower = window.lower()
 
-    # ── 结论优先检测 ──
+    # ── 结论优先检测（全文中搜索） ──
+    full_lower = content.lower()
     for marker in _CONCLUSION_MARKERS:
-        if marker in text or marker in text_lower:
+        if marker in content or marker in full_lower:
             return "结论"
 
-    # ── 标签加权计分（去重） ──
+    # ── 计算每个关键词在窗口中的最佳位置 ──
+    def _find_position(pattern: str, text: str, text_lower: str) -> float:
+        """返回关键词在文本中的相对位置 (0~1)，找不到返回 -1"""
+        if any('\u4e00' <= c <= '\u9fff' for c in pattern):
+            idx = text.find(pattern)
+        else:
+            idx = text_lower.find(pattern)
+        if idx == -1:
+            return -1.0
+        total = max(len(text), 1)
+        return idx / total
+
+    # ── 统计所有标签命中（用于排他性计算） ──
+    all_matches: Dict[str, List[tuple]] = {}  # pattern -> [(tag_index, position)]
+
+    for ti, tag_def in enumerate(_THINK_TAGS):
+        for p in tag_def["cn"]:
+            pos = _find_position(p, window, window_lower)
+            if pos >= 0:
+                if p not in all_matches:
+                    all_matches[p] = []
+                all_matches[p].append((ti, pos))
+        for p in tag_def["en"]:
+            pos = _find_position(p, window, window_lower)
+            if pos >= 0:
+                if p not in all_matches:
+                    all_matches[p] = []
+                all_matches[p].append((ti, pos))
+
+    # ── 计算排他性权重 ──
+    def _exclusivity_multiplier(pattern: str) -> float:
+        """同词被多个标签匹配时减半"""
+        tags_hit = all_matches.get(pattern, [])
+        unique_tags = len(set(t for t, _ in tags_hit))
+        return 0.5 if unique_tags > 1 else 1.0
+
+    # ── 标签加权计分（去重 + 归一化 + 排他性） ──
     best_tag = ""
     best_score = 0.0
     best_priority = -1
 
+    import math as _math
+
     for tag_def in _THINK_TAGS:
-        matches = [p for p in tag_def["cn"] if p in text]
-        matches += [p for p in tag_def["en"] if p in text_lower]
+        matches_cn = [(p, _find_position(p, window, window_lower)) for p in tag_def["cn"]]
+        matches_en = [(p, _find_position(p, window, window_lower)) for p in tag_def["en"]]
+        matches_cn = [(p, pos) for p, pos in matches_cn if pos >= 0]
+        matches_en = [(p, pos) for p, pos in matches_en if pos >= 0]
+        all_hits = matches_cn + matches_en
 
-        # 去重：长模式优先，子串不计
-        uniq = []
-        for p in sorted(set(matches), key=len, reverse=True):
+        if not all_hits:
+            continue
+
+        # 去重：长模式优先，子串不计；每个关键词取最佳位置
+        uniq: Dict[str, float] = {}
+        for p, pos in sorted(all_hits, key=lambda x: len(x[0]), reverse=True):
             if not any(p in u for u in uniq):
-                uniq.append(p)
+                if p not in uniq or pos > uniq[p]:
+                    uniq[p] = pos
 
-        score = sum(_pattern_weight(p) for p in uniq)
-        if score > best_score or (score == best_score and tag_def["priority"] > best_priority):
-            best_score = score
+        # 加权计分：权重 × 排他性
+        score = sum(
+            _pattern_weight(p, position=pos) * _exclusivity_multiplier(p)
+            for p, pos in uniq.items()
+        )
+
+        # 归一化：除以 sqrt(标签关键词总数)
+        tag_kw_count = len(tag_def["cn"]) + len(tag_def["en"])
+        normalized = score / _math.sqrt(max(tag_kw_count, 1))
+
+        if normalized > best_score or (
+            normalized == best_score and tag_def["priority"] > best_priority
+        ):
+            best_score = normalized
             best_tag = tag_def["tag"]
             best_priority = tag_def["priority"]
 
-    return best_tag if best_score >= 2.0 else ""
+    return best_tag if best_score >= 2.5 else ""
 
 
 _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
@@ -3206,12 +3317,31 @@ class CodeWebViewer(QWebEngineView):
         return result[0] or ""
 
     def _get_card_bg_color(self) -> "QColor":
-        """沿父链查找 MessageCard，获取卡片背景色"""
+        """沿父链查找 MessageCard，获取卡片背景色（强制实心化）
+
+        PyQt5 的 QColor() 字符串构造不支持 "rgba(r, g, b, a)" 格式
+        (isValid()=False)，需要手动解析提取 r/g/b 后用 QColor(r, g, b) 构造。
+        """
+        import re
         from PyQt5.QtGui import QColor
         parent = self.parent()
         while parent:
             if hasattr(parent, '_theme') and isinstance(parent._theme, dict) and 'bg' in parent._theme:
-                return QColor(parent._theme['bg'])
+                bg = parent._theme['bg']
+                # 1. 先试标准颜色字符串（#hex、named color 等）
+                color = QColor(bg)
+                if color.isValid():
+                    color.setAlpha(255)
+                    return color
+                # 2. 兜底：手动解析 rgba(r, g, b[, a]) / rgb(r, g, b) 字符串
+                m = re.match(
+                    r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)',
+                    bg,
+                )
+                if m:
+                    return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                # 3. 主题色字符串无效且无法解析，跳出用兜底
+                break
             parent = parent.parent()
         # 兜底：暗色主题背景
         return QColor("#2B2B2B")
