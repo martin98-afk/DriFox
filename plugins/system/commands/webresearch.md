@@ -766,6 +766,29 @@ HTML 内容遵循统一风格模板：
 ## 引用源
 1. ...
 
+## 🔍 探索路径
+
+**总抓取**: 14 页 | **完成跳数**: 5/5 | **主题偏离度**: 18% | **耗时**: 4m 12s
+
+### 遍历轨迹
+
+**跳 1** — 从 search_web 选 3 个种子
+- [a.com/article-1](url) → 关键信息: RAG 的 3 个核心优势
+- [b.org/paper-2](url) → 关键信息: Fine-tuning 的算力成本
+- [c.io/blog-3](url) → 关键信息: 2026 年新趋势 hybrid 方案
+
+**跳 2** — 基于跳 1 候选池选 3 个
+- [d.com/post-4](url) → 关键信息: ...
+- [e.org/article-5](url) → 关键信息: ...
+- [f.io/blog-6](url) → 关键信息: ...
+
+**跳 3** — ...
+- ...
+
+（如触发漂移停止，附加）:
+> ⚠ 在跳 3 触发主题漂移上限（67%），已停止遍历。
+> 已学到的核心信息: X, Y, Z。未深入的子主题: A, B（如需可重新查询）。
+
 ## 不确定性
 - [已知不知道的]
 ```
@@ -776,6 +799,8 @@ HTML 内容遵循统一风格模板：
 - `## 主体发现` → `<h2>主体发现</h2>`，子节使用 `<h3>`
 - 每个 `[事实](url)` → `<a href="url">事实</a><sup class="source-tag">源</sup>`
 - `## 引用源` → `<h2>引用源</h2>` + `<ul class="ref-list">`
+- `## 🔍 探索路径` → `<section class="exploration-path">`（见第 2 节追加的转换规则）
+- 跳数徽章、统计 pill、timeline 列表：按 CSS 类名对应渲染
 - `## 不确定性` → `<div class="callout callout-uncertainty">`
 - `⚠️ 推断` → `<div class="callout callout-infer">`
 - Todo 追踪信息 → `<div class="todo-track">`（如有）
