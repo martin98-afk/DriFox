@@ -37,8 +37,8 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     color_index = hash(name) % len(PROJECT_COLORS)
     hex_color = PROJECT_COLORS[color_index]
     r = int(hex_color[1:3], 16)
-    g = int(hex_color[4:6], 16)
-    b = int(hex_color[7:9], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
