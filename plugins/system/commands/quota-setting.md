@@ -51,6 +51,10 @@ argument-hint:
    - mcp__playwright__browser_wait_for ✓
    - mcp__playwright__browser_network_requests ✓
    - mcp__playwright__browser_network_request ✓
+   - mcp__playwright__browser_run_code_unsafe ✓   # 拿 httpOnly cookie 必须（MCP 的 network_request 会过滤 Cookie 字段）
+   - mcp__playwright__browser_click ✓              # Go 页 ->「使用量」页 fallback
+   - mcp__playwright__browser_console_messages ✓   # 抓不到请求时排查用
+   - mcp__playwright__browser_take_screenshot ✓    # 抓不到请求时排查用
 ```
 
 ### 3. 通用前置流程
@@ -58,7 +62,7 @@ argument-hint:
 无论抓哪个平台，开头都先执行：
 
 ```
-1. mcp__playwright__browser_navigate(url="about:blank")  # 重置浏览器环境
+1. mcp__playwright__browser_navigate(url="about:blank")  # 重置浏览器环境（必须单独一次调用，不能与后续目标 URL 并行——否则触发 "Navigation interrupted by another navigation" 错误）
 2. 提示用户：「即将打开 Playwright 浏览器，请在弹出的窗口中完成登录。
               登录成功后本工具会自动抓取所需配置，无需您手动复制。
               登录过程有 5 分钟超时限制。」
@@ -73,36 +77,58 @@ argument-hint:
 **步骤详解**：
 
 ```
-1. 检查当前服务商配置中是否已填 workspace_id
-   - 询问用户：「OpenCode 需要 workspace_id 才能打开用量页。请提供：
-     ① 直接给我 workspace_id（形如 wrk_xxxxxx）
-     ② 或留空，我会先导航到 https://opencode.ai 让你登录后从 URL 中自动提取」
-2. 构造目标 URL：
+0. workspace_id 不提前询问用户（登录后才能看到，问了也没用）。
+   如果用户消息中已含 `wrk_xxxxxx` 或 `https://opencode.ai/workspace/wrk_xxxxxx/...` 形式的 URL →
+   用正则 `[a-z]+://opencode\.ai/workspace/(wrk_[A-Za-z0-9]+)` 或 `\b(wrk_[A-Za-z0-9]+)\b` 提取。
+   否则先导航到 opencode.ai 首页，登录后从 URL 自动提取。
+
+1. 构造目标 URL：
    - 有 workspace_id → https://opencode.ai/workspace/{workspace_id}/go
    - 无 workspace_id → https://opencode.ai （登录后跳转到 /workspace/{id}/...）
-3. mcp__playwright__browser_navigate(url=目标URL)
-4. 等待用户完成登录（轮询判定）：
+2. mcp__playwright__browser_navigate(url=目标URL)
+3. 等待用户完成登录（轮询判定）：
    轮询间隔 5 秒，最长等 timeout 秒。判定条件（满足任一即视为登录完成）：
    (a) URL 包含 /workspace/wrk_ （说明已登录并进入工作台）
    (b) snapshot 中出现 "Coding Plan"、"5h"、"Weekly"、"Monthly" 任一关键词
    (c) URL 不再是 /sign-in 或 /login 或 /auth
    每次轮询调 mcp__playwright__browser_snapshot()（不要等满 timeout 才发现已登录）
-5. 登录完成后，若第 1 步 workspace_id 为空且第 4 步中未抓到：
-   调 mcp__playwright__browser_evaluate(function="() => window.location.pathname")
-   用正则从 pathname 提取 wrk_xxx
-6. 抓取 cookie（关键！httpOnly cookie 拿不到 document.cookie，必须从网络请求中拿）：
-   6.1 触发一次实际请求（让浏览器发出 API 请求）：
-       若是 OpenCode Zen/Go 用量页，刷新该页即可触发 /_server 请求
-       mcp__playwright__browser_navigate(url=当前URL)  # 强制重新加载
-       mcp__playwright__browser_wait_for(time=3)  # 等待请求发出
-   6.2 mcp__playwright__browser_network_requests(static=false)
-       遍历请求列表，找第一个 pathname 或 url 中包含 _server 的请求，记下它的 index
-   6.3 mcp__playwright__browser_network_request(index=该index, part="request-headers")
-       从返回的 headers 中提取 Cookie 字段（完整值，整段字符串）
-   6.4 备选方案（如果 6.2 找不到 _server 请求）：
-       找任意一个 console.volcengine.com 或 opencode.ai 域名的同源请求
-7. 抓取 server_id（来自 X-Server-Id 请求头，从 6.3 同一次请求拿）：
-   同样在 request-headers 中找 X-Server-Id 字段
+4. 提取 workspace_id（如果步骤 0 中未提前提取）：
+   - 从 URL 正则提取 /workspace/(wrk_[A-Za-z0-9]+)/
+   - 若当前不在 Go 页，导航到 https://opencode.ai/workspace/{workspace_id}/go
+5. 刷新 Go 页确保最新状态：
+   mcp__playwright__browser_navigate(url=当前URL)
+   mcp__playwright__browser_wait_for(time=3)
+6. 抓取 cookie：
+   ⚠️ **关键踩坑**：`browser_network_request(part="request-headers")` 实测只返回 ~8 个非敏感 header
+   （sec-ch-ua、referer、user-agent 等），Cookie 字段被 MCP 服务端过滤掉了。
+   **必须用** Playwright 原生 `context.cookies()` 绕过过滤。
+
+   mcp__playwright__browser_run_code_unsafe(code="""
+     async (page) => {
+       const cookies = await page.context().cookies('https://opencode.ai');
+       return {
+         count: cookies.length,
+         str: cookies.map(c => c.name + '=' + c.value).join('; '),
+         raw: cookies
+       };
+     }
+   """)
+   - str 为空 → 提示「未抓到任何 cookie，请确认已登录」
+   - str 长度 < 20 → 走第 7 节「Cookie 长度异常」错误处理
+   - 否则 cookie = str，记录 length
+
+7. 抓取 server_id（tRPC procedure 哈希，64 字符 SHA256）：
+   ⚠️ Go 页的 `/_server` 订阅走 WebSocket/SSE，实测不出现在 `browser_network_requests` 中。
+   不要尝试跳转到「使用量」页——用户只需要 Go 页的套餐数据，不擅自切换页面。
+
+   7.1 **用户消息中是否含 `https://opencode.ai/_server?id=...&args=...` 这种 API URL？**
+       → server_id = URL 的 `id` query 参数（最准，就是该 procedure 的哈希）
+   7.2 否则尝试从 6.1 刷新的网络请求中找 `/_server`（小概率，在刷新瞬间可能被捕获）：
+       能抓到 → 调 `browser_network_request` 取 `x-server-id`
+       抓不到 → server_id = "（需手动填写 — Go 页订阅走 WebSocket，无法自动捕获）"
+   7.3 server_id 为空时输出提示：「Go 页的套餐用量接口走 WebSocket，无法自动获取 procedure hash。
+       请将 DriFox 配置中的 Server ID 留空，或从浏览器 DevTools → Network 中手动复制 `/_server` GET 请求的 `id` 参数。」
+
 8. 组装结果 dict：{"cookie": "...", "server_id": "...", "workspace_id": "..."}
 9. 进入第 6 节输出格式
 ```
@@ -171,16 +197,16 @@ argument-hint:
 > 请将以下三个值复制到 DriFox 服务商编辑面板的「套餐用量查询（可选）」区域：
 
 ```text
-Server ID:    srv_abc123def456
-Workspace ID: wrk_xxxxxxxxxxxx
-Cookie:       oc_locale=zh; auth=Fe26.2**...（完整 Cookie 字符串，保留原始分号分隔）
+Server ID:    c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd   (64 字符 procedure 哈希)
+Workspace ID: wrk_01KS487R6RE5G1G1W0VZW4NTPY
+Cookie:       auth=Fe26.2**...（完整 Cookie 字符串，保留原始分号分隔）
 ```
 
 | 字段 | 抓取结果 |
 |------|---------|
-| `server_id` | `srv_abc123def456` |
-| `workspace_id` | `wrk_xxxxxxxxxxxx` |
-| `cookie` | 已抓取（**长度 N 字符**，点击上方代码块右上角复制按钮） |
+| `server_id` | `c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd` (64 字符 procedure 哈希) |
+| `workspace_id` | `wrk_01KS487R6RE5G1G1W0VZW4NTPY` |
+| `cookie` | 已抓取（**长度 N 字符**，httpOnly, sameSite=Lax, 域 opencode.ai） |
 
 ⚠️ **请妥善保管 Cookie，避免泄露**。Cookie 有效期通常为数小时到数天，过期后用 `/quota-setting opencode` 重新抓取。
 ````
@@ -227,7 +253,9 @@ X-Web-ID:   x-web-id 的值（如未抓到可留空）
 | 等待登录超时（timeout 秒内未登录成功） | 提示：「登录超时。请重试命令，或检查浏览器是否被其他窗口挡住。**如果您已经登录成功但工具没识别到**，可以告诉我您当前看到的页面标题，我会重新判定登录状态」 |
 | 网络请求列表为空（页面加载失败） | 调 `browser_take_screenshot` 截图，给用户看「页面实际显示了什么」，并提示：「可能需要检查网络或刷新页面」 |
 | 找不到目标 API 请求（OpenCode 找不到 _server / 火山方舟找不到 GetCodingPlanUsage） | 退而求其次：拿任意一个**同源**请求的 Cookie。提示：「未抓到目标 API 请求，已使用同源其他请求的 Cookie 替代，可能短期有效」 |
-| httpOnly cookie 拿不到（document.cookie 返回空） | 不要用这个方法拿——继续用 `browser_network_request` 从请求头拿 |
+| httpOnly cookie 拿不到（document.cookie 返回空） | **不要**用 `browser_network_request` 拿 Cookie（实测它会过滤掉 Cookie 字段）。改用 `browser_run_code_unsafe` + `page.context().cookies('https://opencode.ai')` 拿全量 |
+| 抓不到 `/_server` 请求（Go 页 subscription 走 WebSocket/SSE） | 正常现象，不要跳到「使用量」页。server_id 走第 4 节 7.1（用用户提供的 URL `id` 参数）或标记为手动填写 |
+| `X-Server-Id` 缺失或拿到非 64 字符值 | 这是 procedure 标识，**永远应该是 64 字符 SHA256 哈希**。若不是说明拿错了请求，丢弃此 server_id |
 | 某个字段（如 x_web_id）抓不到且为可选 | 输出中标 `(未抓到，跳过此字段不影响用量查询)`，不要让用户误以为抓取失败 |
 | 用户中途关闭浏览器 | 检测到 `browser_evaluate` 或后续调用失败时停止，提示：「浏览器已被关闭，本次抓取取消」 |
 | 抓到的 cookie 长度明显异常（< 20 字符） | **不要输出**。提示：「抓到的 Cookie 长度异常（仅 N 字符），可能未抓到完整登录态，建议重试」 |
@@ -240,6 +268,10 @@ X-Web-ID:   x-web-id 的值（如未抓到可留空）
 - 自动从登录后的网络请求中提取 httpOnly cookie（document.cookie 拿不到的部分）
 - 清晰标注每个字段对应 DriFox 的哪个配置项
 - 多平台一次性抓取
+- 识别 Go 页的 `/_server` 订阅走 WebSocket/SSE（不出现在网络请求列表），不强行跳到「使用量」页
+- 自动处理 Playwright MCP 过滤 Cookie 字段的问题，通过 `run_code_unsafe` + `context.cookies()` 绕过
+- 自动从用户消息中提取 workspace_id（无需追问），前提是消息里含 `wrk_xxx` 或完整 URL
+- 当 server_id 无法自动捕获时，给出手动填写指引
 
 **不会做**：
 - 存储抓取结果到任何文件 / 数据库 / 配置（**用户要求不写入**）
