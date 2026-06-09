@@ -425,17 +425,31 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
             return conclusion_text[:max_length] + "..."
 
     # ── 策略2: 三段式采样 ──
-    # 展平文本，按句分割，连续短句合并
+    # 展平文本
     flat = text.replace("\n", " ")
-    raw_sentences: List[str] = []
-    current = ""
-    for ch in flat:
-        current += ch
-        if ch in "。！？.!?；;":
+
+    # ── 检测是否英文为主（中文占比 < 30%） ──
+    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    is_english_heavy = cjk_count < len(text) * 0.3
+
+    if is_english_heavy:
+        # 英文为主的策略：按句尾标点+空格+大写字母分句
+        # 避免 1. / 2. / U.S. / v2.5 等被误判为句子边界
+        raw_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', flat)
+        # 清理空串和过短片段（纯粹的数字编号如 "1." 直接丢弃）
+        raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) >= 4]
+    else:
+        raw_sentences: List[str] = []
+        current = ""
+        for ch in flat:
+            current += ch
+            if ch in "。！？.!?；;":
+                s = current.strip()
+                if s:
+                    raw_sentences.append(s)
+                current = ""
+        if current.strip():
             raw_sentences.append(current.strip())
-            current = ""
-    if current.strip():
-        raw_sentences.append(current.strip())
 
     # 合并连续短句（<8 字）到前一句或后一句
     sentences: List[str] = []
@@ -462,8 +476,8 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
         if len(flat) <= max_length:
             return flat
         for i in range(max_length, 0, -1):
-            if flat[i - 1] in " ，,、；;：:":
-                return flat[:i].rstrip("，,、") + "..."
+            if flat[i - 1] in " ，,、；;：:.":
+                return flat[:i].rstrip(" ，,、") + "..."
         return flat[:max_length] + "..."
 
     # 选 3 句：首句 + 中间句(~40%) + 尾句
@@ -522,7 +536,7 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
 # 权重规则：短语(≥4中字/含空格)权值3, 3字权值2, 常见普通词权值0.5, 其他1
 _THINK_TAGS = [
     {
-        "tag": "问题分析",
+        "tag": "分析",
         "priority": 3,
         "cn": ("问题出在", "原因在于", "关键问题", "核心问题",
                "需要分析", "需要理解", "需要考虑",
@@ -531,7 +545,7 @@ _THINK_TAGS = [
                "root cause", "what went wrong", "why"),
     },
     {
-        "tag": "方案设计",
+        "tag": "设计",
         "priority": 2,
         "cn": ("设计方案", "实现方案", "架构设计",
                "方案", "设计", "架构", "策略", "规划"),
@@ -539,7 +553,7 @@ _THINK_TAGS = [
                "architecture", "plan to", "propose to"),
     },
     {
-        "tag": "知识探索",
+        "tag": "探索",
         "priority": 2,
         "cn": ("探索", "研究", "了解", "学习", "查阅", "参考",
                "知识", "概念", "原理", "定义", "资料", "文献",
@@ -549,7 +563,7 @@ _THINK_TAGS = [
                "reference", "knowledge", "investigate"),
     },
     {
-        "tag": "代码验证",
+        "tag": "验证",
         "priority": 2,
         "cn": ("验证", "测试", "检测", "调试", "断言",
                "校验", "用例", "覆盖", "回归",
@@ -559,7 +573,7 @@ _THINK_TAGS = [
                "unit test", "integration test", "test case"),
     },
     {
-        "tag": "版本控制",
+        "tag": "版本",
         "priority": 3,
         "cn": ("版本控制", "仓库", "回滚", "PR",
                "rebase", "stash", "cherry-pick",
@@ -569,7 +583,7 @@ _THINK_TAGS = [
                "version control", "source control"),
     },
     {
-        "tag": "代码实现",
+        "tag": "实现",
         "priority": 2,
         "cn": ("具体实现", "代码片段", "接口定义", "类型定义",
                "模块结构", "类设计", "方法签名", "API设计"),
@@ -578,7 +592,7 @@ _THINK_TAGS = [
                "module structure"),
     },
     {
-        "tag": "错误修复",
+        "tag": "修复",
         "priority": 2,
         "cn": ("错误", "异常", "报错", "修复", "崩溃",
                "排查错误", "错误原因", "调试日志"),
@@ -587,18 +601,45 @@ _THINK_TAGS = [
                "debugging the error"),
     },
     {
-        "tag": "性能优化",
+        "tag": "优化",
         "priority": 2,
         "cn": ("性能", "优化", "速度", "效率", "延迟", "瓶颈"),
         "en": ("performance", "optimize", "speed", "efficiency",
                "latency", "bottleneck", "slow"),
     },
     {
-        "tag": "安全合规",
+        "tag": "安全",
         "priority": 2,
         "cn": ("安全", "权限", "漏洞", "风险", "加密", "认证"),
         "en": ("security", "permission", "auth", "vulnerability",
                "encrypt", "risk", "compliance"),
+    },
+    {
+        "tag": "重构",
+        "priority": 2,
+        "cn": ("重构", "重写", "清理代码", "消除重复", "简化代码",
+               "代码整理", "提取方法", "模块拆分", "内联函数"),
+        "en": ("refactor", "cleanup", "simplify",
+               "extract method", "inline",
+               "split into", "restructure"),
+    },
+    {
+        "tag": "配置",
+        "priority": 2,
+        "cn": ("配置", "参数设置", "环境变量", "开关",
+               "配置文件", "config", "设置项", "调整参数",
+               "初始化配置", "dotenv"),
+        "en": ("configuration", "env var", "environment variable",
+               "setting", "parameter", "config file",
+               "dotenv", ".env"),
+    },
+    {
+        "tag": "审查",
+        "priority": 2,
+        "cn": ("审查", "review代码", "代码检查", "风格检查",
+               "lint", "代码质量", "检查规范", "静态分析"),
+        "en": ("code review", "lint", "code quality",
+               "inspect", "check style", "static analysis"),
     },
 ]
 # 结论标记（中英文，优先级最高）

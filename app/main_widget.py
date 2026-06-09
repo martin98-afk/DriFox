@@ -8266,11 +8266,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
                     # 提示词替换命令：替换 + 用 $ARGUMENT 占位符替换
-                    user_text = f"严格按照以下命令规范执行：{cmd_result.replacement}\n\n"
-                    if cmd_result.remainder:
-                        # fallback: 无 $ARGUMENTS 时保留旧行为
-                        user_text += f"$ARGUMENTS：{cmd_result.remainder}"
-                    # 提示词命令需要发送消息，按现有逻辑处理
+                    user_text = (f"严格按照以下命令规范执行：{cmd_result.replacement}\n\n"
+                                 f"$ARGUMENTS：{cmd_result.remainder or '无用户参数'}")
         # ---- 内置命令拦截结束 ----
 
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----

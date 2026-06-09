@@ -90,3 +90,50 @@ class TestSplitAndStitch:
 
         assert result.width() == 800, f"expected 800, got {result.width()}"
         assert result.height() == 240, f"expected 240, got {result.height()}"
+
+
+# ─────────────────────────────────────────────
+#  _get_card_bg_color 测试
+# ─────────────────────────────────────────────
+class TestGetCardBgColor:
+    """_get_card_bg_color: 沿父链取主题色并强制实心"""
+
+    def test_rgba_string_returns_solid_color(self, qapp):
+        """rgba(45, 30, 20, 150) 应解析为 RGB=45,30,20 且 alpha=255（实心）"""
+        import types
+        from app.widgets.message_card import CodeWebViewer
+
+        # 构造父链桩：_theme = {"bg": "rgba(45, 30, 20, 150)"}
+        mock_card = types.SimpleNamespace(
+            _theme={"bg": "rgba(45, 30, 20, 150)"}
+        )
+        # 构造 viewer 桩：只暴露 parent()
+        viewer = types.SimpleNamespace(parent=lambda: mock_card)
+
+        result = CodeWebViewer._get_card_bg_color(viewer)
+
+        # 强制实心：alpha == 255（修复后应满足）
+        assert result.alpha() == 255, f"expected alpha=255, got {result.alpha()}"
+        # RGB 应保持
+        assert result.red() == 45
+        assert result.green() == 30
+        assert result.blue() == 20
+
+    def test_fallback_color_when_no_parent_theme(self, qapp):
+        """父链无 _theme 时返回兜底色 #2B2B2B"""
+        import types
+        from app.widgets.message_card import CodeWebViewer
+
+        # 链路：viewer.parent() -> obj_without_theme.parent() -> None
+        # obj_without_theme 没有 _theme 属性 → hasattr 返回 False
+        # SimpleNamespace() 空对象自然无 _theme
+        obj_without_theme = types.SimpleNamespace(parent=lambda: None)
+        viewer = types.SimpleNamespace(parent=lambda: obj_without_theme)
+
+        result = CodeWebViewer._get_card_bg_color(viewer)
+
+        # 兜底色 #2B2B2B = (43, 43, 43)
+        assert result.red() == 43
+        assert result.green() == 43
+        assert result.blue() == 43
+        assert result.alpha() == 255

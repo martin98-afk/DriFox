@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import List, Dict, Set
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QFileSystemWatcher
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -251,6 +251,22 @@ class FileMentionCard(QWidget):
         self._async_pending = False  # 异步扫描进行中标志，防重复调度
         self._last_query = ""  # 上次过滤的 query，用于增量剪枝
 
+        # ---- 文件系统监视器：本地新增/删除文件时自动标记缓存失效 ----
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_directory_changed)
+        self._watched_dirs: Set[str] = set()
+        self._scanning = False  # 扫描进行中标志，防止自身扫描触发目录变化信号
+
+        # ---- 目录快照：记录每个目录下的文件名集合，用于增量 diff ----
+        self._dir_snapshots: Dict[str, Set[str]] = {}
+
+        # ---- 增量更新防抖计时器：合并连续文件系统事件 ----
+        self._incr_timer = QTimer(self)
+        self._incr_timer.setSingleShot(True)
+        self._incr_timer.setInterval(200)  # 200ms 覆盖 IDE 批量创建/删除
+        self._incr_timer.timeout.connect(self._do_incremental_update)
+        self._changed_dirs: Set[str] = set()
+
         # ---- 防抖计时器：合并连续快速敲键的筛选调用 ----
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -333,6 +349,196 @@ class FileMentionCard(QWidget):
         if root_dir != self._root_dir:
             self._root_dir = root_dir
             self._cache_dirty = True
+            self._update_fs_watcher()
+
+    def _update_fs_watcher(self):
+        """重置文件系统监视器：移除旧路径，监视新根目录
+
+        切换项目/根目录时，同时清理旧快照和监视器，避免累积泄漏。
+        """
+        if self._watched_dirs:
+            self._fs_watcher.removePaths(list(self._watched_dirs))
+            self._watched_dirs.clear()
+        self._dir_snapshots.clear()
+        if self._root_dir and os.path.isdir(self._root_dir):
+            self._watched_dirs.add(self._root_dir)
+            self._fs_watcher.addPath(self._root_dir)
+
+    def _on_directory_changed(self, path: str):
+        """目录内容变化 → 收集变化目录，启动防抖定时器，到期后增量更新缓存
+
+        排除自身扫描期间触发的信号（某些平台 os.scandir 读目录时可能触发事件）。
+        """
+        if self._scanning:
+            return
+        self._changed_dirs.add(path)
+        self._incr_timer.start()
+
+    def _do_incremental_update(self):
+        """防抖定时器超时后执行增量更新：处理所有累积的变化目录"""
+        dirs = self._changed_dirs.copy()
+        self._changed_dirs.clear()
+
+        if not self._root_dir or not os.path.isdir(self._root_dir):
+            return
+
+        any_change = False
+        for d in dirs:
+            if self._incremental_update_one(d):
+                any_change = True
+
+        if any_change:
+            self._sort_file_cache()
+            # 如果卡片当前可见，即时刷新显示
+            if self._visible:
+                self.load_items(self._current_query)
+
+    def _get_rel_prefix(self, abs_path: str) -> str:
+        """根据根目录计算绝对路径对应的相对路径前缀"""
+        if not self._root_dir:
+            return ""
+        try:
+            rel = os.path.relpath(abs_path, self._root_dir)
+            if rel == ".":
+                return ""
+            return rel.replace("\\", "/")
+        except ValueError:
+            return ""
+
+    def _sort_file_cache(self):
+        """重新排序文件缓存（目录优先，同名不区分大小写）"""
+        self._file_cache.sort(
+            key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower())
+        )
+
+    def _incremental_update_one(self, changed_dir: str) -> bool:
+        """增量处理单个变化目录：diff 快照后增删缓存条目
+
+        返回 True 表示有实际变化（新增或删除），False 表示无变化。
+        """
+        old_names = self._dir_snapshots.get(changed_dir, set())
+        rel_prefix = self._get_rel_prefix(changed_dir)
+        new_names: Set[str] = set()
+        changed = False
+
+        try:
+            with os.scandir(changed_dir) as it:
+                for entry in it:
+                    name = entry.name
+                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+
+                    # 忽略规则检查（仅用内置规则，不重新解析 .gitignore）
+                    if self._is_ignored(rel, is_dir, []):
+                        continue
+
+                    new_names.add(name)
+
+                    if name not in old_names:
+                        # ---- 新增条目 ----
+                        item = {
+                            "name": name,
+                            "path": entry.path,
+                            "relative_path": rel,
+                            "type": "dir" if is_dir else "file",
+                        }
+                        self._file_cache.append(item)
+                        changed = True
+
+                        if is_dir:
+                            # 新目录：递归扫描子文件 + 注册监视
+                            self._incremental_scan_new_dir(entry.path, rel)
+        except (PermissionError, FileNotFoundError, OSError):
+            # 目录可能已被删除
+            new_names = set()
+
+        # ---- 删除条目 ----
+        removed = old_names - new_names
+        for name in removed:
+            rel = f"{rel_prefix}/{name}" if rel_prefix else name
+            # 移除缓存中以此路径为前缀的所有条目
+            prefix = rel if rel.endswith("/") else rel + "/"
+            before = len(self._file_cache)
+            self._file_cache = [
+                item for item in self._file_cache
+                if item["relative_path"] != rel
+                and not item["relative_path"].startswith(prefix)
+            ]
+            if len(self._file_cache) < before:
+                changed = True
+
+            # 清理快照和监视器
+            self._cleanup_deleted_path(rel)
+
+        # 更新快照
+        self._dir_snapshots[changed_dir] = new_names
+        return changed
+
+    def _incremental_scan_new_dir(self, dirpath: str, rel_prefix: str):
+        """递归扫描新创建的目录：填满缓存、快照、监视器
+
+        与 _scan_dir 一致地用 max_items=500 防止大目录导致缓存膨胀失控。
+        """
+        # 注册监视器
+        if dirpath not in self._watched_dirs:
+            self._watched_dirs.add(dirpath)
+            self._fs_watcher.addPath(dirpath)
+
+        # 记录快照
+        max_items = 2000
+        names: Set[str] = set()
+        try:
+            with os.scandir(dirpath) as it:
+                for entry in it:
+                    if len(self._file_cache) >= max_items:
+                        break
+
+                    name = entry.name
+                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+
+                    if self._is_ignored(rel, is_dir, []):
+                        continue
+
+                    names.add(name)
+                    item = {
+                        "name": name,
+                        "path": entry.path,
+                        "relative_path": rel,
+                        "type": "dir" if is_dir else "file",
+                    }
+                    self._file_cache.append(item)
+
+                    if is_dir:
+                        self._incremental_scan_new_dir(entry.path, rel)
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        self._dir_snapshots[dirpath] = names
+
+    def _cleanup_deleted_path(self, rel_path: str):
+        """清理已删除路径相关的快照和监视器"""
+        prefix = rel_path if rel_path.endswith("/") else rel_path + "/"
+        # 清理快照
+        keys_to_remove = []
+        for watched_path in list(self._dir_snapshots):
+            # 用 _get_rel_prefix 判断是否在已删除路径下
+            item_rel = self._get_rel_prefix(watched_path)
+            if item_rel == rel_path or item_rel.startswith(prefix):
+                keys_to_remove.append(watched_path)
+        for k in keys_to_remove:
+            del self._dir_snapshots[k]
+
+        # 清理监视器
+        watcher_paths_to_remove = []
+        for wp in list(self._watched_dirs):
+            wp_rel = self._get_rel_prefix(wp)
+            if wp_rel == rel_path or wp_rel.startswith(prefix):
+                watcher_paths_to_remove.append(wp)
+        if watcher_paths_to_remove:
+            self._fs_watcher.removePaths(watcher_paths_to_remove)
+            for wp in watcher_paths_to_remove:
+                self._watched_dirs.discard(wp)
 
     def invalidate_cache(self):
         """使缓存失效，下次 show 时重建"""
@@ -545,7 +751,7 @@ class FileMentionCard(QWidget):
         return ignored
 
     def _scan_files(self):
-        """扫描根目录下的文件（全递归，最多 2000 项）
+        """扫描根目录下的文件（全递归，最多 2000 项，常量定义在调用处）
 
         使用 os.scandir — Python 最快目录遍历 API（C 实现，
         不创建 Path 对象）。忽略 .gitignore 和内置忽略规则。
@@ -555,24 +761,35 @@ class FileMentionCard(QWidget):
         if not self._root_dir or not os.path.isdir(self._root_dir):
             return
 
-        gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
-        max_items = 500
-
+        self._scanning = True
         try:
-            # 递归扫描——无深度限制，忽略目录不进入
-            self._scan_dir(self._root_dir, "", gitignore_patterns, max_items)
-        except Exception:
-            pass
+            gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
+            max_items = 2000
 
-        # 一次性排序（目录优先，同名不区分大小写）
-        self._file_cache.sort(
-            key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower())
-        )
-        self._cache_dirty = False
+            try:
+                # 递归扫描——无深度限制，忽略目录不进入
+                self._scan_dir(self._root_dir, "", gitignore_patterns, max_items)
+            except Exception:
+                pass
+
+            # 一次性排序（目录优先，同名不区分大小写）
+            self._sort_file_cache()
+            self._cache_dirty = False
+        finally:
+            self._scanning = False
 
     def _scan_dir(self, dirpath: str, rel_prefix: str,
                   gitignore_patterns: List[str], max_items: int):
-        """递归扫描单层目录（os.scandir 实现）"""
+        """递归扫描单层目录（os.scandir 实现）
+
+        同时将扫描到的目录注册到文件系统监视器，以便实时检测新增/删除文件。
+        """
+        # 将当前目录加入文件系统监视器（去重）
+        if dirpath not in self._watched_dirs:
+            self._watched_dirs.add(dirpath)
+            self._fs_watcher.addPath(dirpath)
+
+        names: Set[str] = set()
         try:
             with os.scandir(dirpath) as it:
                 for entry in it:
@@ -587,6 +804,7 @@ class FileMentionCard(QWidget):
                     if self._is_ignored(rel, is_dir, gitignore_patterns):
                         continue
 
+                    names.add(name)
                     item = {
                         "name": name,
                         "path": entry.path,
@@ -599,6 +817,8 @@ class FileMentionCard(QWidget):
                     if is_dir:
                         self._scan_dir(entry.path, rel,
                                        gitignore_patterns, max_items)
+
+            self._dir_snapshots[dirpath] = names
         except PermissionError:
             pass
 
