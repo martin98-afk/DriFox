@@ -50,7 +50,8 @@ class AutoLoopWorker(QThread):
     phase_changed = pyqtSignal(str)  # "planning" / "executing" / "archiving" / "completed"
 
     # === 迭代过程中的消息转发（用于日志显示）===
-    log_signal = pyqtSignal(str)  # 日志消息
+    log_signal = pyqtSignal(str)  # 日志消息（离散事件，带时间戳）
+    log_update = pyqtSignal(str)  # 流式内容预览（实时覆盖更新，无时间戳）
 
     # === Token 实时更新信号（直接更新运行卡 UI）===
     tokens_updated = pyqtSignal(int)  # 追加的 token 数量
@@ -777,12 +778,47 @@ class AutoLoopWorker(QThread):
         # 以 Adapter 的回调为基础
         callbacks = dict(self._adapter.get_callbacks())
 
-        # 日志转发
-        callbacks["content_received"] = lambda p: self.log_signal.emit(f"生成内容...")
-        callbacks["reasoning_content_received"] = lambda p: self.log_signal.emit(f"思考中...")
-        callbacks["thinking_started"] = lambda: self.log_signal.emit(f"开始推理")
-        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"调用工具: {n}")
-        callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(f"工具完成: {n}")
+        # 日志转发 — 流式内容预览（带节流，避免高频信号压垮 UI）
+        # 分离 content/reasoning 两个独立 buffer，避免内容混淆
+        _stream_content_buf = [""]     # 主内容缓存
+        _stream_reasoning_buf = [""]   # 推理内容缓存
+        _last_emit = [0.0]             # 上次发射时间
+        _THROTTLE = 0.3                # 节流间隔（秒）
+
+        def _on_content(piece: str):
+            _stream_content_buf[0] += piece
+            now = time.time()
+            if now - _last_emit[0] > _THROTTLE:
+                preview = _stream_content_buf[0].replace("\n", " ")[-80:]
+                self.log_update.emit(f"💭 {preview}")
+                _last_emit[0] = now
+
+        def _on_reasoning(piece: str):
+            _stream_reasoning_buf[0] += piece
+            now = time.time()
+            if now - _last_emit[0] > _THROTTLE:
+                preview = _stream_reasoning_buf[0].replace("\n", " ")[-80:]
+                self.log_update.emit(f"🧠 {preview}")
+                _last_emit[0] = now
+
+        callbacks["content_received"] = _on_content
+        callbacks["reasoning_content_received"] = _on_reasoning
+        callbacks["thinking_started"] = lambda: self.log_update.emit("🧠 开始推理...")
+        # 工具参数流式更新（实时显示正在接收的参数）
+        # 保留原始回调（更新浮动工具窗口 UI），再叠加日志输出
+        _orig_tool_args_updated = callbacks.get("tool_args_updated")
+        def _on_tool_args_updated(i, n, a):
+            if _orig_tool_args_updated:
+                _orig_tool_args_updated(i, n, a)
+            self.log_update.emit(f"🔧 {n} {self._summarize_args(a)}")
+        callbacks["tool_args_updated"] = _on_tool_args_updated
+        # 工具调用最终确定（完整参数→覆盖流式预览）
+        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(
+            f"🔧 {n} {self._summarize_args(a)}"
+        )
+        callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(
+            f"✅ {n} → {self._summarize_result(r)}"
+        )
 
         # Token 追踪 + 预算检查 + 消息收集
         def on_messages_updated(messages: list):
@@ -872,6 +908,51 @@ class AutoLoopWorker(QThread):
                 lines.append(f"  结果: {content[:300]}")
 
         return "\n".join(lines)
+
+    # ========== 日志摘要辅助方法 ==========
+
+    @staticmethod
+    def _summarize_args(args) -> str:
+        """从工具参数提取关键信息用于日志显示（跳过 _status 等内部字段）"""
+        if not args:
+            return ""
+        if isinstance(args, dict):
+            # 去掉内部状态字段（如 _status=loading）
+            real_args = {k: v for k, v in args.items() if not k.startswith("_")}
+            if not real_args:
+                return "…接收参数中"
+            # 常用工具的关键参数
+            if "path" in real_args:
+                return f"path={real_args['path']}"
+            if "pattern" in real_args:
+                return f"pattern={real_args['pattern']}"
+            if "command" in real_args:
+                cmd = str(real_args["command"])[:50]
+                return f"cmd={cmd}"
+            if "query" in real_args:
+                return f"q={real_args['query']}"
+            if "name" in real_args:
+                return f"name={real_args['name']}"
+            # 兜底：显示第一个参数
+            for k, v in real_args.items():
+                val = str(v)[:40]
+                return f"{k}={val}"
+        return f"{str(args)[:50]}"
+
+    @staticmethod
+    def _summarize_result(result) -> str:
+        """从工具结果提取摘要用于日志显示"""
+        if result is None:
+            return "∅"
+        text = str(result).strip()
+        if not text:
+            return "∅"
+        # 截取关键信息
+        lines = text.split("\n")
+        first_line = lines[0][:80]
+        if len(lines) > 1 or len(text) > 80:
+            return f"{first_line}…"
+        return first_line
 
     # ========== 公共接口（供 main_widget 等外部调用）==========
 

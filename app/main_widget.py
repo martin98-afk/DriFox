@@ -10702,6 +10702,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_loop_worker.log_signal.connect(
             self._on_auto_loop_log, Qt.QueuedConnection
         )
+        self._auto_loop_worker.log_update.connect(
+            self._on_auto_loop_log_update, Qt.QueuedConnection
+        )
         self._auto_loop_worker.phase_changed.connect(
             self._on_auto_loop_phase_changed, Qt.QueuedConnection
         )
@@ -10794,9 +10797,14 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _on_auto_loop_log(self, text: str):
-        """可视化日志更新"""
+        """离散日志更新（带时间戳的事件）"""
         if self._auto_loop_running_card:
             self._auto_loop_running_card.append_log(text)
+
+    def _on_auto_loop_log_update(self, text: str):
+        """流式日志更新（实时覆盖，无时间戳）"""
+        if self._auto_loop_running_card:
+            self._auto_loop_running_card.update_log(text)
 
     def _on_auto_loop_tokens_updated(self, total_tokens: int):
         """Token 实时更新 — 直接使用信号携带的值"""
@@ -10893,8 +10901,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_input_container.setVisible(False)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(False)
+        # 隐藏输入框的发光控件
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
+
+        # 窗口自适应缩小（聊天区和输入框隐藏后只保留运行卡片）
+        self.adjustSize()
 
         # 记录原有状态，用于解锁
         logger.info("[AutoLoop] UI locked")
@@ -10907,6 +10921,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_input_container.setVisible(True)
         if hasattr(self, "_bottom_toolbar_strip"):
             self._bottom_toolbar_strip.setVisible(True)
+        # 恢复输入框的发光控件
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(True)
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 
