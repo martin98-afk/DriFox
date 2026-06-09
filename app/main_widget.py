@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import ctypes
 import gc
+import heapq
 import os
 import re
 import subprocess
@@ -317,7 +318,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
-        self._lazy_card_timer_active = False  # 懒渲染定时器是否已激活，防止重复调度
+        self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：增加防抖时间减少卡顿
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
@@ -5592,10 +5593,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 }
             )
 
-        # 最多消息的会话（按消息数量排序，取前3）
-        top_sessions = sorted(
-            history_list, key=lambda x: x.get("message_count", 0), reverse=True
-        )[:3]
+        # 最多消息的会话（取前3）
+        top_sessions = heapq.nlargest(
+            3, history_list, key=lambda x: x.get("message_count", 0)
+        )
         top_by_count = []
         for session in top_sessions:
             top_by_count.append(
@@ -5898,9 +5899,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if id(card) not in existing_ids:
                 self._pending_lazy_cards.append(card)
                 existing_ids.add(id(card))
-        if pending_lazy_cards and not self._lazy_card_timer_active:
-            self._lazy_card_timer_active = True
-            QTimer.singleShot(0, self._process_next_lazy_card)
+        if pending_lazy_cards and not self._lazy_batch_timer_active:
+            self._lazy_batch_timer_active = True
+            QTimer.singleShot(0, self._process_next_lazy_batch)
 
     def _get_rendered_message_cards(self) -> List[MessageCard]:
         def is_user_or_assistant(widget):
@@ -5908,24 +5909,40 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return collect_message_cards_from_layout(self.chat_layout, is_user_or_assistant)
 
-    def _process_next_lazy_card(self):
-        """分批处理懒渲染卡片，每次处理一个卡片并触发滚动
-        关键：每次渲染完成后立即同步滚动，不依赖定时器延迟
+    def _process_next_lazy_batch(self):
+        """批量懒渲染：每次处理 BATCH_SIZE 个卡片，减少 WebEngine 创建开销
+
+        批量处理期间合并 heightChanged 信号，批次完成后统一触发布局更新和滚底。
+        BATCH_SIZE 默认 5，可通过 self._lazy_batch_size 调整。
         """
+        BATCH_SIZE = getattr(self, '_lazy_batch_size', 5)
+
         if not self._pending_lazy_cards:
-            # 所有懒渲染完成
             self._loading_session = False
-            self._lazy_card_timer_active = False
+            self._lazy_batch_timer_active = False
             return
 
-        card = self._pending_lazy_cards.pop(0)
-        # 检查卡片是否仍然有效且未被回收
-        if self._is_widget_alive(card) and not getattr(card, "_lazy_rendered", False):
+        # 取出当前批次（最多 BATCH_SIZE 个）
+        batch = []
+        while self._pending_lazy_cards and len(batch) < BATCH_SIZE:
+            card = self._pending_lazy_cards.pop(0)
+            if self._is_widget_alive(card) and not getattr(card, "_lazy_rendered", False):
+                batch.append(card)
+
+        if not batch:
+            # 没有需要渲染的有效卡片，继续下一批
+            if self._pending_lazy_cards:
+                QTimer.singleShot(0, self._process_next_lazy_batch)
+            else:
+                self._loading_session = False
+                self._lazy_batch_timer_active = False
+            return
+
+        # 批量渲染所有卡片
+        for card in batch:
             card.ensure_rendered()
 
-        # 每次渲染完一个卡片后立即同步滚动到底部，无论加载多慢都生效
-        # 直接设置滚动条值，不依赖定时器
-        # 关键修复：首次强制滚底后，只在用户未主动滚上去时才继续滚底
+        # 批次全部渲染完成，统一更新滚动
         if self._loading_session:
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             if (
@@ -5935,12 +5952,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
-        # 继续处理下一个，使用 QTimer 异步调度释放事件循环
+        # 继续处理下一批
         if self._pending_lazy_cards:
-            QTimer.singleShot(0, self._process_next_lazy_card)
+            QTimer.singleShot(0, self._process_next_lazy_batch)
         else:
             self._loading_session = False
-            self._lazy_card_timer_active = False
+            self._lazy_batch_timer_active = False
 
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
@@ -6196,7 +6213,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 0, lambda: self._add_chat_widget(w)
             ),
         )
-        self.title_edit.setText("新对话")
 
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):

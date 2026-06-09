@@ -1507,7 +1507,7 @@ class CodeWebViewer(QWebEngineView):
     MAX_WIDTH = 1800
     MAX_HEIGHT = 4000
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, light=False):
         super().__init__(parent)
         from typing import List
         self._markdown_text = ""
@@ -1516,6 +1516,7 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
+        self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         self._min_render_interval = 50
         self._height_report_pending = False
         self._context_lost = False  # 上下文丢失标志
@@ -1781,7 +1782,10 @@ class CodeWebViewer(QWebEngineView):
                 f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}'
             )
 
-        cdn_libs = """
+        if self._light_skeleton:
+            cdn_libs = ""
+        else:
+            cdn_libs = """
         <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"></script>
         """
@@ -2512,6 +2516,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
+                {'' if self._light_skeleton else '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
                     width: 100%;
@@ -2522,6 +2527,7 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(22, 27, 34, 0.6);
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
+                '''}
 
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
@@ -2979,6 +2985,27 @@ class CodeWebViewer(QWebEngineView):
         try:
             if not self.page():
                 return
+
+            # ── 非流式模式（历史加载）：直接渲染，跳过所有增量比较逻辑 ──
+            if not self._streaming:
+                self._refresh_viewer_font_css()
+                # 如果有懒回调，执行一次获取最终 markdown
+                if self._lazy_markdown_cb:
+                    self._markdown_text = self._lazy_markdown_cb()
+                    self._lazy_markdown_cb = None
+                # 直接渲染并注入，跳过字符串比较（历史内容只渲染一次，不会重复）
+                html_content = self._render_markdown_to_html(self._markdown_text)
+                self._last_rendered_markdown = self._markdown_text
+                self._height_report_pending = True
+                js_code = (
+                    "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
+                    + f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                )
+                self._last_rendered_html = None
+                self.page().runJavaScript(js_code)
+                return
+
+            # ── 以下为流式模式（增量渲染） ──
             import time as _t
             _t0 = _t.time()
             # 懒加载：通过回调获取最新 markdown（避免每次 reasoning chunk 都调用 content_to_markdown）
@@ -2987,18 +3014,7 @@ class CodeWebViewer(QWebEngineView):
                 fresh_md = self._lazy_markdown_cb()
                 _tcb = (_t.time() - _tcb0) * 1000
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
-                # 流式模式下跳过全量字符串比较（内容持续增长，比较浪费）
-                if not self._streaming and fresh_md == self._last_rendered_markdown:
-                    if not self._height_report_pending:
-                        self._height_report_pending = True
-                        self._resize_timer.start()
-                    return
                 self._markdown_text = fresh_md
-            elif not self._streaming and self._markdown_text == self._last_rendered_markdown:
-                if not self._height_report_pending:
-                    self._height_report_pending = True
-                    self._resize_timer.start()
-                return
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
@@ -3007,13 +3023,6 @@ class CodeWebViewer(QWebEngineView):
             html_content = self._render_markdown_to_html(self._markdown_text)
             _tr = (_t.time() - _tr0) * 1000
             self._last_rendered_markdown = self._markdown_text
-            # 流式模式下跳过全量 HTML 字符串比较（内容持续增长，比较浪费）
-            if not self._streaming and html_content == self._last_rendered_html:
-                if not self._height_report_pending:
-                    self._height_report_pending = True
-                    self._resize_timer.start()
-                return
-
             self._last_rendered_html = html_content
             self._height_report_pending = True
             # 全量更新前清除已通过 JS 增量注入的工具块，避免重复
@@ -4111,8 +4120,8 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = True
         elif self.role == "welcome":
-            # 欢迎卡片一开始就在可视区域，直接创建viewer不需要懒加载
-            self.viewer = CodeWebViewer(self)
+            # 欢迎卡片直接创建轻量 WebEngine（使用精简骨架，无 echarts CDN）
+            self.viewer = CodeWebViewer(self, light=True)
             self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
             self.viewer.codeActionRequested.connect(self.actionRequested.emit)
             self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
@@ -4120,7 +4129,6 @@ class MessageCard(SimpleCardWidget):
             self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
             self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
             self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
-            # WebEngine 上下文丢失处理
             self.viewer.contextLost.connect(self._on_webengine_context_lost)
             self.viewer.contextRestored.connect(self._on_webengine_context_restored)
             self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
