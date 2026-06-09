@@ -744,13 +744,13 @@ class CommandCard(QWidget):
             param_count = len(self._param_widgets)
             visible_params = sum(1 for w in self._param_widgets if w.isVisible())
             content_height = visible_params * ITEM_HEIGHT
-            self._detail_params_scroll.setFixedHeight(min(content_height, 4 * ITEM_HEIGHT))
-            content_height = min(content_height, 4 * ITEM_HEIGHT)
+            self._detail_params_scroll.setFixedHeight(min(content_height, 7 * ITEM_HEIGHT))
+            content_height = min(content_height, 7 * ITEM_HEIGHT)
             hint_height = 0
         elif self._value_selection_mode:
             # 值选择列表高度
             value_count = len(self._value_widgets)
-            content_height = min(value_count * ITEM_HEIGHT, 4 * ITEM_HEIGHT)
+            content_height = min(value_count * ITEM_HEIGHT, 7 * ITEM_HEIGHT)
             self._detail_value_scroll.setFixedHeight(content_height)
             hint_height = 0
         else:
@@ -1315,6 +1315,9 @@ class CommandCard(QWidget):
         self._render(incremental=incremental)
 
         if len(self._filtered_items) > 0:
+            # 强制重置 _last_selected_index，确保新渲染的列表始终正确选中第一项
+            # 防止上次会话残留的选中索引导致 _update_selection 守卫条件异常
+            self._last_selected_index = -1
             self._selected_index = 0
             self._update_selection()
 
