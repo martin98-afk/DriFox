@@ -2,8 +2,9 @@
 description: 深度网络研究，支持快速查询与多跳调研，自动降级到 DriFox 原生 Web 工具
 type: prompt
 argument-hint:
-  "[--quick]": "快速模式：1 次搜索 + 至多 1 次抓取"
-  "[--deep]": "深度模式：3-5 跳多源调研 + TodoWrite 追踪"
+  "[--quick]": "快速模式：1 次搜索 + 至多 1 次抓取（事实查询、定义）"
+  "[--thorough]": "深度模式：3 跳多源调研 + TodoWrite 追踪（多源验证、对比分析）"
+  "[--deep]": "极深模式：5 跳多源调研 + 主题漂移监测（学术综述、技术深挖）"
   "[--html]": "HTML 报告模式：输出为带统一样式的 HTML 报告（配合 --save-to 使用）"
   "[--save-to=]": "指定报告输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）"
   "<query>": "研究主题（必填，搜索关键词或自然语言问题）"
@@ -15,11 +16,12 @@ argument-hint:
 
 `$ARGUMENTS` 是用户输入的完整字符串（不含 `/research` 前缀）。
 
-| 模式 | 行为 | 适用场景 |
-|------|------|----------|
-| `--quick` | 单次 `search_web` + 至多 1 次 `fetch_web` 深入 | 事实查询、定义、API 用法 |
-| `--deep` | `todo_write` 3-5 任务规划 → 多次 `search_web` 并行 → 选择性 `fetch_web` → 综合分析 | 概念对比、趋势分析、技术选型 |
-| 无标志 | 默认 `--quick` | 兼容性好 |
+| 模式 | 行为 | 抓取预算 | 适用场景 |
+|------|------|----------|----------|
+| `--quick` | 1 跳：单次 `search_web` + 至多 1 次 `fetch_web` 深入 | ≤1 页 | 事实查询、定义、API 用法 |
+| `--thorough` | 3 跳：`todo_write` 3-5 任务规划 → 1 次 `search_web` 选种 → 2 跳链接发现 + 抓取 | ≤6 页 | 多源验证、对比分析 |
+| `--deep` | 5 跳：同上 + 4 跳链接发现 + 抓取 + 主题漂移监测 | ≤15 页 | 学术综述、技术深挖、争议性主题 |
+| 无标志 | 默认 `--quick` | ≤1 页 | 兼容性好 |
 
 - **`<query>`** 是 `$ARGUMENTS` 中去掉所有 `--flag` 后的剩余文本
 - **`--save-to=PATH`** 自定义输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）
