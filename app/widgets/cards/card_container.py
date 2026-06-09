@@ -143,7 +143,9 @@ class CardContainer(QWidget):
                 self._layout.minimumSize().height(),
             )
             if natural_h <= 0:
-                # 兜底：layout 没算出高度，直接放开
+                # 兜底：layout 没算出高度（布局管道尚未完成测量），
+                # 延迟重试，让 Qt 在下一轮事件循环完成几何计算后再展开
+                QTimer.singleShot(0, self._do_expand)
                 return
             current_h = self.height()
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动

@@ -131,7 +131,7 @@ from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
 )
 from app.widgets.cards.settings.project_selector_card import (
-    ProjectSelectorCardContent,
+    ProjectSelectorCardContent, get_project_color,
 )
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
@@ -6676,12 +6676,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 收集所有已渲染用户卡片的位置信息
         user_card_info = []
-        user_node_index = 0  # 节点预览中的索引
 
-        for batch_idx, batch in enumerate(self._message_batch):
-            if not batch or batch[0].get("role") != "user":
-                continue
-            if user_node_index >= total_nodes:
+        # 使用节点-批次映射（与 build_node_preview_data 对齐），只遍历有节点的 user batch
+        node_to_batch = self._build_node_to_batch_mapping()
+        for node_idx, batch_idx in enumerate(node_to_batch):
+            if node_idx >= total_nodes:
                 break
 
             # 尝试从 batch_cards 中找到对应的卡片
@@ -6697,13 +6696,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     if isinstance(card, MessageCard) and card.role == "user":
                         user_card_info.append(
                             {
-                                "index": user_node_index,
+                                "index": node_idx,
                                 "y": card.y(),
                                 "bottom": card.y() + card.height(),
                             }
                         )
                         break
-            user_node_index += 1
 
         # 如果没有找到任何已渲染卡片，fallback到估算
         if not user_card_info and scroll_bar.maximum() > 0:
@@ -6779,17 +6777,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "node_preview"):
             return
 
-        # 使用 message_batch 计算实际的最后一个 user message 索引
-        # 而不是依赖当前渲染的卡片数量（可能只渲染了部分）
-        session = self.session_manager.get_current_session()
-        if session:
-            # 从 session 消息计算所有 user 数量
-            user_count = sum(1 for msg in session.messages if msg.get("role") == "user")
-            if user_count > 0:
-                last_index = user_count - 1
-                self.node_preview.set_visible_node(last_index)
-                self.node_preview.set_progress_position(last_index)
-                self._last_visible_user_pair_index = last_index
+        # 直接使用 node_preview 的节点数（与 build_node_preview_data 保持一致）
+        node_count = len(self.node_preview._nodes) if hasattr(self.node_preview, '_nodes') else 0
+        if node_count > 0:
+            last_index = node_count - 1
+            self.node_preview.set_visible_node(last_index)
+            self.node_preview.set_progress_position(last_index)
+            self._last_visible_user_pair_index = last_index
 
     def _scroll_to_target_node_index(self, target_index: int):
         """
@@ -6802,17 +6796,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        # 计算目标 user 在 _message_batch 中的 batch 索引
-        # 找到 _message_batch 中第 target_index 个 user batch
-        target_batch_index = -1
-        user_count = 0
-        for idx, batch in enumerate(self._message_batch):
-            if batch and batch[0].get("role") == "user":
-                if user_count == target_index:
-                    target_batch_index = idx
-                    break
-                user_count += 1
-
+        # 将节点索引转换为 _message_batch 索引（与 build_node_preview_data 对齐）
+        target_batch_index = self._get_batch_index_from_node_index(target_index)
         if target_batch_index < 0:
             logger.warning(
                 f"[NodePreview] Cannot find batch for target_index={target_index}"
@@ -6882,13 +6867,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 如果 target_batch_index 未提供，从 _message_batch 查找
         if target_batch_index is None:
-            user_count = 0
-            for idx, batch in enumerate(self._message_batch):
-                if batch and batch[0].get("role") == "user":
-                    if user_count == target_index:
-                        target_batch_index = idx
-                        break
-                    user_count += 1
+            target_batch_index = self._get_batch_index_from_node_index(target_index)
 
         if target_batch_index < 0:
             return
@@ -6992,19 +6971,64 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[NodePreview] Cannot find card for batch_index={batch_index}, node_index={node_index}"
         )
 
+    def _build_node_to_batch_mapping(self) -> list:
+        """
+        构建 timeline 节点索引 → _message_batch 索引的映射列表。
+
+        与 build_node_preview_data 的节点创建逻辑保持一致：
+        - user batch 后面跟着 assistant/tool batch → 生成节点
+        - 连续 user 中只有最后一个有 assistant 配对的生成节点
+        - _message_batch 中最后一个 user batch 也生成节点（trailing check）
+
+        返回: mapping[node_index] = batch_index
+        """
+        mapping = []
+        last_user_batch_idx = -1
+
+        for idx, batch in enumerate(self._message_batch):
+            if not batch:
+                continue
+            if batch[0].get("role") != "user":
+                continue
+
+            last_user_batch_idx = idx
+
+            # 检查当前 user batch 之后是否有配对的 assistant/tool batch
+            has_paired = False
+            for next_idx in range(idx + 1, len(self._message_batch)):
+                next_batch = self._message_batch[next_idx]
+                if not next_batch:
+                    continue
+                next_role = next_batch[0].get("role")
+                if next_role in ("assistant", "tool"):
+                    has_paired = True
+                    break
+                if next_role == "user":
+                    break  # 在 assistant 前遇到另一个 user → 无配对
+
+            if has_paired:
+                mapping.append(idx)
+
+        # 最后一个 user（即使是无配对的）也生成节点
+        if last_user_batch_idx >= 0 and (
+            not mapping or mapping[-1] != last_user_batch_idx
+        ):
+            mapping.append(last_user_batch_idx)
+
+        return mapping
+
+    def _get_batch_index_from_node_index(self, node_index: int) -> int:
+        """将 timeline 节点索引转换为 _message_batch 索引。"""
+        mapping = self._build_node_to_batch_mapping()
+        if 0 <= node_index < len(mapping):
+            return mapping[node_index]
+        return -1
+
     def _on_node_preview_clicked(self, index: int):
         """
         点击时间线节点，滚动到对应的 user 卡片。
         """
-        target_batch_index = -1
-        user_count = 0
-        for idx, batch in enumerate(self._message_batch):
-            if batch and batch[0].get("role") == "user":
-                if user_count == index:
-                    target_batch_index = idx
-                    break
-                user_count += 1
-
+        target_batch_index = self._get_batch_index_from_node_index(index)
         if target_batch_index < 0:
             return
 
@@ -9752,10 +9776,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 background: {Colors.HOVER_BG};
             }}
         """)
-        # 项目标签 — 面包屑第一级（粗体 + accent 色）
+        # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
+        project_color = get_project_color(self._current_project)
         self._project_label.setStyleSheet(f"""
             QLabel {{
-                color: {Colors.TEXT_ACCENT};
+                color: {project_color};
                 {get_font_family_css()}
                 {font_size_css(13)}
                 font-weight: bold;

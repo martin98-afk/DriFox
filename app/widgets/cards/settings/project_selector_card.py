@@ -16,6 +16,45 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
+# 项目颜色调色板（12 色，色相均匀分布，每 30° 一跳）
+# 从红色 (0°) 开始，经橙黄绿青蓝紫玫红回到深橙 (330°)
+PROJECT_COLORS = [
+    "#e53935",  # 红    0°
+    "#f57c00",  # 橙   30°
+    "#fdd835",  # 黄   60°
+    "#7cb342",  # 亮绿 90°
+    "#43a047",  # 绿  120°
+    "#00897b",  # 墨绿150°
+    "#00acc1",  # 青  180°
+    "#1e88e5",  # 蓝  210°
+    "#3949ab",  # 靛蓝240°
+    "#8e24aa",  # 紫  270°
+    "#d81b60",  # 玫红300°
+    "#ff5722",  # 深橙330°
+]
+
+
+def get_project_color(name: str, alpha: int = 255) -> str:
+    """根据项目名计算固定颜色（确定性哈希分配）
+
+    使用 zlib.crc32 替代内置 hash()，避免 Python 的
+    进程间随机化种子（PYTHONHASHSEED）导致每次启动颜色不一致。
+
+    Args:
+        name: 项目名
+        alpha: 透明度 0-255
+
+    Returns:
+        RGBA 颜色字符串，如 "rgba(33, 139, 255, 255)"
+    """
+    import zlib
+    color_index = zlib.crc32(name.encode("utf-8")) % len(PROJECT_COLORS)
+    hex_color = PROJECT_COLORS[color_index]
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
 
 class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
@@ -32,6 +71,7 @@ class ProjectItem(QWidget):
         self._is_current = is_current
         self._session_count = 0
         self._worktree_count = 0
+        self._project_color = get_project_color(name)
         self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
@@ -42,11 +82,19 @@ class ProjectItem(QWidget):
         layout.setContentsMargins(10, 0, 4, 0)
         layout.setSpacing(6)
 
-        # 项目图标
-        icon_label = QLabel("📁", self)
-        icon_label.setStyleSheet(f"font-size: {scale_font_size(14)}px;")
-        icon_label.setAlignment(Qt.AlignVCenter)
-        layout.addWidget(icon_label)
+        # 项目彩色圆形标识（首字符 + 项目专属色）
+        first_char = self._name.strip()[0] if self._name.strip() else "?"
+        self._avatar_label = QLabel(first_char, self)
+        self._avatar_label.setFixedSize(22, 22)
+        self._avatar_label.setAlignment(Qt.AlignCenter)
+        self._avatar_label.setStyleSheet(f"""
+            background-color: {self._project_color};
+            color: white;
+            border-radius: 11px;
+            font-size: {scale_font_size(11)}px;
+            font-weight: bold;
+        """)
+        layout.addWidget(self._avatar_label)
 
         # 中间：项目名 + 根目录（垂直布局）
         text_vbox = QVBoxLayout()
@@ -107,14 +155,15 @@ class ProjectItem(QWidget):
         layout.addWidget(self._archive_btn)
 
     def _apply_name_style(self):
-        Colors.refresh()
         if self._is_current:
             self._name_label.setStyleSheet(
-                f"color: {Colors.BORDER_ACCENT}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
+                f"color: {self._project_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
             )
         else:
+            # 非当前项目用半透明版本
+            semi_color = get_project_color(self._name, alpha=160)
             self._name_label.setStyleSheet(
-                f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(13)};"
+                f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};"
             )
 
     def _emit_archive(self):
@@ -156,8 +205,10 @@ class ProjectItem(QWidget):
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
 
     def enterEvent(self, event):
+        # hover 时使用更亮的项目颜色
+        hover_color = get_project_color(self._name, alpha=240)
         self._name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)};"
+            f"color: {hover_color}; {get_font_family_css()} {font_size_css(13)};"
         )
         Colors.refresh()
         self._meta_label.setStyleSheet(
