@@ -16,11 +16,21 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
-# 项目颜色调色板（12 色，参考 GitHub 默认头像风格）
+# 项目颜色调色板（12 色，色相均匀分布，每 30° 一跳）
+# 从红色 (0°) 开始，经橙黄绿青蓝紫玫红回到深橙 (330°)
 PROJECT_COLORS = [
-    "#218bff", "#7c4dff", "#ff6b6b", "#ffa726",
-    "#26c6da", "#ab47bc", "#43a047", "#ef5350",
-    "#78909c", "#5c6bc0", "#ec407a", "#66bb6a",
+    "#e53935",  # 红    0°
+    "#f57c00",  # 橙   30°
+    "#fdd835",  # 黄   60°
+    "#7cb342",  # 亮绿 90°
+    "#43a047",  # 绿  120°
+    "#00897b",  # 墨绿150°
+    "#00acc1",  # 青  180°
+    "#1e88e5",  # 蓝  210°
+    "#3949ab",  # 靛蓝240°
+    "#8e24aa",  # 紫  270°
+    "#d81b60",  # 玫红300°
+    "#ff5722",  # 深橙330°
 ]
 
 
