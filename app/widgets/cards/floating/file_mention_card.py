@@ -248,6 +248,7 @@ class FileMentionCard(QWidget):
         self._root_dir: str = ""
         self._file_cache: List[Dict[str, str]] = []
         self._cache_dirty = True
+        self._gitignore_patterns: List[str] = []  # .gitignore 模式缓存
         self._async_pending = False  # 异步扫描进行中标志，防重复调度
         self._last_query = ""  # 上次过滤的 query，用于增量剪枝
 
@@ -428,8 +429,7 @@ class FileMentionCard(QWidget):
                     rel = f"{rel_prefix}/{name}" if rel_prefix else name
                     is_dir = entry.is_dir(follow_symlinks=False)
 
-                    # 忽略规则检查（仅用内置规则，不重新解析 .gitignore）
-                    if self._is_ignored(rel, is_dir, []):
+                    if self._is_ignored(rel, is_dir, self._gitignore_patterns):
                         continue
 
                     new_names.add(name)
@@ -497,7 +497,7 @@ class FileMentionCard(QWidget):
                     rel = f"{rel_prefix}/{name}" if rel_prefix else name
                     is_dir = entry.is_dir(follow_symlinks=False)
 
-                    if self._is_ignored(rel, is_dir, []):
+                    if self._is_ignored(rel, is_dir, self._gitignore_patterns):
                         continue
 
                     names.add(name)
@@ -764,6 +764,7 @@ class FileMentionCard(QWidget):
         self._scanning = True
         try:
             gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
+            self._gitignore_patterns = gitignore_patterns
             max_items = 2000
 
             try:

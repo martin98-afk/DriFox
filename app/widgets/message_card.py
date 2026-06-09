@@ -477,7 +477,7 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
             return flat
         for i in range(max_length, 0, -1):
             if flat[i - 1] in " ，,、；;：:.":
-                return flat[:i].rstrip(" ，,、") + "..."
+                return flat[:i].rstrip(" ，,、.") + "..."
         return flat[:max_length] + "..."
 
     # 选 3 句：首句 + 中间句(~40%) + 尾句
