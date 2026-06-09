@@ -131,8 +131,7 @@ from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
 )
 from app.widgets.cards.settings.project_selector_card import (
-    ProjectSelectorCardContent,
-    get_project_color,
+    ProjectSelectorCardContent, get_project_color,
 )
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
@@ -5714,57 +5713,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ==================== Batch 结构同步 ====================
 
-    def _rebuild_batch_cards_and_indices(self):
-        """
-        在 _message_batch 重建后（删除/撤销后）重建 _batch_cards 并更新 _message_index。
-
-        旧的 slicing 方式（_batch_cards = _batch_cards[:new_len]）会丢弃删除点之后
-        的幸存卡片引用，且不更新其 _message_index，导致节点点击定位失败。
-
-        新方式：遍历布局中存活的卡片，按布局顺序匹配到新 _message_batch 的各 batch，
-        同时更新 _message_index 索引。
-        """
-        new_batch_cards: List[Optional[List[MessageCard]]] = [None for _ in self._message_batch]
-
-        # 收集布局中存活的卡片（保持布局顺序）
-        surviving = []
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            w = item.widget()
-            if not isinstance(w, MessageCard):
-                continue
-            if getattr(w, "_is_welcome", False):
-                continue
-            if not self._is_widget_alive(w):
-                continue
-            surviving.append(w)
-
-        # 按布局顺序匹配到新 _message_batch（两者都是时间序）
-        card_idx = 0
-        for batch_idx, batch in enumerate(self._message_batch):
-            if not batch:
-                continue
-            batch_role = batch[0].get("role")
-            if not batch_role:
-                continue
-
-            # 从当前位置往后找同角色的下一个卡片
-            for scan_idx in range(card_idx, len(surviving)):
-                card = surviving[scan_idx]
-                if card.role == batch_role:
-                    card._message_index = batch_idx
-                    if new_batch_cards[batch_idx] is None:
-                        new_batch_cards[batch_idx] = []
-                    if card not in new_batch_cards[batch_idx]:
-                        new_batch_cards[batch_idx].append(card)
-                    card_idx = scan_idx + 1
-                    break
-            # 未找到匹配卡片 → batch 保留 None（需懒加载时创建）
-
-        self._batch_cards = new_batch_cards
-
     def _sync_batch_structures(self):
         """
         同步 _message_batch 与 session.messages 的当前状态。
@@ -7213,8 +7161,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
-        # 重建 _batch_cards 并更新所有存活卡片的 _message_index（替代旧 slicing 方式）
-        self._rebuild_batch_cards_and_indices()
+        # 同步裁剪 _batch_cards 长度，防止旧引用残留
+        new_len = len(self._message_batch)
+        if new_len > len(self._batch_cards):
+            self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
+        elif new_len < len(self._batch_cards):
+            self._batch_cards = self._batch_cards[:new_len]
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
@@ -7424,8 +7376,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # === 3. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
-        # 重建 _batch_cards 并更新所有存活卡片的 _message_index（替代旧 slicing 方式）
-        self._rebuild_batch_cards_and_indices()
+        # 同步裁剪 _batch_cards 长度，防止旧引用残留
+        new_len = len(self._message_batch)
+        if new_len > len(self._batch_cards):
+            self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
+        elif new_len < len(self._batch_cards):
+            self._batch_cards = self._batch_cards[:new_len]
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
