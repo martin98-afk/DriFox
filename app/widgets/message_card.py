@@ -1675,7 +1675,8 @@ class CodeWebViewer(QWebEngineView):
     needRecreate = pyqtSignal()  # 需要完全重建控件（恢复失败时）
 
     # WebEngine 最大尺寸限制，防止 GPU 内存溢出
-    # macOS GPU 对过大离屏缓冲分配失败，所以需要保守限制
+    # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
+    # 4000→2000 将单视图 GPU 缓冲区从 ~12.8MB 降至 ~6.4MB
     MAX_WIDTH = 1800
     MAX_HEIGHT = 4000
 

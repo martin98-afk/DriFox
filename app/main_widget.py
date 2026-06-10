@@ -4401,17 +4401,53 @@ class OpenAIChatToolWindow(ToolWindow):
             card.sync_width()
 
     def _sync_all_cards_width(self):
-        """resize 完成后更新所有卡片的宽度（包括非可见区域的）"""
+        """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
         scroll_area = getattr(self, "chat_scroll_area", None)
         if scroll_area:
             viewport_width = scroll_area.viewport().width()
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
+
+        # 第一步：同步所有卡片宽度（轻量，无 GPU 分配）
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
             if item and item.widget() and isinstance(item.widget(), MessageCard):
-                item.widget().sync_width(force=True)
-        self._set_cards_resize_preview_mode(False)
+                try:
+                    item.widget().sync_width(force=True)
+                except RuntimeError:
+                    pass
+
+        # 第二步：收集卡片，分批退出 preview 模式
+        self._restore_queue = []
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), MessageCard):
+                self._restore_queue.append(item.widget())
+
+        if not self._restore_queue:
+            self._resize_preview_active = False
+            return
+
+        self._restore_batch_idx = 0
+        self._process_restore_batch()
+
+    def _process_restore_batch(self):
+        """分批恢复卡片 viewer（触发 GPU 分配，必须分批以避免峰值）"""
+        BATCH_SIZE = 5
+        INTERVAL_MS = 80
+        end = min(self._restore_batch_idx + BATCH_SIZE, len(self._restore_queue))
+        for i in range(self._restore_batch_idx, end):
+            card = self._restore_queue[i]
+            try:
+                card.set_resize_preview_mode(False)
+            except RuntimeError:
+                pass
+        self._restore_batch_idx = end
+        if end < len(self._restore_queue):
+            QTimer.singleShot(INTERVAL_MS, self._process_restore_batch)
+        else:
+            self._restore_queue = []
+            self._resize_preview_active = False
 
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片"""

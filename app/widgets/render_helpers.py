@@ -518,6 +518,111 @@ _TOOL_ICON_MAP = {
 }
 
 
+def _extract_screenshot_image_path(result: str) -> str:
+    """从 screenshot 工具结果字符串中提取截图文件绝对路径
+
+    result 格式类似 Python dict str():
+        {'path': 'D:/...png', 'absolute_path': 'D:/...png', ...}
+    """
+    if not result:
+        return ""
+
+    # 策略1: ast.literal_eval 解析 Python dict 字面量
+    try:
+        import ast
+        data = ast.literal_eval(result)
+        if isinstance(data, dict):
+            path = data.get("absolute_path") or data.get("path") or ""
+            if path and os.path.isfile(path):
+                return path
+    except (ValueError, SyntaxError, MemoryError):
+        pass
+
+    # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
+    for key in ("absolute_path", "path"):
+        m = re.search(r"""['"]""" + key + r"""['"]\s*:\s*['"]([^'"]+\.png)['"]""", result)
+        if m:
+            path = m.group(1)
+            if os.path.isfile(path):
+                return path
+
+    # 策略3: 直接匹配 .png 的绝对路径
+    m = re.search(r"""['"]([A-Za-z]:[^'"]+\.png)['"]""", result)
+    if m:
+        path = m.group(1)
+        if os.path.isfile(path):
+            return path
+
+    return ""
+
+
+def _unescape_newlines(result: str) -> str:
+    """将 \\\\n 字面量还原为真实换行符（逆向 _render_tool_block_content 的转义）"""
+    return result.replace("\\n", "\n")
+
+
+# 文本输出渲染最大长度，防止意外长内容撑爆 DOM
+_MAX_OUTPUT_CHARS = 5000
+
+
+def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None) -> str:
+    """将工具结果以格式化 <pre> 文本块渲染（bash/read/grep/webfetch/diagnostics 等）"""
+    raw = _unescape_newlines(result)[:_MAX_OUTPUT_CHARS]
+    if not raw.strip():
+        return ""
+    tool_args = tool_args or {}
+    _gf = _get_global_font()  # 用户主题全局字体
+
+    # ── bash: 终端风格（命令头 + 输出体） ──
+    if tool_name == "bash":
+        cmd = tool_args.get("command", "")
+        cmd_display = escape(cmd[:120]) if cmd else "(no command)"
+        return f"""
+        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+                $ <span style="color:#c9d1d9;">{cmd_display}</span>
+            </div>
+            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+        </div>"""
+
+    # ── read: 代码预览（文件路径头 + 内容体） ──
+    if tool_name in ("read", "todoread", "read_project_note"):
+        path_hint = tool_args.get("path") or tool_args.get("file_path") or ""
+        path_display = escape(path_hint[:100]) if path_hint else "file"
+        return f"""
+        <div style="background:rgba(22,27,34,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+            <div style="padding:6px 12px;background:rgba(28,33,40,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+                📄 <span style="color:#c9d1d9;">{path_display}</span>
+            </div>
+            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+        </div>"""
+
+    # ── diagnostics: 按严重级别着色 ──
+    if tool_name == "get_diagnostics":
+        lines_html = []
+        for line in raw.split("\n"):
+            lower = line.lower()
+            if "error" in lower or "[error" in lower:
+                lines_html.append(f'<span style="color:#f85149;">{escape(line)}</span>')
+            elif "warning" in lower or "[warning" in lower:
+                lines_html.append(f'<span style="color:#d2991d;">{escape(line)}</span>')
+            elif "success" in lower or " issue" in lower or "issues" in lower:
+                lines_html.append(f'<span style="color:#7ee787;">{escape(line)}</span>')
+            else:
+                lines_html.append(escape(line))
+        return f"""
+        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{"\n".join(lines_html)}</pre>"""
+
+    # ── grep / glob / list / scan: 匹配/列表示结果 ──
+    if tool_name in ("grep", "glob", "list", "scan_repo", "stage_files"):
+        return f"""
+        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
+
+    # ── 通用文本输出 (webfetch, websearch, mouse, keyboard 等) ──
+    return f"""
+    <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
+
+
 def render_tool_block(
     tool_name: str,
     tool_args: dict,
@@ -658,20 +763,58 @@ def render_tool_block(
         except Exception:
             pass
 
-    # 有 echarts 或 diff 时：跳过参数表格，直接显示图表/差异
+    # ── 截图工具：提取图片路径，直接显示截图 ──
+    screenshot_image_html = ""
+    if tool_name == "screenshot" and success is not False:
+        img_path = _extract_screenshot_image_path(result)
+        if img_path:
+            screenshot_image_html = f'''
+            <div class="screenshot-preview" style="margin: 0; padding: 0;">
+                <img src="{escape(img_path)}" style="width: 100%; height: auto; display: block; border-radius: 8px;" alt="Screenshot" />
+            </div>'''
+
+    # ── 通用文本输出工具：bash/read/grep/webfetch/websearch/diagnostics 等 ──
+    _RAW_OUTPUT_TOOLS = frozenset({
+        "bash", "read", "todoread", "read_project_note",
+        "grep", "glob", "list", "scan_repo", "stage_files",
+        "webfetch", "websearch",
+        "get_diagnostics",
+        "mouse", "keyboard",
+    })
+    raw_output_html = ""
+    if tool_name in _RAW_OUTPUT_TOOLS and success is not False:
+        raw_output_html = _render_text_output(result, tool_name, tool_args)
+
+    # 有 echarts / 截图 / 文本输出 / diff 时：跳过参数表格，直接显示内容
     DIFF_AUTO_COLLAPSE_LINES = 20
-    if echarts or (diff and diff_line_count > 0):
-        if echarts:
-            collapsed = False  # 有图表时默认展开
-        else:
-            collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
+    if echarts:
+        collapsed = False  # 有图表时默认展开
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {echarts_html}
+            {diff_html}
+        </div>"""
+    elif screenshot_image_html:
+        collapsed = False  # 截图默认展开
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {screenshot_image_html}
+        </div>"""
+    elif raw_output_html:
+        collapsed = True  # 文本输出默认折叠，用户手动展开
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {raw_output_html}
+        </div>"""
+    elif diff and diff_line_count > 0:
+        collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
         expanded_content = f"""
         <div class="tool-expanded-content">
             {echarts_html}
             {diff_html}
         </div>"""
     else:
-        # 无 echarts 且无 diff 时：显示参数表格
+        # 无特殊渲染时：显示参数表格
         unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
         expanded_content = f"""
         <div class="tool-expanded-content">
