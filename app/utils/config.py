@@ -279,6 +279,13 @@ class Settings(QConfig):
     llm_desktop_automation_enabled = ConfigItem(
         "LLM", "DesktopAutomationEnabled", True, BoolValidator()
     )
+    # 工具块渲染模式：classic（经典，全部折叠，默认）/ compact（紧凑）
+    tool_render_mode = OptionsConfigItem(
+        "LLM",
+        "ToolRenderMode",
+        "classic",
+        OptionsValidator(["compact", "classic"]),
+    )
     # 通知提示音类型
     llm_notify_sound = OptionsConfigItem(
         "LLM",
