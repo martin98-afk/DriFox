@@ -321,6 +321,18 @@ class LLMSettingsCard(SystemCardFrame):
         self._setup_font_card()
         content_layout.addWidget(self.llmFontCard)
 
+        # 工具块渲染模式
+        self.toolRenderModeCard = OptionsSettingCard(
+            self.cfg.tool_render_mode,
+            get_icon("工具"),
+            "工具输出样式",
+            "紧凑模式收拢次要工具，经典模式全部展开",
+            texts=["紧凑", "经典"],
+            parent=self,
+        )
+        self.toolRenderModeCard.optionChanged.connect(self._on_settings_changed)
+        content_layout.addWidget(self.toolRenderModeCard)
+
         # ---- 版本更新分隔标签 ----
         self._sep_update_label = self._make_sep_label("版本更新")
         self._section_anchors["update"] = self._sep_update_label
