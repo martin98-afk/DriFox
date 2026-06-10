@@ -91,14 +91,13 @@ from app.widgets.render_helpers import (
 _md_instance = None
 ACTION_COLOR_MAP = {
     "ask": "#FF6347",
-    "file": "#4CAF50",  # 文件引用 - 绿色
 }
 DEFAULT_COLOR = "#888888"
 
 # ======== 预编译的正则表达式（提升到模块级别，避免重复编译）=======
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
-_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask|file)(?:\|([^)]*))?\)")
+_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask)(?:\|([^)]*))?\)")
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -1665,12 +1664,6 @@ def _inject_context_links(md_text: str) -> str:
                 attrs += f' data-last-time="{escape(last_time)}"'
             return f'<span class="context-tag session-tag" {attrs}>{display_content}</span>'
 
-        if action == "file":
-            # file 格式：[显示名称](file|/path/to/file_or_folder)
-            file_path = extra.strip() if extra else content
-            # 使用 data-type="file" 让 CSS 样式匹配
-            return f'<span class="context-tag" data-type="file" data-path="{escape(file_path)}" data-action="file">{escape(content)}</span>'
-
         return f'<span class="context-tag" data-type="{action}" data-content="{escape(content)}" data-action="{action}">{content}</span>'
 
     return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
@@ -3081,13 +3074,7 @@ class CodeWebViewer(QWebEngineView):
                         var tagContent = sessionId || tag.getAttribute('data-content') || tag.getAttribute('data-title') || '';
                         e.stopPropagation();
                         e.preventDefault();
-                        // file 类型特殊处理：直接发送文件路径
-                        if (tagType === 'file') {{
-                            var filePath = tag.getAttribute('data-path') || tagContent;
-                            console.log('pywebview_action:open_file:' + filePath);
-                        }} else {{
-                            console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
-                        }}
+                        console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
                         return;
                     }}
                     // 图片点击 → 系统默认程序打开
