@@ -1,21 +1,24 @@
 ---
 name: agent-canvas-designer
 description: >
-  可交互的智能体编排画布设计器。通过对话理解需求，启动画布展示流程，
-  用户可拖拽编辑，大模型读取反馈迭代。人在回路交互。
+  AI 驱动的智能体编排画布设计器。通过对话理解需求，AI 自动生成画布配置，
+  通过 Playwright MCP 自动操控浏览器进行可视化验证和迭代。
+  无需用户手动拖拽编辑。内置 JSON 校验和自动备份防损坏。
   Use when 用户说"设计智能体"、"画布设计"、"编排流程"、
   "workflow design"、"生成画布JSON"、"生成配置"。
 ---
 
 # Agent Canvas Designer
 
-通过浏览器画布 + 对话交互，设计智能体编排流程。
+AI 自动驱动的智能体编排画布设计器。结合 Playwright MCP 实现全流程自动化。
 
 ---
 
 ## 交互流程（你必须遵循）
 
 ### Step 1: 需求理解（终端对话，不要启动画布）
+
+**加载 `grill-me` 技能进行需求确认**
 
 **⚠️ 必须使用 question 工具逐个提问，每次只问一个**
 
@@ -32,54 +35,126 @@ description: >
 **示例**：
 > 你要做一个客服路由流程：用户输入 → 分类（技术/订单/投诉）→ 技术走知识检索+LLM，订单走查表+LLM，投诉走人工审核 → 统一回复。对吗？
 
-### Step 2: 启动画布 + 生成初始配置
+### Step 2: 生成配置（三步法：写 → 校验 → 写画布）
 
-用户确认后，按以下顺序操作：
+用户确认后，**你必须严格按照这个顺序执行**，每一步都不能跳过。
 
-**1) 启动服务器**
+#### 2a) 组装配置 JSON
+
+根据需求设计节点和连接，组装出完整的配置对象。
+
+**⚠️ JSON 防损坏规则（违反会导致画布白屏）：**
+- **所有 `system_prompt` / `user_prompt` 中的中文引号必须用 `「」`**，不要用 ASCII `"`！
+- 示例：`判定为「不通过」` ✅  |  `判定为"不通过"` ❌
+- 所有 `config` 值必须是字符串：`"5"` ✅  |  `5` ❌
+- 所有变量引用必须是 `{{xxx}}` 格式
+
+#### 2b) 写入配置文件
+
 ```xml
-<bg_start command="cd /d \"D:\work\DriFoxx\.drifox\skills\agent-canvas-designer\canvas-app\" && python server.py" />
-```
-
-**2) 写入配置**
-```xml
-<write path="D:/work/DriFoxx/.drifox/skills/agent-canvas-designer/canvas-app/config.json">
+<write path="canvas-app/config.json">
 <content><![CDATA[{ ... }]]></content>
 </write>
 ```
 
-**3) 打开浏览器**
+#### 2c) 运行校验工具（**必须执行，不可跳过**）
+
 ```xml
-<bash command="start http://localhost:8081" />
+<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
 ```
 
-然后告诉用户：
-> 画布已打开！你可以在浏览器中拖拽节点、编辑配置、添加连线。改完告诉我，我会读取你的修改。
+必须看到 `✅ 检查通过` 或 `✅ 已修复` 才能继续。如果看到 `❌ JSON 语法错误`，修复后再重试。
 
-### Step 3: 人在回路迭代
+#### 2d) 启动服务器（如果尚未运行）
 
-用户回复"改好了"或提出修改意见后：
-
-**读取当前状态**：
 ```xml
-<read path="D:/work/DriFoxx/.drifox/skills/agent-canvas-designer/canvas-app/config.json" />
+<bg_start command="cd canvas-app && python server.py" />
 ```
 
-根据用户反馈修改配置，重新写入 config.json，画布会自动刷新加载。
+#### 2e) 用 Playwright 自动刷新 + 截图验证
 
-**典型迭代**：
-- 用户拖了新节点 → 你读取后帮它补齐配置（system_prompt 等）
-- 用户修改了连线 → 你读取后检查逻辑是否闭环
-- 用户要求增加分支 → 你在 JSON 中添加节点和连接
-- 用户说某个节点的 prompt 不对 → 你修改后重新写入
+写入配置后，**用 Playwright 自动刷新浏览器**，确认画布正确渲染：
+
+```xml
+<!-- 打开/刷新画布 -->
+<mcp__playwright__browser_navigate>
+<url>http://localhost:8081</url>
+</mcp__playwright__browser_navigate>
+
+<!-- 等待渲染完成 -->
+<mcp__playwright__browser_wait_for>
+<time>2</time>
+</mcp__playwright__browser_wait_for>
+
+<!-- 截图验证 -->
+<mcp__playwright__browser_take_screenshot>
+<type>png</type>
+</mcp__playwright__browser_take_screenshot>
+
+<!-- 读取画布快照确认节点渲染 -->
+<mcp__playwright__browser_snapshot></mcp__playwright__browser_snapshot>
+```
+
+#### 2f) 通过 `/api/validate` 做结构校验
+
+```xml
+<bash command="curl -s http://localhost:8081/api/validate" />
+```
+
+期望输出：`{"valid": true, "node_count": 8, "conn_count": 7, "errors": []}`
+
+### Step 3: AI 直接修改 config.json 迭代
+
+**所有修改都通过直接编辑 config.json 完成，禁止用 Playwright 去点画布上的节点。**
+
+Playwright 仅用于：改完配置后自动刷新浏览器 + 截图验证。
+
+标准迭代循环：
+
+```xml
+<!-- 1. 读取当前配置 -->
+<read path="canvas-app/config.json" />
+
+<!-- 2. AI 在内存中构造修改后的配置 -->
+<!-- ... 增加/删除/修改节点和连接，修改 prompt ... -->
+
+<!-- 3. 写入 -->
+<write path="canvas-app/config.json">
+<content><![CDATA[{ ... 修改后的完整配置 ... }]]></content>
+</write>
+
+<!-- 4. 校验 -->
+<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+
+<!-- 5. 通过 API 校验结构 -->
+<bash command="curl -s http://localhost:8081/api/validate" />
+
+<!-- 6. Playwright 自动刷新浏览器 + 截图验证（仅此用途） -->
+<mcp__playwright__browser_navigate>
+<url>http://localhost:8081</url>
+</mcp__playwright__browser_navigate>
+<mcp__playwright__browser_wait_for>
+<time>2</time>
+</mcp__playwright__browser_wait_for>
+<mcp__playwright__browser_take_screenshot>
+<type>png</type>
+</mcp__playwright__browser_take_screenshot>
+```
+
+**典型迭代场景**（全部通过改 JSON 实现，不碰浏览器交互）：
+- 用户要求增加节点 → 在 JSON 的 nodes 中添加，在 connections 中添加连线
+- 用户要求修改 prompt → 直接改对应节点的 system_prompt
+- 用户要求增加分支 → 在 classifier/condition 中加分类，加节点和连接
+- 用户要求删除节点 → 删除节点和所有相关连线
 
 ### Step 4: 输出最终设计
 
 用户确认满意后：
 1. 读取最终 config.json
 2. 做自检验收（见下方清单）
-3. 输出最终 JSON + 流程说明
-4. 关闭服务器
+3. 运行 `python D:/work/DriFox/plugins/system/skills/agent-canvas-designer/tools/sanitize_config.py check D:/work/DriFox/plugins/system/skills/agent-canvas-designer/canvas-app/config.json` 做最终校验
+4. 输出最终 JSON + 流程说明
+5. 关闭服务器
 
 ```xml
 <bg_stop task_id="bg_xxxxxxxx" />
@@ -500,7 +575,7 @@ def main(tables, doc_type):
 
 ## 自检验收清单
 
-写入 config.json 前，逐项检查：
+### 写入前检查（AI 手动检查）
 
 | # | 检查项 | 怎么查 |
 |---|--------|--------|
@@ -508,11 +583,24 @@ def main(tables, doc_type):
 | 2 | id 不重复 | 每个 id 只出现一次 |
 | 3 | 连接闭合 | 所有非 end 节点都有出边 |
 | 4 | 连接指向存在 | connections 中所有 id 都在 nodes 中 |
-| 5 | config 值全是字符串 | max_iterations 是 "5" 不是 5 |
+| 5 | config 值全是字符串 | max_iterations 是 `"5"` 不是 `5` |
 | 6 | tools 转义 | `"[\"A\",\"B\"]"` 格式 |
 | 7 | 变量引用正确 | `{{n3.output}}` 双花括号 |
 | 8 | system_prompt 有三段 | 角色→输出→规则 |
 | 9 | 每个分支有处理链 | classifier 的每个分类都有下游节点 |
+
+### 写入后自动校验（**必须执行，不可跳过**）
+
+```xml
+<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+```
+
+此工具自动检查：
+1. ✅ JSON 语法是否合法
+2. ✅ 中文引号是否被替换为 `「」`
+3. ✅ config 值是否都是字符串
+4. ✅ 变量引用格式是否完整 `{{...}}`
+5. ⚠️ 报告结构警告（孤立节点等）
 
 ---
 
@@ -571,13 +659,94 @@ start → knowledge ─┐
 
 ---
 
+## 防损坏机制
+
+本技能内置三层防护，防止 JSON 配置损坏：
+
+### 第一层：写入前校验（主动防御）
+
+AI 在写入配置后**必须**运行：
+```xml
+<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+```
+
+`fix` 命令自动：
+1. ✅ 检查 JSON 语法
+2. ✅ 替换中文引号 `"通过"` → `「通过」`
+3. ✅ 将非字符串 config 值转为字符串
+4. ✅ 报告结构问题（孤立节点、重复 id 等）
+
+### 第二层：自动备份（被动恢复）
+
+`server.py` 在每次写入新配置前，自动备份旧配置到 `config.json.bak`。
+
+当画布白屏时（GET /get-state 返回 500），服务器自动尝试从 `.bak` 恢复：
+```xml
+<!-- 查看备份状态 -->
+<bash command="curl -s http://localhost:8081/api/backup" />
+
+<!-- 手动查看备份 -->
+<read path="D:/work/DriFox/plugins/system/skills/agent-canvas-designer/canvas-app/config.json.bak" />
+```
+
+### 第三层：结构校验 API
+
+```xml
+<!-- 校验当前文件 -->
+<bash command="curl -s http://localhost:8081/api/validate" />
+
+<!-- 校验即将写入的内容（不写入文件） -->
+<bash command="curl -s -X POST http://localhost:8081/api/validate -H \"Content-Type: application/json\" -d '...JSON内容...'" />
+```
+
+返回格式：
+```json
+{"valid": true, "errors": [], "node_count": 8, "conn_count": 7}
+```
+
+### 常见损坏场景及修复
+
+| 场景 | 现象 | 修复 |
+|------|------|------|
+| system_prompt 中有 ASCII `"` | 画布白屏，服务器 500 | `fix` 命令自动替换为「」 |
+| config 值写成了数字 | 画布正常但参数异常 | `fix` 命令自动转字符串 |
+| 节点 id 重复 | 画布显示异常 | 检查 nodes，确保 id 唯一 |
+| 缺少 start 或 end | 流程不完整 | 添加缺失的节点 |
+
+---
+
+## Playwright MCP 使用规范
+
+本技能中 Playwright **仅用于**：改完 config.json 后自动刷新浏览器 + 截图验证。
+
+**禁止用途**：用 Playwright 点击画布节点、拖拽连线、编辑配置面板。
+
+### 标准操作
+
+```xml
+<!-- 打开/刷新画布 -->
+<mcp__playwright__browser_navigate><url>http://localhost:8081</url></mcp__playwright__browser_navigate>
+
+<!-- 等待渲染 -->
+<mcp__playwright__browser_wait_for><time>2</time></mcp__playwright__browser_wait_for>
+
+<!-- 截图验证 -->
+<mcp__playwright__browser_take_screenshot><type>png</type></mcp__playwright__browser_take_screenshot>
+```
+
+---
+
 ## 文件位置
 
 ```
 canvas-app/
-├── index.html    # 画布（React Flow CDN，零构建）
-├── server.py     # Python 服务器
-└── config.json   # 当前配置（读写这个文件）
+├── index.html        # 画布（React Flow CDN，零构建）
+├── server.py         # Python 服务器（含备份/校验 API）
+├── config.json       # 当前配置（读写这个文件）
+└── config.json.bak   # 自动备份（写入前生成）
+
+tools/
+└── sanitize_config.py  # JSON 校验与清洗工具
 
 references/
 ├── NODE-GUIDE.md        # 14种节点详解
@@ -590,14 +759,21 @@ references/
 
 **读取画布状态**（推荐直接读文件）：
 ```xml
-<read path="D:/work/DriFoxx/.drifox/skills/agent-canvas-designer/canvas-app/config.json" />
+<read path="canvas-app/config.json" />
 ```
 
-**写入配置**（画布自动刷新加载）：
+**写入配置 + 自动校验**（标准流程）：
 ```xml
-<write path="D:/work/DriFoxx/.drifox/skills/agent-canvas-designer/canvas-app/config.json">
+<!-- 1. 写入 -->
+<write path="canvas-app/config.json">
 <content><![CDATA[{ ... }]]></content>
 </write>
+
+<!-- 2. 校验（必须执行） -->
+<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+
+<!-- 3. API 验证（可选但推荐） -->
+<bash command="curl -s http://localhost:8081/api/validate" />
 ```
 
 **停止服务器**：

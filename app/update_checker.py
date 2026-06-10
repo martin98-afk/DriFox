@@ -244,9 +244,10 @@ class UpdateChecker(QWidget):
                 self._run_macos_upgrade()
             else:
                 # Windows 运行 EXE 安装向导
+                # args 已经是列表，shell=True 多余，去除消除 CWE-78 风险
                 subprocess.Popen(
                     [self.installer_path],
-                    shell=True,
+                    shell=False,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                     | subprocess.DETACHED_PROCESS,
                 )

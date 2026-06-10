@@ -362,7 +362,7 @@ function App() {
   // Keyboard delete
   React.useEffect(function(){
     var handler = function(e){
-      if((e.key==='Delete'||e.key==='Backspace') && selectedRef.current){
+      if(e.key==='Delete' && selectedRef.current){
         var sid = selectedRef.current.id;
         var nt = selectedRef.current.data.nodeType;
         if(nt==='start'||nt==='end') return;
@@ -424,7 +424,7 @@ function App() {
           onConnect:onConnect,onNodeClick:onNodeClick,onPaneClick:onPaneClick,nodeTypes:nodeTypes,
           fitView:true,fitViewOptions:{padding:0.3},
           defaultEdgeOptions:{markerEnd:{type:ReactFlow.MarkerType.ArrowClosed,color:'#888'},style:{stroke:'#555',strokeWidth:2}},
-          deleteKeyCode:['Delete','Backspace']},
+          deleteKeyCode:['Delete']},
           h(ReactFlow.Background,{variant:'dots',gap:24,size:1,color:'#2a2a3e'}),
           h(ReactFlow.Controls,{showInteractive:false})
         )

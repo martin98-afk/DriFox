@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from dataclasses import dataclass, field
 
 from app.tools.result import ToolResult
+from app.tools.command_safety import needs_shell, classify_command, run_safe, run_with_shell
 
 
 @dataclass
@@ -37,6 +38,17 @@ class BackgroundTask:
         # 限制缓冲区大小，最多保留 10000 行
         if len(self.output_buffer) > 10000:
             self.output_buffer = self.output_buffer[-5000:]
+
+
+def _prepare_windows_encoding(command: str) -> str:
+    """Windows 上设置 UTF-8 编码前缀（仅当需要 shell=True 路径时使用）
+
+    替代方案：通过 Python 的 env 传递编码，避免嵌入 chcp 命令。
+    但某些 Windows 程序仍需要控制台代码页，所以保留 chcp 前缀。
+    """
+    if sys.platform == "win32":
+        return f"chcp 65001 >nul 2>&1 && {command}"
+    return command
 
 
 class BackgroundTaskManager:
@@ -81,24 +93,38 @@ class BackgroundTaskManager:
         task_id = f"bg_{uuid.uuid4().hex[:8]}"
         workdir = Path(cwd) if cwd else self._effective_workdir()
 
-        try:
-            # Windows: 设置代码页避免编码问题
-            if sys.platform == "win32":
-                cmd = f"chcp 65001 >nul 2>&1 && {command}"
-            else:
-                cmd = command
+        classification = classify_command(command)
+        if classification == 'block':
+            return task_id, f"❌ 命令被安全策略拦截: {command}"
 
-            process = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=str(workdir),
-            )
+        try:
+            use_shell = needs_shell(command)
+
+            if use_shell:
+                # Path B: 需要 shell 特性 — 使用 shell=True（后台任务暂不强制审批）
+                cmd = _prepare_windows_encoding(command)
+                process = run_with_shell(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(workdir),
+                )
+            else:
+                # Path A: 安全路径 — shell=False
+                process = run_safe(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(workdir),
+                )
 
             task = BackgroundTask(
                 task_id=task_id,
@@ -257,25 +283,42 @@ class TerminalTools:
         """执行 shell 命令，支持可靠的 timeout
 
         使用 communicate(timeout) 避免管道死锁，同时在超时时杀死进程。
+
+        安全说明:
+          - Path A (shell=False): 无 shell 元字符的命令，用 argv 数组直接执行
+          - Path B (shell=True):  含管道/重定向的命令，保留 shell 解释
         """
-        import platform
-
         try:
-            # Windows: 强制切换到 UTF-8 代码页，确保输出编码一致
-            if platform.system() == "Windows":
-                # 先设置环境变量，再嵌入 chcp 命令
-                command = f"chcp 65001 >nul 2>&1 && {command}"
+            # 安全分类
+            classification = classify_command(command)
+            if classification == 'block':
+                return ToolResult(False, error=f"命令被安全策略拦截: {command}")
 
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                cwd=str(self.workdir),
-            )
+            use_shell = needs_shell(command)
+
+            if use_shell:
+                # Path B: 需要 shell 特性（管道、重定向等）
+                cmd = _prepare_windows_encoding(command)
+                process = run_with_shell(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    cwd=str(self.workdir),
+                )
+            else:
+                # Path A: 安全路径 — 无 shell 注入风险
+                process = run_safe(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    cwd=str(self.workdir),
+                )
 
             start_time = time.time()
 
