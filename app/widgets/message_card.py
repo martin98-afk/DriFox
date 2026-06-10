@@ -1678,7 +1678,7 @@ class CodeWebViewer(QWebEngineView):
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
     # 4000→2000 将单视图 GPU 缓冲区从 ~12.8MB 降至 ~6.4MB
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 2000
+    MAX_HEIGHT = 4000
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)

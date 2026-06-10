@@ -4408,7 +4408,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 收集所有卡片，分批恢复（每批 5 个，间隔 80ms）
+        # 第一步：同步所有卡片宽度（轻量，无 GPU 分配）
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), MessageCard):
+                try:
+                    item.widget().sync_width(force=True)
+                except RuntimeError:
+                    pass
+
+        # 第二步：收集卡片，分批退出 preview 模式
         self._restore_queue = []
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
@@ -4416,28 +4425,29 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._restore_queue.append(item.widget())
 
         if not self._restore_queue:
+            self._resize_preview_active = False
             return
 
         self._restore_batch_idx = 0
         self._process_restore_batch()
 
     def _process_restore_batch(self):
-        """处理一批卡片恢复：sync_width + 退出 preview 模式"""
+        """分批恢复卡片 viewer（触发 GPU 分配，必须分批以避免峰值）"""
         BATCH_SIZE = 5
         INTERVAL_MS = 80
         end = min(self._restore_batch_idx + BATCH_SIZE, len(self._restore_queue))
         for i in range(self._restore_batch_idx, end):
             card = self._restore_queue[i]
             try:
-                card.sync_width(force=True)
                 card.set_resize_preview_mode(False)
             except RuntimeError:
-                pass  # 卡片可能在分批期间被删除
+                pass
         self._restore_batch_idx = end
         if end < len(self._restore_queue):
             QTimer.singleShot(INTERVAL_MS, self._process_restore_batch)
         else:
-            self._restore_queue = []  # 释放引用
+            self._restore_queue = []
+            self._resize_preview_active = False
 
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片"""
