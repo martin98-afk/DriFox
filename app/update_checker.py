@@ -261,12 +261,15 @@ class UpdateChecker(QWidget):
     def _run_macos_upgrade(self):
         """macOS 自动升级：挂载DMG → 拷贝 .app 到 /Applications → 启动新版本"""
         # 1. 挂载 DMG（输出 plist 格式以便解析挂载点）
+        # 注意：不能加 -quiet，否则 stdout 会被关闭导致 -plist 输出为空
         result = subprocess.run(
-            ["hdiutil", "attach", "-quiet", "-nobrowse", "-plist", self.installer_path],
+            ["hdiutil", "attach", "-nobrowse", "-plist", self.installer_path],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
             raise RuntimeError(f"DMG 挂载失败: {result.stderr}")
+        if not result.stdout.strip():
+            raise RuntimeError("hdiutil 未输出挂载信息（stdout 为空）")
 
         # 2. 解析 plist 获取挂载点
         plist_data = plistlib.loads(result.stdout.encode())
