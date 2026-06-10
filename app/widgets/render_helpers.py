@@ -518,6 +518,44 @@ _TOOL_ICON_MAP = {
 }
 
 
+def _extract_screenshot_image_path(result: str) -> str:
+    """从 screenshot 工具结果字符串中提取截图文件绝对路径
+
+    result 格式类似 Python dict str():
+        {'path': 'D:/...png', 'absolute_path': 'D:/...png', ...}
+    """
+    if not result:
+        return ""
+
+    # 策略1: ast.literal_eval 解析 Python dict 字面量
+    try:
+        import ast
+        data = ast.literal_eval(result)
+        if isinstance(data, dict):
+            path = data.get("absolute_path") or data.get("path") or ""
+            if path and os.path.isfile(path):
+                return path
+    except (ValueError, SyntaxError, MemoryError):
+        pass
+
+    # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
+    for key in ("absolute_path", "path"):
+        m = re.search(r"""['"]""" + key + r"""['"]\s*:\s*['"]([^'"]+\.png)['"]""", result)
+        if m:
+            path = m.group(1)
+            if os.path.isfile(path):
+                return path
+
+    # 策略3: 直接匹配 .png 的绝对路径
+    m = re.search(r"""['"]([A-Za-z]:[^'"]+\.png)['"]""", result)
+    if m:
+        path = m.group(1)
+        if os.path.isfile(path):
+            return path
+
+    return ""
+
+
 def render_tool_block(
     tool_name: str,
     tool_args: dict,
@@ -658,20 +696,40 @@ def render_tool_block(
         except Exception:
             pass
 
-    # 有 echarts 或 diff 时：跳过参数表格，直接显示图表/差异
+    # ── 截图工具：提取图片路径，直接显示截图 ──
+    screenshot_image_html = ""
+    if tool_name == "screenshot" and success is not False:
+        img_path = _extract_screenshot_image_path(result)
+        if img_path:
+            screenshot_image_html = f'''
+            <div class="screenshot-preview" style="margin: 0; padding: 0;">
+                <img src="{escape(img_path)}" style="width: 100%; height: auto; display: block; border-radius: 8px;" alt="Screenshot" />
+            </div>'''
+
+    # 有 echarts / 截图 / diff 时：跳过参数表格，直接显示内容
     DIFF_AUTO_COLLAPSE_LINES = 20
-    if echarts or (diff and diff_line_count > 0):
-        if echarts:
-            collapsed = False  # 有图表时默认展开
-        else:
-            collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
+    if echarts:
+        collapsed = False  # 有图表时默认展开
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {echarts_html}
+            {diff_html}
+        </div>"""
+    elif screenshot_image_html:
+        collapsed = False  # 截图默认展开
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {screenshot_image_html}
+        </div>"""
+    elif diff and diff_line_count > 0:
+        collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
         expanded_content = f"""
         <div class="tool-expanded-content">
             {echarts_html}
             {diff_html}
         </div>"""
     else:
-        # 无 echarts 且无 diff 时：显示参数表格
+        # 无 echarts / 截图 / diff 时：显示参数表格
         unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
         expanded_content = f"""
         <div class="tool-expanded-content">

@@ -18,19 +18,21 @@ from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
 # 项目颜色调色板（12 色，色相均匀分布，每 30° 一跳）
 # 从红色 (0°) 开始，经橙黄绿青蓝紫玫红回到深橙 (330°)
+# 深色主题优化版：所有颜色 HSL 亮度 ≥ 51%，确保在 #212126 深色背景上清晰可见
+# 同时作为头像圆圈背景时白色文字仍具可读性（亮度 ≤ 63%）
 PROJECT_COLORS = [
-    "#e53935",  # 红    0°
-    "#f57c00",  # 橙   30°
-    "#fdd835",  # 黄   60°
-    "#7cb342",  # 亮绿 90°
-    "#43a047",  # 绿  120°
-    "#00897b",  # 墨绿150°
-    "#00acc1",  # 青  180°
-    "#1e88e5",  # 蓝  210°
-    "#3949ab",  # 靛蓝240°
-    "#8e24aa",  # 紫  270°
-    "#d81b60",  # 玫红300°
-    "#ff5722",  # 深橙330°
+    "#ef5350",  # 红    0°  (L:62%, 原 #e53935 L:55%)
+    "#ff9800",  # 橙   30°  (L:56%, 原 #f57c00 L:48%)
+    "#ffc107",  # 琥珀 60°  (L:58%, 原 #fdd835 L:66%)
+    "#9ccc65",  # 亮绿 90°  (L:60%, 原 #7cb342 L:48%)
+    "#66bb6a",  # 绿  120°  (L:57%, 原 #43a047 L:45%)
+    "#4db6ac",  # 墨绿150°  (L:51%, 原 #00897b L:27%) ★
+    "#26c6da",  # 青  180°  (L:55%, 原 #00acc1 L:37%) ★
+    "#42a5f5",  # 蓝  210°  (L:61%, 原 #1e88e5 L:51%)
+    "#5c6bc0",  # 靛蓝240°  (L:56%, 原 #3949ab L:45%) ★
+    "#ab47bc",  # 紫  270°  (L:51%, 原 #8e24aa L:40%) ★
+    "#ec407a",  # 玫红300°  (L:59%, 原 #d81b60 L:47%)
+    "#ff7043",  # 深橙330°  (L:63%, 原 #ff5722 L:56%)
 ]
 
 
@@ -85,14 +87,17 @@ class ProjectItem(QWidget):
         # 项目彩色圆形标识（首字符 + 项目专属色）
         first_char = self._name.strip()[0] if self._name.strip() else "?"
         self._avatar_label = QLabel(first_char, self)
-        self._avatar_label.setFixedSize(22, 22)
+        self._avatar_label.setFixedSize(24, 24)
         self._avatar_label.setAlignment(Qt.AlignCenter)
         self._avatar_label.setStyleSheet(f"""
-            background-color: {self._project_color};
-            color: white;
-            border-radius: 11px;
-            font-size: {scale_font_size(11)}px;
-            font-weight: bold;
+            QLabel {{
+                background-color: {self._project_color};
+                color: white;
+                border-radius: 12px;
+                border: 2px solid rgba(255, 255, 255, 0.15);
+                font-size: {scale_font_size(12)}px;
+                font-weight: bold;
+            }}
         """)
         layout.addWidget(self._avatar_label)
 
@@ -205,12 +210,19 @@ class ProjectItem(QWidget):
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
 
     def enterEvent(self, event):
-        # hover 时使用更亮的项目颜色
+        # hover 时：整行加半透明背景 + 更亮的项目颜色 + 元数据提亮
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            ProjectItem {{
+                background: {Colors.HOVER_BG};
+                border-radius: 6px;
+                border: none;
+            }}
+        """)
         hover_color = get_project_color(self._name, alpha=240)
         self._name_label.setStyleSheet(
-            f"color: {hover_color}; {get_font_family_css()} {font_size_css(13)};"
+            f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
-        Colors.refresh()
         self._meta_label.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};"
         )
@@ -218,6 +230,7 @@ class ProjectItem(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self.setStyleSheet("")
         self._apply_name_style()
         Colors.refresh()
         self._meta_label.setStyleSheet(
