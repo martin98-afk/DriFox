@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any, Callable
 
 from loguru import logger
 
-from app.constants import PARAM_SCHEMA
+from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 from app.tools.result import ToolResult
 from app.core.message_content import to_api_message
 from app.core.tool_call_parser import smart_parse_arguments
@@ -500,6 +500,8 @@ class SubAgentExecutor(QThread):
                           "系统提示", "启用技能",
                           "name", "provider_name", "config_id", "display_name",
                           "_suffix_index", "备注", "获取地址", "模型列表"}:
+                continue
+            if cn_key in QUOTA_EXCLUDE_KEYS:
                 continue
 
             meta = PARAM_SCHEMA.get(cn_key, {})

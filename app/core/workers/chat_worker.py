@@ -31,7 +31,7 @@ from openai import (
     OpenAI, BadRequestError, RateLimitError, APIError, APIConnectionError,
 )
 
-from app.constants import PARAM_SCHEMA
+from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 from app.core.conversation.config import PermissionCache
 from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
 from app.core.provider_profile import get_provider_profile
@@ -633,6 +633,8 @@ class OpenAIChatWorker(QThread):
                           "系统提示", "启用技能",
                           "name", "provider_name", "config_id", "display_name",
                           "_suffix_index", "备注", "获取地址", "模型列表"}:
+                continue
+            if cn_key in QUOTA_EXCLUDE_KEYS:
                 continue
             # 从 PARAM_SCHEMA 查找 API 参数名
             meta = PARAM_SCHEMA.get(cn_key, {})
@@ -1377,7 +1379,7 @@ class OpenAIChatWorker(QThread):
             "model": cached_config["model"],
             "messages": sanitized,
             "stream": cached_config["stream"],
-            "parallel_tool_calls": True,  # 显式启用并行工具调用（OpenAI 2024-08+ 默认就是 True，显式传更稳；非 OpenAI provider 多为 OpenAI 兼容 API，会忽略未知参数）
+            # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
         # 添加 extra_body
         if cached_config.get("extra_body"):
