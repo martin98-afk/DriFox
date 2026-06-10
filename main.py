@@ -107,12 +107,6 @@ def main():
             # 不 abort()，仅记录日志后返回，让进程继续运行
         elif msg_type == QtMsgType.QtCriticalMsg:
             _logger.error(f"[QtCritical] {msg_text}")
-        elif msg_type == QtMsgType.QtWarningMsg:
-            _logger.warning(f"[QtWarning] {msg_text}")
-        elif msg_type == QtMsgType.QtInfoMsg:
-            _logger.info(f"[QtInfo] {msg_text}")
-        elif msg_type == QtMsgType.QtDebugMsg:
-            _logger.debug(f"[QtDebug] {msg_text}")
 
     qInstallMessageHandler(_qt_message_handler)
 

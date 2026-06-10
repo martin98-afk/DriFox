@@ -4673,6 +4673,7 @@ class MessageCard(SimpleCardWidget):
         painter.drawRoundedRect(stripe_x, 10, stripe_width, max(18, h - 20), 3, 3)
 
         if not self._streaming:
+            painter.end()
             return
 
         # ══════════════════════════════════════════════════════
@@ -4844,6 +4845,7 @@ class MessageCard(SimpleCardWidget):
             top_color = QColor(self._theme["accent"])
             top_color.setAlpha(int(30 * breathe))
         painter.fillRect(0, 0, w, 5, top_color)
+        painter.end()
 
     def set_error_state(self, is_error: bool, error_message: str = ""):
         """设置错误状态

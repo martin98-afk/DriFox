@@ -9,7 +9,7 @@
 from typing import List, Dict
 
 import html
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRect
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -359,7 +359,7 @@ class ParameterItemWidget(QWidget):
 
         # 参数说明
         if self._param.description:
-            desc_label = QLabel(self._param.description)
+            desc_label = _ElidedLabel(self._param.description)
             desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             desc_label.setMinimumWidth(0)
@@ -752,7 +752,7 @@ class CommandCard(QWidget):
         v_margin = margins.top() + margins.bottom()
         spacing = self._detail_container.layout().spacing()
 
-        # 计算描述文本高度
+        # 计算描述文本高度（使用 boundingRect 精确估算 word wrap 后高度）
         fm = self._detail_desc_label.fontMetrics()
         line_height = fm.lineSpacing()
         desc_text = self._detail_desc_label.text()
@@ -760,9 +760,11 @@ class CommandCard(QWidget):
             label_width = self._detail_desc_label.width() or 1
             if label_width <= 0:
                 label_width = self.width() - 24
-            text_width = fm.horizontalAdvance(desc_text)
-            line_count = max(1, (text_width + label_width - 1) // label_width)
-            desc_height = line_height * line_count
+            # 使用 TextWordWrap 标志精确计算多行文本高度，避免 horizontalAdvance
+            # 单行估算不准确导致第一行文字被下方元素遮挡
+            bounding = fm.boundingRect(QRect(0, 0, label_width, 0), Qt.TextWordWrap, desc_text)
+            line_count = max(1, (bounding.height() + line_height - 1) // line_height)
+            desc_height = line_height * line_count + 2  # 2px 安全边距补偿 QLabel 内部渲染偏移
         else:
             desc_height = line_height
 
@@ -782,11 +784,11 @@ class CommandCard(QWidget):
                 fm_pos = self._detail_positional_hint.fontMetrics()
                 pos_line_height = fm_pos.lineSpacing()
                 pos_text = self._detail_positional_hint.text()
-                pos_width = fm_pos.horizontalAdvance(pos_text)
                 label_width = self._detail_positional_hint.width() or 1
                 if label_width <= 0:
                     label_width = self.width() - 24
-                pos_line_count = max(1, (pos_width + label_width - 1) // label_width)
+                pos_bounding = fm_pos.boundingRect(QRect(0, 0, label_width, 0), Qt.TextWordWrap, pos_text)
+                pos_line_count = max(1, (pos_bounding.height() + pos_line_height - 1) // pos_line_height)
                 pos_hint_height = pos_line_height * pos_line_count + 4  # padding 2+2
         elif self._value_selection_mode:
             # 值选择列表高度
@@ -800,11 +802,11 @@ class CommandCard(QWidget):
             if hint_text.strip():
                 fm_hint = self._detail_hint_label.fontMetrics()
                 hint_line_height = fm_hint.lineSpacing()
-                hint_width = fm_hint.horizontalAdvance(hint_text)
                 label_width = self._detail_hint_label.width() or 1
                 if label_width <= 0:
                     label_width = self.width() - 24
-                hint_line_count = max(1, (hint_width + label_width - 1) // label_width)
+                hint_bounding = fm_hint.boundingRect(QRect(0, 0, label_width, 0), Qt.TextWordWrap, hint_text)
+                hint_line_count = max(1, (hint_bounding.height() + hint_line_height - 1) // hint_line_height)
                 hint_height = hint_line_height * hint_line_count
                 self._detail_hint_label.setVisible(True)
             else:
