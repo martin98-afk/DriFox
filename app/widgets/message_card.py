@@ -803,7 +803,8 @@ _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而�
 
 
 def _render_think_block(content: str, completed: bool = True) -> str:
-    expanded = not completed
+    # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
+    expanded = False
 
     # ── 标签分类（完成时才分类，流式过程只显示💡） ──
     if completed:
@@ -847,7 +848,8 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     1. 不执行代码块处理（_strip_code_blocks），直接转义
     2. 不生成 block_key hash（节省计算）
     """
-    expanded = not completed
+    # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
+    expanded = False
 
     # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
     if completed:
