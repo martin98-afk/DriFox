@@ -243,6 +243,9 @@ class HookWorker(QRunnable):
             'text': True,
             'errors': 'replace',
             'timeout': timeout,
+            'creationflags': subprocess.CREATE_NO_WINDOW
+            if os.name == 'nt'
+            else 0,
         }
         if stdin_data is not None:
             subprocess_kwargs['input'] = stdin_data

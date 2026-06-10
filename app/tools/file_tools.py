@@ -464,11 +464,14 @@ class FileTools:
         self, file1: str, file2: str = None, use_git: bool = False
     ) -> ToolResult:
         import subprocess
+        import sys
 
         try:
             path1 = self._resolve_path(file1)
             if not path1.exists():
                 return ToolResult(False, error=f"File not found: {file1}")
+
+            _cf = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
             if use_git:
                 result = subprocess.run(
@@ -478,6 +481,7 @@ class FileTools:
                     encoding="utf-8",
                     errors="ignore",
                     cwd=str(self.workdir),
+                    creationflags=_cf,
                 )
                 if result.returncode != 0 and "not a git repository" in result.stderr:
                     return ToolResult(False, error="Not a git repository")
@@ -498,6 +502,7 @@ class FileTools:
                     text=True,
                     encoding="utf-8",
                     errors="ignore",
+                    creationflags=_cf,
                 )
             else:
                 result = subprocess.run(
@@ -507,6 +512,7 @@ class FileTools:
                     encoding="utf-8",
                     errors="ignore",
                     cwd=str(self.workdir),
+                    creationflags=_cf,
                 )
                 if result.returncode != 0 and "not a git repository" in result.stderr:
                     return ToolResult(

@@ -9,6 +9,7 @@
 """
 import orjson as json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -52,6 +53,9 @@ class DiagnosticsTools:
                 text=True,
                 timeout=timeout,
                 cwd=str(self.workdir) if cwd is None else cwd,
+                creationflags=subprocess.CREATE_NO_WINDOW
+                if sys.platform == "win32"
+                else 0,
             )
             out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
             return r.returncode, out
