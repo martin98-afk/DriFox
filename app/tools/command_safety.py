@@ -142,6 +142,16 @@ def split_command(command: str) -> list[str]:
         return []
 
 
+def _ensure_no_window(kwargs: dict) -> dict:
+    """Windows 上自动添加 CREATE_NO_WINDOW 标志，避免弹出 cmd.exe 黑框
+
+    如果调用方已传 creationflags，则尊重调用方设置不覆盖。
+    """
+    if sys.platform == "win32" and "creationflags" not in kwargs:
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
+
+
 def run_safe(command: str, **kwargs) -> "subprocess.Popen":
     """Path A: 使用 shell=False 执行安全命令
 
@@ -156,7 +166,7 @@ def run_safe(command: str, **kwargs) -> "subprocess.Popen":
     return subprocess.Popen(
         args,
         shell=False,
-        **kwargs,
+        **_ensure_no_window(kwargs),
     )
 
 
@@ -170,5 +180,5 @@ def run_with_shell(command: str, **kwargs) -> "subprocess.Popen":
     return subprocess.Popen(
         command,
         shell=True,
-        **kwargs,
+        **_ensure_no_window(kwargs),
     )

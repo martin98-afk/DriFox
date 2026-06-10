@@ -31,6 +31,7 @@ class ShellExecutionTask(QRunnable):
                 self.callback("[安全拦截] 命令被安全策略禁止执行")
                 return
 
+            _cf = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             use_shell = needs_shell(self.command)
 
             if use_shell:
@@ -46,6 +47,7 @@ class ShellExecutionTask(QRunnable):
                     encoding="utf-8",
                     errors="ignore",
                     timeout=120,
+                    creationflags=_cf,
                 )
             else:
                 # Path A: 安全路径, shell=False
@@ -59,6 +61,7 @@ class ShellExecutionTask(QRunnable):
                     encoding="utf-8",
                     errors="ignore",
                     timeout=120,
+                    creationflags=_cf,
                 )
 
             output = res.stdout.strip() if res.stdout else ""

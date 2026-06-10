@@ -39,13 +39,15 @@ class _RotatingIcon(QWidget):
     def _redraw(self):
         self._last_pixmap.fill(Qt.transparent)
         p = QPainter(self._last_pixmap)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        cx, cy = self._size / 2, self._size / 2
-        p.translate(cx, cy)
-        p.rotate(self._angle)
-        p.translate(-cx, -cy)
-        self._renderer.render(p, QRectF(0, 0, self._size, self._size))
-        p.end()
+        try:
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            cx, cy = self._size / 2, self._size / 2
+            p.translate(cx, cy)
+            p.rotate(self._angle)
+            p.translate(-cx, -cy)
+            self._renderer.render(p, QRectF(0, 0, self._size, self._size))
+        finally:
+            p.end()
 
     def current_pixmap(self) -> QPixmap:
         return self._last_pixmap

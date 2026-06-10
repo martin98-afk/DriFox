@@ -22,7 +22,7 @@ from qfluentwidgets import (
     PasswordLineEdit,
     ComboBox, )
 
-from app.constants import PARAM_SCHEMA
+from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
@@ -114,6 +114,7 @@ class ModelConfigCard(QWidget):
             "模型名称", "API_URL", "API_KEY", "认证方式", "获取地址",
             "模型列表", "选择模型", "provider_name", "name", "config_id",
             "display_name", "_suffix_index",
+            *QUOTA_EXCLUDE_KEYS,  # 套餐用量查询字段不渲染到参数列表
         }
 
         # 收集要渲染的字段：[(order, key, value, meta), ...]

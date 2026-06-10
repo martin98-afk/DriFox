@@ -94,6 +94,28 @@ def main():
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
+
+    # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
+    # PyQt5 默认：信号槽中 Python 异常 → pyqt5_err_print() → qFatal() → abort()
+    # 自定义处理器将 qFatal 转换为日志，防止整个进程崩溃
+    from PyQt5.QtCore import qInstallMessageHandler, QtMsgType
+    from loguru import logger as _logger
+
+    def _qt_message_handler(msg_type, msg_context, msg_text):
+        if msg_type == QtMsgType.QtFatalMsg:
+            _logger.error(f"[QtFatal] {msg_text}")
+            # 不 abort()，仅记录日志后返回，让进程继续运行
+        elif msg_type == QtMsgType.QtCriticalMsg:
+            _logger.error(f"[QtCritical] {msg_text}")
+
+    qInstallMessageHandler(_qt_message_handler)
+
+    # 全局 Python 异常钩子（兜底）
+    import traceback as _traceback
+    def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
+        _logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
+        _logger.error("".join(_traceback.format_exception(exc_type, exc_val, exc_tb)))
+    sys.excepthook = _pyqt_exception_hook
     
     # 禁用默认退出行为（让最后一个窗口隐藏到托盘而不是退出）
     app.setQuitOnLastWindowClosed(False)

@@ -54,6 +54,7 @@ from app.constants import (
     MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
     PROVIDER_MODELS,
+    QUOTA_EXCLUDE_KEYS,
 )
 from app.core import (
     ChatBackend,
@@ -4003,6 +4004,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "config_id",
             "display_name",
             "认证方式",
+            *QUOTA_EXCLUDE_KEYS,  # 套餐用量查询字段不应出现在模型参数配置中
         ]:
             config.pop(pop_key, None)
 

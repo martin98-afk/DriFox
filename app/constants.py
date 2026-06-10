@@ -1,6 +1,14 @@
 MAX_SESSION_CARD_CACHE_SIZE = 10
 
 # ============================================================
+# 套餐用量查询字段（与模型参数无关，仅用于配额查询，不得泄漏到模型参数或 API 请求）
+# ============================================================
+QUOTA_EXCLUDE_KEYS = frozenset({
+    "server_id", "cookie", "workspace_id",
+    "csrf_token", "x_web_id",
+})
+
+# ============================================================
 # 统一参数 schema：定义所有模型参数的 UI 表现与 API 映射
 # - ui_type:      checkbox / combobox / slider / spinbox / password / line
 # - display_name: 展示名（不传则用 key 本身）

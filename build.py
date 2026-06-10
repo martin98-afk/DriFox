@@ -226,7 +226,7 @@ def post_build_cleanup(dist_path):
 
 
 if __name__ == "__main__":
-    print(f"Starting build for CanvasMind...")
+    print(f"Starting build for Drifox...")
 
     # 执行打包
     PyInstaller.__main__.run(params)

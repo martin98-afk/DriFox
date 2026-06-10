@@ -17,6 +17,7 @@ MessageCard - 消息卡片组件
 """
 import base64
 import hashlib
+import json
 import math
 import os
 import random
@@ -90,14 +91,13 @@ from app.widgets.render_helpers import (
 _md_instance = None
 ACTION_COLOR_MAP = {
     "ask": "#FF6347",
-    "file": "#4CAF50",  # 文件引用 - 绿色
 }
 DEFAULT_COLOR = "#888888"
 
 # ======== 预编译的正则表达式（提升到模块级别，避免重复编译）=======
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
-_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask|file)(?:\|([^)]*))?\)")
+_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask)(?:\|([^)]*))?\)")
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -112,6 +112,8 @@ _TOOL_SUCCESS_PATTERN = re.compile(r"^success:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_ID_PATTERN = re.compile(r"^tool_call_id:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_RESULT_PATTERN = re.compile(r"^result:\s*(.*)$", re.MULTILINE)
 _NEXT_FIELD_PATTERN = re.compile(r"\n\w+:")
+# 紧凑模式：剥离所有 <think>...</think> 及其内容
+_THINK_REMOVE_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
@@ -802,6 +804,18 @@ _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而�
                           "总结一下", "也就是说", "最终")
 
 
+def _render_think_badge() -> str:
+    """紧凑模式：思考过程渲染为行内徽章。"""
+    return f"""<span class="cm-compact-badge cm-compact-think" style="
+display: inline-flex; align-items: center; gap: 3px;
+padding: 2px 8px; margin: 2px 3px;
+background: rgba(255,152,0,0.08); border: 1px solid rgba(255,152,0,0.18);
+border-radius: 12px; font-size: {scale_font_size(11)}px; color: #FF9800;
+white-space: nowrap; {get_font_family_css()}">
+🧠 思考
+</span>"""
+
+
 def _render_think_block(content: str, completed: bool = True) -> str:
     # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
     expanded = False
@@ -881,12 +895,18 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
 
-def _inject_think_cards(md_text: str, completed: bool = True) -> str:
+def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入思考框HTML。
 
     关键逻辑：<think> 匹配到下一个 <think> 之前的最后一个 </think>，
     避免流式输出时多个 </think> 导致内容泄露。
+
+    compact=True：完全剥离 think 内容（用户不看思考过程）。
     """
+    if compact:
+        # 紧凑模式：直接剥离所有 <think>...</think> 及其内容
+        return _THINK_REMOVE_PATTERN.sub("", md_text)
+
     parts = []
     i = 0
     while i < len(md_text):
@@ -1341,27 +1361,150 @@ def _extract_by_regex_fallback(content: str) -> dict:
 
 
 def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
-    """注入工具块HTML，类似think块"""
+    """注入工具块HTML。依据 tool_render_mode 设置切换紧凑/经典模式。"""
     if not md_text:
         return md_text
 
-    parts = []
+    # 检测渲染模式
+    try:
+        from app.utils.config import Settings
+        render_mode = Settings.get_instance().tool_render_mode.value
+    except Exception:
+        render_mode = "classic"
+
+    # ── 经典模式：保持原行为 ──
+    if render_mode != "compact":
+        parts = []
+        i = 0
+        while i < len(md_text):
+            start_idx = md_text.find("<tool>", i)
+            if start_idx == -1:
+                parts.append(md_text[i:])
+                break
+            parts.append(md_text[i:start_idx])
+            end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
+            if end_idx != -1:
+                content = md_text[start_idx + len("<tool>"): end_idx]
+                parts.append(_render_tool_block_content(content))
+                i = end_idx + len("</tool>")
+            else:
+                parts.append(md_text[start_idx:])
+                break
+        return "".join(parts)
+
+    # ── 紧凑模式：剥离工具，合并为一行摘要 ──
+    # 工具类型统计
+    ToolCounts = {
+        "bash": 0,
+        "read": 0,
+        "search": 0,
+        "edit": 0,
+        "write": 0,
+        "failed": 0,
+    }
+    # edit/write 的 diff 统计
+    diff_added = 0
+    diff_deleted = 0
+
+    result_parts = []
     i = 0
     while i < len(md_text):
         start_idx = md_text.find("<tool>", i)
         if start_idx == -1:
-            parts.append(md_text[i:])
+            result_parts.append(md_text[i:])
             break
-        parts.append(md_text[i:start_idx])
+        # 工具块之前的文本
+        if start_idx > i:
+            result_parts.append(md_text[i:start_idx])
+
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
-        if end_idx != -1:
-            content = md_text[start_idx + len("<tool>"): end_idx]
-            parts.append(_render_tool_block_content(content))
-            i = end_idx + len("</tool>")
-        else:
-            parts.append(md_text[start_idx:])
+        if end_idx == -1:
+            result_parts.append(md_text[start_idx:])
             break
-    return "".join(parts)
+
+        content = md_text[start_idx + len("<tool>"): end_idx]
+
+        # 解析工具名
+        tool_name = ""
+        tool_success = True
+        name_match = _TOOL_NAME_PATTERN.search(content)
+        if name_match:
+            tool_name = name_match.group(1).strip()
+        success_match = _TOOL_SUCCESS_PATTERN.search(content)
+        if success_match:
+            tool_success = success_match.group(1).strip().lower() == "true"
+
+        # 统计
+        if not tool_success:
+            ToolCounts["failed"] += 1
+        elif tool_name in ("bash",):
+            ToolCounts["bash"] += 1
+        elif tool_name in ("read", "todoread", "read_project_note"):
+            ToolCounts["read"] += 1
+        elif tool_name in ("grep", "glob", "list", "scan_repo", "stage_files",
+                           "webfetch", "websearch", "get_diagnostics",
+                           "mouse", "keyboard"):
+            ToolCounts["search"] += 1
+        elif tool_name in ("edit", "multi_edit"):
+            ToolCounts["edit"] += 1
+            # 提取 diff 统计
+            diff_start = content.find("\ndiff:")
+            if diff_start != -1:
+                diff_after = content[diff_start + 6:]
+                # 简单统计 + 和 - 开头行数
+                for line in diff_after.split("\n"):
+                    line = line.rstrip()
+                    if line.startswith("+"):
+                        diff_added += 1
+                    elif line.startswith("-"):
+                        diff_deleted += 1
+        elif tool_name in ("write",):
+            ToolCounts["write"] += 1
+        else:
+            ToolCounts["search"] += 1  # subagent_para/dag 等归为 search
+
+        # 紧凑模式：不渲染工具块，直接跳过标签
+        i = end_idx + len("</tool>")
+
+    # 构建工具摘要
+    summary_parts = []
+    if ToolCounts["bash"] > 0:
+        summary_parts.append(f"💻 {ToolCounts['bash']} 个命令")
+    if ToolCounts["read"] > 0:
+        summary_parts.append(f"📂 读取 {ToolCounts['read']} 个文件")
+    if ToolCounts["search"] > 0:
+        summary_parts.append(f"🔍 {ToolCounts['search']} 次搜索")
+    if ToolCounts["edit"] > 0:
+        s = f"✏️ 编辑 {ToolCounts['edit']} 个文件"
+        if diff_added or diff_deleted:
+            s += f" (+{diff_added}/-{diff_deleted})"
+        summary_parts.append(s)
+    if ToolCounts["write"] > 0:
+        summary_parts.append(f"📝 创建 {ToolCounts['write']} 个文件")
+    if ToolCounts["failed"] > 0:
+        summary_parts.append(f"❌ {ToolCounts['failed']} 个失败")
+
+    if summary_parts:
+        summary_html = f"""<div class="cm-tool-summary" style="
+margin-top: 4px; padding: 4px 0;
+font-size: {scale_font_size(11)}px; color: {Colors.TEXT_SECONDARY};
+display: flex; flex-wrap: wrap; gap: 4px 12px;
+{get_font_family_css()}">
+{"".join(f'<span style="display:inline-flex;align-items:center;gap:2px;">{p}</span>' for p in summary_parts)}
+</div>"""
+        # 找到最后一个文本段，在它后面插入摘要
+        # 从后往前找非空文本段
+        last_text_idx = -1
+        for idx in range(len(result_parts) - 1, -1, -1):
+            if result_parts[idx].strip():
+                last_text_idx = idx
+                break
+        if last_text_idx >= 0:
+            result_parts.insert(last_text_idx + 1, summary_html)
+        else:
+            result_parts.append(summary_html)
+
+    return "".join(result_parts)
 
 
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
@@ -1419,14 +1562,16 @@ _LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
 
 
 @lru_cache(maxsize=256)
-def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
+def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str, compact: bool) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
+
+    compact 参数参与缓存 key，确保模式切换后缓存正确失效。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
-    processed_md = _inject_think_cards(safe_md, True)
+    processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True)
     processed_md = _inject_hook_blocks(processed_md, True)
 
@@ -1446,24 +1591,30 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
     - 对于超过阈值的文本，跳过缓存直接渲染
     - 保持 LRU 缓存以提高重复内容的性能
     """
+    from app.utils.config import Settings
+    try:
+        compact = Settings.get_instance().tool_render_mode.value == "compact"
+    except Exception:
+        compact = False
+
     # 添加思考块内容
     if reasoning:
-        raw_md = _render_think_block(reasoning, completed=True) + raw_md
+        if compact:
+            pass  # 紧凑模式：不显示思考内容
+        else:
+            raw_md = _render_think_block(reasoning, completed=True) + raw_md
 
     # 大文本跳过缓存，防止内存膨胀
     text_size = len(raw_md.encode('utf-8'))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
         # 大文本直接渲染，绕过缓存
-        # 临时禁用缓存
-        original_cache_info = _render_markdown_to_html_cached_impl.cache_info()
         _render_markdown_to_html_cached_impl.cache_clear()
         try:
-            return _render_markdown_to_html_cached_impl(raw_md, reasoning)
+            return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact)
         finally:
-            # 恢复缓存状态
             pass
 
-    return _render_markdown_to_html_cached_impl(raw_md, reasoning)
+    return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact)
 
     try:
         md = get_markdown_instance()
@@ -1512,12 +1663,6 @@ def _inject_context_links(md_text: str) -> str:
             if last_time:
                 attrs += f' data-last-time="{escape(last_time)}"'
             return f'<span class="context-tag session-tag" {attrs}>{display_content}</span>'
-
-        if action == "file":
-            # file 格式：[显示名称](file|/path/to/file_or_folder)
-            file_path = extra.strip() if extra else content
-            # 使用 data-type="file" 让 CSS 样式匹配
-            return f'<span class="context-tag" data-type="file" data-path="{escape(file_path)}" data-action="file">{escape(content)}</span>'
 
         return f'<span class="context-tag" data-type="{action}" data-content="{escape(content)}" data-action="{action}">{content}</span>'
 
@@ -2929,13 +3074,7 @@ class CodeWebViewer(QWebEngineView):
                         var tagContent = sessionId || tag.getAttribute('data-content') || tag.getAttribute('data-title') || '';
                         e.stopPropagation();
                         e.preventDefault();
-                        // file 类型特殊处理：直接发送文件路径
-                        if (tagType === 'file') {{
-                            var filePath = tag.getAttribute('data-path') || tagContent;
-                            console.log('pywebview_action:open_file:' + filePath);
-                        }} else {{
-                            console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
-                        }}
+                        console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
                         return;
                     }}
                     // 图片点击 → 系统默认程序打开
@@ -3086,7 +3225,14 @@ class CodeWebViewer(QWebEngineView):
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
-        processed_md = _inject_think_cards(safe_md, self._streaming is False)
+
+        from app.utils.config import Settings
+        try:
+            compact = Settings.get_instance().tool_render_mode.value == "compact"
+        except Exception:
+            compact = False
+
+        processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=compact)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
 
@@ -4673,6 +4819,7 @@ class MessageCard(SimpleCardWidget):
         painter.drawRoundedRect(stripe_x, 10, stripe_width, max(18, h - 20), 3, 3)
 
         if not self._streaming:
+            painter.end()
             return
 
         # ══════════════════════════════════════════════════════
@@ -4844,6 +4991,7 @@ class MessageCard(SimpleCardWidget):
             top_color = QColor(self._theme["accent"])
             top_color.setAlpha(int(30 * breathe))
         painter.fillRect(0, 0, w, 5, top_color)
+        painter.end()
 
     def set_error_state(self, is_error: bool, error_message: str = ""):
         """设置错误状态
