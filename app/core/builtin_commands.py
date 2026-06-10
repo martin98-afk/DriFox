@@ -437,8 +437,16 @@ def register_all_commands():
         logger.info(
             f"[BuiltinCommands] 缓存命中，注册 {cmd_count} 命令 + {agent_count} 智能体"
         )
-        _registered = True
-        return
+        # 🛡️ 防御：缓存返回 0 命令时忽略缓存（如 PluginManager 未初始化时写入的空缓存）
+        # 重新走完整解析路径以重建正确的缓存
+        if cmd_count == 0 and agent_count == 0:
+            logger.warning("[BuiltinCommands] 缓存包含 0 命令/0 智能体，忽略缓存，重新解析")
+            # 先清掉刚刚注册的 0 条命令
+            for name in list(cmd_mgr.get_command_names()):
+                cmd_mgr.unregister(name)
+        else:
+            _registered = True
+            return
 
     # ---- 缓存未命中：逐文件解析 ----
     t0 = time.perf_counter()

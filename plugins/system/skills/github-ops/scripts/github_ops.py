@@ -77,8 +77,10 @@ HEADERS = _init_headers()
 def run_git(cmd: str, cwd: str = None) -> tuple:
     """执行 git 命令，返回 (returncode, stdout, stderr)"""
     try:
+        import shlex
+        args = shlex.split(cmd)
         result = subprocess.run(
-            cmd, shell=True, cwd=cwd,
+            args, shell=False, cwd=cwd,
             capture_output=True, text=True, encoding='utf-8'
         )
         return result.returncode, result.stdout, result.stderr
