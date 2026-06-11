@@ -555,6 +555,119 @@ def _extract_screenshot_image_path(result: str) -> str:
 
     return ""
 
+# 参数展示型工具 — 渲染为紧凑单行卡片（无折叠、无 body、无工具结果）
+_INLINE_TOOLS = frozenset({
+    "read", "todoread", "read_project_note",
+    "grep", "glob", "list", "scan_repo", "stage_files",
+    "get_diagnostics",
+})
+
+
+def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
+    """将工具调用转为自然语言描述（用于内联卡片的右侧预览）"""
+    # todoread / read_project_note 等即使无参数也应有描述
+    if tool_name in ("todoread", "read_project_note"):
+        label = {"todoread": "查看待办事项", "read_project_note": "查看项目笔记"}[tool_name]
+        offset = tool_args.get("offset")
+        limit = tool_args.get("limit")
+        if offset is not None and limit is not None and offset > 1:
+            label += f" (第 {offset}-{offset + limit - 1} 行)"
+        elif offset is not None and offset > 1:
+            label += f" (从第 {offset} 行)"
+        elif limit is not None:
+            label += f" (前 {limit} 行)"
+        return label
+    if not tool_args:
+        return ""
+    desc = ""
+    if tool_name == "read":
+        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        if path:
+            desc = f'读取 "{os.path.basename(path.rstrip("/").rstrip("\\\\"))}"'
+        else:
+            desc = "读取文件"
+        offset = tool_args.get("offset")
+        limit = tool_args.get("limit")
+        # offset 为 0 或 1 表示从头开始，仅显示 limit
+        if offset is not None and limit is not None and offset > 1:
+            desc += f" (第 {offset}-{offset + limit - 1} 行)"
+        elif offset is not None and offset > 1:
+            desc += f" (从第 {offset} 行)"
+        elif limit is not None:
+            desc += f" (前 {limit} 行)"
+    elif tool_name == "grep":
+        pattern = tool_args.get("pattern", "")
+        path = tool_args.get("path", "")
+        include = tool_args.get("include", "")
+        desc = f'搜索 "{pattern}"'
+        parts = []
+        if path:
+            parts.append(path)
+        if include:
+            parts.append(include)
+        if parts:
+            desc += " (" + ", ".join(parts) + ")"
+    elif tool_name == "glob":
+        pattern = tool_args.get("pattern", "")
+        path = tool_args.get("path", "")
+        desc = f'匹配 "{pattern}"' if pattern else "文件匹配"
+        if path:
+            desc += f" ({path})"
+    elif tool_name == "list":
+        path = tool_args.get("path", ".")
+        desc = f"列出 {path}"
+    elif tool_name == "scan_repo":
+        path = tool_args.get("path", ".")
+        desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
+        max_depth = tool_args.get("max_depth")
+        if max_depth is not None:
+            desc += f" (深度 {max_depth})"
+    elif tool_name == "stage_files":
+        files = tool_args.get("files", [])
+        if files and isinstance(files, (list, tuple)):
+            names = [os.path.basename(f)[:30] for f in files[:3]]
+            if len(files) > 3:
+                desc = "标记 " + ", ".join(names) + f" 等 {len(files)} 个"
+            else:
+                desc = "标记 " + ", ".join(names)
+        else:
+            desc = "标记文件"
+    elif tool_name == "get_diagnostics":
+        path = tool_args.get("path", "")
+        language = tool_args.get("language", "")
+        desc = f'诊断 {path}' if path else "代码诊断"
+        if language:
+            desc += f" ({language})"
+    return desc
+
+
+def _render_inline_tool(
+    tool_name: str,
+    tool_args: dict,
+    success: bool = None,
+) -> str:
+    """渲染紧凑单行卡片（无折叠、无 body、无工具结果内容）"""
+    status_html = ""
+    if success is not None:
+        status_color = "#4CAF50" if success else "#F44336"
+        status_text = "✓" if success else "✗"
+        status_html = (
+            f'<span style="color: {status_color}; font-weight: bold; '
+            f'margin-left: 6px;">{status_text}</span>'
+        )
+    icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+    natural_preview = _format_natural_preview(tool_name, tool_args)
+    return f"""<div class="tool-block" style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">
+            <span style="flex: 0 0 auto;">{icon}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto;">{escape(tool_name)}</span>
+            {status_html}
+        </span>
+        <span style="flex: 1 1 auto; min-width: 0; text-align: right; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+            {escape(natural_preview)}
+        </span>
+    </div>"""
+
 
 def _unescape_newlines(result: str) -> str:
     """将 \\\\n 字面量还原为真实换行符（逆向 _render_tool_block_content 的转义）"""
@@ -671,6 +784,14 @@ def render_tool_block(
         task_desc = tool_args.get("description", "")[:50]
         if tool_args.get("description"):
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
+
+    # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body）
+    if tool_name in _INLINE_TOOLS:
+        return _render_inline_tool(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            success=success,
+        )
 
     # 文件编辑工具判断
     file_edit_tools = {"write", "edit", "multi_edit"}
