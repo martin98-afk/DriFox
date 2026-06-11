@@ -253,7 +253,11 @@ class TaskTools:
             if not target_path.exists():
                 return ToolResult(False, error=f"Path not found: {target_path}")
 
-            lines = [f"Repository scan: {target_path}"]
+            try:
+                scan_display = str(target_path.relative_to(self.workdir))
+            except ValueError:
+                scan_display = str(target_path)
+            lines = [f"Repository scan: {scan_display}"]
             root_depth = len(target_path.parts)
 
             for root, dirs, files in _os.walk(target_path):
@@ -290,7 +294,11 @@ class TaskTools:
                 if not file_path:
                     continue
                 resolved = self._resolve_path(file_path)
-                staged.append(str(resolved))
+                try:
+                    display = str(resolved.relative_to(self.workdir))
+                except ValueError:
+                    display = str(resolved)
+                staged.append(display)
                 
                 # 自动关联到关键文档
                 if self._key_documents_repo:
