@@ -928,6 +928,13 @@ class SendableTextEdit(TextEdit):
                     return
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
                 if card.is_detail_mode and event.key() == Qt.Key_Tab:
+                    # 文件提及卡片可见时，Tab 优先用于文件补全
+                    # （回车已自然穿透到文件卡片处理，只有 Tab 被 detail 模式拦截）
+                    file_card = self._get_file_mention_card()
+                    if file_card and file_card.is_card_visible and not in_history_mode:
+                        file_card.select_current()
+                        event.accept()
+                        return
                     card.select_current()
                     event.accept()
                     return

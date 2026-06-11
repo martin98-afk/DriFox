@@ -181,7 +181,7 @@ from app.widgets.ui_helpers import (
 
 
 class OpenAIChatToolWindow(ToolWindow):
-    name = "飘狐 DriFox"
+    name = "飘狐"
     icon = get_icon("drifox")
     # 所有窗口实例列表（用于广播事件）
     _instances: List[OpenAIChatToolWindow] = []
