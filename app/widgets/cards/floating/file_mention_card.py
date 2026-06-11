@@ -202,6 +202,17 @@ class FileMentionItemWidget(QWidget):
         # 更新路径显示
         self._update_display()
 
+    def reuse(self, file_data: Dict[str, str], query: str):
+        """复用 widget，重置状态并更新数据
+
+        与 update_data 的区别：额外重置 _hovered 和 _selected，
+        防止前一次鼠标悬停/选中的状态残留到新生命周期。
+        """
+        self._hovered = False
+        self._selected = False
+        self.update_data(file_data, query)
+        self._apply_bg()
+
     def set_selected(self, selected: bool):
         self._selected = selected
         if selected:
@@ -851,8 +862,7 @@ class FileMentionCard(QWidget):
             if path in leftover and path not in seen_paths:
                 w = leftover.pop(path)
                 seen_paths.add(path)
-                # 更新数据（可能在路径不变但查询变化时刷新名称高亮）
-                w.update_data(item, self._current_query)
+                w.reuse(item, self._current_query)
                 new_widgets.append(w)
             else:
                 w = FileMentionItemWidget(item, self._current_query, self._scroll_content)

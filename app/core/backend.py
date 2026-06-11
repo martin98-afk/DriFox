@@ -458,6 +458,8 @@ class ChatBackend(QObject):
         pm = PluginManager.get_instance()
 
         watch_paths = []
+        from pathlib import Path as _Path
+
         # 系统插件目录
         if hasattr(pm, '_SYSTEM_PLUGIN_DIR') and pm._SYSTEM_PLUGIN_DIR.exists():
             watch_paths.append(str(pm._SYSTEM_PLUGIN_DIR.resolve()))
@@ -467,6 +469,13 @@ class ChatBackend(QObject):
             # 确保目录存在，否则 watcher 无法监听（用户后创建目录时热更新不生效）
             user_plugin_dir.mkdir(parents=True, exist_ok=True)
             watch_paths.append(str(user_plugin_dir.resolve()))
+        # Claude Code 插件目录（同时支持两种生态）
+        claude_skills_dir = _Path.home() / ".claude" / "skills"
+        claude_skills_dir.mkdir(parents=True, exist_ok=True)
+        watch_paths.append(str(claude_skills_dir.resolve()))
+        claude_cache_dir = _Path.home() / ".claude" / "plugins" / "cache"
+        if claude_cache_dir.exists():
+            watch_paths.append(str(claude_cache_dir.resolve()))
 
         if not watch_paths:
             logger.warning("[ChatBackend] 无插件目录可监听，跳过热更新")

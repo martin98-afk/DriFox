@@ -38,3 +38,5 @@ debug_*.py
 fixed_extractor.py
 various_test.py
 app.config
+.playwright-mcp/ 
+"nul"  

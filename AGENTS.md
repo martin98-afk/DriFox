@@ -116,6 +116,11 @@ feat|fix|docs|chore|refactor|test: scope - summary
 ### 进行中（待实施）
 - 无
 
+### 已完成
+- **适配 Claude Code 插件路径到监控**: 
+  - `app/core/plugin_manager.py`: 添加 `_CLAUDE_USER_SKILLS_DIR`/`_CLAUDE_PLUGIN_CACHE_DIR` 常量 + `_discover_claude_plugins()` 方法，在 `initialize()` 和 `rescan()` 中均集成 Claude 插件扫描，优先级：系统 → Claude → DriFox 用户（最高）
+  - `app/core/backend.py`: `_start_plugin_watcher()` 的 watch_paths 中新增 `~/.claude/skills/`（自动创建目录）和 `~/.claude/plugins/cache/`（仅存在时监听）
+
 ### 新增功能（2026-06-05）
 - **会话自动关联 worktree**: sessions 表新增 `worktree_path` 列（含迁移逻辑）
   - 保存会话时自动检测当前工作目录是否为 git worktree，若是则将 worktree 路径保存到会话记录

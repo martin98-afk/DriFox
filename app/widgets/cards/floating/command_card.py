@@ -290,6 +290,25 @@ class CommandItemWidget(QWidget):
             self._hovered = False
         self._apply_style()
 
+    def reuse(self, item_data: dict, query: str):
+        """复用 widget，重置状态并更新数据
+
+        防止前一次鼠标悬停/选中状态残留到新生命周期。
+        """
+        self._data = item_data
+        self._query = query
+        self._hovered = False
+        self._selected = False
+        self._update_display()
+        # 刷新快捷键标签
+        shortcut = item_data.get("shortcut", "")
+        if item_data["type"] == "command" and shortcut:
+            self._shortcut_label.setText(shortcut)
+            self._shortcut_label.setVisible(True)
+        else:
+            self._shortcut_label.setVisible(False)
+        self._apply_style()
+
     def enterEvent(self, event):
         self._hovered = True
         if not self._selected:
@@ -1421,17 +1440,7 @@ class CommandCard(QWidget):
             if key in old_by_key_copy and key not in seen_keys:
                 w = old_by_key_copy.pop(key)  # 消耗掉这个 key
                 seen_keys.add(key)
-                # 更新 widget 数据和显示（热重载后 shortcut 等字段可能变化）
-                w._data = item
-                w._query = self._current_query
-                w._update_display()
-                # 刷新快捷键标签
-                shortcut = item.get("shortcut", "")
-                if item["type"] == "command" and shortcut:
-                    w._shortcut_label.setText(shortcut)
-                    w._shortcut_label.setVisible(True)
-                else:
-                    w._shortcut_label.setVisible(False)
+                w.reuse(item, self._current_query)
                 new_widgets.append(w)
             else:
                 # 创建新 widget

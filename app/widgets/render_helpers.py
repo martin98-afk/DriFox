@@ -555,6 +555,119 @@ def _extract_screenshot_image_path(result: str) -> str:
 
     return ""
 
+# 参数展示型工具 — 渲染为紧凑单行卡片（无折叠、无 body、无工具结果）
+_INLINE_TOOLS = frozenset({
+    "read", "todoread", "read_project_note",
+    "grep", "glob", "list", "scan_repo", "stage_files",
+    "get_diagnostics",
+})
+
+
+def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
+    """将工具调用转为自然语言描述（用于内联卡片的右侧预览）"""
+    # todoread / read_project_note 等即使无参数也应有描述
+    if tool_name in ("todoread", "read_project_note"):
+        label = {"todoread": "查看待办事项", "read_project_note": "查看项目笔记"}[tool_name]
+        offset = tool_args.get("offset")
+        limit = tool_args.get("limit")
+        if offset is not None and limit is not None and offset > 1:
+            label += f" (第 {offset}-{offset + limit - 1} 行)"
+        elif offset is not None and offset > 1:
+            label += f" (从第 {offset} 行)"
+        elif limit is not None:
+            label += f" (前 {limit} 行)"
+        return label
+    if not tool_args:
+        return ""
+    desc = ""
+    if tool_name == "read":
+        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        if path:
+            desc = f'读取 "{os.path.basename(path.rstrip("/").rstrip("\\\\"))}"'
+        else:
+            desc = "读取文件"
+        offset = tool_args.get("offset")
+        limit = tool_args.get("limit")
+        # offset 为 0 或 1 表示从头开始，仅显示 limit
+        if offset is not None and limit is not None and offset > 1:
+            desc += f" (第 {offset}-{offset + limit - 1} 行)"
+        elif offset is not None and offset > 1:
+            desc += f" (从第 {offset} 行)"
+        elif limit is not None:
+            desc += f" (前 {limit} 行)"
+    elif tool_name == "grep":
+        pattern = tool_args.get("pattern", "")
+        path = tool_args.get("path", "")
+        include = tool_args.get("include", "")
+        desc = f'搜索 "{pattern}"'
+        parts = []
+        if path:
+            parts.append(path)
+        if include:
+            parts.append(include)
+        if parts:
+            desc += " (" + ", ".join(parts) + ")"
+    elif tool_name == "glob":
+        pattern = tool_args.get("pattern", "")
+        path = tool_args.get("path", "")
+        desc = f'匹配 "{pattern}"' if pattern else "文件匹配"
+        if path:
+            desc += f" ({path})"
+    elif tool_name == "list":
+        path = tool_args.get("path", ".")
+        desc = f"列出 {path}"
+    elif tool_name == "scan_repo":
+        path = tool_args.get("path", ".")
+        desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
+        max_depth = tool_args.get("max_depth")
+        if max_depth is not None:
+            desc += f" (深度 {max_depth})"
+    elif tool_name == "stage_files":
+        files = tool_args.get("files", [])
+        if files and isinstance(files, (list, tuple)):
+            names = [os.path.basename(f)[:30] for f in files[:3]]
+            if len(files) > 3:
+                desc = "标记 " + ", ".join(names) + f" 等 {len(files)} 个"
+            else:
+                desc = "标记 " + ", ".join(names)
+        else:
+            desc = "标记文件"
+    elif tool_name == "get_diagnostics":
+        path = tool_args.get("path", "")
+        language = tool_args.get("language", "")
+        desc = f'诊断 {path}' if path else "代码诊断"
+        if language:
+            desc += f" ({language})"
+    return desc
+
+
+def _render_inline_tool(
+    tool_name: str,
+    tool_args: dict,
+    success: bool = None,
+) -> str:
+    """渲染紧凑单行卡片（无折叠、无 body、无工具结果内容）"""
+    status_html = ""
+    if success is not None:
+        status_color = "#4CAF50" if success else "#F44336"
+        status_text = "✓" if success else "✗"
+        status_html = (
+            f'<span style="color: {status_color}; font-weight: bold; '
+            f'margin-left: 6px;">{status_text}</span>'
+        )
+    icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+    natural_preview = _format_natural_preview(tool_name, tool_args)
+    return f"""<div class="tool-block" style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">
+            <span style="flex: 0 0 auto;">{icon}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto;">{escape(tool_name)}</span>
+            {status_html}
+        </span>
+        <span style="flex: 1 1 auto; min-width: 0; text-align: right; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+            {escape(natural_preview)}
+        </span>
+    </div>"""
+
 
 def _unescape_newlines(result: str) -> str:
     """将 \\\\n 字面量还原为真实换行符（逆向 _render_tool_block_content 的转义）"""
@@ -671,6 +784,14 @@ def render_tool_block(
         task_desc = tool_args.get("description", "")[:50]
         if tool_args.get("description"):
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
+
+    # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body）
+    if tool_name in _INLINE_TOOLS:
+        return _render_inline_tool(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            success=success,
+        )
 
     # 文件编辑工具判断
     file_edit_tools = {"write", "edit", "multi_edit"}
@@ -834,8 +955,8 @@ def render_tool_block(
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
 
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-call-id="{escape(tool_call_id or '')}" style="margin: 8px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 6px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-call-id="{escape(tool_call_id or '')}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 80px; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>
             <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
@@ -847,7 +968,7 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
         </span>
-        <span style="display: flex; align-items: center; flex: 0 0 auto; margin-left: 8px;">
+        <span style="display: flex; align-items: center; flex: 0 0 auto; margin-left: 6px;">
             {diff_icon_html}
             {subagent_log_btn_html}
         </span>
@@ -885,8 +1006,8 @@ def render_hook_block(event_name: str, content: str, collapsed: bool = True) -> 
     </div>
     """
     
-    return f"""<div class="cm-collapsible hook-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-hook-event="{escape(event_name)}" style="margin: 8px 0; background: transparent; border: 1px solid rgba(0, 188, 212, 0.2); border-left: 3px solid {title_color}; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary hook-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 8px 12px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    return f"""<div class="cm-collapsible hook-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-hook-event="{escape(event_name)}" style="margin: 4px 0; background: transparent; border: 1px solid rgba(0, 188, 212, 0.2); border-left: 3px solid {title_color}; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary hook-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 5px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 100px; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>
             <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
@@ -902,126 +1023,6 @@ def render_hook_block(event_name: str, content: str, collapsed: bool = True) -> 
         {expanded_content}
     </div>
 </div>"""
-
-
-# ── 紧凑模式工具分类 ──
-
-# 关键工具：紧凑模式下保持折叠块并默认展开
-_KEY_TOOLS = frozenset({"edit", "write", "multi_edit", "screenshot"})
-
-# 信息工具：紧凑模式下收为摘要栏徽章
-_INFO_TOOLS = frozenset({
-    "read", "todoread", "read_project_note",
-    "grep", "glob", "list", "scan_repo", "stage_files",
-    "webfetch", "websearch",
-    "get_diagnostics",
-    "mouse", "keyboard",
-    "task", "subagent_para", "subagent_dag",
-})
-
-# bash 输出超过此行数时升格为关键工具
-_BASH_KEY_LINE_THRESHOLD = 20
-
-
-def is_key_tool(tool_name: str, success: bool, result: str = "") -> bool:
-    """判断工具是否为"关键工具"——紧凑模式下保持展开。"""
-    if tool_name in _KEY_TOOLS:
-        return True
-    if not success:
-        return True
-    if tool_name == "bash":
-        line_count = result.count("\n") + (1 if result.strip() else 0)
-        if line_count > _BASH_KEY_LINE_THRESHOLD:
-            return True
-    return False
-
-
-def render_compact_tool_badge(
-    tool_name: str, success: bool, args_preview: str,
-    tool_call_id: str = "", block_key: str = "",
-) -> str:
-    """渲染紧凑模式下的工具徽章（信息工具缩为一行）。"""
-    status_color = "#4CAF50" if success else "#F44336"
-    status_icon = "✓" if success else "✗"
-
-    icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
-    if tool_name in ("task", "subagent_para", "subagent_dag"):
-        icon = "🤖"
-
-    onclick = ""
-    if tool_call_id:
-        onclick = f' onclick="event.stopPropagation();window._requestToolDiff(\'{escape(tool_call_id)}\')"'
-
-    return f"""<span class="cm-compact-badge" data-block-key="{block_key}" data-tool-call-id="{escape(tool_call_id or '')}"
-style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; margin: 2px 3px;
-background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-border-radius: 12px; font-size: {scale_font_size(11)}px; color: {Colors.TEXT_SECONDARY};
-cursor: pointer; white-space: nowrap; {get_font_family_css()}"
-title="{escape(args_preview)}"{onclick}>
-    <span>{icon}</span>
-    <span>{escape(tool_name)}</span>
-    <span style="color:{status_color}; font-weight:600;">{status_icon}</span>
-</span>"""
-
-
-def render_compact_summary_bar(tool_infos: list) -> str:
-    """渲染紧凑模式的工具摘要栏 + 关键工具展开块。
-
-    tool_infos: list of dicts, each:
-        - tool_name, success, args_preview, tool_call_id, block_key
-        - is_key: bool
-        - collapsed_html: 经典模式的完整 HTML（关键工具复用）
-    """
-    if not tool_infos:
-        return ""
-
-    key_infos = [t for t in tool_infos if t.get("is_key")]
-    info_infos = [t for t in tool_infos if not t.get("is_key")]
-    thinking_infos = [t for t in info_infos if t.get("tool_name") == "thinking"]
-    info_infos = [t for t in info_infos if t.get("tool_name") != "thinking"]
-
-    parts = []
-
-    # ── 摘要栏 ──
-    badges = []
-    for t in thinking_infos:
-        badges.append(
-            f'<span class="cm-compact-badge" style="display:inline-flex;align-items:center;gap:3px;'
-            f'padding:2px 8px;margin:2px 3px;background:rgba(255,152,0,0.08);border:1px solid rgba(255,152,0,0.18);'
-            f'border-radius:12px;font-size:{scale_font_size(11)}px;color:#FF9800;white-space:nowrap;{get_font_family_css()}">'
-            f'🧠 思考</span>'
-        )
-    for t in info_infos:
-        badges.append(render_compact_tool_badge(
-            t["tool_name"], t.get("success", True),
-            t.get("args_preview", ""), t.get("tool_call_id", ""),
-            t.get("block_key", ""),
-        ))
-
-    if badges:
-        badge_html = "".join(badges)
-        parts.append(f"""<div class="cm-compact-summary-bar" style="
-display: flex; flex-wrap: wrap; align-items: center; gap: 0;
-padding: 4px 0 8px 0; margin: 0;
-border-bottom: 1px solid rgba(255,255,255,0.05);
-{get_font_family_css()}">{badge_html}</div>""")
-
-    # ── 关键工具展开块 ──
-    for t in key_infos:
-        # 复用经典模式的 HTML，但设置为展开
-        html = t.get("collapsed_html", "")
-        if html:
-            # 将 data-expanded="false" 改为 "true"，移除隐藏样式
-            html = html.replace('data-expanded="false"', 'data-expanded="true"')
-            html = html.replace(' style="height:auto; opacity:1;"', '')
-            # 确保 body 可见
-            html = html.replace(
-                '<div class="cm-collapsible__body"',
-                '<div class="cm-collapsible__body" style="height:auto; opacity:1;"',
-            )
-            parts.append(html)
-
-    return "".join(parts)
 
 
 def format_timestamp(ts: str) -> str:

@@ -19,7 +19,11 @@ from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
 
 from app.core.provider_profile import get_provider_profile
-from app.core.model_capabilities import resolve_context_limit, resolve_max_output_tokens
+from app.core.model_capabilities import (
+    resolve_context_limit,
+    resolve_max_output_tokens,
+    get_model_capabilities,
+)
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
@@ -519,6 +523,34 @@ class SubAgentExecutor(QThread):
             req_kwargs["max_tokens"] = self._cap_max_output_tokens(
                 model, req_kwargs["max_tokens"], config
             )
+
+        # 处理思考模式
+        thinking_mode = config.get("思考模式")
+        if thinking_mode is not None:
+            caps = get_model_capabilities(model)
+            t_param = None
+            enable_value = "enabled"
+            if caps:
+                t_param = caps.get("thinking_param")
+                enable_value = caps.get("thinking_enable_value", "enabled")
+            if not t_param:
+                profile = get_provider_profile(config)
+                t_param = profile.get("thinking_param")
+
+            if thinking_mode is True:
+                if t_param == "thinking":
+                    extra_body["thinking"] = {"type": enable_value}
+                    extra_body.pop("reasoning_effort", None)
+                elif t_param == "thinking_budget":
+                    budget = config.get("思考预算", 4096)
+                    extra_body["thinking_budget"] = budget
+            else:  # False - 关闭思考
+                if t_param == "thinking":
+                    extra_body["thinking"] = {"type": "disabled"}
+                    extra_body.pop("thinking_budget", None)
+                elif t_param == "thinking_budget":
+                    extra_body.pop("thinking_budget", None)
+                extra_body.pop("reasoning_effort", None)
 
         if extra_body:
             req_kwargs["extra_body"] = extra_body

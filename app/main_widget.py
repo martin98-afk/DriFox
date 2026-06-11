@@ -103,9 +103,6 @@ from app.widgets.cards.floating.sub_agent_floating_widget import (
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
-from app.widgets.cards.floating.tool_floating_widget import (
-    ToolFloatingWidget,
-)
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
@@ -181,7 +178,7 @@ from app.widgets.ui_helpers import (
 
 
 class OpenAIChatToolWindow(ToolWindow):
-    name = "飘狐 DriFox"
+    name = "飘狐"
     icon = get_icon("drifox")
     # 所有窗口实例列表（用于广播事件）
     _instances: List[OpenAIChatToolWindow] = []
@@ -201,8 +198,6 @@ class OpenAIChatToolWindow(ToolWindow):
     _tool_call_depth: int = 0
     _pending_tool_calls: int = 0
     _first_tool_result: bool = True
-    _tool_cancelled_by_user: bool = False
-    _cancelled_tool_call_id: Optional[str] = None
     _todo_floating_widget = None
     _question_floating_widget = None
     _question_tool_call_id = None
@@ -580,11 +575,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_card_container.add_card("question", self._question_floating_widget)
 
         mgr.register_card(
-            self._window_id, ContainerType.BOTTOM, "tool", self._tool_floating_widget
-        )
-        self._bottom_card_container.add_card("tool", self._tool_floating_widget)
-
-        mgr.register_card(
             self._window_id,
             ContainerType.BOTTOM,
             "sub_agent",
@@ -869,21 +859,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def _handle_tool_start_ui_sync(
         self, tool_call_id: str, tool_name: str, arguments: object, round_id: str
     ):
-        """工具开始时的 UI 同步处理（性能优化：移除阻塞调用）
-
-        修复前：使用 BlockingQueuedConnection + sendPostedEvents + processEvents
-        导致工具执行时 UI 线程被阻塞，出现卡顿。
-
-        修复后：使用 QueuedConnection + 延迟刷新，UI 通过正常事件循环更新，
-        不再强制同步等待。
-        """
+        """工具开始时的 UI 同步处理"""
         self._on_tool_call_started(tool_call_id, tool_name, arguments or {}, round_id)
-        # 性能优化：移除强制同步刷新，让 UI 通过正常事件循环自然更新
-        # 原代码会导致后台线程阻塞主线程，造成卡顿
-        # if self._tool_floating_widget:
-        #     self._tool_floating_widget.repaint()
-        # self.repaint()
-        # QApplication.processEvents()
+        # 🔧 处理等待的信号：确保排在前面的 content_received 信号（文本内容）
+        # 在工具执行前被主线程处理并渲染到 DOM，避免文本延迟到工具执行完毕才显示
+        # 注意：此处的 processEvents 在主线程运行，不会阻塞后台 worker
+        QApplication.processEvents()
 
     def _get_chat_cards_for_engine(self):
         cards = []
@@ -1108,9 +1089,6 @@ class OpenAIChatToolWindow(ToolWindow):
             and self._sub_agent_compact_widget
         ):
             self._sub_agent_compact_widget.set_opacity(opacity)
-        # 更新工具悬浮框
-        if hasattr(self, "_tool_floating_widget") and self._tool_floating_widget:
-            self._tool_floating_widget.set_opacity(opacity)
         # 更新问题悬浮框
         if self._question_floating_widget:
             self._question_floating_widget.set_opacity(opacity)
@@ -1555,12 +1533,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "todos": self._handle_todos_command,
         }
 
-        self._tool_floating_widget = ToolFloatingWidget(self)
-        self._tool_floating_widget.setVisible(False)
-        self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
-
-        # 下方卡片容器 - 添加 Tool、SubAgentCompact 和 SubAgent(详细日志)
-        self._bottom_card_container.add_card("tool", self._tool_floating_widget)
+        # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
         self._bottom_card_container.add_card(
             "sub_agent_compact", self._sub_agent_compact_widget
         )
@@ -1943,6 +1916,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._attach_layout.setSpacing(3)
         self._attach_layout.addStretch()
         self._attachments: list[str] = []
+        self._history_working_attachments: list[str] = []  # 进入历史模式时保存的附件（退出时恢复）
         card_layout.addWidget(self._attach_container)
 
         # 输入框（融入卡片，无边框）
@@ -1966,6 +1940,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.atTriggered.connect(self._on_at_triggered)
         self.input_area.atDismissed.connect(self._on_at_dismissed)
         self.input_area.files_dropped.connect(self._on_files_dropped)
+        self.input_area.enteringHistoryMode.connect(self._on_entering_history_mode)
+        self.input_area.historyAttachmentsRestored.connect(self._on_history_attachments_restored)
+        self.input_area.historyModeExited.connect(self._on_history_mode_exited)
         card_layout.addWidget(self.input_area)
 
         # 加载输入历史
@@ -3885,12 +3862,10 @@ class OpenAIChatToolWindow(ToolWindow):
         return False
 
     def _restore_after_system_close(self):
-        """系统卡片关闭后，恢复 todo/tool/sub_agent 实时卡片"""
+        """系统卡片关闭后，恢复 todo/sub_agent 实时卡片"""
         if not self._is_any_system_card_visible():
             # 只有当所有系统卡片都关闭时才重置标志
             self._is_system_card_visible = False
-            # 解除工具卡片压制（内部会恢复显示）
-            self._tool_floating_widget.set_suppress_visible(False)
         # 恢复 todo（如果之前是显示的且还有内容）
         if (
             self._todo_was_visible_before_system
@@ -4799,10 +4774,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_loop_running_card, "_refresh_theme_style"
         ):
             self._auto_loop_running_card._refresh_theme_style()
-        # 刷新实时卡片主题（todo/tool/question/sub_agent/compact）
+        # 刷新实时卡片主题（todo/question/sub_agent/compact）
         for card in (
             self._todo_floating_widget,
-            self._tool_floating_widget,
             self._question_floating_widget,
             self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
@@ -5103,12 +5077,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._is_streaming = False
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
-        self._tool_cancelled_by_user = False
         self._toggle_send_stop(False)
-
-        if self._tool_floating_widget:
-            self._tool_floating_widget.clear()
-            self._tool_floating_widget.setVisible(False)
 
         if self._sub_agent_floating_widget:
             self._sub_agent_floating_widget.setVisible(False)
@@ -6224,14 +6193,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_preview_messages = None
         session = self.session_manager.get_current_session()
 
+        # [DEBUG-diagnose-welcome] 诊断欢迎卡片显示问题
+        _diag_session_empty = is_session_empty(session)
+        _diag_msg_count = len(session.messages) if session else 0
+        logger.info(f"[DEBUG-diagnose-welcome] _finalize_local_session_mutation: session_empty={_diag_session_empty}, msg_count={_diag_msg_count}")
+
         if is_session_empty(session):
+            logger.info("[DEBUG-diagnose-welcome] Session is empty, will show welcome card")
             self._clear_chat_area()
             self.node_preview.clear_nodes()
             self._current_assistant_card = None
+            logger.info("[DEBUG-diagnose-welcome] Before _show_initial_welcome")
             self._show_initial_welcome()
+            logger.info("[DEBUG-diagnose-welcome] After _show_initial_welcome")
             self._refresh_context_usage_indicator()
             return
 
+        logger.info("[DEBUG-diagnose-welcome] Session is NOT empty, skipping welcome card")
         self._sync_current_assistant_card_ref()
         self._update_node_preview()
         self._refresh_context_usage_indicator()
@@ -7348,6 +7326,10 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[DELETE] Starting deletion for card at round_index={card._round_index}"
         )
 
+        # [DEBUG-diagnose-welcome] 记录删除前状态
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round BEFORE: session.messages count = {len(self.session_manager.get_current_session().messages) if self.session_manager.get_current_session() else 0}")
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round BEFORE: chat_layout.count = {self.chat_layout.count()}")
+
         # === 1. 删除 UI 卡片：基于 card widget 对象在 layout 中的位置 ===
         # 找到 card 在 chat_layout 中的索引
         card_layout_idx = -1
@@ -7382,6 +7364,9 @@ class OpenAIChatToolWindow(ToolWindow):
         delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
         logger.info(f"[DELETE] Removed {len(widgets_to_remove)} cards from UI")
 
+        # [DEBUG-diagnose-welcome] 记录删除 UI 后状态
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round AFTER UI delete: chat_layout.count = {self.chat_layout.count()}")
+
         # === 2. 更新 session 数据 ===
         session = self.session_manager.get_current_session()
         if not session:
@@ -7399,6 +7384,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if round_index < 0 or round_index >= len(round_ranges):
             logger.warning(f"[DELETE] Invalid round_index: {round_index}")
+            # [DEBUG-diagnose-welcome] 记录无效 round_index
+            logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round: INVALID round_index, will return without showing welcome")
             # 仍显示撤销卡片（缓存已设置）
             if self._undo_delete_cache:
                 self._card_manager.show_card("undo_delete", self._window_id)
@@ -7408,9 +7395,14 @@ class OpenAIChatToolWindow(ToolWindow):
             session, round_index, round_ranges
         )
         if not success:
+            # [DEBUG-diagnose-welcome] 记录 truncate 失败
+            logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round: truncate_and_remove_round FAILED")
             return
 
         log_deletion_stats(round_index, len(widgets_to_remove), old_count, new_count)
+
+        # [DEBUG-diagnose-welcome] 记录 truncate 成功后的 session 状态
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round AFTER truncate: session.messages count = {len(session.messages)}, new_count = {new_count}")
 
         # === 3. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
@@ -8165,16 +8157,43 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-    def _record_input_history(self, text: str):
-        """记录用户输入到历史数据库"""
+    def _record_input_history(self, text: str, attachments: Optional[list] = None):
+        """记录用户输入（含附件路径）到历史数据库"""
         try:
             if hasattr(self, "session_store") and self.session_store:
-                self.session_store.add_input_history(text)
+                self.session_store.add_input_history(text, attachments)
                 # 更新输入框的历史缓存
                 history = self.session_store.get_input_history()
                 self.input_area.load_history(history)
         except Exception:
             pass
+
+    # ==================== 历史模式附件管理 ====================
+
+    def _on_entering_history_mode(self):
+        """历史浏览模式即将进入 — 保存当前附件，退出时恢复"""
+        self._history_working_attachments = self._attachments.copy()
+
+    def _on_history_attachments_restored(self, paths: list):
+        """历史浏览模式切换条目 — 恢复对应的附件芯片
+
+        在历史模式中切换条目时，清理当前所有附件芯片，
+        然后根据历史条目保存的路径列表重建 AttachmentChip。
+        """
+        self._clear_attachments()
+        for p in paths:
+            if p not in self._attachments and os.path.exists(p):
+                self._attachments.append(p)
+                chip = AttachmentChip(p, self._attach_container)
+                chip.removed.connect(lambda path=p: self._remove_attachment(path))
+                self._attach_layout.insertWidget(
+                    self._attach_layout.count() - 1, chip
+                )
+        self._attach_container.setVisible(bool(self._attachments))
+
+    def _on_history_mode_exited(self):
+        """退出历史浏览模式 — 恢复进入时保存的附件"""
+        self._on_history_attachments_restored(self._history_working_attachments)
 
     # ==================== 附件管理 ====================
 
@@ -8292,8 +8311,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not user_text:
             user_text = ""
 
-        # ---- 记录输入到历史 ----
-        self._record_input_history(user_text)
+        # ---- 记录输入到历史（含当前附件路径）----
+        self._record_input_history(user_text, self._attachments.copy())
 
         # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
@@ -8453,23 +8472,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """工具参数流式更新 — 流式接收过程中，参数逐块解析完成后触发"""
         if getattr(self, "_is_destroyed", False):
             return
-        if not self._tool_floating_widget:
+
+        # question / todowrite / todoread 有自己的 UI 处理，不创建流式块
+        if tool_name in ("question", "todowrite", "todoread"):
             return
-        # 如果是内部进度消息（带 _preview_hint），显示友好文字
-        hint = partial_args.get("_preview_hint")
-        if hint:
-            self._tool_floating_widget.update_progress(hint)
-            return
-        # 过滤掉内部字段，只显示实际参数
-        display_args = {k: v for k, v in partial_args.items() if not k.startswith("_")}
-        if display_args:
-            args_str = json.dumps(display_args).decode("utf-8")
-            if len(args_str) > 80:
-                args_str = args_str[:80] + "..."
-            self._tool_floating_widget.update_progress(f"参数: {args_str}")
-        else:
-            # 全是内部字段，显示友好消息
-            self._tool_floating_widget.update_progress("正在准备参数...")
+
+        # 注入到当前助手卡片的消息内容中（替代独立 ToolFloatingWidget）
+        card = self._find_latest_assistant_card()
+        if card and getattr(card, 'update_tool_streaming', None):
+            card.update_tool_streaming(tool_call_id, tool_name, partial_args)
 
     def _on_tool_call_started(
         self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None
@@ -8485,7 +8496,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
 
-        # AutoLoop 运行期间不弹出浮动组件
+        # AutoLoop 运行期间不显示工具调用 UI
         if self._is_auto_loop_running:
             return
 
@@ -8503,9 +8514,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._card_manager.show_card("todo", self._window_id)
             return
 
-        # 使用 CardManager 显示工具卡片
-        self._card_manager.show_card("tool", self._window_id)
-        self._tool_floating_widget.start_tool(tool_name, arguments)
+        # 工具参数接收完成，将消息卡片中的流式块转为完成态
+        card = self._find_latest_assistant_card()
+        if card and getattr(card, 'finish_tool_streaming', None):
+            card.finish_tool_streaming(tool_call_id, tool_name, arguments)
 
     def _on_sub_agent_compact_closed(self):
         """子智能体紧凑卡片关闭时清理状态"""
@@ -8683,9 +8695,9 @@ class OpenAIChatToolWindow(ToolWindow):
             for param in cmd_def.parameters:
                 if param.name == "--model=":
                     if saved:
-                        param.description = f"当前默认: {saved} | 设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                        param.description = f"当前子智能体默认模型: {saved}"
                     else:
-                        param.description = "设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                        param.description = "设置子智能体默认模型"
                     break
 
     def _on_sub_agent_task_started(
@@ -8962,43 +8974,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if sub_agent_mgr:
             sub_agent_mgr.task_finished.emit(task_id, result)
 
-    def _on_tool_cancelled(self):
-        """工具执行被用户中止 — 连接自 tool_floating_widget.cancelled 信号"""
-        if getattr(self, "_is_destroyed", False):
-            return
-        logger.info("[ToolFloatingWidget] Tool execution cancelled by user")
-
-        self._tool_cancelled_by_user = True
-        self._cancelled_tool_call_id = getattr(self, "_current_tool_call_id", None)
-
-        # 不停止流式接收，只标记 worker 跳过工具执行
-        # worker 收到标记后，在 _execute_all_tools 中会跳过剩余工具
-        # 并自动发送 "用户中止" 的 tool_result 给模型继续迭代
-        if (
-            self.backend
-            and self.backend._chat_engine
-            and self.backend._chat_engine._current_worker
-        ):
-            worker = self.backend._chat_engine._current_worker
-            worker._is_cancelled = True
-            worker._tool_execution_cancelled = True
-
-        self._tool_floating_widget.finish_tool("用户中止", success=False)
-
-        tool_call_id = getattr(self, "_current_tool_call_id", None)
-        tool_name = getattr(self, "_current_tool_name", "unknown")
-        tool_args = getattr(self, "_current_tool_args", {})
-
-        if tool_call_id and self._current_assistant_card:
-            self._current_assistant_card.append_tool_result(
-                tool_name=tool_name,
-                arguments=tool_args,
-                result="[工具执行已被用户中止]",
-                success=False,
-                tool_call_id=tool_call_id,
-            )
-            self._scroll_to_bottom()
-
     def _on_tool_result_received(
         self, tool_call_id: str, tool_name: str, arguments: dict, result: Any
     ):
@@ -9010,20 +8985,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # AutoLoop 模式：只记录日志，不操作 UI
             if self._auto_loop_running_card:
                 self._auto_loop_running_card.append_log(f"工具完成: {tool_name}")
-
-        if (
-            self._tool_cancelled_by_user
-            and tool_call_id == self._cancelled_tool_call_id
-        ):
-            # 支持 dict 和 ToolResult 两种格式
-            if isinstance(result, dict):
-                error_msg = result.get("error", "") or ""
-            else:
-                error_msg = str(getattr(result, "error", "") or "")
-            if "用户中止" in error_msg:
-                self._tool_floating_widget.finish_tool("用户中止", success=False)
-                return
-            return
 
         elapsed = (
             time.time() - self._current_tool_start_time
@@ -9059,12 +9020,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
                 pass
         elif tool_name not in ("question",):
-            # 其他工具：始终调用 finish_tool 记录完成状态
-            # 卡片内部会根据 _suppress_visible 决定是否显示（及2秒后自动隐藏）
-            self._tool_floating_widget.finish_tool(content[:200], success)
-            if not self._is_system_card_visible:
-                self._tool_floating_widget.show_if_needed(elapsed)
-                self._tool_floating_widget.show_when_ready()
+            # 移除消息卡片中的工具流式块（替换为下方的正式工具结果块）
+            card = self._find_latest_assistant_card()
+            if card and getattr(card, 'remove_tool_streaming', None):
+                card.remove_tool_streaming(tool_call_id)
 
         # 提取 diff 字段（ToolResult 对象或 dict 格式）
         diff_val = None
@@ -9181,8 +9140,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._is_streaming = False
-        self._tool_cancelled_by_user = False
-        self._cancelled_tool_call_id = None
         self._toggle_send_stop(False)
 
         # 写入模型名称到卡片和 session 消息
@@ -9377,18 +9334,12 @@ class OpenAIChatToolWindow(ToolWindow):
         QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
     def _on_engine_error(self, error: str):
-        self._tool_cancelled_by_user = False
-
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.set_error_state(True, error_message=error)
             self._current_assistant_card.update_content(error)
 
         self._is_streaming = False
-
-        if self._tool_floating_widget:
-            self._tool_floating_widget.clear()
-            self._tool_floating_widget.setVisible(False)
 
         self._toggle_send_stop(False)
 
@@ -10506,7 +10457,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_stop_clicked(self):
         if getattr(self, "_is_destroyed", False):
             return
-        self._tool_cancelled_by_user = False
         # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
         self._topic_summary_cancelled = True
 
@@ -10521,10 +10471,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.cancel_streaming()
 
         self._is_streaming = False
-
-        if self._tool_floating_widget:
-            self._tool_floating_widget.clear()
-            self._tool_floating_widget.setVisible(False)
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:

@@ -44,6 +44,9 @@ class SendableTextEdit(TextEdit):
     atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = pyqtSignal()  # @ 触发结束
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
+    enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
+    historyAttachmentsRestored = pyqtSignal(list)  # 恢复附件路径列表
+    historyModeExited = pyqtSignal()  # 退出历史浏览模式（main_widget 从备份恢复附件）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -129,6 +132,7 @@ class SendableTextEdit(TextEdit):
         self._history_working_line: str = (
             ""  # 进入历史模式时保存的当前输入（退出时恢复）
         )
+        self._setting_history_text: bool = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
@@ -658,16 +662,25 @@ class SendableTextEdit(TextEdit):
     # ==================== 输入历史浏览 ====================
 
     def load_history(self, history_list: list):
-        """从外部加载输入历史列表"""
-        self._history_list = list(history_list)
+        """从外部加载输入历史列表（支持 list[dict] 和 list[str]）"""
+        processed = []
+        for item in history_list:
+            if isinstance(item, dict):
+                processed.append(item)
+            else:
+                # 兼容旧数据：纯字符串转为 dict
+                processed.append({"text": str(item), "attachments": []})
+        self._history_list = processed
         self._history_index = -1
 
     def _enter_history_mode(self):
-        """进入历史浏览模式：保存当前文本，加载最新一条"""
+        """进入历史浏览模式：保存当前文本和附件，加载最新一条"""
         if not self._history_list:
             return
         # 保存当前输入为 working line，退出时恢复
         self._history_working_line = self.toPlainText()
+        # 发出信号让 main_widget 保存当前附件到 _history_working_attachments
+        self.enteringHistoryMode.emit()
         # 进入历史模式时，隐藏命令卡片
         card = self._get_card()
         if card and card.is_card_visible:
@@ -678,30 +691,37 @@ class SendableTextEdit(TextEdit):
         self._set_history_text()
 
     def _set_history_text(self):
-        """根据当前 history_index 设置输入框文本
+        """根据当前 history_index 设置输入框文本和附件
 
-        - index >= 0: 显示对应历史条目
-        - index == -1: 恢复 working line（退出历史模式）
+        - index >= 0: 显示对应历史条目（含附件）
+        - index == -1: 恢复 working line（退出历史模式，main_widget 从备份恢复附件）
         """
-        if self._history_index < 0:
-            # 退出历史模式，恢复进入时保存的文本
-            self._suppress_slash_trigger = (
-                self._history_working_line.strip().startswith("/")
-            )
-            self.setPlainText(self._history_working_line)
-            cursor = self.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            self.setTextCursor(cursor)
-            return
-        if self._history_index < len(self._history_list):
-            text = self._history_list[self._history_index]
-            self._suppress_slash_trigger = text.strip().startswith("/")
-            self.setPlainText(text)
-            # 选中全部文本，方便继续编辑
-            cursor = self.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            cursor.movePosition(QTextCursor.Start, QTextCursor.KeepAnchor)
-            self.setTextCursor(cursor)
+        self._setting_history_text = True
+        try:
+            if self._history_index < 0:
+                # 退出历史模式，恢复进入时保存的文本和附件
+                self._suppress_slash_trigger = (
+                    self._history_working_line.strip().startswith("/")
+                )
+                self.setPlainText(self._history_working_line)
+                self.historyModeExited.emit()
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                self.setTextCursor(cursor)
+                return
+            if self._history_index < len(self._history_list):
+                entry = self._history_list[self._history_index]
+                text = entry["text"]
+                self._suppress_slash_trigger = text.strip().startswith("/")
+                self.setPlainText(text)
+                self.historyAttachmentsRestored.emit(entry.get("attachments", []))
+                # 选中全部文本，方便继续编辑
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                cursor.movePosition(QTextCursor.Start, QTextCursor.KeepAnchor)
+                self.setTextCursor(cursor)
+        finally:
+            self._setting_history_text = False
 
     def _navigate_history(self, direction: int):
         """方向导航：1 = 更旧（Up），-1 = 更新（Down）"""
@@ -729,9 +749,17 @@ class SendableTextEdit(TextEdit):
         self._history_index = new_index
         self._set_history_text()
 
-    def _reset_history_mode(self):
-        """退出历史浏览模式"""
+    def _reset_history_mode(self, clear_attachments: bool = False):
+        """退出历史浏览模式
+
+        Args:
+            clear_attachments: 是否同时清空当前恢复的附件。
+                               鼠标点击退出时不清（chip 保持可见），
+                               编辑文本/清空输入时清。
+        """
         self._history_index = -1
+        if clear_attachments:
+            self.historyAttachmentsRestored.emit([])
 
     def _tab_complete_if_card_visible(self):
         """Tab 补全：卡片可见时选中当前项"""
@@ -760,13 +788,14 @@ class SendableTextEdit(TextEdit):
         if not getattr(self, "_initializing", False):
             self._adjust_height_to_content()
         # 历史模式：用户修改了当前显示的文本 → 退出历史模式，↑↓ 不再切历史
-        if self._history_index >= 0:
+        # 注意：_setting_history_text 为 True 时跳过，避免 setPlainText 期间误触发
+        if self._history_index >= 0 and not self._setting_history_text:
             idx = self._history_index
             if (
                 idx < len(self._history_list)
-                and self._history_list[idx] != self.toPlainText()
+                and self._history_list[idx].get("text", "") != self.toPlainText()
             ):
-                self._reset_history_mode()
+                self._reset_history_mode(clear_attachments=True)
         # detail 模式参数同步
         self._sync_detail_params()
 
@@ -899,6 +928,13 @@ class SendableTextEdit(TextEdit):
                     return
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
                 if card.is_detail_mode and event.key() == Qt.Key_Tab:
+                    # 文件提及卡片可见时，Tab 优先用于文件补全
+                    # （回车已自然穿透到文件卡片处理，只有 Tab 被 detail 模式拦截）
+                    file_card = self._get_file_mention_card()
+                    if file_card and file_card.is_card_visible and not in_history_mode:
+                        file_card.select_current()
+                        event.accept()
+                        return
                     card.select_current()
                     event.accept()
                     return

@@ -141,7 +141,12 @@ class FileTools:
             end_idx = min(total_lines, start_idx + limit)
 
             content_slice = all_lines[start_idx:end_idx]
-            res_info = f"#File: {path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n#Content:\n"
+            # 文件头用相对路径（根目录外 fallback 到原始路径）
+            try:
+                display_path = str(full_path.relative_to(self.workdir))
+            except ValueError:
+                display_path = path
+            res_info = f"#File: {display_path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n#Content:\n"
             if show_line_numbers:
                 # 带行号格式
                 formatted_content = "".join(

@@ -14,11 +14,77 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple, Union
 from dataclasses import dataclass, field
 
 from app.tools.result import ToolResult
 from app.tools.command_safety import needs_shell, classify_command, run_safe, run_with_shell
+
+
+def _smart_decode(data: bytes, command: str = "") -> str:
+    """
+    智能解码：根据命令类型选择正确的编码
+    
+    Windows 平台编码规则:
+    - Git/npm/Node 等现代工具: 输出 UTF-8
+    - Windows 原生命令 (dir, type 等): 输出 GBK/CP936
+    - 带管道的命令: 可能是混合编码，用 errors='replace' 容错
+    
+    Args:
+        data: 原始字节数据
+        command: 原始命令（用于判断命令类型）
+    
+    Returns:
+        解码后的字符串
+    """
+    if not data:
+        return ""
+    
+    # 常见现代工具（输出 UTF-8）
+    UTF8_TOOLS = frozenset({
+        'git', 'npm', 'yarn', 'pnpm', 'node', 'deno', 'bun',
+        'python', 'python3', 'pip', 'uv', 'cargo', 'rustc',
+        'go', 'java', 'javac', 'mvn', 'gradle',
+        'docker', 'kubectl', 'helm', 'terraform',
+        'curl', 'wget', 'gh', 'aws', 'gcloud', 'az',
+        'ruby', 'gem', 'php', 'composer',
+        'lua', 'perl', 'R', 'julia',
+        'ruff', 'mypy', 'pytest', 'eslint', 'tsc',
+        'flutter', 'dart', 'swift', 'cargo',
+        'make', 'cmake', 'ninja', 'meson',
+        'npx', 'pip3', 'pipx',
+    })
+    
+    cmd_lower = command.lower().strip()
+    
+    # 判断是否是已知输出 UTF-8 的工具
+    is_utf8_tool = False
+    for tool in UTF8_TOOLS:
+        if cmd_lower.startswith(tool + ' ') or cmd_lower.startswith(tool + '.exe '):
+            is_utf8_tool = True
+            break
+    
+    # 如果命令明确是 UTF-8 工具，优先尝试 UTF-8
+    if is_utf8_tool:
+        try:
+            return data.decode('utf-8')
+        except UnicodeDecodeError:
+            # UTF-8 失败，降级到 GBK
+            return data.decode('gbk', errors='replace')
+    
+    # 对于其他命令，优先尝试 UTF-8（现代工具越来越多）
+    try:
+        decoded = data.decode('utf-8')
+        # 检查是否包含常见乱码特征（GBK 当作 UTF-8 解码时）
+        # 如果结果包含大量不可打印字符，可能是 GBK 被误判为 UTF-8
+        printable_ratio = sum(c.isprintable() or c.isspace() for c in decoded) / max(len(decoded), 1)
+        if printable_ratio > 0.8:
+            return decoded
+    except UnicodeDecodeError:
+        pass
+    
+    # 回退到 GBK
+    return data.decode('gbk', errors='replace')
 
 
 @dataclass
@@ -108,9 +174,6 @@ class BackgroundTaskManager:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     cwd=str(workdir),
                 )
             else:
@@ -120,9 +183,6 @@ class BackgroundTaskManager:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     cwd=str(workdir),
                 )
 
@@ -147,11 +207,13 @@ class BackgroundTaskManager:
             return task_id, f"❌ 启动失败: {str(e)}"
 
     def _capture_output(self, task: BackgroundTask):
-        """捕获进程输出"""
+        """捕获进程输出（智能解码）"""
         try:
             if task.process.stdout:
-                for line in iter(task.process.stdout.readline, ''):
-                    if line:
+                for raw_line in iter(task.process.stdout.readline, b''):
+                    if raw_line:
+                        # 智能解码每一行
+                        line = _smart_decode(raw_line, task.command)
                         task.append_output(line.rstrip('\n'))
                     if task.status != "running":
                         break
@@ -287,6 +349,11 @@ class TerminalTools:
         安全说明:
           - Path A (shell=False): 无 shell 元字符的命令，用 argv 数组直接执行
           - Path B (shell=True):  含管道/重定向的命令，保留 shell 解释
+
+        编码说明:
+          - Windows 原生命令 (dir, type 等): 输出 GBK
+          - Git/npm 等现代工具: 输出 UTF-8
+          - 使用智能解码自动选择正确编码
         """
         try:
             # 安全分类
@@ -303,9 +370,6 @@ class TerminalTools:
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
                     cwd=str(self.workdir),
                 )
             else:
@@ -314,9 +378,6 @@ class TerminalTools:
                     command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
                     cwd=str(self.workdir),
                 )
 
@@ -356,13 +417,15 @@ class TerminalTools:
             if result_holder["error"]:
                 return ToolResult(False, error=f"Execution error: {result_holder['error']}")
 
-            # 进程正常完成
-            stdout = result_holder["stdout"] or ""
-            stderr = result_holder["stderr"] or ""
+            # 进程正常完成：使用智能解码
+            stdout_bytes = result_holder["stdout"] or b""
+            stderr_bytes = result_holder["stderr"] or b""
 
-            output = stdout.strip() if stdout else ""
-            error_out = stderr.strip() if stderr else ""
-            combined = "\n".join(filter(None, [output, error_out]))
+            # 智能解码（自动选择 UTF-8 或 GBK）
+            stdout = _smart_decode(stdout_bytes, command).strip()
+            stderr = _smart_decode(stderr_bytes, command).strip()
+
+            combined = "\n".join(filter(None, [stdout, stderr]))
 
             # Shell 输出压缩（减少 token 消耗）
             from app.tools.shell_compressor import compress

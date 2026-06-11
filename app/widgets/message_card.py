@@ -17,11 +17,11 @@ MessageCard - 消息卡片组件
 """
 import base64
 import hashlib
-import json
 import math
 import os
 import random
 import re
+import sip
 import time
 import urllib.parse
 from datetime import datetime
@@ -85,6 +85,7 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import current_theme, scale_font_size, Colors, font_size_css, _get_global_font, fade_in_widget
 from app.widgets.render_helpers import (
     render_tool_block,
+    _TOOL_ICON_MAP,
 )
 
 # ======== Markdown 实例 ========
@@ -112,8 +113,6 @@ _TOOL_SUCCESS_PATTERN = re.compile(r"^success:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_ID_PATTERN = re.compile(r"^tool_call_id:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_RESULT_PATTERN = re.compile(r"^result:\s*(.*)$", re.MULTILINE)
 _NEXT_FIELD_PATTERN = re.compile(r"\n\w+:")
-# 紧凑模式：剥离所有 <think>...</think> 及其内容
-_THINK_REMOVE_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
@@ -804,16 +803,85 @@ _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而�
                           "总结一下", "也就是说", "最终")
 
 
-def _render_think_badge() -> str:
-    """紧凑模式：思考过程渲染为行内徽章。"""
-    return f"""<span class="cm-compact-badge cm-compact-think" style="
-display: inline-flex; align-items: center; gap: 3px;
-padding: 2px 8px; margin: 2px 3px;
-background: rgba(255,152,0,0.08); border: 1px solid rgba(255,152,0,0.18);
-border-radius: 12px; font-size: {scale_font_size(11)}px; color: #FF9800;
-white-space: nowrap; {get_font_family_css()}">
-🧠 思考
-</span>"""
+_THINK_SNAKE_SVG = (
+    '<svg class="think-snake" width="18" height="18" viewBox="0 0 24 24">'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.2)" stroke-width="2.5"'
+    ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.55)" stroke-width="2.5"'
+    ' stroke-linecap="round" stroke-dasharray="12 38" class="think-snake-arc think-snake-body" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,1)" stroke-width="2.5"'
+    ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
+    '</svg>'
+)
+
+
+def _render_tool_streaming_block(
+    tool_call_id: str,
+    tool_name: str,
+    preview: str,
+    char_count: int = 0,
+    completed: bool = False,
+) -> str:
+    """渲染工具流式调用块 HTML — 布局与正式工具块一致。
+
+    布局：[chevron] [icon] [tool_name] [金色蛇形SVG] | [参数预览 + 字符数]
+
+    Args:
+        tool_call_id: 工具调用 ID
+        tool_name: 原始工具名（如 read、mcp__playwright__browser_navigate）
+        preview: 预览文本
+        char_count: 参数字符数
+        completed: True=参数接收完成（隐藏蛇形动画），False=流式中
+    """
+    # MCP 工具名清理
+    is_mcp = tool_name.startswith("mcp__")
+    display_name = tool_name or ""
+    if is_mcp:
+        display_name = "__".join(display_name.split("__")[2:])
+    if not display_name:
+        display_name = "工具调用中"
+
+    # 图标与颜色：与 render_tool_block 保持一致
+    if is_mcp:
+        icon = "🌐"
+        title_color = "#00BCD4"
+    else:
+        icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+        title_color = "#FFA500"
+
+    # 流式态：蛇形圆环 + 状态文字；完成态：仅图标
+    if completed:
+        spinner_html = ""
+        status_hint = ""
+    else:
+        spinner_html = _THINK_SNAKE_SVG
+        status_hint = ' <span style="opacity:0.55; font-weight:400;">执行中</span>'
+
+    char_hint = f" ({char_count}字符)" if char_count > 0 else ""
+    preview_display = escape(preview) if preview else "准备中..."
+
+    streaming_attr = '' if completed else ' data-streaming="true"'
+
+    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}"{streaming_attr}>
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 0 auto;">
+            <span class="cm-collapsible__chevron" aria-hidden="true"></span>
+            <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(display_name)}</span>
+            {spinner_html}
+            {status_hint}
+        </span>
+        <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {preview_display}{char_hint}
+            </span>
+        </span>
+    </button>
+    <div class="cm-collapsible__body">
+        <div class="think-content loading" style="white-space: normal; word-break: break-word;">{preview_display}</div>
+    </div>
+</div>"""
 
 
 def _render_think_block(content: str, completed: bool = True) -> str:
@@ -823,9 +891,9 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     # ── 标签分类（完成时才分类，流式过程只显示💡） ──
     if completed:
         tag = _classify_think_tag(content)
-        status_text = f"💡 {escape(tag)}" if tag else "💡"
+        status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
     else:
-        status_text = "💡"
+        status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
         tag = ""  # 流式不分类
 
     # ── 预览：完成时结论句+累加，流式时简单截断 ──
@@ -843,7 +911,8 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     # 获取全局字体样式
     font_style = _get_think_block_styles()
 
-    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}">
+    streaming_attr = ' data-streaming="true"' if not completed else ''
+    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}"{streaming_attr}>
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
@@ -868,10 +937,10 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
     if completed:
         tag = _classify_think_tag(content)
-        status_text = f"💡 {escape(tag)}" if tag else "💡"
+        status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
         preview = _get_think_preview(content)
     else:
-        status_text = "💡"
+        status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
         preview = _get_think_preview(content)
 
     expanded_attr = "true" if expanded else "false"
@@ -883,7 +952,8 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # 获取全局字体样式
     font_style = _get_think_block_styles()
 
-    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}">
+    streaming_attr = ' data-streaming="true"' if not completed else ''
+    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}"{streaming_attr}>
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
@@ -895,18 +965,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
 
-def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
+def _inject_think_cards(md_text: str, completed: bool = True) -> str:
     """注入思考框HTML。
 
     关键逻辑：<think> 匹配到下一个 <think> 之前的最后一个 </think>，
     避免流式输出时多个 </think> 导致内容泄露。
-
-    compact=True：完全剥离 think 内容（用户不看思考过程）。
     """
-    if compact:
-        # 紧凑模式：直接剥离所有 <think>...</think> 及其内容
-        return _THINK_REMOVE_PATTERN.sub("", md_text)
-
     parts = []
     i = 0
     while i < len(md_text):
@@ -1361,150 +1425,27 @@ def _extract_by_regex_fallback(content: str) -> dict:
 
 
 def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
-    """注入工具块HTML。依据 tool_render_mode 设置切换紧凑/经典模式。"""
+    """注入工具块HTML，类似think块"""
     if not md_text:
         return md_text
 
-    # 检测渲染模式
-    try:
-        from app.utils.config import Settings
-        render_mode = Settings.get_instance().tool_render_mode.value
-    except Exception:
-        render_mode = "classic"
-
-    # ── 经典模式：保持原行为 ──
-    if render_mode != "compact":
-        parts = []
-        i = 0
-        while i < len(md_text):
-            start_idx = md_text.find("<tool>", i)
-            if start_idx == -1:
-                parts.append(md_text[i:])
-                break
-            parts.append(md_text[i:start_idx])
-            end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
-            if end_idx != -1:
-                content = md_text[start_idx + len("<tool>"): end_idx]
-                parts.append(_render_tool_block_content(content))
-                i = end_idx + len("</tool>")
-            else:
-                parts.append(md_text[start_idx:])
-                break
-        return "".join(parts)
-
-    # ── 紧凑模式：剥离工具，合并为一行摘要 ──
-    # 工具类型统计
-    ToolCounts = {
-        "bash": 0,
-        "read": 0,
-        "search": 0,
-        "edit": 0,
-        "write": 0,
-        "failed": 0,
-    }
-    # edit/write 的 diff 统计
-    diff_added = 0
-    diff_deleted = 0
-
-    result_parts = []
+    parts = []
     i = 0
     while i < len(md_text):
         start_idx = md_text.find("<tool>", i)
         if start_idx == -1:
-            result_parts.append(md_text[i:])
+            parts.append(md_text[i:])
             break
-        # 工具块之前的文本
-        if start_idx > i:
-            result_parts.append(md_text[i:start_idx])
-
+        parts.append(md_text[i:start_idx])
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
-        if end_idx == -1:
-            result_parts.append(md_text[start_idx:])
+        if end_idx != -1:
+            content = md_text[start_idx + len("<tool>"): end_idx]
+            parts.append(_render_tool_block_content(content))
+            i = end_idx + len("</tool>")
+        else:
+            parts.append(md_text[start_idx:])
             break
-
-        content = md_text[start_idx + len("<tool>"): end_idx]
-
-        # 解析工具名
-        tool_name = ""
-        tool_success = True
-        name_match = _TOOL_NAME_PATTERN.search(content)
-        if name_match:
-            tool_name = name_match.group(1).strip()
-        success_match = _TOOL_SUCCESS_PATTERN.search(content)
-        if success_match:
-            tool_success = success_match.group(1).strip().lower() == "true"
-
-        # 统计
-        if not tool_success:
-            ToolCounts["failed"] += 1
-        elif tool_name in ("bash",):
-            ToolCounts["bash"] += 1
-        elif tool_name in ("read", "todoread", "read_project_note"):
-            ToolCounts["read"] += 1
-        elif tool_name in ("grep", "glob", "list", "scan_repo", "stage_files",
-                           "webfetch", "websearch", "get_diagnostics",
-                           "mouse", "keyboard"):
-            ToolCounts["search"] += 1
-        elif tool_name in ("edit", "multi_edit"):
-            ToolCounts["edit"] += 1
-            # 提取 diff 统计
-            diff_start = content.find("\ndiff:")
-            if diff_start != -1:
-                diff_after = content[diff_start + 6:]
-                # 简单统计 + 和 - 开头行数
-                for line in diff_after.split("\n"):
-                    line = line.rstrip()
-                    if line.startswith("+"):
-                        diff_added += 1
-                    elif line.startswith("-"):
-                        diff_deleted += 1
-        elif tool_name in ("write",):
-            ToolCounts["write"] += 1
-        else:
-            ToolCounts["search"] += 1  # subagent_para/dag 等归为 search
-
-        # 紧凑模式：不渲染工具块，直接跳过标签
-        i = end_idx + len("</tool>")
-
-    # 构建工具摘要
-    summary_parts = []
-    if ToolCounts["bash"] > 0:
-        summary_parts.append(f"💻 {ToolCounts['bash']} 个命令")
-    if ToolCounts["read"] > 0:
-        summary_parts.append(f"📂 读取 {ToolCounts['read']} 个文件")
-    if ToolCounts["search"] > 0:
-        summary_parts.append(f"🔍 {ToolCounts['search']} 次搜索")
-    if ToolCounts["edit"] > 0:
-        s = f"✏️ 编辑 {ToolCounts['edit']} 个文件"
-        if diff_added or diff_deleted:
-            s += f" (+{diff_added}/-{diff_deleted})"
-        summary_parts.append(s)
-    if ToolCounts["write"] > 0:
-        summary_parts.append(f"📝 创建 {ToolCounts['write']} 个文件")
-    if ToolCounts["failed"] > 0:
-        summary_parts.append(f"❌ {ToolCounts['failed']} 个失败")
-
-    if summary_parts:
-        summary_html = f"""<div class="cm-tool-summary" style="
-margin-top: 4px; padding: 4px 0;
-font-size: {scale_font_size(11)}px; color: {Colors.TEXT_SECONDARY};
-display: flex; flex-wrap: wrap; gap: 4px 12px;
-{get_font_family_css()}">
-{"".join(f'<span style="display:inline-flex;align-items:center;gap:2px;">{p}</span>' for p in summary_parts)}
-</div>"""
-        # 找到最后一个文本段，在它后面插入摘要
-        # 从后往前找非空文本段
-        last_text_idx = -1
-        for idx in range(len(result_parts) - 1, -1, -1):
-            if result_parts[idx].strip():
-                last_text_idx = idx
-                break
-        if last_text_idx >= 0:
-            result_parts.insert(last_text_idx + 1, summary_html)
-        else:
-            result_parts.append(summary_html)
-
-    return "".join(result_parts)
+    return "".join(parts)
 
 
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
@@ -1562,16 +1503,14 @@ _LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
 
 
 @lru_cache(maxsize=256)
-def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str, compact: bool) -> str:
+def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
-
-    compact 参数参与缓存 key，确保模式切换后缓存正确失效。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
-    processed_md = _inject_think_cards(safe_md, True, compact=compact)
+    processed_md = _inject_think_cards(safe_md, True)
     processed_md = _inject_tool_blocks(processed_md, True)
     processed_md = _inject_hook_blocks(processed_md, True)
 
@@ -1591,30 +1530,24 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
     - 对于超过阈值的文本，跳过缓存直接渲染
     - 保持 LRU 缓存以提高重复内容的性能
     """
-    from app.utils.config import Settings
-    try:
-        compact = Settings.get_instance().tool_render_mode.value == "compact"
-    except Exception:
-        compact = False
-
     # 添加思考块内容
     if reasoning:
-        if compact:
-            pass  # 紧凑模式：不显示思考内容
-        else:
-            raw_md = _render_think_block(reasoning, completed=True) + raw_md
+        raw_md = _render_think_block(reasoning, completed=True) + raw_md
 
     # 大文本跳过缓存，防止内存膨胀
     text_size = len(raw_md.encode('utf-8'))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
         # 大文本直接渲染，绕过缓存
+        # 临时禁用缓存
+        original_cache_info = _render_markdown_to_html_cached_impl.cache_info()
         _render_markdown_to_html_cached_impl.cache_clear()
         try:
-            return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact)
+            return _render_markdown_to_html_cached_impl(raw_md, reasoning)
         finally:
+            # 恢复缓存状态
             pass
 
-    return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact)
+    return _render_markdown_to_html_cached_impl(raw_md, reasoning)
 
     try:
         md = get_markdown_instance()
@@ -2436,7 +2369,7 @@ class CodeWebViewer(QWebEngineView):
                     width: 100%;
                     display: flex;
                     align-items: center;
-                    gap: 8px;
+                    gap: 6px;
                     background: transparent;
                     border: none;
                     text-align: left;
@@ -2449,8 +2382,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .cm-collapsible__chevron {{
                     flex: 0 0 auto;
-                    width: 8px;
-                    height: 8px;
+                    width: 6px;
+                    height: 6px;
                     border-right: 1.5px solid currentColor;
                     border-bottom: 1.5px solid currentColor;
                     transform: rotate(45deg);
@@ -2474,22 +2407,22 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 .think-block {{
-                    margin: 8px 0;
+                    margin: 4px 0;
                     background: transparent;
                     border: 1px solid var(--border);
-                    border-radius: 10px;
+                    border-radius: 6px;
                     transition: border-color 220ms ease;
                 }}
                 .think-block[data-expanded="true"] {{
                     border-color: rgba(102, 198, 255, 0.4);
                 }}
                 .think-block__summary {{
-                    padding: 8px 12px;
+                    padding: 5px 10px;
                     color: var(--text-secondary);
                     font-weight: 600;
                 }}
                 .think-content {{
-                    padding: 10px 12px;
+                    padding: 8px 10px;
                     border-top: 1px solid var(--border);
                     background: transparent;
                     color: var(--text-secondary) !important;
@@ -2513,12 +2446,29 @@ class CodeWebViewer(QWebEngineView):
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
                 }}
+                /* 思考中蛇形爬行动画 */
+                .think-block[data-streaming="true"] .think-block__summary {{
+                    background: rgba(255, 255, 255, 0.04);
+                }}
+                .think-snake {{
+                    display: inline-block;
+                    vertical-align: middle;
+                    margin-right: 2px;
+                }}
+                .think-snake-arc {{
+                    transform-origin: 12px 12px;
+                }}
+
+                /* 工具流式调用块 — 金色圆环动画背景 */
+                .tool-streaming-block[data-streaming="true"] .tool-block__summary {{
+                    background: rgba(255, 200, 50, 0.05);
+                }}
 
                 .tool-block {{
-                    margin: 8px 0;
+                    margin: 4px 0;
                     background: transparent;
                     border: 1px solid var(--border);
-                    border-radius: 10px;
+                    border-radius: 6px;
                     box-shadow: none;
                     transition: border-color 220ms ease;
                 }}
@@ -2526,7 +2476,7 @@ class CodeWebViewer(QWebEngineView):
                     border-color: rgba(95, 209, 140, 0.5);
                 }}
                 .tool-block__summary {{
-                    padding: 8px 12px;
+                    padding: 5px 10px;
                     color: var(--accent);
                     font-weight: 600;
                     font-size: {code_font_size}px;
@@ -3128,6 +3078,27 @@ class CodeWebViewer(QWebEngineView):
                 window._requestSubAgentLog = function(taskIds) {{
                     console.log('pywebview_action:subagent_log:' + taskIds);
                 }};
+
+                // ===== JS驱动的蛇形思考动画（替代CSS animation）=====
+                // 使用 requestAnimationFrame 持续更新 stroke-dashoffset，
+                // 即使 updateContent 重建DOM，新SVG元素在下一帧立即获得正确偏移，
+                // 不再因 CSS animation 重启而导致视觉跳跃。
+                let _snakeStartTime = null;
+                function _animateThinkSnake() {{
+                    if (_snakeStartTime === null) _snakeStartTime = performance.now();
+                    const elapsed = performance.now() - _snakeStartTime;
+                    // 周期 1.5s，完整一圈对应 stroke-dashoffset: 0→-50.265（周长 2π×8 ≈ 50.265）
+                    document.querySelectorAll('.think-snake-arc').forEach(el => {{
+                        let extraDelay = 0;
+                        if (el.classList.contains('think-snake-head')) extraDelay = 350;
+                        else if (el.classList.contains('think-snake-body')) extraDelay = 180;
+                        const phase = (elapsed + extraDelay) % 1500;
+                        const offset = -(phase / 1500) * 50.265;
+                        el.setAttribute('stroke-dashoffset', offset);
+                    }});
+                    requestAnimationFrame(_animateThinkSnake);
+                }}
+                _animateThinkSnake();
             </script>
         </body>
         </html>
@@ -3225,14 +3196,7 @@ class CodeWebViewer(QWebEngineView):
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
-
-        from app.utils.config import Settings
-        try:
-            compact = Settings.get_instance().tool_render_mode.value == "compact"
-        except Exception:
-            compact = False
-
-        processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=compact)
+        processed_md = _inject_think_cards(safe_md, self._streaming is False)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
 
@@ -3479,11 +3443,12 @@ class CodeWebViewer(QWebEngineView):
 
         try:
             is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
+            is_html = "HTML" in selected_filter or file_path.lower().endswith('.html')
             if is_png:
                 if not file_path.lower().endswith('.png'):
                     file_path += '.png'
                 self._export_as_image(file_path)
-            elif is_html or file_path.lower().endswith('.html'):
+            elif is_html:
                 if not file_path.lower().endswith('.html'):
                     file_path += '.html'
                 html_content = self._convert_md_to_html(content)
@@ -3954,10 +3919,28 @@ class PlainTextViewer(QWidget):
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
-        QTimer.singleShot(10, self._update_height)
+        self._schedule_update_height()
 
     def finish_streaming(self):
-        QTimer.singleShot(10, self._update_height)
+        self._schedule_update_height()
+
+    def _schedule_update_height(self):
+        """🛡️ 安全的延迟高度更新
+
+        使用 lambda 包装 + try/except 保护，防止 PlainTextViewer 被 deleteLater()
+        销毁后定时器回调仍访问已释放的 C++ 对象（text_edit）导致段错误。
+        """
+        QTimer.singleShot(10, lambda: self._safe_update_height())
+
+    def _safe_update_height(self):
+        """带存活性检查的 _update_height"""
+        try:
+            # 检查 C++ 对象是否已被销毁
+            if sip.isdeleted(self.text_edit):
+                return
+            self._update_height()
+        except RuntimeError:
+            pass
 
     def get_plain_text(self) -> str:
         return self._text
@@ -3969,7 +3952,7 @@ class PlainTextViewer(QWidget):
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
-        QTimer.singleShot(10, self._update_height)
+        self._schedule_update_height()
 
     def _update_height(self):
         """强制 QTextEdit 重新布局后再计算高度"""
@@ -4078,10 +4061,22 @@ class PlainTextViewer(QWidget):
 
         menu.exec_(self.text_edit.mapToGlobal(pos))
 
-    def _copy_to_clipboard(self):
-        """复制内容到剪贴板"""
+    def _copy_to_clipboard(self, copy_selection: bool = True):
+        """复制内容到剪贴板
+
+        Args:
+            copy_selection: 为 True 时优先复制选中文本（上下文菜单标准行为），
+                            无选中时降级复制全文。
+                            为 False 时直接复制全文（工具栏按钮行为）。
+        """
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
+        if copy_selection:
+            cursor = self.text_edit.textCursor()
+            selected = cursor.selectedText()
+            if selected:
+                clipboard.setText(selected)
+                return
         clipboard.setText(self._text)
 
     def _convert_text_to_html(self, text: str) -> str:
@@ -4367,11 +4362,11 @@ class MessageCard(SimpleCardWidget):
 
     def _setup_ui(self):
         main = QVBoxLayout(self)
-        main.setContentsMargins(6, 6, 6, 6)
-        main.setSpacing(8)
+        main.setContentsMargins(4, 4, 4, 4)
+        main.setSpacing(4)
         top = QHBoxLayout()
-        top.setContentsMargins(8, 2, 8, 2)
-        top.setSpacing(10)
+        top.setContentsMargins(4, 0, 4, 0)
+        top.setSpacing(6)
 
         av = QLabel(self)
         self._av_label = av
@@ -4457,7 +4452,7 @@ class MessageCard(SimpleCardWidget):
                 (
                     get_icon("复制"),
                     "复制",
-                    lambda: self.actionRequested.emit(self.get_plain_text(), "copy"),
+                    lambda: self._copy_user_message(),
                 ),
                 (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
                 (get_icon("删除"), "删除", self.deleteRequested.emit),
@@ -4522,8 +4517,8 @@ class MessageCard(SimpleCardWidget):
 
         self.options_widget = QWidget(self)
         self.options_layout = QVBoxLayout(self.options_widget)
-        self.options_layout.setContentsMargins(0, 8, 0, 0)
-        self.options_layout.setSpacing(8)
+        self.options_layout.setContentsMargins(0, 4, 0, 0)
+        self.options_layout.setSpacing(4)
         self.options_widget.setVisible(False)
         main.addWidget(self.options_widget)
 
@@ -4597,7 +4592,7 @@ class MessageCard(SimpleCardWidget):
             CardWidget {{
                 background-color: {self._theme["bg"]};
                 border: 1px solid {self._theme["border"]};
-                border-radius: 16px;
+                border-radius: 10px;
             }}
             """
         )
@@ -4634,7 +4629,7 @@ class MessageCard(SimpleCardWidget):
             CardWidget {{
                 background-color: {bg or self._base_bg};
                 border: 1px solid {border or self._base_border};
-                border-radius: 16px;
+                border-radius: 10px;
             }}
             """
         )
@@ -5351,6 +5346,15 @@ class MessageCard(SimpleCardWidget):
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
 
+    def _copy_user_message(self):
+        """用户卡片工具栏「复制」：直接复制全文，不走 actionRequested 信号链
+
+        避免信号链引起的 _on_code_action（clipboard.setText + InfoBar 动画），
+        消除主线程阻塞（大文本 clipboard 操作）和 InfoBar 滑入动画叠加造成的闪烁。
+        """
+        if hasattr(self.viewer, '_copy_to_clipboard'):
+            self.viewer._copy_to_clipboard(copy_selection=False)
+
     def get_plain_text(self) -> str:
         if self.role == "assistant":
             return content_to_text(self._content_data, include_tool_results=True)
@@ -5389,6 +5393,152 @@ class MessageCard(SimpleCardWidget):
         """
         self._content_data.append({"type": "reasoning", "content": ""})
 
+    # ── 工具流式调用块 ──────────────────────────────────
+
+    def _inject_tool_streaming_html(
+        self, tool_call_id: str, tool_name: str, preview: str,
+        char_count: int = 0, completed: bool = False,
+    ):
+        """通过 JS 注入/更新工具流式块
+
+        已有同 ID 块时原地更新文本，不重建 DOM，保持折叠/展开状态不丢失。
+        """
+        if not hasattr(self, 'viewer') or not self.viewer:
+            return
+
+        try:
+            block_html = _render_tool_streaming_block(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                preview=preview,
+                char_count=char_count,
+                completed=completed,
+            )
+            safe_html = json.dumps(block_html).decode('utf-8')
+            streaming_flag = 'true' if not completed else 'false'
+            js_code = f"""
+            (function() {{
+                var c = document.getElementById('content-placeholder');
+                if (!c) return;
+                var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                if (el) {{
+                    // 已有块：从新 HTML 提取 summary 和 body，替换内容保留 chevron
+                    var tmp = document.createElement('div');
+                    tmp.innerHTML = {safe_html};
+                    var newBtn = tmp.querySelector('.cm-collapsible__summary');
+                    var btn = el.querySelector('.cm-collapsible__summary');
+                    if (btn && newBtn) {{
+                        var chevron = btn.querySelector('.cm-collapsible__chevron');
+                        var chevronHtml = chevron ? chevron.outerHTML : '';
+                        // 从新按钮中取 chevron 之外的全部 HTML
+                        var newInner = newBtn.innerHTML;
+                        var tmpChevron = newBtn.querySelector('.cm-collapsible__chevron');
+                        if (tmpChevron) {{
+                            newInner = newInner.replace(tmpChevron.outerHTML, '');
+                        }}
+                        btn.innerHTML = chevronHtml + newInner;
+                    }}
+                    var newBody = tmp.querySelector('.cm-collapsible__body');
+                    var body = el.querySelector('.cm-collapsible__body');
+                    if (body && newBody) {{
+                        body.innerHTML = newBody.innerHTML;
+                    }}
+                    el.setAttribute('data-streaming', '{streaming_flag}');
+                    reportHeight();
+                }} else {{
+                    // 新块：完整创建
+                    var d = document.createElement('div');
+                    d.setAttribute('data-tool-injected', 'true');
+                    d.setAttribute('data-tool-streaming', 'true');
+                    d.innerHTML = {safe_html};
+                    c.appendChild(d);
+                    reportHeight();
+                }}
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
+    def update_tool_streaming(
+        self, tool_call_id: str, tool_name: str, partial_args: dict = None,
+    ):
+        """更新工具流式参数预览 — 更新已注入的工具块预览文本
+
+        Args:
+            tool_call_id: 工具调用唯一 ID
+            tool_name: 工具名
+            partial_args: 部分参数
+        """
+        preview = ""
+        char_count = 0
+        if partial_args:
+            hint = partial_args.get("_preview_hint")
+            if hint:
+                preview = str(hint)
+                char_count = len(preview)
+            else:
+                display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
+                if display:
+                    try:
+                        args_str = json.dumps(display).decode('utf-8')
+                        if len(args_str) > 100:
+                            preview = args_str[:100] + "..."
+                        else:
+                            preview = args_str
+                        char_count = len(args_str)
+                    except Exception:
+                        preview = "..."
+                else:
+                    preview = "正在准备参数..."
+        self._inject_tool_streaming_html(
+            tool_call_id, tool_name, preview, char_count, completed=False
+        )
+
+    def finish_tool_streaming(
+        self, tool_call_id: str, tool_name: str, arguments: dict = None,
+    ):
+        """工具参数接收完成 — 将流式块转为完成态，显示工具名和完整参数
+
+        Args:
+            tool_call_id: 工具调用唯一 ID
+            tool_name: 工具名
+            arguments: 完整参数
+        """
+        preview = ""
+        char_count = 0
+        if arguments:
+            display = {k: v for k, v in arguments.items() if not k.startswith("_")}
+            if display:
+                try:
+                    args_str = json.dumps(display).decode('utf-8')
+                    if len(args_str) > 100:
+                        preview = args_str[:100] + "..."
+                    else:
+                        preview = args_str
+                    char_count = len(args_str)
+                except Exception:
+                    preview = "..."
+        self._inject_tool_streaming_html(
+            tool_call_id, tool_name, preview, char_count, completed=True
+        )
+
+    def remove_tool_streaming(self, tool_call_id: str):
+        """移除工具流式块 — 工具执行完成后清理"""
+        if not hasattr(self, 'viewer') or not self.viewer:
+            return
+        try:
+            js_code = f"""
+            (function() {{
+                var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                if (el) el.remove();
+                reportHeight();
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
     def append_reasoning(self, text: str):
         """追加思考内容到当前最后一个思考块（流式模式）
 
@@ -5412,8 +5562,6 @@ class MessageCard(SimpleCardWidget):
             self._content_data.append({"type": "reasoning", "content": text})
         self._reasoning_total_len += len(text)
 
-        LARGE_THINKING_THRESHOLD = 50 * 1024  # 50KB
-
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
             return
@@ -5421,9 +5569,9 @@ class MessageCard(SimpleCardWidget):
         # 标记内容已加载，高度变化时触发 _on_message_card_height_changed 滚底
         self._content_just_loaded = True
 
-        if self._reasoning_total_len > LARGE_THINKING_THRESHOLD:
-            # 超长思考：增量更新提供即时文字，同时定期全量渲染保持 DOM 结构正确
-            self._update_thinking_incremental(text)
+        # 始终走增量 JS 更新（无论内容大小），确保思考文本即时显示，
+        # 蛇形动画已改为 requestAnimationFrame 驱动，不受后续全量渲染影响
+        self._update_thinking_incremental(text)
         # 性能优化：通过 _lazy_markdown_cb 将 content_to_markdown 延迟到
         # _perform_update 执行（渲染定时器自带防抖，多 chunk 合并转换一次）
         # 这同时修复了旧代码的 bug：渲染定时器激活时跳过 markdown 更新，
@@ -5432,9 +5580,10 @@ class MessageCard(SimpleCardWidget):
         self.viewer._schedule_render(immediate=False)
 
     def _update_thinking_incremental(self, new_text: str):
-        """增量更新思考内容（用于超长思考）
+        """增量更新思考内容
 
         直接通过 JavaScript 更新最后一个思考块内容，避免完整重渲染。
+        蛇形动画由 requestAnimationFrame 独立驱动，不受 DOM 重建影响。
         """
         if not hasattr(self.viewer, 'page'):
             return

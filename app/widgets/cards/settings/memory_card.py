@@ -6,6 +6,7 @@
 3. 关键文档 - 列表 + 拖拽添加
 """
 import os
+from typing import Dict
 
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
 from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextDocument, QKeyEvent

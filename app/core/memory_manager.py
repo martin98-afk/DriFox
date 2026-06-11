@@ -301,9 +301,13 @@ class MemoryManagerCore:
                 is_wd = file_path == wd_path
                 if is_wd:
                     has_root_doc = True
-                    lines.append(f"- {file_name} （项目根目录）{file_path}")
+                    lines.append(f"- {file_name} （项目根目录）./")
                 else:
-                    lines.append(f"- {file_name} ({file_path})")
+                    try:
+                        rel = Path(file_path).relative_to(Path(wd_path))
+                        lines.append(f"- {file_name} ({rel})")
+                    except ValueError:
+                        lines.append(f"- {file_name} ({file_path})")
         else:
             lines.append("- 暂无关键文档")
         lines.append("")

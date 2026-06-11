@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import QApplication
 from loguru import logger
 from openai import (
     OpenAI, BadRequestError, RateLimitError, APIError, APIConnectionError,
+    InternalServerError,
 )
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
@@ -469,6 +470,11 @@ class OpenAIChatWorker(QThread):
             self._permission_pending = None
             self._state.permission.pending_permission = None
 
+        # 🛡️ 请求 Qt 线程中断（替代 terminate() 的安全机制）
+        # 设置 isInterruptionRequested() 标志供 run() 检查，
+        # 线程在安全的检查点自行退出，避免 OS 级强杀。
+        self.requestInterruption()
+
         # 🛡️ 关闭流式响应连接，立即中断 worker 线程的 for chunk in response: 等待
         if self._current_response is not None:
             try:
@@ -678,6 +684,8 @@ class OpenAIChatWorker(QThread):
             else:  # False - 关闭思考
                 if t_param == "thinking":
                     extra_body["thinking"] = {"type": "disabled"}
+                    # 关闭思考时必须同时清理 thinking_budget，避免某些 API 将其理解为启用信号
+                    extra_body.pop("thinking_budget", None)
                 elif t_param == "thinking_budget":
                     extra_body.pop("thinking_budget", None)
                 # 关闭思考时必须移除 reasoning_effort
@@ -859,18 +867,21 @@ class OpenAIChatWorker(QThread):
 
                     # 先构造 question_result，再传入 _build_response_message_sequence，
                     # 避免 tool_results=None 被误判为"取消中断"场景而清空 tool_calls
+                    # ⚠️ arguments 必须保留原始 questions，否则渲染时折叠预览/展开表格都看不到参数
+                    question_questions = q.get("questions", [])
+                    question_args = {"questions": question_questions}
                     question_result = {
                         "role": "tool",
                         "tool_call_id": q["tool_call_id"],
                         "name": "question",
-                        "arguments": {},
+                        "arguments": question_args,
                         "content": self._pending_answer,
                         "success": True,
                     }
                     # 发射 tool_result_received，让 UI 在助理卡片中渲染可折叠工具块
                     result_obj = {"success": True, "content": self._pending_answer}
                     self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                             q["tool_call_id"], "question", {}, result_obj)
+                                             q["tool_call_id"], "question", question_args, result_obj)
                     response_sequence = self._build_response_message_sequence([question_result])
                     current_messages.extend(response_sequence)
                     current_session_messages.extend(response_sequence)
@@ -1486,10 +1497,13 @@ class OpenAIChatWorker(QThread):
                 is_server_overload = isinstance(e, APIError) and (
                         "2064" in error_str or "overload" in error_str.lower())
                 is_conn_error = isinstance(e, APIConnectionError)
+                # 通用 5xx：服务端临时故障（如 MiniMax 的 999/1000、OpenAI 500）应重试
+                is_internal_server_error = isinstance(e, InternalServerError)
 
                 should_retry = (
                         is_rate_limit or is_server_overload or is_conn_error or
-                        is_retryable_network or is_retryable_timeout or is_retryable_protocol
+                        is_retryable_network or is_retryable_timeout or is_retryable_protocol or
+                        is_internal_server_error
                 )
 
                 if should_retry and attempt < max_retries - 1:
@@ -1503,6 +1517,8 @@ class OpenAIChatWorker(QThread):
                         retry_reason = "RateLimit"
                     elif is_server_overload:
                         retry_reason = "ServerOverload"
+                    elif is_internal_server_error:
+                        retry_reason = "InternalServerError"
                     elif is_retryable_timeout:
                         retry_reason = "Timeout"
                     elif is_retryable_protocol:
@@ -1647,6 +1663,16 @@ class OpenAIChatWorker(QThread):
             tool_calls = getattr(delta, "tool_calls", None)
             if tool_calls:
                 tool_calls_found = True
+
+                # 🔧 检测到 tool_calls 时，强制冲刷已积累的内容批处理缓冲
+                # 避免：文本因不满 15 字符/50ms 阈值而滞留到流式结束才 emit，
+                # 然后流结束立即进入工具执行，导致内容 signal 排队在工具 signal 之后，
+                # 用户感知为"文本要等工具执行完才出现"
+                if _content_batch:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
+                    _content_batch_time = time.time()
+
                 for tc in tool_calls:
                     tc_id = tc.id
                     if tc_id is None:
@@ -1725,9 +1751,11 @@ class OpenAIChatWorker(QThread):
                                 self._current_tool_calls[tc_id]["_args_parsed"] = True
                                 self._tool_calls_buffer.pop(tc_id, None)
                                 # 流式中间状态：推送实际参数到 UI 更新预览
+                                # 使用 buffer 中的 name 而非局部 tool_name（后续 chunk 可能不含 name 字段）
+                                _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
                                     "tool_args_updated", self.tool_args_updated,
-                                    tc_id, tool_name, parsed_args
+                                    tc_id, _buf_name or "工具", parsed_args
                                 )
                             except json.JSONDecodeError:
                                 # 短参数的 JSON 解析失败，记录到等待队列
@@ -1740,9 +1768,10 @@ class OpenAIChatWorker(QThread):
                                         "_status": "loading",
                                         "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                     }
+                                    _buf_name = buffer["function"].get("name", tool_name)
                                     self._emit_with_callback(
                                         "tool_args_updated", self.tool_args_updated,
-                                        tc_id, tool_name, progress_args
+                                        tc_id, _buf_name or "工具", progress_args
                                     )
                                 if tc_id not in self._waiting_tool_params:
                                     self._waiting_tool_params[tc_id] = {
@@ -1763,9 +1792,10 @@ class OpenAIChatWorker(QThread):
                                     "_status": "loading",
                                     "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                 }
+                                _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
                                     "tool_args_updated", self.tool_args_updated,
-                                    tc_id, tool_name, progress_args
+                                    tc_id, _buf_name or "工具", progress_args
                                 )
                             # 放入等待队列，等流结束后一次性解析
                             if tc_id not in self._waiting_tool_params:
@@ -1865,9 +1895,10 @@ class OpenAIChatWorker(QThread):
                             logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
                         except Exception as e:
                             logger.debug(f"[MEM] 堆压缩失败: {e}")
-            # 性能优化：移除流式响应中的 processEvents()
-            # UI 更新应通过信号-槽机制自然处理，不应强制刷新
-            # if chunk_count % 5 == 0:
+            # processEvents() 从 worker 线程调用仅处理 worker 线程自身事件，
+            # 不会处理主线程事件队列中的跨线程 Qt 信号，因此对内容渲染无帮助。
+            # 核心修复见上方「检测到 tool_calls 时强制冲刷 _content_batch」。
+            # if chunk_count % 10 == 0:
             #     QCoreApplication.processEvents()
 
         # 非流式响应：usage 在 response 对象本身（而非 chunk）
@@ -1891,6 +1922,10 @@ class OpenAIChatWorker(QThread):
             self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
         if _content_batch:
             self._emit_with_callback("content_received", self.content_received, _content_batch)
+
+        # 尝试让主线程处理刚排队的 content_received 信号
+        # (注：从 worker 线程调用可能仅处理 worker 自身事件，主线程事件在下一轮 event loop 处理)
+        QCoreApplication.processEvents()
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
         # 在所有 chunk 接收完成后，再次尝试解析仍处于等待状态的 tool_calls

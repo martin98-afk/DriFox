@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from loguru import logger
 import requests
-from PyQt5.QtCore import pyqtSignal, QSize, Qt, QRect
+from PyQt5.QtCore import pyqtSignal, QSize, Qt, QRect, QTimer
 from PyQt5.QtGui import QIcon, QPainter, QColor, QFont
 from PyQt5.QtWidgets import (
     QWidget,
@@ -304,6 +304,9 @@ class ProviderListSettingCard(ExpandSettingCard):
     showAddProviderCard = pyqtSignal()  # 显示添加服务商卡片
     showEditProviderCard = pyqtSignal(str, dict)  # config_id, provider_info
 
+    # 重入屏障：防止 qconfig.set() → valueChanged → _refresh_items 重入同一对象
+    _is_deleting = False
+
     def __init__(
         self,
         icon: QIcon,
@@ -363,6 +366,10 @@ class ProviderListSettingCard(ExpandSettingCard):
                     break
 
     def _refresh_items(self):
+        # 重入屏障：_remove_provider 执行期间由值变更触发的同步调用直接返回，
+        # 真正的刷新由 _remove_provider 的 finally 块在 _is_deleting 恢复后调度
+        if self._is_deleting:
+            return
         self.providers = (
             qconfig.get(self.configItem).copy()
             if isinstance(qconfig.get(self.configItem), dict)
@@ -439,20 +446,31 @@ class ProviderListSettingCard(ExpandSettingCard):
         w.exec_()
 
     def _remove_provider(self, item: ProviderItem):
+        if self._is_deleting:
+            return  # 防止递归调用
         if item.config_id not in self.providers:
             return
-        del self.providers[item.config_id]
-        qconfig.set(self.configItem, self.providers, save=True)
-        self.viewLayout.removeWidget(item)
-        item.deleteLater()
-        self._adjustViewSize()
-        self.providerChanged.emit(self.providers)
-        # 如果删除的是默认服务商，则更新默认服务商
-        if self.default_provider == item.config_id or self.default_provider == item.provider_name:
-            keys = list(self.providers.keys())
-            self.default_provider = keys[0] if keys else ""
-            qconfig.set(self.defaultProviderItem, self.default_provider, save=True)
-            self.defaultProviderChanged.emit(self.default_provider)
+        self._is_deleting = True
+        try:
+            del self.providers[item.config_id]
+            qconfig.set(self.configItem, self.providers, save=True)
+            self.viewLayout.removeWidget(item)
+            item.deleteLater()
+            self._adjustViewSize()
+            self.providerChanged.emit(self.providers)
+            # 如果删除的是默认服务商，则更新默认服务商
+            if self.default_provider == item.config_id or self.default_provider == item.provider_name:
+                keys = list(self.providers.keys())
+                self.default_provider = keys[0] if keys else ""
+                qconfig.set(self.defaultProviderItem, self.default_provider, save=True)
+                self.defaultProviderChanged.emit(self.default_provider)
+        except Exception as e:
+            logger.error(f"[ProviderList] 删除服务商失败: {e}")
+            raise
+        finally:
+            self._is_deleting = False
+            # 在 _is_deleting 恢复后延迟刷新列表，确保 _refresh_items 不被屏障拦截
+            QTimer.singleShot(0, self._refresh_items)
 
     def _select_provider(self, item: ProviderItem):
         # 取消旧选中项的样式标记

@@ -26,6 +26,38 @@ SHELL_META = re.compile(r'[|;&`$()<>]')
 WINDOWS_SHELL_META = re.compile(r'[|;&`$()<>\^@!%]')
 
 # ============================================================
+# Windows Shell 内置命令（必须通过 shell 执行）
+# ============================================================
+# 这些命令是 cmd.exe 的内置命令，不是可执行文件，
+# 必须通过 shell=True 执行，否则会 FileNotFoundError
+WINDOWS_BUILTIN_COMMANDS = frozenset({
+    # 文件/目录操作
+    'dir', 'cd', 'chdir', 'md', 'mkdir', 'rd', 'rmdir',
+    'copy', 'move', 'ren', 'rename', 'del', 'erase', 'type',
+    'deltree', 'xcopy', 'robocopy', 'replace',
+    # I/O 命令
+    'echo', 'echo.',
+    # 系统命令
+    'cls', 'ver', 'date', 'time', 'prompt', 'set', 'path',
+    'append', 'assign', 'backcup', 'call', 'cdd', 'choice',
+    'cmd', 'color', 'comp', 'compact', 'convert', 'ctty',
+    'diskcomp', 'diskcopy', 'doskey', 'edit', 'edlin',
+    'expand', 'extract', 'fasthelp', 'fc', 'fdisk',
+    'find', 'findstr', 'fixfat', 'fonttool', 'format',
+    'graftabl', 'graphics', 'join', 'keyb', 'label',
+    'loadfix', 'loadhigh', 'lock', 'mem', 'mirror',
+    'mkdir', 'mode', 'more', 'msbackup', 'msd', 'nlsfunc',
+    'ntbackup', 'pathping', 'pause', 'ping', 'power',
+    'print', 'qbasic', 'rabios', 'recover', 'rem',
+    'restore', 'rsh', 'runas', 'setver', 'share',
+    'shift', 'smartdrv', 'sort', 'start', 'subst',
+    'sys', 'telnet', 'tftp', 'tint', 'title',
+    'tlntadmn', 'tracert', 'tree', 'undelete', 'unformat',
+    'unlock', 'verify', 'vol', 'wingding', 'win', 'wmic',
+    'xwizard', 'dos', 'hh',
+})
+
+# ============================================================
 # 命令白名单/黑名单
 # ============================================================
 # 自动允许的安全命令（只读/无害操作）
@@ -86,6 +118,7 @@ def needs_shell(command: str) -> bool:
     """检测命令是否需要 shell 解释器
 
     如果命令包含管道、重定向、命令链等 shell 特性，返回 True。
+    Windows 上还需要考虑 shell 内置命令（如 dir, type, copy 等）。
     """
     if not command or not command.strip():
         return False
@@ -93,8 +126,28 @@ def needs_shell(command: str) -> bool:
     cleaned = _remove_quoted(command)
 
     if sys.platform == "win32":
-        return bool(WINDOWS_SHELL_META.search(cleaned))
+        # 1. 检查是否有 shell 元字符
+        if WINDOWS_SHELL_META.search(cleaned):
+            return True
+        # 2. Windows 上：检查是否是 shell 内置命令
+        cmd_name = _extract_cmd_name(command)
+        if cmd_name and cmd_name in WINDOWS_BUILTIN_COMMANDS:
+            return True
+        return False
     return bool(SHELL_META.search(cleaned))
+
+
+def _extract_cmd_name(command: str) -> Optional[str]:
+    """提取命令名称（去掉路径前缀）"""
+    try:
+        parts = shlex.split(command)
+        if not parts:
+            return None
+        raw_cmd = parts[0].lower()
+        cmd_name = raw_cmd.replace('\\', '/').split('/')[-1]
+        return cmd_name
+    except ValueError:
+        return None
 
 
 def classify_command(command: str) -> str:
