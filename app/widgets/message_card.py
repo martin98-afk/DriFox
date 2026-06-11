@@ -85,6 +85,7 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import current_theme, scale_font_size, Colors, font_size_css, _get_global_font, fade_in_widget
 from app.widgets.render_helpers import (
     render_tool_block,
+    _TOOL_ICON_MAP,
 )
 
 # ======== Markdown 实例 ========
@@ -813,6 +814,74 @@ _THINK_SNAKE_SVG = (
     ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
     '</svg>'
 )
+
+
+def _render_tool_streaming_block(
+    tool_call_id: str,
+    tool_name: str,
+    preview: str,
+    char_count: int = 0,
+    completed: bool = False,
+) -> str:
+    """渲染工具流式调用块 HTML — 布局与正式工具块一致。
+
+    布局：[chevron] [icon] [tool_name] [金色蛇形SVG] | [参数预览 + 字符数]
+
+    Args:
+        tool_call_id: 工具调用 ID
+        tool_name: 原始工具名（如 read、mcp__playwright__browser_navigate）
+        preview: 预览文本
+        char_count: 参数字符数
+        completed: True=参数接收完成（隐藏蛇形动画），False=流式中
+    """
+    # MCP 工具名清理
+    is_mcp = tool_name.startswith("mcp__")
+    display_name = tool_name or ""
+    if is_mcp:
+        display_name = "__".join(display_name.split("__")[2:])
+    if not display_name:
+        display_name = "工具调用中"
+
+    # 图标与颜色：与 render_tool_block 保持一致
+    if is_mcp:
+        icon = "🌐"
+        title_color = "#00BCD4"
+    else:
+        icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+        title_color = "#FFA500"
+
+    # 流式态：蛇形圆环 + 状态文字；完成态：仅图标
+    if completed:
+        spinner_html = ""
+        status_hint = ""
+    else:
+        spinner_html = _THINK_SNAKE_SVG
+        status_hint = ' <span style="opacity:0.55; font-weight:400;">执行中</span>'
+
+    char_hint = f" ({char_count}字符)" if char_count > 0 else ""
+    preview_display = escape(preview) if preview else "准备中..."
+
+    streaming_attr = '' if completed else ' data-streaming="true"'
+
+    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}"{streaming_attr}>
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 0 auto;">
+            <span class="cm-collapsible__chevron" aria-hidden="true"></span>
+            <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(display_name)}</span>
+            {spinner_html}
+            {status_hint}
+        </span>
+        <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {preview_display}{char_hint}
+            </span>
+        </span>
+    </button>
+    <div class="cm-collapsible__body">
+        <div class="think-content loading" style="white-space: normal; word-break: break-word;">{preview_display}</div>
+    </div>
+</div>"""
 
 
 def _render_think_block(content: str, completed: bool = True) -> str:
@@ -2388,6 +2457,11 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .think-snake-arc {{
                     transform-origin: 12px 12px;
+                }}
+
+                /* 工具流式调用块 — 金色圆环动画背景 */
+                .tool-streaming-block[data-streaming="true"] .tool-block__summary {{
+                    background: rgba(255, 200, 50, 0.05);
                 }}
 
                 .tool-block {{
@@ -3986,10 +4060,22 @@ class PlainTextViewer(QWidget):
 
         menu.exec_(self.text_edit.mapToGlobal(pos))
 
-    def _copy_to_clipboard(self):
-        """复制内容到剪贴板"""
+    def _copy_to_clipboard(self, copy_selection: bool = True):
+        """复制内容到剪贴板
+
+        Args:
+            copy_selection: 为 True 时优先复制选中文本（上下文菜单标准行为），
+                            无选中时降级复制全文。
+                            为 False 时直接复制全文（工具栏按钮行为）。
+        """
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
+        if copy_selection:
+            cursor = self.text_edit.textCursor()
+            selected = cursor.selectedText()
+            if selected:
+                clipboard.setText(selected)
+                return
         clipboard.setText(self._text)
 
     def _convert_text_to_html(self, text: str) -> str:
@@ -4365,7 +4451,7 @@ class MessageCard(SimpleCardWidget):
                 (
                     get_icon("复制"),
                     "复制",
-                    lambda: self.actionRequested.emit(self.get_plain_text(), "copy"),
+                    lambda: self._copy_user_message(),
                 ),
                 (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
                 (get_icon("删除"), "删除", self.deleteRequested.emit),
@@ -5259,6 +5345,15 @@ class MessageCard(SimpleCardWidget):
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
 
+    def _copy_user_message(self):
+        """用户卡片工具栏「复制」：直接复制全文，不走 actionRequested 信号链
+
+        避免信号链引起的 _on_code_action（clipboard.setText + InfoBar 动画），
+        消除主线程阻塞（大文本 clipboard 操作）和 InfoBar 滑入动画叠加造成的闪烁。
+        """
+        if hasattr(self.viewer, '_copy_to_clipboard'):
+            self.viewer._copy_to_clipboard(copy_selection=False)
+
     def get_plain_text(self) -> str:
         if self.role == "assistant":
             return content_to_text(self._content_data, include_tool_results=True)
@@ -5296,6 +5391,152 @@ class MessageCard(SimpleCardWidget):
         与文本、工具结果自然交错排列。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
+
+    # ── 工具流式调用块 ──────────────────────────────────
+
+    def _inject_tool_streaming_html(
+        self, tool_call_id: str, tool_name: str, preview: str,
+        char_count: int = 0, completed: bool = False,
+    ):
+        """通过 JS 注入/更新工具流式块
+
+        已有同 ID 块时原地更新文本，不重建 DOM，保持折叠/展开状态不丢失。
+        """
+        if not hasattr(self, 'viewer') or not self.viewer:
+            return
+
+        try:
+            block_html = _render_tool_streaming_block(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                preview=preview,
+                char_count=char_count,
+                completed=completed,
+            )
+            safe_html = json.dumps(block_html).decode('utf-8')
+            streaming_flag = 'true' if not completed else 'false'
+            js_code = f"""
+            (function() {{
+                var c = document.getElementById('content-placeholder');
+                if (!c) return;
+                var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                if (el) {{
+                    // 已有块：从新 HTML 提取 summary 和 body，替换内容保留 chevron
+                    var tmp = document.createElement('div');
+                    tmp.innerHTML = {safe_html};
+                    var newBtn = tmp.querySelector('.cm-collapsible__summary');
+                    var btn = el.querySelector('.cm-collapsible__summary');
+                    if (btn && newBtn) {{
+                        var chevron = btn.querySelector('.cm-collapsible__chevron');
+                        var chevronHtml = chevron ? chevron.outerHTML : '';
+                        // 从新按钮中取 chevron 之外的全部 HTML
+                        var newInner = newBtn.innerHTML;
+                        var tmpChevron = newBtn.querySelector('.cm-collapsible__chevron');
+                        if (tmpChevron) {{
+                            newInner = newInner.replace(tmpChevron.outerHTML, '');
+                        }}
+                        btn.innerHTML = chevronHtml + newInner;
+                    }}
+                    var newBody = tmp.querySelector('.cm-collapsible__body');
+                    var body = el.querySelector('.cm-collapsible__body');
+                    if (body && newBody) {{
+                        body.innerHTML = newBody.innerHTML;
+                    }}
+                    el.setAttribute('data-streaming', '{streaming_flag}');
+                    reportHeight();
+                }} else {{
+                    // 新块：完整创建
+                    var d = document.createElement('div');
+                    d.setAttribute('data-tool-injected', 'true');
+                    d.setAttribute('data-tool-streaming', 'true');
+                    d.innerHTML = {safe_html};
+                    c.appendChild(d);
+                    reportHeight();
+                }}
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
+    def update_tool_streaming(
+        self, tool_call_id: str, tool_name: str, partial_args: dict = None,
+    ):
+        """更新工具流式参数预览 — 更新已注入的工具块预览文本
+
+        Args:
+            tool_call_id: 工具调用唯一 ID
+            tool_name: 工具名
+            partial_args: 部分参数
+        """
+        preview = ""
+        char_count = 0
+        if partial_args:
+            hint = partial_args.get("_preview_hint")
+            if hint:
+                preview = str(hint)
+                char_count = len(preview)
+            else:
+                display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
+                if display:
+                    try:
+                        args_str = json.dumps(display).decode('utf-8')
+                        if len(args_str) > 100:
+                            preview = args_str[:100] + "..."
+                        else:
+                            preview = args_str
+                        char_count = len(args_str)
+                    except Exception:
+                        preview = "..."
+                else:
+                    preview = "正在准备参数..."
+        self._inject_tool_streaming_html(
+            tool_call_id, tool_name, preview, char_count, completed=False
+        )
+
+    def finish_tool_streaming(
+        self, tool_call_id: str, tool_name: str, arguments: dict = None,
+    ):
+        """工具参数接收完成 — 将流式块转为完成态，显示工具名和完整参数
+
+        Args:
+            tool_call_id: 工具调用唯一 ID
+            tool_name: 工具名
+            arguments: 完整参数
+        """
+        preview = ""
+        char_count = 0
+        if arguments:
+            display = {k: v for k, v in arguments.items() if not k.startswith("_")}
+            if display:
+                try:
+                    args_str = json.dumps(display).decode('utf-8')
+                    if len(args_str) > 100:
+                        preview = args_str[:100] + "..."
+                    else:
+                        preview = args_str
+                    char_count = len(args_str)
+                except Exception:
+                    preview = "..."
+        self._inject_tool_streaming_html(
+            tool_call_id, tool_name, preview, char_count, completed=True
+        )
+
+    def remove_tool_streaming(self, tool_call_id: str):
+        """移除工具流式块 — 工具执行完成后清理"""
+        if not hasattr(self, 'viewer') or not self.viewer:
+            return
+        try:
+            js_code = f"""
+            (function() {{
+                var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                if (el) el.remove();
+                reportHeight();
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
 
     def append_reasoning(self, text: str):
         """追加思考内容到当前最后一个思考块（流式模式）

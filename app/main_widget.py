@@ -8498,23 +8498,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """工具参数流式更新 — 流式接收过程中，参数逐块解析完成后触发"""
         if getattr(self, "_is_destroyed", False):
             return
-        if not self._tool_floating_widget:
+
+        # question / todowrite / todoread 有自己的 UI 处理，不创建流式块
+        if tool_name in ("question", "todowrite", "todoread"):
             return
-        # 如果是内部进度消息（带 _preview_hint），显示友好文字
-        hint = partial_args.get("_preview_hint")
-        if hint:
-            self._tool_floating_widget.update_progress(hint)
-            return
-        # 过滤掉内部字段，只显示实际参数
-        display_args = {k: v for k, v in partial_args.items() if not k.startswith("_")}
-        if display_args:
-            args_str = json.dumps(display_args).decode("utf-8")
-            if len(args_str) > 80:
-                args_str = args_str[:80] + "..."
-            self._tool_floating_widget.update_progress(f"参数: {args_str}")
-        else:
-            # 全是内部字段，显示友好消息
-            self._tool_floating_widget.update_progress("正在准备参数...")
+
+        # 注入到当前助手卡片的消息内容中（替代独立 ToolFloatingWidget）
+        card = self._find_latest_assistant_card()
+        if card and getattr(card, 'update_tool_streaming', None):
+            card.update_tool_streaming(tool_call_id, tool_name, partial_args)
 
     def _on_tool_call_started(
         self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None
@@ -8530,7 +8522,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
 
-        # AutoLoop 运行期间不弹出浮动组件
+        # AutoLoop 运行期间不显示工具调用 UI
         if self._is_auto_loop_running:
             return
 
@@ -8548,9 +8540,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._card_manager.show_card("todo", self._window_id)
             return
 
-        # 使用 CardManager 显示工具卡片
-        self._card_manager.show_card("tool", self._window_id)
-        self._tool_floating_widget.start_tool(tool_name, arguments)
+        # 工具参数接收完成，将消息卡片中的流式块转为完成态
+        card = self._find_latest_assistant_card()
+        if card and getattr(card, 'finish_tool_streaming', None):
+            card.finish_tool_streaming(tool_call_id, tool_name, arguments)
 
     def _on_sub_agent_compact_closed(self):
         """子智能体紧凑卡片关闭时清理状态"""
@@ -9028,11 +9021,14 @@ class OpenAIChatToolWindow(ToolWindow):
             worker._is_cancelled = True
             worker._tool_execution_cancelled = True
 
-        self._tool_floating_widget.finish_tool("用户中止", success=False)
-
         tool_call_id = getattr(self, "_current_tool_call_id", None)
         tool_name = getattr(self, "_current_tool_name", "unknown")
         tool_args = getattr(self, "_current_tool_args", {})
+
+        # 同时移除消息卡片中的工具流式块
+        card = self._find_latest_assistant_card()
+        if card and getattr(card, 'remove_tool_streaming', None) and tool_call_id:
+            card.remove_tool_streaming(tool_call_id)
 
         if tool_call_id and self._current_assistant_card:
             self._current_assistant_card.append_tool_result(
@@ -9066,7 +9062,9 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 error_msg = str(getattr(result, "error", "") or "")
             if "用户中止" in error_msg:
-                self._tool_floating_widget.finish_tool("用户中止", success=False)
+                card = self._find_latest_assistant_card()
+                if card and getattr(card, 'remove_tool_streaming', None):
+                    card.remove_tool_streaming(tool_call_id)
                 return
             return
 
@@ -9104,12 +9102,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
                 pass
         elif tool_name not in ("question",):
-            # 其他工具：始终调用 finish_tool 记录完成状态
-            # 卡片内部会根据 _suppress_visible 决定是否显示（及2秒后自动隐藏）
-            self._tool_floating_widget.finish_tool(content[:200], success)
-            if not self._is_system_card_visible:
-                self._tool_floating_widget.show_if_needed(elapsed)
-                self._tool_floating_widget.show_when_ready()
+            # 移除消息卡片中的工具流式块（替换为下方的正式工具结果块）
+            card = self._find_latest_assistant_card()
+            if card and getattr(card, 'remove_tool_streaming', None):
+                card.remove_tool_streaming(tool_call_id)
 
         # 提取 diff 字段（ToolResult 对象或 dict 格式）
         diff_val = None

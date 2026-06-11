@@ -1751,9 +1751,11 @@ class OpenAIChatWorker(QThread):
                                 self._current_tool_calls[tc_id]["_args_parsed"] = True
                                 self._tool_calls_buffer.pop(tc_id, None)
                                 # 流式中间状态：推送实际参数到 UI 更新预览
+                                # 使用 buffer 中的 name 而非局部 tool_name（后续 chunk 可能不含 name 字段）
+                                _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
                                     "tool_args_updated", self.tool_args_updated,
-                                    tc_id, tool_name, parsed_args
+                                    tc_id, _buf_name or "工具", parsed_args
                                 )
                             except json.JSONDecodeError:
                                 # 短参数的 JSON 解析失败，记录到等待队列
@@ -1766,9 +1768,10 @@ class OpenAIChatWorker(QThread):
                                         "_status": "loading",
                                         "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                     }
+                                    _buf_name = buffer["function"].get("name", tool_name)
                                     self._emit_with_callback(
                                         "tool_args_updated", self.tool_args_updated,
-                                        tc_id, tool_name, progress_args
+                                        tc_id, _buf_name or "工具", progress_args
                                     )
                                 if tc_id not in self._waiting_tool_params:
                                     self._waiting_tool_params[tc_id] = {
@@ -1789,9 +1792,10 @@ class OpenAIChatWorker(QThread):
                                     "_status": "loading",
                                     "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                 }
+                                _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
                                     "tool_args_updated", self.tool_args_updated,
-                                    tc_id, tool_name, progress_args
+                                    tc_id, _buf_name or "工具", progress_args
                                 )
                             # 放入等待队列，等流结束后一次性解析
                             if tc_id not in self._waiting_tool_params:
