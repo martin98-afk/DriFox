@@ -1663,6 +1663,16 @@ class OpenAIChatWorker(QThread):
             tool_calls = getattr(delta, "tool_calls", None)
             if tool_calls:
                 tool_calls_found = True
+
+                # 🔧 检测到 tool_calls 时，强制冲刷已积累的内容批处理缓冲
+                # 避免：文本因不满 15 字符/50ms 阈值而滞留到流式结束才 emit，
+                # 然后流结束立即进入工具执行，导致内容 signal 排队在工具 signal 之后，
+                # 用户感知为"文本要等工具执行完才出现"
+                if _content_batch:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
+                    _content_batch_time = time.time()
+
                 for tc in tool_calls:
                     tc_id = tc.id
                     if tc_id is None:
@@ -1881,10 +1891,11 @@ class OpenAIChatWorker(QThread):
                             logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
                         except Exception as e:
                             logger.debug(f"[MEM] 堆压缩失败: {e}")
-            # 每处理 10 个 chunk 让渡一次 CPU 给主线程，确保 content_received 等信号
-            # 能被主线程及时处理并更新 DOM，避免堆积到工具执行完毕后一次性渲染
-            if chunk_count % 10 == 0:
-                QCoreApplication.processEvents()
+            # processEvents() 从 worker 线程调用仅处理 worker 线程自身事件，
+            # 不会处理主线程事件队列中的跨线程 Qt 信号，因此对内容渲染无帮助。
+            # 核心修复见上方「检测到 tool_calls 时强制冲刷 _content_batch」。
+            # if chunk_count % 10 == 0:
+            #     QCoreApplication.processEvents()
 
         # 非流式响应：usage 在 response 对象本身（而非 chunk）
         if not self.stream:
@@ -1908,7 +1919,8 @@ class OpenAIChatWorker(QThread):
         if _content_batch:
             self._emit_with_callback("content_received", self.content_received, _content_batch)
 
-        # 让渡主线程处理刚排队的 content_received 信号，确保文本在工具执行前渲染
+        # 尝试让主线程处理刚排队的 content_received 信号
+        # (注：从 worker 线程调用可能仅处理 worker 自身事件，主线程事件在下一轮 event loop 处理)
         QCoreApplication.processEvents()
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
