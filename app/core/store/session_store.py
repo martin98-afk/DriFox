@@ -681,14 +681,18 @@ class SessionStore:
 
     # ==================== 输入历史操作（委托给 InputHistoryRepository）====================
 
-    def add_input_history(self, content: str) -> bool:
+    def add_input_history(self, content: str, attachments: Optional[list] = None) -> bool:
         """添加输入历史"""
         if self._input_history_repo:
-            return self._input_history_repo.add(content)
+            return self._input_history_repo.add(content, attachments)
         return False
 
-    def get_input_history(self, limit: int = 50):
-        """获取输入历史列表"""
+    def get_input_history(self, limit: int = 50) -> list:
+        """获取输入历史列表（最新在前）
+
+        Returns:
+            list[dict]: 每个元素含 ``text`` 和 ``attachments`` 键
+        """
         if self._input_history_repo:
             return self._input_history_repo.get_all(limit)
         return []

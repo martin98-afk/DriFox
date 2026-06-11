@@ -1943,6 +1943,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._attach_layout.setSpacing(3)
         self._attach_layout.addStretch()
         self._attachments: list[str] = []
+        self._history_working_attachments: list[str] = []  # 进入历史模式时保存的附件（退出时恢复）
         card_layout.addWidget(self._attach_container)
 
         # 输入框（融入卡片，无边框）
@@ -1966,6 +1967,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.atTriggered.connect(self._on_at_triggered)
         self.input_area.atDismissed.connect(self._on_at_dismissed)
         self.input_area.files_dropped.connect(self._on_files_dropped)
+        self.input_area.enteringHistoryMode.connect(self._on_entering_history_mode)
+        self.input_area.historyAttachmentsRestored.connect(self._on_history_attachments_restored)
+        self.input_area.historyModeExited.connect(self._on_history_mode_exited)
         card_layout.addWidget(self.input_area)
 
         # 加载输入历史
@@ -8188,16 +8192,43 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-    def _record_input_history(self, text: str):
-        """记录用户输入到历史数据库"""
+    def _record_input_history(self, text: str, attachments: Optional[list] = None):
+        """记录用户输入（含附件路径）到历史数据库"""
         try:
             if hasattr(self, "session_store") and self.session_store:
-                self.session_store.add_input_history(text)
+                self.session_store.add_input_history(text, attachments)
                 # 更新输入框的历史缓存
                 history = self.session_store.get_input_history()
                 self.input_area.load_history(history)
         except Exception:
             pass
+
+    # ==================== 历史模式附件管理 ====================
+
+    def _on_entering_history_mode(self):
+        """历史浏览模式即将进入 — 保存当前附件，退出时恢复"""
+        self._history_working_attachments = self._attachments.copy()
+
+    def _on_history_attachments_restored(self, paths: list):
+        """历史浏览模式切换条目 — 恢复对应的附件芯片
+
+        在历史模式中切换条目时，清理当前所有附件芯片，
+        然后根据历史条目保存的路径列表重建 AttachmentChip。
+        """
+        self._clear_attachments()
+        for p in paths:
+            if p not in self._attachments and os.path.exists(p):
+                self._attachments.append(p)
+                chip = AttachmentChip(p, self._attach_container)
+                chip.removed.connect(lambda path=p: self._remove_attachment(path))
+                self._attach_layout.insertWidget(
+                    self._attach_layout.count() - 1, chip
+                )
+        self._attach_container.setVisible(bool(self._attachments))
+
+    def _on_history_mode_exited(self):
+        """退出历史浏览模式 — 恢复进入时保存的附件"""
+        self._on_history_attachments_restored(self._history_working_attachments)
 
     # ==================== 附件管理 ====================
 
@@ -8315,8 +8346,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not user_text:
             user_text = ""
 
-        # ---- 记录输入到历史 ----
-        self._record_input_history(user_text)
+        # ---- 记录输入到历史（含当前附件路径）----
+        self._record_input_history(user_text, self._attachments.copy())
 
         # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
