@@ -3443,11 +3443,12 @@ class CodeWebViewer(QWebEngineView):
 
         try:
             is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
+            is_html = "HTML" in selected_filter or file_path.lower().endswith('.html')
             if is_png:
                 if not file_path.lower().endswith('.png'):
                     file_path += '.png'
                 self._export_as_image(file_path)
-            elif is_html or file_path.lower().endswith('.html'):
+            elif is_html:
                 if not file_path.lower().endswith('.html'):
                     file_path += '.html'
                 html_content = self._convert_md_to_html(content)
@@ -4361,11 +4362,11 @@ class MessageCard(SimpleCardWidget):
 
     def _setup_ui(self):
         main = QVBoxLayout(self)
-        main.setContentsMargins(6, 6, 6, 6)
-        main.setSpacing(8)
+        main.setContentsMargins(4, 4, 4, 4)
+        main.setSpacing(4)
         top = QHBoxLayout()
-        top.setContentsMargins(8, 2, 8, 2)
-        top.setSpacing(10)
+        top.setContentsMargins(4, 0, 4, 0)
+        top.setSpacing(6)
 
         av = QLabel(self)
         self._av_label = av
@@ -4516,8 +4517,8 @@ class MessageCard(SimpleCardWidget):
 
         self.options_widget = QWidget(self)
         self.options_layout = QVBoxLayout(self.options_widget)
-        self.options_layout.setContentsMargins(0, 8, 0, 0)
-        self.options_layout.setSpacing(8)
+        self.options_layout.setContentsMargins(0, 4, 0, 0)
+        self.options_layout.setSpacing(4)
         self.options_widget.setVisible(False)
         main.addWidget(self.options_widget)
 
@@ -4591,7 +4592,7 @@ class MessageCard(SimpleCardWidget):
             CardWidget {{
                 background-color: {self._theme["bg"]};
                 border: 1px solid {self._theme["border"]};
-                border-radius: 16px;
+                border-radius: 10px;
             }}
             """
         )
@@ -4628,7 +4629,7 @@ class MessageCard(SimpleCardWidget):
             CardWidget {{
                 background-color: {bg or self._base_bg};
                 border: 1px solid {border or self._base_border};
-                border-radius: 16px;
+                border-radius: 10px;
             }}
             """
         )

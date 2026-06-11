@@ -103,9 +103,6 @@ from app.widgets.cards.floating.sub_agent_floating_widget import (
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
-from app.widgets.cards.floating.tool_floating_widget import (
-    ToolFloatingWidget,
-)
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
@@ -201,8 +198,6 @@ class OpenAIChatToolWindow(ToolWindow):
     _tool_call_depth: int = 0
     _pending_tool_calls: int = 0
     _first_tool_result: bool = True
-    _tool_cancelled_by_user: bool = False
-    _cancelled_tool_call_id: Optional[str] = None
     _todo_floating_widget = None
     _question_floating_widget = None
     _question_tool_call_id = None
@@ -578,11 +573,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget,
         )
         self._bottom_card_container.add_card("question", self._question_floating_widget)
-
-        mgr.register_card(
-            self._window_id, ContainerType.BOTTOM, "tool", self._tool_floating_widget
-        )
-        self._bottom_card_container.add_card("tool", self._tool_floating_widget)
 
         mgr.register_card(
             self._window_id,
@@ -1099,9 +1089,6 @@ class OpenAIChatToolWindow(ToolWindow):
             and self._sub_agent_compact_widget
         ):
             self._sub_agent_compact_widget.set_opacity(opacity)
-        # 更新工具悬浮框
-        if hasattr(self, "_tool_floating_widget") and self._tool_floating_widget:
-            self._tool_floating_widget.set_opacity(opacity)
         # 更新问题悬浮框
         if self._question_floating_widget:
             self._question_floating_widget.set_opacity(opacity)
@@ -1546,12 +1533,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "todos": self._handle_todos_command,
         }
 
-        self._tool_floating_widget = ToolFloatingWidget(self)
-        self._tool_floating_widget.setVisible(False)
-        self._tool_floating_widget.cancelled.connect(self._on_tool_cancelled)
-
-        # 下方卡片容器 - 添加 Tool、SubAgentCompact 和 SubAgent(详细日志)
-        self._bottom_card_container.add_card("tool", self._tool_floating_widget)
+        # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
         self._bottom_card_container.add_card(
             "sub_agent_compact", self._sub_agent_compact_widget
         )
@@ -3880,12 +3862,10 @@ class OpenAIChatToolWindow(ToolWindow):
         return False
 
     def _restore_after_system_close(self):
-        """系统卡片关闭后，恢复 todo/tool/sub_agent 实时卡片"""
+        """系统卡片关闭后，恢复 todo/sub_agent 实时卡片"""
         if not self._is_any_system_card_visible():
             # 只有当所有系统卡片都关闭时才重置标志
             self._is_system_card_visible = False
-            # 解除工具卡片压制（内部会恢复显示）
-            self._tool_floating_widget.set_suppress_visible(False)
         # 恢复 todo（如果之前是显示的且还有内容）
         if (
             self._todo_was_visible_before_system
@@ -4794,10 +4774,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_loop_running_card, "_refresh_theme_style"
         ):
             self._auto_loop_running_card._refresh_theme_style()
-        # 刷新实时卡片主题（todo/tool/question/sub_agent/compact）
+        # 刷新实时卡片主题（todo/question/sub_agent/compact）
         for card in (
             self._todo_floating_widget,
-            self._tool_floating_widget,
             self._question_floating_widget,
             self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
@@ -5098,12 +5077,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._is_streaming = False
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
-        self._tool_cancelled_by_user = False
         self._toggle_send_stop(False)
-
-        if self._tool_floating_widget:
-            self._tool_floating_widget.clear()
-            self._tool_floating_widget.setVisible(False)
 
         if self._sub_agent_floating_widget:
             self._sub_agent_floating_widget.setVisible(False)
@@ -9000,46 +8974,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if sub_agent_mgr:
             sub_agent_mgr.task_finished.emit(task_id, result)
 
-    def _on_tool_cancelled(self):
-        """工具执行被用户中止 — 连接自 tool_floating_widget.cancelled 信号"""
-        if getattr(self, "_is_destroyed", False):
-            return
-        logger.info("[ToolFloatingWidget] Tool execution cancelled by user")
-
-        self._tool_cancelled_by_user = True
-        self._cancelled_tool_call_id = getattr(self, "_current_tool_call_id", None)
-
-        # 不停止流式接收，只标记 worker 跳过工具执行
-        # worker 收到标记后，在 _execute_all_tools 中会跳过剩余工具
-        # 并自动发送 "用户中止" 的 tool_result 给模型继续迭代
-        if (
-            self.backend
-            and self.backend._chat_engine
-            and self.backend._chat_engine._current_worker
-        ):
-            worker = self.backend._chat_engine._current_worker
-            worker._is_cancelled = True
-            worker._tool_execution_cancelled = True
-
-        tool_call_id = getattr(self, "_current_tool_call_id", None)
-        tool_name = getattr(self, "_current_tool_name", "unknown")
-        tool_args = getattr(self, "_current_tool_args", {})
-
-        # 同时移除消息卡片中的工具流式块
-        card = self._find_latest_assistant_card()
-        if card and getattr(card, 'remove_tool_streaming', None) and tool_call_id:
-            card.remove_tool_streaming(tool_call_id)
-
-        if tool_call_id and self._current_assistant_card:
-            self._current_assistant_card.append_tool_result(
-                tool_name=tool_name,
-                arguments=tool_args,
-                result="[工具执行已被用户中止]",
-                success=False,
-                tool_call_id=tool_call_id,
-            )
-            self._scroll_to_bottom()
-
     def _on_tool_result_received(
         self, tool_call_id: str, tool_name: str, arguments: dict, result: Any
     ):
@@ -9051,22 +8985,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # AutoLoop 模式：只记录日志，不操作 UI
             if self._auto_loop_running_card:
                 self._auto_loop_running_card.append_log(f"工具完成: {tool_name}")
-
-        if (
-            self._tool_cancelled_by_user
-            and tool_call_id == self._cancelled_tool_call_id
-        ):
-            # 支持 dict 和 ToolResult 两种格式
-            if isinstance(result, dict):
-                error_msg = result.get("error", "") or ""
-            else:
-                error_msg = str(getattr(result, "error", "") or "")
-            if "用户中止" in error_msg:
-                card = self._find_latest_assistant_card()
-                if card and getattr(card, 'remove_tool_streaming', None):
-                    card.remove_tool_streaming(tool_call_id)
-                return
-            return
 
         elapsed = (
             time.time() - self._current_tool_start_time
@@ -9222,8 +9140,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._is_streaming = False
-        self._tool_cancelled_by_user = False
-        self._cancelled_tool_call_id = None
         self._toggle_send_stop(False)
 
         # 写入模型名称到卡片和 session 消息
@@ -9418,18 +9334,12 @@ class OpenAIChatToolWindow(ToolWindow):
         QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
     def _on_engine_error(self, error: str):
-        self._tool_cancelled_by_user = False
-
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.set_error_state(True, error_message=error)
             self._current_assistant_card.update_content(error)
 
         self._is_streaming = False
-
-        if self._tool_floating_widget:
-            self._tool_floating_widget.clear()
-            self._tool_floating_widget.setVisible(False)
 
         self._toggle_send_stop(False)
 
@@ -10547,7 +10457,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_stop_clicked(self):
         if getattr(self, "_is_destroyed", False):
             return
-        self._tool_cancelled_by_user = False
         # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
         self._topic_summary_cancelled = True
 
@@ -10562,10 +10471,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.cancel_streaming()
 
         self._is_streaming = False
-
-        if self._tool_floating_widget:
-            self._tool_floating_widget.clear()
-            self._tool_floating_widget.setVisible(False)
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:

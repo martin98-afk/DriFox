@@ -12,7 +12,6 @@ from app.widgets.cards.settings.memory_card import MemoryCardContent
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 
 # 悬浮组件（已迁移到 cards/floating/）
-from app.widgets.cards.floating.tool_floating_widget import ToolFloatingWidget
 from app.widgets.cards.floating.sub_agent_floating_widget import SubAgentFloatingWidget
 from app.widgets.cards.floating.todo_floating_widget import TodoFloatingWidget
 from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget
@@ -40,7 +39,6 @@ __all__ = [
     "create_welcome_card",
     "ModelConfigCard",
     # 悬浮组件
-    "ToolFloatingWidget",
     "SubAgentFloatingWidget",
     "TodoFloatingWidget",
     "QuestionFloatingWidget",
