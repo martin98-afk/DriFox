@@ -1881,10 +1881,10 @@ class OpenAIChatWorker(QThread):
                             logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
                         except Exception as e:
                             logger.debug(f"[MEM] 堆压缩失败: {e}")
-            # 性能优化：移除流式响应中的 processEvents()
-            # UI 更新应通过信号-槽机制自然处理，不应强制刷新
-            # if chunk_count % 5 == 0:
-            #     QCoreApplication.processEvents()
+            # 每处理 10 个 chunk 让渡一次 CPU 给主线程，确保 content_received 等信号
+            # 能被主线程及时处理并更新 DOM，避免堆积到工具执行完毕后一次性渲染
+            if chunk_count % 10 == 0:
+                QCoreApplication.processEvents()
 
         # 非流式响应：usage 在 response 对象本身（而非 chunk）
         if not self.stream:
@@ -1907,6 +1907,9 @@ class OpenAIChatWorker(QThread):
             self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
         if _content_batch:
             self._emit_with_callback("content_received", self.content_received, _content_batch)
+
+        # 让渡主线程处理刚排队的 content_received 信号，确保文本在工具执行前渲染
+        QCoreApplication.processEvents()
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
         # 在所有 chunk 接收完成后，再次尝试解析仍处于等待状态的 tool_calls

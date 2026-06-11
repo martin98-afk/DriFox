@@ -869,21 +869,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def _handle_tool_start_ui_sync(
         self, tool_call_id: str, tool_name: str, arguments: object, round_id: str
     ):
-        """工具开始时的 UI 同步处理（性能优化：移除阻塞调用）
-
-        修复前：使用 BlockingQueuedConnection + sendPostedEvents + processEvents
-        导致工具执行时 UI 线程被阻塞，出现卡顿。
-
-        修复后：使用 QueuedConnection + 延迟刷新，UI 通过正常事件循环更新，
-        不再强制同步等待。
-        """
+        """工具开始时的 UI 同步处理"""
         self._on_tool_call_started(tool_call_id, tool_name, arguments or {}, round_id)
-        # 性能优化：移除强制同步刷新，让 UI 通过正常事件循环自然更新
-        # 原代码会导致后台线程阻塞主线程，造成卡顿
-        # if self._tool_floating_widget:
-        #     self._tool_floating_widget.repaint()
-        # self.repaint()
-        # QApplication.processEvents()
+        # 🔧 处理等待的信号：确保排在前面的 content_received 信号（文本内容）
+        # 在工具执行前被主线程处理并渲染到 DOM，避免文本延迟到工具执行完毕才显示
+        # 注意：此处的 processEvents 在主线程运行，不会阻塞后台 worker
+        QApplication.processEvents()
 
     def _get_chat_cards_for_engine(self):
         cards = []
