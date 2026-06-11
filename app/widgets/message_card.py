@@ -802,6 +802,19 @@ _CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而�
                           "总结一下", "也就是说", "最终")
 
 
+_THINK_SNAKE_SVG = (
+    '<svg class="think-snake" width="18" height="18" viewBox="0 0 24 24">'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.2)" stroke-width="2.5"'
+    ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.55)" stroke-width="2.5"'
+    ' stroke-linecap="round" stroke-dasharray="12 38" class="think-snake-arc think-snake-body" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,1)" stroke-width="2.5"'
+    ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
+    '</svg>'
+)
+
+
 def _render_think_block(content: str, completed: bool = True) -> str:
     # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
     expanded = False
@@ -809,9 +822,9 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     # ── 标签分类（完成时才分类，流式过程只显示💡） ──
     if completed:
         tag = _classify_think_tag(content)
-        status_text = f"💡 {escape(tag)}" if tag else "💡"
+        status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
     else:
-        status_text = "💡"
+        status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
         tag = ""  # 流式不分类
 
     # ── 预览：完成时结论句+累加，流式时简单截断 ──
@@ -829,7 +842,8 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     # 获取全局字体样式
     font_style = _get_think_block_styles()
 
-    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}">
+    streaming_attr = ' data-streaming="true"' if not completed else ''
+    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}"{streaming_attr}>
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
@@ -854,10 +868,10 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
     if completed:
         tag = _classify_think_tag(content)
-        status_text = f"💡 {escape(tag)}" if tag else "💡"
+        status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
         preview = _get_think_preview(content)
     else:
-        status_text = "💡"
+        status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
         preview = _get_think_preview(content)
 
     expanded_attr = "true" if expanded else "false"
@@ -869,7 +883,8 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # 获取全局字体样式
     font_style = _get_think_block_styles()
 
-    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}">
+    streaming_attr = ' data-streaming="true"' if not completed else ''
+    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}"{streaming_attr}>
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
@@ -2361,6 +2376,24 @@ class CodeWebViewer(QWebEngineView):
                 @keyframes think-shimmer {{
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
+                }}
+                /* 思考中蛇形爬行动画 */
+                .think-block[data-streaming="true"] .think-block__summary {{
+                    background: rgba(255, 255, 255, 0.04);
+                }}
+                .think-snake {{
+                    display: inline-block;
+                    vertical-align: middle;
+                    margin-right: 2px;
+                }}
+                .think-snake-arc {{
+                    animation: snake-crawl 1.5s linear infinite;
+                    transform-origin: 12px 12px;
+                }}
+                .think-snake-body {{ animation-delay: -0.18s; }}
+                .think-snake-head {{ animation-delay: -0.35s; }}
+                @keyframes snake-crawl {{
+                    to {{ stroke-dashoffset: -50.265; }}
                 }}
 
                 .tool-block {{
