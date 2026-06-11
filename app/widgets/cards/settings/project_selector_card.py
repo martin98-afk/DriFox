@@ -6,6 +6,7 @@
 from typing import Dict
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QSizePolicy,
@@ -58,6 +59,60 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
+class _CircleAvatar(QWidget):
+    """使用 QPainter 绘制的圆形项目头像，替代 QLabel + CSS border-radius
+
+    Qt QSS 在小尺寸（24×24）上同时渲染 border + border-radius 时存在
+    抗锯齿走样问题，导致圆形不够圆。本类用 QPainter 精确绘制，保证像素完美。
+    """
+
+    def __init__(self, text: str, color: str, parent=None):
+        super().__init__(parent)
+        self._text = text[0] if text else "?"
+        # get_project_color() 返回 "rgba(r,g,b,a)" 格式，
+        # QColor(string) 不解析此 CSS 格式，需拆解为数值构造
+        self._color = self._parse_rgba(color)
+        self.setFixedSize(24, 24)
+
+    @staticmethod
+    def _parse_rgba(rgba_str: str) -> QColor:
+        """解析 "rgba(r,g,b,a)" 字符串为 QColor，失败时返回灰色"""
+        if rgba_str.startswith("#"):
+            return QColor(rgba_str)
+        try:
+            import re
+            m = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)', rgba_str)
+            if m:
+                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                a = int(m.group(4)) if m.group(4) else 255
+                return QColor(r, g, b, a)
+        except Exception:
+            pass
+        return QColor(128, 128, 128)  # fallback 灰色
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+        rect = self.rect()
+        # 留出 1px 边距使 2px 宽度的画笔不超出 widget 边界
+        draw_rect = rect.adjusted(1, 1, -1, -1)
+
+        # 圆形背景
+        painter.setBrush(self._color)
+        painter.setPen(QPen(QColor(255, 255, 255, 38), 2))  # rgba(255,255,255,0.15)
+        painter.drawEllipse(draw_rect)
+
+        # 居中文字
+        painter.setPen(Qt.white)
+        font = painter.font()
+        font.setPixelSize(scale_font_size(12))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(rect, Qt.AlignCenter, self._text)
+
+
 class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
     clicked = pyqtSignal(str)
@@ -85,20 +140,9 @@ class ProjectItem(QWidget):
         layout.setSpacing(6)
 
         # 项目彩色圆形标识（首字符 + 项目专属色）
+        # 使用 QPainter 绘制的 _CircleAvatar，避免 QSS border-radius 走样
         first_char = self._name.strip()[0] if self._name.strip() else "?"
-        self._avatar_label = QLabel(first_char, self)
-        self._avatar_label.setFixedSize(24, 24)
-        self._avatar_label.setAlignment(Qt.AlignCenter)
-        self._avatar_label.setStyleSheet(f"""
-            QLabel {{
-                background-color: {self._project_color};
-                color: white;
-                border-radius: 12px;
-                border: 2px solid rgba(255, 255, 255, 0.15);
-                font-size: {scale_font_size(12)}px;
-                font-weight: bold;
-            }}
-        """)
+        self._avatar_label = _CircleAvatar(first_char, self._project_color, self)
         layout.addWidget(self._avatar_label)
 
         # 中间：项目名 + 根目录（垂直布局）
