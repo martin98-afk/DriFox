@@ -141,10 +141,15 @@ class MCPClientManager:
             return future.result(timeout=timeout)
         except asyncio.TimeoutError:
             raise TimeoutError(f"协程执行超时（{timeout}秒）")
+        except asyncio.CancelledError:
+            # 🛡️ 透传取消信号，不拦截
+            # 强制停止对话时 asyncio 会抛出 CancelledError（Python 3.11+ 是 BaseException），
+            # 必须透传而非捕获，否则取消语义丢失并导致 Qt 事件循环收到未预期异常。
+            raise
         except ExceptionGroup as e:
             # 处理 ExceptionGroup（Python 3.11+）
             raise _extract_real_error(e)
-        except BaseException as e:
+        except Exception as e:
             raise _extract_real_error(e)
 
     # ── 连接生命周期（持久 Task 模式）──────────────

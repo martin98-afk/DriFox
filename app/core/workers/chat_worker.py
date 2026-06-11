@@ -469,6 +469,11 @@ class OpenAIChatWorker(QThread):
             self._permission_pending = None
             self._state.permission.pending_permission = None
 
+        # 🛡️ 请求 Qt 线程中断（替代 terminate() 的安全机制）
+        # 设置 isInterruptionRequested() 标志供 run() 检查，
+        # 线程在安全的检查点自行退出，避免 OS 级强杀。
+        self.requestInterruption()
+
         # 🛡️ 关闭流式响应连接，立即中断 worker 线程的 for chunk in response: 等待
         if self._current_response is not None:
             try:

@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 
-from PyQt5.QtCore import QThread, pyqtSignal, QEventLoop
+from PyQt5.QtCore import QThread, pyqtSignal, QEventLoop, QTimer
 from loguru import logger
 
 from app.core.engines.auto_loop import (
@@ -521,9 +521,16 @@ class AutoLoopWorker(QThread):
             if worker:
                 loop = QEventLoop()
                 worker.finished.connect(loop.quit)
+                # 🛡️ 超时保护：60 秒后强制退出 QEventLoop，防止 worker 卡死时
+                # QEventLoop.exec_() 永不返回，进而触发外部的 worker.terminate() 崩溃。
+                timeout_timer = QTimer()
+                timeout_timer.setSingleShot(True)
+                timeout_timer.timeout.connect(loop.quit)
+                timeout_timer.start(60000)
                 if not worker.isRunning():
                     loop.quit()
                 loop.exec_()
+                timeout_timer.stop()
             else:
                 self._adapter.wait_for_completion(timeout=300)
 
@@ -575,9 +582,15 @@ class AutoLoopWorker(QThread):
             if worker:
                 loop = QEventLoop()
                 worker.finished.connect(loop.quit)
+                # 🛡️ 超时保护：60 秒后强制退出 QEventLoop
+                timeout_timer = QTimer()
+                timeout_timer.setSingleShot(True)
+                timeout_timer.timeout.connect(loop.quit)
+                timeout_timer.start(60000)
                 if not worker.isRunning():
                     loop.quit()
                 loop.exec_()
+                timeout_timer.stop()
         except Exception as e:
             self.log_signal.emit(f"⚠️ 强制更新失败: {e}")
             return False

@@ -1,4 +1,5 @@
 # app/core/conversation/executor.py
+import threading
 from typing import Any, Callable, Dict, List, Optional, Type
 
 from loguru import logger
@@ -35,6 +36,7 @@ class ConversationExecutor:
         self._current_worker: Optional[Any] = None  # 不再硬编码 OpenAIChatWorker
         self._is_streaming = False
         self._finalize_worker: Optional[Any] = None  # 两阶段停止：保存 worker 供 finalize_stop() 使用
+        self._stop_lock = threading.Lock()  # 🛡️ 防止 cancel_worker/finalize_stop 多线程并发
 
     @property
     def is_streaming(self) -> bool:
@@ -193,31 +195,32 @@ class ConversationExecutor:
         不等待 worker 线程结束，不获取中断消息，不清理资源。
         调用后需在适当时机调用 finalize_stop() 完成后续操作。
         """
-        self._is_streaming = False
-        worker = self._current_worker
-        self._current_worker = None
+        with self._stop_lock:
+            self._is_streaming = False
+            worker = self._current_worker
+            self._current_worker = None
 
-        if worker:
-            # 断开所有信号连接，防止已取消的 worker 继续向 UI 发送事件
-            # ⚠️ 重要：不断开 `finished` 信号（QThread.finished），
-            # AutoLoopWorker 的主循环 QEventLoop 依赖此信号退出 wait 状态。
-            # 断开它会导致 QEventLoop 永久挂起，进而触发 worker.terminate() 造成闪退。
-            for signal_name in ("retry_status", "error_occurred", "finished_with_content",
-                                "finished_with_messages", "content_received", "reasoning_content_received",
-                                 "tool_call_started", "tool_args_updated", "tool_result_received",
-                                 "question_asked", "permission_approval_requested", "thinking_started",
-                                 "retry_resolved", "compaction_status_changed"):
-                try:
-                    signal = getattr(worker, signal_name, None)
-                    if signal is not None:
-                        signal.disconnect()
-                except (TypeError, RuntimeError):
-                    pass
+            if worker:
+                # 断开所有信号连接，防止已取消的 worker 继续向 UI 发送事件
+                # ⚠️ 重要：不断开 `finished` 信号（QThread.finished），
+                # AutoLoopWorker 的主循环 QEventLoop 依赖此信号退出 wait 状态。
+                # 断开它会导致 QEventLoop 永久挂起，进而触发闪退。
+                for signal_name in ("retry_status", "error_occurred", "finished_with_content",
+                                    "finished_with_messages", "content_received", "reasoning_content_received",
+                                     "tool_call_started", "tool_args_updated", "tool_result_received",
+                                     "question_asked", "permission_approval_requested", "thinking_started",
+                                     "retry_resolved", "compaction_status_changed"):
+                    try:
+                        signal = getattr(worker, signal_name, None)
+                        if signal is not None:
+                            signal.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
 
-            # 设置取消标志（非阻塞，worker 线程会在下次检查时主动退出）
-            worker.cancel()
-            # 保存 worker 引用供 finalize_stop() 使用
-            self._finalize_worker = worker
+                # 设置取消标志（非阻塞，worker 线程会在下次检查时主动退出）
+                worker.cancel()
+                # 保存 worker 引用供 finalize_stop() 使用
+                self._finalize_worker = worker
 
     def finalize_stop(self) -> List[Dict]:
         """完成停止流程（阻塞操作）
@@ -225,11 +228,16 @@ class ConversationExecutor:
         在 cancel_worker() 调用后执行，等待 worker 线程结束并收集结果。
         此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
 
+        线程安全：_stop_lock 防止多线程（daemon 线程 + closeEvent）同时
+        调用 finalize_stop 导致 worker 双重重释放。
+
         Returns:
             被中断的消息列表
         """
-        worker = getattr(self, '_finalize_worker', None)
-        self._finalize_worker = None
+        # 🛡️ 加锁保护，防止与 daemon 线程的 finalize_stop 并发
+        with self._stop_lock:
+            worker = getattr(self, '_finalize_worker', None)
+            self._finalize_worker = None
 
         interrupted: List[Dict] = []
         if not worker:
@@ -238,12 +246,16 @@ class ConversationExecutor:
         # 等待 worker 线程结束（最多等 3 秒）
         if worker.isRunning():
             if not worker.wait(3000):
-                logger.warning(f"[ConversationExecutor] Worker did not finish within 3s, force quit")
+                logger.warning(f"[ConversationExecutor] Worker did not finish within 3s, requesting interruption")
                 worker.quit()
+                worker.requestInterruption()
                 if not worker.wait(1000):
-                    logger.warning(f"[ConversationExecutor] Worker force quit timeout, terminating")
-                    worker.terminate()
-                    worker.wait()
+                    # 🛡️ 安全停止：不调用 QThread.terminate()
+                    # terminate() 会强制杀死 OS 线程，如果 Worker 恰好持有 GIL 或分配内存，
+                    # 会导致 Python 解释器状态损坏 → 段错误闪退。
+                    # 改用 requestInterruption() 请求线程退出（线程内检查 isInterruptionRequested()），
+                    # 即使线程未及时退出，仅产生资源泄漏，远优于进程崩溃。
+                    logger.warning(f"[ConversationExecutor] Worker still running after interruption request, proceeding with cleanup")
 
         # worker 已停止，状态已稳定，安全获取中断消息
         try:
@@ -316,8 +328,13 @@ class ConversationExecutor:
                     except (TypeError, RuntimeError):
                         pass
                 worker.cancel()
+                worker.requestInterruption()
                 if worker.isRunning():
                     worker.quit()
+                    # 🛡️ 等待 Worker 实际退出后再清理，防止 cleanup() 与 Worker
+                    # 线程同时访问 _event_bus、_http_client、messages 等属性
+                    # 导致线程不安全的数据竞争。
+                    worker.wait(2000)
                 worker.cleanup()
             except Exception as e:
                 logger.warning(f"[ConversationExecutor] Cleanup error: {e}")

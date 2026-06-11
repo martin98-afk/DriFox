@@ -22,6 +22,7 @@ import math
 import os
 import random
 import re
+import sip
 import time
 import urllib.parse
 from datetime import datetime
@@ -3954,10 +3955,28 @@ class PlainTextViewer(QWidget):
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
-        QTimer.singleShot(10, self._update_height)
+        self._schedule_update_height()
 
     def finish_streaming(self):
-        QTimer.singleShot(10, self._update_height)
+        self._schedule_update_height()
+
+    def _schedule_update_height(self):
+        """🛡️ 安全的延迟高度更新
+
+        使用 lambda 包装 + try/except 保护，防止 PlainTextViewer 被 deleteLater()
+        销毁后定时器回调仍访问已释放的 C++ 对象（text_edit）导致段错误。
+        """
+        QTimer.singleShot(10, lambda: self._safe_update_height())
+
+    def _safe_update_height(self):
+        """带存活性检查的 _update_height"""
+        try:
+            # 检查 C++ 对象是否已被销毁
+            if sip.isdeleted(self.text_edit):
+                return
+            self._update_height()
+        except RuntimeError:
+            pass
 
     def get_plain_text(self) -> str:
         return self._text
@@ -3969,7 +3988,7 @@ class PlainTextViewer(QWidget):
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
-        QTimer.singleShot(10, self._update_height)
+        self._schedule_update_height()
 
     def _update_height(self):
         """强制 QTextEdit 重新布局后再计算高度"""

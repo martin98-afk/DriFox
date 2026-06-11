@@ -6,6 +6,7 @@ Worker 事件总线 - 统一的事件通知机制
 Worker 只发事件，调用方自行订阅。
 """
 
+import threading
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Dict, List, Any, Optional
@@ -100,10 +101,15 @@ class CompactionPayload:
 
 
 class WorkerEventBus:
-    """Worker 事件总线 - 订阅/发布模式"""
+    """Worker 事件总线 - 订阅/发布模式
+
+    线程安全：所有公开方法使用 threading.Lock 保护 _handlers，
+    防止跨线程 emit() 与 clear() 的并发数据竞争。
+    """
     
     def __init__(self):
         self._handlers: Dict[WorkerEvent, List[Callable]] = {}
+        self._lock = threading.Lock()
     
     def subscribe(self, event: WorkerEvent, handler: Callable) -> None:
         """订阅事件
@@ -112,15 +118,17 @@ class WorkerEventBus:
             event: 事件类型
             handler: 回调函数，签名取决于事件类型
         """
-        if event not in self._handlers:
-            self._handlers[event] = []
-        if handler not in self._handlers[event]:
-            self._handlers[event].append(handler)
+        with self._lock:
+            if event not in self._handlers:
+                self._handlers[event] = []
+            if handler not in self._handlers[event]:
+                self._handlers[event].append(handler)
     
     def unsubscribe(self, event: WorkerEvent, handler: Callable) -> None:
         """取消订阅"""
-        if event in self._handlers and handler in self._handlers[event]:
-            self._handlers[event].remove(handler)
+        with self._lock:
+            if event in self._handlers and handler in self._handlers[event]:
+                self._handlers[event].remove(handler)
     
     def emit(self, event: WorkerEvent, *args, **kwargs) -> None:
         """广播事件到所有订阅者
@@ -129,9 +137,12 @@ class WorkerEventBus:
             event: 事件类型
             *args, **kwargs: 事件数据，传递给所有 handler
         """
-        if event not in self._handlers:
-            return
-        for handler in self._handlers[event]:
+        with self._lock:
+            if event not in self._handlers:
+                return
+            # 快照 handler 列表，在锁保护下拷贝，避免外部回调修改 _handlers
+            handlers = list(self._handlers[event])
+        for handler in handlers:
             try:
                 handler(*args, **kwargs)
             except Exception as e:
@@ -139,8 +150,10 @@ class WorkerEventBus:
     
     def clear(self) -> None:
         """清空所有订阅"""
-        self._handlers.clear()
+        with self._lock:
+            self._handlers.clear()
     
     def has_subscribers(self, event: WorkerEvent) -> bool:
         """检查是否有订阅者"""
-        return event in self._handlers and len(self._handlers[event]) > 0
+        with self._lock:
+            return event in self._handlers and len(self._handlers[event]) > 0
