@@ -44,10 +44,10 @@ class SystemCardFrame(QFrame):
         self._header_layout.setSpacing(4)
 
         self.icon_label = QLabel(self)
-        self.icon_label.setFont(get_unified_font(12))
+        self.icon_label.setFont(get_unified_font(11))
 
         self.title_label = StrongBodyLabel(self)
-        self.title_label.setFont(get_unified_font(12, True))
+        self.title_label.setFont(get_unified_font(11, True))
         Colors.refresh()
         self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
 
