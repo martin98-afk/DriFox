@@ -37,6 +37,26 @@ AI 自动驱动的智能体编排画布设计器。结合 Playwright MCP 实现�
 
 ### Step 2: 生成配置（三步法：写 → 校验 → 写画布）
 
+**⚠️ 路径前置说明（最关键，路径错误会导致画布白屏）**
+
+技能的所有文件（`server.py`、`index.html`、`sanitize_config.py`）都安装在技能安装目录下：
+```
+<技能安装目录>/
+├── canvas-app/
+│   ├── index.html
+│   ├── server.py        # 从这里读取 config.json
+│   └── config.json      # 配置文件必须写到这里
+└── tools/
+    └── sanitize_config.py  # 校验工具在这里
+```
+
+**AI 执行时的当前工作目录（PWD）可能与技能目录不同**，因此：
+- **`config.json` 必须写入到技能目录的 `canvas-app/` 下**（因为 `server.py` 从自己所在目录读取配置）
+- **`sanitize_config.py` 必须通过技能目录的绝对路径调用**
+
+本文中所有 `SKILL_WORKSPACE` 符号代表技能安装目录，执行时必须**替换为实际的绝对路径**。
+> 获取方式：AI 通过 `Skill` 工具加载本技能后，从返回的 `Skill workspace:` 信息中获取路径。
+
 用户确认后，**你必须严格按照这个顺序执行**，每一步都不能跳过。
 
 #### 2a) 组装配置 JSON
@@ -52,10 +72,27 @@ AI 自动驱动的智能体编排画布设计器。结合 Playwright MCP 实现�
 
 #### 2b) 写入配置文件
 
+**⚠️ 路径规则（必须遵守，画布白屏的常见原因）**：
+
+配置文件 `config.json` **必须与 `server.py` 在同一目录**（即技能目录的 `canvas-app/` 下）。
+
+**方式 A（推荐）**：直接写入到技能目录的 `canvas-app/` 下
+
+```xml
+<write path="SKILL_WORKSPACE/canvas-app/config.json">
+<content>{ ... }</content>
+</write>
+```
+
+> 将 `SKILL_WORKSPACE` 替换为技能的实际安装路径。
+
+**方式 B**：先写入到当前项目目录，再复制到技能目录
+
 ```xml
 <write path="canvas-app/config.json">
 <content>{ ... }</content>
 </write>
+<bash command="copy canvas-app\config.json SKILL_WORKSPACE\canvas-app\config.json" />
 ```
 
 **❌ 错误写法（CDATA 会导致解析失败）**：
@@ -66,16 +103,29 @@ AI 自动驱动的智能体编排画布设计器。结合 Playwright MCP 实现�
 #### 2c) 运行校验工具（**必须执行，不可跳过**）
 
 ```xml
-<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+<bash command="python SKILL_WORKSPACE/tools/sanitize_config.py fix SKILL_WORKSPACE/canvas-app/config.json" />
 ```
+
+> 校验工具 `sanitize_config.py` 在技能目录的 `tools/` 下，必须使用绝对路径。
+
 
 必须看到 `✅ 检查通过` 或 `✅ 已修复` 才能继续。如果看到 `❌ JSON 语法错误`，修复后再重试。
 
 #### 2d) 启动服务器（如果尚未运行）
 
 ```xml
-<bg_start command="cd canvas-app && python server.py" />
+<bg_start command="cd SKILL_WORKSPACE/canvas-app && python server.py" />
 ```
+
+**方式 B（备选）**：配置文件在当前项目目录，使用 `--config` 指定路径
+
+```xml
+<bg_start command="cd SKILL_WORKSPACE/canvas-app && python server.py --config ../../project/canvas-app/config.json" />
+```
+
+> `server.py` 在技能目录的 `canvas-app/` 下。默认从自己所在目录读取 `config.json`。
+>
+> 使用 `--config <路径>` 参数可以让服务器从任意位置读取配置文件，适合保留配置在项目目录的场景。
 
 #### 2e) 用 Playwright 自动刷新 + 截图验证
 
@@ -119,22 +169,24 @@ AI 自动驱动的智能体编排画布设计器。结合 Playwright MCP 实现�
 
 Playwright 仅用于：改完配置后自动刷新浏览器 + 截图验证。
 
+**路径规则**：配置文件和校验工具都在技能目录下，必须使用绝对路径 `SKILL_WORKSPACE`。
+
 标准迭代循环：
 
 ```xml
 <!-- 1. 读取当前配置 -->
-<read path="canvas-app/config.json" />
+<read path="SKILL_WORKSPACE/canvas-app/config.json" />
 
 <!-- 2. AI 在内存中构造修改后的配置 -->
 <!-- ... 增加/删除/修改节点和连接，修改 prompt ... -->
 
-<!-- 3. 写入 -->
-<write path="canvas-app/config.json">
+<!-- 3. 写入到技能目录的 canvas-app 下 -->
+<write path="SKILL_WORKSPACE/canvas-app/config.json">
 <content>{ ... 修改后的完整配置 ... }</content>
 </write>
 
-<!-- 4. 校验 -->
-<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+<!-- 4. 校验（使用技能目录的 sanitize 工具） -->
+<bash command="python SKILL_WORKSPACE/tools/sanitize_config.py fix SKILL_WORKSPACE/canvas-app/config.json" />
 
 <!-- 5. 通过 API 校验结构 -->
 <bash command="curl -s http://localhost:8081/api/validate" />
@@ -160,9 +212,9 @@ Playwright 仅用于：改完配置后自动刷新浏览器 + 截图验证。
 ### Step 4: 输出最终设计
 
 用户确认满意后：
-1. 读取最终 config.json
+1. 读取最终 config.json（用技能目录的绝对路径）
 2. 做自检验收（见下方清单）
-3. 运行 `python tools/sanitize_config.py check canvas-app/config.json` 做最终校验
+3. 运行 `python SKILL_WORKSPACE/tools/sanitize_config.py check SKILL_WORKSPACE/canvas-app/config.json` 做最终校验
 4. 输出最终 JSON + 流程说明
 5. 关闭服务器
 
@@ -413,8 +465,10 @@ def main(fault_analysis, feature_params):
 ### 写入后自动校验（**必须执行，不可跳过**）
 
 ```xml
-<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+<bash command="python SKILL_WORKSPACE/tools/sanitize_config.py fix SKILL_WORKSPACE/canvas-app/config.json" />
 ```
+
+> ⚠️ 注意使用绝对路径：`sanitize_config.py` 在技能目录的 `tools/` 下，`config.json` 在技能目录的 `canvas-app/` 下。
 
 此工具自动检查：
 1. ✅ JSON 语法是否合法
@@ -507,7 +561,7 @@ start → knowledge ─┐
 ### 第一层：写入前校验（主动防御）
 
 ```xml
-<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+<bash command="python SKILL_WORKSPACE/tools/sanitize_config.py fix SKILL_WORKSPACE/canvas-app/config.json" />
 ```
 
 ### 第二层：自动备份（被动恢复）
@@ -581,15 +635,15 @@ references/
 └── EXAMPLES/            # 完整示例
 ```
 
-**标准操作流程**：
+**标准操作流程**（所有路径使用技能目录的绝对路径 `SKILL_WORKSPACE`）：
 ```xml
-<!-- 1. 写入 -->
-<write path="canvas-app/config.json">
+<!-- 1. 写入到技能目录的 canvas-app 下 -->
+<write path="SKILL_WORKSPACE/canvas-app/config.json">
 <content>{ ... }</content>
 </write>
 
-<!-- 2. 校验（必须执行） -->
-<bash command="python tools/sanitize_config.py fix canvas-app/config.json" />
+<!-- 2. 校验（必须执行，使用技能目录的 sanitize 工具） -->
+<bash command="python SKILL_WORKSPACE/tools/sanitize_config.py fix SKILL_WORKSPACE/canvas-app/config.json" />
 
 <!-- 3. API 验证 -->
 <bash command="curl -s http://localhost:8081/api/validate" />

@@ -8,12 +8,23 @@ import json
 import os
 import shutil
 import mimetypes
+import sys
 from urllib.parse import urlparse
 
 PORT = 8081
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+# 默认 config.json 与 server.py 在同一目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CONFIG = os.path.join(BASE_DIR, 'config.json')
+
+# 支持 --config 参数指定配置文件路径
+CONFIG_PATH = DEFAULT_CONFIG
+if '--config' in sys.argv:
+    idx = sys.argv.index('--config')
+    if idx + 1 < len(sys.argv):
+        CONFIG_PATH = os.path.abspath(sys.argv[idx + 1])
+
 BACKUP_PATH = CONFIG_PATH + '.bak'
-DIST_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = BASE_DIR
 
 
 # ====== 配置读写与校验 ======
@@ -343,6 +354,7 @@ if __name__ == '__main__':
     print(f"📄 配置路径: {CONFIG_PATH}")
     print(f"📁 备份路径: {BACKUP_PATH}")
     print(f"📁 静态目录: {DIST_DIR}")
+    print(f"🔧 使用 --config <路径> 指定自定义配置文件")
     print("🔒 智能保存：拖拽移动不保存，参数修改才保存")
     print("🛡️  自动备份：写入前备份旧配置到 .bak")
     print("✓ 校验 API: GET /api/validate 和 POST /api/validate")
