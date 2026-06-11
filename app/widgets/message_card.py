@@ -2437,7 +2437,7 @@ class CodeWebViewer(QWebEngineView):
                     width: 100%;
                     display: flex;
                     align-items: center;
-                    gap: 8px;
+                    gap: 6px;
                     background: transparent;
                     border: none;
                     text-align: left;
@@ -2450,8 +2450,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .cm-collapsible__chevron {{
                     flex: 0 0 auto;
-                    width: 8px;
-                    height: 8px;
+                    width: 6px;
+                    height: 6px;
                     border-right: 1.5px solid currentColor;
                     border-bottom: 1.5px solid currentColor;
                     transform: rotate(45deg);
@@ -2475,22 +2475,22 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 .think-block {{
-                    margin: 8px 0;
+                    margin: 4px 0;
                     background: transparent;
                     border: 1px solid var(--border);
-                    border-radius: 10px;
+                    border-radius: 6px;
                     transition: border-color 220ms ease;
                 }}
                 .think-block[data-expanded="true"] {{
                     border-color: rgba(102, 198, 255, 0.4);
                 }}
                 .think-block__summary {{
-                    padding: 8px 12px;
+                    padding: 5px 10px;
                     color: var(--text-secondary);
                     font-weight: 600;
                 }}
                 .think-content {{
-                    padding: 10px 12px;
+                    padding: 8px 10px;
                     border-top: 1px solid var(--border);
                     background: transparent;
                     color: var(--text-secondary) !important;
@@ -2516,10 +2516,10 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 .tool-block {{
-                    margin: 8px 0;
+                    margin: 4px 0;
                     background: transparent;
                     border: 1px solid var(--border);
-                    border-radius: 10px;
+                    border-radius: 6px;
                     box-shadow: none;
                     transition: border-color 220ms ease;
                 }}
@@ -2527,7 +2527,7 @@ class CodeWebViewer(QWebEngineView):
                     border-color: rgba(95, 209, 140, 0.5);
                 }}
                 .tool-block__summary {{
-                    padding: 8px 12px;
+                    padding: 5px 10px;
                     color: var(--accent);
                     font-weight: 600;
                     font-size: {code_font_size}px;

@@ -834,8 +834,8 @@ def render_tool_block(
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
 
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-call-id="{escape(tool_call_id or '')}" style="margin: 8px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 6px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-call-id="{escape(tool_call_id or '')}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 80px; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>
             <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
@@ -847,7 +847,7 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
         </span>
-        <span style="display: flex; align-items: center; flex: 0 0 auto; margin-left: 8px;">
+        <span style="display: flex; align-items: center; flex: 0 0 auto; margin-left: 6px;">
             {diff_icon_html}
             {subagent_log_btn_html}
         </span>
@@ -885,8 +885,8 @@ def render_hook_block(event_name: str, content: str, collapsed: bool = True) -> 
     </div>
     """
     
-    return f"""<div class="cm-collapsible hook-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-hook-event="{escape(event_name)}" style="margin: 8px 0; background: transparent; border: 1px solid rgba(0, 188, 212, 0.2); border-left: 3px solid {title_color}; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary hook-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 8px 12px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    return f"""<div class="cm-collapsible hook-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-hook-event="{escape(event_name)}" style="margin: 4px 0; background: transparent; border: 1px solid rgba(0, 188, 212, 0.2); border-left: 3px solid {title_color}; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary hook-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 5px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 100px; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>
             <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>

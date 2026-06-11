@@ -6224,14 +6224,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_preview_messages = None
         session = self.session_manager.get_current_session()
 
+        # [DEBUG-diagnose-welcome] 诊断欢迎卡片显示问题
+        _diag_session_empty = is_session_empty(session)
+        _diag_msg_count = len(session.messages) if session else 0
+        logger.info(f"[DEBUG-diagnose-welcome] _finalize_local_session_mutation: session_empty={_diag_session_empty}, msg_count={_diag_msg_count}")
+
         if is_session_empty(session):
+            logger.info("[DEBUG-diagnose-welcome] Session is empty, will show welcome card")
             self._clear_chat_area()
             self.node_preview.clear_nodes()
             self._current_assistant_card = None
+            logger.info("[DEBUG-diagnose-welcome] Before _show_initial_welcome")
             self._show_initial_welcome()
+            logger.info("[DEBUG-diagnose-welcome] After _show_initial_welcome")
             self._refresh_context_usage_indicator()
             return
 
+        logger.info("[DEBUG-diagnose-welcome] Session is NOT empty, skipping welcome card")
         self._sync_current_assistant_card_ref()
         self._update_node_preview()
         self._refresh_context_usage_indicator()
@@ -7348,6 +7357,10 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[DELETE] Starting deletion for card at round_index={card._round_index}"
         )
 
+        # [DEBUG-diagnose-welcome] 记录删除前状态
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round BEFORE: session.messages count = {len(self.session_manager.get_current_session().messages) if self.session_manager.get_current_session() else 0}")
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round BEFORE: chat_layout.count = {self.chat_layout.count()}")
+
         # === 1. 删除 UI 卡片：基于 card widget 对象在 layout 中的位置 ===
         # 找到 card 在 chat_layout 中的索引
         card_layout_idx = -1
@@ -7382,6 +7395,9 @@ class OpenAIChatToolWindow(ToolWindow):
         delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
         logger.info(f"[DELETE] Removed {len(widgets_to_remove)} cards from UI")
 
+        # [DEBUG-diagnose-welcome] 记录删除 UI 后状态
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round AFTER UI delete: chat_layout.count = {self.chat_layout.count()}")
+
         # === 2. 更新 session 数据 ===
         session = self.session_manager.get_current_session()
         if not session:
@@ -7399,6 +7415,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if round_index < 0 or round_index >= len(round_ranges):
             logger.warning(f"[DELETE] Invalid round_index: {round_index}")
+            # [DEBUG-diagnose-welcome] 记录无效 round_index
+            logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round: INVALID round_index, will return without showing welcome")
             # 仍显示撤销卡片（缓存已设置）
             if self._undo_delete_cache:
                 self._card_manager.show_card("undo_delete", self._window_id)
@@ -7408,9 +7426,14 @@ class OpenAIChatToolWindow(ToolWindow):
             session, round_index, round_ranges
         )
         if not success:
+            # [DEBUG-diagnose-welcome] 记录 truncate 失败
+            logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round: truncate_and_remove_round FAILED")
             return
 
         log_deletion_stats(round_index, len(widgets_to_remove), old_count, new_count)
+
+        # [DEBUG-diagnose-welcome] 记录 truncate 成功后的 session 状态
+        logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round AFTER truncate: session.messages count = {len(session.messages)}, new_count = {new_count}")
 
         # === 3. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
@@ -8683,9 +8706,9 @@ class OpenAIChatToolWindow(ToolWindow):
             for param in cmd_def.parameters:
                 if param.name == "--model=":
                     if saved:
-                        param.description = f"当前默认: {saved} | 设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                        param.description = f"当前子智能体默认模型: {saved}"
                     else:
-                        param.description = "设置子智能体默认模型（支持: 模型名 / 服务商名 / 服务商:模型名）"
+                        param.description = "设置子智能体默认模型"
                     break
 
     def _on_sub_agent_task_started(
