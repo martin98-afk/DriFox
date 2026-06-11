@@ -2387,13 +2387,7 @@ class CodeWebViewer(QWebEngineView):
                     margin-right: 2px;
                 }}
                 .think-snake-arc {{
-                    animation: snake-crawl 1.5s linear infinite;
                     transform-origin: 12px 12px;
-                }}
-                .think-snake-body {{ animation-delay: -0.18s; }}
-                .think-snake-head {{ animation-delay: -0.35s; }}
-                @keyframes snake-crawl {{
-                    to {{ stroke-dashoffset: -50.265; }}
                 }}
 
                 .tool-block {{
@@ -3010,6 +3004,27 @@ class CodeWebViewer(QWebEngineView):
                 window._requestSubAgentLog = function(taskIds) {{
                     console.log('pywebview_action:subagent_log:' + taskIds);
                 }};
+
+                // ===== JS驱动的蛇形思考动画（替代CSS animation）=====
+                // 使用 requestAnimationFrame 持续更新 stroke-dashoffset，
+                // 即使 updateContent 重建DOM，新SVG元素在下一帧立即获得正确偏移，
+                // 不再因 CSS animation 重启而导致视觉跳跃。
+                let _snakeStartTime = null;
+                function _animateThinkSnake() {{
+                    if (_snakeStartTime === null) _snakeStartTime = performance.now();
+                    const elapsed = performance.now() - _snakeStartTime;
+                    // 周期 1.5s，完整一圈对应 stroke-dashoffset: 0→-50.265（周长 2π×8 ≈ 50.265）
+                    document.querySelectorAll('.think-snake-arc').forEach(el => {{
+                        let extraDelay = 0;
+                        if (el.classList.contains('think-snake-head')) extraDelay = 350;
+                        else if (el.classList.contains('think-snake-body')) extraDelay = 180;
+                        const phase = (elapsed + extraDelay) % 1500;
+                        const offset = -(phase / 1500) * 50.265;
+                        el.setAttribute('stroke-dashoffset', offset);
+                    }});
+                    requestAnimationFrame(_animateThinkSnake);
+                }}
+                _animateThinkSnake();
             </script>
         </body>
         </html>
@@ -5305,8 +5320,6 @@ class MessageCard(SimpleCardWidget):
             self._content_data.append({"type": "reasoning", "content": text})
         self._reasoning_total_len += len(text)
 
-        LARGE_THINKING_THRESHOLD = 50 * 1024  # 50KB
-
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
             return
@@ -5314,9 +5327,9 @@ class MessageCard(SimpleCardWidget):
         # 标记内容已加载，高度变化时触发 _on_message_card_height_changed 滚底
         self._content_just_loaded = True
 
-        if self._reasoning_total_len > LARGE_THINKING_THRESHOLD:
-            # 超长思考：增量更新提供即时文字，同时定期全量渲染保持 DOM 结构正确
-            self._update_thinking_incremental(text)
+        # 始终走增量 JS 更新（无论内容大小），确保思考文本即时显示，
+        # 蛇形动画已改为 requestAnimationFrame 驱动，不受后续全量渲染影响
+        self._update_thinking_incremental(text)
         # 性能优化：通过 _lazy_markdown_cb 将 content_to_markdown 延迟到
         # _perform_update 执行（渲染定时器自带防抖，多 chunk 合并转换一次）
         # 这同时修复了旧代码的 bug：渲染定时器激活时跳过 markdown 更新，
@@ -5325,9 +5338,10 @@ class MessageCard(SimpleCardWidget):
         self.viewer._schedule_render(immediate=False)
 
     def _update_thinking_incremental(self, new_text: str):
-        """增量更新思考内容（用于超长思考）
+        """增量更新思考内容
 
         直接通过 JavaScript 更新最后一个思考块内容，避免完整重渲染。
+        蛇形动画由 requestAnimationFrame 独立驱动，不受 DOM 重建影响。
         """
         if not hasattr(self.viewer, 'page'):
             return

@@ -97,6 +97,9 @@ class PluginManager:
     _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins"
     # 用户插件：~/.drifox/plugins/（相对于 app_data_dir）
     _USER_PLUGIN_DIR_NAME = "plugins"
+    # Claude Code 插件目录（同时支持两种生态）
+    _CLAUDE_USER_SKILLS_DIR = Path.home() / ".claude" / "skills"
+    _CLAUDE_PLUGIN_CACHE_DIR = Path.home() / ".claude" / "plugins" / "cache"
 
     def __init__(self):
         self._plugins: Dict[str, PluginInfo] = {}
@@ -127,7 +130,10 @@ class PluginManager:
         # 1. 扫描系统插件
         self._discover_system_plugins()
 
-        # 2. 扫描用户插件
+        # 2. 扫描 Claude Code 插件（优先级介于系统和用户之间）
+        self._discover_claude_plugins()
+
+        # 3. 扫描用户插件（最高优先级，可覆盖前两者）
         if app_data_dir:
             self._discover_user_plugins(app_data_dir)
 
@@ -193,12 +199,25 @@ class PluginManager:
             user_plugins = self._scan_plugins(user_plugin_dir, "user")
         current_user = {p.name: p for p in user_plugins}
 
-        # 3. 构建新插件映射（用户插件覆盖系统插件）
+        # 2.5 重新扫描 Claude Code 插件
+        claude_plugins = []
+        for claude_dir in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
+            claude_plugins.extend(self._scan_plugins(claude_dir, "claude"))
+        current_claude = {p.name: p for p in claude_plugins}
+
+        # 3. 构建新插件映射（优先级: 系统 → Claude → 用户）
         new_plugins: Dict[str, PluginInfo] = {}
         # 先加系统插件
         for name, p in current_system.items():
             new_plugins[name] = p
-        # 用户插件同名覆盖
+        # Claude 插件同名覆盖系统
+        for name, p in current_claude.items():
+            if name in new_plugins:
+                if new_plugins[name].is_system:
+                    logger.info(f"[PluginManager] Rescan: Claude plugin '{name}' overrides system plugin")
+                    result["changed"].append(p)
+            new_plugins[name] = p
+        # 用户插件同名覆盖前两者（最高优先级）
         for name, p in current_user.items():
             if name in new_plugins:
                 if new_plugins[name].is_system:
@@ -448,6 +467,26 @@ class PluginManager:
                     logger.info(f"[PluginManager] User plugin '{p.name}' "
                                f"overrides system plugin")
             self._plugins[p.name] = p
+
+    def _discover_claude_plugins(self):
+        """扫描 Claude Code 插件目录
+
+        同时兼容两种路径：
+        - ~/.claude/skills/       （个人 skills-directory 插件）
+        - ~/.claude/plugins/cache/（从市场安装的缓存插件）
+
+        优先级介于系统插件和 DriFox 用户插件之间，即：
+        系统 → Claude → DriFox 用户（最高）
+        """
+        for base_dir in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
+            plugins = self._scan_plugins(base_dir, "claude")
+            for p in plugins:
+                if p.name in self._plugins:
+                    existing = self._plugins[p.name]
+                    if existing.is_system:
+                        logger.info(f"[PluginManager] Claude plugin '{p.name}' "
+                                   f"overrides system plugin")
+                self._plugins[p.name] = p
 
     # ============================================================
     # 插件查询

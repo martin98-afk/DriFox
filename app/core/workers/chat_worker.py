@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import QApplication
 from loguru import logger
 from openai import (
     OpenAI, BadRequestError, RateLimitError, APIError, APIConnectionError,
+    InternalServerError,
 )
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
@@ -683,6 +684,8 @@ class OpenAIChatWorker(QThread):
             else:  # False - 关闭思考
                 if t_param == "thinking":
                     extra_body["thinking"] = {"type": "disabled"}
+                    # 关闭思考时必须同时清理 thinking_budget，避免某些 API 将其理解为启用信号
+                    extra_body.pop("thinking_budget", None)
                 elif t_param == "thinking_budget":
                     extra_body.pop("thinking_budget", None)
                 # 关闭思考时必须移除 reasoning_effort
@@ -1494,10 +1497,13 @@ class OpenAIChatWorker(QThread):
                 is_server_overload = isinstance(e, APIError) and (
                         "2064" in error_str or "overload" in error_str.lower())
                 is_conn_error = isinstance(e, APIConnectionError)
+                # 通用 5xx：服务端临时故障（如 MiniMax 的 999/1000、OpenAI 500）应重试
+                is_internal_server_error = isinstance(e, InternalServerError)
 
                 should_retry = (
                         is_rate_limit or is_server_overload or is_conn_error or
-                        is_retryable_network or is_retryable_timeout or is_retryable_protocol
+                        is_retryable_network or is_retryable_timeout or is_retryable_protocol or
+                        is_internal_server_error
                 )
 
                 if should_retry and attempt < max_retries - 1:
@@ -1511,6 +1517,8 @@ class OpenAIChatWorker(QThread):
                         retry_reason = "RateLimit"
                     elif is_server_overload:
                         retry_reason = "ServerOverload"
+                    elif is_internal_server_error:
+                        retry_reason = "InternalServerError"
                     elif is_retryable_timeout:
                         retry_reason = "Timeout"
                     elif is_retryable_protocol:
