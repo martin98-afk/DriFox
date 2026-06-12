@@ -2462,17 +2462,6 @@ class CodeWebViewer(QWebEngineView):
                     background-size: 200% 100%;
                     animation: think-shimmer 1.5s ease-in-out infinite;
                 }}
-                /* 流式预览也使用相同的闪烁脉冲动画，增强"正在生成"的感知 */
-                .think-streaming-preview.loading {{
-                    background-image: linear-gradient(
-                        90deg,
-                        rgba(255, 255, 255, 0.02) 25%,
-                        rgba(255, 255, 255, 0.06) 50%,
-                        rgba(255, 255, 255, 0.02) 75%
-                    );
-                    background-size: 200% 100%;
-                    animation: think-shimmer 1.5s ease-in-out infinite;
-                }}
                 @keyframes think-shimmer {{
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
@@ -5390,12 +5379,21 @@ class MessageCard(SimpleCardWidget):
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
-                if (c) {{
-                    var d = document.createElement('div');
-                    d.setAttribute('data-tool-injected', 'true');
-                    d.innerHTML = {safe_html};
-                    c.appendChild(d);
+                if (!c) return;
+                // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
+                var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                if (existing) {{
+                    // 原地替换 outerHTML：新块占据旧块在 DOM 树中的同一位置
+                    // 不会导致布局高度变化，消除画面抖动
+                    existing.outerHTML = {safe_html};
+                    reportHeight();
+                    return;
                 }}
+                // 无已有流式块时，追加新块（兜底逻辑）
+                var d = document.createElement('div');
+                d.setAttribute('data-tool-injected', 'true');
+                d.innerHTML = {safe_html};
+                c.appendChild(d);
                 reportHeight();
             }})();
             """

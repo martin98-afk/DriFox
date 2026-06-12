@@ -9020,12 +9020,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
                 pass
         elif tool_name not in ("question",):
-            # 移除消息卡片中的工具流式块（替换为下方的正式工具结果块）
-            # 优先使用 _current_assistant_card（与下方 append_tool_result 保持一致），
-            # 避免流式块在旧卡片中残留导致"遗留折叠框"
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and getattr(card, 'remove_tool_streaming', None):
-                card.remove_tool_streaming(tool_call_id)
+            # 工具结果块由 append_tool_result 内部通过原地转换（In-Place
+            # Transformation）替换流式块，不再需要手动 remove_tool_streaming。
+            # 原地转换保持 DOM 树位置不变，避免删除+新建导致的高度抖动。
+            pass
 
         # 提取 diff 字段（ToolResult 对象或 dict 格式）
         diff_val = None
