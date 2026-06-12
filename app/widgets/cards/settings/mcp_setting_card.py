@@ -788,6 +788,7 @@ class MCPListSettingCard(ExpandSettingCard):
                     self._hot_connect(s.get("name", ""), s)
         else:
             self._hot_disconnect_all()
+        self._refresh_status_dots()
         self.serversChanged.emit()
 
     def consume_hot_reload(self) -> bool:
@@ -937,7 +938,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 server_data["enabled"] = enabled
                 pm.update_mcp_server(name, server_data)
 
-        # 执行热连接/断开，并直接更新对应行的开关状态
+        # 执行热连接/断开，并直接更新对应行的开关状态和指示灯
         for name, enabled in tasks.items():
             row = self._server_rows.get(name)
             if enabled and self.cfg.mcp_enabled.value:
@@ -946,12 +947,13 @@ class MCPListSettingCard(ExpandSettingCard):
                 self._hot_connect(name, server_data, force=True)
             else:
                 self._hot_disconnect(name)
-            # 直接更新行的开关状态（避免全量刷新）
+            # 直接更新行的开关状态和指示灯（设黄色，不等异步 busy 状态）
             if row:
                 row.set_enabled(enabled)
+                row.set_status(connected=False, busy=True)
 
-        # 只在添加/删除时才调用全量刷新
-        # self.serversChanged.emit()
+        # 通知其他窗口（热更新有 2 秒防抖，这里直接广播加速同步）
+        self.serversChanged.emit()
 
     # ── 公开刷新方法（供 settings 弹窗 show 时调用） ──
 

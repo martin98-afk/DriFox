@@ -1525,6 +1525,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 连接 MCP 添加/编辑信号
         self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
         self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
+        # MCP 开关变更 → 广播到其他窗口（热更新防抖 2 秒太慢）
+        self._settings_popup.mcpListCard.serversChanged.connect(self._on_mcp_servers_toggled)
 
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
@@ -3812,6 +3814,20 @@ class OpenAIChatToolWindow(ToolWindow):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
         self._card_manager.hide_card("mcp_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
+
+    def _on_mcp_servers_toggled(self):
+        """MCP 服务器开关变更 → 广播到其他窗口刷新列表"""
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed or win is self:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            mcp_card = getattr(settings_popup, "mcpListCard", None)
+            if mcp_card is None:
+                continue
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                mcp_card._refresh()
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
