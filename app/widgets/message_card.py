@@ -927,8 +927,15 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，只显示"思考中"文字 ──
-    return '<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); font-size: 13px;">🤔 思考中...</div>'
+    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    return f'''<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+        {spinner_html}
+        <span>思考中...</span>
+    </span>
+</div>'''
+    
 
 
 def _render_think_block_lightweight(content: str, completed: bool = True) -> str:
@@ -958,8 +965,15 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，只显示"思考中"文字 ──
-    return '<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); font-size: 13px;">🤔 思考中...</div>'
+    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    return f'''<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+        {spinner_html}
+        <span>思考中...</span>
+    </span>
+</div>'''
+    
 
 
 def _inject_think_cards(md_text: str, completed: bool = True) -> str:
@@ -2419,7 +2433,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary);
                     font-weight: 600;
                 }}
-                /* 流式思考纯文本块（无折叠UI） */
+                /* 流式思考纯文本块（无折叠UI）— 金色圆环 + 背景 */
                 .think-streaming {{
                     margin: 4px 0;
                     background: transparent;
@@ -2428,7 +2442,10 @@ class CodeWebViewer(QWebEngineView):
                     padding: 8px 10px;
                     color: var(--text-secondary);
                     font-style: italic;
-                    transition: border-color 220ms ease;
+                    transition: border-color 220ms ease, background 220ms ease;
+                }}
+                .think-streaming[data-streaming="true"] {{
+                    background: rgba(255, 200, 50, 0.05);
                 }}
                 .think-content {{
                     padding: 8px 10px;
@@ -5425,6 +5442,14 @@ class MessageCard(SimpleCardWidget):
                 inner_html = block_html  # 兜底：整个当作 inner HTML
             safe_inner = json.dumps(inner_html).decode('utf-8')
 
+            # 提取外层 <div> 的 style 属性（如 display: flex; align-items: center;）
+            # 用于 INLINE_TOOLS 原地转换时应用到现有元素，保持 flex 布局
+            _outer_style_match = re.search(
+                r'<div[^>]*\sstyle="([^"]*)"', block_html
+            )
+            outer_style = _outer_style_match.group(1) if _outer_style_match else ""
+            safe_outer_style = json.dumps(outer_style).decode('utf-8')
+
             # 提取 block_key（用于设置 data-block-key 属性）
             _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
             block_key = _key_match.group(1) if _key_match else ""
@@ -5442,6 +5467,10 @@ class MessageCard(SimpleCardWidget):
                     existing.setAttribute('data-block-key', '{block_key}');
                     existing.setAttribute('data-expanded', 'false');
                     existing.removeAttribute('data-streaming');
+                    // 恢复外层 div 的 style（如 display:flex），确保 INLINE_TOOLS
+                    // 的预览文字 text-align:right 正确工作。直接 setAttribute 覆盖
+                    // 所有 inline style，比逐个属性设置更简洁高效。
+                    existing.setAttribute('style', {safe_outer_style});
                     existing.innerHTML = {safe_inner};
                     reportHeight();
                     return;
