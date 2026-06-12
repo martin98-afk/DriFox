@@ -9169,6 +9169,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._current_assistant_card:
             self._current_assistant_card.finish_streaming()
+
+        # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
+        # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致
+        # UI 卡顿后「刷的更新一片」
+        QTimer.singleShot(0, self._do_post_stream_cleanup)
+
+        if self.input_area:
+            self.input_area.setFocus()
+
+    def _do_post_stream_cleanup(self):
+        """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+
         if self.history_manager:
             self._save_current_session_to_history()
             # 🛡️ 立即落盘，确保数据写入 SQLite
@@ -9177,9 +9191,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_batch_structures()
             # 修复：同步可见范围，避免回收机制误删当前轮次的卡片
             self._visible_batch_end = len(self._message_batch)
-
-        if self.input_area:
-            self.input_area.setFocus()
 
         session = self.session_manager.get_current_session()
         if session and session.messages:

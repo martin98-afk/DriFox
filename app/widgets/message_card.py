@@ -853,6 +853,8 @@ def _render_tool_streaming_block(
     """
     # MCP 工具名清理
     is_mcp = tool_name.startswith("mcp__")
+    # 子智能体任务
+    is_sub_agent_task = tool_name in ("task", "subagent_para", "subagent_dag")
     display_name = tool_name or ""
     if is_mcp:
         display_name = "__".join(display_name.split("__")[2:])
@@ -863,6 +865,9 @@ def _render_tool_streaming_block(
     if is_mcp:
         icon = "🌐"
         title_color = "#00BCD4"
+    elif is_sub_agent_task:
+        icon = "🤖"
+        title_color = "#9C27B0"
     else:
         icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
         title_color = "#FFA500"
@@ -3370,22 +3375,16 @@ class CodeWebViewer(QWebEngineView):
                 return
 
             # ── 以下为流式模式（增量渲染） ──
-            import time as _t
-            _t0 = _t.time()
             # 懒加载：通过回调获取最新 markdown（避免每次 reasoning chunk 都调用 content_to_markdown）
             if self._lazy_markdown_cb:
-                _tcb0 = _t.time()
                 fresh_md = self._lazy_markdown_cb()
-                _tcb = (_t.time() - _tcb0) * 1000
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
                 self._markdown_text = fresh_md
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
-            _tr0 = _t.time()
             html_content = self._render_markdown_to_html(self._markdown_text)
-            _tr = (_t.time() - _tr0) * 1000
             self._last_rendered_markdown = self._markdown_text
             self._last_rendered_html = html_content
             self._height_report_pending = True
@@ -3394,12 +3393,9 @@ class CodeWebViewer(QWebEngineView):
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 + f"updateContent({json.dumps(html_content).decode('utf-8')});"
             )
-            _tjs0 = _t.time()
             self.page().runJavaScript(js_code)
-            _tjs = (_t.time() - _tjs0) * 1000
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
-            _total = (_t.time() - _t0) * 1000
         except RuntimeError:
             pass
 
@@ -5416,6 +5412,24 @@ class MessageCard(SimpleCardWidget):
                 echarts=echarts,
             )
             safe_html = json.dumps(block_html).decode('utf-8')
+
+            # 提取 inner HTML（去掉外层 <div> 包装），用于原地更新已有 DOM 节点
+            # outerHTML 替换会销毁旧元素再创建新元素，在 WebEngine 渲染管线中
+            # 可能形成"旧元素消失 → 新元素出现"的跨帧闪烁。
+            # 原地更新保持同一 DOM 节点，消除闪烁。
+            _inner_match = re.match(
+                r'^<div[^>]*>(.*)</div>$', block_html, re.DOTALL
+            )
+            if _inner_match:
+                inner_html = _inner_match.group(1).strip()
+            else:
+                inner_html = block_html  # 兜底：整个当作 inner HTML
+            safe_inner = json.dumps(inner_html).decode('utf-8')
+
+            # 提取 block_key（用于设置 data-block-key 属性）
+            _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
+            block_key = _key_match.group(1) if _key_match else ""
+
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
@@ -5423,9 +5437,13 @@ class MessageCard(SimpleCardWidget):
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
                 var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
-                    // 原地替换 outerHTML：新块占据旧块在 DOM 树中的同一位置
-                    // 不会导致布局高度变化，消除画面抖动
-                    existing.outerHTML = {safe_html};
+                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性 / innerHTML
+                    // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
+                    existing.className = 'cm-collapsible tool-block';
+                    existing.setAttribute('data-block-key', '{block_key}');
+                    existing.setAttribute('data-expanded', 'false');
+                    existing.removeAttribute('data-streaming');
+                    existing.innerHTML = {safe_inner};
                     reportHeight();
                     return;
                 }}
