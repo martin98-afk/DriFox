@@ -481,24 +481,41 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
                 return flat[:i].rstrip(" ，,、.") + "..."
         return flat[:max_length] + "..."
 
-    # 选 3 句：首句 + 中间句(~40%) + 尾句
-    selected: List[str] = []
+    # 选首句 + 中间句(~40%) + 尾句（相邻句子直接拼接，不加 ...）
+    selected_indices: List[int] = []
     n = len(sentences)
 
     # 首句
-    selected.append(sentences[0])
+    selected_indices.append(0)
 
     # 中间句（40% 位置，确保不与首尾重复）
     mid_idx = max(1, int(n * 0.4))
     if mid_idx < n - 1:  # 不在最后一句话
-        selected.append(sentences[mid_idx])
+        selected_indices.append(mid_idx)
 
     # 尾句
-    if n > 1 and sentences[-1] != sentences[0]:
-        if len(selected) < 2 or sentences[-1] != selected[-1]:
-            selected.append(sentences[-1])
+    last_idx = n - 1
+    if n > 1 and last_idx not in selected_indices:
+        selected_indices.append(last_idx)
 
-    preview = " ... ".join(selected)
+    # 按原始顺序排序
+    selected_indices.sort()
+
+    # 构建预览：相邻句子直接拼接，非相邻用 ...
+    preview_groups: List[str] = []
+    current_group = sentences[selected_indices[0]]
+    for i in range(1, len(selected_indices)):
+        idx = selected_indices[i]
+        prev_idx = selected_indices[i - 1]
+        if idx == prev_idx + 1:
+            # 与上一个句子相邻，直接拼接
+            current_group += sentences[idx]
+        else:
+            preview_groups.append(current_group)
+            current_group = sentences[idx]
+    preview_groups.append(current_group)
+
+    preview = " ... ".join(preview_groups)
 
     # ── 保证最少 40 字 ──
     if len(preview) < 40:
@@ -510,12 +527,12 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
             else:
                 preview = full[:max_length] + "..."
         else:
-            # 向后扩展：取前几个句子直到 ≥40 字
-            extended = sentences[0]
-            for s in sentences[1:]:
+            # 向后扩展：直接取连续句子直到 ≥40 字（不插入 ...）
+            extended = ""
+            for s in sentences:
                 if len(extended) >= 40:
                     break
-                extended += " ... " + s
+                extended += s
             preview = extended
 
     # 截断到 max_length
