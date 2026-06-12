@@ -714,17 +714,30 @@ class CommandCard(QWidget):
             desc = desc[:max_chars].rstrip() + "…"
         self._detail_desc_label.setText(desc)
 
-        # 决定显示交互参数列表 或 回退静态 hint
-        has_params = bool(cmd and cmd.parameters)
+        # 决定显示交互参数列表
+        # ── 技能动态生成 --enable/--disable 参数（互斥） ──
+        skill_params = None
+        if skill:
+            from app.utils.config import Settings
+            cfg = Settings.get_instance()
+            enabled_skills = cfg.llm_enabled_skills.value or []
+            is_enabled = skill.get("name") in enabled_skills
+            if is_enabled:
+                skill_params = [CommandParameter(name="--disable", description="禁用技能（从系统提示词中移除）")]
+            else:
+                skill_params = [CommandParameter(name="--enable", description="启用技能（添加到系统提示词）")]
+
+        has_params = bool(cmd and cmd.parameters) or bool(skill_params)
         self._detail_has_params = has_params
 
         if has_params:
             # 交互式参数列表
             self._detail_hint_label.setVisible(False)
             self._detail_value_scroll.setVisible(False)
-            self._build_param_widgets(cmd.parameters)
+            params = cmd.parameters if cmd else skill_params
+            self._build_param_widgets(params)
             # 位置参数提示：收集 positional 类型参数的描述显示在列表上方
-            positional_text = self._build_positional_hint(cmd.parameters)
+            positional_text = self._build_positional_hint(params)
             if positional_text:
                 self._detail_positional_hint.setText(positional_text)
                 self._detail_positional_hint.setVisible(True)
