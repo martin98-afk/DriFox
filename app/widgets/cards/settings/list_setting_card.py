@@ -303,7 +303,7 @@ class SkillItem(CardWidget):
 
         # 技能名称
         name_label = StrongBodyLabel(name)
-        name_label.setFixedWidth(100)
+        name_label.setFixedWidth(120)
         layout.addWidget(name_label)
 
         # 描述（自动省略）
@@ -442,7 +442,7 @@ class SkillListSettingCard(ExpandSettingCard):
         header_layout.setContentsMargins(12, 6, 12, 6)
 
         header_title = QLabel("技能名称", header_widget)
-        header_title.setFixedWidth(100)
+        header_title.setFixedWidth(120)
         header_title.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )
