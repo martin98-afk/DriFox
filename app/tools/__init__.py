@@ -1049,7 +1049,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "mcp_list_servers",
-            "description": "列出所有 MCP 服务器的连接状态和可用工具。当需要了解当前有哪些 MCP 服务器可用时可调用此工具。",
+            "description": "列出所有 MCP 服务器的连接状态和可用工具。当需要了解当前有哪些 MCP 服务器可用时可调用此工具。**返回的 tools 字段为完整工具名（含 ``mcp__{server}__`` 前缀），调用时必须原样使用完整名**，不得自行去掉前缀。",
             "parameters": {"type": "object", "properties": {}},
         },
     },
