@@ -259,7 +259,9 @@ class PlatformStatusRow(CardWidget):
                     return
                 
                 success = manager.start_platform(platform_enum)
-                # 等待一小段时间后刷新状态
+                # 立即重置 _is_connecting（不等刷新回调），让后续操作能立即执行
+                self._is_connecting = False
+                # 等待一小段时间后刷新状态（UI 层面的状态刷新）
                 QTimer.singleShot(2000, self._refresh_status_from_manager)
             except Exception as e:
                 self._update_status_safe(False, str(e))
@@ -282,12 +284,16 @@ class PlatformStatusRow(CardWidget):
                 manager = get_platform_manager()
                 if manager:
                     manager.stop_platform(platform_enum)
-                    # 延迟刷新状态
+                    # 立即重置 _is_connecting（不等刷新回调），让后续开关能立即触发连接
+                    self._is_connecting = False
+                    # 延迟刷新状态（UI 层面的状态刷新）
                     QTimer.singleShot(500, self._refresh_status_from_manager)
                 else:
                     self._update_status_safe(False, None)
+                    self._is_connecting = False
             except Exception as e:
                 self._update_status_safe(False, str(e))
+                self._is_connecting = False
 
         t = threading.Thread(target=_do, daemon=True)
         t.start()
@@ -559,6 +565,8 @@ class GatewaySettingCard(ExpandSettingCard):
     管理企业微信、钉钉、Telegram、Discord、飞书、Slack 的连接配置。
     """
 
+    gatewayToggled = pyqtSignal()  # 平台开关变更信号（用于多窗口同步）
+
     def __init__(self, icon, title: str, content: str = None, parent=None, home=None):
         super().__init__(icon, title, content, parent)
         self._home = home
@@ -624,10 +632,12 @@ class GatewaySettingCard(ExpandSettingCard):
     def _on_edit_saved(self, platform: str, config: dict):
         """编辑保存后刷新"""
         self._refresh()
+        self.gatewayToggled.emit()
 
     def _on_platform_enabled_changed(self, platform: str, enabled: bool):
         """平台启用状态改变"""
         self._refresh()
+        self.gatewayToggled.emit()
 
     def _refresh(self):
         """刷新状态"""

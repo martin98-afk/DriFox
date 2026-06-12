@@ -435,10 +435,6 @@ class SkillListSettingCard(ExpandSettingCard):
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
 
-        self.refreshButton = PushButton("刷新", self, FluentIcon.SYNC)
-        self.refreshButton.setCursor(Qt.PointingHandCursor)
-        self.refreshButton.clicked.connect(self._refresh_skills)
-        self.addWidget(self.refreshButton)
 
         header_widget = QWidget(self.view)
         header_widget.setStyleSheet("background-color: transparent;")
@@ -472,7 +468,19 @@ class SkillListSettingCard(ExpandSettingCard):
 
         self._adjustViewSize()
 
+    def _sync_skill_states(self):
+        """轻量同步：只更新 enabled_skills 和现有开关状态，不重建列表"""
+        from qfluentwidgets import qconfig
+        self.enabled_skills = qconfig.get(self.configItem).copy() if qconfig.get(self.configItem) else []
+        for i in range(self.viewLayout.count()):
+            w = self.viewLayout.itemAt(i).widget()
+            if isinstance(w, SkillItem):
+                w.switch.setChecked(w.name in self.enabled_skills)
+
     def _refresh_skills(self):
+        # 从配置重新读取启用状态（跨窗口同步需要）
+        from qfluentwidgets import qconfig
+        self.enabled_skills = qconfig.get(self.configItem).copy() if qconfig.get(self.configItem) else []
         self._discover_skills()
         # 从后往前遍历，只移除 SkillItem 类型的 widgets
         for i in reversed(range(self.viewLayout.count())):

@@ -503,28 +503,55 @@ class MCPServerRow(CardWidget):
         self.switch.setChecked(enabled)
         self.switch.blockSignals(False)
 
+    def set_status(self, connected: bool, busy: bool):
+        """更新连接状态指示灯
+
+        Args:
+            connected: 是否已连接成功
+            busy: 是否正在连接/断开中
+        """
+        if busy:
+            self._status_dot.setText("●")
+            self._status_dot.setStyleSheet(
+                f"color: #f59e0b; font-size: {scale_font_size(16)}px; "
+                f"background: transparent; padding: 0;"
+            )
+            self._status_dot.setToolTip("正在连接/断开中...")
+        elif connected:
+            self._status_dot.setText("●")
+            self._status_dot.setStyleSheet(
+                f"color: #22c55e; font-size: {scale_font_size(16)}px; "
+                f"background: transparent; padding: 0;"
+            )
+            self._status_dot.setToolTip("已连接")
+        else:
+            self._status_dot.setText("●")
+            self._status_dot.setStyleSheet(
+                f"color: #6b7280; font-size: {scale_font_size(16)}px; "
+                f"background: transparent; padding: 0;"
+            )
+            self._status_dot.setToolTip("未连接")
+
     def _setup_ui(self, data: dict):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(8)
 
-        server_type = data.get("type", "stdio")
-        # type_colors = {"stdio": "#2196F3", "sse": "#FF9800", "http": "#4CAF50"}
-        # color = type_colors.get(server_type, "#999")
-        #
-        # type_label = QLabel(server_type.upper())
-        # type_label.setStyleSheet(
-        #     f"background-color: {color}22; color: {color}; "
-        #     f"{get_font_family_css()} font-size: {scale_font_size(11)}px; padding: 2px 8px; border-radius: 4px; font-weight: bold;"
-        # )
-        # type_label.setFixedWidth(55)
-        # type_label.setAlignment(Qt.AlignCenter)
-        # layout.addWidget(type_label)
+        # 连接状态指示灯
+        self._status_dot = QLabel("●")
+        self._status_dot.setFixedWidth(16)
+        self._status_dot.setAlignment(Qt.AlignCenter)
+        self._status_dot.setToolTip("未连接")
+        self._status_dot.setStyleSheet(
+            f"color: #6b7280; font-size: {scale_font_size(16)}px; "
+            f"background: transparent; padding: 0;"
+        )
+        layout.addWidget(self._status_dot)
 
         name_label = StrongBodyLabel(data.get("name", ""))
         name_label.setFixedWidth(100)
         layout.addWidget(name_label)
-
+        server_type = data.get("type", "stdio")
         if server_type == "stdio":
             desc = f"{data.get('command', '')} {' '.join(data.get('args', []))}".strip()
         else:
@@ -584,9 +611,15 @@ class MCPListSettingCard(ExpandSettingCard):
         self._server_rows: Dict[str, "MCPServerRow"] = {}
         # 自触发抑制：本卡片的开关操作不触发 watchfiles 热重载回刷
         self._suppress_hot_reload = False
+        # 状态轮询定时器（3秒刷新一次连接状态指示灯）
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(3000)
+        self._status_timer.timeout.connect(self._refresh_status_dots)
         
         self._setup_ui()
         self._refresh()
+        # 初始刷新一次状态指示灯
+        QTimer.singleShot(500, self._refresh_status_dots)
 
         # 连接信号（主线程处理 UI）
         self._hotConnectResult.connect(self._on_hot_connect_result)
@@ -674,6 +707,8 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_hot_connect_result(self, name: str, success: bool, error_msg: str = ""):
         """连接结果回调（主线程，可安全操作 UI）"""
+        # 立即刷新对应行的状态指示灯
+        self._refresh_status_dots()
         if success:
             logger.info(f"[MCP] '{name}' 热连接成功")
         else:
@@ -753,6 +788,7 @@ class MCPListSettingCard(ExpandSettingCard):
                     self._hot_connect(s.get("name", ""), s)
         else:
             self._hot_disconnect_all()
+        self._refresh_status_dots()
         self.serversChanged.emit()
 
     def consume_hot_reload(self) -> bool:
@@ -764,9 +800,35 @@ class MCPListSettingCard(ExpandSettingCard):
 
     # ── 列表刷新 ──────────────────────────────────────
 
+    def _refresh_status_dots(self):
+        """刷新所有行的连接状态指示灯"""
+        try:
+            mgr = self._get_mcp_manager()
+            if not mgr:
+                return
+            status_list = mgr.get_status()
+            status_map = {s["name"]: s for s in status_list}
+            for name, row in list(self._server_rows.items()):
+                if row is None:
+                    continue
+                try:
+                    st = status_map.get(name, {})
+                    connected = st.get("connected", False)
+                    busy = st.get("busy", False)
+                    row.set_status(connected, busy)
+                except RuntimeError:
+                    # widget 已被销毁
+                    self._server_rows.pop(name, None)
+        except Exception:
+            logger.debug("[MCP] 刷新状态指示灯异常（正常，卡片初始化时暂无可读状态）")
+
     def _refresh(self):
         """刷新服务器列表（保留展开状态）"""
         was_expanded = self.isExpand
+        # 清除旧的行引用
+        self._server_rows.clear()
+        # 停止状态轮询（重建列表期间避免操作已销毁的 widget）
+        self._status_timer.stop()
 
         # 稳妥方式清空 viewLayout：takeAt + 删除 widget
         while self.viewLayout.count():
@@ -806,6 +868,11 @@ class MCPListSettingCard(ExpandSettingCard):
             h = self.viewLayout.sizeHint().height()
             if h > 0:
                 self.setFixedHeight(self.card.height() + h)
+
+        # 刷新状态指示灯
+        self._refresh_status_dots()
+        # 启动状态轮询（卡片展开时持续刷新）
+        self._status_timer.start()
 
         # 重要：新创建的行/标签未应用字体大小，需要重新刷新
         # 否则会回退到 qfluentwidgets 默认的 14px 硬编码字体
@@ -871,7 +938,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 server_data["enabled"] = enabled
                 pm.update_mcp_server(name, server_data)
 
-        # 执行热连接/断开，并直接更新对应行的开关状态
+        # 执行热连接/断开，并直接更新对应行的开关状态和指示灯
         for name, enabled in tasks.items():
             row = self._server_rows.get(name)
             if enabled and self.cfg.mcp_enabled.value:
@@ -880,12 +947,13 @@ class MCPListSettingCard(ExpandSettingCard):
                 self._hot_connect(name, server_data, force=True)
             else:
                 self._hot_disconnect(name)
-            # 直接更新行的开关状态（避免全量刷新）
+            # 直接更新行的开关状态和指示灯（设黄色，不等异步 busy 状态）
             if row:
                 row.set_enabled(enabled)
+                row.set_status(connected=False, busy=True)
 
-        # 只在添加/删除时才调用全量刷新
-        # self.serversChanged.emit()
+        # 通知其他窗口（热更新有 2 秒防抖，这里直接广播加速同步）
+        self.serversChanged.emit()
 
     # ── 公开刷新方法（供 settings 弹窗 show 时调用） ──
 

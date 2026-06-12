@@ -214,8 +214,6 @@ def run_safe(command: str, **kwargs) -> "subprocess.Popen":
     args = split_command(command)
     if not args:
         raise ValueError(f"Cannot split command: {command}")
-
-    logger.info(f"Executing (safe, shell=False): {command}")
     return subprocess.Popen(
         args,
         shell=False,
@@ -229,7 +227,6 @@ def run_with_shell(command: str, **kwargs) -> "subprocess.Popen":
     此路径仅在命令包含 shell 元字符时使用。
     调用方必须确保命令已通过用户审批。
     """
-    logger.info(f"Executing (shell needed): {command}")
     return subprocess.Popen(
         command,
         shell=True,

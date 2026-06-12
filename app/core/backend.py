@@ -766,7 +766,7 @@ class ChatBackend(QObject):
         Returns:
             {"agents": int, "commands": bool, "themes": bool, "skills": bool, "mcp": bool}
         """
-        result: dict = {"agents": 0, "commands": False, "themes": False,
+        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
                         "skills": False, "mcp": False}
 
         try:
@@ -802,6 +802,7 @@ class ChatBackend(QObject):
                     logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
                 # 技能和 MCP：PluginManager 已移除该插件的目录，
                 # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除
+                result["hooks"] = True
                 result["skills"] = True
                 result["mcp"] = True
                 return result
@@ -809,6 +810,7 @@ class ChatBackend(QObject):
             # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
             if component == "agents" and self._agent_manager:
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+                result["hooks"] = True  # agents 组件包含 hooks 重载
                 # 智能体变更后同步重载命令注册（agent 文件同时也是 /agent_name 命令源）
                 # 确保 CommandManager 中的 agent 命令同步更新，否则 /silent-failure-hunter 等命令无法识别
                 try:
@@ -822,6 +824,8 @@ class ChatBackend(QObject):
             # 3. Hooks：仅当变更在 hooks/ 目录（只重载 hooks，不碰 agents）
             if component == "hooks" and self._agent_manager:
                 self._agent_manager.reload_plugin_hooks(plugin_name)
+                result["hooks"] = True
+                logger.debug(f"[ChatBackend] Hooks reloaded for plugin: {plugin_name}")
 
             # 4. 命令：仅变更在 commands 目录才触发
             if component == "commands" and plugin.has_component("commands"):
@@ -959,6 +963,7 @@ class ChatBackend(QObject):
             if self._agent_manager:
                 self._agent_manager.reload_agents()
                 result["agents"] = len(self._agent_manager.list_agents(include_hidden=True))
+                result["hooks"] = True
 
             # 3. 重载命令
             try:

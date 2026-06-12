@@ -293,15 +293,11 @@ class HookListSettingCard(ExpandSettingCard):
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
         
         self.addButton = PushButton("添加", self, FluentIcon.ADD)
-        self.refreshButton = PushButton("刷新", self, FluentIcon.SYNC)
         self.addButton.setObjectName("_hook_add_btn")
-        self.refreshButton.setObjectName("_hook_refresh_btn")
         
         self.addButton.clicked.connect(self.showAddHookCard.emit)
-        self.refreshButton.clicked.connect(self._refresh)
         
         self.addWidget(self.addButton)
-        self.addWidget(self.refreshButton)
         
         self._update_button_position()
         
@@ -309,23 +305,20 @@ class HookListSettingCard(ExpandSettingCard):
         self._render_hooks()
     
     def _update_button_position(self):
-        """将 addButton + refreshButton 移到卡片头部 expandButton 左侧"""
+        """将 addButton 移到卡片头部 expandButton 左侧"""
         card = self.card
         if not hasattr(card, 'hBoxLayout'):
             return
         # 先从原始位置移除
         card.hBoxLayout.removeWidget(self.addButton)
-        card.hBoxLayout.removeWidget(self.refreshButton)
         # 找到 expandButton 位置，在其前面插入
         for i in range(card.hBoxLayout.count()):
             item = card.hBoxLayout.itemAt(i)
             if item.widget() == card.expandButton:
                 card.hBoxLayout.removeItem(card.hBoxLayout.itemAt(i - 1))
-                card.hBoxLayout.insertWidget(i - 1, self.refreshButton, 0, Qt.AlignRight)
-                card.hBoxLayout.insertSpacing(i - 1, 4)
                 card.hBoxLayout.insertWidget(i - 1, self.addButton, 0, Qt.AlignRight)
                 card.hBoxLayout.insertSpacing(i - 1, 4)
-                card.hBoxLayout.insertSpacing(i + 3, 4)
+                card.hBoxLayout.insertSpacing(i + 1, 4)
                 break
     
     def _render_hooks(self):

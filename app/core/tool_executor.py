@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 from loguru import logger
-from typing import Dict, Optional, Callable
+from typing import Dict, List, Optional, Callable
 
 from app.core.hook_manager import HookDecision
 
@@ -453,6 +453,11 @@ class ToolExecutor:
             logger.warning(f"[ToolExecutor] ToolExecutor is invalid (UI may be closed)")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
+        # 🛡️ 防御性补全 mcp__ 前缀：LLM 偶尔可能漏掉前缀
+        # （如从 mcp_list_servers 返回的裸名、训练数据记忆的短名等），
+        # 走完恢复后仍统一为可识别的完整名。
+        tool_name = self._try_recover_mcp_prefix(tool_name) or tool_name
+
         # 🔒 线程安全：捕获当前 session_id/call_id 到局部变量（后续使用局部变量而非实例变量）
         with self._lock:
             local_session_id = self._session_id
@@ -765,6 +770,55 @@ class ToolExecutor:
         self._trigger_post_tool_use(tool_name, args, result)
 
         return result
+
+    def _try_recover_mcp_prefix(self, tool_name: str) -> Optional[str]:
+        """
+        防御性补全 MCP 工具名的 ``mcp__`` 前缀。
+
+        LLM 偶尔会漏掉前缀（例如从 ``mcp_list_servers`` 拿到的裸名、
+        历史对话记忆的短名）。在路由前尝试从已知 MCP 工具表中唯一性匹配，
+        命中就补回完整名；无法唯一确定（如多个 server 同名）则返回 None，
+        让调用走原来的失败路径，避免猜测。
+
+        Args:
+            tool_name: LLM 传来的原始工具名
+
+        Returns:
+            补全前缀后的工具名；不需要补全或无法唯一确定时返回 None
+        """
+        if not tool_name or not self._builtin_tools:
+            return None
+        # 已经有前缀的（可能是合法的非 MCP 工具），原样返回
+        if tool_name.startswith("mcp__"):
+            return tool_name
+        try:
+            mcp_manager = self._builtin_tools._mcp_manager
+        except AttributeError:
+            return None
+        if not mcp_manager or not getattr(mcp_manager, "is_connected", False):
+            return None
+
+        prefix = getattr(mcp_manager, "TOOL_PREFIX", "mcp__")
+        matches: List[str] = []
+        for server_name, conn in mcp_manager._connections.items():
+            if not getattr(conn, "session", None) or not getattr(conn, "enabled", True):
+                continue
+            for t in conn.tools:
+                full = f"{prefix}{server_name}__{t.name}"
+                # 接受两种入参形式：
+                # 1) 'server__tool'（缺前缀但带 server）
+                # 2) 'tool'（仅工具名，需在所有 server 中唯一）
+                stripped = full[len(prefix):]
+                if tool_name == stripped or tool_name == t.name:
+                    matches.append(full)
+
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                f"[ToolExecutor] MCP 前缀恢复歧义：'{tool_name}' 命中多个候选 {matches}，放弃补全"
+            )
+        return None
 
     def set_sub_agent_manager(self, sub_agent_manager):
         """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""

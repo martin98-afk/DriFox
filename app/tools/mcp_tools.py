@@ -668,15 +668,22 @@ class MCPClientManager:
         return self._connected
 
     def get_status(self) -> List[Dict]:
+        # 注意：返回的 tools 必须带 mcp__{server}__ 前缀，与 get_tool_schemas() 保持一致，
+        # 避免 LLM 从 mcp_list_servers 看到裸名后误用导致调用失败。
         status = []
+        with self._busy_lock:
+            busy_names = set(self._busy_names)
         for name, conn in self._connections.items():
             status.append({
                 "name": name,
                 "type": conn.server_type,
                 "enabled": conn.enabled,
                 "connected": conn.session is not None,
+                "busy": name in busy_names,
                 "tool_count": len(conn.tools),
-                "tools": [t.name for t in conn.tools],
+                "tools": [
+                    f"{self.TOOL_PREFIX}{name}__{t.name}" for t in conn.tools
+                ],
             })
         return status
 
