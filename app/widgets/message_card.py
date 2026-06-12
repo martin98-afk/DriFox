@@ -4306,6 +4306,9 @@ class MessageCard(SimpleCardWidget):
         # 标记：内容刚加载到viewer，首次heightChanged后滚动并清除
         self._content_just_loaded = False
         self._finished_streaming_ids: set = set()  # 防止 streaming 状态回退
+        # 工具参数首次到达跟踪：每个 tool_call_id 第一次 update_tool_streaming 时
+        # 触发"标记当前思考块为完成"，避免 reasoning→tool_call 切换时思考块残留"思考中"
+        self._tool_args_first_seen_ids: set = set()
         self._pending_content: Optional[str] = None
         self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
         self._viewer_container = QWidget(self)
@@ -5613,6 +5616,92 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
 
+    def _maybe_finish_thinking_for_tool(self, tool_call_id: str):
+        """当工具参数第一次到达时，标记当前思考块为完成态（💡）。
+
+        修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 上还显示"思考中"。
+
+        触发条件：update_tool_streaming 第一次被某个 tool_call_id 调用。
+
+        实现：直接通过 JS 替换 DOM 上 `data-streaming="true"` 的 think-block 的
+        summary 文字为完成态。Python 端预计算分类标签（与 _render_think_block 一致），
+        传入 JS 以保留 💡 + 分类标签的视觉效果。
+        """
+        if tool_call_id in self._tool_args_first_seen_ids:
+            return
+        self._tool_args_first_seen_ids.add(tool_call_id)
+
+        # 检查 _content_data 末尾是否是未完成的 reasoning block
+        if not self._content_data or not isinstance(self._content_data, list):
+            return
+        last_block = self._content_data[-1]
+        if not isinstance(last_block, dict):
+            return
+        if last_block.get("type") != "reasoning":
+            return
+        content = (last_block.get("content") or "").strip()
+        if not content:
+            # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
+            return
+
+        # 懒渲染未就绪 / viewer 未创建
+        if not self._lazy_rendered or not self.viewer:
+            return
+
+        # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
+        tag = _classify_think_tag(content)
+        if tag:
+            status_html = f'<span class="think-bulb">💡</span> {escape(tag)}'
+        else:
+            status_html = '<span class="think-bulb">💡</span>'
+        safe_status = json.dumps(status_html).decode('utf-8')
+
+        # 直接 JS 替换 DOM 上残留的"思考中"状态
+        # 注意：不能走全量渲染 — `_render_markdown_to_html` 流式模式会去掉末尾 </think>，
+        # 导致 markdown 仍被解析为 completed=False（"思考中"）。
+        try:
+            js_code = f"""
+            (function() {{
+                var blocks = document.querySelectorAll('.think-block[data-streaming="true"]');
+                if (blocks.length === 0) return;
+                blocks.forEach(function(block) {{
+                    block.setAttribute('data-streaming', 'false');
+                    var summary = block.querySelector('.think-block__summary');
+                    if (summary) {{
+                        // 结构：<span class="cm-collapsible__chevron"></span>
+                        //       <span style="white-space: nowrap;">{status_text}</span>
+                        //       {summary_right}
+                        // 第二个 span 才是 status_text
+                        var spans = summary.children;
+                        // 优先按 style 匹配；找不到则取索引 1（chevron 之后）
+                        var statusSpan = null;
+                        for (var i = 0; i < spans.length; i++) {{
+                            var s = spans[i];
+                            var inline = s.getAttribute('style') || '';
+                            if (inline.indexOf('white-space: nowrap') !== -1) {{
+                                statusSpan = s;
+                                break;
+                            }}
+                        }}
+                        if (!statusSpan && spans.length >= 2) {{
+                            statusSpan = spans[1];
+                        }}
+                        if (statusSpan) {{
+                            statusSpan.innerHTML = {safe_status};
+                        }}
+                    }}
+                }});
+                if (typeof reportHeightDebounced === 'function') {{
+                    reportHeightDebounced();
+                }} else if (typeof reportHeight === 'function') {{
+                    reportHeight();
+                }}
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
     def update_tool_streaming(
         self, tool_call_id: str, tool_name: str, partial_args: dict = None,
     ):
@@ -5626,6 +5715,9 @@ class MessageCard(SimpleCardWidget):
         # 已完成参数接收或已追加工具结果的不再更新，防止完成态被退回 streaming 状态
         if tool_call_id in self._finished_streaming_ids:
             return
+        # 🆕 第一次工具参数到达时，标记当前思考块为完成态（💡）
+        # 修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 还显示"思考中"
+        self._maybe_finish_thinking_for_tool(tool_call_id)
         preview = ""
         char_count = 0
         if partial_args:
