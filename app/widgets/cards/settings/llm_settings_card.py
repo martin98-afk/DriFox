@@ -349,7 +349,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 连接信号
         # 注意：只有真正影响外观或模型列表的变更才走 _on_config_changed（触发全量刷新）
         # 技能、通知、提示音等不涉及外观的变更走轻量级保存路径
-        self.llmProviderCard.providerChanged.connect(self._on_config_changed)
+        self.llmProviderCard.providerChanged.connect(self._on_provider_changed)
         self.llmSkillsCard.skillsChanged.connect(self._on_skills_changed)
         self.cfg.llm_notify_enabled.valueChanged.connect(self._on_settings_changed)
         self.llmSoundCard.optionChanged.connect(self._on_settings_changed)
@@ -529,6 +529,11 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_settings_changed(self, _value=None):
         """非外观类设置变更（通知、提示音等）— 仅保存，不需要刷新外观"""
+        self._save_timer.start()
+
+    def _on_provider_changed(self):
+        """服务商变更（添加/删除/修改）— 只需重载模型配置，不需要刷新外观"""
+        self.configChanged.emit()
         self._save_timer.start()
 
     def _on_config_changed(self):

@@ -9540,11 +9540,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
-        # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
-        self._card_manager.show_card("question", self._window_id)
+        # 先填充内容再展开容器：否则 CardContainer._do_expand 在空内容上读 sizeHint
+        # 算出错误高度并锁住，后续 updateGeometry + QTimer.singleShot 排在同一帧事件循环
+        # 里竞争，sizeHint 可能仍是过期的，导致卡片偶尔不显示/被裁切（需手动 resize 兜底）
         self._question_floating_widget.setUpdatesEnabled(False)
         self._question_floating_widget.show_question(questions)
         self._question_floating_widget.setUpdatesEnabled(True)
+        self._card_manager.show_card("question", self._window_id)
         question_text = questions[0].get("question", "") if questions else ""
         self._notify_if_inactive("需要回答问题", question_text[:100])
 
@@ -9667,8 +9669,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._bottom_toolbar_strip.setVisible(False)
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(False)
-        # 先显示卡片（让 layout 在可见状态下准确计算），再压制绘制刷新内容
-        self._card_manager.show_card("question", self._window_id)
+        # 先填充内容再展开容器：见 _on_question_asked 同源 bug 注释
         self._question_floating_widget.setUpdatesEnabled(False)
         try:
             arg_str = str(arguments)[:160] if arguments else ""
@@ -9698,6 +9699,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._restore_after_question_close()
             return
         self._question_floating_widget.setUpdatesEnabled(True)
+        self._card_manager.show_card("question", self._window_id)
 
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
