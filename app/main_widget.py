@@ -1528,6 +1528,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # MCP 开关变更 → 广播到其他窗口（热更新防抖 2 秒太慢）
         self._settings_popup.mcpListCard.serversChanged.connect(self._on_mcp_servers_toggled)
 
+        # Gateway 开关/保存变更 → 广播到其他窗口
+        self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
+
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
         self._hook_edit_card.setFixedHeight(300)
@@ -3828,6 +3831,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             if win._card_manager.is_card_visible("settings", win._window_id):
                 mcp_card._refresh()
+
+    def _on_gateway_toggled(self):
+        """Gateway 平台开关/配置变更 → 广播到其他窗口刷新状态"""
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed or win is self:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            gateway_card = getattr(settings_popup, "gatewayCard", None)
+            if gateway_card is None:
+                continue
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                gateway_card._refresh()
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
