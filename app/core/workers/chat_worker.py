@@ -2211,14 +2211,28 @@ class OpenAIChatWorker(QThread):
                 )
                 future_map[future] = idx
 
-            for future in concurrent.futures.as_completed(future_map):
-                original_idx = future_map[future]
-                try:
-                    result = future.result()
-                    if result is not None:
-                        parallel_results.append((original_idx, result))
-                except Exception as e:
-                    logger.error(f"[ToolCall] 并行工具执行异常: {e}")
+            # 🛡️ 支持取消：用 wait() 循环替代 as_completed()，每 0.5s 检测取消标志
+            # 避免 as_completed() 在工具线程完成前无限阻塞，导致 cancel() 无法生效
+            pending = set(future_map.keys())
+            while pending:
+                if self._is_cancelled or self._tool_execution_cancelled:
+                    for f in pending:
+                        f.cancel()  # 取消尚未启动的任务
+                    break
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=0.5,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    original_idx = future_map[future]
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            parallel_results.append((original_idx, result))
+                    except concurrent.futures.CancelledError:
+                        pass  # 被取消的任务，忽略
+                    except Exception as e:
+                        logger.error(f"[ToolCall] 并行工具执行异常: {e}")
 
         # 按原始索引排序，保持结果顺序稳定
         parallel_results.sort(key=lambda x: x[0])

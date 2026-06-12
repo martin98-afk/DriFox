@@ -645,6 +645,7 @@ def _render_inline_tool(
     tool_name: str,
     tool_args: dict,
     success: bool = None,
+    tool_call_id: str = None,
 ) -> str:
     """渲染紧凑单行卡片（无折叠、无 body、无工具结果内容）"""
     status_html = ""
@@ -657,7 +658,8 @@ def _render_inline_tool(
         )
     icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
     natural_preview = _format_natural_preview(tool_name, tool_args)
-    return f"""<div class="tool-block" style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
+    return f"""<div class="tool-block"{tc_id_attr} style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">
             <span style="flex: 0 0 auto;">{icon}</span>
             <span style="white-space: nowrap; flex: 0 0 auto;">{escape(tool_name)}</span>
@@ -791,6 +793,7 @@ def render_tool_block(
             tool_name=tool_name,
             tool_args=tool_args,
             success=success,
+            tool_call_id=tool_call_id,
         )
 
     # 文件编辑工具判断
