@@ -5411,7 +5411,12 @@ class MessageCard(SimpleCardWidget):
         try:
             # 修复时序问题：工具结果块注入前先强制渲染 pending 文本，
             # 避免工具结果块先于前置文本出现在 DOM 中
-            if self.viewer._streaming and self.viewer._lazy_markdown_cb:
+            # 🐛 修复工具块"粘底"bug：原条件 `and self.viewer._lazy_markdown_cb` 在
+            # callback 已被前一次 _perform_update 消费后被跳过，导致 _markdown_text
+            # 永远不包含工具结果块，下一次全量渲染不会把工具块放在正确位置。
+            # 改为无条件重置 callback，确保后续 _perform_update 能拿到最新 markdown。
+            if self.viewer._streaming:
+                self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
                 self.viewer._schedule_render(immediate=True)
 
             block_html = render_tool_block(

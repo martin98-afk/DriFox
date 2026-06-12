@@ -354,11 +354,8 @@ class FileUndoPreviewDialog(QDialog):
                     item_layout.addWidget(diff_btn, 0)
 
                     # 添加单独撤销按钮
-                    from qfluentwidgets import PrimaryPushButton
-                    undo_btn = PrimaryPushButton("撤销此操作", self)
-                    undo_btn.setFixedHeight(24)
-                    undo_btn.setFixedWidth(80)
-                    undo_btn.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 2px 4px;")
+                    undo_btn = ToolButton(get_icon("撤销"), self)
+                    undo_btn.setFixedSize(24, 24)
                     undo_btn.op_index = i
                     undo_btn.clicked.connect(lambda _, idx=i: self._undo_single_operation(idx))
                     item_layout.addWidget(undo_btn, 0)
