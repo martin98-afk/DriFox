@@ -3476,10 +3476,18 @@ class CodeWebViewer(QWebEngineView):
             parent = parent.parent()
 
     def _copy_to_clipboard(self):
-        """复制内容到剪贴板"""
-        from PyQt5.QtWidgets import QApplication
-        clipboard = QApplication.clipboard()
-        clipboard.setText(self._markdown_text or "")
+        """复制内容到剪贴板（使用系统原生 API）"""
+        try:
+            import win32clipboard
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(self._markdown_text or "", win32clipboard.CF_UNICODETEXT)
+            win32clipboard.CloseClipboard()
+        except Exception:
+            # 兜底：使用 PyQt5 剪贴板
+            from PyQt5.QtWidgets import QApplication
+            clipboard = QApplication.clipboard()
+            clipboard.setText(self._markdown_text or "")
 
     def _get_default_filename(self) -> str:
         """生成默认导出文件名：会话名_时间戳"""

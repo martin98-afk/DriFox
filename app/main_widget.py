@@ -4643,18 +4643,67 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._load_model_selector_to_card()
 
+    def _execute_skill_toggle(self, skill_name: str, enable: bool):
+        """执行技能启用/禁用（FUNCTION 命令，不发送消息给 LLM）"""
+        from app.utils.config import Settings
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        cfg = Settings.get_instance()
+        enabled_skills = cfg.llm_enabled_skills.value.copy() if cfg.llm_enabled_skills.value else []
+        changed = False
+        if enable:
+            if skill_name not in enabled_skills:
+                enabled_skills.append(skill_name)
+                changed = True
+                msg = f"「{skill_name}」已添加到系统提示词"
+            else:
+                msg = f"「{skill_name}」已是启用状态"
+        else:
+            if skill_name in enabled_skills:
+                enabled_skills.remove(skill_name)
+                changed = True
+                msg = f"「{skill_name}」已从系统提示词中移除"
+            else:
+                msg = f"「{skill_name}」已是禁用状态"
+
+        if changed:
+            cfg.set(cfg.llm_enabled_skills, enabled_skills, save=True)
+            # 保存后 cfg.set 会触发 valueChanged → _on_skills_config_changed → 自动同步 UI
+            InfoBar.success(
+                title="技能" + ("已启用" if enable else "已禁用"),
+                content=msg, parent=self, duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.info(
+                title="技能" + ("已启用" if enable else "已禁用"),
+                content=msg, parent=self, duration=1500,
+                position=InfoBarPosition.BOTTOM,
+            )
+        self.input_area.clear()
+        if not self._is_streaming:
+            self.input_area.toggle_send_button(True)
+
+    def _sync_skill_list_cards(self):
+        """同步所有窗口的技能列表卡片状态（无条件同步，widget 隐藏时也更新）"""
+        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+            if win._is_destroyed:
+                continue
+            try:
+                popup = getattr(win, "_settings_popup", None)
+                if popup and hasattr(popup, "llmSkillsCard"):
+                    card = popup.llmSkillsCard
+                    card._sync_skill_states()
+                    card._update_skill_token_count()
+            except (RuntimeError, AttributeError):
+                pass
+
     def _on_skills_config_changed(self, enabled_skills):
         """技能配置变更时的回调（多窗口同步）
 
         当一个窗口启用/禁用了技能，轻量同步开关状态，不重建列表。
         """
-        if (
-            hasattr(self, "_card_manager")
-            and self._card_manager.is_card_visible("settings", self._window_id)
-            and hasattr(self, "_settings_popup")
-            and hasattr(self._settings_popup, "llmSkillsCard")
-        ):
-            self._settings_popup.llmSkillsCard._sync_skill_states()
+        self._sync_skill_list_cards()
 
     def _reload_plugin_system(self):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
@@ -4730,7 +4779,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
-        # 技能变更：轻量同步开关状态，不重建列表
+        # 技能变更：全量重建列表（插件增减后需 rediscover）
         if (
             result.get("skills")
             and hasattr(self, "_settings_popup")
@@ -4738,10 +4787,10 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             try:
                 if hasattr(self._settings_popup, "llmSkillsCard"):
-                    self._settings_popup.llmSkillsCard._sync_skill_states()
-                    logger.debug("[HotReload] skills states synced")
+                    self._settings_popup.llmSkillsCard._refresh_skills()
+                    logger.debug("[HotReload] skills list re-discovered")
             except Exception as e:
-                logger.warning(f"[HotReload] 同步技能状态失败: {e}")
+                logger.warning(f"[HotReload] 刷新技能列表失败: {e}")
 
         # Hooks 变更：刷新设置面板中的 hook 列表
         if (
@@ -8511,14 +8560,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
         if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
+            from app.utils.config import Settings
 
             parts = user_text[1:].split(maxsplit=1)
             if parts:
                 # 解析后缀：如 "tdd-skill" → "tdd"
                 raw_name, _ = CommandManager.parse_suffixed_name(parts[0])
                 skill_name = raw_name or parts[0]
-                if get_skill_by_name(skill_name):
+                skill = get_skill_by_name(skill_name)
+                if skill:
                     remainder = parts[1] if len(parts) > 1 else ""
+                    # ── --enable / --disable 作为 FUNCTION 命令执行 ──
+                    if remainder == "--enable":
+                        self._execute_skill_toggle(skill_name, enable=True)
+                        return
+                    elif remainder == "--disable":
+                        self._execute_skill_toggle(skill_name, enable=False)
+                        return
                     if remainder:
                         user_text = f"加载这个智能体技能：@{skill_name}\n{remainder}"
                     else:

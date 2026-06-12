@@ -303,7 +303,7 @@ class SkillItem(CardWidget):
 
         # 技能名称
         name_label = StrongBodyLabel(name)
-        name_label.setFixedWidth(100)
+        name_label.setFixedWidth(120)
         layout.addWidget(name_label)
 
         # 描述（自动省略）
@@ -442,7 +442,7 @@ class SkillListSettingCard(ExpandSettingCard):
         header_layout.setContentsMargins(12, 6, 12, 6)
 
         header_title = QLabel("技能名称", header_widget)
-        header_title.setFixedWidth(100)
+        header_title.setFixedWidth(120)
         header_title.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )
@@ -466,6 +466,7 @@ class SkillListSettingCard(ExpandSettingCard):
         for skill in self.all_skills:
             self._add_skill_item(skill["name"], skill["description"])
 
+        self._update_skill_token_count()
         self._adjustViewSize()
 
     def _sync_skill_states(self):
@@ -476,6 +477,7 @@ class SkillListSettingCard(ExpandSettingCard):
             w = self.viewLayout.itemAt(i).widget()
             if isinstance(w, SkillItem):
                 w.switch.setChecked(w.name in self.enabled_skills)
+        self._update_skill_token_count()
 
     def _refresh_skills(self):
         # 从配置重新读取启用状态（跨窗口同步需要）
@@ -491,6 +493,7 @@ class SkillListSettingCard(ExpandSettingCard):
                 widget.deleteLater()
         for skill in self.all_skills:
             self._add_skill_item(skill["name"], skill["description"])
+        self._update_skill_token_count()
         self._adjustViewSize()
 
     def _add_skill_item(self, name: str, description: str):
@@ -501,6 +504,33 @@ class SkillListSettingCard(ExpandSettingCard):
         item.show()
         self._adjustViewSize()
 
+    def _update_skill_token_count(self):
+        """更新头部 subtitle：已启用计数 + token 占用估算"""
+        from app.core.token_estimator import estimate_tokens
+        from app.utils.utils import get_local_skills
+
+        enabled = self.enabled_skills or []
+        total = len(self.all_skills)
+
+        if not enabled:
+            self.setContent(f"0/{total} · ~0 tokens")
+            return
+
+        all_skills = get_local_skills()
+        parts = [
+            "\n\n## 偏好技能\n"
+            "以下是部分用户偏好的智能体技能，如果以下技能不能满足用户需求，"
+            "可以使用 `list_skills` 技能加载完整技能列表：\n"
+        ]
+        for skill in all_skills:
+            if skill["name"] in enabled:
+                display_name = skill.get("qualified_name", skill["name"])
+                parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
+
+        content = "\n".join(parts) if len(parts) > 1 else ""
+        count = estimate_tokens(content)
+        self.setContent(f"{len(enabled)}/{total} · ~{count:,} tokens")
+
     def _on_skill_enabled_changed(self, name: str, enabled: bool):
         if enabled and name not in self.enabled_skills:
             self.enabled_skills.append(name)
@@ -510,7 +540,14 @@ class SkillListSettingCard(ExpandSettingCard):
         # 使用 Settings.set() 而非 qconfig.set()，确保持久化到正确的配置文件
         from app.utils.config import Settings
         Settings.get_instance().set(self.configItem, self.enabled_skills, save=True)
+        self._update_skill_token_count()
         self.skillsChanged.emit(self.enabled_skills)
+
+    def setContent(self, text: str):
+        """更新卡片头部 subtitle（服务器计数 + token 占用）"""
+        card = self.card
+        if hasattr(card, 'contentLabel'):
+            card.contentLabel.setText(text)
 
 
 class PackageListSettingCard(ExpandSettingCard):
