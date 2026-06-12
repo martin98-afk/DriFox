@@ -850,20 +850,18 @@ def _render_tool_streaming_block(
         icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
         title_color = "#FFA500"
 
-    # 流式态：蛇形圆环 + 状态文字；完成态：仅图标
-    if completed:
-        spinner_html = ""
-        status_hint = ""
-    else:
-        spinner_html = _THINK_SNAKE_SVG
-        status_hint = ' <span style="opacity:0.55; font-weight:400;">执行中</span>'
+    # 始终包含 spinner 和状态文字，由 CSS data-streaming 控制可见性
+    # 完成态时通过 CSS 过渡淡出，而非从 DOM 中移除
+    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    status_hint = ' <span class="tool-streaming-status" style="opacity:0.55; font-weight:400;">执行中</span>'
 
     char_hint = f" ({char_count}字符)" if char_count > 0 else ""
     preview_display = escape(preview) if preview else "准备中..."
 
-    streaming_attr = '' if completed else ' data-streaming="true"'
+    # 始终设置 data-streaming 属性（"true" 或 "false"）
+    streaming_state = "false" if completed else "true"
 
-    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}"{streaming_attr}>
+    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>
@@ -873,7 +871,7 @@ def _render_tool_streaming_block(
             {status_hint}
         </span>
         <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {preview_display}{char_hint}
             </span>
         </span>
@@ -885,8 +883,8 @@ def _render_tool_streaming_block(
 
 
 def _render_think_block(content: str, completed: bool = True) -> str:
-    # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
-    expanded = False
+    # 流式时展开以查看实时内容；完成时自动折叠，减少视觉干扰
+    expanded = not completed
 
     # ── 标签分类（完成时才分类，流式过程只显示💡） ──
     if completed:
@@ -896,7 +894,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
         status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
         tag = ""  # 流式不分类
 
-    # ── 预览：完成时结论句+累加，流式时简单截断 ──
+    # ── 预览：始终从原始 content 计算 ──
     preview = _get_think_preview(content)
 
     block_seed = f"{content}|{completed}"
@@ -904,22 +902,32 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     expanded_attr = "true" if expanded else "false"
     body_style = ' style="height:auto; opacity:1;"' if expanded else ""
 
-    # 思考内容不需要渲染代码编辑框，移除代码块标记
-    content = _strip_code_blocks(content)
-    content = escape(content)
+    # 思考内容不需要渲染代码编辑框，移除代码块标记后转义
+    content_escaped = escape(_strip_code_blocks(content))
 
     # 获取全局字体样式
     font_style = _get_think_block_styles()
 
-    streaming_attr = ' data-streaming="true"' if not completed else ''
-    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}"{streaming_attr}>
+    streaming_attr = f' data-streaming="{"false" if completed else "true"}"'
+
+    if completed:
+        # 完成态：预览在 summary 右侧，body 放全量思考内容
+        summary_right = f'<span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
+    else:
+        # 流式态：summary 无预览（避免高度抖动），body 放固定高度预览文本 + loading 脉冲动画
+        summary_right = ""
+        preview_escaped = escape(preview) if preview else "思考中..."
+        body_html = f'<div class="think-streaming-preview loading" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; line-height: 1.4; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; word-break: break-word;">{preview_escaped}</div>'
+
+    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}"{streaming_attr} style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
+        {summary_right}
     </button>
     <div class="cm-collapsible__body"{body_style}>
-        <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content}</div>
+        {body_html}
     </div>
 </div>"""
 
@@ -931,17 +939,15 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     1. 不执行代码块处理（_strip_code_blocks），直接转义
     2. 不生成 block_key hash（节省计算）
     """
-    # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
-    expanded = False
+    # 流式时展开以查看实时内容；完成时自动折叠，减少视觉干扰
+    expanded = not completed
 
-    # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
+    # ── 标签（完成时分类，流式时蛇形动画） ──
     if completed:
         tag = _classify_think_tag(content)
         status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
-        preview = _get_think_preview(content)
     else:
         status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
-        preview = _get_think_preview(content)
 
     expanded_attr = "true" if expanded else "false"
     body_style = ' style="height:auto; opacity:1;"' if expanded else ""
@@ -952,15 +958,28 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # 获取全局字体样式
     font_style = _get_think_block_styles()
 
-    streaming_attr = ' data-streaming="true"' if not completed else ''
-    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}"{streaming_attr}>
+    streaming_attr = f' data-streaming="{"false" if completed else "true"}"'
+
+    if completed:
+        # 完成态：预览在 summary 右侧，body 放全量思考内容
+        preview = _get_think_preview(content)
+        summary_right = f'<span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
+    else:
+        # 流式态：summary 无预览（避免高度抖动），body 放固定高度预览文本 + loading 脉冲动画
+        summary_right = ""
+        preview = _get_think_preview(content)
+        preview_escaped = escape(preview) if preview else "思考中..."
+        body_html = f'<div class="think-streaming-preview loading" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; line-height: 1.4; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; word-break: break-word;">{preview_escaped}</div>'
+
+    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}"{streaming_attr} style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
+        {summary_right}
     </button>
     <div class="cm-collapsible__body"{body_style}>
-        <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>
+        {body_html}
     </div>
 </div>"""
 
@@ -2430,6 +2449,7 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {code_font_size}px;
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
+                    transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
                 .think-content.loading {{
@@ -2442,11 +2462,25 @@ class CodeWebViewer(QWebEngineView):
                     background-size: 200% 100%;
                     animation: think-shimmer 1.5s ease-in-out infinite;
                 }}
+                /* 流式预览也使用相同的闪烁脉冲动画，增强"正在生成"的感知 */
+                .think-streaming-preview.loading {{
+                    background-image: linear-gradient(
+                        90deg,
+                        rgba(255, 255, 255, 0.02) 25%,
+                        rgba(255, 255, 255, 0.06) 50%,
+                        rgba(255, 255, 255, 0.02) 75%
+                    );
+                    background-size: 200% 100%;
+                    animation: think-shimmer 1.5s ease-in-out infinite;
+                }}
                 @keyframes think-shimmer {{
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
                 }}
                 /* 思考中蛇形爬行动画 */
+                .think-block .think-block__summary {{
+                    transition: background-color 220ms ease;
+                }}
                 .think-block[data-streaming="true"] .think-block__summary {{
                     background: rgba(255, 255, 255, 0.04);
                 }}
@@ -2460,8 +2494,26 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 /* 工具流式调用块 — 金色圆环动画背景 */
+                .tool-streaming-block .tool-block__summary {{
+                    transition: background-color 220ms ease;
+                }}
                 .tool-streaming-block[data-streaming="true"] .tool-block__summary {{
                     background: rgba(255, 200, 50, 0.05);
+                }}
+                /* spinner 和状态文字的平滑过渡 */
+                .tool-streaming-spinner,
+                .tool-streaming-status {{
+                    transition: opacity 220ms ease, transform 220ms ease;
+                }}
+                .tool-streaming-block[data-streaming="false"] .tool-streaming-spinner,
+                .tool-streaming-block[data-streaming="false"] .tool-streaming-status {{
+                    opacity: 0;
+                    transform: scale(0.7);
+                }}
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-spinner,
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-status {{
+                    opacity: 1;
+                    transform: scale(1);
                 }}
 
                 .tool-block {{
@@ -2931,7 +2983,7 @@ class CodeWebViewer(QWebEngineView):
                         }});
 
                         // 恢复展开状态并移除骨架屏动画
-                        container.querySelectorAll('.think-content').forEach(content => {{
+                        container.querySelectorAll('.think-content, .think-streaming-preview').forEach(content => {{
                             content.classList.remove('loading');
                         }});
 
@@ -5319,6 +5371,11 @@ class MessageCard(SimpleCardWidget):
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
+            # 修复时序问题：工具结果块注入前先强制渲染 pending 文本，
+            # 避免工具结果块先于前置文本出现在 DOM 中
+            if self.viewer._streaming and self.viewer._lazy_markdown_cb:
+                self.viewer._schedule_render(immediate=True)
+
             block_html = render_tool_block(
                 tool_name=tool_name,
                 tool_args=arguments or {},
@@ -5406,7 +5463,18 @@ class MessageCard(SimpleCardWidget):
         if not hasattr(self, 'viewer') or not self.viewer:
             return
 
+        # 修复工具折叠框先于前置文本出现的时序问题：
+        # 流式模式下 updateContent 全量渲染有定时器延迟（200ms+），
+        # 而工具块通过 _inject_tool_streaming_html 即时 append 到 DOM，
+        # 导致工具块在文本渲染之前就出现。
+        # 解决方案：注入工具块之前先强制渲染 pending 文本，保证文本先于工具块展示。
+        if self.viewer._streaming and self.viewer._lazy_markdown_cb:
+            self.viewer._schedule_render(immediate=True)
+
         try:
+            preview_escaped = escape(preview) if preview else "准备中..."
+            char_hint = f" ({char_count}字符)" if char_count > 0 else ""
+            preview_content = f"{preview_escaped}{char_hint}"
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -5415,6 +5483,7 @@ class MessageCard(SimpleCardWidget):
                 completed=completed,
             )
             safe_html = json.dumps(block_html).decode('utf-8')
+            safe_preview = json.dumps(preview_content).decode('utf-8')
             streaming_flag = 'true' if not completed else 'false'
             js_code = f"""
             (function() {{
@@ -5422,36 +5491,24 @@ class MessageCard(SimpleCardWidget):
                 if (!c) return;
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (el) {{
-                    // 已有块：从新 HTML 提取 summary 和 body，替换内容保留 chevron
-                    var tmp = document.createElement('div');
-                    tmp.innerHTML = {safe_html};
-                    var newBtn = tmp.querySelector('.cm-collapsible__summary');
-                    var btn = el.querySelector('.cm-collapsible__summary');
-                    if (btn && newBtn) {{
-                        var chevron = btn.querySelector('.cm-collapsible__chevron');
-                        var chevronHtml = chevron ? chevron.outerHTML : '';
-                        // 从新按钮中取 chevron 之外的全部 HTML
-                        var newInner = newBtn.innerHTML;
-                        var tmpChevron = newBtn.querySelector('.cm-collapsible__chevron');
-                        if (tmpChevron) {{
-                            newInner = newInner.replace(tmpChevron.outerHTML, '');
-                        }}
-                        btn.innerHTML = chevronHtml + newInner;
-                    }}
-                    var newBody = tmp.querySelector('.cm-collapsible__body');
-                    var body = el.querySelector('.cm-collapsible__body');
-                    if (body && newBody) {{
-                        body.innerHTML = newBody.innerHTML;
-                    }}
+                    // 已有块：只更新 data-streaming 属性和预览文本
+                    // 保留 spinner/status DOM 元素，由 CSS 过渡控制淡出
                     el.setAttribute('data-streaming', '{streaming_flag}');
+                    var previewEl = el.querySelector('.tool-streaming-preview');
+                    if (previewEl) {{
+                        previewEl.innerHTML = {safe_preview};
+                    }}
+                    var bodyEl = el.querySelector('.cm-collapsible__body .think-content');
+                    if (bodyEl) {{
+                        bodyEl.innerHTML = {safe_preview};
+                    }}
                     reportHeight();
                 }} else {{
-                    // 新块：完整创建
-                    var d = document.createElement('div');
-                    d.setAttribute('data-tool-injected', 'true');
-                    d.setAttribute('data-tool-streaming', 'true');
-                    d.innerHTML = {safe_html};
-                    c.appendChild(d);
+                    // 新块：直接插入，避免额外 wrapper div 影响 margin 折叠
+                    var tmp = document.createElement('div');
+                    tmp.innerHTML = {safe_html};
+                    var block = tmp.firstElementChild;
+                    if (block) c.appendChild(block);
                     reportHeight();
                 }}
             }})();
@@ -5580,31 +5637,34 @@ class MessageCard(SimpleCardWidget):
         self.viewer._schedule_render(immediate=False)
 
     def _update_thinking_incremental(self, new_text: str):
-        """增量更新思考内容
+        """增量更新思考块预览
 
-        直接通过 JavaScript 更新最后一个思考块内容，避免完整重渲染。
+        流式过程中只更新 body 内的 .think-streaming-preview 预览文本（固定高度），
+        不直接追加全量思考内容到 .think-content。
         蛇形动画由 requestAnimationFrame 独立驱动，不受 DOM 重建影响。
         """
         if not hasattr(self.viewer, 'page'):
             return
 
         try:
-            # 对新内容进行转义和代码块清理
-            # 内存优化：超长 thinking chunk 截断，避免单次 JS 调用传输过大数据
-            if len(new_text) > 3000:
-                new_text = new_text[:3000] + "\n\n..."
-            escaped = escape(new_text)
-            escaped = _CODE_BLOCK_REMOVE_PATTERN.sub("", escaped)
-            escaped = escaped.replace("`", "").replace("\r\n", " ").replace("\n", " ")
+            # 获取当前累计的 reasoning 全量内容
+            full_content = ""
+            for i in reversed(range(len(self._content_data))):
+                if self._content_data[i].get("type") == "reasoning":
+                    full_content = self._content_data[i].get("content", "") or ""
+                    break
 
-            # 直接更新最后一个思考块内容（通过 JS）
+            # 计算预览文本（与 _get_think_preview 一致）
+            preview_text = _get_think_preview(full_content) if full_content else "思考中..."
+            preview_safe = json.dumps(escape(preview_text)).decode('utf-8')
+
+            # 更新 body 内 .think-streaming-preview（只更新预览，不追加全量内容）
             js_code = f"""
             (function() {{
-                const thinkContents = document.querySelectorAll('.think-content');
-                if (thinkContents.length > 0) {{
-                    const lastThink = thinkContents[thinkContents.length - 1];
-                    lastThink.textContent += {json.dumps(escaped)};
-                    lastThink.classList.remove('loading');
+                const previews = document.querySelectorAll('.think-streaming-preview');
+                if (previews.length > 0) {{
+                    const lastPreview = previews[previews.length - 1];
+                    lastPreview.textContent = {preview_safe};
                 }}
                 reportHeight();
             }})();
