@@ -1791,6 +1791,9 @@ class CodeWebViewer(QWebEngineView):
         self._resize_unlock_timer.setInterval(150)  # resize 结束后 150ms 再报告高度
         self._resize_unlock_timer.timeout.connect(self._on_resize_unlock)
 
+        # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
+        self._thinking_finalized = False
+
         # 1. 渲染定时器
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -3250,10 +3253,10 @@ class CodeWebViewer(QWebEngineView):
             html_content = _resolve_image_src(html_content)
             return html_content
 
-        # 流式模式：仅在最后一个块是 reasoning 时，去掉其闭合标签
+        # 流式模式：仅在最后一个块是 reasoning 且思考尚未被工具调用标记为完成时，去掉其闭合标签
         # 判断标准：markdown 以 </think> 结尾（说明最后一个块恰好是 reasoning）
         streaming_md = raw_md.rstrip()
-        if self._streaming and streaming_md.endswith("</think>"):
+        if self._streaming and streaming_md.endswith("</think>") and not self._thinking_finalized:
             # 末尾正好是 reasoning 块的闭合标签，去掉它表示该块尚未完成
             streaming_md = streaming_md[:-len("</think>")].rstrip()
 
@@ -5530,6 +5533,9 @@ class MessageCard(SimpleCardWidget):
         使新块获得独立的 data-streaming 状态。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
+        # 新一轮思考开始，重置 viewer 的 finalized 标志
+        if self.viewer:
+            self.viewer._thinking_finalized = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
         if self.viewer and getattr(self.viewer, 'page', None):
@@ -5667,6 +5673,9 @@ class MessageCard(SimpleCardWidget):
         # 懒渲染未就绪 / viewer 未创建
         if not self._lazy_rendered or not self.viewer:
             return
+
+        # 通知 viewer：思考已完成，后续全量渲染不要再剥离 </think>
+        self.viewer._thinking_finalized = True
 
         # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
         tag = _classify_think_tag(content)
