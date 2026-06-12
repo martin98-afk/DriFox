@@ -2383,6 +2383,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow: hidden;
                     transform: translateZ(0);
                     backface-visibility: hidden;
+                    contain: layout style;
                 }}
                 .cm-collapsible__summary {{
                     width: 100%;
@@ -5445,8 +5446,28 @@ class MessageCard(SimpleCardWidget):
 
         将 reasoning 作为 _content_data 的一个 block，
         与文本、工具结果自然交错排列。
+
+        关键：立即在 DOM 端标记所有已有的流式思考块为完成态，
+        防止 _update_thinking_incremental 将新块文本错误写入旧块预览。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
+        # DOM 端：将所有 data-streaming="true" 的旧块标记为完成，隐藏其预览
+        if self.viewer and getattr(self.viewer, 'page', None):
+            try:
+                self.viewer.page().runJavaScript("""
+                (function() {
+                    var blocks = document.querySelectorAll('.think-block[data-streaming="true"]');
+                    blocks.forEach(function(block) {
+                        block.setAttribute('data-streaming', 'false');
+                        var preview = block.querySelector('.think-streaming-preview');
+                        if (preview) {
+                            preview.style.display = 'none';
+                        }
+                    });
+                })();
+                """)
+            except RuntimeError:
+                pass
 
     # ── 工具流式调用块 ──────────────────────────────────
 
@@ -5462,12 +5483,18 @@ class MessageCard(SimpleCardWidget):
             return
 
         # 修复工具折叠框先于前置文本出现的时序问题：
-        # 流式模式下 updateContent 全量渲染有定时器延迟（200ms+），
-        # 而工具块通过 _inject_tool_streaming_html 即时 append 到 DOM，
-        # 导致工具块在文本渲染之前就出现。
-        # 解决方案：注入工具块之前先强制渲染 pending 文本，保证文本先于工具块展示。
+        # 文本已由 _append_text_incremental 增量推送到 DOM，不需要
+        # 昂贵的全量 updateContent()。只确保调度了全量渲染即可（非立即）。
+        # 避免每次工具参数 chunk 都触发全量 DOM 重建造成的闪烁。
         if self.viewer._streaming and self.viewer._lazy_markdown_cb:
-            self.viewer._schedule_render(immediate=True)
+            # 轻量推送：确保 pending 文本已通过增量路径可见
+            # 全量渲染由 _schedule_render 定时器自然触发（200ms+防抖）
+            if not self.viewer._render_timer.isActive():
+                self.viewer._schedule_render(immediate=False)
+
+        # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
+        # 触发消息列表滚底。工具流式块注入属于内容加载，应滚动。
+        self._content_just_loaded = True
 
         try:
             preview_escaped = escape(preview) if preview else "准备中..."
@@ -5488,6 +5515,7 @@ class MessageCard(SimpleCardWidget):
                 var c = document.getElementById('content-placeholder');
                 if (!c) return;
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
                 if (el) {{
                     // 已有块：只更新 data-streaming 属性和预览文本
                     // 保留 spinner/status DOM 元素，由 CSS 过渡控制淡出
@@ -5500,14 +5528,14 @@ class MessageCard(SimpleCardWidget):
                     if (bodyEl) {{
                         bodyEl.innerHTML = {safe_preview};
                     }}
-                    reportHeight();
+                    hr();
                 }} else {{
                     // 新块：直接插入，避免额外 wrapper div 影响 margin 折叠
                     var tmp = document.createElement('div');
                     tmp.innerHTML = {safe_html};
                     var block = tmp.firstElementChild;
                     if (block) c.appendChild(block);
-                    reportHeight();
+                    hr();
                 }}
             }})();
             """
@@ -5644,6 +5672,10 @@ class MessageCard(SimpleCardWidget):
         if not hasattr(self.viewer, 'page'):
             return
 
+        # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
+        # 触发消息列表滚底。思考流式预览更新属于内容加载，应滚动。
+        self._content_just_loaded = True
+
         try:
             # 获取当前累计的 reasoning 全量内容
             full_content = ""
@@ -5657,14 +5689,33 @@ class MessageCard(SimpleCardWidget):
             preview_safe = json.dumps(escape(preview_text)).decode('utf-8')
 
             # 更新 body 内 .think-streaming-preview（只更新预览，不追加全量内容）
+            # 精确命中最后一个 data-streaming="true" 的 think-block，
+            # 避免旧块未完成时新块文本泄露到旧块预览（配合 start_new_thinking_block 的 DOM 标记）
+            # 使用 reportHeightDebounced 防抖，避免高频 reportHeight 触发 Qt 布局重算抖动
             js_code = f"""
             (function() {{
-                const previews = document.querySelectorAll('.think-streaming-preview');
-                if (previews.length > 0) {{
-                    const lastPreview = previews[previews.length - 1];
-                    lastPreview.textContent = {preview_safe};
+                var targetBlock = null;
+                var streamingBlocks = document.querySelectorAll('.think-block[data-streaming="true"]');
+                if (streamingBlocks.length > 0) {{
+                    targetBlock = streamingBlocks[streamingBlocks.length - 1];
+                }} else {{
+                    // 降级：全量渲染尚未创建新块 DOM 时，查找任意 .think-streaming-preview
+                    var previews = document.querySelectorAll('.think-streaming-preview');
+                    if (previews.length > 0) {{
+                        targetBlock = previews[previews.length - 1].closest('.think-block');
+                    }}
                 }}
-                reportHeight();
+                if (targetBlock) {{
+                    var preview = targetBlock.querySelector('.think-streaming-preview');
+                    if (preview) {{
+                        preview.textContent = {preview_safe};
+                    }}
+                }}
+                if (typeof reportHeightDebounced === 'function') {{
+                    reportHeightDebounced();
+                }} else {{
+                    reportHeight();
+                }}
             }})();
             """
             self.viewer.page().runJavaScript(js_code)

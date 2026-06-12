@@ -214,8 +214,6 @@ def run_safe(command: str, **kwargs) -> "subprocess.Popen":
     args = split_command(command)
     if not args:
         raise ValueError(f"Cannot split command: {command}")
-
-    logger.info(f"Executing (safe, shell=False): {command}")
     return subprocess.Popen(
         args,
         shell=False,

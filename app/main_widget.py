@@ -8739,30 +8739,41 @@ class OpenAIChatToolWindow(ToolWindow):
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
             executor.progress_updated.connect(
-                lambda tid, msg: self._sub_agent_floating_widget.update_progress(
-                    tid, msg
+                lambda tid, msg: (
+                    self._sub_agent_floating_widget.update_progress(tid, msg)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.tool_call_started.connect(
-                lambda tid, name, args: self._sub_agent_floating_widget.add_tool_call(
-                    tid, name, args
+                lambda tid, name, args: (
+                    self._sub_agent_floating_widget.add_tool_call(tid, name, args)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.tool_call_started.connect(
-                lambda tid, name, args: self._sub_agent_compact_widget.add_tool_call(
-                    tid, name, args
+                lambda tid, name, args: (
+                    self._sub_agent_compact_widget.add_tool_call(tid, name, args)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.tool_result_received.connect(
-                lambda tid,
-                name,
-                result,
-                success: self._sub_agent_floating_widget.add_tool_result(
-                    tid, name, result, success
+                lambda tid, name, result, success: (
+                    self._sub_agent_floating_widget.add_tool_result(
+                        tid, name, result, success
+                    )
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.finished_with_result.connect(
-                lambda tid, result: self._on_sub_agent_finished(tid, result)
+                lambda tid, result: (
+                    self._on_sub_agent_finished(tid, result)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
+                )
             )
 
     def _on_sub_agent_task_finished(self, task_id: str, result: str):

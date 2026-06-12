@@ -132,13 +132,16 @@ class SubTaskLogWidget(QFrame):
 
     def _append_log(self, text: str, fmt: QTextCharFormat = None):
         """追加日志（带格式）"""
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(cursor.End)
-        if fmt:
-            cursor.setCharFormat(fmt)
-        cursor.insertText(text + "\n")
-        self.log_text.setTextCursor(cursor)
-        self.log_text.ensureCursorVisible()
+        try:
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(cursor.End)
+            if fmt:
+                cursor.setCharFormat(fmt)
+            cursor.insertText(text + "\n")
+            self.log_text.setTextCursor(cursor)
+            self.log_text.ensureCursorVisible()
+        except RuntimeError:
+            pass  # C++ 对象已删除（窗口已关闭），忽略
 
     def _update_time(self):
         """更新时间显示（已完成的任务不再更新时间）"""
