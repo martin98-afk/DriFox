@@ -53,10 +53,20 @@ def main():
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
-    # OpenGL 共享上下文（解决 QtWebEngineWidgets 导入问题）
+    # OpenGL 共享上下文设置
+    # AA_DontCreateNativeWidgetSiblings：macOS 上启用会导致 Cocoa 插件问题，跳过
+    # AA_ShareOpenGLContexts：macOS 也必须启用，否则创建第二个 QWebEngineView
+    #   时 Chromium GPU 进程会触发 SIGTRAP（trace trap）崩溃
     if platform.system() != "Darwin":
         QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
-        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+
+    # macOS 上设置 Chromium 进程模式为 in-process-GPU，防止多窗口时
+    # GPU 子进程冲突导致的 SIGTRAP/SIGBUS 崩溃
+    if platform.system() == "Darwin":
+        import os as _os
+        if "QTWEBENGINE_CHROMIUM_FLAGS" not in _os.environ:
+            _os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--in-process-gpu"
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 提前导入，确保在 app 创建之前触发
@@ -105,6 +115,8 @@ def main():
         if msg_type == QtMsgType.QtFatalMsg:
             _logger.error(f"[QtFatal] {msg_text}")
             # 不 abort()，仅记录日志后返回，让进程继续运行
+            # 注意：某些 PyQt5 版本中 pyqt5_err_print() 直接在 C++ 层调用 abort()
+            # 此处理器无法阻止那一类 abort，需要配合信号槽外层 try-catch
         elif msg_type == QtMsgType.QtCriticalMsg:
             _logger.error(f"[QtCritical] {msg_text}")
 
@@ -116,6 +128,17 @@ def main():
         _logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
         _logger.error("".join(_traceback.format_exception(exc_type, exc_val, exc_tb)))
     sys.excepthook = _pyqt_exception_hook
+
+    # sys.unraisablehook：处理 Python 对象析构时抛出的不可捕获异常
+    # 防止 GC 收集 SIP 包装器时对象已释放导致的内存错误
+    def _unraisable_hook(unraisable):
+        msg = getattr(unraisable.exc_value, 'args', (str(unraisable.exc_value),))
+        err_msg = msg[0] if msg else str(unraisable.exc_value)
+        _logger.error(f"[UnraisableException] {unraisable.exc_type.__name__}: {err_msg}")
+        if unraisable.object:
+            _logger.error(f"  Object: {unraisable.object!r}")
+        _logger.error(f"  Err: {unraisable.err_msg}")
+    sys.unraisablehook = _unraisable_hook
     
     # 禁用默认退出行为（让最后一个窗口隐藏到托盘而不是退出）
     app.setQuitOnLastWindowClosed(False)

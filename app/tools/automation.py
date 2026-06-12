@@ -88,16 +88,21 @@ class AutomationTools:
     必须在 Settings.llm_desktop_automation_enabled = True 时才生效
     """
 
+    # 类级共享资源：只有一个全局热键监听器，跨窗口共用
+    _global_stop_listener = None  # 共享的 GlobalHotKeys 实例
+    _global_stop_callback = None  # 共享回调包装器
+    _stop_listener_instances: set = set()  # 所有注册的 AutomationTools 实例
+
     def __init__(self, owner=None):
         self._owner = owner
         self._mouse = MouseController() if _HAS_PYNPUT else None
         self._kb = _kb_module.Controller() if (_HAS_PYNPUT and _kb_module) else None
         self._emergency_stopped = False
-        self._stop_listener = None
+        self._stop_listener = None  # 不再直接持有监听器
         # 显示器信息懒加载缓存; 分辨率运行期几乎不变, 不必每次重新探测
         self._screen_info_cache: Optional[dict] = None
-        # 注册紧急停止热键 (Ctrl+Alt+Esc)
-        self._register_emergency_stop()
+        # 注册紧急停止热键 (Ctrl+Alt+Esc) - 全局共享
+        self._register_global_stop()
 
     def _get_screen_info(self) -> dict:
         """获取主显示器尺寸 + 全部显示器列表 (mss 未装时返回空 dict)
@@ -174,23 +179,43 @@ class AutomationTools:
             )
         return None
 
-    def _register_emergency_stop(self) -> None:
-        """注册 Ctrl+Alt+Esc 全局热键用于紧急停止"""
+    def _register_global_stop(self) -> None:
+        """注册全局共享的 Ctrl+Alt+Esc 热键监听器
+
+        macOS 上不允许同一个进程注册多个 CGEventTapCreate 全局事件监听器，
+        否则第二个 GlobalHotKeys 会触发 SIGTRAP 崩溃。
+        这里使用类变量确保进程内只创建一个监听器，所有实例共享。
+        """
         if not _HAS_PYNPUT or _kb_module is None:
             return
+
+        # 注册当前实例到共享集合
+        AutomationTools._stop_listener_instances.add(self)
+
+        # 如果全局监听器已存在，不再重复创建
+        if AutomationTools._global_stop_listener is not None:
+            return
+
         try:
-            self._stop_listener = _kb_module.GlobalHotKeys({
-                "<ctrl>+<alt>+<esc>": self._on_emergency_stop,
+            # 定义一个共享回调，通知所有已注册实例
+            def _shared_emergency_stop():
+                logger.warning("[Automation] ⚠️ 紧急停止触发 (Ctrl+Alt+Esc)")
+                for inst in AutomationTools._stop_listener_instances:
+                    try:
+                        inst._emergency_stopped = True
+                    except Exception:
+                        pass
+
+            AutomationTools._global_stop_callback = _shared_emergency_stop
+            listener = _kb_module.GlobalHotKeys({
+                "<ctrl>+<alt>+<esc>": _shared_emergency_stop,
             })
-            self._stop_listener.daemon = True
-            self._stop_listener.start()
+            listener.daemon = True
+            listener.start()
+            AutomationTools._global_stop_listener = listener
             logger.info("[Automation] 紧急停止热键已注册: Ctrl+Alt+Esc")
         except Exception as e:
             logger.warning(f"[Automation] 紧急热键注册失败 (可能缺权限): {e}")
-
-    def _on_emergency_stop(self) -> None:
-        logger.warning("[Automation] ⚠️ 紧急停止触发 (Ctrl+Alt+Esc)")
-        self._emergency_stopped = True
 
     def _validate_xy(self, x, y) -> Optional[ToolResult]:
         if not (isinstance(x, int) and isinstance(y, int)):

@@ -666,14 +666,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self._copy_btn = TransparentToolButton(get_icon("新建窗口"), self)
         self._copy_btn.setFixedSize(28, 28)
         self._copy_btn.setToolTip("新建窗口")
-        self._copy_btn.clicked.connect(lambda: self._duplicate_window(branch=False))
+        self._copy_btn.clicked.connect(
+            lambda: self._safe_duplicate_window(branch=False)
+        )
         title_bar.insert_button(0, self._copy_btn)
 
         # 创建分支按钮
         self._branch_btn = TransparentToolButton(get_icon("分支"), self)
         self._branch_btn.setFixedSize(28, 28)
         self._branch_btn.setToolTip("分支当前对话")
-        self._branch_btn.clicked.connect(lambda: self._duplicate_window(branch=True))
+        self._branch_btn.clicked.connect(
+            lambda: self._safe_duplicate_window(branch=True)
+        )
         title_bar.insert_button(1, self._branch_btn)
         # 创建设置按钮
         self._settings_btn = TransparentToolButton(FluentIcon.SETTING, self)
@@ -691,6 +695,40 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.gateway import open_docs
 
         open_docs()
+
+    def _safe_duplicate_window(self, branch: bool = False):
+        """安全包装 _duplicate_window，确保任何异常都不会传播到 PyQt5 信号槽链
+
+        PyQt5 中信号槽内的未捕获异常会调用 pyqt5_err_print() → qFatal() → abort()，
+        导致整个进程崩溃（macOS 上的经典崩溃模式）。
+        此方法在最外层用 BaseException 兜底，确保异常不会逃逸到 PyQt5 的信号调度器。
+
+        调用链：分支/复制窗口按钮的 clicked 信号直接连接 lambda，lambda 内部通过
+        本方法用 BaseException 兜底。如果连本方法都进不去（信号来自已析构的 widget
+        等极端情况），异常会由 PyQt5 内部的 C++ 异常处理器捕获 → pyqt5_err_print，
+        其中部分 PyQt5 版本会不可阻止地调用 qFatal → abort。
+        头尾通过日志确认入口/出口状态。
+        """
+        logger.debug(f"[_safe_duplicate_window] ENTER branch={branch}")
+        try:
+            self._duplicate_window(branch=branch)
+        except BaseException:
+            import traceback
+            logger.error(f"[_safe_duplicate_window] 复制窗口时发生异常: {traceback.format_exc()}")
+            # 强制刷新日志缓冲区，确保异常信息写入磁盘
+            try:
+                logger.complete()
+            except BaseException:
+                pass
+            try:
+                from qfluentwidgets import InfoBar, InfoBarPosition
+                InfoBar.error(
+                    "复制失败", "创建窗口时发生异常，请重试",
+                    parent=self, position=InfoBarPosition.BOTTOM,
+                )
+            except BaseException:
+                pass  # InfoBar 也失败时彻底放弃
+        logger.debug(f"[_safe_duplicate_window] LEAVE branch={branch}")
 
     def _duplicate_window(self, branch: bool = False):
         """复制当前窗口并以弹窗方式显示，或从当前会话分支创建新会话
@@ -848,6 +886,11 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "复制失败", str(e), parent=self, position=InfoBarPosition.BOTTOM
             )
+        except BaseException:
+            # 极端情况（如 KeyboardInterrupt）也要兜底，防止 pyqt5_err_print → qFatal → abort
+            import traceback
+            from loguru import logger as _log
+            _log.error(f"[_duplicate_window] 未预期的异常: {traceback.format_exc()}")
 
     def _request_tool_start_ui_sync(
         self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None
@@ -7943,23 +7986,27 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_code_action(self, code: str, action: str = "copy"):
         from loguru import logger
 
-        logger.info(f"[_on_code_action] action={action}, code_len={len(code)}")
-        if action == "insert":
-            self.insertResponse.emit(code)
-        elif action == "create":
-            self.createResponse.emit(code)
-        elif action == "copy":
-            clipboard = QApplication.clipboard()
-            clipboard.setText(code)
-            # 复制成功提示 - 使用 self 作为 parent
-            logger.info("[_on_code_action] showing InfoBar")
-            InfoBar.success(
-                "已复制",
-                "",
-                duration=1500,
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
+        try:
+            logger.info(f"[_on_code_action] action={action}, code_len={len(code)}")
+            if action == "insert":
+                self.insertResponse.emit(code)
+            elif action == "create":
+                self.createResponse.emit(code)
+            elif action == "copy":
+                from PyQt5.QtWidgets import QApplication
+                clipboard = QApplication.clipboard()
+                clipboard.setText(code)
+                # 复制成功提示 - 使用 self 作为 parent
+                logger.info("[_on_code_action] showing InfoBar")
+                InfoBar.success(
+                    "已复制",
+                    "",
+                    duration=1500,
+                    parent=self,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception as e:
+            logger.error(f"[_on_code_action] 异常: {e}")
 
     def _scroll_to_bottom(self, sticky_ms: int = 0):
         self._pending_scroll_to_bottom = True
@@ -8432,6 +8479,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = True
         self._response_start_time = time.time()
         self._accumulated_content = ""
+        # 每个新的流式轮次清空工具结果去重集合
+        self._processed_tool_result_ids: set = set()
         # 当 LLM 实际开始流式响应时切换为停止按钮
         # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
         self._toggle_send_stop(True)
@@ -8514,10 +8563,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._card_manager.show_card("todo", self._window_id)
             return
 
-        # 工具参数接收完成，将消息卡片中的流式块转为完成态
+        # 工具参数接收完成，更新预览文本，保持"执行中"状态（金色转圈继续显示）
+        # 转圈在 append_tool_result（工具结果返回）时由 DOM 原地替换自然消失，
+        # 不可提前设为完成态 —— 此时工具尚未执行。
         card = self._find_latest_assistant_card()
-        if card and getattr(card, 'finish_tool_streaming', None):
-            card.finish_tool_streaming(tool_call_id, tool_name, arguments)
+        if card and getattr(card, 'update_tool_streaming', None):
+            card.update_tool_streaming(tool_call_id, tool_name, arguments)
 
     def _on_sub_agent_compact_closed(self):
         """子智能体紧凑卡片关闭时清理状态"""
@@ -8739,30 +8790,41 @@ class OpenAIChatToolWindow(ToolWindow):
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
             executor.progress_updated.connect(
-                lambda tid, msg: self._sub_agent_floating_widget.update_progress(
-                    tid, msg
+                lambda tid, msg: (
+                    self._sub_agent_floating_widget.update_progress(tid, msg)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.tool_call_started.connect(
-                lambda tid, name, args: self._sub_agent_floating_widget.add_tool_call(
-                    tid, name, args
+                lambda tid, name, args: (
+                    self._sub_agent_floating_widget.add_tool_call(tid, name, args)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.tool_call_started.connect(
-                lambda tid, name, args: self._sub_agent_compact_widget.add_tool_call(
-                    tid, name, args
+                lambda tid, name, args: (
+                    self._sub_agent_compact_widget.add_tool_call(tid, name, args)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.tool_result_received.connect(
-                lambda tid,
-                name,
-                result,
-                success: self._sub_agent_floating_widget.add_tool_result(
-                    tid, name, result, success
+                lambda tid, name, result, success: (
+                    self._sub_agent_floating_widget.add_tool_result(
+                        tid, name, result, success
+                    )
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
                 )
             )
             executor.finished_with_result.connect(
-                lambda tid, result: self._on_sub_agent_finished(tid, result)
+                lambda tid, result: (
+                    self._on_sub_agent_finished(tid, result)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
+                )
             )
 
     def _on_sub_agent_task_finished(self, task_id: str, result: str):
@@ -8981,6 +9043,14 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         import time
 
+        # 去重保护：_emit_with_callback 双路径（event_bus + signal.emit）
+        # 会导致本方法被调用两次，产生重复工具块
+        if not hasattr(self, "_processed_tool_result_ids"):
+            self._processed_tool_result_ids: set = set()
+        if tool_call_id in self._processed_tool_result_ids:
+            return
+        self._processed_tool_result_ids.add(tool_call_id)
+
         if self._is_auto_loop_running:
             # AutoLoop 模式：只记录日志，不操作 UI
             if self._auto_loop_running_card:
@@ -9020,10 +9090,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
                 pass
         elif tool_name not in ("question",):
-            # 移除消息卡片中的工具流式块（替换为下方的正式工具结果块）
-            card = self._find_latest_assistant_card()
-            if card and getattr(card, 'remove_tool_streaming', None):
-                card.remove_tool_streaming(tool_call_id)
+            # 工具结果块由 append_tool_result 内部通过原地转换（In-Place
+            # Transformation）替换流式块，不再需要手动 remove_tool_streaming。
+            # 原地转换保持 DOM 树位置不变，避免删除+新建导致的高度抖动。
+            pass
 
         # 提取 diff 字段（ToolResult 对象或 dict 格式）
         diff_val = None
@@ -9158,6 +9228,26 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._current_assistant_card:
             self._current_assistant_card.finish_streaming()
+
+        # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
+        # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或
+        # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
+        # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
+        self._scroll_to_bottom()
+
+        # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
+        # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致
+        # UI 卡顿后「刷的更新一片」
+        QTimer.singleShot(0, self._do_post_stream_cleanup)
+
+        if self.input_area:
+            self.input_area.setFocus()
+
+    def _do_post_stream_cleanup(self):
+        """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+
         if self.history_manager:
             self._save_current_session_to_history()
             # 🛡️ 立即落盘，确保数据写入 SQLite
@@ -9166,9 +9256,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_batch_structures()
             # 修复：同步可见范围，避免回收机制误删当前轮次的卡片
             self._visible_batch_end = len(self._message_batch)
-
-        if self.input_area:
-            self.input_area.setFocus()
 
         session = self.session_manager.get_current_session()
         if session and session.messages:

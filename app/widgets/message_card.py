@@ -481,24 +481,41 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
                 return flat[:i].rstrip(" ，,、.") + "..."
         return flat[:max_length] + "..."
 
-    # 选 3 句：首句 + 中间句(~40%) + 尾句
-    selected: List[str] = []
+    # 选首句 + 中间句(~40%) + 尾句（相邻句子直接拼接，不加 ...）
+    selected_indices: List[int] = []
     n = len(sentences)
 
     # 首句
-    selected.append(sentences[0])
+    selected_indices.append(0)
 
     # 中间句（40% 位置，确保不与首尾重复）
     mid_idx = max(1, int(n * 0.4))
     if mid_idx < n - 1:  # 不在最后一句话
-        selected.append(sentences[mid_idx])
+        selected_indices.append(mid_idx)
 
     # 尾句
-    if n > 1 and sentences[-1] != sentences[0]:
-        if len(selected) < 2 or sentences[-1] != selected[-1]:
-            selected.append(sentences[-1])
+    last_idx = n - 1
+    if n > 1 and last_idx not in selected_indices:
+        selected_indices.append(last_idx)
 
-    preview = " ... ".join(selected)
+    # 按原始顺序排序
+    selected_indices.sort()
+
+    # 构建预览：相邻句子直接拼接，非相邻用 ...
+    preview_groups: List[str] = []
+    current_group = sentences[selected_indices[0]]
+    for i in range(1, len(selected_indices)):
+        idx = selected_indices[i]
+        prev_idx = selected_indices[i - 1]
+        if idx == prev_idx + 1:
+            # 与上一个句子相邻，直接拼接
+            current_group += sentences[idx]
+        else:
+            preview_groups.append(current_group)
+            current_group = sentences[idx]
+    preview_groups.append(current_group)
+
+    preview = " ... ".join(preview_groups)
 
     # ── 保证最少 40 字 ──
     if len(preview) < 40:
@@ -510,12 +527,12 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
             else:
                 preview = full[:max_length] + "..."
         else:
-            # 向后扩展：取前几个句子直到 ≥40 字
-            extended = sentences[0]
-            for s in sentences[1:]:
+            # 向后扩展：直接取连续句子直到 ≥40 字（不插入 ...）
+            extended = ""
+            for s in sentences:
                 if len(extended) >= 40:
                     break
-                extended += " ... " + s
+                extended += s
             preview = extended
 
     # 截断到 max_length
@@ -836,6 +853,8 @@ def _render_tool_streaming_block(
     """
     # MCP 工具名清理
     is_mcp = tool_name.startswith("mcp__")
+    # 子智能体任务
+    is_sub_agent_task = tool_name in ("task", "subagent_para", "subagent_dag")
     display_name = tool_name or ""
     if is_mcp:
         display_name = "__".join(display_name.split("__")[2:])
@@ -846,24 +865,25 @@ def _render_tool_streaming_block(
     if is_mcp:
         icon = "🌐"
         title_color = "#00BCD4"
+    elif is_sub_agent_task:
+        icon = "🤖"
+        title_color = "#9C27B0"
     else:
         icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
         title_color = "#FFA500"
 
-    # 流式态：蛇形圆环 + 状态文字；完成态：仅图标
-    if completed:
-        spinner_html = ""
-        status_hint = ""
-    else:
-        spinner_html = _THINK_SNAKE_SVG
-        status_hint = ' <span style="opacity:0.55; font-weight:400;">执行中</span>'
+    # 始终包含 spinner 和状态文字，由 CSS data-streaming 控制可见性
+    # 完成态时通过 CSS 过渡淡出，而非从 DOM 中移除
+    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    status_hint = ' <span class="tool-streaming-status" style="opacity:0.55; font-weight:400;">执行中</span>'
 
     char_hint = f" ({char_count}字符)" if char_count > 0 else ""
     preview_display = escape(preview) if preview else "准备中..."
 
-    streaming_attr = '' if completed else ' data-streaming="true"'
+    # 始终设置 data-streaming 属性（"true" 或 "false"）
+    streaming_state = "false" if completed else "true"
 
-    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}"{streaming_attr}>
+    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>
@@ -872,8 +892,8 @@ def _render_tool_streaming_block(
             {spinner_html}
             {status_hint}
         </span>
-        <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+        <span style="margin-left: auto; min-width: 0; overflow: hidden; flex-shrink: 1;">
+            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {preview_display}{char_hint}
             </span>
         </span>
@@ -885,43 +905,37 @@ def _render_tool_streaming_block(
 
 
 def _render_think_block(content: str, completed: bool = True) -> str:
-    # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
-    expanded = False
-
-    # ── 标签分类（完成时才分类，流式过程只显示💡） ──
     if completed:
+        # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
         status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
-    else:
-        status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
-        tag = ""  # 流式不分类
-
-    # ── 预览：完成时结论句+累加，流式时简单截断 ──
-    preview = _get_think_preview(content)
-
-    block_seed = f"{content}|{completed}"
-    block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-    expanded_attr = "true" if expanded else "false"
-    body_style = ' style="height:auto; opacity:1;"' if expanded else ""
-
-    # 思考内容不需要渲染代码编辑框，移除代码块标记
-    content = _strip_code_blocks(content)
-    content = escape(content)
-
-    # 获取全局字体样式
-    font_style = _get_think_block_styles()
-
-    streaming_attr = ' data-streaming="true"' if not completed else ''
-    return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}"{streaming_attr}>
-    <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
+        content_escaped = escape(_strip_code_blocks(content))
+        font_style = _get_think_block_styles()
+        preview = _get_think_preview(content)
+        block_seed = f"{content}|1"
+        block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+        summary_right = f'<span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
+        return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="false" style="margin: 4px 0;">
+    <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
+        {summary_right}
     </button>
-    <div class="cm-collapsible__body"{body_style}>
-        <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content}</div>
+    <div class="cm-collapsible__body">
+        {body_html}
     </div>
 </div>"""
+
+    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    return f'''<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+        {spinner_html}
+        <span>思考中...</span>
+    </span>
+</div>'''
+    
 
 
 def _render_think_block_lightweight(content: str, completed: bool = True) -> str:
@@ -931,38 +945,35 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     1. 不执行代码块处理（_strip_code_blocks），直接转义
     2. 不生成 block_key hash（节省计算）
     """
-    # 始终保持折叠状态（流式输出时也不展开），用户可手动点击查看
-    expanded = False
-
-    # ── 标签 + 预览（完成时分类+扩展，流式时简单截断） ──
     if completed:
+        # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
         status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
+        content_escaped = escape(content)
+        font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
-    else:
-        status_text = _THINK_SNAKE_SVG + ' <span style="opacity:0.5">思考中</span>'
-        preview = _get_think_preview(content)
-
-    expanded_attr = "true" if expanded else "false"
-    body_style = ' style="height:auto; opacity:1;"' if expanded else ""
-
-    # 轻量级处理：只做转义，不处理代码块
-    content_escaped = escape(content)
-
-    # 获取全局字体样式
-    font_style = _get_think_block_styles()
-
-    streaming_attr = ' data-streaming="true"' if not completed else ''
-    return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}"{streaming_attr}>
-    <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
+        summary_right = f'<span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
+        return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
+    <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
         <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
-        <span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>
+        {summary_right}
     </button>
-    <div class="cm-collapsible__body"{body_style}>
-        <div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>
+    <div class="cm-collapsible__body">
+        {body_html}
     </div>
 </div>"""
+
+    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    return f'''<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+        {spinner_html}
+        <span>思考中...</span>
+    </span>
+</div>'''
+    
 
 
 def _inject_think_cards(md_text: str, completed: bool = True) -> str:
@@ -2364,6 +2375,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow: hidden;
                     transform: translateZ(0);
                     backface-visibility: hidden;
+                    contain: layout style;
                 }}
                 .cm-collapsible__summary {{
                     width: 100%;
@@ -2421,6 +2433,20 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary);
                     font-weight: 600;
                 }}
+                /* 流式思考纯文本块（无折叠UI）— 金色圆环 + 背景 */
+                .think-streaming {{
+                    margin: 4px 0;
+                    background: transparent;
+                    border: 1px solid var(--border);
+                    border-radius: 6px;
+                    padding: 8px 10px;
+                    color: var(--text-secondary);
+                    font-style: italic;
+                    transition: border-color 220ms ease, background 220ms ease;
+                }}
+                .think-streaming[data-streaming="true"] {{
+                    background: rgba(255, 200, 50, 0.05);
+                }}
                 .think-content {{
                     padding: 8px 10px;
                     border-top: 1px solid var(--border);
@@ -2430,6 +2456,7 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {code_font_size}px;
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
+                    transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
                 .think-content.loading {{
@@ -2446,7 +2473,32 @@ class CodeWebViewer(QWebEngineView):
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
                 }}
+                /* 思考流式预览 — 默认静态色 */
+                .think-streaming-preview {{
+                    position: relative;
+                    color: {Colors.TEXT_SECONDARY};
+                }}
+                /* 流式状态：::after 伪元素叠加流动光效，不触碰文字层 */
+                .think-block[data-streaming="true"] .think-streaming-preview::after {{
+                    content: '';
+                    position: absolute;
+                    inset: 0;
+                    pointer-events: none;
+                    background: linear-gradient(
+                        90deg,
+                        transparent 0%,
+                        rgba(255, 200, 50, 0.05) 45%,
+                        rgba(255, 200, 50, 0.10) 50%,
+                        rgba(255, 200, 50, 0.05) 55%,
+                        transparent 100%
+                    );
+                    background-size: 250% 100%;
+                    animation: think-shimmer 3s ease-in-out infinite;
+                }}
                 /* 思考中蛇形爬行动画 */
+                .think-block .think-block__summary {{
+                    transition: background-color 220ms ease;
+                }}
                 .think-block[data-streaming="true"] .think-block__summary {{
                     background: rgba(255, 255, 255, 0.04);
                 }}
@@ -2460,8 +2512,26 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 /* 工具流式调用块 — 金色圆环动画背景 */
+                .tool-streaming-block .tool-block__summary {{
+                    transition: background-color 220ms ease;
+                }}
                 .tool-streaming-block[data-streaming="true"] .tool-block__summary {{
                     background: rgba(255, 200, 50, 0.05);
+                }}
+                /* spinner 和状态文字的平滑过渡 */
+                .tool-streaming-spinner,
+                .tool-streaming-status {{
+                    transition: opacity 220ms ease, transform 220ms ease;
+                }}
+                .tool-streaming-block[data-streaming="false"] .tool-streaming-spinner,
+                .tool-streaming-block[data-streaming="false"] .tool-streaming-status {{
+                    opacity: 0;
+                    transform: scale(0.7);
+                }}
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-spinner,
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-status {{
+                    opacity: 1;
+                    transform: scale(1);
                 }}
 
                 .tool-block {{
@@ -2931,7 +3001,7 @@ class CodeWebViewer(QWebEngineView):
                         }});
 
                         // 恢复展开状态并移除骨架屏动画
-                        container.querySelectorAll('.think-content').forEach(content => {{
+                        container.querySelectorAll('.think-content, .think-streaming-preview').forEach(content => {{
                             content.classList.remove('loading');
                         }});
 
@@ -3003,7 +3073,7 @@ class CodeWebViewer(QWebEngineView):
                         const act = btn.getAttribute('data-action');
                         const b64 = btn.getAttribute('data-copy');
                         const lang = btn.getAttribute('data-lang') || '';
-                        if (act === 'copy' && navigator.clipboard) navigator.clipboard.writeText(atob(b64));
+                        if (act === 'copy') try {{ navigator.clipboard.writeText(atob(b64)); }} catch(e) {{}}
                         console.log('pywebview_action:' + act + ':' + b64 + ':' + lang);
                         return;
                     }}
@@ -3281,44 +3351,59 @@ class CodeWebViewer(QWebEngineView):
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
                 js_code = (
+                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失
+                    "(function(){"
+                    "var _sbs=[];"
+                    "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                    "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
-                    + f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                    f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                    "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                    "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+                    "var _t=document.createElement('div');_t.innerHTML=b.html;"
+                    "var _bk=_t.firstElementChild;if(_bk)_c.appendChild(_bk);}});}"
+                    "})();"
                 )
                 self._last_rendered_html = None
                 self.page().runJavaScript(js_code)
                 return
 
             # ── 以下为流式模式（增量渲染） ──
-            import time as _t
-            _t0 = _t.time()
             # 懒加载：通过回调获取最新 markdown（避免每次 reasoning chunk 都调用 content_to_markdown）
             if self._lazy_markdown_cb:
-                _tcb0 = _t.time()
                 fresh_md = self._lazy_markdown_cb()
-                _tcb = (_t.time() - _tcb0) * 1000
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
                 self._markdown_text = fresh_md
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
-            _tr0 = _t.time()
             html_content = self._render_markdown_to_html(self._markdown_text)
-            _tr = (_t.time() - _tr0) * 1000
             self._last_rendered_markdown = self._markdown_text
             self._last_rendered_html = html_content
             self._height_report_pending = True
-            # 全量更新前清除已通过 JS 增量注入的工具块，避免重复
+            # 全量更新前清除已通过 JS 增量注入的工具块，避免重复；
+            # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
+            # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
+            # 因找不到流式块而追加重复的 data-tool-injected 块）
             js_code = (
+                "(function(){"
+                "var _sbs=[];"
+                "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
-                + f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+                "var _t=document.createElement('div');_t.innerHTML=b.html;"
+                "var _bk=_t.firstElementChild;if(_bk)_c.appendChild(_bk);}});}"
+                "})();"
             )
-            _tjs0 = _t.time()
             self.page().runJavaScript(js_code)
-            _tjs = (_t.time() - _tjs0) * 1000
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
-            _total = (_t.time() - _t0) * 1000
         except RuntimeError:
             pass
 
@@ -4231,6 +4316,10 @@ class MessageCard(SimpleCardWidget):
         self._lazy_rendered = False
         # 标记：内容刚加载到viewer，首次heightChanged后滚动并清除
         self._content_just_loaded = False
+        self._finished_streaming_ids: set = set()  # 防止 streaming 状态回退
+        # 工具参数首次到达跟踪：每个 tool_call_id 第一次 update_tool_streaming 时
+        # 触发"标记当前思考块为完成"，避免 reasoning→tool_call 切换时思考块残留"思考中"
+        self._tool_args_first_seen_ids: set = set()
         self._pending_content: Optional[str] = None
         self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
         self._viewer_container = QWidget(self)
@@ -5312,6 +5401,10 @@ class MessageCard(SimpleCardWidget):
                 echarts=echarts,
             )
         )
+        # 标记为已完成：后续 streaming 更新直接跳过，避免在完成态工具块上
+        # 错误挂载 data-streaming 属性导致样式混乱
+        if tool_call_id:
+            self._finished_streaming_ids.add(tool_call_id)
         # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
@@ -5319,6 +5412,11 @@ class MessageCard(SimpleCardWidget):
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
+            # 修复时序问题：工具结果块注入前先强制渲染 pending 文本，
+            # 避免工具结果块先于前置文本出现在 DOM 中
+            if self.viewer._streaming and self.viewer._lazy_markdown_cb:
+                self.viewer._schedule_render(immediate=True)
+
             block_html = render_tool_block(
                 tool_name=tool_name,
                 tool_args=arguments or {},
@@ -5330,15 +5428,58 @@ class MessageCard(SimpleCardWidget):
                 echarts=echarts,
             )
             safe_html = json.dumps(block_html).decode('utf-8')
+
+            # 提取 inner HTML（去掉外层 <div> 包装），用于原地更新已有 DOM 节点
+            # outerHTML 替换会销毁旧元素再创建新元素，在 WebEngine 渲染管线中
+            # 可能形成"旧元素消失 → 新元素出现"的跨帧闪烁。
+            # 原地更新保持同一 DOM 节点，消除闪烁。
+            _inner_match = re.match(
+                r'^<div[^>]*>(.*)</div>$', block_html, re.DOTALL
+            )
+            if _inner_match:
+                inner_html = _inner_match.group(1).strip()
+            else:
+                inner_html = block_html  # 兜底：整个当作 inner HTML
+            safe_inner = json.dumps(inner_html).decode('utf-8')
+
+            # 提取外层 <div> 的 style 属性（如 display: flex; align-items: center;）
+            # 用于 INLINE_TOOLS 原地转换时应用到现有元素，保持 flex 布局
+            _outer_style_match = re.search(
+                r'<div[^>]*\sstyle="([^"]*)"', block_html
+            )
+            outer_style = _outer_style_match.group(1) if _outer_style_match else ""
+            safe_outer_style = json.dumps(outer_style).decode('utf-8')
+
+            # 提取 block_key（用于设置 data-block-key 属性）
+            _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
+            block_key = _key_match.group(1) if _key_match else ""
+
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
-                if (c) {{
-                    var d = document.createElement('div');
-                    d.setAttribute('data-tool-injected', 'true');
-                    d.innerHTML = {safe_html};
-                    c.appendChild(d);
+                if (!c) return;
+                // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
+                var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                if (existing) {{
+                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性 / innerHTML
+                    // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
+                    existing.className = 'cm-collapsible tool-block';
+                    existing.setAttribute('data-block-key', '{block_key}');
+                    existing.setAttribute('data-expanded', 'false');
+                    existing.removeAttribute('data-streaming');
+                    // 恢复外层 div 的 style（如 display:flex），确保 INLINE_TOOLS
+                    // 的预览文字 text-align:right 正确工作。直接 setAttribute 覆盖
+                    // 所有 inline style，比逐个属性设置更简洁高效。
+                    existing.setAttribute('style', {safe_outer_style});
+                    existing.innerHTML = {safe_inner};
+                    reportHeight();
+                    return;
                 }}
+                // 无已有流式块时，追加新块（兜底逻辑）
+                var d = document.createElement('div');
+                d.setAttribute('data-tool-injected', 'true');
+                d.innerHTML = {safe_html};
+                c.appendChild(d);
                 reportHeight();
             }})();
             """
@@ -5390,8 +5531,27 @@ class MessageCard(SimpleCardWidget):
 
         将 reasoning 作为 _content_data 的一个 block，
         与文本、工具结果自然交错排列。
+
+        关键：立即在 DOM 端标记所有已有的流式思考块为完成态，
+        使新块获得独立的 data-streaming 状态。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
+        # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
+        # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
+        if self.viewer and getattr(self.viewer, 'page', None):
+            try:
+                self.viewer.page().runJavaScript("""
+                (function() {
+                    var blocks = document.querySelectorAll(
+                        '.think-block[data-streaming="true"], .think-streaming[data-streaming="true"]'
+                    );
+                    blocks.forEach(function(block) {
+                        block.setAttribute('data-streaming', 'false');
+                    });
+                })();
+                """)
+            except RuntimeError:
+                pass
 
     # ── 工具流式调用块 ──────────────────────────────────
 
@@ -5402,56 +5562,175 @@ class MessageCard(SimpleCardWidget):
         """通过 JS 注入/更新工具流式块
 
         已有同 ID 块时原地更新文本，不重建 DOM，保持折叠/展开状态不丢失。
+
+        preview 为 None 时表示仅更新 data-streaming 状态，不修改任何文字内容。
+        用于 preview 阶段的 finish_tool_streaming 调用（参数全是占位键时）。
         """
         if not hasattr(self, 'viewer') or not self.viewer:
             return
 
+        # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
+        # 触发消息列表滚底。工具流式块注入属于内容加载，应滚动。
+        # ⚠️ 不在此处调用 _schedule_render：全量渲染会执行 updateContent()
+        # 销毁所有 JS 注入的 [data-tool-injected] 元素，导致流式块闪灭→再现。
+        # 流式文本已由 _append_text_incremental 增量推送，不需要全量渲染。
+        self._content_just_loaded = True
+
         try:
+            _text_only = preview is None
+            preview_escaped = escape(preview) if preview else "准备中..."
+            char_hint = f" ({char_count}字符)" if char_count > 0 else ""
+            preview_content = f"{preview_escaped}{char_hint}"
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
-                preview=preview,
+                preview=preview if preview else "",
                 char_count=char_count,
                 completed=completed,
             )
             safe_html = json.dumps(block_html).decode('utf-8')
+            safe_preview = json.dumps(preview_content).decode('utf-8')
             streaming_flag = 'true' if not completed else 'false'
+            _text_only_js = 'true' if _text_only else 'false'
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
                 if (!c) return;
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
                 if (el) {{
-                    // 已有块：从新 HTML 提取 summary 和 body，替换内容保留 chevron
+                    var curStreaming = el.getAttribute('data-streaming');
+                    // text-only 模式：仅更新 data-streaming 状态，不碰文字
+                    if ({_text_only_js}) {{
+                        el.setAttribute('data-streaming', '{streaming_flag}');
+                        hr();
+                        return;
+                    }}
+                    // 防止状态回退：已完成的块（data-streaming="false"）不允许
+                    // 再切回流式态（data-streaming="true"），避免 spinner 反复闪烁
+                    if ('{streaming_flag}' === 'true' && curStreaming === 'false') {{
+                        // 只更新文本内容，保持 data-streaming="false"
+                        var previewEl2 = el.querySelector('.tool-streaming-preview');
+                        if (previewEl2) {{
+                            previewEl2.innerHTML = {safe_preview};
+                        }}
+                    }} else {{
+                        el.setAttribute('data-streaming', '{streaming_flag}');
+                        var previewEl = el.querySelector('.tool-streaming-preview');
+                        if (previewEl) {{
+                            previewEl.innerHTML = {safe_preview};
+                        }}
+                        var bodyEl = el.querySelector('.cm-collapsible__body .think-content');
+                        if (bodyEl) {{
+                            bodyEl.innerHTML = {safe_preview};
+                        }}
+                    }}
+                    hr();
+                }} else {{
+                    // text-only 模式下不存在块：不创建（避免 "准备中..." 空块）
+                    if ({_text_only_js}) return;
+                    // 新块：直接插入，避免额外 wrapper div 影响 margin 折叠
                     var tmp = document.createElement('div');
                     tmp.innerHTML = {safe_html};
-                    var newBtn = tmp.querySelector('.cm-collapsible__summary');
-                    var btn = el.querySelector('.cm-collapsible__summary');
-                    if (btn && newBtn) {{
-                        var chevron = btn.querySelector('.cm-collapsible__chevron');
-                        var chevronHtml = chevron ? chevron.outerHTML : '';
-                        // 从新按钮中取 chevron 之外的全部 HTML
-                        var newInner = newBtn.innerHTML;
-                        var tmpChevron = newBtn.querySelector('.cm-collapsible__chevron');
-                        if (tmpChevron) {{
-                            newInner = newInner.replace(tmpChevron.outerHTML, '');
+                    var block = tmp.firstElementChild;
+                    if (block) c.appendChild(block);
+                    hr();
+                }}
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
+    def _maybe_finish_thinking_for_tool(self, tool_call_id: str):
+        """当工具参数第一次到达时，标记当前思考块为完成态（💡）。
+
+        修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 上还显示"思考中"。
+
+        触发条件：update_tool_streaming 第一次被某个 tool_call_id 调用。
+
+        实现：
+        - 对 .think-block（已有折叠框结构）→ JS 更新 summary 文字为完成态
+        - 对 .think-streaming（流式纯文本）→ Python 生成完整折叠框 HTML 替换
+        """
+        if tool_call_id in self._tool_args_first_seen_ids:
+            return
+        self._tool_args_first_seen_ids.add(tool_call_id)
+
+        # 检查 _content_data 末尾是否是未完成的 reasoning block
+        if not self._content_data or not isinstance(self._content_data, list):
+            return
+        last_block = self._content_data[-1]
+        if not isinstance(last_block, dict):
+            return
+        if last_block.get("type") != "reasoning":
+            return
+        content = (last_block.get("content") or "").strip()
+        if not content:
+            # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
+            return
+
+        # 懒渲染未就绪 / viewer 未创建
+        if not self._lazy_rendered or not self.viewer:
+            return
+
+        # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
+        tag = _classify_think_tag(content)
+        if tag:
+            status_html = f'<span class="think-bulb">💡</span> {escape(tag)}'
+        else:
+            status_html = '<span class="think-bulb">💡</span>'
+        safe_status = json.dumps(status_html).decode('utf-8')
+
+        # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
+        completed_html = _render_think_block(content, completed=True)
+        safe_completed_html = json.dumps(completed_html).decode('utf-8')
+
+        # 直接 JS 处理 DOM 上残留的"思考中"状态
+        # 注意：不能走全量渲染 — `_render_markdown_to_html` 流式模式会去掉末尾 </think>，
+        # 导致 markdown 仍被解析为 completed=False（"思考中"）。
+        try:
+            js_code = f"""
+            (function() {{
+                // ── 处理 .think-streaming 纯文本块：替换为完成态折叠框 ──
+                var streamingBlocks = document.querySelectorAll('.think-streaming[data-streaming="true"]');
+                streamingBlocks.forEach(function(block) {{
+                    block.setAttribute('data-streaming', 'false');
+                    var tmp = document.createElement('div');
+                    tmp.innerHTML = {safe_completed_html};
+                    var newBlock = tmp.firstElementChild;
+                    if (newBlock) {{
+                        block.parentNode.replaceChild(newBlock, block);
+                    }}
+                }});
+
+                // ── 处理 .think-block 已有折叠框：只更新 summary 文字 ──
+                var blocks = document.querySelectorAll('.think-block[data-streaming="true"]');
+                blocks.forEach(function(block) {{
+                    block.setAttribute('data-streaming', 'false');
+                    var summary = block.querySelector('.think-block__summary');
+                    if (summary) {{
+                        var spans = summary.children;
+                        var statusSpan = null;
+                        for (var i = 0; i < spans.length; i++) {{
+                            var s = spans[i];
+                            var inline = s.getAttribute('style') || '';
+                            if (inline.indexOf('white-space: nowrap') !== -1) {{
+                                statusSpan = s;
+                                break;
+                            }}
                         }}
-                        btn.innerHTML = chevronHtml + newInner;
+                        if (!statusSpan && spans.length >= 2) {{
+                            statusSpan = spans[1];
+                        }}
+                        if (statusSpan) {{
+                            statusSpan.innerHTML = {safe_status};
+                        }}
                     }}
-                    var newBody = tmp.querySelector('.cm-collapsible__body');
-                    var body = el.querySelector('.cm-collapsible__body');
-                    if (body && newBody) {{
-                        body.innerHTML = newBody.innerHTML;
-                    }}
-                    el.setAttribute('data-streaming', '{streaming_flag}');
-                    reportHeight();
-                }} else {{
-                    // 新块：完整创建
-                    var d = document.createElement('div');
-                    d.setAttribute('data-tool-injected', 'true');
-                    d.setAttribute('data-tool-streaming', 'true');
-                    d.innerHTML = {safe_html};
-                    c.appendChild(d);
+                }});
+                if (typeof reportHeightDebounced === 'function') {{
+                    reportHeightDebounced();
+                }} else if (typeof reportHeight === 'function') {{
                     reportHeight();
                 }}
             }})();
@@ -5470,6 +5749,12 @@ class MessageCard(SimpleCardWidget):
             tool_name: 工具名
             partial_args: 部分参数
         """
+        # 已完成参数接收或已追加工具结果的不再更新，防止完成态被退回 streaming 状态
+        if tool_call_id in self._finished_streaming_ids:
+            return
+        # 🆕 第一次工具参数到达时，标记当前思考块为完成态（💡）
+        # 修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 还显示"思考中"
+        self._maybe_finish_thinking_for_tool(tool_call_id)
         preview = ""
         char_count = 0
         if partial_args:
@@ -5519,6 +5804,12 @@ class MessageCard(SimpleCardWidget):
                     char_count = len(args_str)
                 except Exception:
                     preview = "..."
+            else:
+                # 参数全部是 _ 前缀占位键（preview 阶段），仅更新状态不覆盖文字
+                self._inject_tool_streaming_html(
+                    tool_call_id, tool_name, preview=None, char_count=0, completed=True
+                )
+                return
         self._inject_tool_streaming_html(
             tool_call_id, tool_name, preview, char_count, completed=True
         )
@@ -5580,36 +5871,29 @@ class MessageCard(SimpleCardWidget):
         self.viewer._schedule_render(immediate=False)
 
     def _update_thinking_incremental(self, new_text: str):
-        """增量更新思考内容
+        """流式思考增量更新（仅触发布局高度重算）
 
-        直接通过 JavaScript 更新最后一个思考块内容，避免完整重渲染。
-        蛇形动画由 requestAnimationFrame 独立驱动，不受 DOM 重建影响。
+        思考中不再更新预览文字，仅显示转圈+思考中。
+        结束时通过全量渲染更新预览文字到 summary 右侧。
         """
         if not hasattr(self.viewer, 'page'):
             return
 
-        try:
-            # 对新内容进行转义和代码块清理
-            # 内存优化：超长 thinking chunk 截断，避免单次 JS 调用传输过大数据
-            if len(new_text) > 3000:
-                new_text = new_text[:3000] + "\n\n..."
-            escaped = escape(new_text)
-            escaped = _CODE_BLOCK_REMOVE_PATTERN.sub("", escaped)
-            escaped = escaped.replace("`", "").replace("\r\n", " ").replace("\n", " ")
+        # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
+        # 触发消息列表滚底。
+        self._content_just_loaded = True
 
-            # 直接更新最后一个思考块内容（通过 JS）
-            js_code = f"""
-            (function() {{
-                const thinkContents = document.querySelectorAll('.think-content');
-                if (thinkContents.length > 0) {{
-                    const lastThink = thinkContents[thinkContents.length - 1];
-                    lastThink.textContent += {json.dumps(escaped)};
-                    lastThink.classList.remove('loading');
-                }}
-                reportHeight();
-            }})();
-            """
-            self.viewer.page().runJavaScript(js_code)
+        try:
+            # 仅触发布局高度重算，不再更新 .think-streaming-preview
+            self.viewer.page().runJavaScript("""
+            (function() {
+                if (typeof reportHeightDebounced === 'function') {
+                    reportHeightDebounced();
+                } else {
+                    reportHeight();
+                }
+            })();
+            """)
         except RuntimeError:
             pass
 

@@ -205,11 +205,14 @@ class ChatWorkerState:
         """
         彻底清理所有状态，防止内存泄漏。
         在对话结束后调用。
+
+        注意：不重置 is_cancelled / execution_cancelled 取消标志。
+        原因：finalize_stop() 可能因 worker 被工具线程阻塞而超时，
+        此时调用 cleanup() 后 worker 线程仍可能恢复执行。
+        如果重置取消标志，worker 会误以为未被取消而继续发起 API 调用
+        （用旧会话的消息浪费 tokens）。保持取消标志不变确保 worker
+        恢复后立刻退出循环。
         """
-        # 重置所有状态标志
-        self.is_cancelled = False
-        self.tool_call.execution_cancelled = False
-        
         # 重置工具调用
         self.tool_call = ToolCallState()
         
