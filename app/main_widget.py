@@ -1501,6 +1501,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._on_providers_config_changed
         )
 
+        # 监听技能配置变更（启用/禁用），确保多窗口同步
+        self.cfg.llm_enabled_skills.valueChanged.connect(
+            self._on_skills_config_changed
+        )
+
         # 连接服务商添加/编辑信号
         self._settings_popup.llmProviderCard.showAddProviderCard.connect(
             self._show_provider_add_card
@@ -3614,6 +3619,24 @@ class OpenAIChatToolWindow(ToolWindow):
                     hook_type=values["type"],
                     enabled=values["enabled"],
                 )
+        # 广播给所有其他窗口刷新 hook 列表
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed or win is self:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            hook_card = getattr(settings_popup, "hookListCard", None)
+            if hook_card is None:
+                continue
+            # 通知设置卡片已打开的其他窗口刷新 hook 列表
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                # 先重新加载 HookManager 内存（从文件读取）
+                if hook_card._hook_manager:
+                    hook_card._hook_manager.reload_global_hooks(
+                        str(hook_card.hooks_config_file)
+                    )
+                hook_card._refresh(reload=True)
         self._card_manager.show_card("settings", self._window_id)
 
     def _on_hook_edit_closed(self):
@@ -3754,6 +3777,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
             self._settings_popup.mcpListCard._refresh()
             QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
+
+        # 广播给所有其他窗口刷新 MCP 列表
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed or win is self:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            mcp_card = getattr(settings_popup, "mcpListCard", None)
+            if mcp_card is None:
+                continue
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                mcp_card._refresh()
 
     def _on_mcp_edit_closed(self):
         """MCP 编辑关闭回调"""
@@ -4574,6 +4610,19 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._load_model_selector_to_card()
 
+    def _on_skills_config_changed(self, enabled_skills):
+        """技能配置变更时的回调（多窗口同步）
+
+        当一个窗口启用/禁用了技能，轻量同步开关状态，不重建列表。
+        """
+        if (
+            hasattr(self, "_card_manager")
+            and self._card_manager.is_card_visible("settings", self._window_id)
+            and hasattr(self, "_settings_popup")
+            and hasattr(self._settings_popup, "llmSkillsCard")
+        ):
+            self._settings_popup.llmSkillsCard._sync_skill_states()
+
     def _reload_plugin_system(self):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
         if hasattr(self, "backend") and self.backend:
@@ -4648,6 +4697,35 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
+        # 技能变更：轻量同步开关状态，不重建列表
+        if (
+            result.get("skills")
+            and hasattr(self, "_settings_popup")
+            and self._settings_popup
+        ):
+            try:
+                if hasattr(self._settings_popup, "llmSkillsCard"):
+                    self._settings_popup.llmSkillsCard._sync_skill_states()
+                    logger.debug("[HotReload] skills states synced")
+            except Exception as e:
+                logger.warning(f"[HotReload] 同步技能状态失败: {e}")
+
+        # Hooks 变更：刷新设置面板中的 hook 列表
+        if (
+            result.get("hooks")
+            and hasattr(self, "_settings_popup")
+            and self._settings_popup
+        ):
+            try:
+                if hasattr(self._settings_popup, "hookListCard"):
+                    card = self._settings_popup.hookListCard
+                    if card._hook_manager:
+                        card._hook_manager.reload_global_hooks(str(card.hooks_config_file))
+                    card._refresh(reload=True)
+                    logger.debug("[HotReload] hooks card refreshed")
+            except Exception as e:
+                logger.warning(f"[HotReload] 刷新 hooks 列表失败: {e}")
+
         # 主题变更：主动刷新设置面板中的主题下拉列表
         if (
             result.get("themes")
@@ -4672,7 +4750,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 如果当前是自触发的（开关操作），跳过全量刷新
                     if not card.consume_hot_reload():
                         card._refresh()
-                        QTimer.singleShot(500, card.refresh_connections)
                         logger.debug("[HotReload] MCP server list refreshed")
                     else:
                         logger.debug(
