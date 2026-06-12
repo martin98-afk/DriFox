@@ -8432,6 +8432,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = True
         self._response_start_time = time.time()
         self._accumulated_content = ""
+        # 每个新的流式轮次清空工具结果去重集合
+        self._processed_tool_result_ids: set = set()
         # 当 LLM 实际开始流式响应时切换为停止按钮
         # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
         self._toggle_send_stop(True)
@@ -8992,6 +8994,14 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         import time
 
+        # 去重保护：_emit_with_callback 双路径（event_bus + signal.emit）
+        # 会导致本方法被调用两次，产生重复工具块
+        if not hasattr(self, "_processed_tool_result_ids"):
+            self._processed_tool_result_ids: set = set()
+        if tool_call_id in self._processed_tool_result_ids:
+            return
+        self._processed_tool_result_ids.add(tool_call_id)
+
         if self._is_auto_loop_running:
             # AutoLoop 模式：只记录日志，不操作 UI
             if self._auto_loop_running_card:
@@ -9169,6 +9179,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._current_assistant_card:
             self._current_assistant_card.finish_streaming()
+
+        # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
+        # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或
+        # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
+        # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
+        self._scroll_to_bottom()
 
         # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
         # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致
