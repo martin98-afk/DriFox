@@ -918,7 +918,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
         # 流式态：summary 无预览（避免高度抖动），body 放固定高度预览文本 + loading 脉冲动画
         summary_right = ""
         preview_escaped = escape(preview) if preview else "思考中..."
-        body_html = f'<div class="think-streaming-preview loading" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; line-height: 1.4; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; word-break: break-word;">{preview_escaped}</div>'
+        body_html = f'<div class="think-streaming-preview loading" style="font-size: {scale_font_size(11)}px; line-height: 1.5; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; white-space: normal; word-break: break-word;">{preview_escaped}</div>'
 
     return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="{expanded_attr}"{streaming_attr} style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
@@ -970,7 +970,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         summary_right = ""
         preview = _get_think_preview(content)
         preview_escaped = escape(preview) if preview else "思考中..."
-        body_html = f'<div class="think-streaming-preview loading" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; line-height: 1.4; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; word-break: break-word;">{preview_escaped}</div>'
+        body_html = f'<div class="think-streaming-preview loading" style="font-size: {scale_font_size(11)}px; line-height: 1.5; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; white-space: normal; word-break: break-word;">{preview_escaped}</div>'
 
     return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="{expanded_attr}"{streaming_attr} style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="{expanded_attr}" style="{font_style}">
@@ -2466,6 +2466,28 @@ class CodeWebViewer(QWebEngineView):
                 @keyframes think-shimmer {{
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
+                }}
+                /* 思考流式预览 — 默认静态色 */
+                .think-streaming-preview {{
+                    position: relative;
+                    color: {Colors.TEXT_SECONDARY};
+                }}
+                /* 流式状态：::after 伪元素叠加流动光效，不触碰文字层 */
+                .think-block[data-streaming="true"] .think-streaming-preview::after {{
+                    content: '';
+                    position: absolute;
+                    inset: 0;
+                    pointer-events: none;
+                    background: linear-gradient(
+                        90deg,
+                        transparent 0%,
+                        rgba(255, 200, 50, 0.05) 45%,
+                        rgba(255, 200, 50, 0.10) 50%,
+                        rgba(255, 200, 50, 0.05) 55%,
+                        transparent 100%
+                    );
+                    background-size: 250% 100%;
+                    animation: think-shimmer 3s ease-in-out infinite;
                 }}
                 /* 思考中蛇形爬行动画 */
                 .think-block .think-block__summary {{
@@ -5686,7 +5708,10 @@ class MessageCard(SimpleCardWidget):
 
             # 计算预览文本（与 _get_think_preview 一致）
             preview_text = _get_think_preview(full_content) if full_content else "思考中..."
-            preview_safe = json.dumps(escape(preview_text)).decode('utf-8')
+            # textContent 不解析 HTML，不需要 escape()。escape() 会把 &<> 转成
+            # HTML 实体（如 &amp;），textContent 解释为纯文本，导致显示 &amp; 而非 &。
+            # 只做 JSON 序列化确保 JS 字符串安全即可。
+            preview_safe = json.dumps(preview_text).decode('utf-8')
 
             # 更新 body 内 .think-streaming-preview（只更新预览，不追加全量内容）
             # 精确命中最后一个 data-streaming="true" 的 think-block，
