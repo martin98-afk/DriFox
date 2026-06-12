@@ -872,10 +872,8 @@ def _render_tool_streaming_block(
         icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
         title_color = "#FFA500"
 
-    # 始终包含 spinner 和状态文字，由 CSS data-streaming 控制可见性
-    # 完成态时通过 CSS 过渡淡出，而非从 DOM 中移除
+    # spinner 由 CSS data-streaming 控制可见性，完成态时通过 CSS 过渡淡出
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    status_hint = ' <span class="tool-streaming-status" style="opacity:0.55; font-weight:400;">执行中</span>'
 
     char_hint = f" ({char_count}字符)" if char_count > 0 else ""
     preview_display = escape(preview) if preview else "准备中..."
@@ -890,7 +888,6 @@ def _render_tool_streaming_block(
             <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(display_name)}</span>
             {spinner_html}
-            {status_hint}
         </span>
         <span style="margin-left: auto; min-width: 0; overflow: hidden; flex-shrink: 1;">
             <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
@@ -2519,17 +2516,14 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(255, 200, 50, 0.05);
                 }}
                 /* spinner 和状态文字的平滑过渡 */
-                .tool-streaming-spinner,
-                .tool-streaming-status {{
+                .tool-streaming-spinner {{
                     transition: opacity 220ms ease, transform 220ms ease;
                 }}
-                .tool-streaming-block[data-streaming="false"] .tool-streaming-spinner,
-                .tool-streaming-block[data-streaming="false"] .tool-streaming-status {{
+                .tool-streaming-block[data-streaming="false"] .tool-streaming-spinner {{
                     opacity: 0;
                     transform: scale(0.7);
                 }}
-                .tool-streaming-block[data-streaming="true"] .tool-streaming-spinner,
-                .tool-streaming-block[data-streaming="true"] .tool-streaming-status {{
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-spinner {{
                     opacity: 1;
                     transform: scale(1);
                 }}
