@@ -611,10 +611,11 @@ class MCPListSettingCard(ExpandSettingCard):
         self._server_rows: Dict[str, "MCPServerRow"] = {}
         # 自触发抑制：本卡片的开关操作不触发 watchfiles 热重载回刷
         self._suppress_hot_reload = False
-        # 状态轮询定时器（3秒刷新一次连接状态指示灯）
+        # 状态轮询定时器（3秒刷新一次连接状态指示灯 + token 占用）
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(3000)
         self._status_timer.timeout.connect(self._refresh_status_dots)
+        self._status_timer.timeout.connect(self._update_mcp_token_count)
         
         self._setup_ui()
         self._refresh()
@@ -789,6 +790,7 @@ class MCPListSettingCard(ExpandSettingCard):
         else:
             self._hot_disconnect_all()
         self._refresh_status_dots()
+        self._update_mcp_token_count()
         self.serversChanged.emit()
 
     def consume_hot_reload(self) -> bool:
@@ -851,10 +853,6 @@ class MCPListSettingCard(ExpandSettingCard):
                 self._server_rows[server_data.get("name", "")] = row
                 self.viewLayout.addWidget(row)
 
-            count = len(servers)
-            enabled_count = sum(1 for s in servers if s.get("enabled", True))
-            self.setCount(f"{enabled_count}/{count}")
-
         # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确
         from PyQt5.QtCore import QCoreApplication
         QCoreApplication.processEvents()
@@ -873,6 +871,9 @@ class MCPListSettingCard(ExpandSettingCard):
         self._refresh_status_dots()
         # 启动状态轮询（卡片展开时持续刷新）
         self._status_timer.start()
+
+        # 更新头部 subtitle（服务器计数 + token 占用）
+        self._update_mcp_token_count()
 
         # 重要：新创建的行/标签未应用字体大小，需要重新刷新
         # 否则会回退到 qfluentwidgets 默认的 14px 硬编码字体
@@ -952,6 +953,9 @@ class MCPListSettingCard(ExpandSettingCard):
                 row.set_enabled(enabled)
                 row.set_status(connected=False, busy=True)
 
+        # 更新 token 估算
+        self._update_mcp_token_count()
+
         # 通知其他窗口（热更新有 2 秒防抖，这里直接广播加速同步）
         self.serversChanged.emit()
 
@@ -972,6 +976,28 @@ class MCPListSettingCard(ExpandSettingCard):
             already = any(st["name"] == name and st["connected"] for st in status_list)
             if not already:
                 self._hot_connect(name, s)
+
+    # ── Token 占用估算 ──────────────────────────────
+
+    def _update_mcp_token_count(self):
+        """更新头部 subtitle：服务器计数 + token 占用估算"""
+        from app.core.token_estimator import estimate_tokens
+
+        servers = self._get_servers()
+        count = len(servers)
+        enabled_count = sum(1 for s in servers if s.get("enabled", True))
+        base = f"{enabled_count}/{count}"
+
+        # 获取已连接的 MCP 工具 schema 并计算 token 数
+        mgr = self._get_mcp_manager()
+        token_count = 0
+        if mgr and self.cfg.mcp_enabled.value:
+            schemas = mgr.get_tool_schemas()
+            if schemas:
+                text = json.dumps(schemas, ensure_ascii=False)
+                token_count = estimate_tokens(text)
+
+        self.setCount(f"{base} · ~{token_count:,} tokens")
 
     # ── 供外部调用的添加/更新方法 ──────────────────────
 
