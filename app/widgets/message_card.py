@@ -3073,7 +3073,7 @@ class CodeWebViewer(QWebEngineView):
                         const act = btn.getAttribute('data-action');
                         const b64 = btn.getAttribute('data-copy');
                         const lang = btn.getAttribute('data-lang') || '';
-                        if (act === 'copy' && navigator.clipboard) navigator.clipboard.writeText(atob(b64));
+                        if (act === 'copy') try {{ navigator.clipboard.writeText(atob(b64)); }} catch(e) {{}}
                         console.log('pywebview_action:' + act + ':' + b64 + ':' + lang);
                         return;
                     }}

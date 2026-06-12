@@ -666,14 +666,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self._copy_btn = TransparentToolButton(get_icon("新建窗口"), self)
         self._copy_btn.setFixedSize(28, 28)
         self._copy_btn.setToolTip("新建窗口")
-        self._copy_btn.clicked.connect(lambda: self._duplicate_window(branch=False))
+        self._copy_btn.clicked.connect(
+            lambda: self._safe_duplicate_window(branch=False)
+        )
         title_bar.insert_button(0, self._copy_btn)
 
         # 创建分支按钮
         self._branch_btn = TransparentToolButton(get_icon("分支"), self)
         self._branch_btn.setFixedSize(28, 28)
         self._branch_btn.setToolTip("分支当前对话")
-        self._branch_btn.clicked.connect(lambda: self._duplicate_window(branch=True))
+        self._branch_btn.clicked.connect(
+            lambda: self._safe_duplicate_window(branch=True)
+        )
         title_bar.insert_button(1, self._branch_btn)
         # 创建设置按钮
         self._settings_btn = TransparentToolButton(FluentIcon.SETTING, self)
@@ -691,6 +695,40 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.gateway import open_docs
 
         open_docs()
+
+    def _safe_duplicate_window(self, branch: bool = False):
+        """安全包装 _duplicate_window，确保任何异常都不会传播到 PyQt5 信号槽链
+
+        PyQt5 中信号槽内的未捕获异常会调用 pyqt5_err_print() → qFatal() → abort()，
+        导致整个进程崩溃（macOS 上的经典崩溃模式）。
+        此方法在最外层用 BaseException 兜底，确保异常不会逃逸到 PyQt5 的信号调度器。
+
+        调用链：分支/复制窗口按钮的 clicked 信号直接连接 lambda，lambda 内部通过
+        本方法用 BaseException 兜底。如果连本方法都进不去（信号来自已析构的 widget
+        等极端情况），异常会由 PyQt5 内部的 C++ 异常处理器捕获 → pyqt5_err_print，
+        其中部分 PyQt5 版本会不可阻止地调用 qFatal → abort。
+        头尾通过日志确认入口/出口状态。
+        """
+        logger.debug(f"[_safe_duplicate_window] ENTER branch={branch}")
+        try:
+            self._duplicate_window(branch=branch)
+        except BaseException:
+            import traceback
+            logger.error(f"[_safe_duplicate_window] 复制窗口时发生异常: {traceback.format_exc()}")
+            # 强制刷新日志缓冲区，确保异常信息写入磁盘
+            try:
+                logger.complete()
+            except BaseException:
+                pass
+            try:
+                from qfluentwidgets import InfoBar, InfoBarPosition
+                InfoBar.error(
+                    "复制失败", "创建窗口时发生异常，请重试",
+                    parent=self, position=InfoBarPosition.BOTTOM,
+                )
+            except BaseException:
+                pass  # InfoBar 也失败时彻底放弃
+        logger.debug(f"[_safe_duplicate_window] LEAVE branch={branch}")
 
     def _duplicate_window(self, branch: bool = False):
         """复制当前窗口并以弹窗方式显示，或从当前会话分支创建新会话
@@ -848,6 +886,11 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "复制失败", str(e), parent=self, position=InfoBarPosition.BOTTOM
             )
+        except BaseException:
+            # 极端情况（如 KeyboardInterrupt）也要兜底，防止 pyqt5_err_print → qFatal → abort
+            import traceback
+            from loguru import logger as _log
+            _log.error(f"[_duplicate_window] 未预期的异常: {traceback.format_exc()}")
 
     def _request_tool_start_ui_sync(
         self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None
@@ -7943,23 +7986,27 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_code_action(self, code: str, action: str = "copy"):
         from loguru import logger
 
-        logger.info(f"[_on_code_action] action={action}, code_len={len(code)}")
-        if action == "insert":
-            self.insertResponse.emit(code)
-        elif action == "create":
-            self.createResponse.emit(code)
-        elif action == "copy":
-            clipboard = QApplication.clipboard()
-            clipboard.setText(code)
-            # 复制成功提示 - 使用 self 作为 parent
-            logger.info("[_on_code_action] showing InfoBar")
-            InfoBar.success(
-                "已复制",
-                "",
-                duration=1500,
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
+        try:
+            logger.info(f"[_on_code_action] action={action}, code_len={len(code)}")
+            if action == "insert":
+                self.insertResponse.emit(code)
+            elif action == "create":
+                self.createResponse.emit(code)
+            elif action == "copy":
+                from PyQt5.QtWidgets import QApplication
+                clipboard = QApplication.clipboard()
+                clipboard.setText(code)
+                # 复制成功提示 - 使用 self 作为 parent
+                logger.info("[_on_code_action] showing InfoBar")
+                InfoBar.success(
+                    "已复制",
+                    "",
+                    duration=1500,
+                    parent=self,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception as e:
+            logger.error(f"[_on_code_action] 异常: {e}")
 
     def _scroll_to_bottom(self, sticky_ms: int = 0):
         self._pending_scroll_to_bottom = True
