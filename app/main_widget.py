@@ -8563,10 +8563,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._card_manager.show_card("todo", self._window_id)
             return
 
-        # 工具参数接收完成，将消息卡片中的流式块转为完成态
+        # 工具参数接收完成，更新预览文本，保持"执行中"状态（金色转圈继续显示）
+        # 转圈在 append_tool_result（工具结果返回）时由 DOM 原地替换自然消失，
+        # 不可提前设为完成态 —— 此时工具尚未执行。
         card = self._find_latest_assistant_card()
-        if card and getattr(card, 'finish_tool_streaming', None):
-            card.finish_tool_streaming(tool_call_id, tool_name, arguments)
+        if card and getattr(card, 'update_tool_streaming', None):
+            card.update_tool_streaming(tool_call_id, tool_name, arguments)
 
     def _on_sub_agent_compact_closed(self):
         """子智能体紧凑卡片关闭时清理状态"""
