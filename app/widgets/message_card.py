@@ -1012,6 +1012,7 @@ def _inject_think_cards(md_text: str, completed: bool = True) -> str:
     return "".join(parts)
 
 
+@lru_cache(maxsize=128)
 def _render_tool_block_content(content: str) -> str:
     """
     渲染工具块内容为HTML。
@@ -3374,6 +3375,12 @@ class CodeWebViewer(QWebEngineView):
                 fresh_md = self._lazy_markdown_cb()
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
                 self._markdown_text = fresh_md
+            else:
+                # [PERF-opt] 无新内容：流式模式下跳过全量渲染
+                # 工具块/思考块的状态切换已通过增量 JS（_inject_tool_streaming_html /
+                # _maybe_finish_thinking_for_tool）处理完毕，无需全量 updateContent
+                # 覆盖 DOM，避免"闪灭→再现"闪烁和重复工作。
+                return
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
@@ -3403,6 +3410,7 @@ class CodeWebViewer(QWebEngineView):
             self.page().runJavaScript(js_code)
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
+
         except RuntimeError:
             pass
 
@@ -5769,6 +5777,12 @@ class MessageCard(SimpleCardWidget):
         # 流式文本已由 _append_text_incremental 增量推送，不需要全量渲染。
         self._content_just_loaded = True
 
+        # [PERF-opt] 状态切换（完成或 text_only）时：取消待处理的全量渲染定时器，
+        # 防止其覆盖增量 JS 更新造成"闪灭→再现"闪烁。增量更新已足够，不需要全量 re-render。
+        if (completed or preview is None) and hasattr(self, 'viewer') and self.viewer:
+            if hasattr(self.viewer, '_render_timer') and self.viewer._render_timer.isActive():
+                self.viewer._render_timer.stop()
+
         try:
             _text_only = preview is None
             preview_escaped = escape(preview) if preview else "准备中..."
@@ -5868,6 +5882,10 @@ class MessageCard(SimpleCardWidget):
 
         # 通知 viewer：思考已完成，后续全量渲染不要再剥离 </think>
         self.viewer._thinking_finalized = True
+
+        # [PERF-opt] 取消待处理的全量渲染定时器，防止覆盖增量 JS 思考框更新
+        if hasattr(self.viewer, '_render_timer') and self.viewer._render_timer.isActive():
+            self.viewer._render_timer.stop()
 
         # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
         tag = _classify_think_tag(content)
