@@ -1087,7 +1087,7 @@ class MemoryCardContent(QWidget):
         if not memory_mgr:
             return
 
-        entries = memory_mgr.get_entry_memories(self._search_filter)
+        entries = memory_mgr.get_entry_memories(self._search_filter, limit=9999)
         for entry in entries:
             memory_id = entry.get("id", "")
             content = entry.get("content", "")
@@ -1349,16 +1349,30 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _remove_key_document(self, doc_id: str):
-        """移除关键文档（删除后保持滚动位置）"""
+        """移除关键文档（直接移除列表项，避免全量重建导致的卡顿）"""
         memory_mgr = self._get_memory_manager()
         if memory_mgr:
             memory_mgr.remove_key_document(doc_id)
-        # 保存滚动位置，避免全量重绘后跳回顶部
-        scroll_bar = self.docs_list.verticalScrollBar()
-        scroll_pos = scroll_bar.value() if scroll_bar else 0
-        self._load_key_documents()
-        if scroll_bar:
-            scroll_bar.setValue(scroll_pos)
+
+        # 直接在列表中查找并移除对应项，不走 _load_key_documents() 全量重建
+        for i in range(self.docs_list.count()):
+            item = self.docs_list.item(i)
+            widget = self.docs_list.itemWidget(item)
+            if hasattr(widget, 'doc_id') and widget.doc_id == doc_id:
+                taken = self.docs_list.takeItem(i)
+                if taken:
+                    widget.deleteLater()  # 主动释放 widget
+                    del taken             # 释放 item
+                break
+
+        # 更新计数（只计 KeyDocumentItemWidget，排除 worktree 区域）
+        doc_count = 0
+        for i in range(self.docs_list.count()):
+            w = self.docs_list.itemWidget(self.docs_list.item(i))
+            if isinstance(w, KeyDocumentItemWidget):
+                doc_count += 1
+        self._docs_count_label.setText(f"({doc_count})" if doc_count > 0 else "")
+        self._docs_empty_hint.setVisible(doc_count == 0)
 
     def _set_as_working_directory(self, file_path: str):
         """设置为工作目录（再次点击取消）

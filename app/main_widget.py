@@ -341,6 +341,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = False
         self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
+        self._stop_elapsed = None  # 手动停止时暂存的耗时
         # 使用 try-except 保护 homepage 操作，防止 C++ 对象已删除错误
         try:
             from PyQt5 import sip
@@ -1325,6 +1326,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def setup_ui(self):
         Colors.refresh()
+        # 注册自身为 ThemeManager 的刷新目标，热重载时自动级联
+        from app.utils.theme_manager import theme_manager
+        theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
 
@@ -4621,6 +4625,10 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}"
         )
 
+    def refresh_theme(self):
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
+        self._apply_runtime_ui_settings()
+
     def _on_settings_config_changed(self):
         self._load_model_configs()
         self._apply_runtime_ui_settings()
@@ -4957,7 +4965,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     frame.refresh_style()
         # 刷新智能体切换按钮样式
         if hasattr(self, "_agent_switch_widget"):
-            Colors.refresh()
             self._agent_switch_widget.setStyleSheet(f"""
                 background: {Colors.TOOLBAR_BG};
                 border: none;
@@ -5016,7 +5023,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_project_selector_card"):
             self._project_selector_card.refresh_style()
         if hasattr(self, "_project_new_edit"):
-            Colors.refresh()
             self._project_new_edit.setStyleSheet(f"""
                 QLineEdit {{
                     background: {Colors.HOVER_BG};
@@ -9657,10 +9663,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
 
-        # 停止计时器并设置最终耗时
+        # 停止计时器并写入最终耗时到 session 消息（引擎错误路径不走 _on_messages_updated）
         if self._current_assistant_card and self._response_start_time is not None:
             elapsed = time.time() - self._response_start_time
             self._current_assistant_card.set_meta_info(elapsed=elapsed)
+            # 写入 session 最后一条 assistant 消息以便持久化
+            session = self.session_manager.get_current_session()
+            if session and session.messages:
+                for msg in reversed(session.messages):
+                    if msg.get("role") == "assistant" and "elapsed" not in msg:
+                        msg["elapsed"] = round(elapsed, 1)
+                        break
             self._response_start_time = None
 
         # 🔧 异常时保存已生成的部分消息到历史记录
@@ -10796,11 +10809,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:
-            # 停止计时器并设置最终耗时
+            # 强制停止计时器（不依赖 set_meta_info）
+            self._current_assistant_card._elapsed_timer.stop()
+            self._current_assistant_card._elapsed_start_time = None
+            # 设置并暂存最终耗时（_on_finalize_complete 可能收不到消息，需独立持久化）
             if self._response_start_time is not None:
-                elapsed = time.time() - self._response_start_time
-                self._current_assistant_card.set_meta_info(elapsed=elapsed)
-                self._response_start_time = None
+                self._stop_elapsed = time.time() - self._response_start_time
+                self._current_assistant_card.set_meta_info(elapsed=self._stop_elapsed)
+            else:
+                self._stop_elapsed = None
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.finish_streaming()
 
@@ -10861,6 +10878,21 @@ class OpenAIChatToolWindow(ToolWindow):
             # 无 chat_engine，仍然需要更新时间线
             self._update_node_preview()
 
+    def _persist_stop_elapsed(self):
+        """将手动停止时暂存的耗时写入 session.messages 并持久化"""
+        if self._stop_elapsed is None:
+            return
+        session = self.session_manager.get_current_session()
+        if not session or not session.messages:
+            return
+        for msg in reversed(session.messages):
+            if msg.get("role") == "assistant" and "elapsed" not in msg:
+                msg["elapsed"] = round(self._stop_elapsed, 1)
+                break
+        if self.history_manager:
+            self._save_current_session_to_history()
+            self.history_manager.flush()
+
     def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
         """主线程回调：处理 finalize_stop 异步完成后的消息保存
 
@@ -10869,15 +10901,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if interrupted_messages:
-            # 🛡️ Bug 修复：截断/恢复哨兵检查
-            # 场景：用户在流式中点撤销/恢复 → _persist_session_after_mutation 末尾
-            #      设置 _truncation_sentinel（标记"用户主动操作过会话"）
-            #      → finalize_stop 在后台线程跑完后回调到主线程
-            #      → worker 内部的 _current_session_messages 是启动时的**陈旧快照**，
-            #        不知道用户的截断/恢复操作；若直接覆盖会把已恢复的消息丢失。
-            # 策略：只要 sentinel 存在且 session 匹配，就丢弃 worker 覆盖。
-            #      不再依赖长度比较——恢复后 session 长度可能等于甚至超过 worker
-            #      长度，但内容已被用户修改，长度比较会漏判并导致消息丢失。
             current_session = self.session_manager.get_current_session()
             should_apply = True
             sentinel = self._truncation_sentinel
@@ -10892,15 +10915,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"session_id={current_session.session_id[:8]}"
                 )
                 should_apply = False
-            # 哨兵是一次性的，无论应用与否都清空
             self._truncation_sentinel = None
 
             if should_apply:
                 self._on_messages_updated(interrupted_messages)
+                # 兜底：_on_messages_updated 可能因 _response_start_time 已清除而跳过
+                self._persist_stop_elapsed()
                 if self.history_manager:
                     self._save_current_session_to_history()
-                    # 🛡️ 立即落盘，防止第一次对话中断后数据因延迟定时器未触发而丢失
                     self.history_manager.flush()
+        else:
+            # interrupted_messages 为空（如提前取消），独立持久化 elapsed
+            self._persist_stop_elapsed()
+
+        # 清理计时相关状态
+        self._response_start_time = None
+        self._stop_elapsed = None
 
         # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()

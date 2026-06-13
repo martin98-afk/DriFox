@@ -815,11 +815,6 @@ def _classify_think_tag(content: str) -> str:
     return best_tag if best_score >= 3.0 else ""
 
 
-_CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
-                          "总的来说", "建议", "推荐", "结论是", "答案是",
-                          "总结一下", "也就是说", "最终")
-
-
 _THINK_SNAKE_SVG = (
     '<svg class="think-snake" width="18" height="18" viewBox="0 0 24 24">'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
@@ -1012,6 +1007,7 @@ def _inject_think_cards(md_text: str, completed: bool = True) -> str:
     return "".join(parts)
 
 
+@lru_cache(maxsize=128)
 def _render_tool_block_content(content: str) -> str:
     """
     渲染工具块内容为HTML。
@@ -1766,7 +1762,7 @@ class CodeWebViewer(QWebEngineView):
     # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
     # 标准消息卡片在正常宽度(400~700px)下，1500px 高度已覆盖绝大多数内容
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 2000
+    MAX_HEIGHT = 3000
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
@@ -3351,17 +3347,25 @@ class CodeWebViewer(QWebEngineView):
                 self._height_report_pending = True
                 js_code = (
                     # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失
+                    # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
+                    # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
                     "(function(){"
                     "var _sbs=[];"
+                    "var _cp=document.getElementById('content-placeholder');"
+                    "var _childrenArr=Array.from(_cp.children);"
                     "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
+                    "idx:_childrenArr.indexOf(el)});"
                     "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
                     "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                    "var _bk=_t.firstElementChild;if(_bk)_c.appendChild(_bk);}});}"
+                    "var _bk=_t.firstElementChild;if(_bk){"
+                    "var _ref=_c.children[b.idx];"
+                    "if(_ref)_c.insertBefore(_bk,_ref);"
+                    "else _c.appendChild(_bk);}}});}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -3374,6 +3378,12 @@ class CodeWebViewer(QWebEngineView):
                 fresh_md = self._lazy_markdown_cb()
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
                 self._markdown_text = fresh_md
+            else:
+                # [PERF-opt] 无新内容：流式模式下跳过全量渲染
+                # 工具块/思考块的状态切换已通过增量 JS（_inject_tool_streaming_html /
+                # _maybe_finish_thinking_for_tool）处理完毕，无需全量 updateContent
+                # 覆盖 DOM，避免"闪灭→再现"闪烁和重复工作。
+                return
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
@@ -3386,23 +3396,32 @@ class CodeWebViewer(QWebEngineView):
             # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
             # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
             # 因找不到流式块而追加重复的 data-tool-injected 块）
+            # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
+            # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
+                "var _cp=document.getElementById('content-placeholder');"
+                "var _childrenArr=Array.from(_cp.children);"
                 "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
+                "idx:_childrenArr.indexOf(el)});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
                 "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                "var _bk=_t.firstElementChild;if(_bk)_c.appendChild(_bk);}});}"
+                "var _bk=_t.firstElementChild;if(_bk){"
+                "var _ref=_c.children[b.idx];"
+                "if(_ref)_c.insertBefore(_bk,_ref);"
+                "else _c.appendChild(_bk);}}});}"
                 "})();"
             )
             self.page().runJavaScript(js_code)
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
+
         except RuntimeError:
             pass
 
@@ -4536,9 +4555,9 @@ class MessageCard(SimpleCardWidget):
         if token_usage is not None and self._footer_tokens_label:
             total = token_usage.get("total", 0)
             if total >= 1000:
-                text = f"🪙 {total/1000:.1f}K tokens"
+                text = f"{total/1000:.1f}K tokens"
             else:
-                text = f"🪙 {total} tokens"
+                text = f"{total} tokens"
             self._footer_tokens_label.setText(text)
             self._footer_tokens_label.setVisible(True)
         # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
@@ -5769,6 +5788,12 @@ class MessageCard(SimpleCardWidget):
         # 流式文本已由 _append_text_incremental 增量推送，不需要全量渲染。
         self._content_just_loaded = True
 
+        # [PERF-opt] 状态切换（完成或 text_only）时：取消待处理的全量渲染定时器，
+        # 防止其覆盖增量 JS 更新造成"闪灭→再现"闪烁。增量更新已足够，不需要全量 re-render。
+        if (completed or preview is None) and hasattr(self, 'viewer') and self.viewer:
+            if hasattr(self.viewer, '_render_timer') and self.viewer._render_timer.isActive():
+                self.viewer._render_timer.stop()
+
         try:
             _text_only = preview is None
             preview_escaped = escape(preview) if preview else "准备中..."
@@ -5868,6 +5893,10 @@ class MessageCard(SimpleCardWidget):
 
         # 通知 viewer：思考已完成，后续全量渲染不要再剥离 </think>
         self.viewer._thinking_finalized = True
+
+        # [PERF-opt] 取消待处理的全量渲染定时器，防止覆盖增量 JS 思考框更新
+        if hasattr(self.viewer, '_render_timer') and self.viewer._render_timer.isActive():
+            self.viewer._render_timer.stop()
 
         # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
         tag = _classify_think_tag(content)

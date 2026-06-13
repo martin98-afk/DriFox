@@ -1239,7 +1239,7 @@ class ChatBackend(QObject):
             self._sub_agent_manager.set_history_getter(getter)
     
     # ========== MemoryManager 代理方法 ==========
-    def get_memory_context_string(self, limit: int = 8) -> str:
+    def get_memory_context_string(self, limit: int = 100) -> str:
         """获取记忆上下文字符串
         
         多窗口隔离：优先使用 tool_executor 中的实例级 workdir，
@@ -1253,7 +1253,7 @@ class ChatBackend(QObject):
             return self._memory_manager.format_memories_for_prompt(
                 project=self._current_project,
                 entry_limit=limit,
-                doc_limit=20,
+                doc_limit=50,
                 workdir_override=workdir,
             )
         return ""
@@ -1401,8 +1401,8 @@ class ChatBackend(QObject):
             workdir = self._tool_executor.get_workdir()
         return self._memory_manager.format_memories_for_prompt(
             project=project,
-            entry_limit=8,
-            doc_limit=20,
+            entry_limit=100,
+            doc_limit=50,
             workdir_override=workdir,
         )
     

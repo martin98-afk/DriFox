@@ -340,6 +340,50 @@ class Colors:
     ERROR = "#ef4444"
     INFO = "#3b82f6"
 
+    # 以下两个 attr 在 refresh() 中通过 theme.get() 设置，但类定义中缺少默认值
+    CAPSULE_BG = "rgba(27, 35, 50, 180)"
+    CAPSULE_BORDER = "rgba(43, 56, 80, 200)"
+
+    # ── 颜色映射表 ──────────────────────────────────────
+    # 约定：Colors 属性名 = YAML key 的 UPPER_CASE（下划线分割一致）
+    # 以下列出非标准映射（YAML key → 不同的 Colors 属性名）。
+    # 标准 1:1 映射由 refresh() 自动派生，无需在此声明。
+    _COLOR_ALIASES = {
+        "TEXT_ACCENT": "accent",                  # YAML "accent" → Colors.TEXT_ACCENT
+        "TAB_ACTIVE_BG": "selected_bg",            # YAML "selected_bg" → Colors.TAB_ACTIVE_BG
+        "TAB_HOVER_BG": "hover_bg",                # YAML "hover_bg" → Colors.TAB_HOVER_BG
+        "TEXT_SECONDARY_HOVER": "text_primary",    # YAML "text_primary" → Colors.TEXT_SECONDARY_HOVER
+    }
+
+    # Colors 属性名白名单 — 仅有这些属性经由主题 YAML 填充。
+    # 不在白名单内的属性（如 SUCCESS, WARNING, TAB_INACTIVE 等）始终保持类级默认值。
+    _THEME_SOURCED_ATTRS = None  # 懒加载，见 _get_theme_sourced_attrs()
+
+    # 主题 YAML 中不作为颜色值的顶层 key（跳过）
+    _SKIP_YAML_KEYS = frozenset({"name", "id", "window", "background", "input_glow_preset"})
+
+    @classmethod
+    def _get_theme_sourced_attrs(cls) -> frozenset:
+        """获取所有应该由主题 YAML 填充的 Colors 属性名"""
+        if cls._THEME_SOURCED_ATTRS is not None:
+            return cls._THEME_SOURCED_ATTRS
+
+        # 别名映射中的 attr
+        aliased = set(cls._COLOR_ALIASES.keys())
+        # 1:1 映射：从类属性中筛选出命名符合约定且不在跳过列表中的
+        direct = set()
+        for attr_name in dir(cls):
+            if attr_name.startswith("_"):
+                continue
+            if attr_name.isupper() and attr_name not in aliased:
+                yaml_key = attr_name.lower()
+                if yaml_key not in cls._SKIP_YAML_KEYS:
+                    direct.add(attr_name)
+        # 排除非颜色值的类属性
+        EXCLUDE = {"SUCCESS", "WARNING", "ERROR", "INFO", "TAB_INACTIVE"}
+        cls._THEME_SOURCED_ATTRS = frozenset((direct | aliased) - EXCLUDE)
+        return cls._THEME_SOURCED_ATTRS
+
     @classmethod
     def refresh(cls) -> None:
         """从 ThemeManager 同步当前主题颜色到类属性"""
@@ -347,211 +391,35 @@ class Colors:
         if not theme:
             return
 
-        cls.CARD_BG = (
-            theme["card_bg"].rsplit(",", 1)[0] + ", {alpha})"
-            if theme["card_bg"].startswith("rgba(")
-            else theme["card_bg"]
-        )
-        cls.CARD_BG_SOLID = theme.get("card_bg_solid", cls.CARD_BG_SOLID)
-        cls.CONTENT_BG = theme.get("content_bg", cls.CONTENT_BG)
-        cls.BORDER = theme.get("border", cls.BORDER)
-        cls.BORDER_ACCENT = theme.get("border_accent", cls.BORDER_ACCENT)
-        cls.TEXT_PRIMARY = theme.get("text_primary", cls.TEXT_PRIMARY)
-        cls.TEXT_SECONDARY = theme.get("text_secondary", cls.TEXT_SECONDARY)
-        cls.TEXT_SECONDARY_HOVER = theme.get("text_primary", cls.TEXT_PRIMARY)
-        cls.TEXT_ACCENT = theme.get("accent", cls.TEXT_ACCENT)
-        cls.TEXT_MUTED = theme.get("text_muted", cls.TEXT_MUTED)
-        cls.TAB_ACTIVE_BG = theme.get("selected_bg", cls.TAB_ACTIVE_BG)
-        cls.TAB_HOVER_BG = theme.get("hover_bg", cls.TAB_HOVER_BG)
-        cls.HOVER_BG = theme.get("hover_bg", cls.HOVER_BG)
-        cls.SELECTED_BG = theme.get("selected_bg", cls.SELECTED_BG)
+        # 1. 特殊处理：CARD_BG 需要 {alpha} 模板
+        if "card_bg" in theme:
+            cls.CARD_BG = (
+                theme["card_bg"].rsplit(",", 1)[0] + ", {alpha})"
+                if theme["card_bg"].startswith("rgba(")
+                else theme["card_bg"]
+            )
 
-        # 组件级颜色
-        cls.USER_CARD_BG = theme.get("user_card_bg", cls.USER_CARD_BG)
-        cls.USER_CARD_ACCENT = theme.get("user_card_accent", cls.USER_CARD_ACCENT)
-        cls.USER_CARD_TEXT = theme.get("user_card_text", cls.USER_CARD_TEXT)
-        cls.USER_CARD_MUTED = theme.get("user_card_muted", cls.USER_CARD_MUTED)
-        cls.ASSISTANT_CARD_BG = theme.get("assistant_card_bg", cls.ASSISTANT_CARD_BG)
-        cls.ASSISTANT_CARD_ACCENT = theme.get(
-            "assistant_card_accent", cls.ASSISTANT_CARD_ACCENT
-        )
-        cls.ASSISTANT_CARD_TEXT = theme.get(
-            "assistant_card_text", cls.ASSISTANT_CARD_TEXT
-        )
-        cls.ASSISTANT_CARD_MUTED = theme.get(
-            "assistant_card_muted", cls.ASSISTANT_CARD_MUTED
-        )
-        cls.AGENT_BTN_TEXT = theme.get("agent_btn_text", cls.AGENT_BTN_TEXT)
-        cls.AGENT_BTN_TEXT_ACTIVE = theme.get(
-            "agent_btn_text_active", cls.AGENT_BTN_TEXT_ACTIVE
-        )
-        cls.AGENT_BTN_BG_ACTIVE = theme.get(
-            "agent_btn_bg_active", cls.AGENT_BTN_BG_ACTIVE
-        )
-        cls.AGENT_BTN_SEPARATOR = theme.get(
-            "agent_btn_separator", cls.AGENT_BTN_SEPARATOR
-        )
-        cls.INPUT_BG_START = theme.get("input_bg_start", cls.INPUT_BG_START)
-        cls.INPUT_BG_END = theme.get("input_bg_end", cls.INPUT_BG_END)
-        cls.INPUT_FOCUS_BG_START = theme.get(
-            "input_focus_bg_start", cls.INPUT_FOCUS_BG_START
-        )
-        cls.INPUT_FOCUS_BG_END = theme.get("input_focus_bg_end", cls.INPUT_FOCUS_BG_END)
-        cls.INPUT_TEXT = theme.get("input_text", cls.INPUT_TEXT)
-        cls.INPUT_FOCUS_TEXT = theme.get("input_focus_text", cls.INPUT_FOCUS_TEXT)
-        cls.INPUT_BORDER = theme.get("input_border", cls.INPUT_BORDER)
-        cls.INPUT_FOCUS_BORDER = theme.get("input_focus_border", cls.INPUT_FOCUS_BORDER)
-        cls.INPUT_PLACEHOLDER = theme.get("input_placeholder", cls.INPUT_PLACEHOLDER)
+        # 2. 1:1 映射：yaml_key → Colors.UPPER(yaml_key)
+        sourced = cls._get_theme_sourced_attrs()
+        for yaml_key, val in theme.items():
+            if yaml_key in cls._SKIP_YAML_KEYS:
+                continue
+            if yaml_key == "card_bg":
+                continue  # 已在上方处理
+            attr = yaml_key.upper()
+            if attr in sourced:
+                setattr(cls, attr, val)
 
-        # 聚焦发光 halo cascade — 各主题可独立微调，缺省用 cls 类级默认值
-        # （与 Shadows.GLOW_PRIMARY / GLOW_AMBIENT 保持同步；此处不直接引用 Shadows，
-        #  因为本 refresh() 在 Shadows 类定义之前已被模块级调用）
-        cls.GLOW_PRIMARY_ALPHA = theme.get("glow_primary_alpha", cls.GLOW_PRIMARY_ALPHA)
-        cls.GLOW_PRIMARY_BLUR = theme.get("glow_primary_blur", cls.GLOW_PRIMARY_BLUR)
-        cls.GLOW_AMBIENT_ALPHA = theme.get("glow_ambient_alpha", cls.GLOW_AMBIENT_ALPHA)
-        cls.GLOW_AMBIENT_BLUR = theme.get("glow_ambient_blur", cls.GLOW_AMBIENT_BLUR)
+        # 3. 别名映射：yaml_key → 非标准 Colors 属性名
+        for attr, yaml_key in cls._COLOR_ALIASES.items():
+            if yaml_key in theme:
+                setattr(cls, attr, theme[yaml_key])
 
-        # 输入卡双层 halo 独立 token（可从主题 YAML 中覆盖）
-        cls.INPUT_GLOW_PRIMARY_BLUR = theme.get(
-            "input_glow_primary_blur", cls.INPUT_GLOW_PRIMARY_BLUR
-        )
-        cls.INPUT_GLOW_PRIMARY_ALPHA = theme.get(
-            "input_glow_primary_alpha", cls.INPUT_GLOW_PRIMARY_ALPHA
-        )
-        cls.INPUT_GLOW_AMBIENT_BLUR = theme.get(
-            "input_glow_ambient_blur", cls.INPUT_GLOW_AMBIENT_BLUR
-        )
-        cls.INPUT_GLOW_AMBIENT_ALPHA = theme.get(
-            "input_glow_ambient_alpha", cls.INPUT_GLOW_AMBIENT_ALPHA
-        )
-
-        cls.CAPSULE_BG = theme.get("capsule_bg", "rgba(27, 35, 50, 180)")
-        cls.CAPSULE_BORDER = theme.get("capsule_border", "rgba(43, 56, 80, 200)")
-        cls.TOOLBAR_STRIP_BG = theme.get("toolbar_strip_bg", cls.TOOLBAR_STRIP_BG)
-        cls.TOOLBAR_STRIP_BORDER = theme.get(
-            "toolbar_strip_border", cls.TOOLBAR_STRIP_BORDER
-        )
-
-        # 实时卡片色
-        cls.REALTIME_BORDER = theme.get("realtime_border", cls.REALTIME_BORDER)
-        cls.REALTIME_ACCENT = theme.get("realtime_accent", cls.REALTIME_ACCENT)
-        cls.REALTIME_ACCENT_WARM = theme.get(
-            "realtime_accent_warm", cls.REALTIME_ACCENT_WARM
-        )
-        cls.REALTIME_SUCCESS = theme.get("realtime_success", cls.REALTIME_SUCCESS)
-        cls.REALTIME_ERROR = theme.get("realtime_error", cls.REALTIME_ERROR)
-        cls.REALTIME_BG = theme.get("realtime_bg", cls.REALTIME_BG)
-        cls.REALTIME_TEXT = theme.get("realtime_text", cls.REALTIME_TEXT)
-        cls.REALTIME_TEXT_SECONDARY = theme.get(
-            "realtime_text_secondary", cls.REALTIME_TEXT_SECONDARY
-        )
-        cls.REALTIME_TAG_BG = theme.get("realtime_tag_bg", cls.REALTIME_TAG_BG)
-        cls.REALTIME_TAG_BORDER = theme.get(
-            "realtime_tag_border", cls.REALTIME_TAG_BORDER
-        )
-
-        # 系统卡片色
-        cls.SYSTEM_BORDER = theme.get("system_border", cls.SYSTEM_BORDER)
-        cls.SYSTEM_ACCENT = theme.get("system_accent", cls.SYSTEM_ACCENT)
-
-        # 发送按钮
-        cls.SEND_BTN_START = theme.get("send_btn_start", cls.SEND_BTN_START)
-        cls.SEND_BTN_END = theme.get("send_btn_end", cls.SEND_BTN_END)
-        cls.SEND_BTN_HOVER_START = theme.get(
-            "send_btn_hover_start", cls.SEND_BTN_HOVER_START
-        )
-        cls.SEND_BTN_HOVER_END = theme.get("send_btn_hover_end", cls.SEND_BTN_HOVER_END)
-        cls.SEND_BTN_RADIUS = theme.get("send_btn_radius", cls.SEND_BTN_RADIUS)
-
-        # 时间线
-        cls.TIMELINE_NODE = theme.get("timeline_node", cls.TIMELINE_NODE)
-        cls.TIMELINE_NODE_HOVER = theme.get(
-            "timeline_node_hover", cls.TIMELINE_NODE_HOVER
-        )
-        cls.TIMELINE_NODE_VISIBLE = theme.get(
-            "timeline_node_visible", cls.TIMELINE_NODE_VISIBLE
-        )
-        cls.TIMELINE_NODE_SELECTED = theme.get(
-            "timeline_node_selected", cls.TIMELINE_NODE_SELECTED
-        )
-        cls.TIMELINE_LINE = theme.get("timeline_line", cls.TIMELINE_LINE)
-        cls.TIMELINE_LINE_PROGRESS = theme.get(
-            "timeline_line_progress", cls.TIMELINE_LINE_PROGRESS
-        )
-
-        # 上下文圆环
-        cls.RING_NORMAL = theme.get("ring_normal", cls.RING_NORMAL)
-        cls.RING_WARNING = theme.get("ring_warning", cls.RING_WARNING)
-        cls.RING_DANGER = theme.get("ring_danger", cls.RING_DANGER)
-        cls.RING_COMPACTED = theme.get("ring_compacted", cls.RING_COMPACTED)
-
-        # 分支标签
-        cls.BRANCH_LABEL_BG = theme.get("branch_label_bg", cls.BRANCH_LABEL_BG)
-        cls.BRANCH_LABEL_BORDER = theme.get(
-            "branch_label_border", cls.BRANCH_LABEL_BORDER
-        )
-        cls.WINDOW_BG = theme.get("window_bg", cls.WINDOW_BG)
-
-        cls.ACCENT_WARM = theme.get("accent_warm", cls.ACCENT_WARM)
-
-        # 全局 UI 基底
-        cls.TOOLBAR_BG = theme.get("toolbar_bg", cls.TOOLBAR_BG)
-        cls.DIVIDER_COLOR = theme.get("divider_color", cls.DIVIDER_COLOR)
-        cls.HOVER_BG_STRONG = theme.get("hover_bg_strong", cls.HOVER_BG_STRONG)
-        cls.SCROLLBAR_HANDLE_BG = theme.get(
-            "scrollbar_handle_bg", cls.SCROLLBAR_HANDLE_BG
-        )
-        cls.SCROLLBAR_HANDLE_HOVER_BG = theme.get(
-            "scrollbar_handle_hover_bg", cls.SCROLLBAR_HANDLE_HOVER_BG
-        )
-        cls.CARD_PLACEHOLDER_TEXT = theme.get(
-            "card_placeholder_text", cls.CARD_PLACEHOLDER_TEXT
-        )
-
-        # 卡片级语义色
-        cls.BUTTON_TEXT_ON_ACCENT = theme.get(
-            "button_text_on_accent", cls.BUTTON_TEXT_ON_ACCENT
-        )
-        cls.STATUS_INFO = theme.get("status_info", cls.STATUS_INFO)
-        cls.STATUS_DANGER_BG = theme.get("status_danger_bg", cls.STATUS_DANGER_BG)
-        cls.STATUS_ARCHIVE_BG = theme.get("status_archive_bg", cls.STATUS_ARCHIVE_BG)
-        cls.CARD_BG_DIM = theme.get("card_bg_dim", cls.CARD_BG_DIM)
-        cls.ARCHIVED_CARD_BG = theme.get("archived_card_bg", cls.ARCHIVED_CARD_BG)
-        cls.ARCHIVED_CARD_BORDER = theme.get(
-            "archived_card_border", cls.ARCHIVED_CARD_BORDER
-        )
-
-        # 语法高亮色
-        cls.SYNTAX_STEP = theme.get("syntax_step", cls.SYNTAX_STEP)
-        cls.SYNTAX_TOOL = theme.get("syntax_tool", cls.SYNTAX_TOOL)
-        cls.SYNTAX_SUCCESS = theme.get("syntax_success", cls.SYNTAX_SUCCESS)
-        cls.SYNTAX_ERROR = theme.get("syntax_error", cls.SYNTAX_ERROR)
-        cls.SYNTAX_RESULT = theme.get("syntax_result", cls.SYNTAX_RESULT)
-
-        # 标签色
-        cls.TAG_ACCENT = theme.get("tag_accent", cls.TAG_ACCENT)
-        cls.TAG_ACCENT_TEXT = theme.get("tag_accent_text", cls.TAG_ACCENT_TEXT)
-        cls.TAG_PURPLE = theme.get("tag_purple", cls.TAG_PURPLE)
-        cls.TAG_PURPLE_TEXT = theme.get("tag_purple_text", cls.TAG_PURPLE_TEXT)
-        cls.TAG_ORANGE = theme.get("tag_orange", cls.TAG_ORANGE)
-        cls.TAG_ORANGE_TEXT = theme.get("tag_orange_text", cls.TAG_ORANGE_TEXT)
-
-        # 失焦态发光 token（默认 0 = 失焦完全关闭；glow preset 会改写）
-        cls.INPUT_GLOW_UNFOCUSED_AMBIENT_BLUR = theme.get(
-            "input_glow_unfocused_ambient_blur", cls.INPUT_GLOW_UNFOCUSED_AMBIENT_BLUR
-        )
-        cls.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA = theme.get(
-            "input_glow_unfocused_ambient_alpha",
-            cls.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA,
-        )
-
-        # 发光预设（如写了 input_glow_preset 字段则覆盖所有相关 token；
-        # 注意：写在 token 之后，覆盖力强于逐个 token，覆盖力优先于个别微调）
+        # 4. 发光预设（最后执行，会覆盖已设置的单个发光 token）
         preset_name = theme.get("input_glow_preset")
         if preset_name:
             if not cls.apply_glow_preset(preset_name):
                 import warnings
-
                 warnings.warn(
                     f"[design_tokens] Unknown input_glow_preset: {preset_name!r} "
                     f"(valid: {sorted(GLOW_PRESETS.keys())}); falling back to class defaults."
