@@ -1556,13 +1556,15 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
 
     return _render_markdown_to_html_cached_impl(raw_md, reasoning)
 
-    try:
-        md = get_markdown_instance()
-        md.reset()
-        html_content = md.convert(processed_md)
-        return _wrap_code_blocks_with_copy_button_web(html_content)
-    except Exception:
-        return f"<pre>{escape(raw_md)}</pre>"
+
+def clear_global_render_cache():
+    """清理全局 Markdown 渲染 LRU 缓存
+
+    应在会话切换、清空聊天区域时调用，释放缓存的 HTML 字符串。
+    LRU maxsize=256，每个缓存条目为大段 HTML，长期运行可累积数 MB。
+    超过 50KB 的大文本渲染会直接绕过缓存，因此缓存条目规模可控。
+    """
+    _render_markdown_to_html_cached_impl.cache_clear()
 
 
 def get_random_tip() -> str:
@@ -1761,9 +1763,10 @@ class CodeWebViewer(QWebEngineView):
 
     # WebEngine 最大尺寸限制，防止 GPU 内存溢出
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
-    # 4000→2000 将单视图 GPU 缓冲区从 ~12.8MB 降至 ~6.4MB
+    # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
+    # 标准消息卡片在正常宽度(400~700px)下，1500px 高度已覆盖绝大多数内容
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 4000
+    MAX_HEIGHT = 2000
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
@@ -3412,6 +3415,11 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = None
         self._lazy_markdown_cb = None
 
+    @staticmethod
+    def clear_global_cache():
+        """类方法：清理模块级 LRU 渲染缓存"""
+        clear_global_render_cache()
+
     def get_plain_text(self) -> str:
         return self._markdown_text
 
@@ -4458,7 +4466,6 @@ class MessageCard(SimpleCardWidget):
         """构建助手卡片底部极简元信息栏：token | 耗时 | 模型（右对齐，分割线下方）"""
         bar = QWidget(self)
         self._footer_bar = bar
-        bar.setFixedHeight(12)
         bar.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(6, 0, 6, 0)
@@ -4534,20 +4541,14 @@ class MessageCard(SimpleCardWidget):
                 text = f"🪙 {total} tokens"
             self._footer_tokens_label.setText(text)
             self._footer_tokens_label.setVisible(True)
-        # 刷新分隔点（序：token · 耗时 · 模型）
-        has_tokens = self._footer_tokens_label and self._footer_tokens_label.isVisible()
-        has_elapsed = self._footer_elapsed_label and self._footer_elapsed_label.isVisible()
-        has_model = self._footer_model_label and self._footer_model_label.isVisible()
-        if self._footer_sep1:
-            self._footer_sep1.setVisible(has_tokens and has_elapsed)
-        if self._footer_sep2:
-            self._footer_sep2.setVisible(has_elapsed and has_model)
+        # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
+        self._refresh_footer_separators()
 
     def _refresh_footer_separators(self):
-        """根据标签可见性刷新分隔点"""
-        has_tokens = self._footer_tokens_label and self._footer_tokens_label.isVisible()
-        has_elapsed = self._footer_elapsed_label and self._footer_elapsed_label.isVisible()
-        has_model = self._footer_model_label and self._footer_model_label.isVisible()
+        """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
+        has_tokens = bool(self._footer_tokens_label and self._footer_tokens_label.text())
+        has_elapsed = bool(self._footer_elapsed_label and self._footer_elapsed_label.text())
+        has_model = bool(self._footer_model_label and self._footer_model_label.text())
         if self._footer_sep1:
             self._footer_sep1.setVisible(has_tokens and has_elapsed)
         if self._footer_sep2:
@@ -6149,6 +6150,28 @@ class MessageCard(SimpleCardWidget):
         super().resizeEvent(event)
         # 宽度同步由外层聊天窗口统一调度，避免卡片自身 resize 再次触发全量重算
 
+    def _disconnect_all_signals(self):
+        """断开 MessageCard 发射的所有信号，打破信号-槽引用环路"""
+        signals = [
+            self.heightChanged,
+            self.deleteRequested,
+            self.undoRequested,
+            self.actionRequested,
+            self.contextActionRequested,
+            self.optionSelected,
+            self.interventionRequested,
+            self.toolDiffRequested,
+            self.subAgentLogRequested,
+            self.cardDiffRequested,
+            self.saveFileRequested,
+            self.lazyRenderCompleted,
+        ]
+        for sig in signals:
+            try:
+                sig.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+
     def cleanup(self):
         """
         清理 MessageCard 持有的资源，防止内存泄漏。
@@ -6158,6 +6181,7 @@ class MessageCard(SimpleCardWidget):
         timers_to_stop = [
             self._anim_timer,
             self._height_anim,
+            self._elapsed_timer,
         ]
         for timer in timers_to_stop:
             try:
@@ -6167,6 +6191,9 @@ class MessageCard(SimpleCardWidget):
                     timer.stop()
             except RuntimeError:
                 pass
+
+        # 断开所有信号连接（打破引用环路）
+        self._disconnect_all_signals()
 
         # 调用 viewer 的清理方法（先清理后释放引用）
         if hasattr(self.viewer, 'cleanup'):
@@ -6183,6 +6210,9 @@ class MessageCard(SimpleCardWidget):
         self._last_rendered_html = None  # 大 HTML 字符串
         self._last_rendered_markdown = None  # 可能很大的 markdown
         self._rendered_code_blocks = []  # 代码块缓存
+        self._pending_content = None  # 待渲染内容
+        self._finished_streaming_ids.clear()  # 流式 ID 集合
+        self._tool_args_first_seen_ids.clear()
 
         # 清理 markdown_cache 如果存在
         if hasattr(self, '_markdown_cache') and self._markdown_cache:

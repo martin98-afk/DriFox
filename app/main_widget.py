@@ -149,6 +149,7 @@ from app.widgets.file_undo_dialog import (
 from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
+    clear_global_render_cache,
 )
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
@@ -272,7 +273,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._incremental_visible_batch_count = 8
         self._history_load_threshold = 48
         # 虚拟滚动：可见范围外前后保留多少个增量批次（缓冲区）
-        self._virtual_scroll_buffer = 2
+        # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
+        # 1 表示：可见区域 + 前方1个buffer + 后方1个buffer 的卡片保留
+        self._virtual_scroll_buffer = 1
         self._message_batch: List[List[Dict[str, Any]]] = []
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
@@ -5656,6 +5659,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     item.widget().deleteLater()
                 else:
                     item.widget().hide()
+        # 清理全局 LRU 渲染缓存
+        if delete_widgets:
+            clear_global_render_cache()
 
     def _take_chat_widgets(self) -> List[QWidget]:
         """从布局中取出所有 widgets，返回列表（不删除，由调用方负责删除）"""
@@ -5703,6 +5709,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             card.deleteLater()
                         except Exception:
                             pass
+
+        # 清理全局 Markdown 渲染 LRU 缓存（缓存的 HTML 字符串可达数 MB）
+        clear_global_render_cache()
 
         # 立即处理所有 deleteLater 事件，确保旧卡片在新卡片创建前被销毁
         QApplication.processEvents()
@@ -9648,6 +9657,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
 
+        # 停止计时器并设置最终耗时
+        if self._current_assistant_card and self._response_start_time is not None:
+            elapsed = time.time() - self._response_start_time
+            self._current_assistant_card.set_meta_info(elapsed=elapsed)
+            self._response_start_time = None
+
         # 🔧 异常时保存已生成的部分消息到历史记录
         # finished_with_messages 信号已先于 error_occurred 被处理，
         # 会话已包含部分消息，这里持久化到历史
@@ -10781,6 +10796,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:
+            # 停止计时器并设置最终耗时
+            if self._response_start_time is not None:
+                elapsed = time.time() - self._response_start_time
+                self._current_assistant_card.set_meta_info(elapsed=elapsed)
+                self._response_start_time = None
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.finish_streaming()
 
