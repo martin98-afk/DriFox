@@ -409,6 +409,10 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["round_id"] = str(message.get("round_id"))
         if message.get("model_name"):
             normalized["model_name"] = str(message.get("model_name"))
+        if message.get("elapsed") is not None:
+            normalized["elapsed"] = float(message["elapsed"])
+        if isinstance(message.get("token_usage"), dict):
+            normalized["token_usage"] = dict(message["token_usage"])
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None

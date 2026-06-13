@@ -875,7 +875,6 @@ def _render_tool_streaming_block(
     # spinner 由 CSS data-streaming 控制可见性，完成态时通过 CSS 过渡淡出
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
 
-    char_hint = f" ({char_count}字符)" if char_count > 0 else ""
     preview_display = escape(preview) if preview else "准备中..."
 
     # 始终设置 data-streaming 属性（"true" 或 "false"）
@@ -891,7 +890,7 @@ def _render_tool_streaming_block(
         </span>
         <span style="margin-left: auto; min-width: 0; overflow: hidden; flex-shrink: 1;">
             <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {preview_display}{char_hint}
+                {preview_display}
             </span>
         </span>
     </button>
@@ -1557,13 +1556,15 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
 
     return _render_markdown_to_html_cached_impl(raw_md, reasoning)
 
-    try:
-        md = get_markdown_instance()
-        md.reset()
-        html_content = md.convert(processed_md)
-        return _wrap_code_blocks_with_copy_button_web(html_content)
-    except Exception:
-        return f"<pre>{escape(raw_md)}</pre>"
+
+def clear_global_render_cache():
+    """清理全局 Markdown 渲染 LRU 缓存
+
+    应在会话切换、清空聊天区域时调用，释放缓存的 HTML 字符串。
+    LRU maxsize=256，每个缓存条目为大段 HTML，长期运行可累积数 MB。
+    超过 50KB 的大文本渲染会直接绕过缓存，因此缓存条目规模可控。
+    """
+    _render_markdown_to_html_cached_impl.cache_clear()
 
 
 def get_random_tip() -> str:
@@ -1762,9 +1763,10 @@ class CodeWebViewer(QWebEngineView):
 
     # WebEngine 最大尺寸限制，防止 GPU 内存溢出
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
-    # 4000→2000 将单视图 GPU 缓冲区从 ~12.8MB 降至 ~6.4MB
+    # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
+    # 标准消息卡片在正常宽度(400~700px)下，1500px 高度已覆盖绝大多数内容
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 4000
+    MAX_HEIGHT = 2000
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
@@ -3413,6 +3415,11 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = None
         self._lazy_markdown_cb = None
 
+    @staticmethod
+    def clear_global_cache():
+        """类方法：清理模块级 LRU 渲染缓存"""
+        clear_global_render_cache()
+
     def get_plain_text(self) -> str:
         return self._markdown_text
 
@@ -4294,6 +4301,17 @@ class MessageCard(SimpleCardWidget):
         self._retry_wait_time = 0.0  # 等待时间
         self._round_index: Optional[int] = None  # 用于卡片差异功能
         self._message_index: Optional[int] = None  # 用于卡片差异和撤销功能：消息在 session.messages 中的索引
+        # 底部元信息栏（助手卡片）
+        self._footer_bar: Optional[QWidget] = None
+        self._footer_model_label: Optional[QLabel] = None
+        self._footer_elapsed_label: Optional[QLabel] = None
+        self._footer_tokens_label: Optional[QLabel] = None
+        self._footer_sep1: Optional[QLabel] = None
+        self._footer_sep2: Optional[QLabel] = None
+        # 耗时实时计时器
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.timeout.connect(self._update_elapsed_display)
+        self._elapsed_start_time: Optional[float] = None
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
         self._pulse_phase = 0.0
@@ -4438,6 +4456,123 @@ class MessageCard(SimpleCardWidget):
                 }}
                 """
             )
+        # 同步到底部元信息栏
+        if self._footer_model_label:
+            self._footer_model_label.setText(model_name)
+            self._footer_model_label.setVisible(True)
+            self._refresh_footer_separators()
+
+    def _build_footer_bar(self, main: QVBoxLayout):
+        """构建助手卡片底部极简元信息栏：token | 耗时 | 模型（右对齐，分割线下方）"""
+        bar = QWidget(self)
+        self._footer_bar = bar
+        bar.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(3)
+
+        accent = self._theme["accent"]
+        font_css = get_font_family_css()
+        label_style = (
+            f"{font_css} font-size: {scale_font_size(9)}px; "
+            f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
+        )
+
+        layout.addStretch()
+
+        # Token 消耗
+        tokens_l = QLabel("", self)
+        tokens_l.setStyleSheet(label_style)
+        tokens_l.setVisible(False)
+        self._footer_tokens_label = tokens_l
+        layout.addWidget(tokens_l)
+
+        # 分隔点 1（token ↔ 耗时）
+        sep1 = QLabel("·", self)
+        sep1.setStyleSheet(label_style)
+        sep1.setVisible(False)
+        self._footer_sep1 = sep1
+        layout.addWidget(sep1)
+
+        # 耗时
+        elapsed_l = QLabel("", self)
+        elapsed_l.setStyleSheet(label_style)
+        elapsed_l.setVisible(False)
+        self._footer_elapsed_label = elapsed_l
+        layout.addWidget(elapsed_l)
+
+        # 分隔点 2（耗时 ↔ 模型）
+        sep2 = QLabel("·", self)
+        sep2.setStyleSheet(label_style)
+        sep2.setVisible(False)
+        self._footer_sep2 = sep2
+        layout.addWidget(sep2)
+
+        # 模型名称
+        model_l = QLabel(self.model_name or "", self)
+        model_l.setStyleSheet(label_style)
+        model_l.setVisible(bool(self.model_name))
+        self._footer_model_label = model_l
+        layout.addWidget(model_l)
+
+        main.addWidget(bar)
+
+    def set_meta_info(self, elapsed: float = None, token_usage: dict = None):
+        """设置助手卡片的元信息（耗时和 token 消耗）
+        
+        Args:
+            elapsed: 响应耗时（秒），如 3.2。传入后停止实时计时。
+            token_usage: 如 {"input": 1234, "output": 567, "total": 1801}
+        """
+        if self.role != "assistant":
+            return
+        # 耗时
+        if elapsed is not None and self._footer_elapsed_label:
+            self._elapsed_timer.stop()
+            self._elapsed_start_time = None
+            self._footer_elapsed_label.setText(f"⏱ {elapsed:.1f}s")
+            self._footer_elapsed_label.setVisible(True)
+        # Token
+        if token_usage is not None and self._footer_tokens_label:
+            total = token_usage.get("total", 0)
+            if total >= 1000:
+                text = f"🪙 {total/1000:.1f}K tokens"
+            else:
+                text = f"🪙 {total} tokens"
+            self._footer_tokens_label.setText(text)
+            self._footer_tokens_label.setVisible(True)
+        # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
+        self._refresh_footer_separators()
+
+    def _refresh_footer_separators(self):
+        """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
+        has_tokens = bool(self._footer_tokens_label and self._footer_tokens_label.text())
+        has_elapsed = bool(self._footer_elapsed_label and self._footer_elapsed_label.text())
+        has_model = bool(self._footer_model_label and self._footer_model_label.text())
+        if self._footer_sep1:
+            self._footer_sep1.setVisible(has_tokens and has_elapsed)
+        if self._footer_sep2:
+            self._footer_sep2.setVisible(has_elapsed and has_model)
+
+    def start_elapsed_tracking(self):
+        """开始实时计时（流式输出时调用）"""
+        if self.role != "assistant":
+            return
+        if not self._footer_elapsed_label:
+            return
+        self._elapsed_start_time = time.time()
+        self._footer_elapsed_label.setText("⏱ 0s")
+        self._footer_elapsed_label.setVisible(True)
+        self._refresh_footer_separators()
+        self._elapsed_timer.start(1000)  # 每秒更新
+
+    def _update_elapsed_display(self):
+        """实时更新耗时显示"""
+        if self._elapsed_start_time is None:
+            self._elapsed_timer.stop()
+            return
+        elapsed = time.time() - self._elapsed_start_time
+        self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
 
     def _build_avatar_style(self):
         font_css = get_font_family_css()
@@ -4523,11 +4658,11 @@ class MessageCard(SimpleCardWidget):
         top.addWidget(ts)
         top.addStretch()
 
+        # 顶部操作按钮
         btns = QWidget(self)
         bl = QHBoxLayout(btns)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(4)
-        specs = []
         if self.role == "assistant":
             specs = [
                 (
@@ -4543,14 +4678,12 @@ class MessageCard(SimpleCardWidget):
             ]
         elif self.role == "user":
             specs = [
-                (
-                    get_icon("复制"),
-                    "复制",
-                    lambda: self._copy_user_message(),
-                ),
+                (get_icon("复制"), "复制", lambda: self._copy_user_message()),
                 (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
                 (get_icon("删除"), "删除", self.deleteRequested.emit),
             ]
+        else:
+            specs = []
         for ic, tp, cb in specs:
             b = TransparentToolButton(ic, self)
             b.setToolTip(tp)
@@ -4558,7 +4691,8 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(32, 32)
             b.installEventFilter(ToolTipFilter(b))
             bl.addWidget(b)
-        top.addWidget(btns)
+        if specs:
+            top.addWidget(btns)
         main.addLayout(top)
         main.addWidget(CardSeparator(self))
 
@@ -4681,6 +4815,10 @@ class MessageCard(SimpleCardWidget):
         main.addWidget(self._retry_status_widget)
 
         main.addWidget(CardSeparator(self))
+
+        # ===== 助手卡片底部元信息栏（分割线下方） =====
+        if self.role == "assistant":
+            self._build_footer_bar(main)
         self.setStyleSheet(
             f"""
             CardWidget {{
@@ -5464,6 +5602,33 @@ class MessageCard(SimpleCardWidget):
             _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
             block_key = _key_match.group(1) if _key_match else ""
 
+            # ── 增量更新解析：将 inner_html 拆分为 button 和 body 两部分 ──
+            # 避免 existing.innerHTML = safe_inner 整体替换导致的子节点空窗期
+            # （外层 div 子节点清空瞬间 margin 暴露为可见间距，详见 #间距修复）
+            _btn_match = re.match(
+                r'<button[^>]*>(.*?)</button>', inner_html, re.DOTALL
+            )
+            _body_match = re.search(
+                r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$',
+                inner_html, re.DOTALL
+            )
+            if _btn_match and _body_match:
+                btn_inner = _btn_match.group(1)
+                body_inner = _body_match.group(1)
+                # 提取 body div 上可能携带的 style（如 expanded: height:auto）
+                _body_style_match = re.search(
+                    r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"',
+                    inner_html
+                )
+                body_style = _body_style_match.group(1) if _body_style_match else ""
+                safe_btn_inner = json.dumps(btn_inner).decode('utf-8')
+                safe_body_inner = json.dumps(body_inner).decode('utf-8')
+                safe_body_style = json.dumps(body_style).decode('utf-8')
+                _use_incremental = 'true'
+            else:
+                safe_btn_inner = safe_body_inner = safe_body_style = '""'
+                _use_incremental = 'false'
+
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
@@ -5471,17 +5636,32 @@ class MessageCard(SimpleCardWidget):
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
                 var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
-                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性 / innerHTML
+                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性
                     // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
                     existing.className = 'cm-collapsible tool-block';
                     existing.setAttribute('data-block-key', '{block_key}');
                     existing.setAttribute('data-expanded', 'false');
                     existing.removeAttribute('data-streaming');
                     // 恢复外层 div 的 style（如 display:flex），确保 INLINE_TOOLS
-                    // 的预览文字 text-align:right 正确工作。直接 setAttribute 覆盖
-                    // 所有 inline style，比逐个属性设置更简洁高效。
+                    // 的预览文字 text-align:right 正确工作。
                     existing.setAttribute('style', {safe_outer_style});
-                    existing.innerHTML = {safe_inner};
+
+                    if ({_use_incremental}) {{
+                        // 【增量更新】分别更新 button 和 body，避免 innerHTML 整体替换
+                        // 导致外层 div 子节点临时清空，margin 暴露为可见间距
+                        var btn = existing.querySelector('.cm-collapsible__summary');
+                        if (btn) btn.innerHTML = {safe_btn_inner};
+                        var body = existing.querySelector('.cm-collapsible__body');
+                        if (body) {{
+                            body.innerHTML = {safe_body_inner};
+                            if ({safe_body_style}) {{
+                                body.setAttribute('style', {safe_body_style});
+                            }}
+                        }}
+                    }} else {{
+                        // 兜底：整体替换（fallback，不应触发）
+                        existing.innerHTML = {safe_inner};
+                    }}
                     reportHeight();
                     return;
                 }}
@@ -5592,8 +5772,7 @@ class MessageCard(SimpleCardWidget):
         try:
             _text_only = preview is None
             preview_escaped = escape(preview) if preview else "准备中..."
-            char_hint = f" ({char_count}字符)" if char_count > 0 else ""
-            preview_content = f"{preview_escaped}{char_hint}"
+            preview_content = preview_escaped
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -5971,6 +6150,28 @@ class MessageCard(SimpleCardWidget):
         super().resizeEvent(event)
         # 宽度同步由外层聊天窗口统一调度，避免卡片自身 resize 再次触发全量重算
 
+    def _disconnect_all_signals(self):
+        """断开 MessageCard 发射的所有信号，打破信号-槽引用环路"""
+        signals = [
+            self.heightChanged,
+            self.deleteRequested,
+            self.undoRequested,
+            self.actionRequested,
+            self.contextActionRequested,
+            self.optionSelected,
+            self.interventionRequested,
+            self.toolDiffRequested,
+            self.subAgentLogRequested,
+            self.cardDiffRequested,
+            self.saveFileRequested,
+            self.lazyRenderCompleted,
+        ]
+        for sig in signals:
+            try:
+                sig.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+
     def cleanup(self):
         """
         清理 MessageCard 持有的资源，防止内存泄漏。
@@ -5980,6 +6181,7 @@ class MessageCard(SimpleCardWidget):
         timers_to_stop = [
             self._anim_timer,
             self._height_anim,
+            self._elapsed_timer,
         ]
         for timer in timers_to_stop:
             try:
@@ -5989,6 +6191,9 @@ class MessageCard(SimpleCardWidget):
                     timer.stop()
             except RuntimeError:
                 pass
+
+        # 断开所有信号连接（打破引用环路）
+        self._disconnect_all_signals()
 
         # 调用 viewer 的清理方法（先清理后释放引用）
         if hasattr(self.viewer, 'cleanup'):
@@ -6005,6 +6210,9 @@ class MessageCard(SimpleCardWidget):
         self._last_rendered_html = None  # 大 HTML 字符串
         self._last_rendered_markdown = None  # 可能很大的 markdown
         self._rendered_code_blocks = []  # 代码块缓存
+        self._pending_content = None  # 待渲染内容
+        self._finished_streaming_ids.clear()  # 流式 ID 集合
+        self._tool_args_first_seen_ids.clear()
 
         # 清理 markdown_cache 如果存在
         if hasattr(self, '_markdown_cache') and self._markdown_cache:

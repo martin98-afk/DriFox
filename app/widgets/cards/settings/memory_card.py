@@ -822,23 +822,70 @@ class MemoryCardContent(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # 使用 QGridLayout 让提示文字叠加在拖拽区域背景上
+        # 文档容器（带虚线边框，内部含工具栏行+列表）
         docs_container = QWidget(widget)
+        Colors.refresh()
+        docs_container.setStyleSheet(f"""
+            QWidget#docsContainer {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                border: 2px dashed {Colors.BORDER};
+                border-radius: 6px;
+            }}
+        """)
+        docs_container.setObjectName("docsContainer")
         docs_layout = QGridLayout(docs_container)
-        docs_layout.setContentsMargins(0, 0, 0, 0)
-        docs_layout.setSpacing(0)
+        docs_layout.setContentsMargins(8, 4, 8, 4)
+        docs_layout.setSpacing(4)
+        docs_layout.setRowStretch(0, 0)  # 工具栏行
+        docs_layout.setRowStretch(1, 1)  # 列表行
 
-        # 文档列表（支持拖拽）- 始终显示，作为虚线拖拽区域背景
-        self.docs_list = DocDropListWidget(docs_container)  # 使用支持拖拽的列表
+        # ── 顶部工具栏行 ──
+        toolbar = QWidget(docs_container)
+        toolbar.setStyleSheet("background: transparent;")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(4)
+
+        # 左侧标题+数量
+        self._docs_header_label = BodyLabel("📁 关键文档", toolbar)
+        self._docs_header_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {font_size_css(12)}"
+        )
+        toolbar_layout.addWidget(self._docs_header_label)
+
+        self._docs_count_label = BodyLabel("", toolbar)
+        self._docs_count_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
+        )
+        toolbar_layout.addWidget(self._docs_count_label)
+
+        toolbar_layout.addStretch()
+
+        # 紧凑图标按钮
+        self.add_doc_btn = TransparentToolButton(FluentIcon.ADD, toolbar)
+        self.add_doc_btn.setFixedSize(24, 24)
+        self.add_doc_btn.setToolTip("添加文件")
+        self.add_doc_btn.clicked.connect(self._on_add_file_clicked)
+        toolbar_layout.addWidget(self.add_doc_btn)
+
+        self.add_folder_btn = TransparentToolButton(FluentIcon.FOLDER, toolbar)
+        self.add_folder_btn.setFixedSize(24, 24)
+        self.add_folder_btn.setToolTip("添加文件夹")
+        self.add_folder_btn.clicked.connect(self._on_add_folder_clicked)
+        toolbar_layout.addWidget(self.add_folder_btn)
+
+        docs_layout.addWidget(toolbar, 0, 0)
+
+        # ── 文档列表（无边框，由外层容器统一虚线边框）──
+        self.docs_list = DocDropListWidget(docs_container)
         self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.docs_list.setResizeMode(ListWidget.Adjust)
         Colors.refresh()
         self.docs_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 2px dashed {Colors.BORDER};
+                background: transparent;
+                border: none;
                 color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
                 {get_font_family_css()}
             }}
             QListWidget::item {{
@@ -847,69 +894,21 @@ class MemoryCardContent(QWidget):
             }}
         """)
         self.docs_list.files_dropped.connect(self._on_files_dropped)
-        docs_layout.addWidget(self.docs_list, 0, 0)
+        docs_layout.addWidget(self.docs_list, 1, 0)
 
-        # 空列表提示（叠加在拖拽区域中央，文档列表为空时显示）
+        # 空列表提示（叠加在列表中央）
         self._docs_empty_hint = BodyLabel("拖拽项目目录到此并选择设置为根目录即可开始项目开发", docs_container)
         self._docs_empty_hint.setAlignment(Qt.AlignCenter)
         self._docs_empty_hint.setWordWrap(True)
-        # 透明背景 + 不接收鼠标事件，保证拖拽事件能穿透到下方列表
         self._docs_empty_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         Colors.refresh()
         self._docs_empty_hint.setStyleSheet(
             f"background: transparent; color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)} padding: 20px;"
         )
         self._docs_empty_hint.setVisible(False)
-        docs_layout.addWidget(self._docs_empty_hint, 0, 0, Qt.AlignCenter)
+        docs_layout.addWidget(self._docs_empty_hint, 1, 0, Qt.AlignCenter)
 
         layout.addWidget(docs_container, 1)
-
-        # 添加按钮（右对齐）
-        add_btn_layout = QHBoxLayout()
-        add_btn_layout.setSpacing(6)
-        add_btn_layout.addStretch()
-        
-        self.add_doc_btn = PrimaryPushButton("📄 添加文件", self)
-        self.add_doc_btn.setFixedHeight(28)
-        self.add_doc_btn.setFixedWidth(110)
-        self.add_doc_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.INFO};
-                color: white;
-                border: none;
-                border-radius: 4px;
-                {get_font_family_css()}
-                font-size: {scale_font_size(12)}px;
-                padding: 0 8px;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.BORDER_ACCENT};
-            }}
-        """)
-        self.add_doc_btn.clicked.connect(self._on_add_file_clicked)
-        
-        self.add_folder_btn = PrimaryPushButton("📁 添加文件夹", self)
-        self.add_folder_btn.setFixedHeight(28)
-        self.add_folder_btn.setFixedWidth(120)
-        self.add_folder_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.SUCCESS};
-                color: white;
-                border: none;
-                border-radius: 4px;
-                {get_font_family_css()}
-                font-size: {scale_font_size(12)}px;
-                padding: 0 8px;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.BORDER_ACCENT};
-            }}
-        """)
-        self.add_folder_btn.clicked.connect(self._on_add_folder_clicked)
-        
-        add_btn_layout.addWidget(self.add_doc_btn)
-        add_btn_layout.addWidget(self.add_folder_btn)
-        layout.addLayout(add_btn_layout)
 
         return widget
 
@@ -1047,14 +1046,23 @@ class MemoryCardContent(QWidget):
             self.notes_stats_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
             )
-        # 文档列表
+        # 文档容器（虚线边框）
+        docs_container = self.findChild(QWidget, "docsContainer")
+        if docs_container:
+            docs_container.setStyleSheet(f"""
+                QWidget#docsContainer {{
+                    background-color: {Colors.CARD_BG.format(alpha=180)};
+                    border: 2px dashed {Colors.BORDER};
+                    border-radius: 6px;
+                }}
+            """)
+        # 文档列表（无边框，透明背景）
         if hasattr(self, 'docs_list'):
             self.docs_list.setStyleSheet(f"""
                 QListWidget {{
-                    background-color: {Colors.CARD_BG.format(alpha=180)};
-                    border: 2px dashed {Colors.BORDER};
+                    background: transparent;
+                    border: none;
                     color: {Colors.TEXT_PRIMARY};
-                    border-radius: 6px;
                     {get_font_family_css()}
                 }}
                 QListWidget::item {{
@@ -1062,38 +1070,15 @@ class MemoryCardContent(QWidget):
                     border-bottom: 1px solid {Colors.BORDER};
                 }}
             """)
-        # 添加文件按钮
-        if hasattr(self, 'add_doc_btn'):
-            self.add_doc_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {Colors.INFO};
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    {get_font_family_css()}
-                    font-size: {scale_font_size(12)}px;
-                    padding: 0 8px;
-                }}
-                QPushButton:hover {{
-                    background-color: {Colors.BORDER_ACCENT};
-                }}
-            """)
-        # 添加文件夹按钮
-        if hasattr(self, 'add_folder_btn'):
-            self.add_folder_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {Colors.SUCCESS};
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    {get_font_family_css()}
-                    font-size: {scale_font_size(12)}px;
-                    padding: 0 8px;
-                }}
-                QPushButton:hover {{
-                    background-color: {Colors.BORDER_ACCENT};
-                }}
-            """)
+        # 文档工具栏标题
+        if hasattr(self, '_docs_header_label'):
+            self._docs_header_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {font_size_css(12)}"
+            )
+        if hasattr(self, '_docs_count_label'):
+            self._docs_count_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
+            )
 
     def _load_entries(self):
         """加载条目记忆（使用 self._search_filter 过滤）"""
@@ -1332,9 +1317,12 @@ class MemoryCardContent(QWidget):
                 self.docs_list.addItem(wt_item)
                 self.docs_list.setItemWidget(wt_item, wt_widget)
 
-        # 空列表时显示提示文字（叠加在拖拽区域背景上）
+        # 更新文件计数
         has_visible_items = self.docs_list.count() > 0
         self._docs_empty_hint.setVisible(not has_visible_items)
+        if hasattr(self, '_docs_count_label'):
+            count = len(docs)
+            self._docs_count_label.setText(f"({count})" if count > 0 else "")
 
     def _get_worktree_section_size(self, repo_info):
         """计算 worktree 树状组件的高度"""
@@ -1361,11 +1349,16 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _remove_key_document(self, doc_id: str):
-        """移除关键文档"""
+        """移除关键文档（删除后保持滚动位置）"""
         memory_mgr = self._get_memory_manager()
         if memory_mgr:
             memory_mgr.remove_key_document(doc_id)
+        # 保存滚动位置，避免全量重绘后跳回顶部
+        scroll_bar = self.docs_list.verticalScrollBar()
+        scroll_pos = scroll_bar.value() if scroll_bar else 0
         self._load_key_documents()
+        if scroll_bar:
+            scroll_bar.setValue(scroll_pos)
 
     def _set_as_working_directory(self, file_path: str):
         """设置为工作目录（再次点击取消）

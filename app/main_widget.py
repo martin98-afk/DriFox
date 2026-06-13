@@ -149,6 +149,7 @@ from app.widgets.file_undo_dialog import (
 from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
+    clear_global_render_cache,
 )
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
@@ -272,7 +273,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._incremental_visible_batch_count = 8
         self._history_load_threshold = 48
         # 虚拟滚动：可见范围外前后保留多少个增量批次（缓冲区）
-        self._virtual_scroll_buffer = 2
+        # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
+        # 1 表示：可见区域 + 前方1个buffer + 后方1个buffer 的卡片保留
+        self._virtual_scroll_buffer = 1
         self._message_batch: List[List[Dict[str, Any]]] = []
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
@@ -5656,6 +5659,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     item.widget().deleteLater()
                 else:
                     item.widget().hide()
+        # 清理全局 LRU 渲染缓存
+        if delete_widgets:
+            clear_global_render_cache()
 
     def _take_chat_widgets(self) -> List[QWidget]:
         """从布局中取出所有 widgets，返回列表（不删除，由调用方负责删除）"""
@@ -5703,6 +5709,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             card.deleteLater()
                         except Exception:
                             pass
+
+        # 清理全局 Markdown 渲染 LRU 缓存（缓存的 HTML 字符串可达数 MB）
+        clear_global_render_cache()
 
         # 立即处理所有 deleteLater 事件，确保旧卡片在新卡片创建前被销毁
         QApplication.processEvents()
@@ -6013,6 +6022,26 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._batch_cards[new_batch_idx].append(widget)
                 assigned_batch_indices.add(new_batch_idx)
 
+
+    def _restore_meta_from_batch(self, card, batch: list) -> None:
+        """从历史消息 batch 中恢复元信息（耗时和 token 消耗）到卡片底部栏"""
+        if card.role != "assistant":
+            return
+        elapsed = None
+        token_usage = None
+        for msg in batch:
+            if msg.get("role") == "assistant":
+                if msg.get("elapsed") is not None:
+                    elapsed = msg["elapsed"]
+                if msg.get("token_usage"):
+                    token_usage = msg["token_usage"]
+        if elapsed is not None or token_usage is not None:
+            card.set_meta_info(elapsed=elapsed, token_usage=token_usage)
+        # 延迟刷新分隔点：等父级布局完成后再检查 isVisible()，避免加载时父级隐藏导致误判
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, card._refresh_footer_separators)
+
+
     def _render_message_to_card(
         self,
         batches: List[List[Dict[str, Any]]],
@@ -6081,6 +6110,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     cards.append(assistant_card)
                     # 使用辅助函数渲染消息
                     render_batch_to_assistant_card(assistant_card, batch)
+                    # 从 batch 中恢复元信息（耗时和 token）
+                    self._restore_meta_from_batch(assistant_card, batch)
                 if insert_index is not None and assistant_card:
                     insert_index += 1
 
@@ -8617,6 +8648,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_card = assistant_card
         # 记录响应开始时间（供 _on_stream_finished 计算持续时间）
         self._response_start_time = time.time()
+        assistant_card.start_elapsed_tracking()
         self._is_streaming = True
         self._toggle_send_stop(True)
 
@@ -8646,6 +8678,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._is_streaming = True
         self._response_start_time = time.time()
+        if self._current_assistant_card:
+            self._current_assistant_card.start_elapsed_tracking()
         self._accumulated_content = ""
         # 每个新的流式轮次清空工具结果去重集合
         self._processed_tool_result_ids: set = set()
@@ -9186,6 +9220,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置当前卡片（必须在 send_message 之前，否则流式回调触发时 _current_assistant_card 为 None）
         self._current_assistant_card = assistant_card
         self._response_start_time = time.time()
+        assistant_card.start_elapsed_tracking()
         self._is_streaming = True
         # ❌ 不在这里切换停止按钮！内建函数/子智能体执行后只是准备接收回调响应，
         # 按钮状态应在 LLM 实际开始流式响应时由 _on_stream_started 切换。
@@ -9392,9 +9427,15 @@ class OpenAIChatToolWindow(ToolWindow):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
                             break
+        # 计算流式耗时并设置到卡片底部栏
+        elapsed = None
+        if self._response_start_time is not None:
+            elapsed = time.time() - self._response_start_time
         self._response_start_time = None
 
         if self._current_assistant_card:
+            if elapsed is not None:
+                self._current_assistant_card.set_meta_info(elapsed=elapsed)
             self._current_assistant_card.finish_streaming()
 
         # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
@@ -9581,7 +9622,25 @@ class OpenAIChatToolWindow(ToolWindow):
         # worker 送回来的 current_session_messages 是原始未压缩消息，
         # 保留旧的压缩缓存会导致 state 不一致（缓存说"已压缩"但消息已膨胀）。
         # 清空缓存让下一次 ContextBudgetAllocator 从原始消息正确重新压缩。
+
+        # ⚠️ 写入 elapsed 必须在 set_messages 之前：set_messages 内部 consolidate
+        # 会创建新 dict，之后修改参数 messages 不会反映到 session.messages
+        if self._response_start_time is not None:
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant" and "elapsed" not in msg:
+                    msg["elapsed"] = round(time.time() - self._response_start_time, 1)
+                    break
+
         session.set_messages(messages or [], preserve_compaction=False)
+
+        # 提取最新 assistant 消息的 token_usage 更新当前卡片 UI
+        if self._current_assistant_card:
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant" and msg.get("token_usage"):
+                    self._current_assistant_card.set_meta_info(token_usage=msg["token_usage"])
+                    break
+
+        # 延迟刷新上下文指示器，让 UI 先完成消息更新再处理 compaction
         # 延迟刷新上下文指示器，让 UI 先完成消息更新再处理 compaction
         # 避免 finished_with_messages 信号处理过程中阻塞主线程
         from PyQt5.QtCore import QTimer
@@ -9597,6 +9656,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = False
 
         self._toggle_send_stop(False)
+
+        # 停止计时器并设置最终耗时
+        if self._current_assistant_card and self._response_start_time is not None:
+            elapsed = time.time() - self._response_start_time
+            self._current_assistant_card.set_meta_info(elapsed=elapsed)
+            self._response_start_time = None
 
         # 🔧 异常时保存已生成的部分消息到历史记录
         # finished_with_messages 信号已先于 error_occurred 被处理，
@@ -10731,6 +10796,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:
+            # 停止计时器并设置最终耗时
+            if self._response_start_time is not None:
+                elapsed = time.time() - self._response_start_time
+                self._current_assistant_card.set_meta_info(elapsed=elapsed)
+                self._response_start_time = None
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.finish_streaming()
 

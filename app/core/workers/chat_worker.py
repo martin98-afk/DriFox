@@ -677,19 +677,31 @@ class OpenAIChatWorker(QThread):
                     extra_body["thinking"] = {"type": enable_value}
                     # 用 thinking 控制的模型不支持同时传 reasoning_effort
                     extra_body.pop("reasoning_effort", None)
+                    extra_body.pop("thinking_budget", None)
                 elif t_param == "thinking_budget":
                     budget = self.llm_config.get("思考预算", 4096)
                     extra_body["thinking_budget"] = budget
-                # reasoning_effort 由 思考等级 的 api_param 映射自动流入
+                    # thinking_budget 型清理非 budget 参数
+                    extra_body.pop("reasoning_effort", None)
+                    extra_body.pop("thinking", None)
+                elif t_param == "reasoning_effort":
+                    # reasoning_effort 由 思考等级 的 api_param 映射自动流入
+                    # 这里确保兜底值并清理冲突参数
+                    if "reasoning_effort" not in extra_body:
+                        extra_body["reasoning_effort"] = self.llm_config.get("思考等级", "medium")
+                    extra_body.pop("thinking", None)
+                    extra_body.pop("thinking_budget", None)
             else:  # False - 关闭思考
-                if t_param == "thinking":
-                    extra_body["thinking"] = {"type": "disabled"}
-                    # 关闭思考时必须同时清理 thinking_budget，避免某些 API 将其理解为启用信号
-                    extra_body.pop("thinking_budget", None)
-                elif t_param == "thinking_budget":
-                    extra_body.pop("thinking_budget", None)
-                # 关闭思考时必须移除 reasoning_effort
+                # 显式告诉 API 不要思考（所有 t_param 类型都发此通用信号）
+                extra_body["thinking"] = {"type": "disabled"}
+                # 同时清理可能残留的其他思考参数
+                extra_body.pop("thinking_budget", None)
                 extra_body.pop("reasoning_effort", None)
+
+            logger.debug(
+                f"[Thinking] mode={thinking_mode}, t_param={t_param}, "
+                f"extra_body_keys={[k for k in extra_body if k in ('thinking', 'thinking_budget', 'reasoning_effort')]}"
+            )
 
         # 处理认证
         auth_headers = None
@@ -1193,6 +1205,18 @@ class OpenAIChatWorker(QThread):
             if model_name:
                 empty_msg["model_name"] = model_name
             sequence.append(empty_msg)
+
+        # 将 token_usage 注入到 sequence 中的 assistant 消息
+        if self._last_usage:
+            usage = {
+                "input": self._last_usage.get("prompt_tokens", 0),
+                "output": self._last_usage.get("completion_tokens", 0),
+                "total": self._last_usage.get("total_tokens", 0),
+            }
+            for msg in sequence:
+                if msg.get("role") == "assistant":
+                    msg["token_usage"] = usage
+                    break  # 只用一次，后续轮次会重新设置
 
         return sequence
 

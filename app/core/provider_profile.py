@@ -223,6 +223,15 @@ PROVIDER_CAPABILITIES = {
         "supports_thinking": False,
         "thinking_param": None,
     },
+    "opencode": {
+        "context_limit": 200000,
+        "max_output_tokens": 8192,
+        "absolute_limit": 65536,
+        "supports_vision": True,
+        "supports_thinking": True,
+        "thinking_param": "reasoning_effort",   # OpenCode 多数模型（deepseek-v4 系）走 reasoning_effort
+        "reasoning_effort_param": "reasoning_effort",
+    },
     "custom": {
         "context_limit": 200000,
         "max_output_tokens": 8192,
@@ -247,6 +256,8 @@ def detect_provider_family(llm_config: Dict[str, Any]) -> str:
         return "dashscope"
     if "bigmodel.cn" in api_url or model.startswith("glm"):
         return "zhipu"
+    if "opencode.ai" in api_url:
+        return "opencode"
     if "deepseek.com" in api_url or model.startswith("deepseek"):
         return "deepseek"
     if "api.groq.com" in api_url or "groq/" in model:

@@ -114,6 +114,10 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
         "source": "models.dev", "note": "通义 Qwen3.6-Plus，2026-04-02 发布；API 格式同 DashScope 系",
     },
+    "qwen3.5-plus": {
+        "context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
+        "source": "inferred", "note": "OpenCode Zen 提供；thinking 控制方式同 qwen3.6-plus",
+    },
     "qwen3.7-max": {
         "context_limit": 1000000, "supports_thinking": True, "thinking_param": "thinking",
         "source": "vendor_official", "note": "通义 Qwen3.7-Max，2026-05-20 阿里云峰会发布；API 格式同 DashScope 系",
@@ -125,6 +129,10 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
     "deepseek-v4-flash": {
         "context_limit": 1048576, "supports_thinking": True, "thinking_param": "reasoning_effort",
         "source": "models.dev", "note": "DeepSeek-V4-Flash，2026-04-24 发布",
+    },
+    "deepseek-v4-flash-free": {
+        "context_limit": 1048576, "supports_thinking": True, "thinking_param": "reasoning_effort",
+        "source": "inferred", "note": "OpenCode Zen 免费档转发 DeepSeek-V4-Flash；thinking_param 沿用 deepseek-v4-flash",
     },
 
     # ========== OpenCode Zen 真实免费模型（来自 opencode/xxx 系列） ==========
