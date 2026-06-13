@@ -1766,7 +1766,7 @@ class CodeWebViewer(QWebEngineView):
     # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
     # 标准消息卡片在正常宽度(400~700px)下，1500px 高度已覆盖绝大多数内容
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 2000
+    MAX_HEIGHT = 3000
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
