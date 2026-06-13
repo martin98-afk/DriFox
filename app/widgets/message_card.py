@@ -815,11 +815,6 @@ def _classify_think_tag(content: str) -> str:
     return best_tag if best_score >= 3.0 else ""
 
 
-_CONCLUSION_INDICATORS = ("因此", "所以", "综上", "综上所述", "总而言之",
-                          "总的来说", "建议", "推荐", "结论是", "答案是",
-                          "总结一下", "也就是说", "最终")
-
-
 _THINK_SNAKE_SVG = (
     '<svg class="think-snake" width="18" height="18" viewBox="0 0 24 24">'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
@@ -3352,17 +3347,25 @@ class CodeWebViewer(QWebEngineView):
                 self._height_report_pending = True
                 js_code = (
                     # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失
+                    # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
+                    # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
                     "(function(){"
                     "var _sbs=[];"
+                    "var _cp=document.getElementById('content-placeholder');"
+                    "var _childrenArr=Array.from(_cp.children);"
                     "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
+                    "idx:_childrenArr.indexOf(el)});"
                     "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
                     "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                    "var _bk=_t.firstElementChild;if(_bk)_c.appendChild(_bk);}});}"
+                    "var _bk=_t.firstElementChild;if(_bk){"
+                    "var _ref=_c.children[b.idx];"
+                    "if(_ref)_c.insertBefore(_bk,_ref);"
+                    "else _c.appendChild(_bk);}}});}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -3393,18 +3396,26 @@ class CodeWebViewer(QWebEngineView):
             # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
             # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
             # 因找不到流式块而追加重复的 data-tool-injected 块）
+            # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
+            # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
+                "var _cp=document.getElementById('content-placeholder');"
+                "var _childrenArr=Array.from(_cp.children);"
                 "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
+                "idx:_childrenArr.indexOf(el)});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
                 "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                "var _bk=_t.firstElementChild;if(_bk)_c.appendChild(_bk);}});}"
+                "var _bk=_t.firstElementChild;if(_bk){"
+                "var _ref=_c.children[b.idx];"
+                "if(_ref)_c.insertBefore(_bk,_ref);"
+                "else _c.appendChild(_bk);}}});}"
                 "})();"
             )
             self.page().runJavaScript(js_code)
