@@ -169,7 +169,7 @@ class KeyDocumentsRepository:
             logger.error(f"[KeyDocumentsRepository] get_working_directory 异常: {e}")
             return None
 
-    def get_by_project(self, project: str, limit: int = 20) -> List[Dict]:
+    def get_by_project(self, project: str, limit: int = 9999) -> List[Dict]:
         """
         获取指定项目的所有关键文档
 

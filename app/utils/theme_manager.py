@@ -8,10 +8,11 @@
 - 参考技能加载模式设计（多层搜索 + 合并）
 """
 import os
+import weakref
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -190,10 +191,58 @@ class ThemeManager:
         if callback in self._reload_callbacks:
             self._reload_callbacks.remove(callback)
 
+    # ── 统一刷新目标注册 ──────────────────────────────────
+    # 使用弱引用防止阻止垃圾回收
+    _refresh_targets: list = []
+
+    def register_refresh_target(self, widget) -> None:
+        """注册需要接收主题刷新的 widget（自动去重）
+
+        Args:
+            widget: 实现了 refresh_theme() 方法的 QWidget 实例
+        """
+        ref = weakref.ref(widget)
+        # 去重
+        for existing in self._refresh_targets:
+            if existing() is widget:
+                return
+        self._refresh_targets.append(ref)
+
+    def unregister_refresh_target(self, widget) -> None:
+        """取消注册 widget"""
+        self._refresh_targets = [
+            ref for ref in self._refresh_targets if ref() is not widget
+        ]
+
+    def dispatch_refresh(self) -> None:
+        """向所有已注册的 widget 分发 refresh_theme() 调用
+
+        由 reload() 或外部触发（配置变更）调用。
+        已失效的弱引用会被自动清理。
+        """
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+
+        alive = []
+        for ref in self._refresh_targets:
+            widget = ref()
+            if widget is None:
+                continue  # 弱引用已失效，跳过
+            alive.append(ref)
+            try:
+                if hasattr(widget, "refresh_theme"):
+                    widget.refresh_theme()
+            except Exception as e:
+                logger.warning(f"[ThemeManager] dispatch_refresh error: {e}")
+        self._refresh_targets = alive
+
     def reload(self):
         """重新加载所有主题（修改文件后调用）"""
         self._themes.clear()
         self._load_themes()
+        # 分发刷新给所有注册 widget
+        self.dispatch_refresh()
+        # 兼容旧回调
         for cb in self._reload_callbacks:
             try:
                 cb()

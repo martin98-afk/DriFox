@@ -87,7 +87,7 @@ class MemoryManagerCore:
 
     # ==================== 条目记忆 API ====================
 
-    def get_entry_memories(self, query: str = "", limit: int = 30) -> List[Dict]:
+    def get_entry_memories(self, query: str = "", limit: int = 9999) -> List[Dict]:
         """获取条目记忆列表，支持搜索"""
         if not self._entry_memories_repo:
             return []
@@ -189,11 +189,11 @@ class MemoryManagerCore:
 
     # ==================== 关键文档 API ====================
 
-    def get_key_documents(self, project: str) -> List[Dict]:
+    def get_key_documents(self, project: str, limit: int = 9999) -> List[Dict]:
         """获取项目的关键文档列表"""
         if not self._key_documents_repo:
             return []
-        return self._key_documents_repo.get_by_project(project)
+        return self._key_documents_repo.get_by_project(project, limit=limit)
 
     def add_key_document(self, project: str, file_path: str, added_by: str = "manual") -> bool:
         """添加关键文档"""
@@ -249,8 +249,8 @@ class MemoryManagerCore:
     def format_memories_for_prompt(
         self,
         project: str = "默认项目",
-        entry_limit: int = 30,
-        doc_limit: int = 20,
+        entry_limit: int = 100,
+        doc_limit: int = 50,
         workdir_override: Optional[str] = None,
     ) -> str:
         """
@@ -291,6 +291,18 @@ class MemoryManagerCore:
         # 3. 关键文档
         lines.append("### 关键文档")
         docs = self.get_key_documents(project)[:doc_limit]
+        # 确保根目录（is_working_dir）始终在结果中，即使超过了 doc_limit
+        if project and self._key_documents_repo:
+            wd_path = workdir_override if workdir_override is not None else self.get_working_directory(project)
+            if wd_path:
+                all_docs = self.get_key_documents(project)
+                root_in_list = any(d.get("file_path") == wd_path for d in docs)
+                if not root_in_list:
+                    for d in all_docs:
+                        if d.get("file_path") == wd_path:
+                            # 把根目录插到列表头部
+                            docs.insert(0, d)
+                            break
         # 获取当前项目的工作目录（多窗口隔离：优先使用实例缓存值）
         wd_path = workdir_override if workdir_override is not None else self.get_working_directory(project)
         has_root_doc = False

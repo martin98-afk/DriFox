@@ -1326,6 +1326,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def setup_ui(self):
         Colors.refresh()
+        # 注册自身为 ThemeManager 的刷新目标，热重载时自动级联
+        from app.utils.theme_manager import theme_manager
+        theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
 
@@ -4622,6 +4625,10 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}"
         )
 
+    def refresh_theme(self):
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
+        self._apply_runtime_ui_settings()
+
     def _on_settings_config_changed(self):
         self._load_model_configs()
         self._apply_runtime_ui_settings()
@@ -4958,7 +4965,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     frame.refresh_style()
         # 刷新智能体切换按钮样式
         if hasattr(self, "_agent_switch_widget"):
-            Colors.refresh()
             self._agent_switch_widget.setStyleSheet(f"""
                 background: {Colors.TOOLBAR_BG};
                 border: none;
@@ -5017,7 +5023,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_project_selector_card"):
             self._project_selector_card.refresh_style()
         if hasattr(self, "_project_new_edit"):
-            Colors.refresh()
             self._project_new_edit.setStyleSheet(f"""
                 QLineEdit {{
                     background: {Colors.HOVER_BG};

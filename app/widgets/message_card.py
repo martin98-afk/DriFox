@@ -4536,9 +4536,9 @@ class MessageCard(SimpleCardWidget):
         if token_usage is not None and self._footer_tokens_label:
             total = token_usage.get("total", 0)
             if total >= 1000:
-                text = f"🪙 {total/1000:.1f}K tokens"
+                text = f"{total/1000:.1f}K tokens"
             else:
-                text = f"🪙 {total} tokens"
+                text = f"{total} tokens"
             self._footer_tokens_label.setText(text)
             self._footer_tokens_label.setVisible(True)
         # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）

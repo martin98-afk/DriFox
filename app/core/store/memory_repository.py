@@ -382,7 +382,7 @@ class MemoryRepository:
             logger.error(f"[MemoryRepository] update_last_accessed 异常: {e}")
             return False
 
-    def search(self, query: str = "", limit: int = 30) -> List[Dict]:
+    def search(self, query: str = "", limit: int = 9999) -> List[Dict]:
         """
         搜索记忆
 
