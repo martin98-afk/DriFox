@@ -1349,11 +1349,16 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _remove_key_document(self, doc_id: str):
-        """移除关键文档"""
+        """移除关键文档（删除后保持滚动位置）"""
         memory_mgr = self._get_memory_manager()
         if memory_mgr:
             memory_mgr.remove_key_document(doc_id)
+        # 保存滚动位置，避免全量重绘后跳回顶部
+        scroll_bar = self.docs_list.verticalScrollBar()
+        scroll_pos = scroll_bar.value() if scroll_bar else 0
         self._load_key_documents()
+        if scroll_bar:
+            scroll_bar.setValue(scroll_pos)
 
     def _set_as_working_directory(self, file_path: str):
         """设置为工作目录（再次点击取消）

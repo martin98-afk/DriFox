@@ -1206,6 +1206,18 @@ class OpenAIChatWorker(QThread):
                 empty_msg["model_name"] = model_name
             sequence.append(empty_msg)
 
+        # 将 token_usage 注入到 sequence 中的 assistant 消息
+        if self._last_usage:
+            usage = {
+                "input": self._last_usage.get("prompt_tokens", 0),
+                "output": self._last_usage.get("completion_tokens", 0),
+                "total": self._last_usage.get("total_tokens", 0),
+            }
+            for msg in sequence:
+                if msg.get("role") == "assistant":
+                    msg["token_usage"] = usage
+                    break  # 只用一次，后续轮次会重新设置
+
         return sequence
 
     def _emit_compaction_status(self, state: Dict):

@@ -4293,6 +4293,17 @@ class MessageCard(SimpleCardWidget):
         self._retry_wait_time = 0.0  # 等待时间
         self._round_index: Optional[int] = None  # 用于卡片差异功能
         self._message_index: Optional[int] = None  # 用于卡片差异和撤销功能：消息在 session.messages 中的索引
+        # 底部元信息栏（助手卡片）
+        self._footer_bar: Optional[QWidget] = None
+        self._footer_model_label: Optional[QLabel] = None
+        self._footer_elapsed_label: Optional[QLabel] = None
+        self._footer_tokens_label: Optional[QLabel] = None
+        self._footer_sep1: Optional[QLabel] = None
+        self._footer_sep2: Optional[QLabel] = None
+        # 耗时实时计时器
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.timeout.connect(self._update_elapsed_display)
+        self._elapsed_start_time: Optional[float] = None
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
         self._pulse_phase = 0.0
@@ -4437,6 +4448,130 @@ class MessageCard(SimpleCardWidget):
                 }}
                 """
             )
+        # 同步到底部元信息栏
+        if self._footer_model_label:
+            self._footer_model_label.setText(model_name)
+            self._footer_model_label.setVisible(True)
+            self._refresh_footer_separators()
+
+    def _build_footer_bar(self, main: QVBoxLayout):
+        """构建助手卡片底部极简元信息栏：token | 耗时 | 模型（右对齐，分割线下方）"""
+        bar = QWidget(self)
+        self._footer_bar = bar
+        bar.setFixedHeight(12)
+        bar.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(3)
+
+        accent = self._theme["accent"]
+        font_css = get_font_family_css()
+        label_style = (
+            f"{font_css} font-size: {scale_font_size(9)}px; "
+            f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
+        )
+
+        layout.addStretch()
+
+        # Token 消耗
+        tokens_l = QLabel("", self)
+        tokens_l.setStyleSheet(label_style)
+        tokens_l.setVisible(False)
+        self._footer_tokens_label = tokens_l
+        layout.addWidget(tokens_l)
+
+        # 分隔点 1（token ↔ 耗时）
+        sep1 = QLabel("·", self)
+        sep1.setStyleSheet(label_style)
+        sep1.setVisible(False)
+        self._footer_sep1 = sep1
+        layout.addWidget(sep1)
+
+        # 耗时
+        elapsed_l = QLabel("", self)
+        elapsed_l.setStyleSheet(label_style)
+        elapsed_l.setVisible(False)
+        self._footer_elapsed_label = elapsed_l
+        layout.addWidget(elapsed_l)
+
+        # 分隔点 2（耗时 ↔ 模型）
+        sep2 = QLabel("·", self)
+        sep2.setStyleSheet(label_style)
+        sep2.setVisible(False)
+        self._footer_sep2 = sep2
+        layout.addWidget(sep2)
+
+        # 模型名称
+        model_l = QLabel(self.model_name or "", self)
+        model_l.setStyleSheet(label_style)
+        model_l.setVisible(bool(self.model_name))
+        self._footer_model_label = model_l
+        layout.addWidget(model_l)
+
+        main.addWidget(bar)
+
+    def set_meta_info(self, elapsed: float = None, token_usage: dict = None):
+        """设置助手卡片的元信息（耗时和 token 消耗）
+        
+        Args:
+            elapsed: 响应耗时（秒），如 3.2。传入后停止实时计时。
+            token_usage: 如 {"input": 1234, "output": 567, "total": 1801}
+        """
+        if self.role != "assistant":
+            return
+        # 耗时
+        if elapsed is not None and self._footer_elapsed_label:
+            self._elapsed_timer.stop()
+            self._elapsed_start_time = None
+            self._footer_elapsed_label.setText(f"⏱ {elapsed:.1f}s")
+            self._footer_elapsed_label.setVisible(True)
+        # Token
+        if token_usage is not None and self._footer_tokens_label:
+            total = token_usage.get("total", 0)
+            if total >= 1000:
+                text = f"🪙 {total/1000:.1f}K tokens"
+            else:
+                text = f"🪙 {total} tokens"
+            self._footer_tokens_label.setText(text)
+            self._footer_tokens_label.setVisible(True)
+        # 刷新分隔点（序：token · 耗时 · 模型）
+        has_tokens = self._footer_tokens_label and self._footer_tokens_label.isVisible()
+        has_elapsed = self._footer_elapsed_label and self._footer_elapsed_label.isVisible()
+        has_model = self._footer_model_label and self._footer_model_label.isVisible()
+        if self._footer_sep1:
+            self._footer_sep1.setVisible(has_tokens and has_elapsed)
+        if self._footer_sep2:
+            self._footer_sep2.setVisible(has_elapsed and has_model)
+
+    def _refresh_footer_separators(self):
+        """根据标签可见性刷新分隔点"""
+        has_tokens = self._footer_tokens_label and self._footer_tokens_label.isVisible()
+        has_elapsed = self._footer_elapsed_label and self._footer_elapsed_label.isVisible()
+        has_model = self._footer_model_label and self._footer_model_label.isVisible()
+        if self._footer_sep1:
+            self._footer_sep1.setVisible(has_tokens and has_elapsed)
+        if self._footer_sep2:
+            self._footer_sep2.setVisible(has_elapsed and has_model)
+
+    def start_elapsed_tracking(self):
+        """开始实时计时（流式输出时调用）"""
+        if self.role != "assistant":
+            return
+        if not self._footer_elapsed_label:
+            return
+        self._elapsed_start_time = time.time()
+        self._footer_elapsed_label.setText("⏱ 0s")
+        self._footer_elapsed_label.setVisible(True)
+        self._refresh_footer_separators()
+        self._elapsed_timer.start(1000)  # 每秒更新
+
+    def _update_elapsed_display(self):
+        """实时更新耗时显示"""
+        if self._elapsed_start_time is None:
+            self._elapsed_timer.stop()
+            return
+        elapsed = time.time() - self._elapsed_start_time
+        self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
 
     def _build_avatar_style(self):
         font_css = get_font_family_css()
@@ -4522,11 +4657,11 @@ class MessageCard(SimpleCardWidget):
         top.addWidget(ts)
         top.addStretch()
 
+        # 顶部操作按钮
         btns = QWidget(self)
         bl = QHBoxLayout(btns)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(4)
-        specs = []
         if self.role == "assistant":
             specs = [
                 (
@@ -4542,14 +4677,12 @@ class MessageCard(SimpleCardWidget):
             ]
         elif self.role == "user":
             specs = [
-                (
-                    get_icon("复制"),
-                    "复制",
-                    lambda: self._copy_user_message(),
-                ),
+                (get_icon("复制"), "复制", lambda: self._copy_user_message()),
                 (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
                 (get_icon("删除"), "删除", self.deleteRequested.emit),
             ]
+        else:
+            specs = []
         for ic, tp, cb in specs:
             b = TransparentToolButton(ic, self)
             b.setToolTip(tp)
@@ -4557,7 +4690,8 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(32, 32)
             b.installEventFilter(ToolTipFilter(b))
             bl.addWidget(b)
-        top.addWidget(btns)
+        if specs:
+            top.addWidget(btns)
         main.addLayout(top)
         main.addWidget(CardSeparator(self))
 
@@ -4680,6 +4814,10 @@ class MessageCard(SimpleCardWidget):
         main.addWidget(self._retry_status_widget)
 
         main.addWidget(CardSeparator(self))
+
+        # ===== 助手卡片底部元信息栏（分割线下方） =====
+        if self.role == "assistant":
+            self._build_footer_bar(main)
         self.setStyleSheet(
             f"""
             CardWidget {{
