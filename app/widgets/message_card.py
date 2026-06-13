@@ -875,7 +875,6 @@ def _render_tool_streaming_block(
     # spinner 由 CSS data-streaming 控制可见性，完成态时通过 CSS 过渡淡出
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
 
-    char_hint = f" ({char_count}字符)" if char_count > 0 else ""
     preview_display = escape(preview) if preview else "准备中..."
 
     # 始终设置 data-streaming 属性（"true" 或 "false"）
@@ -891,7 +890,7 @@ def _render_tool_streaming_block(
         </span>
         <span style="margin-left: auto; min-width: 0; overflow: hidden; flex-shrink: 1;">
             <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {preview_display}{char_hint}
+                {preview_display}
             </span>
         </span>
     </button>
@@ -5464,6 +5463,33 @@ class MessageCard(SimpleCardWidget):
             _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
             block_key = _key_match.group(1) if _key_match else ""
 
+            # ── 增量更新解析：将 inner_html 拆分为 button 和 body 两部分 ──
+            # 避免 existing.innerHTML = safe_inner 整体替换导致的子节点空窗期
+            # （外层 div 子节点清空瞬间 margin 暴露为可见间距，详见 #间距修复）
+            _btn_match = re.match(
+                r'<button[^>]*>(.*?)</button>', inner_html, re.DOTALL
+            )
+            _body_match = re.search(
+                r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$',
+                inner_html, re.DOTALL
+            )
+            if _btn_match and _body_match:
+                btn_inner = _btn_match.group(1)
+                body_inner = _body_match.group(1)
+                # 提取 body div 上可能携带的 style（如 expanded: height:auto）
+                _body_style_match = re.search(
+                    r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"',
+                    inner_html
+                )
+                body_style = _body_style_match.group(1) if _body_style_match else ""
+                safe_btn_inner = json.dumps(btn_inner).decode('utf-8')
+                safe_body_inner = json.dumps(body_inner).decode('utf-8')
+                safe_body_style = json.dumps(body_style).decode('utf-8')
+                _use_incremental = 'true'
+            else:
+                safe_btn_inner = safe_body_inner = safe_body_style = '""'
+                _use_incremental = 'false'
+
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
@@ -5471,17 +5497,32 @@ class MessageCard(SimpleCardWidget):
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
                 var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
-                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性 / innerHTML
+                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性
                     // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
                     existing.className = 'cm-collapsible tool-block';
                     existing.setAttribute('data-block-key', '{block_key}');
                     existing.setAttribute('data-expanded', 'false');
                     existing.removeAttribute('data-streaming');
                     // 恢复外层 div 的 style（如 display:flex），确保 INLINE_TOOLS
-                    // 的预览文字 text-align:right 正确工作。直接 setAttribute 覆盖
-                    // 所有 inline style，比逐个属性设置更简洁高效。
+                    // 的预览文字 text-align:right 正确工作。
                     existing.setAttribute('style', {safe_outer_style});
-                    existing.innerHTML = {safe_inner};
+
+                    if ({_use_incremental}) {{
+                        // 【增量更新】分别更新 button 和 body，避免 innerHTML 整体替换
+                        // 导致外层 div 子节点临时清空，margin 暴露为可见间距
+                        var btn = existing.querySelector('.cm-collapsible__summary');
+                        if (btn) btn.innerHTML = {safe_btn_inner};
+                        var body = existing.querySelector('.cm-collapsible__body');
+                        if (body) {{
+                            body.innerHTML = {safe_body_inner};
+                            if ({safe_body_style}) {{
+                                body.setAttribute('style', {safe_body_style});
+                            }}
+                        }}
+                    }} else {{
+                        // 兜底：整体替换（fallback，不应触发）
+                        existing.innerHTML = {safe_inner};
+                    }}
                     reportHeight();
                     return;
                 }}
@@ -5592,8 +5633,7 @@ class MessageCard(SimpleCardWidget):
         try:
             _text_only = preview is None
             preview_escaped = escape(preview) if preview else "准备中..."
-            char_hint = f" ({char_count}字符)" if char_count > 0 else ""
-            preview_content = f"{preview_escaped}{char_hint}"
+            preview_content = preview_escaped
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,

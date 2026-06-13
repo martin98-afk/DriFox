@@ -541,15 +541,20 @@ class SubAgentExecutor(QThread):
                 if t_param == "thinking":
                     extra_body["thinking"] = {"type": enable_value}
                     extra_body.pop("reasoning_effort", None)
+                    extra_body.pop("thinking_budget", None)
                 elif t_param == "thinking_budget":
                     budget = config.get("思考预算", 4096)
                     extra_body["thinking_budget"] = budget
+                    extra_body.pop("reasoning_effort", None)
+                    extra_body.pop("thinking", None)
+                elif t_param == "reasoning_effort":
+                    if "reasoning_effort" not in extra_body:
+                        extra_body["reasoning_effort"] = config.get("思考等级", "medium")
+                    extra_body.pop("thinking", None)
+                    extra_body.pop("thinking_budget", None)
             else:  # False - 关闭思考
-                if t_param == "thinking":
-                    extra_body["thinking"] = {"type": "disabled"}
-                    extra_body.pop("thinking_budget", None)
-                elif t_param == "thinking_budget":
-                    extra_body.pop("thinking_budget", None)
+                extra_body["thinking"] = {"type": "disabled"}
+                extra_body.pop("thinking_budget", None)
                 extra_body.pop("reasoning_effort", None)
 
         if extra_body:
