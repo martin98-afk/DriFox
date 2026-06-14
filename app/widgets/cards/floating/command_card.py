@@ -1593,8 +1593,9 @@ class CommandCard(QWidget):
         if self._detail_mode and self._detail_has_params:
             # 只对可见参数导航
             visible = [i for i, w in enumerate(self._param_widgets) if w.isVisible()]
-            if not visible:
-                return True
+            # 只有一个（或零个）可见参数时无需导航，让按键透传到输入区域
+            if len(visible) <= 1:
+                return False
             if self._selected_param_index < visible[-1]:
                 # 找到下一个可见的
                 current_pos = visible.index(self._selected_param_index) if self._selected_param_index in visible else -1
@@ -1620,8 +1621,9 @@ class CommandCard(QWidget):
             return True
         if self._detail_mode and self._detail_has_params:
             visible = [i for i, w in enumerate(self._param_widgets) if w.isVisible()]
-            if not visible:
-                return True
+            # 只有一个（或零个）可见参数时无需导航，让按键透传到输入区域
+            if len(visible) <= 1:
+                return False
             if self._selected_param_index > visible[0]:
                 current_pos = visible.index(self._selected_param_index) if self._selected_param_index in visible else -1
                 if current_pos > 0:

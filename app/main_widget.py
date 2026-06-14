@@ -10464,6 +10464,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             self._memory_card_popup._instance_workdir[project] = workdir or ""
 
+        # 工作目录变化后刷新分支标签
+        self._update_branch()
+
         from loguru import logger
 
         logger.info(
@@ -10584,8 +10587,20 @@ class OpenAIChatToolWindow(ToolWindow):
             db_wd = mm.get_working_directory(project)
             mm.add_key_document(project, worktree_path, "git_worktree")
             mm.set_working_directory(project, worktree_path)
+            # 恢复非 worktree 根目录的 is_working_dir 标记，确保记忆卡片
+            # 能正确识别用户设定的根目录。get_working_directory 可能返回
+            # worktree 路径（ORDER BY 优先），此时跳过 restore 以避免
+            # 错误地为 worktree 恢复标记。
             if db_wd and db_wd != worktree_path and db_wd != "clear":
-                mm.restore_working_directory_mark(project, db_wd)
+                # 如果 db_wd 指向的是 worktree（added_by 为 git_worktree），
+                # 不恢复它 — 我们需要恢复的是主仓库/根目录的标记
+                all_docs = mm.get_key_documents(project)
+                is_db_wd_worktree = any(
+                    d.get("file_path") == db_wd and d.get("added_by") == "git_worktree"
+                    for d in all_docs
+                )
+                if not is_db_wd_worktree:
+                    mm.restore_working_directory_mark(project, db_wd)
 
         # 2. 更新实例缓存 + 同步工具执行器 + 刷新分支标签
         self._current_workdir[project] = worktree_path

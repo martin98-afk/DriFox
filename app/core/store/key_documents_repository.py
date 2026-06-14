@@ -151,6 +151,10 @@ class KeyDocumentsRepository:
 
         Returns:
             Optional[str]: 工作目录路径，未设置返回 None
+
+        注意：当主仓库和 worktree 同时有 is_working_dir=1 时（_switch_to_worktree
+        会同时标记两者），优先返回 added_by='git_worktree' 的路径，因为 worktree
+        是用户最近切换到的活动工作目录。使用 ORDER BY 确保确定性。
         """
         if not self.is_initialized:
             return None
@@ -158,7 +162,8 @@ class KeyDocumentsRepository:
 
         try:
             success, rows = self._execute(
-                f'SELECT file_path FROM {self.TABLE_NAME} WHERE project = ? AND is_working_dir = 1 LIMIT 1',
+                f'SELECT file_path FROM {self.TABLE_NAME} WHERE project = ? AND is_working_dir = 1 '
+                f'ORDER BY CASE WHEN added_by = \'git_worktree\' THEN 0 ELSE 1 END, added_at DESC LIMIT 1',
                 (project,)
             )
             if success and rows:
