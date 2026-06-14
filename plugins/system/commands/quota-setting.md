@@ -95,9 +95,31 @@ argument-hint:
 4. 提取 workspace_id（如果步骤 0 中未提前提取）：
    - 从 URL 正则提取 /workspace/(wrk_[A-Za-z0-9]+)/
    - 若当前不在 Go 页，导航到 https://opencode.ai/workspace/{workspace_id}/go
-5. 刷新 Go 页确保最新状态：
-   mcp__playwright__browser_navigate(url=当前URL)
-   mcp__playwright__browser_wait_for(time=3)
+5. 刷新 Go 页确保最新状态 + 捕获 `/_server` 请求：
+   5.1 先查一次 network_requests 能否捡到漏：
+       mcp__playwright__browser_network_requests(static=true)
+       如果有 `/_server` → 跳到 7.2 提取公式
+   5.2 如果没捡到，需要**带着 listener 重新导航**（listener 必须在 navigation 之前注册，否则漏掉）：
+       mcp__playwright__browser_run_code_unsafe(code="""
+         async (page) => {
+           const url = await new Promise((resolve) => {
+             const timer = setTimeout(() => resolve(null), 10000);
+             page.on('request', req => {
+               if (req.url().includes('/_server')) {
+                 clearTimeout(timer);
+                 resolve(req.url());
+               }
+             });
+             // listner 就位后才导航
+             page.goto('""" + 当前URL + """').then(() => {});
+           });
+           return url;
+         }
+       """)
+       返回非 null → 从 URL 的 `id` query 参数提取 server_id，跳到步骤 8
+       返回 null → 继续步骤 6（cookie 照抓，server_id 走 7.3 人工兜底）
+   5.3 无论 5.2 是否抓到，都会重新加载了一次页面，cookie 不受影响
+
 6. 抓取 cookie：
    ⚠️ **关键踩坑**：`browser_network_request(part="request-headers")` 实测只返回 ~8 个非敏感 header
    （sec-ch-ua、referer、user-agent 等），Cookie 字段被 MCP 服务端过滤掉了。
@@ -117,17 +139,18 @@ argument-hint:
    - str 长度 < 20 → 走第 7 节「Cookie 长度异常」错误处理
    - 否则 cookie = str，记录 length
 
-7. 抓取 server_id（tRPC procedure 哈希，64 字符 SHA256）：
-   ⚠️ Go 页的 `/_server` 订阅走 WebSocket/SSE，实测不出现在 `browser_network_requests` 中。
-   不要尝试跳转到「使用量」页——用户只需要 Go 页的套餐数据，不擅自切换页面。
+7. 提取 server_id（tRPC procedure 哈希，64 字符 SHA256）：
+   ⚠️ Go 页通过 HTTP GET `/_server?id=<64字符SHA256>&args=...` 获取套餐用量数据。
+   不是 WebSocket/SSE。核心捕获逻辑已在步骤 5 中完成（request listener 拦截 + 重新导航）。
+   这里只是提取和兜底：
 
-   7.1 **用户消息中是否含 `https://opencode.ai/_server?id=...&args=...` 这种 API URL？**
-       → server_id = URL 的 `id` query 参数（最准，就是该 procedure 的哈希）
-   7.2 否则尝试从 6.1 刷新的网络请求中找 `/_server`（小概率，在刷新瞬间可能被捕获）：
-       能抓到 → 调 `browser_network_request` 取 `x-server-id`
-       抓不到 → server_id = "（需手动填写 — Go 页订阅走 WebSocket，无法自动捕获）"
-   7.3 server_id 为空时输出提示：「Go 页的套餐用量接口走 WebSocket，无法自动获取 procedure hash。
-       请将 DriFox 配置中的 Server ID 留空，或从浏览器 DevTools → Network 中手动复制 `/_server` GET 请求的 `id` 参数。」
+   7.1 如果步骤 5.2 已返回 URL → 用正则 `[?&]id=([A-Fa-f0-9]{64})` 从 URL 提取 server_id
+   7.2 如果步骤 5.1 的 `browser_network_requests` 捡到 `/_server`：
+       mcp__playwright__browser_network_request(index=该index, part="request-headers")
+       从 URL 的 `id` query 参数提取 server_id
+   7.3 **人工兜底**：若以上都拿不到：
+       提示用户：「`/_server` GET 请求的 `id` 参数值（64 字符 SHA256 哈希）即为 server_id。
+       请在 DriFox 配置中留空此字段，或从浏览器 DevTools → Network 筛选 `/_server` 复制 `id` 参数。」
 
 8. 组装结果 dict：{"cookie": "...", "server_id": "...", "workspace_id": "..."}
 9. 进入第 6 节输出格式
@@ -254,7 +277,7 @@ X-Web-ID:   x-web-id 的值（如未抓到可留空）
 | 网络请求列表为空（页面加载失败） | 调 `browser_take_screenshot` 截图，给用户看「页面实际显示了什么」，并提示：「可能需要检查网络或刷新页面」 |
 | 找不到目标 API 请求（OpenCode 找不到 _server / 火山方舟找不到 GetCodingPlanUsage） | 退而求其次：拿任意一个**同源**请求的 Cookie。提示：「未抓到目标 API 请求，已使用同源其他请求的 Cookie 替代，可能短期有效」 |
 | httpOnly cookie 拿不到（document.cookie 返回空） | **不要**用 `browser_network_request` 拿 Cookie（实测它会过滤掉 Cookie 字段）。改用 `browser_run_code_unsafe` + `page.context().cookies('https://opencode.ai')` 拿全量 |
-| 抓不到 `/_server` 请求（Go 页 subscription 走 WebSocket/SSE） | 正常现象，不要跳到「使用量」页。server_id 走第 4 节 7.1（用用户提供的 URL `id` 参数）或标记为手动填写 |
+| 抓不到 `/_server` 请求（Go 页 HTTP GET 时机微妙易漏掉） | 走第 4 节 7.1 请求拦截法重试（`browser_run_code_unsafe` 监听 request 事件）。仍失败则提示手动从 DevTools 复制 URL 的 `id` 参数 |
 | `X-Server-Id` 缺失或拿到非 64 字符值 | 这是 procedure 标识，**永远应该是 64 字符 SHA256 哈希**。若不是说明拿错了请求，丢弃此 server_id |
 | 某个字段（如 x_web_id）抓不到且为可选 | 输出中标 `(未抓到，跳过此字段不影响用量查询)`，不要让用户误以为抓取失败 |
 | 用户中途关闭浏览器 | 检测到 `browser_evaluate` 或后续调用失败时停止，提示：「浏览器已被关闭，本次抓取取消」 |
@@ -268,7 +291,7 @@ X-Web-ID:   x-web-id 的值（如未抓到可留空）
 - 自动从登录后的网络请求中提取 httpOnly cookie（document.cookie 拿不到的部分）
 - 清晰标注每个字段对应 DriFox 的哪个配置项
 - 多平台一次性抓取
-- 识别 Go 页的 `/_server` 订阅走 WebSocket/SSE（不出现在网络请求列表），不强行跳到「使用量」页
+- 识别 Go 页的 `/_server` 是 HTTP GET 请求（非 WebSocket），通过 request 事件拦截自动捕获
 - 自动处理 Playwright MCP 过滤 Cookie 字段的问题，通过 `run_code_unsafe` + `context.cookies()` 绕过
 - 自动从用户消息中提取 workspace_id（无需追问），前提是消息里含 `wrk_xxx` 或完整 URL
 - 当 server_id 无法自动捕获时，给出手动填写指引
