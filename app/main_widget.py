@@ -3271,7 +3271,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 调用已有的模型切换逻辑
-        self._on_model_selected_from_popup(provider_name, model_name)
+        # 🛡️ 传 config_id 而非 provider_name（显示名），避免 _on_model_selected_from_popup
+        # 内部通过 _display_to_config_id 二次解析时因字典未构建而解析失败或匹配到错误的配置
+        self._on_model_selected_from_popup(config_id, model_name)
 
     def _get_model_btn_text_style(self) -> str:
         """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
