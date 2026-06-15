@@ -61,12 +61,16 @@ def main():
         QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
-    # macOS 上设置 Chromium 进程模式为 in-process-GPU，防止多窗口时
-    # GPU 子进程冲突导致的 SIGTRAP/SIGBUS 崩溃
+    # Chromium flags：所有 WebEngine 视图共享同一个渲染进程，
+    # 防止大量消息卡片创建多个渲染进程导致内存膨胀
+    import os as _os
+    _chromium_flags = ["--renderer-process-limit=1"]
+    # macOS 上额外启用 in-process-GPU，防止多窗口时 GPU 子进程
+    # 冲突导致的 SIGTRAP/SIGBUS 崩溃
     if platform.system() == "Darwin":
-        import os as _os
-        if "QTWEBENGINE_CHROMIUM_FLAGS" not in _os.environ:
-            _os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--in-process-gpu"
+        _chromium_flags.append("--in-process-gpu")
+    if "QTWEBENGINE_CHROMIUM_FLAGS" not in _os.environ:
+        _os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(_chromium_flags)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 提前导入，确保在 app 创建之前触发
@@ -157,6 +161,11 @@ def main():
     # 设置主题
     from qfluentwidgets import Theme, setTheme
     setTheme(Theme.DARK)
+
+    # 初始化共享 WebEngine Profile（所有 WebEngine 视图共用）
+    # 必须在创建任何 QWebEngineView 之前完成，因此放在此位置
+    from app.core.webengine_profile import init_shared_web_profile
+    init_shared_web_profile(parent=app)
     # 获取全局字体配置
     try:
         from app.utils.config import Settings

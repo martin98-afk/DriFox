@@ -331,6 +331,25 @@ class AutoLoopEngine(BaseEngine):
         all_steps = set(range(1, self._total_steps + 1))
         return self._verified_steps == all_steps
 
+    def all_steps_verified(self) -> bool:
+        """检查所有步骤是否已验证完成
+
+        优先使用 _verified_steps 缓存（从笔记同步），
+        如果缓存为空则从笔记直接解析。
+        """
+        if self._total_steps == 0:
+            return False
+        if self._verified_steps:
+            all_steps = set(range(1, self._total_steps + 1))
+            return self._verified_steps == all_steps
+        # 兜底：从笔记直接解析
+        notes = self.read_shared_notes()
+        checked = self.parse_checked_steps_from_notes(notes)
+        if checked:
+            all_steps = set(range(1, self._total_steps + 1))
+            return checked == all_steps
+        return False
+
     # ========== 完成检测 ==========
 
     def check_completion(self, response_text: str) -> bool:

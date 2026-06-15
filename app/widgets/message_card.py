@@ -50,6 +50,7 @@ from PyQt5.QtGui import (
     QPainterPath,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
+from app.core.webengine_profile import get_shared_web_profile
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -280,6 +281,29 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
                 '''
             except Exception:
                 # JSON 解析失败，降级为普通代码块
+                pass
+
+        # ===== Mermaid 图代码块：渲染为交互式图表 =====
+        if lang == "mermaid":
+            try:
+                # 解码 HTML 实体，得到原始 mermaid 定义
+                mermaid_def = (
+                    code_content_raw.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", '"')
+                )
+                if not mermaid_def.strip():
+                    raise ValueError("empty mermaid definition")
+                # base64 编码防止 HTML 属性转义问题
+                b64_def = base64.b64encode(mermaid_def.encode("utf-8")).decode("ascii")
+                diagram_id = "mermaid-" + hashlib.sha1(mermaid_def.encode("utf-8")).hexdigest()[:12]
+                return f'''
+                <div id="{diagram_id}" class="mermaid-container" data-mermaid-def="{b64_def}"></div>
+                '''
+            except Exception:
+                # 降级为普通代码块
                 pass
 
         # --- 普通代码块处理 ---
@@ -1656,6 +1680,18 @@ class ConsoleMonitorPage(QWebEnginePage):
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
 
+    def __init__(self, profile=None, parent=None):
+        """创建一个 ConsoleMonitorPage。
+
+        Args:
+            profile: QWebEngineProfile 实例。传入 None 则使用默认 profile。
+            parent: 父 QObject。
+        """
+        if profile is not None:
+            super().__init__(profile, parent)
+        else:
+            super().__init__(parent)
+
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
         msg = message.strip()
         if msg == "pywebview_ready":
@@ -1803,7 +1839,7 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        self._page = ConsoleMonitorPage(self)
+        self._page = ConsoleMonitorPage(get_shared_web_profile(), self)
         self.setPage(self._page)
 
         # 启用本地文件访问，支持 markdown 图片显示
@@ -2048,6 +2084,7 @@ class CodeWebViewer(QWebEngineView):
             cdn_libs = """
         <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
         """
 
         scrollbar_css = """
@@ -2860,6 +2897,31 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(22, 27, 34, 0.6);
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
+                /* ===== Mermaid 图表容器 ===== */
+                .mermaid-container {{
+                    display: flex;
+                    justify-content: center;
+                    width: 100%;
+                    margin: 12px 0;
+                    padding: 16px 8px;
+                    background: rgba(255,255,255,0.02);
+                    border: 1px solid var(--border);
+                    border-radius: 12px;
+                    overflow-x: auto;
+                    min-height: 60px;
+                }}
+                .mermaid-container svg {{
+                    max-width: 100%;
+                    height: auto;
+                }}
+                .mermaid-error {{
+                    color: #ff7b7b;
+                    font-family: {mono_font};
+                    font-size: {code_font_size}px;
+                    padding: 12px 16px;
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                }}
                 '''}
 
                 /* 内容区图片可点击打开 */
@@ -3037,6 +3099,69 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
+                        // 初始化 Mermaid 图表
+                        if (typeof mermaid !== 'undefined') {{
+                            document.querySelectorAll('.mermaid-container').forEach(function(el) {{
+                                try {{
+                                    var defB64 = el.getAttribute('data-mermaid-def');
+                                    if (!defB64 || el._mermaidInited) return;
+                                    var _bytes = Uint8Array.from(atob(defB64), function(c) {{ return c.charCodeAt(0); }});
+                                    var definition = new TextDecoder('utf-8').decode(_bytes);
+                                    // 直接将 mermaid 定义文本放入元素，mermaid.run() 会自动渲染
+                                    el.textContent = definition;
+                                    el._mermaidInited = true;
+                                }} catch(e) {{
+                                    console.error('Mermaid decode error:', e);
+                                    el.innerHTML = '<div class=\"mermaid-error\">Mermaid 解析失败: ' + e.message + '</div>';
+                                }}
+                            }});
+                            // 批量渲染所有新增的 mermaid 图表
+                            mermaid.run({{
+                                querySelector: '.mermaid-container',
+                            }}).then(function() {{
+                                // 清理残留文本节点，防止它们撑高容器
+                                document.querySelectorAll('.mermaid-container').forEach(function(el) {{
+                                    for (var i = el.childNodes.length - 1; i >= 0; i--) {{
+                                        if (el.childNodes[i].nodeType === 3 /* TEXT_NODE */) {{
+                                            el.removeChild(el.childNodes[i]);
+                                        }}
+                                    }}
+                                    // 强制容器高度匹配 SVG 实际高度
+                                    var svg = el.querySelector('svg');
+                                    if (svg) {{
+                                        var svgH = svg.getBoundingClientRect().height;
+                                        if (svgH > 0) {{
+                                            el.style.height = (svgH + 32) + 'px';
+                                            el.style.overflow = 'hidden';
+                                        }}
+                                    }}
+                                }});
+                                reportHeight();
+                            }}).catch(function(err) {{
+                                console.error('Mermaid render error:', err);
+                                // 渲染失败的容器显示错误提示，并重置 _mermaidInited 以允许下次重试
+                                document.querySelectorAll('.mermaid-container').forEach(function(el) {{
+                                    if (el._mermaidInited && el.querySelector('svg') === null) {{
+                                        var defB64 = el.getAttribute('data-mermaid-def');
+                                        if (defB64) {{
+                                            try {{
+                                                var _b = Uint8Array.from(atob(defB64), function(c) {{ return c.charCodeAt(0); }});
+                                                var _d = new TextDecoder('utf-8').decode(_b);
+                                                el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 语法错误:\\n' + _d.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+                                            }} catch(decodeErr) {{
+                                                el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 渲染失败</div>';
+                                            }}
+                                        }} else {{
+                                            el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 渲染失败</div>';
+                                        }}
+                                        // 重置标记，允许下次 updateContent 时重新尝试渲染
+                                        el._mermaidInited = false;
+                                    }}
+                                }});
+                                reportHeight();
+                            }});
+                        }}
+
                         // 自动滚动到 body 底部（流式时新内容在底部）
                         // setTimeout 确保 Qt WebEngine 在 innerHTML 替换后完成布局再滚动
                         setTimeout(function() {{
@@ -3112,6 +3237,23 @@ class CodeWebViewer(QWebEngineView):
                 document.addEventListener('DOMContentLoaded', () => {{
                     console.log('pywebview_ready');
                     reportHeight();
+                    // ── Mermaid 全局初始化 ──
+                    if (typeof mermaid !== 'undefined') {{
+                        mermaid.initialize({{
+                            startOnLoad: false,
+                            theme: 'dark',
+                            securityLevel: 'sandbox',
+                            themeVariables: {{
+                                darkMode: true,
+                                background: 'transparent',
+                                primaryColor: '#3a3f50',
+                                primaryTextColor: '#c9d1d9',
+                                lineColor: '#58a6ff',
+                                secondaryColor: '#21262d',
+                                tertiaryColor: '#161b22',
+                            }},
+                        }});
+                    }}
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
                     new ResizeObserver(() => {{
@@ -4281,6 +4423,7 @@ class MessageCard(SimpleCardWidget):
     cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
+    modelLabelClicked = pyqtSignal(str, str)  # provider_name, model_name — 用户点击页脚模型标签时触发
 
     def __init__(
             self,
@@ -4290,11 +4433,13 @@ class MessageCard(SimpleCardWidget):
             error: bool = False,
             reasoning_content: str = "",
             model_name: str = None,
+            provider_name: str = None,
     ):
         super().__init__(parent)
         self._parent = parent
         self.role = role
         self.model_name = model_name
+        self.provider_name = provider_name
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -4453,13 +4598,27 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, 'viewer') and self.viewer and hasattr(self.viewer, '_refresh_viewer_font'):
             self.viewer._refresh_viewer_font()
 
-    def set_model_name(self, model_name: str):
-        """设置模型名称显示（用于助手卡片）"""
+    def _get_footer_model_text(self) -> str:
+        """根据 provider_name 和 model_name 生成页脚显示文本"""
+        if self.provider_name and self.model_name:
+            return f"{self.provider_name} · {self.model_name}"
+        return self.model_name or ""
+
+    def set_model_name(self, model_name: str, provider_name: str = None):
+        """设置模型名称显示（用于助手卡片）
+
+        Args:
+            model_name: 模型名称
+            provider_name: 服务商名称（可选，用于页脚显示"服务商 · 模型"格式）
+        """
         if self.role != "assistant":
             return
         if not model_name:
             return
         self.model_name = model_name
+        if provider_name is not None:
+            self.provider_name = provider_name
+        footer_text = self._get_footer_model_text()
         if hasattr(self, '_ts_label'):
             self._ts_label.setText(model_name)
             self._ts_label.setVisible(True)
@@ -4477,7 +4636,7 @@ class MessageCard(SimpleCardWidget):
             )
         # 同步到底部元信息栏
         if self._footer_model_label:
-            self._footer_model_label.setText(model_name)
+            self._footer_model_label.setText(footer_text)
             self._footer_model_label.setVisible(True)
             self._refresh_footer_separators()
 
@@ -4527,10 +4686,15 @@ class MessageCard(SimpleCardWidget):
         self._footer_sep2 = sep2
         layout.addWidget(sep2)
 
-        # 模型名称
-        model_l = QLabel(self.model_name or "", self)
-        model_l.setStyleSheet(label_style)
-        model_l.setVisible(bool(self.model_name))
+        # 模型名称（可点击，显示"服务商 · 模型"格式）
+        footer_text = self._get_footer_model_text()
+        model_l = QLabel(footer_text, self)
+        model_l.setStyleSheet(
+            f"{label_style}"
+        )
+        model_l.setVisible(bool(footer_text))
+        model_l.setCursor(Qt.PointingHandCursor)
+        model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
@@ -4549,7 +4713,7 @@ class MessageCard(SimpleCardWidget):
         if elapsed is not None and self._footer_elapsed_label:
             self._elapsed_timer.stop()
             self._elapsed_start_time = None
-            self._footer_elapsed_label.setText(f"⏱ {elapsed:.1f}s")
+            self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
             self._footer_elapsed_label.setVisible(True)
         # Token
         if token_usage is not None and self._footer_tokens_label:
@@ -4562,6 +4726,11 @@ class MessageCard(SimpleCardWidget):
             self._footer_tokens_label.setVisible(True)
         # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
         self._refresh_footer_separators()
+
+    def _on_footer_model_clicked(self, event):
+        """用户点击页脚模型标签时，发出 modelLabelClicked 信号"""
+        if self.provider_name and self.model_name:
+            self.modelLabelClicked.emit(self.provider_name, self.model_name)
 
     def _refresh_footer_separators(self):
         """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""

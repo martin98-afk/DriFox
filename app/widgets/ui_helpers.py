@@ -1638,6 +1638,7 @@ def create_assistant_card_widget(
     timestamp: str,
     round_index: int,
     model_name: str = None,
+    provider_name: str = None,
     on_action=None,
     on_context_action=None,
     on_tool_diff=None,
@@ -1654,6 +1655,7 @@ def create_assistant_card_widget(
         timestamp: 时间戳
         round_index: 轮次索引
         model_name: 模型名称（显示在卡片头部）
+        provider_name: 服务商名称（显示在页脚"服务商 · 模型"格式）
         on_action: 动作回调
         on_context_action: 上下文动作回调
         on_tool_diff: 工具差异回调
@@ -1666,7 +1668,8 @@ def create_assistant_card_widget(
     Returns:
         配置好的 MessageCard
     """
-    card = MessageCard(parent=parent, role="assistant", timestamp=timestamp, model_name=model_name)
+    card = MessageCard(parent=parent, role="assistant", timestamp=timestamp,
+                       model_name=model_name, provider_name=provider_name)
     card._round_index = round_index
     if immediate_render:
         # 流式输出需要立即渲染，否则内容无处写入
