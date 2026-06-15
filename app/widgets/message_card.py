@@ -4713,7 +4713,7 @@ class MessageCard(SimpleCardWidget):
         if elapsed is not None and self._footer_elapsed_label:
             self._elapsed_timer.stop()
             self._elapsed_start_time = None
-            self._footer_elapsed_label.setText(f"⏱ {elapsed:.1f}s")
+            self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
             self._footer_elapsed_label.setVisible(True)
         # Token
         if token_usage is not None and self._footer_tokens_label:

@@ -6896,10 +6896,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if session:
             self._displayed_session_id = session.session_id
 
-        # 如果未传 provider_name，从当前配置解析
-        if not provider_name and hasattr(self, "_current_provider_name"):
-            config = self._valid_configs.get(self._current_provider_name, {})
-            provider_name = config.get("display_name", self._current_provider_name)
+        # 如果消息没有 provider_name，尝试从 model_name 反查唯一匹配的服务商
+        if not provider_name and model_name and self._valid_configs:
+            matched_display = None
+            for cid, info in self._valid_configs.items():
+                if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
+                    if matched_display is None:
+                        matched_display = info.get("display_name", info.get("provider_name", cid))
+                    else:
+                        matched_display = None  # 多于一个匹配 → 不明确，跳过
+                        break
+            if matched_display:
+                provider_name = matched_display
 
         # 使用辅助函数创建卡片
         def on_context_action(action, context):
@@ -10739,6 +10747,23 @@ class OpenAIChatToolWindow(ToolWindow):
         has_user_message = any(msg.get("role") == "user" for msg in session.messages)
         if not has_user_message:
             return
+
+        # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
+        for msg in session.messages:
+            if msg.get("role") != "assistant":
+                continue
+            if msg.get("model_name") and not msg.get("provider_name") and self._valid_configs:
+                model = msg["model_name"]
+                matched = None
+                for cid, info in self._valid_configs.items():
+                    if info.get("模型名称") == model or model in (info.get("模型列表") or []):
+                        if matched is None:
+                            matched = info.get("display_name", info.get("provider_name", cid))
+                        else:
+                            matched = None  # 多个匹配 → 不明确，跳过
+                            break
+                if matched:
+                    msg["provider_name"] = matched
 
         system_prompt = getattr(session, "system_prompt", "") or ""
         worktree_path = self._get_current_worktree_path()
