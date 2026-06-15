@@ -3227,6 +3227,52 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("model_selector", self._window_id)
 
+    def _on_footer_model_label_clicked(self, provider_name: str, model_name: str):
+        """用户点击消息卡片页脚的模型标签 — 自动切换为对应的服务商和模型"""
+        # 查找匹配的 config_id
+        config_id = None
+        for cid, info in self._valid_configs.items():
+            info_display = info.get("display_name", info.get("provider_name", cid))
+            if info_display == provider_name:
+                config_id = cid
+                break
+            if info.get("provider_name") == provider_name:
+                config_id = cid
+                break
+
+        if not config_id:
+            # 尝试直接作为 config_id 查找
+            if provider_name in self._valid_configs:
+                config_id = provider_name
+
+        if not config_id:
+            InfoBar.warning(
+                "未找到服务商",
+                f"未找到服务商「{provider_name}」，可能已被移除",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 检查该服务商是否包含此模型
+        provider_config = self._valid_configs.get(config_id, {})
+        available_models = provider_config.get("模型列表", [])
+        current_model = provider_config.get("模型名称", "")
+
+        if available_models and model_name not in available_models:
+            InfoBar.warning(
+                "模型不可用",
+                f"服务商「{provider_name}」下没有模型「{model_name}」，可能已被移除",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 调用已有的模型切换逻辑
+        self._on_model_selected_from_popup(provider_name, model_name)
+
     def _get_model_btn_text_style(self) -> str:
         """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
         Colors.refresh()
@@ -6103,12 +6149,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     insert_index += 1
 
             if role == "assistant" or role == "tool":
+                provider_name = batch[0].get("provider_name") if role == "assistant" else None
                 assistant_card = self._append_assistant_message(
                     timestamp=timestamp,
                     scroll=False,
                     insert_index=insert_index,
                     round_index=round_index,
                     model_name=model_name if role == "assistant" else None,
+                    provider_name=provider_name,
                 )
                 if assistant_card:
                     # 设置 message_index 用于卡片差异功能
@@ -6840,10 +6888,16 @@ class OpenAIChatToolWindow(ToolWindow):
         insert_index: Optional[int] = None,
         round_index: Optional[int] = None,
         model_name: str = None,
+        provider_name: str = None,
     ) -> MessageCard:
         session = self.session_manager.get_current_session()
         if session:
             self._displayed_session_id = session.session_id
+
+        # 如果未传 provider_name，从当前配置解析
+        if not provider_name and hasattr(self, "_current_provider_name"):
+            config = self._valid_configs.get(self._current_provider_name, {})
+            provider_name = config.get("display_name", self._current_provider_name)
 
         # 使用辅助函数创建卡片
         def on_context_action(action, context):
@@ -6859,6 +6913,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 else self._current_assistant_round_index
             ),
             model_name=model_name,
+            provider_name=provider_name,
             on_action=self._on_code_action,
             on_context_action=on_context_action,
             on_tool_diff=self._on_tool_diff_requested,
@@ -6867,6 +6922,9 @@ class OpenAIChatToolWindow(ToolWindow):
             on_subagent_log=self._on_subagent_log_requested,
             immediate_render=scroll,  # 流式(scroll=True)立即渲染，加载(scroll=False)走懒渲染队列
         )
+
+        # 连接模型标签点击信号到切换逻辑
+        card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
         if scroll and not self._suspend_auto_scroll:
@@ -9421,17 +9479,21 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = False
         self._toggle_send_stop(False)
 
-        # 写入模型名称到卡片和 session 消息
+        # 写入模型名称/服务商到卡片和 session 消息
         if self._current_assistant_card:
             current_model_name = getattr(self, "_current_model_name", "") or ""
             if current_model_name:
-                self._current_assistant_card.set_model_name(current_model_name)
+                # 解析当前服务商显示名称
+                config = self._valid_configs.get(self._current_provider_name, {})
+                current_provider_name = config.get("display_name", self._current_provider_name)
+                self._current_assistant_card.set_model_name(current_model_name, provider_name=current_provider_name)
                 # 写入 session 的最后一条 assistant 消息
                 session = self.session_manager.get_current_session()
                 if session and session.messages:
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
+                            msg["provider_name"] = current_provider_name
                             break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None

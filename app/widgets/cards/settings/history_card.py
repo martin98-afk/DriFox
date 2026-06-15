@@ -299,23 +299,23 @@ class _HistoryItemCard(SimpleCardWidget):
 
         bottom_row.addStretch()
 
+        layout.addLayout(bottom_row)
+
+        # 预览标签独立一行（不放在 bottom_row 中，避免与右侧按钮竞争水平空间）
         self._preview_label = None  # 懒创建，便于更新
         if preview:
             self._ensure_preview_label(preview)
-            self._preview_label.setWordWrap(True)
-            bottom_row.addSpacing(25)
-            bottom_row.addWidget(self._preview_label, 1)
-
-        layout.addLayout(bottom_row)
 
     def _ensure_preview_label(self, text: str):
-        """确保存在预览标签"""
+        """确保存在预览标签（独立一行，不挤占右侧按钮空间）"""
         if self._preview_label is None:
             self._preview_label = CaptionLabel("", self)
             self._preview_label.setStyleSheet(
                 f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
             )
             self._preview_label.setWordWrap(True)
+            # 添加到主布局底部（bottom_row 下方），占满整行宽度
+            self.layout().addWidget(self._preview_label)
         self._preview_label.setText(text)
         self._preview_label.setVisible(bool(text))
 
@@ -538,22 +538,23 @@ class _ArchivedItemCard(CardWidget):
 
         bottom_row.addStretch()
 
+        layout.addLayout(bottom_row)
+
+        # 预览标签独立一行（不放在 bottom_row 中，避免与右侧按钮竞争水平空间）
         self._preview_label = None  # 懒创建
         if preview:
             self._init_preview_label(preview)
-            bottom_row.addSpacing(25)
-            bottom_row.addWidget(self._preview_label, 1)
-
-        layout.addLayout(bottom_row)
 
     def _init_preview_label(self, text: str):
-        """初始化预览标签"""
+        """初始化预览标签（独立一行，不挤占右侧按钮空间）"""
         caption_size = scale_font_size(12)
         self._preview_label = CaptionLabel(text, self)
         self._preview_label.setStyleSheet(
             f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
         )
         self._preview_label.setWordWrap(True)
+        # 添加到主布局底部（bottom_row 下方），占满整行宽度
+        self.layout().addWidget(self._preview_label)
 
     def _init_project_label(self, project: str):
         """初始化项目标签"""
@@ -589,11 +590,6 @@ class _ArchivedItemCard(CardWidget):
         # 预览更新
         if self._preview_label is None:
             self._init_preview_label(preview or "")
-            # 找到 bottom_row 并添加预览标签
-            bottom_row = self.layout().itemAt(self.layout().count() - 1)
-            if bottom_row and isinstance(bottom_row, QHBoxLayout):
-                bottom_row.addSpacing(25)
-                bottom_row.addWidget(self._preview_label, 1)
         else:
             self._preview_label.setText(preview)
             self._preview_label.setVisible(bool(preview))
