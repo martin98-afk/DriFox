@@ -14,7 +14,8 @@ from typing import List, Dict
 from loguru import logger
 from PyQt5.QtWidgets import QDialog, QHBoxLayout
 from PyQt5.QtCore import Qt
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+from app.core.webengine_profile import get_shared_web_profile
 
 
 # 预编译正则表达式
@@ -1798,8 +1799,10 @@ class DiffViewerWindow:
         layout = QHBoxLayout(self._window)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 创建 WebEngineView
+        # 创建 WebEngineView，使用共享 Profile（与消息卡片共用缓存/Cookie）
         self._webview = QWebEngineView()
+        page = QWebEnginePage(get_shared_web_profile(), self._webview)
+        self._webview.setPage(page)
 
         layout.addWidget(self._webview)
 

@@ -50,6 +50,7 @@ from PyQt5.QtGui import (
     QPainterPath,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
+from app.core.webengine_profile import get_shared_web_profile
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -1656,6 +1657,18 @@ class ConsoleMonitorPage(QWebEnginePage):
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
 
+    def __init__(self, profile=None, parent=None):
+        """创建一个 ConsoleMonitorPage。
+
+        Args:
+            profile: QWebEngineProfile 实例。传入 None 则使用默认 profile。
+            parent: 父 QObject。
+        """
+        if profile is not None:
+            super().__init__(profile, parent)
+        else:
+            super().__init__(parent)
+
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
         msg = message.strip()
         if msg == "pywebview_ready":
@@ -1803,7 +1816,7 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        self._page = ConsoleMonitorPage(self)
+        self._page = ConsoleMonitorPage(get_shared_web_profile(), self)
         self.setPage(self._page)
 
         # 启用本地文件访问，支持 markdown 图片显示
