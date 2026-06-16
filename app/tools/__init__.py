@@ -1053,6 +1053,23 @@ TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "gitee_upload",
+            "description": "将本地文件上传至 Gitee 仓库图床，返回公开下载链接。支持图片和通用文件。上传前需在设置中配置 Gitee Token/Owner/Repo。Gateway 发送文件/图片时会自动调用此工具生成外链。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "local_path": {
+                        "type": "string",
+                        "description": "本地文件路径（绝对路径或相对 workdir 的路径）",
+                    },
+                },
+                "required": ["local_path"],
+            },
+        },
+    },
 ]
 
 

@@ -393,7 +393,14 @@ class AutoLoopEngine(BaseEngine):
 
     def check_planning_complete(self, response_text: str, notes: str) -> bool:
         """检测规划是否完成"""
-        if "PLANNING_COMPLETE" not in response_text.upper():
+        resp_upper = response_text.upper() if response_text else ""
+        found = "PLANNING_COMPLETE" in resp_upper
+        logger.info(
+            f"[AutoLoop] check_planning_complete: found={found} "
+            f"resp_len={len(response_text) if response_text else 0} "
+            f"resp_tail={(response_text[-200:] if response_text else '(空)').replace(chr(10), '\\n')[-100:]}"
+        )
+        if not found:
             return False
         return True
 

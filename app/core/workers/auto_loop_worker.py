@@ -269,6 +269,21 @@ class AutoLoopWorker(QThread):
                 # _execute_llm_conversation 内部已处理错误/取消
                 continue
 
+            # 🔧 兜底恢复：如果 response 为空但 _round_messages 有内容
+            # （防止 finished_with_content 信号因 bug 传递空字符串）
+            if not response and self._round_messages:
+                for msg in reversed(self._round_messages):
+                    if msg.get("role") == "assistant":
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            content = "".join(
+                                b.get("text", "") for b in content if b.get("type") == "text"
+                            )
+                        if content:
+                            response = content
+                            self.log_signal.emit("⚠️ [FALLBACK] 从消息历史恢复响应文本")
+                            break
+
             # 生成摘要 & 写日志
             summary = self._extract_summary(response, iteration)
             self.iteration_completed.emit(iteration, summary)
@@ -277,7 +292,13 @@ class AutoLoopWorker(QThread):
             # ===== 接力文档强制更新检查 =====
             # 在所有阶段处理之前统一检查，避免模型"作弊"（如输出了 PLANNING_COMPLETE 但没写笔记）
             # 注意：归档阶段跳过接力文档检查，避免不必要的 LLM 对话干扰归档流程
-            if not self._engine.is_archiving_phase() and not self._check_relay_doc_updated(iteration):
+            relay_ok = self._check_relay_doc_updated(iteration)
+            self.log_signal.emit(
+                f"📋 [RELAY_CHECK] iter={iteration} "
+                f"relay_ok={relay_ok} "
+                f"is_planning={self._engine.is_planning_phase()}"
+            )
+            if not self._engine.is_archiving_phase() and not relay_ok:
                 self.log_signal.emit(
                     f"⚠️【强制】接力文档未更新！iteration={iteration} "
                     f"phase={'planning' if self._engine.is_planning_phase() else 'executing'}"
@@ -525,6 +546,13 @@ class AutoLoopWorker(QThread):
             #    持续处理信号直到 worker 完成。最后强制调用 _on_worker_finished
             #    确保 _is_streaming 被重置（防御信号处理顺序问题）。
             worker = self._conversation_executor.get_current_worker()
+            # 【P0 修复】cancel_worker() 会把 _current_worker 置 None（executor.py:206），
+            # 但 _finalize_worker 仍保留引用。退化到 _finalize_worker，
+            # 否则下面的 wait/cancel/wait 块被整体跳过，
+            # → adapter.wait_for_completion 永久阻塞
+            # → 5 秒兜底清理时触发 "QThread: Destroyed while thread is still running"。
+            if not worker:
+                worker = getattr(self._conversation_executor, '_finalize_worker', None)
             if worker:
                 # 阶段 1：QEventLoop 等待 worker 完成（同时处理实时日志信号）
                 loop = QEventLoop()
@@ -639,6 +667,18 @@ class AutoLoopWorker(QThread):
 
         # 检测规划是否完成
         planning_done = self._engine.check_planning_complete(response, notes)
+
+        # 🔍 诊断日志（始终输出）
+        resp_tail = (response[-200:] if response else "(空)").replace('\n', '\\n')
+        notes_preview = notes[:100].replace('\n', ' ') if notes else "(空)"
+        self.log_signal.emit(
+            f"📋 [PLANNING_DIAG] iter={self._engine.iteration} "
+            f"planning_done={planning_done} "
+            f"resp_len={len(response) if response else 0} "
+            f"resp_has_PC={'PLANNING_COMPLETE' in response.upper() if response else False} "
+            f"resp_tail={resp_tail[-100:]} "
+            f"notes_has_plan={'## 执行计划' in notes or '- [步骤' in notes}"
+        )
 
         if planning_done:
             self._transition_to_execution(notes)
