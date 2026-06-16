@@ -130,6 +130,7 @@ from app.widgets.cards.settings.model_selector_card import (
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent, get_project_color,
+    _SquareAvatar, extract_project_initials,
 )
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
@@ -1392,6 +1393,17 @@ class OpenAIChatToolWindow(ToolWindow):
         pb_layout = QHBoxLayout(self._project_branch_container)
         pb_layout.setContentsMargins(0, 0, 0, 0)
         pb_layout.setSpacing(0)
+
+        # 项目方形 icon（缩写字母，flat design squircle 风格）
+        self._project_avatar = _SquareAvatar(
+            extract_project_initials(self._current_project),
+            get_project_color(self._current_project),
+            self, size=22
+        )
+        self._project_avatar.setCursor(Qt.PointingHandCursor)
+        self._project_avatar.mousePressEvent = self._on_project_label_clicked
+        self._project_avatar.setToolTip("点击切换项目")
+        pb_layout.addWidget(self._project_avatar)
 
         # 项目选择标签
         self._project_label = QLabel(self._current_project, self)
@@ -9611,6 +9623,52 @@ class OpenAIChatToolWindow(ToolWindow):
         # 对话完成后刷新余额显示
         self._refresh_balance()
 
+        # 更新当前助手卡片差异统计
+        self._update_card_diff_stats()
+
+    def _update_card_diff_stats(self):
+        """计算当前助手卡片的文件修改统计并更新到页脚"""
+        card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        round_index = getattr(card, "_round_index", None)
+        if round_index is None or round_index < 0:
+            return
+
+        # 检查 file_recorder 是否可用
+        if not self.backend.tool_executor or not self.backend.file_recorder:
+            return
+
+        try:
+            from app.widgets.ui_helpers import (
+                collect_operations_for_round,
+                compute_diff_stats,
+            )
+
+            call_ids = self._get_tool_call_ids_in_round(round_index)
+            if not call_ids:
+                return
+
+            operations = collect_operations_for_round(
+                self.backend.file_recorder, session.session_id, call_ids
+            )
+            if not operations:
+                return
+
+            stats = compute_diff_stats(operations)
+            if stats["files"] > 0 or stats["additions"] > 0 or stats["deletions"] > 0:
+                card.set_diff_stats(
+                    files_count=stats["files"],
+                    additions=stats["additions"],
+                    deletions=stats["deletions"],
+                )
+        except Exception as e:
+            logger.warning(f"[DiffStats] 计算差异统计失败: {e}")
+
     def _refresh_balance(self):
         """刷新余额显示（对话完成后调用）"""
         logger.debug(
@@ -10212,6 +10270,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
         project_color = get_project_color(self._current_project)
+        # 同步更新方形 avatar
+        if hasattr(self, '_project_avatar'):
+            self._project_avatar.set_project(self._current_project, project_color)
         self._project_label.setStyleSheet(f"""
             QLabel {{
                 color: {project_color};
@@ -10222,9 +10283,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 background: transparent;
                 border: none;
                 border-radius: 4px;
-            }}
-            QLabel:hover {{
-                background: {Colors.SELECTED_BG};
             }}
         """)
         # 分隔符 — 三角箭头（小号 + 次级色）

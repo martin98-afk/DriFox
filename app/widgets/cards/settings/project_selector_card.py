@@ -17,10 +17,54 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
+def extract_project_initials(name: str) -> str:
+    """从项目名提取最多 2 个字符的缩写
+
+    优先级：
+    1. 中文 → 首个汉字
+    2. 下划线分隔 → 每段首字母大写（最多 2 段）
+    3. 驼峰/帕斯卡 → 大写字母（最多 2 个）
+    4. 其他 → 前 2 个字母大写
+
+    Args:
+        name: 项目名
+
+    Returns:
+        1-2 个字符的缩写字符串
+    """
+    if not name:
+        return "??"
+
+    # ── 中文：首个汉字 ──
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in name)
+    if has_cjk:
+        for c in name:
+            if '\u4e00' <= c <= '\u9fff':
+                return c
+        return name[0]
+
+    # ── 下划线分隔：每段首字母 ──
+    if '_' in name:
+        parts = [p for p in name.split('_') if p]
+        initials = ''.join(p[0].upper() for p in parts[:2])
+        if initials:
+            return initials
+
+    # ── 驼峰/帕斯卡：提取大写字母 ──
+    uppers = [c for c in name if c.isupper()]
+    if uppers:
+        return ''.join(uppers[:2])
+
+    # ── 普通单词：前 2 字母大写 ──
+    if len(name) >= 2:
+        return name[:2].upper()
+    return name.upper()
+
+
 # 项目颜色调色板（12 色，色相均匀分布，每 30° 一跳）
 # 从红色 (0°) 开始，经橙黄绿青蓝紫玫红回到深橙 (330°)
 # 深色主题优化版：所有颜色 HSL 亮度 ≥ 51%，确保在 #212126 深色背景上清晰可见
-# 同时作为头像圆圈背景时白色文字仍具可读性（亮度 ≤ 63%）
+# 同时作为方形头像背景时白色文字仍具可读性（亮度 ≤ 63%）
 PROJECT_COLORS = [
     "#ef5350",  # 红    0°  (L:62%, 原 #e53935 L:55%)
     "#ff9800",  # 橙   30°  (L:56%, 原 #f57c00 L:48%)
@@ -59,20 +103,22 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
-class _CircleAvatar(QWidget):
-    """使用 QPainter 绘制的圆形项目头像，替代 QLabel + CSS border-radius
+class _SquareAvatar(QWidget):
+    """使用 QPainter 绘制的方形项目头像 — flat design squircle 风格
 
+    纯色圆角矩形 + 1-2 个白色缩写字母，用于项目卡片列表和面包屑标签。
     Qt QSS 在小尺寸（24×24）上同时渲染 border + border-radius 时存在
-    抗锯齿走样问题，导致圆形不够圆。本类用 QPainter 精确绘制，保证像素完美。
+    抗锯齿走样问题。本类用 QPainter 精确绘制，保证像素完美。
     """
 
-    def __init__(self, text: str, color: str, parent=None):
+    def __init__(self, text: str, color: str, parent=None, size: int = 24):
         super().__init__(parent)
-        self._text = text[0] if text else "?"
+        self._text = text if text else "?"
         # get_project_color() 返回 "rgba(r,g,b,a)" 格式，
         # QColor(string) 不解析此 CSS 格式，需拆解为数值构造
         self._color = self._parse_rgba(color)
-        self.setFixedSize(24, 24)
+        self._size = size
+        self.setFixedSize(size, size)
 
     @staticmethod
     def _parse_rgba(rgba_str: str) -> QColor:
@@ -90,24 +136,34 @@ class _CircleAvatar(QWidget):
             pass
         return QColor(128, 128, 128)  # fallback 灰色
 
+    def set_project(self, name: str, color: str):
+        """更新项目名和颜色（用于面包屑等动态场景）"""
+        self._text = extract_project_initials(name)
+        self._color = self._parse_rgba(color)
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
 
         rect = self.rect()
-        # 留出 1px 边距使 2px 宽度的画笔不超出 widget 边界
-        draw_rect = rect.adjusted(1, 1, -1, -1)
+        # 微妙圆角（约 5px，like VS Code squircle）
+        corner_radius = 5
 
-        # 圆形背景
+        # 纯色填充背景（无边框，flat design）
+        painter.setPen(Qt.NoPen)
         painter.setBrush(self._color)
-        painter.setPen(QPen(QColor(255, 255, 255, 38), 2))  # rgba(255,255,255,0.15)
-        painter.drawEllipse(draw_rect)
+        painter.drawRoundedRect(rect, corner_radius, corner_radius)
 
-        # 居中文字
+        # 居中白字
         painter.setPen(Qt.white)
         font = painter.font()
-        font.setPixelSize(scale_font_size(12))
+        # 单字符（中文）字号稍大，双字符略小
+        if len(self._text) <= 1:
+            font.setPixelSize(scale_font_size(self._size * 12 // 24))
+        else:
+            font.setPixelSize(scale_font_size(self._size * 9 // 24))
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignCenter, self._text)
@@ -139,10 +195,10 @@ class ProjectItem(QWidget):
         layout.setContentsMargins(10, 0, 4, 0)
         layout.setSpacing(6)
 
-        # 项目彩色圆形标识（首字符 + 项目专属色）
-        # 使用 QPainter 绘制的 _CircleAvatar，避免 QSS border-radius 走样
-        first_char = self._name.strip()[0] if self._name.strip() else "?"
-        self._avatar_label = _CircleAvatar(first_char, self._project_color, self)
+        # 项目彩色方形标识（缩写字母 + 项目专属色）
+        # 使用 QPainter 绘制的 _SquareAvatar，flat design 风格
+        initials = extract_project_initials(self._name)
+        self._avatar_label = _SquareAvatar(initials, self._project_color, self)
         layout.addWidget(self._avatar_label)
 
         # 中间：项目名 + 根目录（垂直布局）

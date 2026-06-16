@@ -967,6 +967,81 @@ def collect_operations_for_round(
     return deduplicate_operations(operations)
 
 
+def compute_diff_stats(operations: list) -> dict:
+    """从操作列表计算差异统计（文件数、新增行、删除行）
+
+    对比备份文件（编辑前）与当前文件内容，统计新增和删除的行数。
+    多个操作涉及同一文件时只计算一次（按文件路径去重）。
+
+    Args:
+        operations: 从 file_recorder 获取的操作列表
+
+    Returns:
+        {"files": int, "additions": int, "deletions": int}
+    """
+    import difflib
+    from pathlib import Path
+
+    seen_files = set()
+    total_files = 0
+    total_additions = 0
+    total_deletions = 0
+
+    for op in operations:
+        file_path = op.get("file_path", "")
+        backup_path = op.get("backup_path", "")
+        tool_name = op.get("tool_name", "")
+
+        # 跳过非编辑类操作
+        if tool_name not in ("write", "edit", "multi_edit"):
+            continue
+        # 按文件路径去重
+        if file_path in seen_files:
+            continue
+        seen_files.add(file_path)
+
+        try:
+            old_content = ""
+            new_content = ""
+
+            # 读取备份（编辑前）
+            if backup_path and Path(backup_path).exists():
+                with open(backup_path, 'r', encoding='utf-8', errors='replace') as f:
+                    old_content = f.read()
+
+            # 读取当前文件（编辑后）
+            resolved = Path(file_path)
+            if resolved.exists():
+                with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+                    new_content = f.read()
+
+            old_lines = old_content.splitlines(True) if old_content else []
+            new_lines = new_content.splitlines(True) if new_content else []
+
+            diff = list(difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile='a', tofile='b',
+                n=0,  # 不显示上下文
+            ))
+
+            additions = sum(1 for line in diff if line.startswith('+') and not line.startswith('+++'))
+            deletions = sum(1 for line in diff if line.startswith('-') and not line.startswith('---'))
+
+            if additions > 0 or deletions > 0:
+                total_files += 1
+                total_additions += additions
+                total_deletions += deletions
+
+        except Exception:
+            continue
+
+    return {
+        "files": total_files,
+        "additions": total_additions,
+        "deletions": total_deletions,
+    }
+
+
 def get_round_message_indices(session, round_index: int) -> tuple:
     """
     获取指定 round 的消息索引范围

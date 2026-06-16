@@ -50,6 +50,9 @@ from app.utils.design_tokens import scale_font_size, font_size_css, Colors
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.git_worktree import GitWorktreeDetector
 from app.widgets.worktree_section import WorktreeSectionWidget
+from app.widgets.cards.settings.project_selector_card import (
+    get_project_color, _SquareAvatar, extract_project_initials,
+)
 
 # Tab 标识
 TAB_ENTRY_MEMORIES = "entries"
@@ -762,8 +765,16 @@ class MemoryCardContent(QWidget):
         top_layout = QHBoxLayout()
         top_layout.setSpacing(0)
 
+        # 项目方形 icon（缩写字母，18px 小尺寸）
+        self._notes_project_avatar = _SquareAvatar(
+            extract_project_initials(self._current_project),
+            get_project_color(self._current_project),
+            self, size=18
+        )
+        top_layout.addWidget(self._notes_project_avatar)
+
         # 项目名标签
-        self.project_name_label = BodyLabel(f"项目: {self._current_project}", self)
+        self.project_name_label = BodyLabel(f" {self._current_project}", self)
         Colors.refresh()
         self.project_name_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
@@ -1182,7 +1193,13 @@ class MemoryCardContent(QWidget):
             return
 
         workdir = self._get_effective_workdir(self._current_project)
-        self.project_name_label.setText(f"项目: {self._current_project}")
+        self.project_name_label.setText(f" {self._current_project}")
+        # 同步更新方形 avatar
+        if hasattr(self, '_notes_project_avatar'):
+            self._notes_project_avatar.set_project(
+                self._current_project,
+                get_project_color(self._current_project)
+            )
         note = memory_mgr.get_or_create_project_note(
             self._current_project, workdir=workdir
         )
