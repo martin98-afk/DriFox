@@ -1056,8 +1056,8 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "gitee_upload",
-            "description": "将本地文件上传至 Gitee 仓库图床，返回公开下载链接。支持图片和通用文件。上传前需在设置中配置 Gitee Token/Owner/Repo。Gateway 发送文件/图片时会自动调用此工具生成外链。",
+            "name": "upload_file",
+            "description": "将本地文件上传至 Gitee 仓库，返回公开下载链接。适用于需要 LLM 访问本地文件但又无法直接读取的场景（如 gateway 远程调用场景）。**请勿滥用**，仅在确实需要时使用，并注意保护敏感信息，避免上传包含敏感数据的文件。",
             "parameters": {
                 "type": "object",
                 "properties": {

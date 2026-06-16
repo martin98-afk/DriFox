@@ -418,11 +418,6 @@ class OpenAIChatToolWindow(ToolWindow):
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
 
-    # 全局缓存：套餐用量按服务商名缓存，多个窗口共享（避免重复查询）
-    # 格式: {provider_name: (timestamp, result)}，缓存有效期 60 秒
-    _coding_plan_cache: Dict[str, tuple] = {}
-    _CODING_PLAN_CACHE_TTL = 60.0  # 秒
-
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
 
@@ -810,9 +805,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     if wd:
                         new_instance._memory_card_popup._instance_workdir[proj] = wd
             # ──────────────────────────────────────────────────
-
-            # 复制窗口跳过 _sync_working_directory（已在上面同步完成）
-            new_instance._skip_sync_workdir = True
 
             # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
             if hasattr(new_instance, "_refresh_project_branch_style"):
@@ -3452,34 +3444,11 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         self._coding_plan_last_ts = now
-
-        # 检查全局缓存（带 TTL），避免重复查询
-        cached_entry = OpenAIChatToolWindow._coding_plan_cache.get(provider_name)
-        if cached_entry is not None:
-            cached_ts, cached_result = cached_entry
-            if time.monotonic() - cached_ts < OpenAIChatToolWindow._CODING_PLAN_CACHE_TTL:
-                logger.debug(f"[CodingPlan] 命中缓存: provider={provider_name}")
-                self._on_coding_plan_result(cached_result)
-                return
-
         from app.core.coding_plan_fetcher import fetch_async
 
         def _on_result(result):
-            ts = time.monotonic()
-            # 缓存结果（带时间戳）
-            OpenAIChatToolWindow._coding_plan_cache[provider_name] = (ts, result)
             # 后台线程 → 通过信号桥接回主线程
             self._coding_plan_result_ready.emit(result)
-            # 如果结果有效，通知同服务商的其他窗口同步更新 UI
-            if result:
-                for inst in OpenAIChatToolWindow._instances:
-                    if inst is self or inst._is_destroyed:
-                        continue
-                    inst_provider = inst._valid_configs.get(
-                        getattr(inst, "_current_provider_name", ""), {}
-                    ).get("provider_name", "")
-                    if inst_provider == provider_name:
-                        inst._on_coding_plan_result(result)
 
         fetch_async(provider_name, config, _on_result)
 
@@ -6150,15 +6119,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 global_batch_index, batch_offset
             )
 
-            # 🛡️ 如果 batch 以 tool 开头（tool → assistant 顺序），
-            # batch[0] 不含 model_name/provider_name，需要从后续 assistant 消息中提取
-            if role == "tool" and not model_name:
-                for m in batch:
-                    if m.get("role") == "assistant":
-                        if m.get("model_name"):
-                            model_name = m["model_name"]
-                        break
-
             # 检查该batch是否已经渲染过并且被回收了
             if self._batch_cards[global_batch_index] is not None:
                 # 已经渲染过，卡片已经存在，不需要重新创建
@@ -6199,12 +6159,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
             if role == "assistant" or role == "tool":
                 provider_name = batch[0].get("provider_name") if role == "assistant" else None
-                # 🛡️ 如果 batch 以 tool 开头，从后续 assistant 消息中提取 provider_name
-                if role == "tool":
-                    for m in batch:
-                        if m.get("role") == "assistant":
-                            provider_name = m.get("provider_name")
-                            break
                 assistant_card = self._append_assistant_message(
                     timestamp=timestamp,
                     scroll=False,
@@ -6951,22 +6905,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 如果消息没有 provider_name，尝试从 model_name 反查唯一匹配的服务商
         if not provider_name and model_name and self._valid_configs:
-            # 优先匹配当前选中的服务商
-            if self._current_provider_name:
-                cfg = self._valid_configs.get(self._current_provider_name, {})
-                if cfg.get("模型名称") == model_name or model_name in (cfg.get("模型列表") or []):
-                    provider_name = cfg.get("display_name", self._current_provider_name)
-            if not provider_name:
-                matched_display = None
-                for cid, info in self._valid_configs.items():
-                    if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
-                        if matched_display is None:
-                            matched_display = info.get("display_name", info.get("provider_name", cid))
-                        else:
-                            matched_display = None  # 多于一个匹配 → 不明确，跳过
-                            break
-                if matched_display:
-                    provider_name = matched_display
+            matched_display = None
+            for cid, info in self._valid_configs.items():
+                if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
+                    if matched_display is None:
+                        matched_display = info.get("display_name", info.get("provider_name", cid))
+                    else:
+                        matched_display = None  # 多于一个匹配 → 不明确，跳过
+                        break
+            if matched_display:
+                provider_name = matched_display
 
         # 使用辅助函数创建卡片
         def on_context_action(action, context):
@@ -9556,20 +9504,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 config = self._valid_configs.get(self._current_provider_name, {})
                 current_provider_name = config.get("display_name", self._current_provider_name)
                 self._current_assistant_card.set_model_name(current_model_name, provider_name=current_provider_name)
-                # 🛡️ 写入 session 中所有缺少 provider_name 的 assistant 消息
-                # 之前只更新最后一条，导致同一会话中早期轮次的 assistant 消息
-                # 缺失 provider_name，重新加载会话后服务商显示丢失。
-                # 注意：只补 provider_name，不覆盖已有的 model_name（防止跨轮次模型切换时错误覆盖）
+                # 写入 session 的最后一条 assistant 消息
                 session = self.session_manager.get_current_session()
-                if session and session.messages and current_provider_name:
-                    for msg in session.messages:
-                        if msg.get("role") == "assistant" and msg.get("model_name"):
-                            if not msg.get("provider_name"):
-                                msg["provider_name"] = current_provider_name
-                    # 确保最后一条 assistant 消息的 model_name 是最新的
+                if session and session.messages:
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
+                            msg["provider_name"] = current_provider_name
                             break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
@@ -10582,11 +10523,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """切换项目时自动加载并同步工作目录
 
         多窗口隔离：实例缓存优先；首次启动时从 DB 读取（新窗口默认值回退）。
-        复制/分支窗口不执行（源窗口已同步完整工作目录），避免 git 命令重复执行。
         """
         if getattr(self, "_is_destroyed", False):
-            return
-        if getattr(self, "_skip_sync_workdir", False):
             return
         if not self.backend or not self.backend.tool_executor:
             return
@@ -10818,22 +10756,11 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
-        # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
-        current_provider_display = ""
-        if self._current_provider_name:
-            cfg = self._valid_configs.get(self._current_provider_name, {})
-            current_provider_display = cfg.get("display_name", self._current_provider_name)
         for msg in session.messages:
             if msg.get("role") != "assistant":
                 continue
             if msg.get("model_name") and not msg.get("provider_name") and self._valid_configs:
                 model = msg["model_name"]
-                # 先尝试精确匹配当前选中的服务商
-                if current_provider_display:
-                    cfg = self._valid_configs.get(self._current_provider_name, {})
-                    if cfg.get("模型名称") == model or model in (cfg.get("模型列表") or []):
-                        msg["provider_name"] = current_provider_display
-                        continue
                 matched = None
                 for cid, info in self._valid_configs.items():
                     if info.get("模型名称") == model or model in (info.get("模型列表") or []):
