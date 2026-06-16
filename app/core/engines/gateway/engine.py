@@ -534,7 +534,7 @@ class GatewayEngine(QObject, BaseEngine):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
-        gateway_constraints = """
+        gateway_constraints = r"""
 ## Gateway 模式约束
 你正在通过 Gateway 对外提供 AI 服务（当前平台可能为钉钉/企业微信等）。
 以下是必须遵守的规则：
