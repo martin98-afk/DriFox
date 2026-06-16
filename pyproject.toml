@@ -77,6 +77,17 @@ all = [
     "drifox[gateway,dev]",
 ]
 
+# UV 依赖组（与 optional-dependencies 一致）
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.16.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
 # 构建系统配置
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
