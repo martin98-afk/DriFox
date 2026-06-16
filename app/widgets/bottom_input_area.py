@@ -755,7 +755,8 @@ class SendableTextEdit(TextEdit):
         Args:
             clear_attachments: 是否同时清空当前恢复的附件。
                                鼠标点击退出时不清（chip 保持可见），
-                               编辑文本/清空输入时清。
+                               编辑文本时不清（chip 转为工作附件保持可见），
+                               仅外部主动清空时传 True。
         """
         self._history_index = -1
         if clear_attachments:
@@ -795,7 +796,7 @@ class SendableTextEdit(TextEdit):
                 idx < len(self._history_list)
                 and self._history_list[idx].get("text", "") != self.toPlainText()
             ):
-                self._reset_history_mode(clear_attachments=True)
+                self._reset_history_mode(clear_attachments=False)
         # detail 模式参数同步
         self._sync_detail_params()
 

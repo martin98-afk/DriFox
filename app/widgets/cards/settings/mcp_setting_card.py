@@ -24,6 +24,7 @@ from loguru import logger
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
+    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     InfoBar,
@@ -39,7 +40,13 @@ from app.utils.design_tokens import Colors, CardStyles, Sizes, ButtonStyles, Swi
 from app.utils.design_tokens import apply_font_size_to_widget
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
-from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
+
+
+class NoWheelComboBox(ComboBox):
+    """禁用滚轮切换的普通下拉框（防止误触）"""
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -147,7 +154,7 @@ class MCPEditCard(QWidget):
         form_layout.addLayout(row)
 
         # ── 类型 ──
-        self.typeCombo = SearchableEditableComboBox()
+        self.typeCombo = NoWheelComboBox()
         self.typeCombo.addItems(["stdio", "sse", "http"])
         self.typeCombo.setCurrentText(self._server_data.get("type", "stdio"))
         self.typeCombo.currentTextChanged.connect(self._on_type_changed)

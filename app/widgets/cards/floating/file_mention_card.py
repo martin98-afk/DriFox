@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import List, Dict, Set
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QFileSystemWatcher
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QFileSystemWatcher, QSize
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -139,6 +139,8 @@ class FileMentionItemWidget(QWidget):
         """只更新背景色——比完整的 _apply_style（4×setStyleSheet）轻量得多
 
         setStyleSheet 只设置自身背景，不触碰子 QLabel 样式。
+        调用 unpolish/polish 强制 Qt 立即重新计算样式，防止新/复用 widget
+        的 setStyleSheet 延迟到下一帧才生效导致选中高亮不可见。
         """
         if self._selected:
             bg = Colors.REALTIME_TAG_BG
@@ -154,6 +156,8 @@ class FileMentionItemWidget(QWidget):
                 border-radius: 4px;
             }}
         """)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     @staticmethod
     def _all_highlight_queries(text: str, query: str) -> List[str]:
@@ -288,6 +292,21 @@ class FileMentionCard(QWidget):
 
         self.setVisible(False)
         self._setup_ui()
+
+    def sizeHint(self):
+        """返回卡片期望高度。
+
+        Qt 的 QWidgetItem::sizeHint() 不尊重 setFixedHeight/setMinimumHeight 约束，
+        它只读 raw sizeHint()。这里显式返回 minimumHeight() 确保容器 _do_expand
+        能读到正确的卡片高度，而不是空 QScrollArea 返回的 QSize(0, 0)。
+        """
+        mh = self.minimumHeight()
+        if mh > 0:
+            w = super().sizeHint().width()
+            if w <= 0:
+                w = self.width()
+            return QSize(w, mh)
+        return super().sizeHint()
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -892,6 +911,9 @@ class FileMentionCard(QWidget):
         else:
             visible = min(item_count, MAX_VISIBLE_ITEMS)
             self.setFixedHeight(visible * ITEM_HEIGHT)
+        # 渲染重建后强制滚动回顶部，防止 Qt 在布局变化期间自动调整
+        # 滚动位置导致 _update_selection 的 ensureWidgetVisible 滚动到中间
+        self._scroll_area.verticalScrollBar().setValue(0)
 
     @staticmethod
     def _matches_multi(item: Dict[str, str], query: str) -> bool:
@@ -981,6 +1003,15 @@ class FileMentionCard(QWidget):
         elif self._item_widgets:
             self._render_incremental()
 
+    def _deferred_select_first(self):
+        """延迟一帧选中第一项（新 widget 创建后 style 可能延迟生效）"""
+        try:
+            if self._item_widgets:
+                self._selected_index = 0
+                self._update_selection()
+        except RuntimeError:
+            pass
+
     def _on_item_clicked(self):
         """item 被鼠标点击"""
         sender = self.sender()
@@ -1040,13 +1071,28 @@ class FileMentionCard(QWidget):
 
         关键设计：
         - 缓存就绪 → 即时 O(n) 过滤 + O(k) widget 创建
-        - 缓存未就绪 → 立即显示空卡片，QTimer 延迟扫描，
+        - 缓存未就绪 → 立即显示卡片（设占位高度），QTimer 延迟扫描，
           扫描完成后自动刷新显示。
         - 绝不阻塞 UI 线程。
+
+        ⚠️ 修复：CardManager 无参调用 (root_dir="") 时，仅使卡片可见，
+        不加载/过滤内容，防止脏 _current_query 泄露导致容器展开到错误高度。
+        真正的加载由 main_widget 通过 show_card(workdir, query) 执行。
+
+        ⚠️ 修复2：异步扫描路径在 delay 前设至少 ITEM_HEIGHT 占位高度，
+        防止容器 _do_expand 读到 natural_h ≈ 0 导致卡片首次展开非常矮。
         """
         Colors.refresh()
-        if not root_dir and not self._root_dir:
-            # CardManager 纯可视性调用，尚无根目录 → 仅显示空白卡片
+        if not root_dir:
+            # CardManager 纯可视性调用 → 仅显示，不刷新内容
+            # 不做任何 I/O 或过滤，防止陈旧 _current_query 污染容器展开高度
+            if not self._root_dir:
+                # 尚无根目录 → 仅显示空白卡片
+                self._visible = True
+                self.setVisible(True)
+                self.updateGeometry()
+                return
+            # 已有根目录 → 仅显示，保留当前内容状态
             self._visible = True
             self.setVisible(True)
             self.updateGeometry()
@@ -1055,10 +1101,12 @@ class FileMentionCard(QWidget):
             if root_dir != self._root_dir:
                 self._root_dir = root_dir
                 self._cache_dirty = True
-        self._current_query = query if root_dir else self._current_query
+        self._current_query = query  # root_dir 有值时始终更新 query
 
         if self._cache_dirty and not self._async_pending:
-            # 🚀 立即显示卡片（哪怕为空），异步扫描
+            # 🚀 立即显示卡片（占位高度），异步扫描
+            # 设占位高度确保容器 _do_expand 不会读到 natural_h ≈ 0
+            self.setFixedHeight(ITEM_HEIGHT)
             self._visible = True
             self.setVisible(True)
             self.updateGeometry()
@@ -1085,6 +1133,7 @@ class FileMentionCard(QWidget):
         """异步扫描完成后立即渲染（跳过防抖）
 
         扫描本身已异步耗时（50-200ms），完成后直接渲染，不再等 20ms 防抖。
+        首次打开时还需延迟一帧让 Qt 完成布局后再应用选中状态。
         """
         self._async_pending = False
         self._scan_files()
@@ -1096,12 +1145,19 @@ class FileMentionCard(QWidget):
         self._visible = has_items
         self.setVisible(has_items)
         self.updateGeometry()
+        # 延迟一帧重新应用选中状态：新 widget 刚被创建并加入布局，
+        # setStyleSheet 可能延迟到下一轮事件循环的 style 事件才生效，
+        # 延迟刷新确保选中高亮可见
+        if has_items and self._item_widgets:
+            self._last_selected_index = -1
+            QTimer.singleShot(0, self._deferred_select_first)
 
     def dismiss(self):
         """关闭卡片"""
         self._filter_timer.stop()
         self._visible = False
         self.setVisible(False)
+        self._current_query = ""  # 重置陈旧 query，防止下次 @ 触发时泄漏
         self.dismissed.emit()
 
     @property
