@@ -3045,6 +3045,19 @@ class CodeWebViewer(QWebEngineView):
                             expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
                         }});
 
+                        // ── 冻结折叠框 CSS transition 避免 DOM 重建时边框闪烁 ──
+                        // container.innerHTML = newHtml 会销毁所有已有 DOM 节点，
+                        // 重建后 restoreCollapsibleStates 设置 data-expanded 会触发
+                        // 220ms 的 border-color transition（灰色→蓝色），导致可见闪烁。
+                        // 用 getElementById 复用已有元素，避免多次 updateContent 时残留重复 <style>
+                        const _freezeEl = document.getElementById('_fz') || (function(){{
+                            var _el = document.createElement('style');
+                            _el.id = '_fz';
+                            document.head.appendChild(_el);
+                            return _el;
+                        }})();
+                        _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *{{transition:none!important}}';
+
                         container.innerHTML = newHtml;
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
@@ -3075,6 +3088,13 @@ class CodeWebViewer(QWebEngineView):
                                     body.style.opacity = savedState ? '1' : '0';
                                 }}
                             }}
+                        }});
+
+                        // ── 恢复 CSS transition（requestAnimationFrame 使浏览器在下一次
+                        // 重绘前已发现元素处于 target 状态，不会触发过渡动画） ──
+                        requestAnimationFrame(function() {{
+                            var _fe = document.getElementById('_fz');
+                            if (_fe) _fe.remove();
                         }});
 
                         // 初始化 ECharts 图表
@@ -4470,6 +4490,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_model_label: Optional[QLabel] = None
         self._footer_elapsed_label: Optional[QLabel] = None
         self._footer_tokens_label: Optional[QLabel] = None
+        self._footer_diff_stats_label: Optional[QLabel] = None
         self._footer_sep1: Optional[QLabel] = None
         self._footer_sep2: Optional[QLabel] = None
         # 耗时实时计时器
@@ -4599,9 +4620,7 @@ class MessageCard(SimpleCardWidget):
             self.viewer._refresh_viewer_font()
 
     def _get_footer_model_text(self) -> str:
-        """根据 provider_name 和 model_name 生成页脚显示文本"""
-        if self.provider_name and self.model_name:
-            return f"{self.provider_name} · {self.model_name}"
+        """根据 model_name 生成页脚显示文本（服务商名已隐藏，仅显示模型名）"""
         return self.model_name or ""
 
     def set_model_name(self, model_name: str, provider_name: str = None):
@@ -4641,7 +4660,7 @@ class MessageCard(SimpleCardWidget):
             self._refresh_footer_separators()
 
     def _build_footer_bar(self, main: QVBoxLayout):
-        """构建助手卡片底部极简元信息栏：token | 耗时 | 模型（右对齐，分割线下方）"""
+        """构建助手卡片底部极简元信息栏：差异统计（左） | token | 耗时 | 模型（右）"""
         bar = QWidget(self)
         self._footer_bar = bar
         bar.setStyleSheet("background: transparent;")
@@ -4655,6 +4674,15 @@ class MessageCard(SimpleCardWidget):
             f"{font_css} font-size: {scale_font_size(9)}px; "
             f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
         )
+
+        # 差异统计（左对齐，极简风格，点击弹出差异弹窗）
+        diff_l = QLabel("", self)
+        diff_l.setStyleSheet(label_style)
+        diff_l.setVisible(False)
+        diff_l.setCursor(Qt.PointingHandCursor)
+        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
+        self._footer_diff_stats_label = diff_l
+        layout.addWidget(diff_l)
 
         layout.addStretch()
 
@@ -4686,7 +4714,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_sep2 = sep2
         layout.addWidget(sep2)
 
-        # 模型名称（可点击，显示"服务商 · 模型"格式）
+        # 模型名称（可点击，仅显示模型名，服务商名已隐藏但保留用于跳转）
         footer_text = self._get_footer_model_text()
         model_l = QLabel(footer_text, self)
         model_l.setStyleSheet(
@@ -4726,6 +4754,78 @@ class MessageCard(SimpleCardWidget):
             self._footer_tokens_label.setVisible(True)
         # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
         self._refresh_footer_separators()
+
+    def set_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0):
+        """设置左对齐差异统计：📄N | +N | -N（点击弹出差异弹窗）
+
+        Args:
+            files_count: 修改的文件数
+            additions: 新增行数
+            deletions: 删除行数
+        """
+        if self.role != "assistant":
+            return
+        if not self._footer_diff_stats_label:
+            return
+        if files_count == 0 and additions == 0 and deletions == 0:
+            self._footer_diff_stats_label.setVisible(False)
+            return
+
+        accent = self._theme.get("accent", "#888888")
+        html = f'<span style="color:{accent};">📄{files_count}</span>'
+
+        add_del = []
+        if additions > 0:
+            add_del.append('<span style="color:#2ea043;">+{}</span>'.format(additions))
+        if deletions > 0:
+            add_del.append('<span style="color:#f85149;">-{}</span>'.format(deletions))
+        if add_del:
+            html += "&nbsp;" + "/".join(add_del)
+
+        self._footer_diff_stats_label.setText(html)
+        self._footer_diff_stats_label.setTextFormat(Qt.RichText)
+        self._footer_diff_stats_label.setVisible(True)
+
+    def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
+                        seen_files: set = None):
+        """增量累加差异统计（工具执行时实时调用，文件级去重避免多次编辑同一文件重复计数）
+
+        Args:
+            files_count: 本次新增的文件数
+            additions: 本次新增的行数
+            deletions: 本次删除的行数
+            seen_files: 本次操作涉及的文件路径集合（用于去重）
+        """
+        if self.role != "assistant":
+            return
+        if not self._footer_diff_stats_label:
+            return
+
+        # 懒初始化累积计数器
+        if not hasattr(self, '_diff_seen_files'):
+            self._diff_seen_files = set()
+        if not hasattr(self, '_diff_files_total'):
+            self._diff_files_total = 0
+        if not hasattr(self, '_diff_additions_total'):
+            self._diff_additions_total = 0
+        if not hasattr(self, '_diff_deletions_total'):
+            self._diff_deletions_total = 0
+
+        if seen_files:
+            new_files = seen_files - self._diff_seen_files
+            self._diff_seen_files.update(seen_files)
+        else:
+            new_files = set()
+
+        self._diff_files_total += len(new_files) if seen_files else files_count
+        self._diff_additions_total += additions
+        self._diff_deletions_total += deletions
+
+        self.set_diff_stats(
+            files_count=self._diff_files_total,
+            additions=self._diff_additions_total,
+            deletions=self._diff_deletions_total,
+        )
 
     def _on_footer_model_clicked(self, event):
         """用户点击页脚模型标签时，发出 modelLabelClicked 信号"""

@@ -35,7 +35,7 @@ def _try_import(platform_name: str, module_path: str, names: list) -> list:
         module = importlib.import_module(module_path)
     except ImportError as e:
         logger.warning(
-            "[Gateway] %s 适配器模块加载失败（依赖缺失）: %s",
+            "[Gateway] {} 适配器模块加载失败（依赖缺失）: {}",
             platform_name, e,
         )
         return [None] * len(names)

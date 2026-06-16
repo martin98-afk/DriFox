@@ -130,6 +130,7 @@ from app.widgets.cards.settings.model_selector_card import (
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent, get_project_color,
+    _SquareAvatar, extract_project_initials,
 )
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
@@ -1392,6 +1393,17 @@ class OpenAIChatToolWindow(ToolWindow):
         pb_layout = QHBoxLayout(self._project_branch_container)
         pb_layout.setContentsMargins(0, 0, 0, 0)
         pb_layout.setSpacing(0)
+
+        # 项目方形 icon（缩写字母，flat design squircle 风格）
+        self._project_avatar = _SquareAvatar(
+            extract_project_initials(self._current_project),
+            get_project_color(self._current_project),
+            self, size=22
+        )
+        self._project_avatar.setCursor(Qt.PointingHandCursor)
+        self._project_avatar.mousePressEvent = self._on_project_label_clicked
+        self._project_avatar.setToolTip("点击切换项目")
+        pb_layout.addWidget(self._project_avatar)
 
         # 项目选择标签
         self._project_label = QLabel(self._current_project, self)
@@ -5854,6 +5866,12 @@ class OpenAIChatToolWindow(ToolWindow):
             len(self._message_batch),
             int(cache_entry.get("visible_batch_end", len(self._message_batch))),
         )
+        # 延迟恢复所有助手卡片的差异统计（避免文件 I/O 阻塞首屏）
+        for card in alive_cards:
+            if card.role == "assistant":
+                QTimer.singleShot(
+                    0, lambda c=card: self._update_card_diff_stats(c)
+                )
         return True
 
     def _get_or_create_welcome_card(self) -> MessageCard:
@@ -6193,6 +6211,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     render_batch_to_assistant_card(assistant_card, batch)
                     # 从 batch 中恢复元信息（耗时和 token）
                     self._restore_meta_from_batch(assistant_card, batch)
+                    # 延迟恢复差异统计（避免文件 I/O 阻塞首屏渲染）
+                    QTimer.singleShot(
+                        0, lambda c=assistant_card: self._update_card_diff_stats(c)
+                    )
                 if insert_index is not None and assistant_card:
                     insert_index += 1
 
@@ -9430,6 +9452,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._scroll_to_bottom()
 
+        # 编辑类工具执行后实时更新差异统计
+        if tool_name in ("write", "edit", "multi_edit"):
+            self._update_card_diff_stats_for_call(tool_call_id)
+
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:
         for i in range(self.chat_layout.count() - 1, -1, -1):
             item = self.chat_layout.itemAt(i)
@@ -9610,6 +9636,97 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 对话完成后刷新余额显示
         self._refresh_balance()
+
+        # 更新当前助手卡片差异统计
+        self._update_card_diff_stats()
+
+    def _update_card_diff_stats_for_call(self, tool_call_id: str, card=None):
+        """单个工具完成后增量更新卡片差异统计（直接用 call_id 查 file_recorder，不依赖 session.messages）
+        
+        Args:
+            tool_call_id: 刚刚完成的工具调用 ID
+            card: 可选，目标卡片；不传则用 _current_assistant_card
+        """
+        if card is None:
+            card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        if not self.backend.file_recorder:
+            return
+
+        from app.widgets.ui_helpers import compute_diff_stats
+
+        try:
+            session = self.session_manager.get_current_session()
+            if not session:
+                return
+            session_id = session.session_id
+
+            ops = self.backend.file_recorder.get_operations_for_preview(session_id, tool_call_id)
+            if not ops:
+                return
+
+            stats = compute_diff_stats(ops)
+            if stats["files"] > 0 or stats["additions"] > 0 or stats["deletions"] > 0:
+                # 提取本次涉及的文件路径用于去重
+                seen = {op.get("file_path", "") for op in ops if op.get("file_path")}
+                card.add_diff_stats(
+                    files_count=stats["files"],
+                    additions=stats["additions"],
+                    deletions=stats["deletions"],
+                    seen_files=seen,
+                )
+        except Exception as e:
+            logger.warning(f"[DiffStats] 增量更新统计失败: {e}")
+
+
+    def _update_card_diff_stats(self, card=None):
+        """计算助手卡片的文件修改统计并更新到页脚
+        
+        Args:
+            card: 可选，指定要更新的卡片；不传则使用 _current_assistant_card
+        """
+        if card is None:
+            card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        round_index = getattr(card, "_round_index", None)
+        if round_index is None or round_index < 0:
+            return
+
+        # 检查 file_recorder 是否可用
+        if not self.backend.tool_executor or not self.backend.file_recorder:
+            return
+
+        try:
+            from app.widgets.ui_helpers import (
+                collect_operations_for_round,
+                compute_diff_stats,
+            )
+
+            call_ids = self._get_tool_call_ids_in_round(round_index)
+            if not call_ids:
+                return
+
+            operations = collect_operations_for_round(
+                self.backend.file_recorder, session.session_id, call_ids
+            )
+            if not operations:
+                return
+
+            stats = compute_diff_stats(operations)
+            if stats["files"] > 0 or stats["additions"] > 0 or stats["deletions"] > 0:
+                card.set_diff_stats(
+                    files_count=stats["files"],
+                    additions=stats["additions"],
+                    deletions=stats["deletions"],
+                )
+        except Exception as e:
+            logger.warning(f"[DiffStats] 计算差异统计失败: {e}")
 
     def _refresh_balance(self):
         """刷新余额显示（对话完成后调用）"""
@@ -10212,6 +10329,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
         project_color = get_project_color(self._current_project)
+        # 同步更新方形 avatar
+        if hasattr(self, '_project_avatar'):
+            self._project_avatar.set_project(self._current_project, project_color)
         self._project_label.setStyleSheet(f"""
             QLabel {{
                 color: {project_color};
@@ -10222,9 +10342,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 background: transparent;
                 border: none;
                 border-radius: 4px;
-            }}
-            QLabel:hover {{
-                background: {Colors.SELECTED_BG};
             }}
         """)
         # 分隔符 — 三角箭头（小号 + 次级色）
@@ -10923,6 +11040,20 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_save_current_session()
         except Exception:
             pass
+
+        # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
+        if not OpenAIChatToolWindow._instances:
+            try:
+                workdir = self._current_workdir.get(self._current_project)
+                if workdir and self.backend and self.backend.memory_manager:
+                    self.backend.memory_manager.set_working_directory(
+                        self._current_project, workdir
+                    )
+                    logger.info(
+                        f"[MainWidget] 应用退出，保存工作目录: {workdir}"
+                    )
+            except Exception:
+                pass
 
         # 断开 aboutToQuit 信号，防止退出时访问已销毁的 widget
         try:
