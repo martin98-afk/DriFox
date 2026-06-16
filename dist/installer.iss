@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "Drifox"
-#define MyAppVersion "v0.2.6"
+#define MyAppVersion "v0.2.7"
 #define MyAppPublisher "Jinshan Psychiatric Hospital"
 #define MyAppURL "https://Drifox-sphinx-build.readthedocs.io/zh-cn/latest/"
 #define MyAppExeName "Drifox.exe"

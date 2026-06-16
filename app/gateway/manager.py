@@ -111,7 +111,7 @@ class PlatformManager:
         )
         
         # 企业微信
-        if check_wecom_requirements():
+        if check_wecom_requirements and check_wecom_requirements():
             wecom_config = self._config.get_platform_config(Platform.WECOM)
             self._adapters[Platform.WECOM] = WeComAdapter(wecom_config)
             logger.info("[PlatformManager] WeCom adapter loaded")
@@ -119,7 +119,7 @@ class PlatformManager:
             logger.info("[PlatformManager] WeCom adapter skipped (missing dependencies)")
         
         # 钉钉
-        if check_dingtalk_requirements():
+        if check_dingtalk_requirements and check_dingtalk_requirements():
             dingtalk_config = self._config.get_platform_config(Platform.DINGTALK)
             self._adapters[Platform.DINGTALK] = DingTalkAdapter(dingtalk_config)
             logger.info("[PlatformManager] DingTalk adapter loaded")
@@ -127,7 +127,7 @@ class PlatformManager:
             logger.info("[PlatformManager] DingTalk adapter skipped (missing dependencies)")
         
         # Telegram
-        if check_telegram_requirements():
+        if check_telegram_requirements and check_telegram_requirements():
             telegram_config = self._config.get_platform_config(Platform.TELEGRAM)
             self._adapters[Platform.TELEGRAM] = TelegramAdapter(telegram_config)
             logger.info("[PlatformManager] Telegram adapter loaded")
@@ -135,7 +135,7 @@ class PlatformManager:
             logger.info("[PlatformManager] Telegram adapter skipped (missing dependencies)")
         
         # Discord
-        if check_discord_requirements():
+        if check_discord_requirements and check_discord_requirements():
             discord_config = self._config.get_platform_config(Platform.DISCORD)
             self._adapters[Platform.DISCORD] = DiscordAdapter(discord_config)
             logger.info("[PlatformManager] Discord adapter loaded")
@@ -153,7 +153,7 @@ class PlatformManager:
         
         # 飞书
         from app.gateway.adapters.feishu import FeishuAdapter, check_feishu_requirements
-        if check_feishu_requirements():
+        if check_feishu_requirements and check_feishu_requirements():
             feishu_config = self._config.get_platform_config(Platform.FEISHU)
             self._adapters[Platform.FEISHU] = FeishuAdapter(feishu_config)
             logger.info("[PlatformManager] Feishu adapter loaded")

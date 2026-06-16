@@ -130,6 +130,16 @@ elif platform.system() == "Darwin":
     if icon_path.exists():
         icon_arg = f"--icon={icon_path}"
 
+# 需显式声明的隐藏导入（因 importlib.import_module() 动态加载而无法被 PyInstaller 自动检测）
+_hidden_imports = [
+    "app.gateway.adapters.wecom",
+    "app.gateway.adapters.dingtalk",
+    "app.gateway.adapters.telegram",
+    "app.gateway.adapters.discord",
+    "app.gateway.adapters.feishu",
+    "app.gateway.adapters.extra",
+]
+
 # 3. 构造参数列表
 params = [
     "main.py",
@@ -138,6 +148,8 @@ params = [
     "--name=Drifox",  # 直接指定名称，省去后期改名麻烦
     # 数据文件包含
     f"--add-data=plugins{os.pathsep}plugins",
+    # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）
+    *[f"--hidden-import={m}" for m in _hidden_imports],
 ]
 
 if icon_arg:
