@@ -111,12 +111,21 @@ class KeyDocumentsRepository:
             )
             if not file_path or file_path == "clear":
                 return True
-            # 设置指定路径为工作目录
+            # 设置指定路径为工作目录，同时更新 added_at 使其排在最前
             file_path = str(file_path).replace("\\", "/")
-            success, _ = self._execute(
-                f'UPDATE {self.TABLE_NAME} SET is_working_dir = 1 WHERE project = ? AND file_path = ?',
-                (project, file_path)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            success, rowcount = self._execute(
+                f'UPDATE {self.TABLE_NAME} SET is_working_dir = 1, added_at = ? WHERE project = ? AND file_path = ?',
+                (now, project, file_path)
             )
+            # 🛡️ 路径不在表中时（UPDATE 影响 0 行），自动插入后再设置标记
+            # 场景：_restore_main_repo 切回主仓库时，主仓库路径可能未加入 key_documents
+            if success and rowcount == 0:
+                self.add(project, file_path, "manual")
+                success, _ = self._execute(
+                    f'UPDATE {self.TABLE_NAME} SET is_working_dir = 1, added_at = ? WHERE project = ? AND file_path = ?',
+                    (now, project, file_path)
+                )
             return success
         except Exception as e:
             logger.error(f"[KeyDocumentsRepository] set_working_directory 异常: {e}")
@@ -152,9 +161,9 @@ class KeyDocumentsRepository:
         Returns:
             Optional[str]: 工作目录路径，未设置返回 None
 
-        注意：当主仓库和 worktree 同时有 is_working_dir=1 时（_switch_to_worktree
-        会同时标记两者），优先返回 added_by='git_worktree' 的路径，因为 worktree
-        是用户最近切换到的活动工作目录。使用 ORDER BY 确保确定性。
+        当多条记录的 is_working_dir=1 时，按 added_at DESC 返回最近添加的路径。
+        用户显式切换工作目录时会触发 set_working_directory → add() → updated added_at，
+        因此最近交互过的路径会优先返回。
         """
         if not self.is_initialized:
             return None
@@ -163,7 +172,7 @@ class KeyDocumentsRepository:
         try:
             success, rows = self._execute(
                 f'SELECT file_path FROM {self.TABLE_NAME} WHERE project = ? AND is_working_dir = 1 '
-                f'ORDER BY CASE WHEN added_by = \'git_worktree\' THEN 0 ELSE 1 END, added_at DESC LIMIT 1',
+                f'ORDER BY added_at DESC LIMIT 1',
                 (project,)
             )
             if success and rows:

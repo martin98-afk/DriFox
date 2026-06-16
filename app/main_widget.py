@@ -11041,6 +11041,20 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
+        if not OpenAIChatToolWindow._instances:
+            try:
+                workdir = self._current_workdir.get(self._current_project)
+                if workdir and self.backend and self.backend.memory_manager:
+                    self.backend.memory_manager.set_working_directory(
+                        self._current_project, workdir
+                    )
+                    logger.info(
+                        f"[MainWidget] 应用退出，保存工作目录: {workdir}"
+                    )
+            except Exception:
+                pass
+
         # 断开 aboutToQuit 信号，防止退出时访问已销毁的 widget
         try:
             app = QApplication.instance()
