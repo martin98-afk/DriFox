@@ -4786,6 +4786,47 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
         self._footer_diff_stats_label.setVisible(True)
 
+    def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
+                        seen_files: set = None):
+        """增量累加差异统计（工具执行时实时调用，文件级去重避免多次编辑同一文件重复计数）
+
+        Args:
+            files_count: 本次新增的文件数
+            additions: 本次新增的行数
+            deletions: 本次删除的行数
+            seen_files: 本次操作涉及的文件路径集合（用于去重）
+        """
+        if self.role != "assistant":
+            return
+        if not self._footer_diff_stats_label:
+            return
+
+        # 懒初始化累积计数器
+        if not hasattr(self, '_diff_seen_files'):
+            self._diff_seen_files = set()
+        if not hasattr(self, '_diff_files_total'):
+            self._diff_files_total = 0
+        if not hasattr(self, '_diff_additions_total'):
+            self._diff_additions_total = 0
+        if not hasattr(self, '_diff_deletions_total'):
+            self._diff_deletions_total = 0
+
+        if seen_files:
+            new_files = seen_files - self._diff_seen_files
+            self._diff_seen_files.update(seen_files)
+        else:
+            new_files = set()
+
+        self._diff_files_total += len(new_files) if seen_files else files_count
+        self._diff_additions_total += additions
+        self._diff_deletions_total += deletions
+
+        self.set_diff_stats(
+            files_count=self._diff_files_total,
+            additions=self._diff_additions_total,
+            deletions=self._diff_deletions_total,
+        )
+
     def _on_footer_model_clicked(self, event):
         """用户点击页脚模型标签时，发出 modelLabelClicked 信号"""
         if self.provider_name and self.model_name:

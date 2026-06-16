@@ -9454,7 +9454,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 编辑类工具执行后实时更新差异统计
         if tool_name in ("write", "edit", "multi_edit"):
-            self._update_card_diff_stats()
+            self._update_card_diff_stats_for_call(tool_call_id)
 
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -9639,6 +9639,46 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新当前助手卡片差异统计
         self._update_card_diff_stats()
+
+    def _update_card_diff_stats_for_call(self, tool_call_id: str, card=None):
+        """单个工具完成后增量更新卡片差异统计（直接用 call_id 查 file_recorder，不依赖 session.messages）
+        
+        Args:
+            tool_call_id: 刚刚完成的工具调用 ID
+            card: 可选，目标卡片；不传则用 _current_assistant_card
+        """
+        if card is None:
+            card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        if not self.backend.file_recorder:
+            return
+
+        from app.widgets.ui_helpers import compute_diff_stats
+
+        try:
+            session = self.session_manager.get_current_session()
+            if not session:
+                return
+            session_id = session.session_id
+
+            ops = self.backend.file_recorder.get_operations_for_preview(session_id, tool_call_id)
+            if not ops:
+                return
+
+            stats = compute_diff_stats(ops)
+            if stats["files"] > 0 or stats["additions"] > 0 or stats["deletions"] > 0:
+                # 提取本次涉及的文件路径用于去重
+                seen = {op.get("file_path", "") for op in ops if op.get("file_path")}
+                card.add_diff_stats(
+                    files_count=stats["files"],
+                    additions=stats["additions"],
+                    deletions=stats["deletions"],
+                    seen_files=seen,
+                )
+        except Exception as e:
+            logger.warning(f"[DiffStats] 增量更新统计失败: {e}")
+
 
     def _update_card_diff_stats(self, card=None):
         """计算助手卡片的文件修改统计并更新到页脚
