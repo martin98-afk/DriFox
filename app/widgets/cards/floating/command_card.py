@@ -1105,6 +1105,9 @@ class CommandCard(QWidget):
     def update_active_params(self, active: set, full_text: str = "", cursor_pos: int = -1):
         """根据输入中已存在的参数名列表，显隐参数项
 
+        支持互斥参数组：当互斥组中任一参数被激活后，同组其他参数自动隐藏，
+        避免用户同时选中两个互斥参数（如 --quick 和 --thorough）。
+
         Args:
             active: 输入文本中已存在的参数名集合，如 {"--with-context", "--model="}
             full_text: 完整输入文本（用于自动检测 --model 触发值选择 + 实时搜索）
@@ -1139,6 +1142,21 @@ class CommandCard(QWidget):
                 # 参数已被删掉 → 退出值选择模式，回到参数列表
                 self._exit_value_selection()
 
+        # ---- 第一遍：检测互斥组激活状态 ----
+        mutex_active_groups: set = set()  # 已有激活参数的互斥组名
+        for w in self._param_widgets:
+            mg = getattr(w._param, 'mutex_group', '')
+            if not mg:
+                continue
+            param_clean = w.param_name.rstrip("=")
+            if w.param_type == "value" and w.param_name.endswith("="):
+                is_active = any("=" in a and a.rstrip("=") == param_clean for a in active)
+            else:
+                is_active = any(a.rstrip("=") == param_clean for a in active)
+            if is_active:
+                mutex_active_groups.add(mg)
+
+        # ---- 第二遍：根据激活状态 + 互斥规则设置可见性 ----
         any_visible = False
         for w in self._param_widgets:
             param_key = w.param_name
@@ -1147,7 +1165,17 @@ class CommandCard(QWidget):
                 is_active = any("=" in a and a.rstrip("=") == param_clean for a in active)
             else:
                 is_active = any(a.rstrip("=") == param_clean for a in active)
-            w.setVisible(not is_active)
+
+            # 标准去重：已激活的参数隐藏
+            visible = not is_active
+
+            # 互斥规则：如果此参数属于某个已被激活的互斥组，
+            # 则同组所有参数全部隐藏（包括未被激活的兄弟参数）
+            mg = getattr(w._param, 'mutex_group', '')
+            if mg and mg in mutex_active_groups:
+                visible = False
+
+            w.setVisible(visible)
             if w.isVisible():
                 any_visible = True
 
@@ -1155,6 +1183,20 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(any_visible)
         if any_visible:
             self._detail_params_content.setVisible(True)
+
+        # 调整选中索引：如果当前选中的参数已被隐藏，跳到第一个可见参数
+        if not any_visible:
+            self._selected_param_index = -1
+        elif (self._selected_param_index < 0
+              or self._selected_param_index >= len(self._param_widgets)
+              or not self._param_widgets[self._selected_param_index].isVisible()):
+            new_idx = -1
+            for i, w in enumerate(self._param_widgets):
+                if w.isVisible():
+                    new_idx = i
+                    break
+            self._selected_param_index = new_idx
+        self._update_param_selection()
 
         # 自动检测 --model 前缀：进入/刷新值选择模式（实时搜索）
         if full_text and any_visible:

@@ -40,3 +40,4 @@ various_test.py
 app.config
 .playwright-mcp/ 
 "nul"  
+/.mypy_cache/

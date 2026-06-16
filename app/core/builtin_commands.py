@@ -75,7 +75,7 @@ class FunctionCommandHandlers:
 # 解析结果缓存（避免每次启动重解析 60+ .md 文件）
 # ============================================================
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 _cache_disabled = False  # 调试用，设为 True 跳过缓存
 
 
@@ -177,6 +177,7 @@ def _serialize_params(params: list) -> list:
                 "description": getattr(p, 'description', ''),
                 "param_type": getattr(p, 'param_type', 'flag'),
                 "required": getattr(p, 'required', False),
+                "mutex_group": getattr(p, 'mutex_group', ''),
             })
         elif isinstance(p, dict):
             result.append({
@@ -184,9 +185,10 @@ def _serialize_params(params: list) -> list:
                 "description": p.get("description", ""),
                 "param_type": p.get("param_type", "flag"),
                 "required": p.get("required", False),
+                "mutex_group": p.get("mutex_group", ""),
             })
         else:
-            result.append({"name": str(p), "description": "", "param_type": "flag", "required": False})
+            result.append({"name": str(p), "description": "", "param_type": "flag", "required": False, "mutex_group": ""})
     return result
 
 
@@ -199,6 +201,7 @@ def _deserialize_params(params: list) -> list:
             description=p.get("description", ""),
             param_type=p.get("param_type", "flag"),
             required=p.get("required", False),
+            mutex_group=p.get("mutex_group", ""),
         ))
     return result
 
@@ -260,18 +263,28 @@ def _parse_param_name(name_raw: str) -> dict:
     return {"name": name, "required": True}
 
 
-def _parse_raw_params_to_command_params(raw: any) -> list:
+def _parse_raw_params_to_command_params(raw: any, mutex_groups: dict = None) -> list:
     """将 YAML frontmatter 中的参数描述统一转为 CommandParameter 列表
 
     支持格式：
-      1. 数组：parameters: [{name: --branch, desc: ...}, ...]
+      1. 数组：parameters: [{name: --branch, desc: ..., mutex: mode}, ...]
       2. 字典：parameters: {--branch: desc, [--verbose]: desc}
       3. 字典：argument-hint: {--branch: desc, [--verbose]: desc}（复用旧字段）
+
+    Args:
+        raw: 参数原始数据（dict/list/None）
+        mutex_groups: 互斥组定义 dict，如 {"mode": ["--quick", "--thorough", "--deep"]}
+                      当 raw 为 dict 格式时，通过此参数注入互斥关系
     """
     if not raw:
         return []
 
     params = []
+    mutex_map = {}  # param_name -> mutex_group
+    if mutex_groups:
+        for group_name, param_names in mutex_groups.items():
+            for pn in param_names:
+                mutex_map[pn] = group_name
 
     if isinstance(raw, dict):
         # 格式 2/3：字典 {参数名: 描述}
@@ -289,9 +302,10 @@ def _parse_raw_params_to_command_params(raw: any) -> list:
             params.append(CommandParameter(
                 name=name, description=desc,
                 param_type=ptype, required=parsed["required"],
+                mutex_group=mutex_map.get(name, ""),
             ))
     elif isinstance(raw, list):
-        # 格式 1：数组 [{name, desc, ...}]
+        # 格式 1：数组 [{name, desc, mutex, ...}]
         for p in raw:
             if isinstance(p, str):
                 # 列表元素是纯字符串 → 视为 positional 参数名
@@ -316,9 +330,12 @@ def _parse_raw_params_to_command_params(raw: any) -> list:
                 ptype = "positional"
             # 显式 required 优先，否则从 [] 推断
             required = p.get("required", parsed["required"])
+            # 互斥组：优先使用数组格式中的 mutex 字段，回退到 mutex_groups 映射
+            mg = p.get("mutex", mutex_map.get(name, ""))
             params.append(CommandParameter(
                 name=name, description=desc,
                 param_type=ptype, required=required,
+                mutex_group=mg,
             ))
 
     return params
@@ -351,7 +368,11 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         raw_params = meta.get("parameters")
         if raw_params is None:
             raw_params = meta.get("argument-hint")
-        params = _parse_raw_params_to_command_params(raw_params)
+        # 解析互斥组定义（可选 frontmatter 字段）
+        mutex_groups = meta.get("mutex_groups")
+        if mutex_groups and not isinstance(mutex_groups, dict):
+            mutex_groups = None  # 格式不正确时忽略
+        params = _parse_raw_params_to_command_params(raw_params, mutex_groups=mutex_groups)
 
         # 参数来源决定 argument_hint 回退：dict 来源表示已被解析为 params，不再做静态 hint
         raw_argument_hint = meta.get("argument-hint")

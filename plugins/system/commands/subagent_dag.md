@@ -7,6 +7,8 @@ argument-hint:
   "[--hybrid]": "混合模式：含分支和汇合点的复杂依赖（默认）"
   "[--nodes=]": "节点数建议：建议拆分为几个子任务，默认自动判断"
   "<task-desc>": "任务描述（必填），描述你想要完成的复杂任务"
+mutex_groups:
+  mode: ["--pipeline", "--fanout", "--hybrid"]
 ---
 
 ## ⚙️ 行为规范（LLM 提示词正文）
