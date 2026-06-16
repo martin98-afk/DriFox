@@ -430,6 +430,7 @@ class ToolExecutor:
         "question": ["questions"],
         "read_persisted_output": ["file_path"],
         "gitee_upload": ["local_path"],
+        "upload_file": ["local_path"],
         # 桌面自动化 (mouse / keyboard / screenshot)
         "mouse": ["action"],
         "keyboard": ["action"],
@@ -665,6 +666,9 @@ class ToolExecutor:
                 content=self._builtin_tools._mcp_manager.get_status()
             ),
             "gitee_upload": lambda: self._builtin_tools.gitee_upload(
+                local_path=args.get("local_path", ""),
+            ),
+            "upload_file": lambda: self._builtin_tools.gitee_upload(
                 local_path=args.get("local_path", ""),
             ),
             "read_persisted_output": lambda: (
