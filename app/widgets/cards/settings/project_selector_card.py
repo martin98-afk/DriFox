@@ -161,9 +161,9 @@ class _SquareAvatar(QWidget):
         font = painter.font()
         # 单字符（中文）字号稍大，双字符略小
         if len(self._text) <= 1:
-            font.setPixelSize(scale_font_size(self._size * 12 // 24))
+            font.setPixelSize(scale_font_size(self._size * 14 // 24))
         else:
-            font.setPixelSize(scale_font_size(self._size * 9 // 24))
+            font.setPixelSize(scale_font_size(self._size * 14 // 24))
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignCenter, self._text)
