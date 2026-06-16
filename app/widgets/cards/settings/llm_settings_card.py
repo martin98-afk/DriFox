@@ -166,7 +166,7 @@ class LLMSettingsCard(SystemCardFrame):
         super().__init__(parent)
         self.set_icon("⚙️")
         self.set_title_text("系统设置")
-        self.setFixedHeight(350)
+        self.setMinimumHeight(250)  # 自适应窗口高度，showEvent 会自动设置 maximumHeight
 
         self.cfg = Settings.get_instance()
         self._save_timer = QTimer(self)

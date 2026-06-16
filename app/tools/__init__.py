@@ -1053,6 +1053,23 @@ TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "upload_file",
+            "description": "将本地文件上传至 Gitee 仓库，返回公开下载链接。适用于需要 LLM 访问本地文件但又无法直接读取的场景（如 gateway 远程调用场景）。**请勿滥用**，仅在确实需要时使用，并注意保护敏感信息，避免上传包含敏感数据的文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "local_path": {
+                        "type": "string",
+                        "description": "本地文件路径（绝对路径或相对 workdir 的路径）",
+                    },
+                },
+                "required": ["local_path"],
+            },
+        },
+    },
 ]
 
 

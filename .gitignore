@@ -27,7 +27,7 @@ Thumbs.db
 /.drifox/app.config
 /docs/
 .superpowers/
-
+/tests/
 # Build artifacts
 dist/
 *.spec

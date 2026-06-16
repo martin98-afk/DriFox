@@ -24,6 +24,7 @@ from loguru import logger
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
+    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     InfoBar,
@@ -39,7 +40,13 @@ from app.utils.design_tokens import Colors, CardStyles, Sizes, ButtonStyles, Swi
 from app.utils.design_tokens import apply_font_size_to_widget
 from app.utils.utils import get_icon, get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
-from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
+
+
+class NoWheelComboBox(ComboBox):
+    """禁用滚轮切换的普通下拉框（防止误触）"""
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -147,7 +154,7 @@ class MCPEditCard(QWidget):
         form_layout.addLayout(row)
 
         # ── 类型 ──
-        self.typeCombo = SearchableEditableComboBox()
+        self.typeCombo = NoWheelComboBox()
         self.typeCombo.addItems(["stdio", "sse", "http"])
         self.typeCombo.setCurrentText(self._server_data.get("type", "stdio"))
         self.typeCombo.currentTextChanged.connect(self._on_type_changed)
@@ -179,7 +186,8 @@ class MCPEditCard(QWidget):
 
         # ── Headers（sse/http） ──
         self.headersEdit = QPlainTextEdit()
-        self.headersEdit.setMaximumHeight(60)
+        self.headersEdit.setMaximumHeight(100)
+        self.headersEdit.setMinimumHeight(48)
         self.headersEdit.setPlaceholderText('可选 JSON，例如: {"Authorization": "Bearer xxx"}')
         saved_headers = self._server_data.get("headers")
         if saved_headers and isinstance(saved_headers, dict):
@@ -189,7 +197,8 @@ class MCPEditCard(QWidget):
 
         # ── 环境变量（stdio） ──
         self.envEdit = QPlainTextEdit()
-        self.envEdit.setMaximumHeight(60)
+        self.envEdit.setMaximumHeight(100)
+        self.envEdit.setMinimumHeight(48)
         self.envEdit.setPlaceholderText('可选 JSON，例如: {"API_KEY": "xxx"}')
         saved_env = self._server_data.get("env")
         if saved_env and isinstance(saved_env, dict):

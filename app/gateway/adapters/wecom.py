@@ -507,10 +507,20 @@ class WeComAdapter(BasePlatformAdapter):
                 "msg_type": "image",
                 "media_id": media_id,
             })
-            
+
+            send_ok = result.get("errcode", 0) == 0
+
+            # 🆕 同时上传到 Gitee 图床，发送公开查看链接
+            gitee_url = await self._try_gitee_upload(image_path)
+            if gitee_url and gitee_url != image_path:
+                try:
+                    await self.send(chat_id, f"🖼️ 图片外链: {gitee_url}")
+                except Exception:
+                    pass
+
             return SendResult(
-                success=result.get("errcode", 0) == 0,
-                error=result.get("errmsg") if result.get("errcode", 0) != 0 else None,
+                success=send_ok,
+                error=result.get("errmsg") if not send_ok else None,
             )
             
         except Exception as e:
@@ -563,10 +573,20 @@ class WeComAdapter(BasePlatformAdapter):
                 "msg_type": "file",
                 "media_id": media_id,
             })
-            
+
+            send_ok = result.get("errcode", 0) == 0
+
+            # 🆕 同时上传到 Gitee 图床，发送公开下载链接
+            gitee_url = await self._try_gitee_upload(file_path)
+            if gitee_url and gitee_url != file_path:
+                try:
+                    await self.send(chat_id, f"📎 文件下载链接: {gitee_url}")
+                except Exception:
+                    pass
+
             return SendResult(
-                success=result.get("errcode", 0) == 0,
-                error=result.get("errmsg") if result.get("errcode", 0) != 0 else None,
+                success=send_ok,
+                error=result.get("errmsg") if not send_ok else None,
             )
             
         except Exception as e:

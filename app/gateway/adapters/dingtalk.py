@@ -26,20 +26,13 @@ from app.gateway.base import (
     get_cache_dir,
 )
 
-# 钉钉 SDK 组件（延迟导入）
+# 钉钉 SDK 组件占位（真正延迟导入：见 check_dingtalk_requirements() 与 connect()）
 ChatbotHandler = None
 ChatbotMessage = None
 AckMessage = None
-
-
-def _ensure_dingtalk_imports():
-    """确保钉钉 SDK 组件已导入"""
-    global ChatbotHandler, ChatbotMessage, AckMessage
-    if ChatbotHandler is None:
-        from dingtalk_stream import ChatbotHandler as CH, ChatbotMessage as CM, AckMessage as AM
-        ChatbotHandler = CH
-        ChatbotMessage = CM
-        AckMessage = AM
+# _IncomingHandler 类占位：在 check_dingtalk_requirements() 成功后才通过
+# _build_incoming_handler_class() 动态构建，以避免模块顶层就依赖 dingtalk_stream
+IncomingHandler = None
 
 
 def _patch_dingtalk_stream_logging():
@@ -96,8 +89,9 @@ def _patch_dingtalk_stream_logging():
     dstream.DingTalkStreamClient.start = patched_start
 
 
-# 预导入钉钉 SDK 组件
-_ensure_dingtalk_imports()
+# 注意：原文件此处曾在模块顶层预调用 _ensure_dingtalk_imports() / _patch_dingtalk_stream_logging()，
+# 导致 import 在 dingtalk-stream 未安装时抛 ModuleNotFoundError，牵连整个 gateway 加载。
+# 现已删除：依赖检测统一在 check_dingtalk_requirements()，monkey patch 仅在 connect() 调用一次。
 
 
 # 消息类型映射
@@ -148,34 +142,40 @@ class DingTalkAdapter(BasePlatformAdapter):
         try:
             from dingtalk_stream import DingTalkStreamClient, Credential
         except ImportError:
-            logger.error("[DingTalk] dingtalk-stream not installed. Run: pip install 'dingtalk-stream>=0.20'")
+            logger.error("[DingTalk] dingtalk-stream not installed. Run: pip install 'drifox[gateway]'")
             self._last_error = "依赖不可用"
             return False
-        
+
         # 修复三方库 dingtalk-stream 的日志 bug（TypeError 噪声）
+        # 仅在 connect() 调用一次，避免 import 期与运行时双重 patch
         _patch_dingtalk_stream_logging()
-        
+
         if not self._client_id or not self._client_secret:
             logger.error("[DingTalk] client_id and client_secret are required")
             self._last_error = "缺少 client_id 或 client_secret"
             return False
-        
+
         try:
             import httpx
             from app.gateway.platforms._http_client_limits import platform_httpx_limits
-            
+
             limits = platform_httpx_limits()
             self._http_client = httpx.AsyncClient(
                 timeout=30.0,
                 limits=limits if limits else httpx.Limits(),
             )
-            
+
             # 创建 Stream 客户端
             credential = Credential(self._client_id, self._client_secret)
             self._stream_client = DingTalkStreamClient(credential)
-            
+
             # 注册处理器 - 使用字符串 topic
-            handler = _IncomingHandler(self)
+            # IncomingHandler 由 check_dingtalk_requirements() 构建；此 connect() 路径
+            # 已被 manager.py:122 的 `if check_dingtalk_requirements():` 守护，理论上
+            # 不会走到这里；保险起见若未构建则立即构建。
+            if IncomingHandler is None:
+                _build_incoming_handler_class()
+            handler = IncomingHandler(self)
             self._stream_client.register_callback_handler(
                 "/v1.0/im/bot/messages/get",  # 机器人消息 topic
                 handler
@@ -490,34 +490,33 @@ class DingTalkAdapter(BasePlatformAdapter):
         try:
             from pathlib import Path
             import httpx
-            
+
             image_path = str(image_path)
-            
-            # 如果是 URL，先下载
+
+            # 如果是 URL，先下载到本地缓存
+            # 副作用：image_path 会被重写为本地 UUID 文件名，
+            # 后续 text 消息的 content 用本地文件名（避免泄漏原始 URL）。
             if image_path.startswith("http"):
                 cache_dir = get_cache_dir("images")
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.get(image_path)
                     response.raise_for_status()
-                    
+
                     ext = ".jpg"
                     if "." in image_path:
                         ext = "." + image_path.rsplit(".", 1)[-1].split("?")[0]
-                    
+
                     filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
                     filepath = cache_dir / filename
                     filepath.write_bytes(response.content)
                     image_path = str(filepath)
-            
-            # 读取图片数据
-            with open(image_path, "rb") as f:
-                image_data = f.read()
-            
-            # 钉钉需要先上传媒体获取 media_id
-            # 注意：这里需要先获取 access_token
-            # 简化实现：使用文件路径作为文本发送
+
+            # TODO(dingtalk-media-upload): 真实图片发送需要先调钉钉 media API
+            # 上传文件获取 media_id，再构造 msgtype=image 的消息体。
+            # 当前实现是降级占位：直接发文本消息显示文件名。
+            # 参考文档: https://open.dingtalk.com/document/orgapp-server/upload-media-files
             payload = {
                 "msg": {
                     "msgtype": "text",
@@ -584,55 +583,98 @@ class DingTalkAdapter(BasePlatformAdapter):
         )
 
 
-class _IncomingHandler(ChatbotHandler):
+# 注意：原文件此处曾在模块顶层定义 `class _IncomingHandler(ChatbotHandler)`。
+# 当 ChatbotHandler=None（缺包）时，该类继承会立即抛 TypeError。
+# 现已改为：模块顶层只暴露 IncomingHandler 占位变量，
+# 实际类由 _build_incoming_handler_class() 在 SDK 确认可用后动态构建。
+
+
+def _build_incoming_handler_class():
     """
-    钉钉消息处理器
-    
-    继承自 dingtalk_stream.ChatbotHandler，处理机器人消息。
+    构建 _IncomingHandler 动态类。
+
+    必须在 check_dingtalk_requirements() 成功（即 ChatbotHandler 已就绪）后调用。
+    类定义延迟至此，避免模块顶层对 dingtalk_stream 的强依赖。
     """
-    
-    def __init__(self, adapter: DingTalkAdapter):
-        from dingtalk_stream import ChatbotMessage
-        super().__init__()
-        self._adapter = adapter
-        self._ChatbotMessage = ChatbotMessage
-    
-    async def process(self, callback) -> tuple:
+    global IncomingHandler
+    if IncomingHandler is not None:
+        return IncomingHandler
+
+    class _IncomingHandler(ChatbotHandler):
         """
-        处理消息回调
-        
-        Args:
-            callback: 钉钉 SDK 的回调消息
-            
-        Returns:
-            (status_code, response)
+        钉钉消息处理器
+
+        继承自 dingtalk_stream.ChatbotHandler，处理机器人消息。
         """
-        try:
-            from dingtalk_stream import AckMessage
-            
-            # 获取消息数据
-            data = callback.data if hasattr(callback, 'data') else callback
-            
-            # 创建 ChatbotMessage
-            message = self._ChatbotMessage.from_dict(data)
-            
-            # 异步处理消息
-            await self._adapter._on_message(message)
-            
-            # 返回成功状态
-            return AckMessage.STATUS_OK, 'OK'
-            
-        except Exception as e:
-            logger.error("[DingTalk] Handler process error: %s", e, exc_info=True)
-            from dingtalk_stream import AckMessage
-            return AckMessage.STATUS_FAIL, str(e)
+
+        def __init__(self, adapter: "DingTalkAdapter"):
+            from dingtalk_stream import ChatbotMessage
+            super().__init__()
+            self._adapter = adapter
+            self._ChatbotMessage = ChatbotMessage
+
+        async def process(self, callback) -> tuple:
+            """
+            处理消息回调
+
+            Args:
+                callback: 钉钉 SDK 的回调消息
+
+            Returns:
+                (status_code, response)
+            """
+            try:
+                from dingtalk_stream import AckMessage
+
+                # 获取消息数据
+                data = callback.data if hasattr(callback, 'data') else callback
+
+                # 创建 ChatbotMessage
+                message = self._ChatbotMessage.from_dict(data)
+
+                # 异步处理消息
+                await self._adapter._on_message(message)
+
+                # 返回成功状态
+                return AckMessage.STATUS_OK, 'OK'
+
+            except Exception as e:
+                logger.error("[DingTalk] Handler process error: %s", e, exc_info=True)
+                from dingtalk_stream import AckMessage
+                return AckMessage.STATUS_FAIL, str(e)
+
+    IncomingHandler = _IncomingHandler
+    return IncomingHandler
 
 
 def check_dingtalk_requirements() -> bool:
-    """检查钉钉依赖是否满足"""
+    """
+    检查钉钉依赖是否满足。
+
+    成功时同时设置模块级 SDK 占位全局变量（ChatbotHandler/ChatbotMessage/AckMessage），
+    并通过 _build_incoming_handler_class() 构建 IncomingHandler 类。
+    此函数被调用前，模块顶层 import 是安全的（不依赖 dingtalk_stream）。
+    """
+    global ChatbotHandler, ChatbotMessage, AckMessage
+    if ChatbotHandler is not None:
+        # 已就绪：幂等返回 True（同时确保 IncomingHandler 已构建）
+        _build_incoming_handler_class()
+        return True
     try:
-        from dingtalk_stream import DingTalkStreamClient, Credential
-        import httpx
+        from dingtalk_stream import (
+            ChatbotHandler as CH,
+            ChatbotMessage as CM,
+            AckMessage as AM,
+        )
+        import httpx  # noqa: F401  # 显式依赖 httpx，缺包时也归类到钉钉缺失
+        ChatbotHandler = CH
+        ChatbotMessage = CM
+        AckMessage = AM
+        _build_incoming_handler_class()
         return True
     except ImportError:
+        logger.error(
+            "[DingTalk] dingtalk-stream not installed. "
+            "Run: pip install 'drifox[gateway]'"
+        )
         return False

@@ -535,3 +535,44 @@ class FileTools:
             return ToolResult(True, content=result.stdout)
         except Exception as e:
             return ToolResult(False, error=f"Diff error: {str(e)}")
+
+    # ========== Gitee 上传 ==========
+
+    def gitee_upload(self, local_path: str) -> ToolResult:
+        """
+        将本地文件上传至 Gitee 仓库，返回公开下载链接。
+
+        AI 可调用此工具上传文件到 Gitee 图床，
+        Gateway 适配器在发送文件/图片时会自动调用。
+
+        Args:
+            local_path: 本地文件路径（绝对路径或相对 workdir 的路径）
+
+        Returns:
+            ToolResult:
+                成功: content 包含 {"url": "https://...", "filename": "..."}
+                失败: error 包含错误描述
+        """
+        from app.gateway.utils.gitee_uploader import GiteeUploader
+
+        full_path = self._resolve_path(local_path)
+        uploader = GiteeUploader.get_instance()
+
+        if not uploader.is_configured():
+            return ToolResult(
+                False,
+                error="Gitee 未配置。请在设置中填写 Gitee Token、Owner、Repo。",
+            )
+
+        url, err = uploader.upload_file(str(full_path))
+        if err:
+            return ToolResult(False, error=f"Gitee 上传失败: {err}")
+
+        return ToolResult(
+            True,
+            content={
+                "url": url,
+                "filename": full_path.name,
+                "local_path": str(full_path),
+            },
+        )

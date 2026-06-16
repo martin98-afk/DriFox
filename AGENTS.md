@@ -131,6 +131,16 @@ feat|fix|docs|chore|refactor|test: scope - summary
   - 🐛 **已修复**: 不在 worktree 中时不再传 worktree_path（否则 update_session 会覆盖已有值）
   - 🐛 **已修复**: _switch_to_worktree 同步更新 memory_card._instance_workdir`
 
+### 新增功能 (2026-06-16)
+- **Gitee 图床上传工具**: 将本地文件上传至 Gitee 仓库返回公开下载链接
+  - `app/gateway/utils/gitee_uploader.py`: GiteeUploader 单例类（upload_file / upload_bytes）
+  - `app/utils/config.py`: 新增 gitee_enabled/token/owner/repo/path/branch 配置项
+  - `app/tools/file_tools.py`: 新增 gitee_upload() 方法，AI 可通过 function calling 调用
+  - `app/core/tool_executor.py`: TOOL_SCHEMAS 注册 + dispatch map
+  - `app/gateway/base.py`: BasePlatformAdapter 新增 send_file_via_gitee() + _try_gitee_upload()
+  - `app/gateway/adapters/wecom.py`: send_image/send_file 自动上传到 Gitee 并追加外链
+  - Gitee API: `POST https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}`
+
 ### 待处理
 - **main_widget.py (10,139 行) 拆分**: 架构蓝图已完成但未实施
 - **P0 SerpAPI 硬编码密钥**: 用户选择跳过

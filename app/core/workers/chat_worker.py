@@ -854,8 +854,11 @@ class OpenAIChatWorker(QThread):
                     self.full_response = ''.join(self._response_chunks)
                     self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                              current_session_messages)
+                    # 🔧 修复：先保存 full_response，再清理状态（_clear_pending_response_state
+                    # 内部的 _sync_state_from_state 会用 state 中的旧值覆盖 self.full_response）
+                    final_response = self.full_response
                     self._clear_pending_response_state()
-                    self._emit_with_callback("finished_with_content", self.finished_with_content, self.full_response)
+                    self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
                     return
 
                 # [MEM] 执行工具前

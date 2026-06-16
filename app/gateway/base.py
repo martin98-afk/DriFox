@@ -275,7 +275,86 @@ class BasePlatformAdapter(ABC):
             success=False,
             error="Platform does not support native voice sending"
         )
-    
+
+    async def send_file_via_gitee(self, chat_id: str, file_path: str,
+                                   content_hint: str = "",
+                                   **kwargs) -> SendResult:
+        """
+        将本地文件上传到 Gitee 图床后发送下载链接。
+
+        适用于不支持原生文件发送的平台（如 Telegram、Discord），
+        或需要在消息中附带可公开访问的链接。
+
+        Args:
+            chat_id: 聊天 ID
+            file_path: 本地文件路径
+            content_hint: 附加到消息中的文本说明
+
+        Returns:
+            SendResult
+        """
+        from app.gateway.utils.gitee_uploader import GiteeUploader
+
+        uploader = GiteeUploader.get_instance()
+        if not uploader.is_configured():
+            return SendResult(
+                success=False,
+                error="Gitee 未配置，无法上传文件。请先在设置中配置 Gitee Token/Owner/Repo。",
+            )
+
+        from pathlib import Path
+        fp = Path(file_path)
+        url, err = uploader.upload_file(str(fp))
+        if err:
+            return SendResult(
+                success=False,
+                error=f"Gitee 上传失败: {err}",
+            )
+
+        # 构建消息内容
+        filename = fp.name
+        ext = fp.suffix.lower()
+        is_image = ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+        if is_image:
+            content = f"{content_hint}\n![{filename}]({url})" if content_hint else f"![{filename}]({url})"
+        else:
+            content = f"{content_hint}\n📎 [{filename}]({url})" if content_hint else f"📎 [{filename}]({url})"
+
+        return await self.send(chat_id, content, **kwargs)
+
+    async def _try_gitee_upload(self, file_path: str) -> str:
+        """
+        尝试将文件上传到 Gitee，返回下载链接。
+
+        如果未配置或上传失败，返回原始路径。
+
+        适配器子类可在 send_image/send_file 中调用此方法，
+        将本地路径转换为公开 URL 后嵌入消息中。
+
+        Args:
+            file_path: 本地文件路径
+
+        Returns:
+            下载链接（成功时）或原始路径（失败/未配置时）
+        """
+        try:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            uploader = GiteeUploader.get_instance()
+            if not uploader.is_configured():
+                return file_path
+
+            url, err = uploader.upload_file(file_path)
+            if url:
+                logger.info(f"[{self.name}] Gitee 上传成功: {url}")
+                return url
+            logger.debug(f"[{self.name}] Gitee 上传跳过: {err}")
+        except Exception as e:
+            logger.debug(f"[{self.name}] Gitee 上传异常: {e}")
+
+        return file_path
+
     @abstractmethod
     async def get_chat_info(self, chat_id: str) -> ChatInfo:
         """

@@ -547,6 +547,7 @@ class GatewayEngine(QObject, BaseEngine):
 ### 【必须遵守】
 - 所有任务必须**一次性完成**
 - 如果信息不足，使用 `websearch` 或 `webfetch` 自行搜索
+- 如果需要引用本地文件，必须使用 `upload_file` 工具上传并获取链接，然后在回答中使用markdown格式引用该链接
 - 直接输出最终结果
 - 回答要简洁、完整、可直接使用
 """

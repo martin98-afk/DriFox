@@ -202,12 +202,18 @@ class ConversationExecutor:
             self._current_worker = None
 
             if worker:
-                # 断开所有信号连接，防止已取消的 worker 继续向 UI 发送事件
-                # ⚠️ 重要：不断开 `finished` 信号（QThread.finished），
-                # AutoLoopWorker 的主循环 QEventLoop 依赖此信号退出 wait 状态。
-                # 断开它会导致 QEventLoop 永久挂起，进而触发闪退。
-                for signal_name in ("retry_status", "error_occurred", "finished_with_content",
-                                    "finished_with_messages", "content_received", "reasoning_content_received",
+                # 断开业务流信号，防止已取消的 worker 继续向 UI 发送事件
+                # ⚠️ 重要：保留以下 3 个"终结类"信号不断开：
+                #   - `finished`（QThread.finished）：AutoLoopWorker 的主循环
+                #     QEventLoop 依赖此信号退出 wait 状态。断开会导致 QEventLoop
+                #     永久挂起，进而触发闪退。
+                #   - `finished_with_content` / `finished_with_messages`：
+                #     AutoLoopConversationAdapter 通过回调订阅这两个信号来
+                #     set threading.Event，断开后 adapter.wait_for_completion
+                #     会永久阻塞，进而在 5 秒兜底清理时触发
+                #     "QThread: Destroyed while thread is still running"。
+                for signal_name in ("retry_status", "error_occurred",
+                                    "content_received", "reasoning_content_received",
                                      "tool_call_started", "tool_args_updated", "tool_result_received",
                                      "question_asked", "permission_approval_requested", "thinking_started",
                                      "retry_resolved", "compaction_status_changed"):

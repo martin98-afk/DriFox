@@ -405,11 +405,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.tool_executor:
             self.backend.set_session_context(self._current_session_id)
 
-        # 自动检查更新（启动时静默检查）
-        self._init_auto_update_check()
+        # 自动检查更新（启动时静默检查，全局仅首次窗口触发）
+        if not OpenAIChatToolWindow._global_auto_update_checked:
+            OpenAIChatToolWindow._global_auto_update_checked = True
+            self._init_auto_update_check()
+        else:
+            logger.debug("[AutoUpdate] 已检查过更新，跳过")
 
         # 注册到全局实例列表（用于多窗口事件广播）
         OpenAIChatToolWindow._instances.append(self)
+
+    # 全局标志：自动更新检查在整个应用生命周期内只触发一次
+    _global_auto_update_checked = False
 
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
@@ -1540,7 +1547,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
-        self._hook_edit_card.setFixedHeight(300)
+        self._hook_edit_card.setMinimumHeight(200)
+        self._hook_edit_card.set_height_mode('content')  # 按内容自适应高度
         self._hook_edit_popup = HookEditCard(parent=self)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
@@ -1552,7 +1560,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 服务商编辑卡片
         self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
-        self._provider_edit_card.setFixedHeight(300)
+        self._provider_edit_card.setMinimumHeight(300)
+        self._provider_edit_card.set_height_mode('content')  # 按内容自适应高度
         self._provider_edit_popup = ProviderEditCard(parent=self)
         # 默认是新建流程（ProviderEditCard 内部 is_new 默认 True）
         self._provider_edit_popup.saved.connect(
@@ -1570,7 +1579,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # MCP 编辑卡片
         self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
-        self._mcp_edit_card.setFixedHeight(350)
+        self._mcp_edit_card.setMinimumHeight(350)
+        self._mcp_edit_card.set_height_mode('content')  # 按内容自适应高度
         self._mcp_edit_popup = None
         self._mcp_edit_card.setVisible(False)
         self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
@@ -1648,7 +1658,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 历史会话卡片
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setFixedHeight(350)
+        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置历史/归档标签
         self._history_card.setup_tabs(
             [
@@ -1705,7 +1715,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 记忆管理卡片
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setFixedHeight(350)
+        self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
         self._memory_card.setup_tabs(
             [
@@ -1742,7 +1752,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
-        self._model_config_card.setFixedHeight(280)  # 初始值，set_config 时会重新计算
+        self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
+        self._model_config_card.set_height_mode('content')  # 按内容自适应高度
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
@@ -1757,7 +1768,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型选择卡片（底部卡片形式）
         self._model_selector_card = BaseSettingsCard("", "", self)
-        self._model_selector_card.setFixedHeight(350)
+        self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
         self._model_selector_card_content = ModelSelectorCardContent()
         self._model_selector_card_content.modelSelected.connect(
             self._on_model_selected_from_popup
@@ -1803,7 +1814,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 项目选择卡片（Top 卡片，与 settings 同容器）
         self._project_selector_card = BaseSettingsCard("", "", self)
-        self._project_selector_card.setFixedHeight(350)
+        self._project_selector_card.setMinimumHeight(200)  # 自适应窗口高度
         self._project_selector_card_content = ProjectSelectorCardContent()
         self._project_selector_card_content.projectSelected.connect(
             self._on_project_selected
@@ -6151,13 +6162,27 @@ class OpenAIChatToolWindow(ToolWindow):
                     insert_index += 1
 
             if role == "assistant" or role == "tool":
-                provider_name = batch[0].get("provider_name") if role == "assistant" else None
+                # 🛡️ batch[0] 可能是 tool 消息，不含 provider_name/model_name
+                # 此时需要从 batch 中的 assistant 消息提取
+                if role == "assistant":
+                    provider_name = batch[0].get("provider_name")
+                    effective_model_name = model_name
+                else:
+                    provider_name = None
+                    effective_model_name = model_name  # 可能在前面已从 assistant 消息提取
+                    for m in batch:
+                        if m.get("role") == "assistant":
+                            if m.get("provider_name"):
+                                provider_name = m["provider_name"]
+                            if not effective_model_name and m.get("model_name"):
+                                effective_model_name = m["model_name"]
+                            break
                 assistant_card = self._append_assistant_message(
                     timestamp=timestamp,
                     scroll=False,
                     insert_index=insert_index,
                     round_index=round_index,
-                    model_name=model_name if role == "assistant" else None,
+                    model_name=effective_model_name,
                     provider_name=provider_name,
                 )
                 if assistant_card:
@@ -6899,12 +6924,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 如果消息没有 provider_name，尝试从 model_name 反查唯一匹配的服务商
         if not provider_name and model_name and self._valid_configs:
             matched_display = None
-            for cid, info in self._valid_configs.items():
-                if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
-                    if matched_display is None:
-                        matched_display = info.get("display_name", info.get("provider_name", cid))
-                    else:
-                        matched_display = None  # 多于一个匹配 → 不明确，跳过
+            # 优先匹配当前选中的服务商
+            if self._current_provider_name:
+                cfg = self._valid_configs.get(self._current_provider_name, {})
+                if cfg.get("模型名称") == model_name or model_name in (cfg.get("模型列表") or []):
+                    provider_name = cfg.get("display_name", self._current_provider_name)
+            if not provider_name:
+                for cid, info in self._valid_configs.items():
+                    if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
+                        if matched_display is None:
+                            matched_display = info.get("display_name", info.get("provider_name", cid))
+                        else:
+                            matched_display = None  # 多于一个匹配 → 不明确，跳过
                         break
             if matched_display:
                 provider_name = matched_display
@@ -9497,13 +9528,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 config = self._valid_configs.get(self._current_provider_name, {})
                 current_provider_name = config.get("display_name", self._current_provider_name)
                 self._current_assistant_card.set_model_name(current_model_name, provider_name=current_provider_name)
-                # 写入 session 的最后一条 assistant 消息
+                # 🛡️ 写入 session 中所有缺少 provider_name 的 assistant 消息
+                # 之前只更新最后一条，导致同一会话中早期轮次的 assistant 消息
+                # 缺失 provider_name，重新加载会话后服务商显示丢失。
+                # 注意：只补 provider_name，不覆盖已有的 provider_name
                 session = self.session_manager.get_current_session()
-                if session and session.messages:
+                if session and session.messages and current_provider_name:
+                    for msg in session.messages:
+                        if msg.get("role") == "assistant" and msg.get("model_name"):
+                            if not msg.get("provider_name"):
+                                msg["provider_name"] = current_provider_name
+                    # 确保最后一条 assistant 消息的 model_name 是最新的
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
-                            msg["provider_name"] = current_provider_name
                             break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
@@ -10749,11 +10787,22 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
+        # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
+        current_provider_display = ""
+        if self._current_provider_name:
+            cfg = self._valid_configs.get(self._current_provider_name, {})
+            current_provider_display = cfg.get("display_name", self._current_provider_name)
         for msg in session.messages:
             if msg.get("role") != "assistant":
                 continue
             if msg.get("model_name") and not msg.get("provider_name") and self._valid_configs:
                 model = msg["model_name"]
+                # 先尝试精确匹配当前选中的服务商
+                if current_provider_display:
+                    cfg = self._valid_configs.get(self._current_provider_name, {})
+                    if cfg.get("模型名称") == model or model in (cfg.get("模型列表") or []):
+                        msg["provider_name"] = current_provider_display
+                        continue
                 matched = None
                 for cid, info in self._valid_configs.items():
                     if info.get("模型名称") == model or model in (info.get("模型列表") or []):

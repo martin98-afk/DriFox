@@ -349,7 +349,6 @@ class ProjectSelectorCardContent(QWidget):
 
         self._scroll_area.setWidget(self._content_widget)
         self._scroll_area.setMinimumHeight(40)
-        self._scroll_area.setMaximumHeight(280)
         layout.addWidget(self._scroll_area, 1)
 
     def refresh_style(self):

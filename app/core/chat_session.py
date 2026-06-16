@@ -87,7 +87,7 @@ class ChatSession:
         self.messages = consolidate_messages(self.messages)
         self._update_timestamp()
 
-    def add_assistant_message(self, content: str, model_name: str = None):
+    def add_assistant_message(self, content: str, model_name: str = None, provider_name: str = None):
         msg = {
             "role": "assistant",
             "content": content,
@@ -95,6 +95,8 @@ class ChatSession:
         }
         if model_name:
             msg["model_name"] = model_name
+        if provider_name:
+            msg["provider_name"] = provider_name
         self.messages.append(msg)
         self.messages = consolidate_messages(self.messages)
         self._update_timestamp()

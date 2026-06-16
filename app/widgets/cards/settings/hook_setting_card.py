@@ -17,8 +17,7 @@ from qfluentwidgets import (
 
 from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.utils.design_tokens import scale_font_size, Sizes, ButtonStyles, SwitchStyles
-from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel, EDIT_CARD_STYLE, _make_row
-from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
+from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel, EDIT_CARD_STYLE, _make_row, NoWheelComboBox
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
@@ -115,7 +114,7 @@ class HookEditCard(QWidget):
         main_layout.setSpacing(6)
 
         # ── 事件 ──
-        self.eventCombo = SearchableEditableComboBox()
+        self.eventCombo = NoWheelComboBox()
         self.eventCombo.addItems([
             "SessionStart", "PreUserMessage", "PostUserMessage",
             "PreAssistantMessage", "PostAssistantMessage",
@@ -125,7 +124,7 @@ class HookEditCard(QWidget):
         main_layout.addLayout(row)
 
         # ── 类型 ──
-        self.typeCombo = SearchableEditableComboBox()
+        self.typeCombo = NoWheelComboBox()
         self.typeCombo.addItems(["command", "http", "python"])
         self.typeCombo.currentTextChanged.connect(self._on_type_changed)
         row, _ = _make_row("类型:", self.typeCombo)
