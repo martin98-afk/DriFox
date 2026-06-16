@@ -1183,6 +1183,9 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(any_visible)
         if any_visible:
             self._detail_params_content.setVisible(True)
+            # 从隐藏恢复时，确保 scroll area 及其 viewport 被唤醒
+            self._detail_params_scroll.show()
+            self._detail_params_content.show()
 
         # 调整选中索引：如果当前选中的参数已被隐藏，跳到第一个可见参数
         if not any_visible:
@@ -1204,6 +1207,13 @@ class CommandCard(QWidget):
 
         # 重算高度
         self._adjust_detail_height()
+        # 强制刷新布局：当 scroll area 从隐藏变为可见时，
+        # Qt 布局不会自动重新分配空间，需显式失效并激活
+        if any_visible:
+            detail_layout = self._detail_container.layout()
+            if detail_layout:
+                detail_layout.invalidate()
+                detail_layout.activate()
         # 通知父容器布局更新
         parent = self.parentWidget()
         if parent:

@@ -4,7 +4,7 @@ type: prompt
 argument-hint:
   "[--opencode]": "抓取 OpenCode Zen/Go 的 cookie + server_id + workspace_id"
   "[--volcengine]": "抓取火山方舟的 cookie + csrf_token + x-web-id"
-  "[--timeout=N]": "自定义登录等待超时秒数（默认 300，范围 60-900）。可与平台名同时使用"
+  "[--timeout=]": "自定义登录等待超时秒数（默认 300，范围 60-900）。可与平台名同时使用"
 mutex_groups:
   mode: ["--opencode", "--volcengine"]
 ---
@@ -26,7 +26,7 @@ mutex_groups:
 
 | 标志 | 行为 |
 |------|------|
-| `--timeout=N` | 自定义登录等待超时秒数，默认 300（5 分钟），范围 60-900 |
+| `--timeout=` | 自定义登录等待超时秒数，默认 300（5 分钟），范围 60-900 |
 
 参数解析示例：
 - `/quota-setting --opencode` → target=opencode，timeout=300
