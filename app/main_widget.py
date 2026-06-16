@@ -1548,6 +1548,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
         self._hook_edit_card.setMinimumHeight(200)
+        self._hook_edit_card.set_height_mode('content')  # 按内容自适应高度
         self._hook_edit_popup = HookEditCard(parent=self)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
@@ -1560,6 +1561,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 服务商编辑卡片
         self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
         self._provider_edit_card.setMinimumHeight(300)
+        self._provider_edit_card.set_height_mode('content')  # 按内容自适应高度
         self._provider_edit_popup = ProviderEditCard(parent=self)
         # 默认是新建流程（ProviderEditCard 内部 is_new 默认 True）
         self._provider_edit_popup.saved.connect(
@@ -1578,6 +1580,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # MCP 编辑卡片
         self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
         self._mcp_edit_card.setMinimumHeight(350)
+        self._mcp_edit_card.set_height_mode('content')  # 按内容自适应高度
         self._mcp_edit_popup = None
         self._mcp_edit_card.setVisible(False)
         self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
@@ -1750,6 +1753,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
         self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
+        self._model_config_card.set_height_mode('content')  # 按内容自适应高度
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)

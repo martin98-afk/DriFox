@@ -179,7 +179,8 @@ class MCPEditCard(QWidget):
 
         # ── Headers（sse/http） ──
         self.headersEdit = QPlainTextEdit()
-        self.headersEdit.setMaximumHeight(60)
+        self.headersEdit.setMaximumHeight(100)
+        self.headersEdit.setMinimumHeight(48)
         self.headersEdit.setPlaceholderText('可选 JSON，例如: {"Authorization": "Bearer xxx"}')
         saved_headers = self._server_data.get("headers")
         if saved_headers and isinstance(saved_headers, dict):
@@ -189,7 +190,8 @@ class MCPEditCard(QWidget):
 
         # ── 环境变量（stdio） ──
         self.envEdit = QPlainTextEdit()
-        self.envEdit.setMaximumHeight(60)
+        self.envEdit.setMaximumHeight(100)
+        self.envEdit.setMinimumHeight(48)
         self.envEdit.setPlaceholderText('可选 JSON，例如: {"API_KEY": "xxx"}')
         saved_env = self._server_data.get("env")
         if saved_env and isinstance(saved_env, dict):
