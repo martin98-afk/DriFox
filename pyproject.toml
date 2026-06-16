@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.2.0"
+version = "0.2.6"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,6 +43,14 @@ dependencies = [
     "requests",
     "orjson>=3.8.0",
     "pypinyin",
+    # 桌面自动化 (pynput + mss 组合)
+    "pynput>=1.7.6",
+    "mss>=9.0.1",
+    # MCP (Model Context Protocol)
+    "mcp>=1.0.0",
+    # 插件热更新
+    "watchfiles>=1.0.0",
+    "aiohttp"
 ]
 
 # 可选依赖 - Gateway 通讯平台
