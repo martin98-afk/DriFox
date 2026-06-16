@@ -409,5 +409,14 @@ class SystemCardFrame(QFrame):
     def hide(self):
         self.setVisible(False)
 
+    def showEvent(self, event):
+        """显示时根据窗口高度动态调整卡片最大高度（70% 窗口高，最少 250px）"""
+        super().showEvent(event)
+        if self.window():
+            win_h = self.window().height()
+            if win_h > 0:
+                max_h = max(250, int(win_h * 0.7))
+                self.setMaximumHeight(max_h)
+
     def set_opacity(self, opacity: float):
         pass

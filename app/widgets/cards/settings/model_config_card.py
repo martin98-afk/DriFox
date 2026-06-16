@@ -173,7 +173,8 @@ class ModelConfigCard(QWidget):
         self._adjust_parent_height(items, groups)
 
     def _adjust_parent_height(self, items, groups):
-        """根据字段数和组数估算高度，向上找 BaseSettingsCard 并 setFixedHeight"""
+        """根据字段数和组数估算高度，向上找 BaseSettingsCard 并设置最小高度
+        最大高度由 SystemCardFrame.showEvent 根据窗口高度自适应控制"""
         field_count = len(items)
         non_empty_groups = [g for _, g in groups if g]
         group_count = len(non_empty_groups)
@@ -192,7 +193,7 @@ class ModelConfigCard(QWidget):
         parent = self.parentWidget()
         while parent:
             if isinstance(parent, BaseSettingsCard):
-                parent.setFixedHeight(int(card_height))
+                parent.setMinimumHeight(int(card_height))
                 break
             parent = parent.parentWidget()
 
