@@ -1012,6 +1012,15 @@ class FileMentionCard(QWidget):
         except RuntimeError:
             pass
 
+    def _deferred_container_expand(self):
+        """延迟一帧触父容器 _schedule_expand（等 LayoutRequest 传播完）"""
+        try:
+            parent = self.parentWidget()
+            if parent and hasattr(parent, '_schedule_expand'):
+                parent._schedule_expand()
+        except RuntimeError:
+            pass
+
     def _on_item_clicked(self):
         """item 被鼠标点击"""
         sender = self.sender()
@@ -1134,6 +1143,10 @@ class FileMentionCard(QWidget):
 
         扫描本身已异步耗时（50-200ms），完成后直接渲染，不再等 20ms 防抖。
         首次打开时还需延迟一帧让 Qt 完成布局后再应用选中状态。
+
+        ⚠️ 关键修复：容器 _do_expand 的动画可能正在约束 maximumHeight（0→ITEM_HEIGHT），
+        导致卡片 setFixedHeight(N*ITEM_HEIGHT) 后无法触发 Resize 事件（卡片已处于被约束
+        的几何尺寸）。这里触父容器的 _schedule_expand 停掉旧动画，重读 sizeHint 重新展开。
         """
         self._async_pending = False
         self._scan_files()
@@ -1141,6 +1154,17 @@ class FileMentionCard(QWidget):
         self.load_items(self._pending_query)
         self._filter_timer.stop()  # 取消防抖
         self._do_filter_and_render()  # 立即渲染
+
+        # ---- 强制容器重算布局 ----
+        # _render_incremental 已调用了 setFixedHeight(N*ITEM_HEIGHT)，
+        # 但容器动画可能仍在约束 maxHeight 在旧值（ITEM_HEIGHT），导致
+        # 卡片无法触发 Resize → 容器不会重新 _do_expand → 高度永久卡住。
+        # ⚠️ 必须延迟到下一帧：setFixedHeight 发出的 LayoutRequest 需要
+        # 通过事件循环传播到父容器布局后才能被 _do_expand→sizeHint() 读到新值。
+        parent = self.parentWidget()
+        if parent and hasattr(parent, '_schedule_expand'):
+            QTimer.singleShot(0, self._deferred_container_expand)
+
         has_items = len(self._filtered_items) > 0
         self._visible = has_items
         self.setVisible(has_items)
