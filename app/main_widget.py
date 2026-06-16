@@ -405,11 +405,23 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.tool_executor:
             self.backend.set_session_context(self._current_session_id)
 
-        # 自动检查更新（启动时静默检查）
-        self._init_auto_update_check()
+        # 自动检查更新（启动时静默检查，全局仅首次窗口触发）
+        if not OpenAIChatToolWindow._global_auto_update_checked:
+            OpenAIChatToolWindow._global_auto_update_checked = True
+            self._init_auto_update_check()
+        else:
+            logger.debug("[AutoUpdate] 已检查过更新，跳过")
 
         # 注册到全局实例列表（用于多窗口事件广播）
         OpenAIChatToolWindow._instances.append(self)
+
+    # 全局标志：自动更新检查在整个应用生命周期内只触发一次
+    _global_auto_update_checked = False
+
+    # 全局缓存：套餐用量按服务商名缓存，多个窗口共享（避免重复查询）
+    # 格式: {provider_name: (timestamp, result)}，缓存有效期 60 秒
+    _coding_plan_cache: Dict[str, tuple] = {}
+    _CODING_PLAN_CACHE_TTL = 60.0  # 秒
 
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
@@ -798,6 +810,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     if wd:
                         new_instance._memory_card_popup._instance_workdir[proj] = wd
             # ──────────────────────────────────────────────────
+
+            # 复制窗口跳过 _sync_working_directory（已在上面同步完成）
+            new_instance._skip_sync_workdir = True
 
             # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
             if hasattr(new_instance, "_refresh_project_branch_style"):
@@ -3437,11 +3452,34 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         self._coding_plan_last_ts = now
+
+        # 检查全局缓存（带 TTL），避免重复查询
+        cached_entry = OpenAIChatToolWindow._coding_plan_cache.get(provider_name)
+        if cached_entry is not None:
+            cached_ts, cached_result = cached_entry
+            if time.monotonic() - cached_ts < OpenAIChatToolWindow._CODING_PLAN_CACHE_TTL:
+                logger.debug(f"[CodingPlan] 命中缓存: provider={provider_name}")
+                self._on_coding_plan_result(cached_result)
+                return
+
         from app.core.coding_plan_fetcher import fetch_async
 
         def _on_result(result):
+            ts = time.monotonic()
+            # 缓存结果（带时间戳）
+            OpenAIChatToolWindow._coding_plan_cache[provider_name] = (ts, result)
             # 后台线程 → 通过信号桥接回主线程
             self._coding_plan_result_ready.emit(result)
+            # 如果结果有效，通知同服务商的其他窗口同步更新 UI
+            if result:
+                for inst in OpenAIChatToolWindow._instances:
+                    if inst is self or inst._is_destroyed:
+                        continue
+                    inst_provider = inst._valid_configs.get(
+                        getattr(inst, "_current_provider_name", ""), {}
+                    ).get("provider_name", "")
+                    if inst_provider == provider_name:
+                        inst._on_coding_plan_result(result)
 
         fetch_async(provider_name, config, _on_result)
 
@@ -10516,8 +10554,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """切换项目时自动加载并同步工作目录
 
         多窗口隔离：实例缓存优先；首次启动时从 DB 读取（新窗口默认值回退）。
+        复制/分支窗口不执行（源窗口已同步完整工作目录），避免 git 命令重复执行。
         """
         if getattr(self, "_is_destroyed", False):
+            return
+        if getattr(self, "_skip_sync_workdir", False):
             return
         if not self.backend or not self.backend.tool_executor:
             return

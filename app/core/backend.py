@@ -359,11 +359,19 @@ class ChatBackend(QObject):
         self._initialized = True
         logger.info("[ChatBackend] 初始化完成")
         
-        # 连接 Gateway 信号（跨线程安全）
+        # 连接 Gateway 信号（跨线程安全，每个窗口实例连接自己的回调）
         self.gateway_input_received.connect(self._on_gateway_input)
 
         # 初始化 Gateway（后台进行，不阻塞）
-        self._init_gateway_async()
+        # 使用 get_platform_manager() 判断是否已存在管理器实例，避免重复初始化
+        from app.gateway.manager import get_platform_manager
+        existing_mgr = get_platform_manager()
+        if existing_mgr is not None:
+            self._gateway_manager = existing_mgr
+            self._gateway_initialized = True
+            logger.debug("[ChatBackend] Gateway 已存在，复用管理器")
+        else:
+            self._init_gateway_async()
     
     def set_callback(self, name: str, callback: Callable):
         """设置回调（代理到 ChatEngine）"""

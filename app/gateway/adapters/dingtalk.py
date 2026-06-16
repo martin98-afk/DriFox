@@ -490,34 +490,33 @@ class DingTalkAdapter(BasePlatformAdapter):
         try:
             from pathlib import Path
             import httpx
-            
+
             image_path = str(image_path)
-            
-            # 如果是 URL，先下载
+
+            # 如果是 URL，先下载到本地缓存
+            # 副作用：image_path 会被重写为本地 UUID 文件名，
+            # 后续 text 消息的 content 用本地文件名（避免泄漏原始 URL）。
             if image_path.startswith("http"):
                 cache_dir = get_cache_dir("images")
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.get(image_path)
                     response.raise_for_status()
-                    
+
                     ext = ".jpg"
                     if "." in image_path:
                         ext = "." + image_path.rsplit(".", 1)[-1].split("?")[0]
-                    
+
                     filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
                     filepath = cache_dir / filename
                     filepath.write_bytes(response.content)
                     image_path = str(filepath)
-            
-            # 读取图片数据
-            with open(image_path, "rb") as f:
-                image_data = f.read()
-            
-            # 钉钉需要先上传媒体获取 media_id
-            # 注意：这里需要先获取 access_token
-            # 简化实现：使用文件路径作为文本发送
+
+            # TODO(dingtalk-media-upload): 真实图片发送需要先调钉钉 media API
+            # 上传文件获取 media_id，再构造 msgtype=image 的消息体。
+            # 当前实现是降级占位：直接发文本消息显示文件名。
+            # 参考文档: https://open.dingtalk.com/document/orgapp-server/upload-media-files
             payload = {
                 "msg": {
                     "msgtype": "text",
