@@ -5866,6 +5866,12 @@ class OpenAIChatToolWindow(ToolWindow):
             len(self._message_batch),
             int(cache_entry.get("visible_batch_end", len(self._message_batch))),
         )
+        # 延迟恢复所有助手卡片的差异统计（避免文件 I/O 阻塞首屏）
+        for card in alive_cards:
+            if card.role == "assistant":
+                QTimer.singleShot(
+                    0, lambda c=card: self._update_card_diff_stats(c)
+                )
         return True
 
     def _get_or_create_welcome_card(self) -> MessageCard:
@@ -6205,6 +6211,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     render_batch_to_assistant_card(assistant_card, batch)
                     # 从 batch 中恢复元信息（耗时和 token）
                     self._restore_meta_from_batch(assistant_card, batch)
+                    # 延迟恢复差异统计（避免文件 I/O 阻塞首屏渲染）
+                    QTimer.singleShot(
+                        0, lambda c=assistant_card: self._update_card_diff_stats(c)
+                    )
                 if insert_index is not None and assistant_card:
                     insert_index += 1
 
@@ -9442,6 +9452,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._scroll_to_bottom()
 
+        # 编辑类工具执行后实时更新差异统计
+        if tool_name in ("write", "edit", "multi_edit"):
+            self._update_card_diff_stats()
+
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:
         for i in range(self.chat_layout.count() - 1, -1, -1):
             item = self.chat_layout.itemAt(i)
@@ -9626,9 +9640,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新当前助手卡片差异统计
         self._update_card_diff_stats()
 
-    def _update_card_diff_stats(self):
-        """计算当前助手卡片的文件修改统计并更新到页脚"""
-        card = getattr(self, "_current_assistant_card", None)
+    def _update_card_diff_stats(self, card=None):
+        """计算助手卡片的文件修改统计并更新到页脚
+        
+        Args:
+            card: 可选，指定要更新的卡片；不传则使用 _current_assistant_card
+        """
+        if card is None:
+            card = getattr(self, "_current_assistant_card", None)
         if not card or card.role != "assistant":
             return
         session = self.session_manager.get_current_session()

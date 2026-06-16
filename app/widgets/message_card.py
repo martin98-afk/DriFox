@@ -4772,12 +4772,15 @@ class MessageCard(SimpleCardWidget):
             return
 
         accent = self._theme.get("accent", "#888888")
-        parts = [f'<span style="color:{accent};">📄{files_count}</span>']
+        html = f'<span style="color:{accent};">📄{files_count}</span>'
+
+        add_del = []
         if additions > 0:
-            parts.append('<span style="color:#2ea043;">+{}</span>'.format(additions))
+            add_del.append('<span style="color:#2ea043;">+{}</span>'.format(additions))
         if deletions > 0:
-            parts.append('<span style="color:#f85149;">-{}</span>'.format(deletions))
-        html = "&nbsp;|&nbsp;".join(parts)
+            add_del.append('<span style="color:#f85149;">-{}</span>'.format(deletions))
+        if add_del:
+            html += "&nbsp;" + "/".join(add_del)
 
         self._footer_diff_stats_label.setText(html)
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
