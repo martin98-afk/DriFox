@@ -6158,13 +6158,27 @@ class OpenAIChatToolWindow(ToolWindow):
                     insert_index += 1
 
             if role == "assistant" or role == "tool":
-                provider_name = batch[0].get("provider_name") if role == "assistant" else None
+                # 🛡️ batch[0] 可能是 tool 消息，不含 provider_name/model_name
+                # 此时需要从 batch 中的 assistant 消息提取
+                if role == "assistant":
+                    provider_name = batch[0].get("provider_name")
+                    effective_model_name = model_name
+                else:
+                    provider_name = None
+                    effective_model_name = model_name  # 可能在前面已从 assistant 消息提取
+                    for m in batch:
+                        if m.get("role") == "assistant":
+                            if m.get("provider_name"):
+                                provider_name = m["provider_name"]
+                            if not effective_model_name and m.get("model_name"):
+                                effective_model_name = m["model_name"]
+                            break
                 assistant_card = self._append_assistant_message(
                     timestamp=timestamp,
                     scroll=False,
                     insert_index=insert_index,
                     round_index=round_index,
-                    model_name=model_name if role == "assistant" else None,
+                    model_name=effective_model_name,
                     provider_name=provider_name,
                 )
                 if assistant_card:
@@ -6906,12 +6920,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 如果消息没有 provider_name，尝试从 model_name 反查唯一匹配的服务商
         if not provider_name and model_name and self._valid_configs:
             matched_display = None
-            for cid, info in self._valid_configs.items():
-                if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
-                    if matched_display is None:
-                        matched_display = info.get("display_name", info.get("provider_name", cid))
-                    else:
-                        matched_display = None  # 多于一个匹配 → 不明确，跳过
+            # 优先匹配当前选中的服务商
+            if self._current_provider_name:
+                cfg = self._valid_configs.get(self._current_provider_name, {})
+                if cfg.get("模型名称") == model_name or model_name in (cfg.get("模型列表") or []):
+                    provider_name = cfg.get("display_name", self._current_provider_name)
+            if not provider_name:
+                for cid, info in self._valid_configs.items():
+                    if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
+                        if matched_display is None:
+                            matched_display = info.get("display_name", info.get("provider_name", cid))
+                        else:
+                            matched_display = None  # 多于一个匹配 → 不明确，跳过
                         break
             if matched_display:
                 provider_name = matched_display
@@ -9504,13 +9524,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 config = self._valid_configs.get(self._current_provider_name, {})
                 current_provider_name = config.get("display_name", self._current_provider_name)
                 self._current_assistant_card.set_model_name(current_model_name, provider_name=current_provider_name)
-                # 写入 session 的最后一条 assistant 消息
+                # 🛡️ 写入 session 中所有缺少 provider_name 的 assistant 消息
+                # 之前只更新最后一条，导致同一会话中早期轮次的 assistant 消息
+                # 缺失 provider_name，重新加载会话后服务商显示丢失。
+                # 注意：只补 provider_name，不覆盖已有的 provider_name
                 session = self.session_manager.get_current_session()
-                if session and session.messages:
+                if session and session.messages and current_provider_name:
+                    for msg in session.messages:
+                        if msg.get("role") == "assistant" and msg.get("model_name"):
+                            if not msg.get("provider_name"):
+                                msg["provider_name"] = current_provider_name
+                    # 确保最后一条 assistant 消息的 model_name 是最新的
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
-                            msg["provider_name"] = current_provider_name
                             break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
@@ -10756,11 +10783,22 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
+        # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
+        current_provider_display = ""
+        if self._current_provider_name:
+            cfg = self._valid_configs.get(self._current_provider_name, {})
+            current_provider_display = cfg.get("display_name", self._current_provider_name)
         for msg in session.messages:
             if msg.get("role") != "assistant":
                 continue
             if msg.get("model_name") and not msg.get("provider_name") and self._valid_configs:
                 model = msg["model_name"]
+                # 先尝试精确匹配当前选中的服务商
+                if current_provider_display:
+                    cfg = self._valid_configs.get(self._current_provider_name, {})
+                    if cfg.get("模型名称") == model or model in (cfg.get("模型列表") or []):
+                        msg["provider_name"] = current_provider_display
+                        continue
                 matched = None
                 for cid, info in self._valid_configs.items():
                     if info.get("模型名称") == model or model in (info.get("模型列表") or []):
