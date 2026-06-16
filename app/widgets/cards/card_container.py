@@ -138,6 +138,11 @@ class CardContainer(QWidget):
             # ── 展开：snap 或动画到 layout 算出的自然高度 ──
             # 先放开 maxHeight，让 layout 算出"展开后该有多高"
             self.setMaximumHeight(self._EXPAND_MAX)
+            # 强制激活布局：修复 setUpdatesEnabled(False) 期间填充内容后，
+            # layout.sizeHint() 可能返回过期缓存值（输入框隐藏但卡片不显示，
+            # resize 窗口后恢复正常）。activate() 确保子 widget 的最新内容
+            # 被计入容器高度。
+            self._layout.activate()
             natural_h = max(
                 self._layout.sizeHint().height(),
                 self._layout.minimumSize().height(),

@@ -526,17 +526,16 @@ class DingTalkAdapter(BasePlatformAdapter):
                 }
             }
             
-            async with self._http_client as client:
-                response = await client.post(webhook, json=payload)
-                
-                if response.status_code == 200:
-                    return SendResult(success=True)
-                else:
-                    return SendResult(
-                        success=False,
-                        error=f"HTTP {response.status_code}",
-                        retryable=response.status_code >= 500
-                    )
+            response = await self._http_client.post(webhook, json=payload)
+            
+            if response.status_code == 200:
+                return SendResult(success=True)
+            else:
+                return SendResult(
+                    success=False,
+                    error=f"HTTP {response.status_code}",
+                    retryable=response.status_code >= 500
+                )
                     
         except Exception as e:
             logger.error(f"[DingTalk] Send image failed: {e}", exc_info=True)
@@ -562,13 +561,12 @@ class DingTalkAdapter(BasePlatformAdapter):
                 }
             }
             
-            async with self._http_client as client:
-                response = await client.post(webhook, json=payload)
-                
-                if response.status_code == 200:
-                    return SendResult(success=True)
-                else:
-                    return SendResult(success=False, error=f"HTTP {response.status_code}")
+            response = await self._http_client.post(webhook, json=payload)
+            
+            if response.status_code == 200:
+                return SendResult(success=True)
+            else:
+                return SendResult(success=False, error=f"HTTP {response.status_code}")
                     
         except Exception as e:
             logger.error(f"[DingTalk] Send file failed: {e}", exc_info=True)

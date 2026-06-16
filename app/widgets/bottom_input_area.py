@@ -526,6 +526,8 @@ class SendableTextEdit(TextEdit):
     def _on_parameter_selected(self, param_name: str, param_type: str):
         """参数项被选中（来自 CommandCard.parameterSelected）"""
         self.insert_parameter_text(param_name, param_type)
+        # 插入文本后显式同步参数显隐，确保互斥规则立即生效
+        self._sync_detail_params()
 
     def _on_param_value_selected(self, value: str):
         """值选择完成（来自 CommandCard.parameterValueSelected）
@@ -554,6 +556,8 @@ class SendableTextEdit(TextEdit):
         cursor.insertText(" ")
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
+        # 值插入后同步参数显隐（如 --model= 选择完成后）
+        self._sync_detail_params()
 
     def _find_partial_param(self, text: str, param_name: str, cursor_pos: int = None):
         """在输入文本中查找参数名的部分匹配（优先光标附近）
@@ -623,6 +627,8 @@ class SendableTextEdit(TextEdit):
                 cursor.insertText(f"{param_name}")
             self.setTextCursor(cursor)
             self.setFocus(Qt.OtherFocusReason)
+            # 参数插入后立即同步卡片显隐（含互斥逻辑）
+            self._sync_detail_params()
             return
 
         # 无部分匹配 → 在光标处追加
@@ -641,6 +647,8 @@ class SendableTextEdit(TextEdit):
             cursor.insertText(f"{prefix}{param_name}")
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
+        # 参数插入后立即同步卡片显隐（含互斥逻辑）
+        self._sync_detail_params()
 
     def _sync_detail_params(self):
         """同步 detail 模式的参数显隐：从输入文本提取已存在参数 → 更新卡片

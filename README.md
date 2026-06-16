@@ -8,7 +8,7 @@
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/github/license/martin98-afk/DriFox)
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
@@ -42,11 +42,12 @@
 | 🖼️ **图片渲染** | Markdown 图片、HTML `<img>` 标签原生渲染，本地图片自动解析为绝对路径 |
 | 🔗 **SubAgent DAG** | 有向无环图编排子智能体，自动拓扑排序，并行执行无依赖节点，实时可视化 |
 | 🤖 **多智能体并行** | 20+ 子智能体同时执行，独立 LLM 循环+工具环境，实时状态监控 |
+| 📎 **Gitee 图床** | 本地文件自动上传至 Gitee 仓库返回公开链接，Gateway 消息图片直发 |
 | 🧩 **插件系统** | 革命性插件架构，33+ 即装即用插件，颠覆原有系统能力边界 |
 | 🔌 **Hook 系统** | 可扩展的事件钩子系统，支持在特定事件触发自定义脚本 |
 | 🌐 **MCP 系统** | Model Context Protocol 支持，连接任意 MCP Server 扩展工具能力 |
 | 🧩 **Skill 系统** | 支持自动检测系统 Agent、Skill 模块，自带有 20+ 常用技能 |
-| 🛠️ **代码工具** | 35+ 工具：读、写、搜索、执行、diff、ECharts 图表等 |
+| 🛠️ **代码工具** | 35+ 工具：读、写、搜索、执行、diff、ECharts 图表、Gitee 上传等 |
 | 🔌 **多模型** | OpenAI / Claude / DeepSeek / MiniMax / 通义 等随时切换 |
 | 🛡️ **穿透模式** | 悬浮窗口可穿透点击，不阻断其他应用 |
 | 🚀 **自动更新** | 自动检查新版本，随时保持更新 |
@@ -56,23 +57,32 @@
 ## 快速开始
 
 ### 环境要求
-- Python 3.8+
+- Python 3.10+
 - PyQt5 >= 5.15.0
 
-### 安装
+### 安装（推荐 uv）
 
 ```bash
 git clone https://github.com/martin98-afk/DriFox.git
 cd DriFox
 
-# 创建虚拟环境
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-.venv\Scripts\activate     # Windows
+# 安装 uv（如果尚未安装）
+pip install uv  # 或参考 https://docs.astral.sh/uv/#installation
 
-# 安装依赖
-pip install -r requirements.txt
+# 创建虚拟环境并安装核心依赖
+uv sync
+
+# 如需安装可选组件，选择以下之一：
+uv sync --group gateway   # 通讯平台（钉钉/Telegram/Discord/飞书/Slack）
+uv sync --group dev       # 开发工具（pytest/ruff/mypy/pyinstaller）
+uv sync --all-groups      # 全部安装
 ```
+
+> **可选依赖组说明**：
+> - `gateway` — 多平台通讯适配（钉钉、Telegram、Discord、Slack、飞书）
+> - `dev` — 开发与构建工具
+>
+> 不指定组则只装核心依赖，功能不受影响。
 
 ### 运行
 
@@ -669,7 +679,7 @@ permission:
 
 | 类别 | 工具 |
 |------|------|
-| **文件** | read, write, edit, multi_edit, patch, grep, glob, list, diff |
+| **文件** | read, write, edit, multi_edit, patch, grep, glob, list, diff, upload_file |
 | **执行** | bash, bg_start, bg_stop, bg_logs, bg_list |
 | **网络** | webfetch, websearch |
 | **代码** | get_diagnostics |
@@ -810,21 +820,35 @@ DriFox/
 │   ├── side_dock_area.py         # 浮动窗口管理
 │   ├── core/                     # 核心引擎
 │   │   ├── plugin_manager.py     # 插件系统（单例，发现/热插拔/MCP合并）
-│   │   ├── chat_engine.py        # 对话引擎
+│   │   ├── backend.py            # 后端初始化 + 插件热更新
 │   │   ├── context_builder.py    # 上下文构建
 │   │   ├── history_compactor.py  # 上下文压缩
 │   │   ├── hook_manager.py       # 事件钩子系统
-│   │   ├── agent_manager.py      # Agent 管理
-│   │   ├── memory_manager.py     # 长期记忆
 │   │   ├── command_manager.py    # 命令系统
-│   │   ├── backend.py            # 后端初始化/热更新引擎
+│   │   ├── memory_manager.py     # 长期记忆
+│   │   ├── agent.py              # Agent 定义与管理
+│   │   ├── chat_session.py       # 会话管理
+│   │   ├── tool_executor.py      # 工具执行引擎
+│   │   ├── message_content.py    # 消息内容格式化
+│   │   ├── model_capabilities.py # 模型能力配置
+│   │   ├── token_estimator.py    # Token 估算
+│   │   ├── tool_call_parser.py   # 工具调用解析
+│   │   ├── tool_result_persister.py # 工具结果持久化
+│   │   ├── webengine_profile.py  # WebEngine 配置
+│   │   ├── coding_plan_fetcher.py # 套餐用量查询
+│   │   ├── project_notes_manager.py # 项目笔记管理
+│   │   ├── single_instance.py    # 单实例守护
+│   │   ├── builtin_commands.py   # 内置命令
+│   │   ├── chat_engine/          # 对话引擎子包
+│   │   ├── conversation/         # 会话领域子包
+│   │   ├── store/                # 存储层子包
 │   │   └── workers/              # 后台工作线程
 │   │       ├── subagent_worker.py # 子智能体 + DAG 执行引擎
 │   │       └── chat_worker.py    # 对话工作线程
-│   ├── tools/                    # 工具实现（35+ 工具）
-│   │   ├── file_tools.py
-│   │   ├── terminal_tools.py
-│   │   ├── web_tools.py
+│   ├── tools/                    # 工具实现
+│   │   ├── file_tools.py         # 文件工具（含 gitee_upload）
+│   │   ├── terminal_tools.py     # 终端执行工具
+│   │   ├── web_tools.py          # 网络工具
 │   │   ├── task_tools.py         # subagent_para/dag/status
 │   │   ├── mcp_tools.py          # MCP 工具适配
 │   │   └── result.py             # ToolResult 数据类
@@ -835,6 +859,10 @@ DriFox/
 │   │   ├── coding_plan_ring.py   # 套餐用量环图
 │   │   ├── cards/floating/       # 悬浮 UI 组件
 │   │   └── cards/settings/       # 设置面板卡片
+│   ├── gateway/                  # 消息网关
+│   │   └── utils/
+│   │       ├── gitee_uploader.py # Gitee 图床上传
+│   │       └── ...               # 平台适配器
 │   └── utils/                    # 工具模块
 │       ├── diff_viewer.py        # 差异对比查看器
 │       ├── git_worktree.py       # Git Worktree 管理
@@ -867,10 +895,19 @@ DriFox/
 | watchfiles | 插件目录热更新监听 |
 | markdown + Pygments | Markdown → HTML + 代码高亮 |
 | orjson | 高性能 JSON 序列化 |
+| uv | Python 包管理与项目构建 |
+| httpx | 异步 HTTP 客户端 |
+| fastapi + uvicorn | 本地 HTTP 服务 |
+| mcp | Model Context Protocol |
 
 ---
 
 ## 更新日志
+
+### v0.2.6 (2026-06-16)
+- 📎 **Gitee 图床上传工具**：本地文件自动上传至 Gitee 仓库返回公开下载链接，Gateway 消息中的图片/文件自动经 Gitee 上传后发送
+- 🔧 修复 Gateway 适配器转义字符处理和 HTTP 客户端用法
+- 🔧 优化消息卡片样式和附件重置行为
 
 ### v0.2.5 (2026-06-07)
 - 🧩 **项目选择器**：优化界面结构，支持显示根目录和异步归档扫描

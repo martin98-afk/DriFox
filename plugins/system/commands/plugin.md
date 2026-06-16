@@ -8,6 +8,8 @@ argument-hint:
   "[--enable=]": "启用已禁用的插件"
   "[--disable=]": "禁用已启用的插件"
   "[--marketplace=]": "添加第三方插件市场，如 --marketplace=owner/repo"
+mutex_groups:
+  mode: ["--list", "--install=", "--uninstall=", "--enable=", "--disable=", "--marketplace="]
 ---
 
 # /plugin 命令 — 插件管理器

@@ -534,7 +534,7 @@ class GatewayEngine(QObject, BaseEngine):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
-        gateway_constraints = """
+        gateway_constraints = r"""
 ## Gateway 模式约束
 你正在通过 Gateway 对外提供 AI 服务（当前平台可能为钉钉/企业微信等）。
 以下是必须遵守的规则：
@@ -544,10 +544,18 @@ class GatewayEngine(QObject, BaseEngine):
 - ❌ **禁止** 使用 `subagent_para` 和 `subagent_status` 工具
 - ❌ **禁止** 使用 `todowrite` 工具
 
-### 【必须遵守】
+### 【文件引用规则 — 硬性强制】
+- **禁止** 在任何回答中直接引用本地文件路径（如 `C:\xxx`、`/home/xxx`、`D:/work/xxx` 等）
+- **必须** 先调用 `upload_file` 工具将文件上传为公开链接，然后在回答中使用 Markdown 格式引用该链接：
+  - 图片 → `![描述](链接)`
+  - 其他文件 → `📎 [文件名](链接)`
+- ❌ 错误示例：`"查看文件 /tmp/report.pdf"` → **禁止**
+- ✅ 正确示例：`"查看报告 📎 [report.pdf](https://gitee.com/...)"` → **必须这样**
+- 此规则适用于所有文件类型（图片、PDF、文档、日志、代码文件等）
+
+### 【其他必须遵守】
 - 所有任务必须**一次性完成**
 - 如果信息不足，使用 `websearch` 或 `webfetch` 自行搜索
-- 如果需要引用本地文件，必须使用 `upload_file` 工具上传并获取链接，然后在回答中使用markdown格式引用该链接
 - 直接输出最终结果
 - 回答要简洁、完整、可直接使用
 """

@@ -8,6 +8,8 @@ argument-hint:
   "[--html]": "HTML 报告模式：输出为带统一样式的 HTML 报告（配合 --save-to 使用）"
   "[--save-to=]": "指定报告输出路径（默认 docs/research/research_<topic>_<ts>.md，--html 时扩展名为 .html）"
   "<query>": "研究主题（必填，搜索关键词或自然语言问题）"
+mutex_groups:
+  mode: ["--quick", "--thorough", "--deep"]
 ---
 
 ## ⚙️ 行为规范（LLM 提示词正文）

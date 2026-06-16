@@ -43,6 +43,7 @@ class CommandParameter:
     param_type: str = "flag" # "flag" | "value" | "positional"
     required: bool = False   # 是否必填（选填参数在 UI 上显示为灰色/标记）
     value_options: list = field(default_factory=list)  # value 类型的可选值列表（硬编码）
+    mutex_group: str = ""    # 互斥组名，同组参数只能选其一（空字符串表示不参与互斥）
 
 
 class CommandType(Enum):
@@ -243,6 +244,10 @@ class CommandManager:
         - --key=value → "--key="
         - --flag      → "--flag"
 
+        使用 (?<!\S) 和 (?!\S) 作为词边界，比 \s 更可靠：
+        - 不会把 --quick--thorough 拆成两个（无空格粘连的情况）
+        - 正确处理字符串开头/结尾的 flag 参数
+
         Args:
             text: 输入框文本
 
@@ -258,8 +263,8 @@ class CommandManager:
         for m in re.finditer(r'--[\w-]+=', text):
             result.add(m.group())
 
-        # 2. 独立 --flag 形式的参数（前后是空白/字符串边界，且不跟 =）
-        for m in re.finditer(r'(?:^|\s)(--[\w-]+)(?=\s|$)', text):
+        # 2. 独立 --flag 形式的参数（用负向断言代替 ^|\s 和 \s|$，更健壮）
+        for m in re.finditer(r'(?<!\S)(--[\w-]+)(?!\S)', text):
             flag = m.group(1)
             if flag + "=" not in result:  # 排除已被 --key= 覆盖的
                 result.add(flag)
