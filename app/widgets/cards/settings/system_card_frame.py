@@ -409,14 +409,33 @@ class SystemCardFrame(QFrame):
     def hide(self):
         self.setVisible(False)
 
+    def sizeHint(self):
+        """根据窗口高度报告自适应卡片高度（55% 窗口高，不低于 minimumHeight）
+
+        CardContainer._do_expand() 会读取此值进行展开动画。
+        """
+        from PyQt5.QtCore import QSize
+        base = super().sizeHint()
+        win = self.window()
+        if win and win.height() > 0:
+            target_h = max(self.minimumHeight(), int(win.height() * 0.55))
+            return QSize(max(base.width(), 200), target_h)
+        return base
+
     def showEvent(self, event):
-        """显示时根据窗口高度动态调整卡片最大高度（70% 窗口高，最少 250px）"""
+        """显示时安装窗口 resize 事件过滤器，窗口缩放时通知容器重新展开"""
         super().showEvent(event)
-        if self.window():
-            win_h = self.window().height()
-            if win_h > 0:
-                max_h = max(250, int(win_h * 0.7))
-                self.setMaximumHeight(max_h)
+        win = self.window()
+        if win:
+            win.installEventFilter(self)
+            self.updateGeometry()
+
+    def eventFilter(self, obj, event):
+        """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
+        from PyQt5.QtCore import QEvent
+        if obj is self.window() and event.type() == QEvent.Resize:
+            self.updateGeometry()
+        return super().eventFilter(obj, event)
 
     def set_opacity(self, opacity: float):
         pass

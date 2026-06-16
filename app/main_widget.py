@@ -1559,7 +1559,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 服务商编辑卡片
         self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
-        self._provider_edit_card.setMinimumHeight(200)
+        self._provider_edit_card.setMinimumHeight(300)
         self._provider_edit_popup = ProviderEditCard(parent=self)
         # 默认是新建流程（ProviderEditCard 内部 is_new 默认 True）
         self._provider_edit_popup.saved.connect(
@@ -1577,7 +1577,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # MCP 编辑卡片
         self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
-        self._mcp_edit_card.setMinimumHeight(250)
+        self._mcp_edit_card.setMinimumHeight(350)
         self._mcp_edit_popup = None
         self._mcp_edit_card.setVisible(False)
         self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
@@ -1655,7 +1655,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 历史会话卡片
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setFixedHeight(350)
+        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置历史/归档标签
         self._history_card.setup_tabs(
             [
@@ -1712,7 +1712,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 记忆管理卡片
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setFixedHeight(350)
+        self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
         self._memory_card.setup_tabs(
             [
@@ -1749,7 +1749,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
-        self._model_config_card.setFixedHeight(280)  # 初始值，set_config 时会重新计算
+        self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
         self._model_config_card.content_layout.addWidget(self._model_config_popup)
@@ -1764,7 +1764,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 模型选择卡片（底部卡片形式）
         self._model_selector_card = BaseSettingsCard("", "", self)
-        self._model_selector_card.setFixedHeight(350)
+        self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
         self._model_selector_card_content = ModelSelectorCardContent()
         self._model_selector_card_content.modelSelected.connect(
             self._on_model_selected_from_popup
@@ -1810,7 +1810,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 项目选择卡片（Top 卡片，与 settings 同容器）
         self._project_selector_card = BaseSettingsCard("", "", self)
-        self._project_selector_card.setFixedHeight(350)
+        self._project_selector_card.setMinimumHeight(200)  # 自适应窗口高度
         self._project_selector_card_content = ProjectSelectorCardContent()
         self._project_selector_card_content.projectSelected.connect(
             self._on_project_selected
