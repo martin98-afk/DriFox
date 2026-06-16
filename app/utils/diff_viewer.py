@@ -440,6 +440,18 @@ THEME_CSS = r"""
     ::-webkit-scrollbar-track { background:transparent; }
     ::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:3px; }
     ::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.22); }
+
+    /* ---- Initial loading pulse ---- */
+    .diff-scroll:empty::after {
+        content: '加载差异中...';
+        display:flex; align-items:center; justify-content:center;
+        height:200px; color:var(--text2); font-size:13px;
+        animation:pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+        0%,100% { opacity:0.3; } 50% { opacity:0.8; }
+    }
+    .file-block[data-placeholder] { min-height:40px; }
 </style>
 """
 
@@ -472,18 +484,21 @@ class DiffHtmlGenerator:
 
         tree_html = ""
         blocks_html = ""
-        preload_n = 3 if lazy_load and total_files > 3 else total_files
-        files_json = cls._gen_files_json(files)
+        preload_n = 1 if lazy_load and total_files > 1 else total_files
+        files_meta = cls._gen_files_meta(files)
 
         for i, fi in enumerate(files):
             fid = f"file-{i}"
             tree_html += cls._tree_item(fi, fid)
+            # 将每文件的 lines 单独序列化，避免一个巨大 JSON 导致解析卡死
+            lines_json = json.dumps(fi["lines"]).decode("utf-8")
             if i < preload_n:
                 blocks_html += cls._file_block(fi, fid)
+                blocks_html += f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
             elif lazy_load:
                 blocks_html += (
-                    f'<div class="file-block" id="{fid}" '
-                    f'data-placeholder="true"></div>'
+                    f'<div class="file-block" id="{fid}" data-placeholder="true"></div>'
+                    f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
                 )
 
         if not files:
@@ -523,7 +538,7 @@ class DiffHtmlGenerator:
 </div>
 </div>
 <script>
-window._df={files_json};window._lf=new Set({list(range(preload_n))});
+window._dm={files_meta};window._lf=new Set({list(range(preload_n))});
 window._pc={preload_n};window._cv={dv};window._ae=false;
 
 function esc(s){{var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}}
@@ -609,9 +624,8 @@ function genRows(ls){{
                 sh+=sPair('add','',addNums[k],'',esc(addLines[k]),'added');
             }}
         }}else if(ln.indexOf('+')===0&&ln.indexOf('+++')!==0){{
-            // Standalone added
-            var cl=ac>1?'add-e':'add-e';
-            uh+=uRow('add-e','',nln,'+',esc(ln.substring(1)),'added');
+            // Standalone added (no preceding delete block) — no border
+            uh+=uRow('add-m','',nln,'+',esc(ln.substring(1)),'added');
             sh+=sPair('add','',nln,'',esc(ln.substring(1)),'added');
             nln++;i++;
         }}else if(ln.indexOf(' ')==0){{
@@ -628,16 +642,16 @@ function genRows(ls){{
     return{{u:uh,s:sh}};
 }}
 
-function genBlock(fi){{
+function genBlock(fi,lines){{
     var as=fi.additions>0?'<span class="fh-add">+'+fi.additions+'</span>':'';
     var ds=fi.deletions>0?'<span class="fh-del">-'+fi.deletions+'</span>':'';
-        var ep=encodeURIComponent(fi.path);
+    var ep=encodeURIComponent(fi.path);
     var h='<div class="file-hdr">'+
         '<span class="fh-icon">'+fi.icon+'</span>'+
         '<a class="fh-path" href="drifox://open-file?path='+ep+'" title="点击打开">'+esc(fi.path)+'</a>'+
         as+ds+
         '<button class="fh-open" data-path="'+ep+'" onclick="openFile(decodeURIComponent(this.dataset.path))">打开</button></div>';
-    var r=genRows(fi.lines);
+    var r=genRows(lines);
     return h+'<div class="diff-unified" data-view="unified" style="display:none">'+r.u+'</div>'+
         '<div class="diff-split" data-view="split">'+r.s+'</div>';
 }}
@@ -646,9 +660,16 @@ function genBlock(fi){{
 function loadFile(id,idx){{
     if(window._lf.has(idx))return;
     window._lf.add(idx);
-    var fi=window._df[idx];if(!fi)return;
+    var fi=window._dm[idx];if(!fi)return;
     var el=document.getElementById(id);
-    if(el){{el.innerHTML=genBlock(fi);el.removeAttribute('data-placeholder');applyFold(el);applyView(el);if(window._do)window._do.observe(el);}}
+    if(el){{
+        var ld=document.getElementById('ld-'+id);
+        var lines=ld?JSON.parse(ld.textContent):[];
+        el.innerHTML=genBlock(fi,lines);
+        el.removeAttribute('data-placeholder');
+        applyFold(el);applyView(el);
+        if(window._do)window._do.observe(el);
+    }}
 }}
 
 function applyView(c){{
@@ -954,9 +975,8 @@ requestAnimationFrame(function(){{
                              f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{cls.escape_html(add_texts[k])}</span></div></div>')
 
             elif ln.startswith("+") and not ln.startswith("+++"):
-                # 孤立新增（前面没有删除行）
-                cl = "add-e"
-                u.append(f'<div class="du-row {cl}" data-type="added">'
+                # 孤立新增（前面没有删除行）— 无底部边框
+                u.append(f'<div class="du-row add-m" data-type="added">'
                          f'<span class="du-num"></span><span class="du-num">{nln}</span>'
                          f'<span class="du-sign">+</span><span class="du-code">{cls.escape_html(ln[1:])}</span></div>')
                 s.append(f'<div class="ds-pair add" data-type="added">'
@@ -1006,15 +1026,15 @@ requestAnimationFrame(function(){{
                 n_p.append(f'<span class="w-add">{cls.escape_html(new_text[j1:j2])}</span>')
         return "".join(o_p), "".join(n_p)
 
-    # ---- Files JSON ----
+    # ---- Files metadata (no lines, for lightweight initial load) ----
     @classmethod
-    def _gen_files_json(cls, files: List[Dict]) -> str:
+    def _gen_files_meta(cls, files: List[Dict]) -> str:
         data = []
         for i, fi in enumerate(files):
             data.append({"id": f"file-{i}", "path": fi["path"],
                          "icon": cls._icon(fi["path"]),
                          "additions": fi["additions"], "deletions": fi["deletions"],
-                         "status": fi.get("status", "modified"), "lines": fi["lines"]})
+                         "status": fi.get("status", "modified")})
         r = json.dumps(data).decode("utf-8")
         return r.replace("</", "\\u003C/")
 
@@ -1218,7 +1238,7 @@ class DiffViewerWindow:
     def _on_closed(self):
         page = self._webview.page()
         if page:
-            try: page.runJavaScript("delete window._df;delete window._lf;")
+            try: page.runJavaScript("delete window._dm;delete window._lf;")
             except Exception: pass
         try: self._webview.setHtml("")
         except Exception: pass
@@ -1235,7 +1255,7 @@ class DiffViewerWindow:
     def close(self):
         page = self._webview.page()
         if page:
-            try: page.runJavaScript("delete window._df;delete window._lf;")
+            try: page.runJavaScript("delete window._dm;delete window._lf;")
             except Exception: pass
         self._webview.setHtml(""); self._current_html = None; self._window.close()
 

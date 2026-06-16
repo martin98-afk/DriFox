@@ -195,6 +195,15 @@ class ProjectItem(QWidget):
         layout.setContentsMargins(10, 0, 4, 0)
         layout.setSpacing(6)
 
+        # 当前项目指示（放在最前，icon 之前）
+        if self._is_current:
+            self._check_label = QLabel("✓", self)
+            self._check_label.setStyleSheet(
+                f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;"
+            )
+            self._check_label.setAlignment(Qt.AlignVCenter)
+            layout.addWidget(self._check_label)
+
         # 项目彩色方形标识（缩写字母 + 项目专属色）
         # 使用 QPainter 绘制的 _SquareAvatar，flat design 风格
         initials = extract_project_initials(self._name)
@@ -230,15 +239,6 @@ class ProjectItem(QWidget):
         )
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
-
-        # 当前项目指示
-        if self._is_current:
-            check_label = QLabel("✓", self)
-            check_label.setStyleSheet(
-                f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;"
-            )
-            check_label.setAlignment(Qt.AlignVCenter)
-            layout.addWidget(check_label)
 
         # 归档按钮（默认隐藏）
         self._archive_btn = TransparentToolButton(get_icon("归档"), self)
