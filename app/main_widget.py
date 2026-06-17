@@ -9296,12 +9296,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"[ChatEngine] Saved {len(interrupted_msgs)} interrupted messages"
                 )
 
-            # 5. 重置状态并发送回调消息
+            # 5. 重置状态
             self._toggle_send_stop(False)
-        else:
-            # 非流式场景（如 /compact 手动命令）：没有活跃的流式对话
-            # 此时不中断任何东西，但需要准备 UI 以接收回调产生的流式响应
-            self._prepare_ui_for_callback_message(callback_text)
+
+        # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
+        # 🔧 修复：流式路径之前缺失此步骤，导致 _current_assistant_card 仍指向旧卡片，
+        # 后续流式输出写入旧卡片而非新卡片
+        self._prepare_ui_for_callback_message(callback_text)
 
         # 发送回调消息到引擎（非流式场景下 UI 已在 _prepare_ui_for_callback_message 中准备好）
         if not self.backend.send_message_to_engine(callback_text):
@@ -9309,20 +9310,19 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(
                 "[ChatEngine] Sub-agent callback: send_message_to_engine failed, rolling back UI"
             )
-            if not is_currently_streaming:
-                self._is_streaming = False
-                self._toggle_send_stop(False)
-                if self._current_assistant_card:
-                    self._current_assistant_card.deleteLater()
-                    self._current_assistant_card = None
+            self._is_streaming = False
+            self._toggle_send_stop(False)
+            if self._current_assistant_card:
+                self._current_assistant_card.deleteLater()
+                self._current_assistant_card = None
         else:
             # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
-            if not is_currently_streaming:
-                self._sync_batch_structures()
-                self._fix_new_card_message_index(user_text=callback_text)
-                self._visible_batch_end = len(self._message_batch)
-                # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
-                self._sync_node_preview_to_last()
+            # 🔧 修复：移除 `if not is_currently_streaming` 条件，无论流式/非流式路径都需同步
+            self._sync_batch_structures()
+            self._fix_new_card_message_index(user_text=callback_text)
+            self._visible_batch_end = len(self._message_batch)
+            # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
+            self._sync_node_preview_to_last()
 
     def _prepare_ui_for_callback_message(self, callback_text: str):
         """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
