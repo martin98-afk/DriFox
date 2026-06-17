@@ -381,8 +381,21 @@ class UIEngine(BaseEngine):
         # 直接构建消息
         messages = self._build_messages(session, llm_config)
 
+        # 获取工具 schema（与实际 API 请求一致），计入上下文占用
+        if self._current_agent:
+            available_tools = self._get_agent_manager().get_agent_tools_schema(
+                self._current_agent
+            )
+        else:
+            available_tools = get_builtin_tools_schema(
+                self._get_agent_manager(),
+                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+            )
+        # 获取当前模型名用于 token 编码选择
+        model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
+
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
-        used_tokens = count_messages_tokens(messages)
+        used_tokens = count_messages_tokens(messages, model=model, tools=available_tools)
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 
         # 计算普通上下文和压缩上下文的 token 分解

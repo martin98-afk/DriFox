@@ -45,6 +45,32 @@ ENCODING_MAPPING = {
     "default": "cl100k_base",
 }
 
+# 模型 token 校正系数 — cl100k_base 编码器与实际模型 tokenizer 之间的补偿
+# 系数 = 实际 API token / cl100k_base 估算值
+# DeepSeek/Claude/Qwen/GLM 的中文分词效率与 OpenAI 不同，需要乘以校正系数
+_MODEL_TOKEN_RATIOS: Dict[str, float] = {
+    "deepseek": 1.05,   # DeepSeek tokenizer 对中文/代码比 cl100k_base 略多 5%
+    "claude": 1.08,     # Anthropic tokenizer 差异更大
+    "minimax": 1.04,    # MiniMax 近似 OpenAI
+    "qwen": 1.07,       # 通义千问对中文更费 token
+    "glm": 1.06,        # 智谱 tokenizer
+    "kimi": 1.04,       # Moonshot 近似
+    "gemini": 1.03,     # Google tokenizer 较高效
+    "gpt-4": 1.00,      # OpenAI 原生，无需校正
+    "gpt-3.5": 1.00,
+    "gpt-3": 1.00,
+    "default": 1.00,    # 未知模型不校正
+}
+
+
+def _get_model_token_ratio(model: str) -> float:
+    """获取模型 token 校正系数"""
+    model_lower = model.lower()
+    for key, ratio in _MODEL_TOKEN_RATIOS.items():
+        if key in model_lower:
+            return ratio
+    return _MODEL_TOKEN_RATIOS["default"]
+
 
 def _get_encoding_name(model: str = "gpt-4") -> str:
     """根据模型名称获取编码名称"""
@@ -197,6 +223,11 @@ def count_messages_tokens(
                     # 图片 token 估算 (简化版)
                     total += 85  # 图片基准开销
         
+        # reasoning_content 处理 (DeepSeek V4 / GLM-5 thinking mode)
+        reasoning = msg.get("reasoning_content")
+        if reasoning and isinstance(reasoning, str):
+            total += estimate_tokens(reasoning, model)
+        
         # tool_calls 处理
         tool_calls = msg.get("tool_calls")
         if tool_calls and isinstance(tool_calls, list):
@@ -220,6 +251,9 @@ def count_messages_tokens(
     # 工具定义 tokens
     if tools:
         total += count_tools_tokens(tools, model)
+    
+    # 模型 tokenizer 校正系数（cl100k_base → 实际模型编码补偿）
+    total = int(total * _get_model_token_ratio(model))
     
     # 确保返回值非负（防御性编程）
     return max(0, total)
