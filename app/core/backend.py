@@ -1195,10 +1195,10 @@ class ChatBackend(QObject):
         if self._chat_engine:
             self._chat_engine.provide_question_answer(answer)
     
-    def send_message_to_engine(self, text: str) -> bool:
-        """发送消息到引擎"""
+    def send_message_to_engine(self, text: str, **kwargs) -> bool:
+        """发送消息到引擎，支持 _user_content（multimodal list）"""
         if self._chat_engine:
-            return self._chat_engine.send_message(text)
+            return self._chat_engine.send_message(text, **kwargs)
         return False
     
     # ========== ToolExecutor 代理方法 ==========

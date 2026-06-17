@@ -938,6 +938,10 @@ class OpenAIChatWorker(QThread):
                 current_session_messages.extend(response_sequence)
                 self._current_session_messages = list(current_session_messages)
 
+                # ========== 视觉模型注入：截图 → base64 图片 ==========
+                self._try_inject_vision_content(tool_results, current_messages)
+                # =====================================================
+
                 # [MEM] 消息构建后
                 self._mem_snapshot("after_build_msg",
                     msg_count=len(current_messages),
@@ -1240,6 +1244,97 @@ class OpenAIChatWorker(QThread):
             return
         self._last_compaction_state = normalized
         self._emit_with_callback("compaction_status_changed", self.compaction_status_changed, dict(normalized))
+
+    # ========== 视觉模型图片注入 ==========
+
+    def _try_inject_vision_content(self, tool_results, current_messages):
+        """
+        截图工具结果在视觉模型 → 将截图以 base64 图片块注入到最后一个用户消息。
+
+        触发条件：
+        1. 本轮工具执行结果中有成功的 screenshot 工具
+        2. 当前模型支持视觉（supports_vision=True）
+
+        注入方式：
+        在最后一条 user 消息的 content 中追加 image_url 块（multimodal list 格式）。
+        这样 LLM 在下一轮 API 调用时就能看到图片内容。
+        """
+        if not tool_results or not current_messages:
+            return
+
+        # 检查是否有成功的截图工具结果
+        screenshot_info = None
+        for r in tool_results:
+            if isinstance(r, dict) and r.get("name") == "screenshot" and r.get("success"):
+                content = r.get("content", "")
+                if isinstance(content, dict):
+                    screenshot_info = content.get("absolute_path") or content.get("path")
+                elif isinstance(content, str):
+                    # 从文本中提取路径
+                    m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
+                    if m:
+                        screenshot_info = m.group(1)
+                if screenshot_info:
+                    break
+
+        if not screenshot_info:
+            return
+
+        # 检查模型是否支持视觉
+        model_name = str(self.llm_config.get("模型名称", "") or "")
+        caps = get_model_capabilities(model_name)
+        if not caps.get("supports_vision"):
+            logger.debug(f"[Vision] Model {model_name} does not support vision, skipping image injection")
+            return
+
+        # 验证文件存在
+        abs_path = screenshot_info
+        if not os.path.isfile(abs_path):
+            logger.warning(f"[Vision] Screenshot file not found: {abs_path}")
+            return
+
+        # 读文件 → base64
+        import base64
+        try:
+            with open(abs_path, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+
+            ext = os.path.splitext(abs_path)[1].lower()
+            mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+            mime = mime_map.get(ext, "image/png")
+            data_uri = f"data:{mime};base64,{img_data}"
+
+            # 找到最后一个 user 消息，注入 image_url 块
+            for i in range(len(current_messages) - 1, -1, -1):
+                msg = current_messages[i]
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        # 纯文本 → 转为 multimodal list
+                        msg["content"] = [
+                            {"type": "text", "text": content},
+                            {"type": "image_url", "image_url": {"url": data_uri}},
+                        ]
+                    elif isinstance(content, list):
+                        # 已有 multimodal list → 追加图片块
+                        content.append(
+                            {"type": "image_url", "image_url": {"url": data_uri}}
+                        )
+                    logger.info(f"[Vision] Injected screenshot ({len(img_data)} bytes base64) into user message for {model_name}")
+                    # 重建 API 缓存：current_messages 已被修改（含 image_url），
+                    # 但 _api_messages_cache 仍是旧版本（无图片）。
+                    # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
+                    try:
+                        self._api_messages_cache = messages_to_api(current_messages)
+                        self._api_messages_built = True
+                    except Exception as cache_e:
+                        logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
+                        self._api_messages_cache = None
+                        self._api_messages_built = False
+                    break
+        except Exception as e:
+            logger.warning(f"[Vision] Failed to inject screenshot image: {e}")
 
     def _fix_tool_result_order(self, messages: List[Dict]) -> tuple[List[Dict], bool]:
         """

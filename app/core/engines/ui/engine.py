@@ -289,6 +289,15 @@ class UIEngine(BaseEngine):
             self._emit("error", "配置无效，请检查模型设置")
             return False
 
+        # 处理 multimodal 内容（图片 base64）
+        _user_content = kwargs.get("_user_content", None)  # 可选：multimodal list
+        if _user_content is not None:
+            content_to_store = _user_content
+            content_for_hook = user_text  # hook 仍传文本
+        else:
+            content_to_store = user_text
+            content_for_hook = user_text
+
         # 公共辅助方法：触发 hook
         def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
             if extra_context is None:
@@ -298,16 +307,16 @@ class UIEngine(BaseEngine):
             hook_mgr.trigger_event(
                 event_name,
                 context=ctx,
-                current_message=msg_text or user_text,
+                current_message=msg_text or content_for_hook,
             )
 
         hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
 
         if hook_mgr:
-            _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
-        session.add_user_message(content=user_text)
+            _do_trigger(hook_mgr, "PreUserMessage", {"message": content_for_hook})
+        session.add_user_message(content=content_to_store)
         if hook_mgr:
-            _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})
+            _do_trigger(hook_mgr, "PostUserMessage", {"message": content_for_hook})
 
         # PreAssistantMessage
         if hook_mgr:

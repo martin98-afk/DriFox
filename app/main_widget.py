@@ -66,7 +66,7 @@ from app.core import (
     TopicSummaryTask,
 )
 from app.core.command_manager import CommandManager, CommandType
-from app.core.model_capabilities import apply_model_defaults
+from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -8741,17 +8741,58 @@ class OpenAIChatToolWindow(ToolWindow):
                         user_text = f"加载这个智能体技能：@{skill_name}"
         # ---- 技能替换结束 ----
 
-        # ---- 拼接附件路径到用户文本 ----
+        # ---- 检查模型配置（用于后续判断图片支持）----
+        llm_config = self._get_current_model_config()
+        if not llm_config or not llm_config.get("API_KEY"):
+            InfoBar.warning(
+                "请先选择模型",
+                "请在设置中选择一个可用的模型后再发送消息",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 检查当前模型是否支持视觉
+        _model_name = str(llm_config.get("模型名称", "") or "")
+        _supports_vision = bool(get_model_capabilities(_model_name).get("supports_vision"))
+
+        # ---- 拼接附件路径到用户文本 + 图片附件处理 ----
+        _user_content = None  # multimodal content (含图片)
         if self._attachments:
+            # 先统一处理附件文本替换（含图片 [[basename]] → 路径）
             user_text = self._build_user_text_with_attachments(user_text)
+
+            if _supports_vision:
+                # 视觉模型：图片附件 → base64 image_url blocks
+                _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+                image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
+
+                if image_paths:
+                    import base64
+                    image_blocks = []
+                    for img_path in image_paths:
+                        try:
+                            with open(img_path, "rb") as f:
+                                img_bytes = f.read()
+                            img_b64 = base64.b64encode(img_bytes).decode()
+                            ext = os.path.splitext(img_path)[1].lower()
+                            mime_map = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                                        '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'}
+                            mime = mime_map.get(ext, 'image/png')
+                            data_uri = f"data:{mime};base64,{img_b64}"
+                            image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
+                        except Exception as e:
+                            logger.warning(f"处理图片附件失败 {img_path}: {e}")
+                    if image_blocks:
+                        _user_content = [{"type": "text", "text": user_text}] + image_blocks
+            # else: 非视觉模型 → 图片路径已作为文本拼入 user_text，不生成 image_url
 
         # 非函数命令：检查是否正在流式输出
         if self._is_streaming:
             self._on_stop_clicked()
 
-        # 检查模型配置
-        llm_config = self._get_current_model_config()
-        if not llm_config or not llm_config.get("API_KEY"):
+        # ---- 删除原来的模型配置检查（已提前）----
             InfoBar.warning(
                 "请先选择模型",
                 "请在设置中选择一个可用的模型后再发送消息",
@@ -8785,7 +8826,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.set_session_context(session.session_id)
 
         # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
-        if not self.backend.send_message_to_engine(user_text):
+        engine_kwargs = {}
+        if _user_content is not None:
+            engine_kwargs["_user_content"] = _user_content
+        if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
             self._is_streaming = False
             self._toggle_send_stop(False)
             assistant_card.deleteLater()
