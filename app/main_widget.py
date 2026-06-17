@@ -66,7 +66,7 @@ from app.core import (
     TopicSummaryTask,
 )
 from app.core.command_manager import CommandManager, CommandType
-from app.core.model_capabilities import apply_model_defaults
+from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.tool_popup import ToolWindow
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -8741,15 +8741,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         user_text = f"加载这个智能体技能：@{skill_name}"
         # ---- 技能替换结束 ----
 
-        # ---- 拼接附件路径到用户文本 ----
-        if self._attachments:
-            user_text = self._build_user_text_with_attachments(user_text)
-
-        # 非函数命令：检查是否正在流式输出
-        if self._is_streaming:
-            self._on_stop_clicked()
-
-        # 检查模型配置
+        # ---- 检查模型配置（用于后续判断图片支持）----
         llm_config = self._get_current_model_config()
         if not llm_config or not llm_config.get("API_KEY"):
             InfoBar.warning(
@@ -8760,6 +8752,58 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
             return
+
+        # 检查当前模型是否支持视觉
+        _model_name = str(llm_config.get("模型名称", "") or "")
+        _model_caps = get_model_capabilities(_model_name)
+        _supports_vision = bool(_model_caps.get("supports_vision"))
+
+        # ---- 拼接附件路径到用户文本 + 图片附件处理 ----
+        _user_content = None  # multimodal content (含图片)
+        if self._attachments:
+            # 先统一处理附件文本替换（含图片 [[basename]] → 路径）
+            user_text = self._build_user_text_with_attachments(user_text)
+
+            if _supports_vision:
+                # 视觉模型：图片附件 → base64 image_url blocks
+                _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+                image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
+
+                if image_paths:
+                    import base64
+                    image_blocks = []
+                    for img_path in image_paths:
+                        try:
+                            with open(img_path, "rb") as f:
+                                img_bytes = f.read()
+                            img_b64 = base64.b64encode(img_bytes).decode()
+                            ext = os.path.splitext(img_path)[1].lower()
+                            mime_map = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                                        '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'}
+                            mime = mime_map.get(ext, 'image/png')
+                            data_uri = f"data:{mime};base64,{img_b64}"
+                            image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
+                        except Exception as e:
+                            logger.warning(f"处理图片附件失败 {img_path}: {e}")
+                    if image_blocks:
+                        _user_content = [{"type": "text", "text": user_text}] + image_blocks
+                        logger.info(
+                            f"[ImageAttach] 模型 {_model_name} 支持视觉，"
+                            f"已将 {len(image_blocks)} 张图片注入 multimodal user content"
+                        )
+            else:
+                # 非视觉模型 → 图片路径已作为文本拼入 user_text
+                _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+                has_image = any(os.path.splitext(p)[1].lower() in _IMAGE_EXTS for p in self._attachments)
+                if has_image:
+                    logger.warning(
+                        f"[ImageAttach] 模型 {_model_name} 不支持视觉 (caps={_model_caps})，"
+                        f"图片附件仅作为文件路径文本发送，模型将调用 read 读取"
+                    )
+
+        # 非函数命令：检查是否正在流式输出
+        if self._is_streaming:
+            self._on_stop_clicked()
 
         self._hide_welcome_cards()
 
@@ -8785,7 +8829,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.set_session_context(session.session_id)
 
         # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
-        if not self.backend.send_message_to_engine(user_text):
+        engine_kwargs = {}
+        if _user_content is not None:
+            engine_kwargs["_user_content"] = _user_content
+        if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
             self._is_streaming = False
             self._toggle_send_stop(False)
             assistant_card.deleteLater()
@@ -9296,12 +9343,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"[ChatEngine] Saved {len(interrupted_msgs)} interrupted messages"
                 )
 
-            # 5. 重置状态并发送回调消息
+            # 5. 重置状态
             self._toggle_send_stop(False)
-        else:
-            # 非流式场景（如 /compact 手动命令）：没有活跃的流式对话
-            # 此时不中断任何东西，但需要准备 UI 以接收回调产生的流式响应
-            self._prepare_ui_for_callback_message(callback_text)
+
+        # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
+        # 🔧 修复：流式路径之前缺失此步骤，导致 _current_assistant_card 仍指向旧卡片，
+        # 后续流式输出写入旧卡片而非新卡片
+        self._prepare_ui_for_callback_message(callback_text)
 
         # 发送回调消息到引擎（非流式场景下 UI 已在 _prepare_ui_for_callback_message 中准备好）
         if not self.backend.send_message_to_engine(callback_text):
@@ -9309,20 +9357,19 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(
                 "[ChatEngine] Sub-agent callback: send_message_to_engine failed, rolling back UI"
             )
-            if not is_currently_streaming:
-                self._is_streaming = False
-                self._toggle_send_stop(False)
-                if self._current_assistant_card:
-                    self._current_assistant_card.deleteLater()
-                    self._current_assistant_card = None
+            self._is_streaming = False
+            self._toggle_send_stop(False)
+            if self._current_assistant_card:
+                self._current_assistant_card.deleteLater()
+                self._current_assistant_card = None
         else:
             # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
-            if not is_currently_streaming:
-                self._sync_batch_structures()
-                self._fix_new_card_message_index(user_text=callback_text)
-                self._visible_batch_end = len(self._message_batch)
-                # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
-                self._sync_node_preview_to_last()
+            # 🔧 修复：移除 `if not is_currently_streaming` 条件，无论流式/非流式路径都需同步
+            self._sync_batch_structures()
+            self._fix_new_card_message_index(user_text=callback_text)
+            self._visible_batch_end = len(self._message_batch)
+            # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
+            self._sync_node_preview_to_last()
 
     def _prepare_ui_for_callback_message(self, callback_text: str):
         """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）

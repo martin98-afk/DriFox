@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import TransparentToolButton
 
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
@@ -156,9 +156,9 @@ class _SquareAvatar(QWidget):
         painter.setBrush(self._color)
         painter.drawRoundedRect(rect, corner_radius, corner_radius)
 
-        # 居中白字
+        # 居中白字，使用系统配置字体
         painter.setPen(Qt.white)
-        font = painter.font()
+        font = get_unified_font()
         # 单字符（中文）字号稍大，双字符略小
         if len(self._text) <= 1:
             font.setPixelSize(scale_font_size(self._size * 14 // 24))

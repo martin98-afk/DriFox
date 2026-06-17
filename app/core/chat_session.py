@@ -101,14 +101,16 @@ class ChatSession:
         self.messages = consolidate_messages(self.messages)
         self._update_timestamp()
 
-    def add_user_message(self, content: str, **kwargs):
-        self.messages.append(
-            {
-                "role": "user",
-                "content": content,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-        )
+    def add_user_message(self, content, **kwargs):
+        """添加用户消息，支持 str 和 list（multimodal content）"""
+        msg = {
+            "role": "user",
+            "content": content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        if kwargs.get("params"):
+            msg["params"] = kwargs["params"]
+        self.messages.append(msg)
         self.messages = consolidate_messages(self.messages)
         self._update_timestamp()
 

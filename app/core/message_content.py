@@ -34,6 +34,95 @@ def _sanitize_rendering_string(text: str) -> str:
     return _SANITIZE_PATTERN.sub("", text)
 
 
+def _has_image_content(content: Any) -> bool:
+    """检查内容中是否包含图片块"""
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "image_url":
+                    return True
+                # Anthropic 格式
+                if block.get("type") == "input_image":
+                    return True
+                if block.get("type") == "image":
+                    return True
+    return False
+
+
+def _extract_content_for_api(content: Any, supports_vision: bool = True) -> Any:
+    """
+    提取适合 API 调用的内容格式。
+    纯文本返回 str，含图片块返回 list。
+
+    Args:
+        content: 消息内容
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符。
+
+    Returns:
+        str 或 list，保持图片块的原样传递
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # 是否有图片块？
+        has_image = any(
+            isinstance(b, dict) and b.get("type") in ("image_url", "input_image", "image")
+            for b in content
+        )
+        if not has_image:
+            # 纯文本块，合并为字符串
+            return _extract_text_content(content)
+        # 含图片块但不支持视觉 → 将图片块替换为 [图片] 文本
+        if not supports_vision:
+            return _strip_image_blocks(content)
+        # 支持视觉，返回完整的 multimodal list
+        return _clean_multimodal_blocks(content)
+    return str(content)
+
+
+def _strip_image_blocks(content: list) -> str:
+    """将含图片块的内容列表转为纯文本，图片块替换为 [图片] 占位符。
+
+    用于不支持视觉输入的模型：发送请求前过滤掉 image_url/input_image/image 块。
+    """
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = str(block.get("text", ""))
+            if text:
+                parts.append(text)
+        elif btype in ("image_url", "input_image", "image"):
+            parts.append("[图片]")
+    return "\n".join(parts) if parts else ""
+
+
+def _clean_multimodal_blocks(blocks: List[Dict]) -> List[Dict]:
+    """
+    清理 multimodal 内容块列表，去掉空文本块。
+    """
+    cleaned = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = str(block.get("text", ""))
+            if text:
+                cleaned.append({"type": "text", "text": text})
+        elif btype in ("image_url", "input_image", "image"):
+            cleaned.append(dict(block))
+        else:
+            # 其他类型保留
+            cleaned.append(dict(block))
+    return cleaned
+
+
 def _sanitize_tool_args(args: Any) -> Any:
     """
     递归清理工具参数中的渲染敏感标记。
@@ -104,6 +193,8 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
     """
     将任意格式的内容转换为标准 blocks 列表。
 
+    支持类型：text, reasoning, tool_result, image_url, input_image, image
+
     性能优化：简化类型检查逻辑，减少重复代码。
     """
     if content is None:
@@ -118,6 +209,9 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
                     text = str(item.get("text", ""))
                     if text:
                         blocks.append({"type": "text", "text": text})
+                elif item_type in ("image_url", "input_image", "image"):
+                    # 图片块直接透传
+                    blocks.append(dict(item))
                 elif item_type == "reasoning":
                     reasoning_content = str(item.get("content", "") or "")
                     blocks.append({"type": "reasoning", "content": reasoning_content})
@@ -201,6 +295,9 @@ def content_to_text(content: Any, include_tool_results: bool = False) -> str:
             text = str(block.get("text", ""))
             if text:
                 texts.append(text)
+        elif block_type in ("image_url", "input_image", "image"):
+            # 图片块转为文本占位符
+            texts.append("[图片]")
         elif include_tool_results and block_type == "tool_result":
             name = str(block.get("name", "tool"))
             result = str(block.get("result", ""))
@@ -223,6 +320,19 @@ def content_to_markdown(content: Any) -> str:
             reasoning_content = str(block.get("content", "") or "")
             if reasoning_content:
                 parts.append(f"<think>{reasoning_content}</think>")
+        elif block_type in ("image_url", "input_image", "image"):
+            # 图片块转为 markdown 图片引用
+            image_url = ""
+            if block_type == "image_url":
+                image_data = block.get("image_url", {}) or {}
+                image_url = str(image_data.get("url", ""))
+            if image_url:
+                if image_url.startswith("data:image"):
+                    parts.append("![image](uploaded_image)")
+                else:
+                    parts.append(f"![image]({image_url})")
+            else:
+                parts.append("[图片]")
         elif block_type == "text":
             text = str(block.get("text", ""))
             if text:
@@ -439,10 +549,18 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["echarts"] = str(message.get("echarts"))
         return normalized
 
-    normalized["content"] = content_to_text(message.get("content", ""))
+    raw_content = message.get("content", "")
+    # 用户消息：如果含图片块，保留原始 list 格式；否则转为文本
     if role == "user":
+        if isinstance(raw_content, list) and _has_image_content(raw_content):
+            normalized["content"] = _clean_multimodal_blocks(raw_content)
+        else:
+            normalized["content"] = content_to_text(raw_content)
         params = message.get("params")
         normalized["params"] = dict(params) if isinstance(params, dict) else {}
+    else:
+        normalized["content"] = content_to_text(raw_content)
+
     if message.get("model_name"):
         normalized["model_name"] = str(message.get("model_name"))
     return normalized
@@ -500,10 +618,17 @@ def group_messages_for_display(
     return batches
 
 
-def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
+def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dict[str, Any]:
     """
     将内部消息格式转换为标准API请求格式。
     用于发送给API的消息构建。
+
+    Args:
+        message: 内部消息字典
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符，避免不支持视觉的模型报 400 错误。
+
+    支持 multimodal 内容（含 image_url 块的列表）。
     """
     normalized_message = normalize_message(message)
     if not normalized_message:
@@ -516,12 +641,15 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
             "content": _extract_text_content(normalized_message.get("content", "")),
         }
     elif role == "user":
+        raw_content = normalized_message.get("content", "")
+        api_content = _extract_content_for_api(raw_content, supports_vision=supports_vision)
         api_msg = {
             "role": "user",
-            "content": _extract_text_content(normalized_message.get("content", "")),
+            "content": api_content,
         }
+        # 如果 content 是 str 且有 params → 拼合上下文
         params = normalized_message.get("params", {})
-        if params:
+        if params and isinstance(api_content, str):
             context_parts = [
                 str(value[1])
                 for value in params.values()
@@ -530,8 +658,8 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
             combined = "\n\n".join(part for part in context_parts if part)
             if combined:
                 api_msg["content"] = (
-                    combined + "\n\n" + api_msg["content"]
-                    if api_msg["content"]
+                    combined + "\n\n" + api_content
+                    if api_content
                     else combined
                 )
         return api_msg
@@ -554,11 +682,26 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
             api_msg["content"] = ""
         return api_msg
     elif role == "tool":
+        raw_content = normalized_message.get("content", "")
+        # tool 结果支持 multimodal（如图片 base64 描述）
+        tool_content = _extract_content_for_api(raw_content)
+        # tool 消息的 content 必须是字符串（OpenAI 协议要求）
+        # 如果有 image_url 块，将其转换为文本描述
+        if isinstance(tool_content, list):
+            tool_text_parts = []
+            for block in tool_content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        tool_text_parts.append(str(block.get("text", "")))
+                    elif block.get("type") == "image_url":
+                        # tool 结果中的图片转为文本描述
+                        tool_text_parts.append("[Image: base64 data]")
+            tool_content = "\n".join(tool_text_parts)
         return {
             "role": "tool",
             "tool_call_id": str(normalized_message.get("tool_call_id", "")),
             "name": str(normalized_message.get("name", "")),
-            "content": str(normalized_message.get("content", "") or ""),
+            "content": str(tool_content or ""),
         }
     return {
         "role": role,
@@ -566,10 +709,17 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def messages_to_api(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def messages_to_api(messages: List[Dict[str, Any]], supports_vision: bool = True) -> List[Dict[str, Any]]:
+    """将内部消息列表转换为标准API请求格式列表。
+
+    Args:
+        messages: 内部消息列表
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符。
+    """
     api_messages: List[Dict[str, Any]] = []
     for message in messages:
-        api_message = to_api_message(message)
+        api_message = to_api_message(message, supports_vision=supports_vision)
         if api_message:
             if api_message.get("role") == "user" and not api_message.get("content"):
                 continue

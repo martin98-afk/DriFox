@@ -525,6 +525,9 @@ class AutoLoopWorker(QThread):
         try:
             self._adapter.reset()
 
+            # 保存当前阶段 tools，供回调中的 token 计数使用
+            self._current_phase_tools = current_tools
+
             wrapped_callbacks = self._make_autoloop_callbacks()
             llm_config = self._model_config_getter() if self._model_config_getter else {}
 
@@ -617,6 +620,8 @@ class AutoLoopWorker(QThread):
 
         try:
             self._adapter.reset()
+            # 保存当前阶段 tools，供回调中的 token 计数使用
+            self._current_phase_tools = current_tools
             self._conversation_executor.execute(
                 messages=force_messages,
                 llm_config=llm_config,
@@ -926,7 +931,8 @@ class AutoLoopWorker(QThread):
                 if session:
                     session.set_messages(messages, preserve_compaction=True)
             if self._engine and messages:
-                current_count = count_messages_tokens(messages)
+                current_tools = getattr(self, "_current_phase_tools", None)
+                current_count = count_messages_tokens(messages, tools=current_tools)
                 delta = max(0, current_count - self._last_message_token_count)
                 if delta > 0:
                     self._engine.add_tokens(delta)

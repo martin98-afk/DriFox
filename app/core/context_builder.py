@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Any
 
 from loguru import logger
 
-from app.core.message_content import consolidate_messages
+from app.core.message_content import consolidate_messages, _extract_text_content
 from app.core.token_estimator import count_messages_tokens
 from app.utils.config import Settings
 
@@ -174,7 +174,14 @@ class ContextBudgetAllocator:
             dynamic_parts.append(memory_context)
 
         dynamic_context = "\n\n".join(dynamic_parts)
-        messages[-1]["content"] = f"{dynamic_context}\n\n用户提问：{messages[-1]['content']}"
+        last_content = messages[-1]["content"]
+        if isinstance(last_content, list):
+            # multimodal content（含图片）：动态上下文作为 text block 插到最前面
+            messages[-1]["content"] = [
+                {"type": "text", "text": f"{dynamic_context}\n\n用户提问：{_extract_text_content(last_content)}"}
+            ] + [b for b in last_content if b.get("type") != "text"]
+        else:
+            messages[-1]["content"] = f"{dynamic_context}\n\n用户提问：{last_content}"
 
         return messages
 
