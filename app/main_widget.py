@@ -6874,6 +6874,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend._current_project = session_project
         self._project_label.setText(session_project)
         self._refresh_project_branch_style()
+        # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(session_project)
 
         # 自动切换到该会话关联的 worktree
         # 规则：会话有 worktree_path → 切到该 worktree
@@ -8489,7 +8492,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 同步项目
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
+            self.backend._current_project = session_project
             self._project_label.setText(session_project)
+            self._refresh_project_branch_style()
+            # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_current_project(session_project)
             self._refresh_project_branch_style()
             # 自动切换到该会话关联的 worktree
             # 规则：会话有 worktree_path → 切到该 worktree
@@ -10643,6 +10651,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label.setText(project)
         self._refresh_project_branch_style()
         self._update_branch()
+        # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(project)
         # 保存到配置
         self.cfg.current_project.value = project
         self.cfg.save()
@@ -10691,6 +10702,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._update_branch()
             self.cfg.current_project.value = default_project
             self.cfg.save()
+            # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_current_project(default_project)
             self._create_new_session()
         else:
             self._current_history_project = self._current_project
