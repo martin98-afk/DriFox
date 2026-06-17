@@ -10,6 +10,13 @@ argument-hint:
   "[--marketplace=]": "添加第三方插件市场，如 --marketplace=owner/repo"
 mutex_groups:
   mode: ["--list", "--install=", "--uninstall=", "--enable=", "--disable=", "--marketplace="]
+prompt_sections:
+  --list: "list"
+  --install=: "install"
+  --uninstall=: "uninstall"
+  --enable=: "enable"
+  --disable=: "disable"
+  --marketplace=: "marketplace"
 ---
 
 # /plugin 命令 — 插件管理器
@@ -38,9 +45,44 @@ mutex_groups:
 如果用户只输入了 `--install=` 但没有值，提示用户输入插件名。
 如果用户没有输入任何参数，列出所有子命令的使用说明。
 
-## 子命令详情
+## 📁 目录结构参考
 
-### 1. `--list`
+```
+DriFox/
+├── plugins/system/              ← 系统插件（不可卸载/修改）
+│   └── commands/plugin.md       ← 你正在阅读的这个文件
+│
+.drifox/
+├── plugins/                     ← 用户插件（启用状态，watchfiles 自动加载）
+│   ├── user-custom/
+│   ├── code-review/
+│   └── <新安装的插件>/
+│
+└── plugins-disabled/            ← 已禁用的插件（--disable 移入，--enable 移出）
+    └── <被禁用的插件>/
+```
+
+## 🎯 格式兼容性
+
+DriFox **原生支持** `.claude-plugin/plugin.json` 格式。市面上 270+ Claude 插件无需任何格式转换，直接可用。
+
+## ⚠️ 安全与边界
+
+- ❌ **不要卸载系统插件**（`plugins/system/` 下的）
+- ❌ **不要修改 `plugins/system/` 目录内容**
+- ❌ **不要修改 `app.config` 中其他功能区的字段**
+- ✅ **安装前向用户展示插件信息确认**
+- ✅ **`git clone` 失败时尝试回退方案或报错**
+
+## 🌐 内置市场
+
+| 名称 | GitHub 仓库 | 说明 |
+|------|-------------|------|
+| `official` | `anthropics/claude-plugins-official` | Anthropic 官方市场，270+ 插件，29.2k stars |
+| `classmethod-marketplace` | `classmethod/claude-code-marketplace` | 第三方社区市场示例 |
+
+<!-- section:list -->
+### `--list`
 列出所有已安装的插件：
 
 1. 用 `glob` 搜索插件清单文件：
@@ -57,8 +99,10 @@ mutex_groups:
 | system | DriFox 系统内置插件 | 系统 | ✅ 启用 |
 | code-review | Automated code review... | 用户 | ✅ 启用 |
 | my-plugin | ... | 用户 | ⛔ 已禁用 |
+<!-- end -->
 
-### 2. `--install=<name>[@marketplace]`
+<!-- section:install -->
+### `--install=<name>[@marketplace]`
 从插件市场安装插件：
 
 **① 确定市场来源**
@@ -133,8 +177,10 @@ rd /S /Q %TEMP_DIR%
 - 插件已自动启用
 - 可立即使用该插件的命令/功能
 - 如需禁用，使用 `/plugin --disable=<name>`
+<!-- end -->
 
-### 3. `--uninstall=<name>`
+<!-- section:uninstall -->
+### `--uninstall=<name>`
 卸载并删除插件：
 
 1. **安全检查**：检查 `plugins/system/<name>/` 是否存在 → 如果存在则拒绝卸载（系统插件），提示用 `--disable=` 替代
@@ -143,8 +189,10 @@ rd /S /Q %TEMP_DIR%
    rd /S /Q .drifox\plugins\<name>\
    ```
 3. 告知用户卸载完成（watchfiles 会自动移除运行时注册）
+<!-- end -->
 
-### 4. `--enable=<name>`
+<!-- section:enable -->
+### `--enable=<name>`
 将已禁用的插件移回启用目录，立即生效。
 
 **原理**：`.drifox/plugins-disabled/<name>/` → 移动到 → `.drifox/plugins/<name>/`
@@ -156,8 +204,10 @@ watchfiles 检测到新增目录 → 自动注册 + 启用。
    move .drifox\plugins-disabled\<name> .drifox\plugins\<name>
    ```
 3. 告知用户：插件已移回启用目录，watchfiles 热更新将在 1-3 秒内自动加载
+<!-- end -->
 
-### 5. `--disable=<name>`
+<!-- section:disable -->
+### `--disable=<name>`
 将插件移出启用目录，使其被 DriFox 卸载，立即生效。
 
 **原理**：`.drifox/plugins/<name>/` → 移动到 → `.drifox/plugins-disabled/<name>/`
@@ -173,8 +223,10 @@ watchfiles 检测到目录删除 → 自动从运行时移除。
    ```
 5. 告知用户：插件已移出，watchfiles 热更新将在 1-3 秒内自动卸载
 6. 如需恢复，使用 `/plugin --enable=<name>`
+<!-- end -->
 
-### 6. `--marketplace=<owner/repo>`
+<!-- section:marketplace -->
+### `--marketplace=<owner/repo>`
 注册一个新的插件市场：
 
 1. 格式校验：参数应为 `owner/repo` 格式（GitHub 仓库）
@@ -188,39 +240,4 @@ watchfiles 检测到目录删除 → 自动从运行时移除。
 5. 写回文件
 6. 列出该市场中前 10 个可安装的插件
 7. 提示用户可用 `/plugin --install=<name>@<市场名>` 安装
-
-## 📁 目录结构参考
-
-```
-DriFox/
-├── plugins/system/              ← 系统插件（不可卸载/修改）
-│   └── commands/plugin.md       ← 你正在阅读的这个文件
-│
-.drifox/
-├── plugins/                     ← 用户插件（启用状态，watchfiles 自动加载）
-│   ├── user-custom/
-│   ├── code-review/
-│   └── <新安装的插件>/
-│
-└── plugins-disabled/            ← 已禁用的插件（--disable 移入，--enable 移出）
-    └── <被禁用的插件>/
-```
-
-## 🎯 格式兼容性
-
-DriFox **原生支持** `.claude-plugin/plugin.json` 格式。市面上 270+ Claude 插件无需任何格式转换，直接可用。
-
-## ⚠️ 安全与边界
-
-- ❌ **不要卸载系统插件**（`plugins/system/` 下的）
-- ❌ **不要修改 `plugins/system/` 目录内容**
-- ❌ **不要修改 `app.config` 中其他功能区的字段**
-- ✅ **安装前向用户展示插件信息确认**
-- ✅ **`git clone` 失败时尝试回退方案或报错**
-
-## 🌐 内置市场
-
-| 名称 | GitHub 仓库 | 说明 |
-|------|-------------|------|
-| `official` | `anthropics/claude-plugins-official` | Anthropic 官方市场，270+ 插件，29.2k stars |
-| `classmethod-marketplace` | `classmethod/claude-code-marketplace` | 第三方社区市场示例 |
+<!-- end -->

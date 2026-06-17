@@ -76,6 +76,7 @@ class CommandDefinition:
     prompt_text: str = ""        # PROMPT/AGENT 命令使用
     parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
     shortcut: str = ""           # 快捷键，如 "Ctrl+Shift+B"
+    prompt_sections: Dict[str, str] = field(default_factory=dict)  # 参数→提示词分段映射（按需加载）
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -141,6 +142,7 @@ class CommandManager:
         prompt_text: str = "",
         parameters: Optional[List[CommandParameter]] = None,
         shortcut: str = "",
+        prompt_sections: Optional[Dict[str, str]] = None,
     ):
         """注册一个内置命令
 
@@ -152,6 +154,7 @@ class CommandManager:
             prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
             parameters: 可交互参数列表（用于 detail 模式参数补全）
             shortcut: 快捷键，如 "Ctrl+Shift+B"
+            prompt_sections: 参数→提示词分段映射（用于按需加载，如 {"--create=": "提示词模板", "common": "通用提示词"}）
         """
         if name not in self._commands:
             self._commands[name] = {}
@@ -163,6 +166,7 @@ class CommandManager:
             prompt_text=prompt_text,
             parameters=parameters or [],
             shortcut=shortcut,
+            prompt_sections=prompt_sections or {},
         )
 
     def unregister(self, name: str):
@@ -434,6 +438,89 @@ class CommandManager:
             replacement=cmd.prompt_text,
             remainder=remainder,
         )
+
+    # ---- 提示词分段装配 ----
+
+    def select_prompt(self, command_name: str, remainder: str) -> Optional[str]:
+        """根据参数从 body 中过滤出匹配的段落，返回精简后的提示词
+
+        工作方式：
+        - prompt_sections 定义参数→标记 ID 的映射，如 {--list: "list"}
+        - body 中用 `<!-- section:id -->` / `<!-- end -->` 标记段落
+        - 匹配的参数只取对应的标记段，不匹配的段被滤除
+        - 无匹配时返回 None，调用方使用完整 body（向后兼容）
+
+        Args:
+            command_name: 命令名
+            remainder: 命令后的用户参数文本
+
+        Returns:
+            过滤后的提示词文本，或 None（无 prompt_sections / 无匹配）
+        """
+        entries = self._commands.get(command_name, {})
+        if not entries:
+            return None
+        cmd = _pick_first_entry(entries)
+        if not cmd.prompt_sections:
+            return None
+
+        active_params = self.parse_active_params(remainder)
+
+        # 构建参数 → mutex_group 映射
+        param_to_mg: Dict[str, str] = {}
+        for p in cmd.parameters:
+            if p.mutex_group:
+                param_to_mg[p.name] = p.mutex_group
+
+        # 找出要保留的标记 ID（按参数定义顺序，同组互斥）
+        matched_groups: set = set()
+        want_markers: set = set()
+
+        for param in cmd.parameters:
+            if param.name not in active_params:
+                continue
+            marker = cmd.prompt_sections.get(param.name)
+            if not marker:
+                continue
+            mg = param_to_mg.get(param.name, "")
+            if mg:
+                if mg in matched_groups:
+                    continue
+                matched_groups.add(mg)
+            want_markers.add(marker)
+
+        if not want_markers:
+            return None
+
+        # 从 body 中过滤出需要的段落
+        return self._build_filtered_body(cmd.prompt_text, want_markers)
+
+    @staticmethod
+    def _build_filtered_body(body: str, want_markers: set) -> str:
+        """从 body 保留公共内容 + 匹配的标记段，移除不匹配的段落"""
+        lines = body.splitlines()
+        result: List[str] = []
+        skip = False  # 是否跳过当前段
+
+        for line in lines:
+            s = line.strip()
+
+            # 段开始标记：<!-- section:id -->
+            if s.startswith("<!--") and "section:" in s:
+                section_id = s[len("<!--"):-len("-->")].strip()
+                section_id = section_id.removeprefix("section:").strip()
+                skip = section_id not in want_markers
+                continue  # 不输出标记行本身
+
+            # 段结束标记：<!-- end -->
+            if s == "<!-- end -->":
+                skip = False
+                continue  # 不输出标记行本身
+
+            if not skip:
+                result.append(line)
+
+        return "\n".join(result).strip()
 
     @staticmethod
     def _parse_subagent_flags(text: str):

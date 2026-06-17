@@ -8710,8 +8710,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
-                    # 提示词替换命令：替换 + 用 $ARGUMENT 占位符替换
-                    user_text = (f"严格按照以下命令规范执行：{cmd_result.replacement}\n\n"
+                    # 提示词替换命令：prompt_sections 按参数过滤 body 段落
+                    selected_text = cmd_mgr.select_prompt(cmd_result.command_name,
+                                                         cmd_result.remainder)
+                    if not selected_text:
+                        selected_text = cmd_result.replacement  # 无匹配/无 sections → 完整 body
+                    user_text = (f"严格按照以下命令规范执行：{selected_text}\n\n"
                                  f"$ARGUMENTS：{cmd_result.remainder or '无用户参数'}")
         # ---- 内置命令拦截结束 ----
 
@@ -8989,10 +8993,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """/subagents 命令：管理子智能体任务和默认模型
 
         参数：
-          无参数    → 显示运行中的子智能体任务（紧凑卡片）
-          --detail  → 显示子智能体详细日志面板
-          --model=X → 设置子智能体默认模型
-          --reset   → 清空子智能体默认模型设置
+          无参数     → 显示运行中的子智能体任务（紧凑卡片）
+          --detail   → 显示子智能体详细日志面板
+          --model=X  → 设置子智能体默认模型
+          --reset    → 清空子智能体默认模型设置
+          --create=X → 进入创建子智能体工作流，AI 自动在 user-custom 插件下生成 agent md 文件
         """
         import re
         from app.utils.config import Settings
@@ -9057,6 +9062,62 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             # 更新命令卡参数描述
             self._update_subagents_param_description()
+            return
+
+        # ---- --create=<描述>：启动创建子智能体工作流 ----
+        create_match = re.match(r'^--create=(.+)$', args)
+        if create_match:
+            user_description = create_match.group(1).strip()
+            if not user_description:
+                InfoBar.warning(
+                    title="参数错误",
+                    content="--create= 后需要输入子智能体的功能描述",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 从命令定义的 prompt_sections 中读取 --create= 分段提示词
+            # prompt_sections 存的是标记 ID，实际内容在 body 的 <!-- section:id --> 标记中
+            from app.core.command_manager import CommandManager
+            cmd_mgr = CommandManager.get_instance()
+            cmd_def = cmd_mgr.get_command("subagents")
+            section_prompt = ""
+            if cmd_def and cmd_def.prompt_sections:
+                marker_id = cmd_def.prompt_sections.get("--create=", "")
+                if marker_id:
+                    # 从 body 中提取标记段内容
+                    filtered = CommandManager._build_filtered_body(
+                        cmd_def.prompt_text, {marker_id}
+                    )
+                    if filtered:
+                        section_prompt = filtered
+
+            if not section_prompt:
+                InfoBar.error(
+                    title="提示词缺失",
+                    content="subagents.md 中未找到 --create= 的 prompt_sections 配置",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 替换 $ARGUMENTS 占位符
+            prompt = section_prompt.replace("$ARGUMENTS", user_description)
+            self.input_area.clear()
+            self.input_area.setPlainText(prompt)
+            # 延迟触发发送，让当前 _on_send_clicked 先完整返回
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(50, self.input_area.sendMessageRequested.emit)
+            InfoBar.success(
+                title="创建子智能体",
+                content="已注入创建提示词，AI 将自动生成智能体文件",
+                parent=self,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         # ---- --detail：显示详细日志面板 ----
