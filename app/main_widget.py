@@ -8710,8 +8710,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
-                    # 提示词替换命令：替换 + 用 $ARGUMENT 占位符替换
-                    user_text = (f"严格按照以下命令规范执行：{cmd_result.replacement}\n\n"
+                    # 提示词替换命令：prompt_sections 按参数过滤 body 段落
+                    selected_text = cmd_mgr.select_prompt(cmd_result.command_name,
+                                                         cmd_result.remainder)
+                    if not selected_text:
+                        selected_text = cmd_result.replacement  # 无匹配/无 sections → 完整 body
+                    user_text = (f"严格按照以下命令规范执行：{selected_text}\n\n"
                                  f"$ARGUMENTS：{cmd_result.remainder or '无用户参数'}")
         # ---- 内置命令拦截结束 ----
 
@@ -9075,12 +9079,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
 
             # 从命令定义的 prompt_sections 中读取 --create= 分段提示词
+            # prompt_sections 存的是标记 ID，实际内容在 body 的 <!-- section:id --> 标记中
             from app.core.command_manager import CommandManager
             cmd_mgr = CommandManager.get_instance()
             cmd_def = cmd_mgr.get_command("subagents")
             section_prompt = ""
             if cmd_def and cmd_def.prompt_sections:
-                section_prompt = cmd_def.prompt_sections.get("--create=", "")
+                marker_id = cmd_def.prompt_sections.get("--create=", "")
+                if marker_id:
+                    # 从 body 中提取标记段内容
+                    filtered = CommandManager._build_filtered_body(
+                        cmd_def.prompt_text, {marker_id}
+                    )
+                    if filtered:
+                        section_prompt = filtered
 
             if not section_prompt:
                 InfoBar.error(

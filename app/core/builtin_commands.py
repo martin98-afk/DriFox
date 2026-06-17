@@ -350,12 +350,21 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         if not content.startswith("---"):
             return None
 
-        parts = content.split("---", 2)
-        if len(parts) < 3:
+        # 按行分割 frontmatter，只认「行首的 ---」
+        # ⚠️ content.split("---", 2) 会误匹配 markdown 表格中的 |---|
+        lines = content.splitlines()
+        if len(lines) < 2 or lines[0].strip() != "---":
+            return None
+        close_idx = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                close_idx = i
+                break
+        if close_idx is None:
             return None
 
-        frontmatter = parts[1]
-        body = parts[2].strip() if len(parts) > 2 else ""
+        frontmatter = "\n".join(lines[1:close_idx])
+        body = "\n".join(lines[close_idx + 1:]).strip()
 
         meta = yaml.safe_load(frontmatter)
         if not meta:
@@ -699,12 +708,20 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
             if not content.startswith("---"):
                 continue
 
-            parts = content.split("---", 2)
-            if len(parts) < 3:
+            # 按行分割 frontmatter，只认「行首的 ---」
+            lines = content.splitlines()
+            if len(lines) < 2 or lines[0].strip() != "---":
+                continue
+            close_idx = None
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    close_idx = i
+                    break
+            if close_idx is None:
                 continue
 
-            frontmatter = parts[1]
-            body = parts[2].strip()
+            frontmatter = "\n".join(lines[1:close_idx])
+            body = "\n".join(lines[close_idx + 1:]).strip()
 
             try:
                 meta = yaml.safe_load(frontmatter)
