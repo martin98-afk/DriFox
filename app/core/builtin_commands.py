@@ -218,6 +218,7 @@ def _register_from_cached_commands(cmd_mgr: CommandManager, cached_commands: lis
             prompt_text=cmd.get("prompt_text", ""),
             parameters=_deserialize_params(cmd.get("parameters", [])),
             shortcut=cmd.get("shortcut", ""),
+            prompt_sections=cmd.get("prompt_sections", {}),
         )
         count += 1
     return count
@@ -383,6 +384,11 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
         else:
             argument_hint = ""
 
+        # 解析 prompt_sections（参数→提示词分段映射，支持按需加载）
+        prompt_sections = meta.get("prompt_sections", {})
+        if not isinstance(prompt_sections, dict):
+            prompt_sections = {}
+
         return {
             "name": file_path.stem,  # 文件名作为命令名
             "description": meta.get("description", ""),
@@ -391,6 +397,7 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
             "prompt_text": enhanced_body,  # 已包含工具限制说明（如有）
             "parameters": params,
             "shortcut": meta.get("shortcut", ""),
+            "prompt_sections": prompt_sections,
         }
     except Exception as e:
         logger.error(f"[BuiltinCommands] Failed to load command {file_path}: {e}")
@@ -539,6 +546,7 @@ def reload_all_commands():
             "prompt_text": cmd.get("prompt_text", ""),
             "parameters": _serialize_params(cmd.get("parameters", [])),
             "shortcut": cmd.get("shortcut", ""),
+            "prompt_sections": cmd.get("prompt_sections", {}),
         })
     serialized_agents = []
     for ag in agents:
@@ -595,6 +603,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
                 prompt_text=cmd["prompt_text"],
                 parameters=cmd.get("parameters", []),
                 shortcut=cmd.get("shortcut", ""),
+                prompt_sections=cmd.get("prompt_sections", {}),
             )
             commands.append(cmd)
     return commands

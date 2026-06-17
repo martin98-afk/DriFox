@@ -8976,10 +8976,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """/subagents 命令：管理子智能体任务和默认模型
 
         参数：
-          无参数    → 显示运行中的子智能体任务（紧凑卡片）
-          --detail  → 显示子智能体详细日志面板
-          --model=X → 设置子智能体默认模型
-          --reset   → 清空子智能体默认模型设置
+          无参数     → 显示运行中的子智能体任务（紧凑卡片）
+          --detail   → 显示子智能体详细日志面板
+          --model=X  → 设置子智能体默认模型
+          --reset    → 清空子智能体默认模型设置
+          --create=X → 进入创建子智能体工作流，AI 自动在 user-custom 插件下生成 agent md 文件
         """
         import re
         from app.utils.config import Settings
@@ -9044,6 +9045,54 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             # 更新命令卡参数描述
             self._update_subagents_param_description()
+            return
+
+        # ---- --create=<描述>：启动创建子智能体工作流 ----
+        create_match = re.match(r'^--create=(.+)$', args)
+        if create_match:
+            user_description = create_match.group(1).strip()
+            if not user_description:
+                InfoBar.warning(
+                    title="参数错误",
+                    content="--create= 后需要输入子智能体的功能描述",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 从命令定义的 prompt_sections 中读取 --create= 分段提示词
+            from app.core.command_manager import CommandManager
+            cmd_mgr = CommandManager.get_instance()
+            cmd_def = cmd_mgr.get_command("subagents")
+            section_prompt = ""
+            if cmd_def and cmd_def.prompt_sections:
+                section_prompt = cmd_def.prompt_sections.get("--create=", "")
+
+            if not section_prompt:
+                InfoBar.error(
+                    title="提示词缺失",
+                    content="subagents.md 中未找到 --create= 的 prompt_sections 配置",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 替换 $ARGUMENTS 占位符
+            prompt = section_prompt.replace("$ARGUMENTS", user_description)
+            self.input_area.clear()
+            self.input_area.setPlainText(prompt)
+            # 延迟触发发送，让当前 _on_send_clicked 先完整返回
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(50, self.input_area.sendMessageRequested.emit)
+            InfoBar.success(
+                title="创建子智能体",
+                content="已注入创建提示词，AI 将自动生成智能体文件",
+                parent=self,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         # ---- --detail：显示详细日志面板 ----

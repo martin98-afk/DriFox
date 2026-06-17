@@ -76,6 +76,7 @@ class CommandDefinition:
     prompt_text: str = ""        # PROMPT/AGENT 命令使用
     parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
     shortcut: str = ""           # 快捷键，如 "Ctrl+Shift+B"
+    prompt_sections: Dict[str, str] = field(default_factory=dict)  # 参数→提示词分段映射（按需加载）
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -141,6 +142,7 @@ class CommandManager:
         prompt_text: str = "",
         parameters: Optional[List[CommandParameter]] = None,
         shortcut: str = "",
+        prompt_sections: Optional[Dict[str, str]] = None,
     ):
         """注册一个内置命令
 
@@ -152,6 +154,7 @@ class CommandManager:
             prompt_text: PROMPT/AGENT 命令使用，替换后的提示词文本
             parameters: 可交互参数列表（用于 detail 模式参数补全）
             shortcut: 快捷键，如 "Ctrl+Shift+B"
+            prompt_sections: 参数→提示词分段映射（用于按需加载，如 {"--create=": "提示词模板", "common": "通用提示词"}）
         """
         if name not in self._commands:
             self._commands[name] = {}
@@ -163,6 +166,7 @@ class CommandManager:
             prompt_text=prompt_text,
             parameters=parameters or [],
             shortcut=shortcut,
+            prompt_sections=prompt_sections or {},
         )
 
     def unregister(self, name: str):
