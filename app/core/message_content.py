@@ -49,10 +49,15 @@ def _has_image_content(content: Any) -> bool:
     return False
 
 
-def _extract_content_for_api(content: Any) -> Any:
+def _extract_content_for_api(content: Any, supports_vision: bool = True) -> Any:
     """
     提取适合 API 调用的内容格式。
     纯文本返回 str，含图片块返回 list。
+
+    Args:
+        content: 消息内容
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符。
 
     Returns:
         str 或 list，保持图片块的原样传递
@@ -70,9 +75,31 @@ def _extract_content_for_api(content: Any) -> Any:
         if not has_image:
             # 纯文本块，合并为字符串
             return _extract_text_content(content)
-        # 含图片块，返回完整的 multimodal list
+        # 含图片块但不支持视觉 → 将图片块替换为 [图片] 文本
+        if not supports_vision:
+            return _strip_image_blocks(content)
+        # 支持视觉，返回完整的 multimodal list
         return _clean_multimodal_blocks(content)
     return str(content)
+
+
+def _strip_image_blocks(content: list) -> str:
+    """将含图片块的内容列表转为纯文本，图片块替换为 [图片] 占位符。
+
+    用于不支持视觉输入的模型：发送请求前过滤掉 image_url/input_image/image 块。
+    """
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = str(block.get("text", ""))
+            if text:
+                parts.append(text)
+        elif btype in ("image_url", "input_image", "image"):
+            parts.append("[图片]")
+    return "\n".join(parts) if parts else ""
 
 
 def _clean_multimodal_blocks(blocks: List[Dict]) -> List[Dict]:
@@ -591,10 +618,15 @@ def group_messages_for_display(
     return batches
 
 
-def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
+def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dict[str, Any]:
     """
     将内部消息格式转换为标准API请求格式。
     用于发送给API的消息构建。
+
+    Args:
+        message: 内部消息字典
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符，避免不支持视觉的模型报 400 错误。
 
     支持 multimodal 内容（含 image_url 块的列表）。
     """
@@ -610,7 +642,7 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
         }
     elif role == "user":
         raw_content = normalized_message.get("content", "")
-        api_content = _extract_content_for_api(raw_content)
+        api_content = _extract_content_for_api(raw_content, supports_vision=supports_vision)
         api_msg = {
             "role": "user",
             "content": api_content,
@@ -677,10 +709,17 @@ def to_api_message(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def messages_to_api(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def messages_to_api(messages: List[Dict[str, Any]], supports_vision: bool = True) -> List[Dict[str, Any]]:
+    """将内部消息列表转换为标准API请求格式列表。
+
+    Args:
+        messages: 内部消息列表
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符。
+    """
     api_messages: List[Dict[str, Any]] = []
     for message in messages:
-        api_message = to_api_message(message)
+        api_message = to_api_message(message, supports_vision=supports_vision)
         if api_message:
             if api_message.get("role") == "user" and not api_message.get("content"):
                 continue

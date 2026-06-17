@@ -124,6 +124,9 @@ class OpenAIChatWorker(QThread):
         if model_name:
             self._cache_tracker.set_model(model_name)
 
+        # 缓存模型是否支持视觉，用于过滤 image_url 块
+        self._supports_vision = bool(get_model_capabilities(model_name).get("supports_vision"))
+
         # ========== 性能优化：API 消息缓存 ==========
         # 向后兼容：保留 PyQt Signal，但通过 EventBus 统一发射
         # UI 层连接这些 signal，事件总线负责分发到所有订阅者
@@ -362,7 +365,7 @@ class OpenAIChatWorker(QThread):
             return self._api_messages_cache
 
         # 首次构建：处理所有历史消息
-        self._api_messages_cache = messages_to_api(self.messages)
+        self._api_messages_cache = messages_to_api(self.messages, supports_vision=self._supports_vision)
         self._api_messages_built = True
         return self._api_messages_cache
 
@@ -375,12 +378,12 @@ class OpenAIChatWorker(QThread):
             new_messages: 新增的消息列表
         """
         if self._api_messages_cache is None:
-            self._api_messages_cache = messages_to_api(new_messages)
+            self._api_messages_cache = messages_to_api(new_messages, supports_vision=self._supports_vision)
             return
 
         # 只转换新消息并追加
         for msg in new_messages:
-            api_msg = to_api_message(msg)
+            api_msg = to_api_message(msg, supports_vision=self._supports_vision)
             if api_msg:
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
@@ -939,7 +942,7 @@ class OpenAIChatWorker(QThread):
                 self._current_session_messages = list(current_session_messages)
 
                 # ========== 视觉模型注入：截图 → base64 图片 ==========
-                self._try_inject_vision_content(tool_results, current_messages)
+                vision_injected = self._try_inject_vision_content(tool_results, current_messages)
                 # =====================================================
 
                 # [MEM] 消息构建后
@@ -969,13 +972,14 @@ class OpenAIChatWorker(QThread):
                     # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
                     # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
                     current_messages, _ = self._fix_tool_result_order(current_messages)
-                    self._api_messages_cache = messages_to_api(current_messages)
-                    # 注意：current_session_messages 故意不做同步压缩。
+                    self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
                     # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
                 else:
                     # 更新 API 消息缓存
-                    self._append_to_api_cache(response_sequence)
+                    # 注意：如果 _try_inject_vision_content 已重建完整缓存，跳过追加避免重复
+                    if not vision_injected:
+                        self._append_to_api_cache(response_sequence)
                 self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                          current_session_messages)
 
@@ -1247,7 +1251,7 @@ class OpenAIChatWorker(QThread):
 
     # ========== 视觉模型图片注入 ==========
 
-    def _try_inject_vision_content(self, tool_results, current_messages):
+    def _try_inject_vision_content(self, tool_results, current_messages) -> bool:
         """
         截图工具结果在视觉模型 → 将截图以 base64 图片块注入到最后一个用户消息。
 
@@ -1258,40 +1262,60 @@ class OpenAIChatWorker(QThread):
         注入方式：
         在最后一条 user 消息的 content 中追加 image_url 块（multimodal list 格式）。
         这样 LLM 在下一轮 API 调用时就能看到图片内容。
+
+        Returns:
+            bool: True 表示成功注入了图片（调用方应跳过后续的 _append_to_api_cache）
         """
         if not tool_results or not current_messages:
-            return
+            return False
 
         # 检查是否有成功的截图工具结果
         screenshot_info = None
         for r in tool_results:
             if isinstance(r, dict) and r.get("name") == "screenshot" and r.get("success"):
+                # 优先从 raw_content（原始 ToolResult.content）提取
+                raw = r.get("raw_content")
+                if isinstance(raw, dict):
+                    screenshot_info = raw.get("absolute_path") or raw.get("path")
+                    if screenshot_info:
+                        break
+                # Fallback: 从字符串 content 中提取
                 content = r.get("content", "")
                 if isinstance(content, dict):
                     screenshot_info = content.get("absolute_path") or content.get("path")
                 elif isinstance(content, str):
-                    # 从文本中提取路径
-                    m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
-                    if m:
-                        screenshot_info = m.group(1)
+                    # 尝试用 ast.literal_eval 解析 dict 字符串表示
+                    if content.startswith("{") and "absolute_path" in content:
+                        import ast
+                        try:
+                            d = ast.literal_eval(content)
+                            if isinstance(d, dict):
+                                screenshot_info = d.get("absolute_path") or d.get("path")
+                        except (ValueError, SyntaxError):
+                            pass
+                    if not screenshot_info:
+                        # 正则回退：匹配中文"路径"标记
+                        m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
+                        if m:
+                            screenshot_info = m.group(1)
                 if screenshot_info:
                     break
 
         if not screenshot_info:
-            return
+            return False
 
         # 检查模型是否支持视觉
         model_name = str(self.llm_config.get("模型名称", "") or "")
         caps = get_model_capabilities(model_name)
         if not caps.get("supports_vision"):
             logger.debug(f"[Vision] Model {model_name} does not support vision, skipping image injection")
-            return
+            return False
 
         # 验证文件存在
         abs_path = screenshot_info
         if not os.path.isfile(abs_path):
             logger.warning(f"[Vision] Screenshot file not found: {abs_path}")
-            return
+            return False
 
         # 读文件 → base64
         import base64
@@ -1326,15 +1350,16 @@ class OpenAIChatWorker(QThread):
                     # 但 _api_messages_cache 仍是旧版本（无图片）。
                     # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
                     try:
-                        self._api_messages_cache = messages_to_api(current_messages)
+                        self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
                         self._api_messages_built = True
                     except Exception as cache_e:
                         logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
                         self._api_messages_cache = None
                         self._api_messages_built = False
-                    break
+                    return True  # 重建了完整缓存，调用方应跳过 _append_to_api_cache
         except Exception as e:
             logger.warning(f"[Vision] Failed to inject screenshot image: {e}")
+        return False
 
     def _fix_tool_result_order(self, messages: List[Dict]) -> tuple[List[Dict], bool]:
         """
@@ -1500,7 +1525,7 @@ class OpenAIChatWorker(QThread):
         if use_cache and self._api_messages_cache is not None:
             sanitized = self._api_messages_cache
         else:
-            sanitized = messages_to_api(messages)
+            sanitized = messages_to_api(messages, supports_vision=self._supports_vision)
             if use_cache:
                 self._api_messages_cache = sanitized
                 self._api_messages_built = True
@@ -1563,7 +1588,7 @@ class OpenAIChatWorker(QThread):
                     fixed_messages, was_fixed = self._fix_tool_result_order(req_kwargs["messages"])
 
                     if was_fixed:
-                        fixed_sanitized = messages_to_api(fixed_messages)
+                        fixed_sanitized = messages_to_api(fixed_messages, supports_vision=self._supports_vision)
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
@@ -1588,7 +1613,7 @@ class OpenAIChatWorker(QThread):
                     fixed_messages = self._try_recover_tool_arguments(req_kwargs["messages"])
 
                     if fixed_messages is not None:
-                        fixed_sanitized = messages_to_api(fixed_messages)
+                        fixed_sanitized = messages_to_api(fixed_messages, supports_vision=self._supports_vision)
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
@@ -2563,8 +2588,14 @@ class OpenAIChatWorker(QThread):
         return result, result_content, success
 
     def _build_result_dict(self, tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj):
-        """构建标准的结果字典"""
-        return {
+        """构建标准的结果字典
+
+        content: 字符串形式（兼容下游 consumers）
+        raw_content: ToolResult.content 原始值（dict/list 等），
+                     供 _try_inject_vision_content 等需要结构化数据的场景使用
+        """
+        raw_content = getattr(result_obj, "content", None) if result_obj else None
+        result = {
             "role": "tool",
             "tool_call_id": tool_call_id,
             "name": tool_name,
@@ -2576,6 +2607,9 @@ class OpenAIChatWorker(QThread):
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
         }
+        if raw_content is not None:
+            result["raw_content"] = raw_content
+        return result
 
     def _execute_one_tool_parallel(self, tool_name, tool_call_id, arguments, round_id, idx):
         """
