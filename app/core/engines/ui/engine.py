@@ -289,15 +289,6 @@ class UIEngine(BaseEngine):
             self._emit("error", "配置无效，请检查模型设置")
             return False
 
-        # 处理 multimodal 内容（图片 base64）
-        _user_content = kwargs.get("_user_content", None)  # 可选：multimodal list
-        if _user_content is not None:
-            content_to_store = _user_content
-            content_for_hook = user_text  # hook 仍传文本
-        else:
-            content_to_store = user_text
-            content_for_hook = user_text
-
         # 公共辅助方法：触发 hook
         def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
             if extra_context is None:
@@ -307,16 +298,16 @@ class UIEngine(BaseEngine):
             hook_mgr.trigger_event(
                 event_name,
                 context=ctx,
-                current_message=msg_text or content_for_hook,
+                current_message=msg_text or user_text,
             )
 
         hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
 
         if hook_mgr:
-            _do_trigger(hook_mgr, "PreUserMessage", {"message": content_for_hook})
-        session.add_user_message(content=content_to_store)
+            _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
+        session.add_user_message(content=user_text)
         if hook_mgr:
-            _do_trigger(hook_mgr, "PostUserMessage", {"message": content_for_hook})
+            _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})
 
         # PreAssistantMessage
         if hook_mgr:
@@ -390,21 +381,8 @@ class UIEngine(BaseEngine):
         # 直接构建消息
         messages = self._build_messages(session, llm_config)
 
-        # 获取工具 schema（与实际 API 请求一致），计入上下文占用
-        if self._current_agent:
-            available_tools = self._get_agent_manager().get_agent_tools_schema(
-                self._current_agent
-            )
-        else:
-            available_tools = get_builtin_tools_schema(
-                self._get_agent_manager(),
-                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
-            )
-        # 获取当前模型名用于 token 编码选择
-        model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
-
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
-        used_tokens = count_messages_tokens(messages, model=model, tools=available_tools)
+        used_tokens = count_messages_tokens(messages)
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 
         # 计算普通上下文和压缩上下文的 token 分解
