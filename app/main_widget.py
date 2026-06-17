@@ -8792,16 +8792,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming:
             self._on_stop_clicked()
 
-        # ---- 删除原来的模型配置检查（已提前）----
-            InfoBar.warning(
-                "请先选择模型",
-                "请在设置中选择一个可用的模型后再发送消息",
-                parent=self,
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
         self._hide_welcome_cards()
 
         self.input_area.clear()

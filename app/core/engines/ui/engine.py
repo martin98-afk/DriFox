@@ -289,6 +289,11 @@ class UIEngine(BaseEngine):
             self._emit("error", "配置无效，请检查模型设置")
             return False
 
+        # ---- 提取多模态内容（含图片的 _user_content），用于 session 存储和 LLM 消息构建 ----
+        _user_content = kwargs.pop("_user_content", None)
+        content_to_store = _user_content or user_text
+        # user_text 始终是纯文本版本，用于 hook 触发和 UI 显示
+
         # 公共辅助方法：触发 hook
         def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
             if extra_context is None:
@@ -305,7 +310,7 @@ class UIEngine(BaseEngine):
 
         if hook_mgr:
             _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
-        session.add_user_message(content=user_text)
+        session.add_user_message(content=content_to_store)
         if hook_mgr:
             _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})
 
