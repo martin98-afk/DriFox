@@ -2616,7 +2616,7 @@ class OpenAIChatWorker(QThread):
                 tool_name, arguments, call_id=tool_call_id
             )
         except Exception as e:
-            logger.error(f"[Tool] Tool '{tool_name}' execution failed: {e}")
+            logger.exception(f"[Tool] Tool '{tool_name}' execution failed: {e}")
             return None, f"Tool execution error: {str(e)}", False
 
         if self._is_cancelled or self._tool_execution_cancelled:

@@ -15,6 +15,7 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
+from app.core.message_content import content_to_text
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
@@ -321,7 +322,7 @@ class UIEngine(BaseEngine):
             if session_for_hook and hasattr(session_for_hook, 'messages'):
                 for msg in reversed(session_for_hook.messages):
                     if msg.get('role') == 'user':
-                        last_user_msg = msg.get('content', '')
+                        last_user_msg = content_to_text(msg.get('content', ''))
                         break
             _do_trigger(hook_mgr, "PreAssistantMessage", msg_text=last_user_msg)
 
@@ -490,7 +491,7 @@ class UIEngine(BaseEngine):
         if session and hasattr(session, 'messages'):
             for msg in reversed(session.messages):
                 if msg.get('role') == 'user':
-                    last_user_msg = msg.get('content', '')
+                    last_user_msg = content_to_text(msg.get('content', ''))
                     break
 
         context = {
