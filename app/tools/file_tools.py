@@ -121,6 +121,9 @@ class FileTools:
             show_line_numbers: 是否显示行号，默认 False（返回原文）
 
         读取时记录文件的修改时间，用于后续编辑时检测文件是否被外部修改
+
+        对图片文件（.png/.jpg/.jpeg/.gif/.webp/.bmp）自动以二进制读取，
+        返回 base64 编码数据（通过 image_data 字段），视觉模型可自动注入上下文。
         """
         try:
             full_path = self._resolve_path(path)
@@ -129,6 +132,36 @@ class FileTools:
 
             if full_path.is_dir():
                 return self.list_directory(path)
+
+            # ===== 图片文件检测：自动读取为 base64，供视觉模型使用 =====
+            _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+            ext = full_path.suffix.lower()
+            if ext in _IMAGE_EXTENSIONS:
+                import base64
+                with open(full_path, "rb") as f:
+                    img_bytes = f.read()
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+                _MIME_MAP = {
+                    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+                }
+                mime = _MIME_MAP.get(ext, "image/png")
+
+                try:
+                    display_path = str(full_path.relative_to(self.workdir))
+                except ValueError:
+                    display_path = path
+
+                file_size_kb = len(img_bytes) / 1024
+                text_preview = f"[图片: {display_path} ({file_size_kb:.1f} KB, {ext.upper()})]"
+                self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
+
+                return ToolResult(
+                    success=True,
+                    content=text_preview,
+                    image_data={"mime": mime, "data": img_b64},
+                )
 
             # 记录文件修改时间
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime

@@ -8755,7 +8755,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 检查当前模型是否支持视觉
         _model_name = str(llm_config.get("模型名称", "") or "")
-        _supports_vision = bool(get_model_capabilities(_model_name).get("supports_vision"))
+        _model_caps = get_model_capabilities(_model_name)
+        _supports_vision = bool(_model_caps.get("supports_vision"))
 
         # ---- 拼接附件路径到用户文本 + 图片附件处理 ----
         _user_content = None  # multimodal content (含图片)
@@ -8786,7 +8787,19 @@ class OpenAIChatToolWindow(ToolWindow):
                             logger.warning(f"处理图片附件失败 {img_path}: {e}")
                     if image_blocks:
                         _user_content = [{"type": "text", "text": user_text}] + image_blocks
-            # else: 非视觉模型 → 图片路径已作为文本拼入 user_text，不生成 image_url
+                        logger.info(
+                            f"[ImageAttach] 模型 {_model_name} 支持视觉，"
+                            f"已将 {len(image_blocks)} 张图片注入 multimodal user content"
+                        )
+            else:
+                # 非视觉模型 → 图片路径已作为文本拼入 user_text
+                _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+                has_image = any(os.path.splitext(p)[1].lower() in _IMAGE_EXTS for p in self._attachments)
+                if has_image:
+                    logger.warning(
+                        f"[ImageAttach] 模型 {_model_name} 不支持视觉 (caps={_model_caps})，"
+                        f"图片附件仅作为文件路径文本发送，模型将调用 read 读取"
+                    )
 
         # 非函数命令：检查是否正在流式输出
         if self._is_streaming:

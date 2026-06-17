@@ -355,7 +355,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": "读取文件内容。返回原文，可选带行号。读取时记录文件修改时间，用于后续编辑时检测外部修改。",
+            "description": "读取文件内容。返回原文，可选带行号。支持文本和图片文件（.png/.jpg/.jpeg/.gif/.webp/.bmp）。读取图片时返回 base64 编码数据，由系统自动处理。读取时记录文件修改时间，用于后续编辑时检测外部修改。",
             "parameters": {
                 "type": "object",
                 "properties": {

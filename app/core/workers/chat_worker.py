@@ -941,8 +941,11 @@ class OpenAIChatWorker(QThread):
                 current_session_messages.extend(response_sequence)
                 self._current_session_messages = list(current_session_messages)
 
-                # ========== 视觉模型注入：截图 → base64 图片 ==========
-                vision_injected = self._try_inject_vision_content(tool_results, current_messages)
+                # ========== 视觉模型注入：截图/read图片 → base64 图片 ==========
+                vision_injected = self._try_inject_vision_content(
+                    tool_results, current_messages,
+                    session_messages=current_session_messages,
+                )
                 # =====================================================
 
                 # [MEM] 消息构建后
@@ -1251,57 +1254,57 @@ class OpenAIChatWorker(QThread):
 
     # ========== 视觉模型图片注入 ==========
 
-    def _try_inject_vision_content(self, tool_results, current_messages) -> bool:
+    @staticmethod
+    def _inject_images_to_user_message(messages: List[Dict], data_uris: List[str]) -> bool:
         """
-        截图工具结果在视觉模型 → 将截图以 base64 图片块注入到最后一个用户消息。
+        将图片 data_uri 注入到 messages 列表中最后一个 user 消息的 content 中。
+
+        纯文本 content 转为 multimodal list（text + image_url），
+        已有 list 则追加 image_url 块。
+
+        Returns:
+            True 成功注入，False 未找到 user 消息
+        """
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                for data_uri in data_uris:
+                    if isinstance(content, str):
+                        content = [
+                            {"type": "text", "text": content},
+                            {"type": "image_url", "image_url": {"url": data_uri}},
+                        ]
+                        msg["content"] = content
+                    elif isinstance(content, list):
+                        content.append(
+                            {"type": "image_url", "image_url": {"url": data_uri}}
+                        )
+                return True
+        return False
+
+    def _try_inject_vision_content(self, tool_results, current_messages,
+                                   session_messages: Optional[List[Dict]] = None) -> bool:
+        """
+        截图/read 图片工具结果在视觉模型 → 将图片以 base64 注入到最后一个用户消息。
 
         触发条件：
-        1. 本轮工具执行结果中有成功的 screenshot 工具
-        2. 当前模型支持视觉（supports_vision=True）
+        1. 本轮工具执行结果中有成功的 screenshot 工具，或
+        2. 有成功的 read 工具且读取的是图片文件（返回了 image_data）
+        3. 当前模型支持视觉（supports_vision=True）
 
         注入方式：
         在最后一条 user 消息的 content 中追加 image_url 块（multimodal list 格式）。
         这样 LLM 在下一轮 API 调用时就能看到图片内容。
+        支持同轮注入多张图片（如同时截图 + 读取图片）。
+
+        同时也会注入到 session_messages（如果传入），确保注入的图片在会话历史中持久化，
+        跨多轮对话不会丢失。
 
         Returns:
             bool: True 表示成功注入了图片（调用方应跳过后续的 _append_to_api_cache）
         """
         if not tool_results or not current_messages:
-            return False
-
-        # 检查是否有成功的截图工具结果
-        screenshot_info = None
-        for r in tool_results:
-            if isinstance(r, dict) and r.get("name") == "screenshot" and r.get("success"):
-                # 优先从 raw_content（原始 ToolResult.content）提取
-                raw = r.get("raw_content")
-                if isinstance(raw, dict):
-                    screenshot_info = raw.get("absolute_path") or raw.get("path")
-                    if screenshot_info:
-                        break
-                # Fallback: 从字符串 content 中提取
-                content = r.get("content", "")
-                if isinstance(content, dict):
-                    screenshot_info = content.get("absolute_path") or content.get("path")
-                elif isinstance(content, str):
-                    # 尝试用 ast.literal_eval 解析 dict 字符串表示
-                    if content.startswith("{") and "absolute_path" in content:
-                        import ast
-                        try:
-                            d = ast.literal_eval(content)
-                            if isinstance(d, dict):
-                                screenshot_info = d.get("absolute_path") or d.get("path")
-                        except (ValueError, SyntaxError):
-                            pass
-                    if not screenshot_info:
-                        # 正则回退：匹配中文"路径"标记
-                        m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
-                        if m:
-                            screenshot_info = m.group(1)
-                if screenshot_info:
-                    break
-
-        if not screenshot_info:
             return False
 
         # 检查模型是否支持视觉
@@ -1311,55 +1314,94 @@ class OpenAIChatWorker(QThread):
             logger.debug(f"[Vision] Model {model_name} does not support vision, skipping image injection")
             return False
 
-        # 验证文件存在
-        abs_path = screenshot_info
-        if not os.path.isfile(abs_path):
-            logger.warning(f"[Vision] Screenshot file not found: {abs_path}")
+        # ---- 收集所有可注入的图片 data_uri ----
+        import base64
+        data_uris = []
+
+        for r in tool_results:
+            if not isinstance(r, dict) or not r.get("success"):
+                continue
+            tool_name = r.get("name", "")
+
+            if tool_name == "screenshot":
+                # 从 raw_content（原始 ToolResult.content）提取路径
+                raw = r.get("raw_content")
+                img_path = None
+                if isinstance(raw, dict):
+                    img_path = raw.get("absolute_path") or raw.get("path")
+                if not img_path:
+                    content = r.get("content", "")
+                    if isinstance(content, dict):
+                        img_path = content.get("absolute_path") or content.get("path")
+                    elif isinstance(content, str):
+                        if content.startswith("{") and "absolute_path" in content:
+                            import ast
+                            try:
+                                d = ast.literal_eval(content)
+                                if isinstance(d, dict):
+                                    img_path = d.get("absolute_path") or d.get("path")
+                            except (ValueError, SyntaxError):
+                                pass
+                        if not img_path:
+                            m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
+                            if m:
+                                img_path = m.group(1)
+                if img_path and os.path.isfile(img_path):
+                    try:
+                        with open(img_path, "rb") as f:
+                            img_data = base64.b64encode(f.read()).decode("utf-8")
+                        ext = os.path.splitext(img_path)[1].lower()
+                        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+                        mime = mime_map.get(ext, "image/png")
+                        data_uris.append(f"data:{mime};base64,{img_data}")
+                    except Exception as e:
+                        logger.warning(f"[Vision] Failed to read screenshot {img_path}: {e}")
+
+            elif tool_name == "read":
+                # 从 image_data 字段获取已编码的图片数据
+                img_data = r.get("image_data")
+                if isinstance(img_data, dict):
+                    mime = img_data.get("mime", "image/png")
+                    data = img_data.get("data", "")
+                    if data:
+                        data_uris.append(f"data:{mime};base64,{data}")
+                        logger.debug(
+                            f"[Vision] read 图片注入: mime={mime}, base64_len={len(data)}"
+                        )
+                else:
+                    logger.debug(
+                        f"[Vision] read 工具结果无 image_data: "
+                        f"content_preview={str(r.get('content', ''))[:60]}"
+                    )
+
+        if not data_uris:
             return False
 
-        # 读文件 → base64
-        import base64
+        # ---- 注入到 current_messages（用于本轮 API 调用） ----
+        injected = self._inject_images_to_user_message(current_messages, data_uris)
+        if not injected:
+            return False
+
+        # ---- 同步注入到 session_messages（跨轮持久化） ----
+        if session_messages is not None:
+            self._inject_images_to_user_message(session_messages, data_uris)
+
+        logger.info(
+            f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}"
+        )
+
+        # 重建 API 缓存：current_messages 已被修改（含 image_url），
+        # 但 _api_messages_cache 仍是旧版本（无图片）。
+        # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
-            with open(abs_path, "rb") as f:
-                img_data = base64.b64encode(f.read()).decode("utf-8")
-
-            ext = os.path.splitext(abs_path)[1].lower()
-            mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
-            mime = mime_map.get(ext, "image/png")
-            data_uri = f"data:{mime};base64,{img_data}"
-
-            # 找到最后一个 user 消息，注入 image_url 块
-            for i in range(len(current_messages) - 1, -1, -1):
-                msg = current_messages[i]
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        # 纯文本 → 转为 multimodal list
-                        msg["content"] = [
-                            {"type": "text", "text": content},
-                            {"type": "image_url", "image_url": {"url": data_uri}},
-                        ]
-                    elif isinstance(content, list):
-                        # 已有 multimodal list → 追加图片块
-                        content.append(
-                            {"type": "image_url", "image_url": {"url": data_uri}}
-                        )
-                    logger.info(f"[Vision] Injected screenshot ({len(img_data)} bytes base64) into user message for {model_name}")
-                    # 重建 API 缓存：current_messages 已被修改（含 image_url），
-                    # 但 _api_messages_cache 仍是旧版本（无图片）。
-                    # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
-                    try:
-                        self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
-                        self._api_messages_built = True
-                    except Exception as cache_e:
-                        logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
-                        self._api_messages_cache = None
-                        self._api_messages_built = False
-                    return True  # 重建了完整缓存，调用方应跳过 _append_to_api_cache
-        except Exception as e:
-            logger.warning(f"[Vision] Failed to inject screenshot image: {e}")
-        return False
+            self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
+            self._api_messages_built = True
+        except Exception as cache_e:
+            logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
+            self._api_messages_cache = None
+            self._api_messages_built = False
+        return True  # 重建了完整缓存，调用方应跳过 _append_to_api_cache
 
     def _fix_tool_result_order(self, messages: List[Dict]) -> tuple[List[Dict], bool]:
         """
@@ -2606,6 +2648,7 @@ class OpenAIChatWorker(QThread):
             "diff": getattr(result_obj, "diff", None) if result_obj else None,
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
+            "image_data": getattr(result_obj, "image_data", None) if result_obj else None,
         }
         if raw_content is not None:
             result["raw_content"] = raw_content
