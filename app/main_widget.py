@@ -1798,6 +1798,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工具控制卡片
         self._tool_control_card = ToolControlCardFrame(self)
         self._tool_control_card.setObjectName("toolControlCard")
+        self._tool_control_card.setMinimumHeight(250)
+        self._tool_control_card.set_height_mode('content')
         self._tool_control_card.setVisible(False)
         self._tool_control_card.closed.connect(
             lambda: self._card_manager.hide_card("tool_control", self._window_id)
@@ -1805,6 +1807,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_control_card.togglesChanged.connect(
             lambda _: self._refresh_tool_toggle_btn()
         )
+        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
 
         # 模型选择卡片（底部卡片形式）
         self._model_selector_card = BaseSettingsCard("", "", self)
