@@ -151,7 +151,7 @@ class ToolControlCardContent(QWidget):
         all_on = all(self._toggles.get(t, True) for t in tool_names)
         group_switch = SwitchButton()
         group_switch.setChecked(all_on)
-        group_switch.setOnColor(QColor("#22c55e") if is_safe else QColor("#ff5050"))
+        group_switch.setTextColor(QColor("#22c55e"), QColor("#22c55e") if is_safe else QColor("#ff5050"))
         group_switch.setFixedSize(38, 20)
         header_layout.addWidget(group_switch)
         self._group_switches[group_name] = group_switch
@@ -212,9 +212,9 @@ class ToolControlCardContent(QWidget):
         sw.setChecked(enabled)
         sw.setFixedSize(34, 16)
         if classify_tool_danger(tool_name) == "dangerous":
-            sw.setOnColor(QColor("#ff5050"))
+            sw.setTextColor(QColor("#22c55e"), QColor("#ff5050"))
         else:
-            sw.setOnColor(QColor("#22c55e"))
+            sw.setTextColor(QColor("#22c55e"), QColor("#22c55e"))
         row_layout.addWidget(sw)
         self._toggle_widgets[tool_name] = sw
 
