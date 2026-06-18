@@ -2239,27 +2239,29 @@ class OpenAIChatToolWindow(ToolWindow):
         tt_layout.addWidget(tt_icon)
         tt_layout.addSpacing(4)
 
-        # 左：危险工具数
+        # 左：危险工具数（暗红）
         self._tool_danger_label = QLabel("0")
         self._tool_danger_label.setAlignment(Qt.AlignCenter)
         self._tool_danger_label.setFixedHeight(20)
         self._tool_danger_label.setStyleSheet(f"""
-            background: {Colors.STATUS_DANGER_BG};
-            color: white; font-size: 11px; font-weight: 700;
+            background: {Colors.STATUS_DANGER_BG_DARK};
+            color: white; font-weight: 700;
             border: none; border-top-left-radius: 4px; border-bottom-left-radius: 4px;
             padding: 0 8px;
+            {font_size_css(13)} {get_font_family_css()}
         """)
         tt_layout.addWidget(self._tool_danger_label)
 
-        # 右：安全工具数
+        # 右：安全工具数（暗绿）
         self._tool_safe_label = QLabel("0")
         self._tool_safe_label.setAlignment(Qt.AlignCenter)
         self._tool_safe_label.setFixedHeight(20)
         self._tool_safe_label.setStyleSheet(f"""
-            background: {Colors.SUCCESS};
-            color: white; font-size: 11px; font-weight: 700;
+            background: {Colors.SUCCESS_DARK};
+            color: white; font-weight: 700;
             border: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px;
             padding: 0 8px;
+            {font_size_css(13)} {get_font_family_css()}
         """)
         tt_layout.addWidget(self._tool_safe_label)
 
@@ -4246,11 +4248,38 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.toggle_card("tool_control", self._window_id)
 
     def _refresh_tool_toggle_btn(self):
-        """刷新工具开关按钮上的数字"""
+        """刷新工具开关按钮上的数字和 agent 覆盖指示"""
         toggles = self._tool_permission_controller.get_toggles()
         dangerous, safe = get_tool_counts(toggles)
         self._tool_danger_label.setText(str(dangerous))
         self._tool_safe_label.setText(str(safe))
+
+        # agent 覆盖 → 整个按钮背景变色
+        Colors.refresh()
+        agent_name = self._tool_permission_controller.get_active_agent_name()
+        if agent_name:
+            tooltip = (
+                f"🔧 工具权限 | 危险 {dangerous} 安全 {safe}\n"
+                f"🤖 由智能体「{agent_name}」控制，点击查看详情"
+            )
+            self._tool_toggle_btn.setStyleSheet(f"""
+                background: rgba(255,149,0,0.12);
+                border: 1px solid rgba(255,149,0,0.25);
+                border-radius: 8px;
+            """)
+        else:
+            tooltip = (
+                f"🔧 工具控制 | 危险 {dangerous} 安全 {safe}\n点击查看详情"
+            )
+            self._tool_toggle_btn.setStyleSheet(f"""
+                background: {Colors.TOOLBAR_BG};
+                border: none;
+                border-radius: 8px;
+            """)
+        # 给按钮及其所有子 label 挂 tooltip（子控件会阻挡父控件的 tooltip 传播）
+        self._tool_toggle_btn.setToolTip(tooltip)
+        self._tool_danger_label.setToolTip(tooltip)
+        self._tool_safe_label.setToolTip(tooltip)
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
@@ -5003,7 +5032,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 border: none;
                 border-radius: 8px;
             """)
-        self._refresh_agent_button_styles()
         # 刷新设置卡片
         for card in self.findChildren(BaseSettingsCard):
             if hasattr(card, "refresh_style"):
@@ -5078,6 +5106,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._memory_card_popup, "refresh_style"
         ):
             self._memory_card_popup.refresh_style()
+        # 刷新工具控制卡片主题
+        if hasattr(self, "_tool_control_card") and hasattr(
+            self._tool_control_card, "refresh_style"
+        ):
+            self._tool_control_card.refresh_style()
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行

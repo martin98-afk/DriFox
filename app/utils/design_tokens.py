@@ -311,6 +311,7 @@ class Colors:
     BUTTON_TEXT_ON_ACCENT = "#1A1F2B"
     STATUS_INFO = "#7FDBFF"
     STATUS_DANGER_BG = "rgba(255, 80, 80, 0.8)"
+    STATUS_DANGER_BG_DARK = "#8B4A4A"       # 暗红（工具按钮用）
     STATUS_ARCHIVE_BG = "rgba(139, 92, 246, 0.8)"
     CARD_BG_DIM = "rgba(255, 255, 255, 0.04)"
     ARCHIVED_CARD_BG = "rgba(255, 180, 100, 0.08)"
@@ -336,6 +337,7 @@ class Colors:
 
     # 语义色
     SUCCESS = "#22c55e"
+    SUCCESS_DARK = "#3D7A5A"                # 暗绿（工具按钮用）
     WARNING = "#f59e0b"
     ERROR = "#ef4444"
     INFO = "#3b82f6"

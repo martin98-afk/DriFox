@@ -9,15 +9,17 @@
 """
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton, QSizePolicy,
 )
 from qfluentwidgets import SwitchButton, ComboBox
 
 from app.tools.tool_classifier import (
     DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles,
 )
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.elided_label import _ElidedLabel
 
 
 # =============================================================================
@@ -42,7 +44,7 @@ TOOL_DESCRIPTIONS = {
     "bg_stop": "停止后台任务",
     "mouse": "鼠标操作",
     "keyboard": "键盘操作",
-    "upload_file": "上传到Gitee",
+    "upload_file": "上传本地文件到Gitee",
     "edit_project_note": "编辑项目笔记",
     "todowrite": "创建/更新待办",
     "stage_files": "标记相关文件",
@@ -114,6 +116,10 @@ class ToolControlCardContent(QWidget):
         if self._controller is None:
             return
         self._apply_toggles()
+
+    def refresh_style(self):
+        """主题/字体变更时重建全部 widget 以应用新样式"""
+        self._rebuild()
 
     def _rebuild(self):
         """全量重建内容"""
@@ -214,7 +220,8 @@ class ToolControlCardContent(QWidget):
 
         label = QLabel(f"{group_name} ({len(tool_names)})")
         label.setStyleSheet(
-            "color: #ddd; font-weight: 600; font-size: 12px; background: transparent; border: none;"
+            f"color: #ddd; font-weight: 600; background: transparent; border: none; "
+            f"{font_size_css(12)} {get_font_family_css()}"
         )
         header_layout.addWidget(label)
         header_layout.addStretch()
@@ -263,23 +270,24 @@ class ToolControlCardContent(QWidget):
         row_layout.setContentsMargins(0, 3, 0, 3)
         row_layout.setSpacing(8)
 
+        enabled = all_toggles.get(tool_name, True)
+
         name_label = QLabel(tool_name)
         name_label.setStyleSheet(
-            "color: #ccc; font-size: 12px; background: transparent; border: none;"
+            f"color: #ccc; background: transparent; border: none; "
+            f"{font_size_css(12)} {get_font_family_css()}"
         )
-        name_label.setFixedWidth(80)
         row_layout.addWidget(name_label)
 
         desc = TOOL_DESCRIPTIONS.get(tool_name, "")
-        desc_label = QLabel(desc)
+        desc_label = _ElidedLabel(desc)
+        desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(
-            "color: #666; font-size: 10px; background: transparent; border: none;"
+            f"color: #666; background: transparent; border: none; "
+            f"{font_size_css(10)} {get_font_family_css()}"
         )
-        desc_label.setMaximumWidth(90)
         row_layout.addWidget(desc_label)
-        row_layout.addStretch()
 
-        enabled = all_toggles.get(tool_name, True)
         sw = SwitchButton()
         sw.setChecked(enabled)
         row_layout.addWidget(sw)
@@ -346,7 +354,6 @@ class ToolControlCardFrame(SystemCardFrame):
 
         # ========== 右上角下拉框:关闭时行为 ==========
         self._behavior_combo = ComboBox(self)
-        self._behavior_combo.setFixedWidth(100)
         for value, label in OFF_BEHAVIOR_OPTIONS:
             self._behavior_combo.addItem(label, userData=value)
         # 从 controller 读取当前 behavior
@@ -361,9 +368,9 @@ class ToolControlCardFrame(SystemCardFrame):
         # ========== 智能体徽章 + 恢复按钮(仅 agent 激活时显示) ==========
         self._active_agent_label = QLabel(self)
         self._active_agent_label.setStyleSheet(
-            "color: #ff9500; font-size: 12px; font-weight: 600; "
-            "background: rgba(255,149,0,0.12); border: 1px solid rgba(255,149,0,0.3); "
-            "border-radius: 6px; padding: 2px 8px;"
+            f"color: #ff9500; font-weight: 600; "
+            f"background: rgba(255,149,0,0.12); border: 1px solid rgba(255,149,0,0.3); "
+            f"border-radius: 6px; padding: 2px 8px; {font_size_css(12)} {get_font_family_css()}"
         )
         self._active_agent_label.setVisible(False)
         self._active_agent_label.setToolTip(
@@ -374,12 +381,12 @@ class ToolControlCardFrame(SystemCardFrame):
         self._restore_btn.setFixedHeight(26)
         self._restore_btn.setCursor(Qt.PointingHandCursor)
         self._restore_btn.setStyleSheet(
-            "QPushButton {"
-            "  color: #fff; background: rgba(255,149,0,0.85); "
-            "  border: none; border-radius: 6px; padding: 2px 10px; font-size: 12px;"
-            "}"
-            "QPushButton:hover { background: rgba(255,149,0,1.0); }"
-            "QPushButton:pressed { background: rgba(255,149,0,0.7); }"
+            f"QPushButton {{"
+            f"  color: #fff; background: rgba(255,149,0,0.85); "
+            f"  border: none; border-radius: 6px; padding: 2px 10px; {font_size_css(12)} {get_font_family_css()}"
+            f"}}"
+            f"QPushButton:hover {{ background: rgba(255,149,0,1.0); }}"
+            f"QPushButton:pressed {{ background: rgba(255,149,0,0.7); }}"
         )
         self._restore_btn.setVisible(False)
         self._restore_btn.setToolTip("恢复用户自定义的工具权限设置")
@@ -398,7 +405,6 @@ class ToolControlCardFrame(SystemCardFrame):
         self._content_layout.setContentsMargins(8, 2, 8, 2)
 
         self._card.togglesChanged.connect(self.togglesChanged.emit)
-        self._card.togglesChanged.connect(lambda t: self._refresh_stats(t))
 
         # 监听 controller 的智能体激活状态变化
         if self._controller:
@@ -421,6 +427,18 @@ class ToolControlCardFrame(SystemCardFrame):
         controller.activeAgentChanged.connect(self._on_agent_changed)
         # 初始状态
         self._on_agent_changed(controller.get_active_agent_name() or "")
+
+    def refresh_style(self):
+        """主题/字体变更时刷新卡片样式"""
+        super().refresh_style()
+        # 刷新内容区 widget（全量重建以应用新样式）
+        if hasattr(self, "_card") and self._card is not None:
+            self._card.refresh_style()
+        # 刷新行为下拉框样式
+        self._behavior_combo.setStyleSheet(f"""
+            background: rgba(255,149,0,0.12); {font_size_css(11)} {get_font_family_css()}
+        """)
+        self.update()
 
     def _on_behavior_changed(self, idx: int):
         value = self._behavior_combo.itemData(idx)
@@ -459,12 +477,6 @@ class ToolControlCardFrame(SystemCardFrame):
         else:
             self._active_agent_label.setVisible(False)
             self._restore_btn.setVisible(False)
-
-    def _refresh_stats(self, toggles: dict):
-        from app.tools.tool_classifier import get_tool_counts
-        dangerous, safe = get_tool_counts(toggles)
-        self._count_label.setText(f"{dangerous}危险·{safe}安全")
-        self._count_label.setVisible(True)
 
     def set_toggles(self, toggles: dict):
         """兼容旧 API:仅用于初始化占位,实际数据来自 controller"""
