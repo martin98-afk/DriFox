@@ -298,6 +298,8 @@ class ToolControlCardFrame(SystemCardFrame):
 
     def show_card(self):
         self._card.show_content()
+        self.setVisible(True)
 
     def hide_card(self):
         self._card.hide_content()
+        self.setVisible(False)
