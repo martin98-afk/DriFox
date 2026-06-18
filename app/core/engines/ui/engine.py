@@ -167,25 +167,28 @@ class UIEngine(BaseEngine):
         # ========== 工具开关过滤（优先于 Agent 权限检查） ==========
         # 前移至此以接入 PermissionStrategy.INTERACTIVE 的 ask/deny 对话框机制。
         # 此前在 ToolExecutor 中检查，"ask" 只能返回错误文本，无法弹出确认对话框。
-        from app.utils.config import Settings
-        from app.tools.tool_classifier import get_default_toggles, DANGEROUS_TOOLS, SAFE_TOOLS
-
+        # 数据源：per-window controller (多窗口隔离) → 兜底：全局 Settings
         check_name = tool_name
         if tool_name.startswith("mcp__"):
             parts = tool_name.split("__", 2)
             check_name = parts[2] if len(parts) > 2 else tool_name
 
-        settings = Settings.get_instance()
-        toggles = dict(settings.tool_toggles.value)
+        controller = None
+        if self._backend is not None:
+            controller = getattr(self._backend, "tool_permission_controller", None)
 
-        all_known = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
-        defaults = get_default_toggles(all_known)
-        if check_name not in toggles:
-            toggles[check_name] = defaults.get(check_name, True)
+        if controller is not None:
+            toggles = controller.get_toggles()
+            behavior = controller.get_behavior()
+        else:
+            # 兜底：全局 Settings（API 模式等无 controller 的场景）
+            from app.utils.config import Settings
+            settings = Settings.get_instance()
+            toggles = dict(settings.tool_toggles.value)
+            behavior = settings.tool_off_behavior.value
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            behavior = settings.tool_off_behavior.value
             logger.info(
                 f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}"
             )

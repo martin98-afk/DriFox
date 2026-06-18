@@ -75,6 +75,7 @@ from app.tools.tool_classifier import (
     DANGEROUS_TOOLS,
     SAFE_TOOLS,
 )
+from app.core.tool_permission_controller import ToolPermissionController
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
@@ -255,13 +256,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
         self._window_id = str(uuid.uuid4())[:8]
 
+        # 🛡️ 工具权限控制器（per-window 多窗口隔离）
+        # 必须在 backend.initialize 之前创建并注入,engine 启动时会读取
+        self._tool_permission_controller = ToolPermissionController(self)
+
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
         self.backend = ChatBackend()
+        # 注入工具权限控制器（在 initialize 之前,engine 创建时会用到）
+        self.backend.set_tool_permission_controller(self._tool_permission_controller)
         self.backend.initialize(
             get_model_config=self._get_current_model_config,
             workdir=str(Path(__file__).parent.parent.parent),
         )
+        # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
+        # 此时 controller 还没建好,需要延迟绑定)
+        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
+            self._tool_control_card.set_controller(self._tool_permission_controller)
         # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
         self.backend.set_subagent_model_resolver(self._resolve_subagent_model_config)
         # 连接插件热更新信号
@@ -864,6 +875,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._update_model_selector_btn()
             except Exception:
                 pass  # 忽略模型复制失败
+
+            # ── 多窗口隔离：复制工具权限设置(user + active + agent 状态) ──
+            try:
+                if (
+                    hasattr(self, "_tool_permission_controller")
+                    and hasattr(new_instance, "_tool_permission_controller")
+                ):
+                    new_instance._tool_permission_controller.copy_state_from(
+                        self._tool_permission_controller
+                    )
+            except Exception:
+                pass  # 忽略权限复制失败
 
             # 设置 session 初始化的标志，避免重复创建新 session
             # 并标记为新会话模式，跳过历史会话恢复
@@ -1795,8 +1818,11 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
-        # 工具控制卡片
+        # 工具控制卡片（controller 由 _tool_permission_controller 在后续 set_controller 注入）
         self._tool_control_card = ToolControlCardFrame(self)
+        # 🛡️ 如果 controller 已存在（__init__ 中在 super 之前创建时），立即绑定
+        if hasattr(self, "_tool_permission_controller") and self._tool_permission_controller is not None:
+            self._tool_control_card.set_controller(self._tool_permission_controller)
         self._tool_control_card.setObjectName("toolControlCard")
         self._tool_control_card.setMinimumHeight(250)
         self._tool_control_card.setVisible(False)
@@ -4213,22 +4239,15 @@ class OpenAIChatToolWindow(ToolWindow):
     def _toggle_tool_control_card(self):
         """切换工具控制卡片的显示"""
         if not self._card_manager.is_card_visible("tool_control", self._window_id):
-            settings = Settings.get_instance()
-            toggles = dict(settings.tool_toggles.value)
-            if not toggles:
-                all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
-                toggles = get_default_toggles(all_tools)
-            self._tool_control_card.set_toggles(toggles)
+            # 通知 card 从 controller 拉取最新状态
+            self._tool_control_card.set_toggles(
+                self._tool_permission_controller.get_toggles()
+            )
         self._card_manager.toggle_card("tool_control", self._window_id)
 
     def _refresh_tool_toggle_btn(self):
         """刷新工具开关按钮上的数字"""
-        settings = Settings.get_instance()
-        toggles = dict(settings.tool_toggles.value)
-        # 空配置补全为默认全开
-        if not toggles:
-            all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
-            toggles = get_default_toggles(all_tools)
+        toggles = self._tool_permission_controller.get_toggles()
         dangerous, safe = get_tool_counts(toggles)
         self._tool_danger_label.setText(str(dangerous))
         self._tool_safe_label.setText(str(safe))
@@ -8611,6 +8630,37 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._on_send_clicked(user_text=question.strip())
 
+    def _apply_agent_command_permissions(self, agent_name: str):
+        """智能体命令(非子智能体)执行时,自动注入其设定的工具权限
+
+        Args:
+            agent_name: 智能体名(对应 Agent 数据类的 name)
+        """
+        from app.core.agent import AgentManager
+        agent_manager = AgentManager.get_instance()
+        if agent_manager is None:
+            logger.warning("[AgentCommand] AgentManager 未初始化,跳过权限注入")
+            return
+
+        agent = agent_manager.get_agent(agent_name)
+        if agent is None:
+            logger.warning(f"[AgentCommand] 未找到智能体 '{agent_name}',跳过权限注入")
+            return
+
+        # 注入 agent 的工具权限到当前窗口的 controller
+        self._tool_permission_controller.apply_agent(
+            agent_name=agent_name,
+            agent_tools=dict(agent.tools or {}),
+            agent_permission=dict(agent.permission or {}),
+        )
+        logger.info(
+            f"[AgentCommand] 已注入智能体 '{agent_name}' 的工具权限"
+        )
+
+        # 主动刷新工具控制卡片(确保立即显示 agent 权限,避免信号时序问题)
+        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
+            self._tool_control_card.refresh()
+
     def _on_send_clicked(self, user_text: str = ""):
         if getattr(self, "_is_destroyed", False):
             return
@@ -8670,6 +8720,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
+                    # 智能体命令(非子智能体)：自动注入其设定的工具权限
+                    # PROMPT 和 AGENT 类型均可触发（用户可能在卡片选了"提示词"而非"智能体"）
+                    self._apply_agent_command_permissions(cmd_result.command_name)
                     # 提示词替换命令：prompt_sections 按参数过滤 body 段落
                     selected_text = cmd_mgr.select_prompt(cmd_result.command_name,
                                                          cmd_result.remainder)
