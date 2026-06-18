@@ -2,6 +2,7 @@
 ICON_NAME_TO_FILE = {
     "Anthropic": "Anthropic.svg",
     "baidu": "baidu.svg",
+    "build-agent": "build-agent.svg",
     "deepseek": "deepseek.svg",
     "discord": "discord.svg",
     "drifox": "drifox.ico",
@@ -13,6 +14,7 @@ ICON_NAME_TO_FILE = {
     "MiniMax": "MiniMax.svg",
     "Ollama": "Ollama.svg",
     "opencode": "opencode.svg",
+    "plan-agent": "plan-agent.svg",
     "qwen": "qwen.svg",
     "siliconflow": "siliconflow.png",
     "slack": "slack.svg",

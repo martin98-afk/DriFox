@@ -7,6 +7,7 @@
     <file>Ollama.svg</file>
     <file>Telegram.svg</file>
     <file>baidu.svg</file>
+    <file>build-agent.svg</file>
     <file>deepseek.svg</file>
     <file>discord.svg</file>
     <file>drifox.ico</file>
@@ -15,6 +16,7 @@
     <file>groq.svg</file>
     <file>hooks.svg</file>
     <file>opencode.svg</file>
+    <file>plan-agent.svg</file>
     <file>qwen.svg</file>
     <file>siliconflow.png</file>
     <file>slack.svg</file>

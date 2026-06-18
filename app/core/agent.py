@@ -764,22 +764,20 @@ class AgentManager:
             if subagents_info:
                 global_contract = global_contract + "\n\n" + subagents_info
 
+        # 【缓存优化】稳定前缀在前：global_contract + role_constraints 不随 Agent 变化
+        # agent.prompt 放在后面作为动态后缀，切换 Agent 时不影响前缀缓存命中
         if agent.prompt:
             return "\n\n".join(
-                part for part in [agent.prompt, global_contract, role_constraints, base_prompt] if part
+                part for part in [global_contract, role_constraints, agent.prompt, base_prompt] if part
             )
 
-        # Fallback 提示词
-        fallback_prompt = f"""# {agent.name}
+        # Fallback 提示词（同样遵循稳定前缀在前原则）
+        fallback_header = f"""# {agent.name}
 {agent.description}
 
 ## Available Tools
-Use the tools available to you based on your permissions.
-
-{global_contract}
-{role_constraints}
-"""
-        return "\n\n".join(part for part in [fallback_prompt, base_prompt] if part)
+Use the tools available to you based on your permissions."""
+        return "\n\n".join(part for part in [global_contract, role_constraints, fallback_header, base_prompt] if part)
 
     def get_unified_system_prompt(self) -> str:
         return """# LLM Chatter
