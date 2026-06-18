@@ -3,9 +3,8 @@
 工具控制卡片 — 按模块分组控制工具开关，样式对齐模型参数卡片
 """
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
 )
 from qfluentwidgets import SwitchButton, ComboBox
 
@@ -68,7 +67,6 @@ class ToolControlCardContent(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
-        self._stats_label = None
 
     def set_toggles(self, toggles: dict):
         """加载 toggles 并重建 UI"""
@@ -80,7 +78,6 @@ class ToolControlCardContent(QWidget):
 
     def _rebuild(self):
         """全量重建内容"""
-        # 清除旧内容（保留 _stats_label 之外的所有 widget）
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
@@ -106,7 +103,6 @@ class ToolControlCardContent(QWidget):
         )
         stats.setStyleSheet("font-size:12px; background:transparent; border:none; padding: 2px 0 6px 0;")
         self._layout.addWidget(stats)
-        self._stats_label = stats
 
         # 按组构建
         for group_name, tool_names in TOOL_GROUPS:
@@ -151,7 +147,6 @@ class ToolControlCardContent(QWidget):
         all_on = all(self._toggles.get(t, True) for t in tool_names)
         group_switch = SwitchButton()
         group_switch.setChecked(all_on)
-        group_switch.setTextColor(QColor("#22c55e"), QColor("#22c55e") if is_safe else QColor("#ff5050"))
         group_switch.setFixedSize(38, 20)
         header_layout.addWidget(group_switch)
         self._group_switches[group_name] = group_switch
@@ -211,10 +206,6 @@ class ToolControlCardContent(QWidget):
         sw = SwitchButton()
         sw.setChecked(enabled)
         sw.setFixedSize(34, 16)
-        if classify_tool_danger(tool_name) == "dangerous":
-            sw.setTextColor(QColor("#22c55e"), QColor("#ff5050"))
-        else:
-            sw.setTextColor(QColor("#22c55e"), QColor("#22c55e"))
         row_layout.addWidget(sw)
         self._toggle_widgets[tool_name] = sw
 
