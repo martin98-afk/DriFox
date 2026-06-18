@@ -99,49 +99,11 @@ feat|fix|docs|chore|refactor|test: scope - summary
 
 ---
 
-## 7. 当前工作状态（2026-06-05 更新）
-
-### Worktree
-- 主仓库: `D:/work/DriFox`（分支: dev）
-
-### 已完成
-- **代码质量分析**: 扫描 `app/core/`、`app/widgets/`、`app/tools/`、`app/gateway/`，产出 13 项关键问题清单
-- **交互式清理（5 阶段）**: 枚举引用修复、`$null` 删除、重复函数合并、死码清除、`bare except:` 修复、`print()→logger`、widget 导入声明修复、`QDesktop→QScreen API`
-- **history_compactor.py 拆分**: 1518→~1050 行，提取 `compression/` 子包
-- **backend.py 拆分**: 1726→955 行（-45%），提取 3 个独立模块：`plugin_hot_reload.py`、`mcp_discovery.py`、`gateway_bridge.py`
-- **app/core/ 按领域分包整理**: 12 个平面文件移入 6 个子包（agent/、command/、chat/、plugin/、provider/、tool/），9 个文件保留原位。全量 import 引用已批量更新，`import app.core` 验证通过
-- **修复插件路径计算**: 因文件移入子包导致 `_SYSTEM_PLUGIN_DIR` 路径少算一层（指向 `app/plugins/` 而非 `plugins/`），改用 `parents[3]` 修复。`tool_executor.py` 中 2 处 fallback 路径同步修复
-- **修复 PluginManager.get_plugin_path 不存在**: `plugin_hot_reload.py` 的 `build_plugin_path_index()` 调用了不存在的 `pm.get_plugin_path()`，改用 `plugin.path`（`PluginInfo` 数据类已有该属性）。自提取时即存在的 bug，从未生效过
-
-### 进行中（待实施）
-- 无
-
-### 已完成
-- **适配 Claude Code 插件路径到监控**: 
-  - `app/core/plugin_manager.py`: 添加 `_CLAUDE_USER_SKILLS_DIR`/`_CLAUDE_PLUGIN_CACHE_DIR` 常量 + `_discover_claude_plugins()` 方法，在 `initialize()` 和 `rescan()` 中均集成 Claude 插件扫描，优先级：系统 → Claude → DriFox 用户（最高）
-  - `app/core/backend.py`: `_start_plugin_watcher()` 的 watch_paths 中新增 `~/.claude/skills/`（自动创建目录）和 `~/.claude/plugins/cache/`（仅存在时监听）
-
-### 新增功能（2026-06-05）
-- **会话自动关联 worktree**: sessions 表新增 `worktree_path` 列（含迁移逻辑）
-  - 保存会话时自动检测当前工作目录是否为 git worktree，若是则将 worktree 路径保存到会话记录
-  - 加载会话时自动切换到该会话关联的 worktree（通过 memory_manager 设置工作目录 + 关键文档）
-  - 切换逻辑覆盖：tool_executor 同步、分支标签刷新、记忆卡片 UI 刷新、memory_card._instance_workdir 同步
-  - 兼容旧会话（worktree_path 为空时跳过自动切换）
-  - 两个加载入口均已覆盖：`_load_history_session_from_popup` + `_switch_to_session_by_id`
-  - 🐛 **已修复**: 不在 worktree 中时不再传 worktree_path（否则 update_session 会覆盖已有值）
-  - 🐛 **已修复**: _switch_to_worktree 同步更新 memory_card._instance_workdir`
-
-### 新增功能 (2026-06-16)
-- **Gitee 图床上传工具**: 将本地文件上传至 Gitee 仓库返回公开下载链接
-  - `app/gateway/utils/gitee_uploader.py`: GiteeUploader 单例类（upload_file / upload_bytes）
-  - `app/utils/config.py`: 新增 gitee_enabled/token/owner/repo/path/branch 配置项
-  - `app/tools/file_tools.py`: 新增 gitee_upload() 方法，AI 可通过 function calling 调用
-  - `app/core/tool_executor.py`: TOOL_SCHEMAS 注册 + dispatch map
-  - `app/gateway/base.py`: BasePlatformAdapter 新增 send_file_via_gitee() + _try_gitee_upload()
-  - `app/gateway/adapters/wecom.py`: send_image/send_file 自动上传到 Gitee 并追加外链
-  - Gitee API: `POST https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}`
-
-### 待处理
-- **main_widget.py (10,139 行) 拆分**: 架构蓝图已完成但未实施
-- **P0 SerpAPI 硬编码密钥**: 用户选择跳过
-- 10 个 print() 在 docstring/注释中（非代码逻辑，跳过）
+### 已修复（2026-06-18）
+- **tool_control_card 信号链 / 统计数字不更新**:
+  - `_on_active_toggles_changed` 完整实现（含 `rebuild` + `update()` + `togglesChanged.emit()`）
+  - 删除 109 行重复的 `_on_active_toggles_changed` 定义
+  - `main_widget.py` 双向绑定兜底：`setup_ui` 创建卡片后检查 controller，`__init__` 创建 controller 后检查卡片
+  - `_on_tool_toggled` 改为直接调 `rebuild()`，不再依赖信号链延迟
+  - 日志格式统一：`[ToolCard] _rebuild: agent=xxx, toggles_enabled=X/32`
+  - 所有用户开关/组开关/agent 权限注入/恢复功能已验证通过 ✅

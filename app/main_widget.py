@@ -2265,6 +2265,25 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
         tt_layout.addWidget(self._tool_safe_label)
 
+        # 恢复按钮（仅 agent 覆盖时显示，不打开卡片即可恢复）
+        self._tool_restore_btn = QPushButton("↺", self._tool_toggle_btn)
+        self._tool_restore_btn.setFixedSize(20, 20)
+        self._tool_restore_btn.setCursor(Qt.PointingHandCursor)
+        self._tool_restore_btn.setToolTip("取消 agent 覆盖，恢复用户工具权限")
+        self._tool_restore_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: none;
+                color: #ff9500; {font_size_css(13)} {get_font_family_css()}
+                font-weight: bold; padding: 0;
+            }}
+            QPushButton:hover {{
+                color: #ffb84d;
+            }}
+        """)
+        self._tool_restore_btn.setVisible(False)
+        self._tool_restore_btn.clicked.connect(lambda: self._on_tool_restore())
+        tt_layout.addWidget(self._tool_restore_btn)
+
         toolbar_layout.addWidget(self._tool_toggle_btn)
 
         toolbar_layout.addStretch(1)
@@ -4280,6 +4299,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_toggle_btn.setToolTip(tooltip)
         self._tool_danger_label.setToolTip(tooltip)
         self._tool_safe_label.setToolTip(tooltip)
+        # 恢复按钮显隐
+        self._tool_restore_btn.setVisible(bool(agent_name))
+
+    def _on_tool_restore(self):
+        """工具按钮上的恢复点击：恢复用户权限设置"""
+        if not hasattr(self, "_tool_permission_controller") or not self._tool_permission_controller:
+            return
+        self._tool_permission_controller.restore_user()
+        # 刷新卡片和按钮
+        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
+            self._tool_control_card.refresh()
+        self._refresh_tool_toggle_btn()
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
