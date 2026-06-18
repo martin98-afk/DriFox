@@ -4209,15 +4209,27 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_tool_control_card(self):
         """切换工具控制卡片的显示"""
+        logger.info("[ToolToggle] _toggle_tool_control_card CALLED")
+        logger.info(f"[ToolToggle] card_manager={self._card_manager}, window_id={self._window_id}")
+        logger.info(f"[ToolToggle] tool_control_card={self._tool_control_card}")
+        logger.info(f"[ToolToggle] is_visible={self._card_manager.is_card_visible('tool_control', self._window_id)}")
         if not self._card_manager.is_card_visible("tool_control", self._window_id):
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
-            # 空配置补全为默认全开
+            logger.info(f"[ToolToggle] toggles={toggles}")
             if not toggles:
                 all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
                 toggles = get_default_toggles(all_tools)
-            self._tool_control_card.set_toggles(toggles)
-        self._card_manager.toggle_card("tool_control", self._window_id)
+            try:
+                self._tool_control_card.set_toggles(toggles)
+                logger.info("[ToolToggle] set_toggles OK")
+            except Exception as e:
+                logger.exception(f"[ToolToggle] set_toggles FAILED: {e}")
+        try:
+            self._card_manager.toggle_card("tool_control", self._window_id)
+            logger.info("[ToolToggle] toggle_card OK")
+        except Exception as e:
+            logger.exception(f"[ToolToggle] toggle_card FAILED: {e}")
 
     def _refresh_tool_toggle_btn(self):
         """刷新工具开关按钮上的数字"""
