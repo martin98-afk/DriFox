@@ -1802,7 +1802,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_control_card.set_height_mode('content')
         self._tool_control_card.setVisible(False)
         self._tool_control_card.closed.connect(
-            lambda: self._card_manager.hide_card("tool_control", self._window_id)
+            lambda: (
+                self._card_manager.hide_card("tool_control", self._window_id),
+                self._restore_after_system_close(),
+            )
         )
         self._tool_control_card.togglesChanged.connect(
             lambda _: self._refresh_tool_toggle_btn()
@@ -1972,6 +1975,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "mcp_edit",
             "hook_edit",
             "project_selector",
+            "tool_control",
         ):
             self._card_manager.on_card_shown(
                 self._window_id, _cid, lambda cid: self._on_system_card_opened(cid)

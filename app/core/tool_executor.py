@@ -555,10 +555,6 @@ class ToolExecutor:
             toggles[check_name] = defaults.get(check_name, True)
 
         is_enabled = toggles.get(check_name, True)
-        logger.info(
-            f"[ToolToggle] tool={tool_name} check_name={check_name} enabled={is_enabled} "
-            f"behavior={settings.tool_off_behavior.value} toggles_keys={list(toggles.keys())[:5]}..."
-        )
         if not is_enabled:
             behavior = settings.tool_off_behavior.value
             logger.info(
