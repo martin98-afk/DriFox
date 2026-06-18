@@ -61,15 +61,15 @@ class ToolControlCardContent(QWidget):
         self._toggles: dict = {}
         self._toggle_widgets: dict = {}
         self._group_switches: dict = {}
+        self._stats_label: QLabel = None
         self._setup_ui()
 
     def _setup_ui(self):
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(0)
+        self._layout.setContentsMargins(0, 4, 0, 4)
+        self._layout.setSpacing(8)
 
     def set_toggles(self, toggles: dict):
-        """加载 toggles 并重建 UI"""
         self._toggles = dict(toggles)
         self._rebuild()
 
@@ -77,13 +77,14 @@ class ToolControlCardContent(QWidget):
         return dict(self._toggles)
 
     def _rebuild(self):
-        """全量重建内容"""
+        """全量重建内容（仅首次加载调用）"""
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._toggle_widgets.clear()
         self._group_switches.clear()
+        self._stats_label = None
 
         # 确保所有工具都在 toggles 中
         all_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
@@ -93,22 +94,47 @@ class ToolControlCardContent(QWidget):
                 self._toggles[name] = defaults[name]
 
         # 统计行
-        dangerous, safe = get_tool_counts(self._toggles)
-        Colors.refresh()
-        stats = QLabel(
-            f"<span style='color:#ff5050;font-weight:600;'>{dangerous}</span>"
-            f"<span style='color:#888;'> 危险 · </span>"
-            f"<span style='color:#22c55e;font-weight:600;'>{safe}</span>"
-            f"<span style='color:#888;'> 安全</span>"
-        )
-        stats.setStyleSheet("font-size:12px; background:transparent; border:none; padding: 2px 0 6px 0;")
-        self._layout.addWidget(stats)
+        self._stats_label = self._make_stats_label()
+        self._layout.addWidget(self._stats_label)
 
         # 按组构建
         for group_name, tool_names in TOOL_GROUPS:
             self._build_group(group_name, tool_names)
 
         self._layout.addStretch()
+
+    def _refresh_stats(self):
+        """仅刷新统计行文本 + 各整组开关状态（不全量重建）"""
+        if self._stats_label:
+            dangerous, safe = get_tool_counts(self._toggles)
+            self._stats_label.setText(
+                f"<span style='color:#ff5050;font-weight:600;'>{dangerous}</span>"
+                f"<span style='color:#888;'> 危险 · </span>"
+                f"<span style='color:#22c55e;font-weight:600;'>{safe}</span>"
+                f"<span style='color:#888;'> 安全</span>"
+            )
+        # 刷新每个组的整组开关状态
+        for group_name, tool_names in TOOL_GROUPS:
+            gs = self._group_switches.get(group_name)
+            if gs:
+                all_on = all(self._toggles.get(t, True) for t in tool_names)
+                gs.blockSignals(True)
+                gs.setChecked(all_on)
+                gs.blockSignals(False)
+
+    def _make_stats_label(self) -> QLabel:
+        dangerous, safe = get_tool_counts(self._toggles)
+        Colors.refresh()
+        label = QLabel(
+            f"<span style='color:#ff5050;font-weight:600;'>{dangerous}</span>"
+            f"<span style='color:#888;'> 危险 · </span>"
+            f"<span style='color:#22c55e;font-weight:600;'>{safe}</span>"
+            f"<span style='color:#888;'> 安全</span>"
+        )
+        label.setStyleSheet(
+            "font-size:12px; background:transparent; border:none; padding: 2px 0 4px 0;"
+        )
+        return label
 
     def _build_group(self, group_name: str, tool_names: list):
         """构建一个工具组"""
@@ -131,10 +157,12 @@ class ToolControlCardContent(QWidget):
 
         # 组头
         header = QWidget()
-        header.setStyleSheet(f"background: {header_bg}; border: none; border-radius: 8px;")
+        header.setStyleSheet(
+            f"background: {header_bg}; border: none; border-radius: 8px;"
+        )
         header.setCursor(Qt.PointingHandCursor)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(10, 7, 10, 7)
+        header_layout.setContentsMargins(10, 8, 10, 8)
 
         label = QLabel(f"{group_name} ({len(tool_names)})")
         label.setStyleSheet(
@@ -157,8 +185,8 @@ class ToolControlCardContent(QWidget):
         body = QWidget()
         body.setStyleSheet("background: transparent; border: none;")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(10, 4, 10, 6)
-        body_layout.setSpacing(2)
+        body_layout.setContentsMargins(10, 6, 10, 8)
+        body_layout.setSpacing(3)
 
         for tool_name in tool_names:
             row = self._build_tool_row(tool_name)
@@ -184,14 +212,14 @@ class ToolControlCardContent(QWidget):
         row = QWidget()
         row.setStyleSheet("background: transparent; border: none;")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 2, 0, 2)
+        row_layout.setContentsMargins(0, 3, 0, 3)
         row_layout.setSpacing(8)
 
         name_label = QLabel(tool_name)
         name_label.setStyleSheet(
-            "color: #ccc; font-size: 11px; background: transparent; border: none;"
+            "color: #ccc; font-size: 12px; background: transparent; border: none;"
         )
-        name_label.setFixedWidth(100)
+        name_label.setFixedWidth(105)
         row_layout.addWidget(name_label)
 
         desc = TOOL_DESCRIPTIONS.get(tool_name, "")
@@ -219,19 +247,23 @@ class ToolControlCardContent(QWidget):
         self._toggles[tool_name] = enabled
         self._settings.tool_toggles.value = dict(self._toggles)
         self._settings.save()
-        self._rebuild()
+        self._refresh_stats()
         self.togglesChanged.emit(dict(self._toggles))
 
     def _on_group_toggled(self, tool_names: list, enabled: bool):
         for name in tool_names:
             self._toggles[name] = enabled
+            tw = self._toggle_widgets.get(name)
+            if tw:
+                tw.blockSignals(True)
+                tw.setChecked(enabled)
+                tw.blockSignals(False)
         self._settings.tool_toggles.value = dict(self._toggles)
         self._settings.save()
-        self._rebuild()
+        self._refresh_stats()
         self.togglesChanged.emit(dict(self._toggles))
 
     def show_content(self):
-        """显示时刷新数据"""
         self._toggles = dict(self._settings.tool_toggles.value)
         self._rebuild()
 
@@ -249,7 +281,6 @@ class ToolControlCardFrame(SystemCardFrame):
         super().__init__(parent)
         self.set_height_mode("content")
 
-        # 设置标题
         self.title_label.setText("🔧 工具控制")
         self.icon_label.hide()
 
@@ -264,20 +295,15 @@ class ToolControlCardFrame(SystemCardFrame):
             self._behavior_combo.setCurrentIndex(idx)
         self._behavior_combo.currentIndexChanged.connect(self._on_behavior_changed)
 
-        # 插入到头部（关闭按钮之前）
         self._header_layout.insertWidget(
             self._header_layout.count() - 2, self._behavior_combo
         )
 
-        # 内容
         self._card = ToolControlCardContent(self)
         self._content_layout.addWidget(self._card)
 
-        # 转发信号
         self._card.togglesChanged.connect(self.togglesChanged.emit)
-        self._card.togglesChanged.connect(
-            lambda t: self._refresh_stats(t)
-        )
+        self._card.togglesChanged.connect(lambda t: self._refresh_stats(t))
 
     def _on_behavior_changed(self, idx: int):
         value = self._behavior_combo.itemData(idx)
