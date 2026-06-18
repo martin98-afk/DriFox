@@ -150,8 +150,8 @@ class ToolControlCardContent(QWidget):
         all_on = all(self._toggles.get(t, True) for t in tool_names)
         group_switch = SwitchButton()
         group_switch.setChecked(all_on)
-        group_switch.setFixedSize(38, 20)
         header_layout.addWidget(group_switch)
+        header_layout.addSpacing(16)
         self._group_switches[group_name] = group_switch
 
         group_layout.addWidget(header)
@@ -209,8 +209,8 @@ class ToolControlCardContent(QWidget):
         enabled = self._toggles.get(tool_name, True)
         sw = SwitchButton()
         sw.setChecked(enabled)
-        sw.setFixedSize(34, 16)
         row_layout.addWidget(sw)
+        row_layout.addSpacing(8)
         self._toggle_widgets[tool_name] = sw
 
         sw.checkedChanged.connect(

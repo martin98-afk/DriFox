@@ -1581,7 +1581,7 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
-        print(sanitized)
+        
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]
@@ -2568,6 +2568,19 @@ class OpenAIChatWorker(QThread):
             return True
 
         permission_result = self.permission_check_callback(tool_name, arguments)
+
+        if permission_result == "deny":
+            # 🛡️ 工具被关闭/禁用：直接拒绝执行，追加错误结果，通知 UI
+            logger.info(f"[Permission] tool={tool_name} 被拒绝（工具开关关闭）")
+            self._emit_with_callback("tool_result_received", self.tool_result_received,
+                                     tool_call_id, tool_name, arguments,
+                                     type("ToolResult", (),
+                                          {"success": False, "error": f"Tool '{tool_name}' is disabled by tool toggle"})())
+            results.append({
+                "role": "tool", "tool_call_id": tool_call_id,
+                "content": f"Error: Tool '{tool_name}' is disabled (set tool_toggles to enable)", "round_id": round_id,
+            })
+            return True  # 已处理，继续对话（工具不会真正执行）
 
         if permission_result == "ask":
             # 串行化用户交互：同一时间只有一个工具需要用户确认
