@@ -4209,6 +4209,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._card_manager.is_card_visible("tool_control", self._window_id):
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
+            # 空配置补全为默认全开
+            if not toggles:
+                all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+                toggles = get_default_toggles(all_tools)
             self._tool_control_card.set_toggles(toggles)
         self._card_manager.toggle_card("tool_control", self._window_id)
 
@@ -4216,6 +4220,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """刷新工具开关按钮上的数字"""
         settings = Settings.get_instance()
         toggles = dict(settings.tool_toggles.value)
+        # 空配置补全为默认全开
+        if not toggles:
+            all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+            toggles = get_default_toggles(all_tools)
         dangerous, safe = get_tool_counts(toggles)
         self._tool_danger_label.setText(str(dangerous))
         self._tool_safe_label.setText(str(safe))
