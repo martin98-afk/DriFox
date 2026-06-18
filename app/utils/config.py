@@ -373,6 +373,10 @@ class Settings(QConfig):
     gitee_path = ConfigItem("Gitee", "Path", "drifox")
     gitee_branch = ConfigItem("Gitee", "Branch", "master")
 
+    # ========== 工具开关控制 ==========
+    tool_toggles = ConfigItem("Tools", "Toggles", {})
+    tool_off_behavior = ConfigItem("Tools", "OffBehavior", "deny")
+
 
 
 def update_theme_options():

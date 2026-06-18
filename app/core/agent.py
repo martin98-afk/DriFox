@@ -701,11 +701,6 @@ class AgentManager:
 
         # 通用编码契约（所有智能体）
         global_contract = """
-## Global Coding Contract
-- 这是一个代码工作台，不是普通闲聊窗口。
-- 优先围绕"相关文件、实施动作、验证方式、剩余风险"组织输出。
-- 回答要像工程师交付，不要像客服聊天。
-
 ### 工具调用并行原则
 - 对于**互相独立**的任务（如同时读取多个文件、多个 grep 查询、多个 webfetch、并行启动后台任务），请在**一次响应中并行发出**所有 tool_call，不要拆成多轮串行调用。
 - 串行的典型场景：依赖前一步结果（如 grep → read → edit；先探测再决策）。
@@ -764,22 +759,20 @@ class AgentManager:
             if subagents_info:
                 global_contract = global_contract + "\n\n" + subagents_info
 
+        # 【缓存优化】稳定前缀在前：global_contract + role_constraints 不随 Agent 变化
+        # agent.prompt 放在后面作为动态后缀，切换 Agent 时不影响前缀缓存命中
         if agent.prompt:
             return "\n\n".join(
-                part for part in [agent.prompt, global_contract, role_constraints, base_prompt] if part
+                part for part in [global_contract, role_constraints, agent.prompt, base_prompt] if part
             )
 
-        # Fallback 提示词
-        fallback_prompt = f"""# {agent.name}
+        # Fallback 提示词（同样遵循稳定前缀在前原则）
+        fallback_header = f"""# {agent.name}
 {agent.description}
 
 ## Available Tools
-Use the tools available to you based on your permissions.
-
-{global_contract}
-{role_constraints}
-"""
-        return "\n\n".join(part for part in [fallback_prompt, base_prompt] if part)
+Use the tools available to you based on your permissions."""
+        return "\n\n".join(part for part in [global_contract, role_constraints, fallback_header, base_prompt] if part)
 
     def get_unified_system_prompt(self) -> str:
         return """# LLM Chatter

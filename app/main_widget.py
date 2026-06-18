@@ -68,6 +68,14 @@ from app.core import (
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.tool_popup import ToolWindow
+from app.tools.tool_classifier import (
+    classify_tool_danger,
+    get_tool_counts,
+    get_default_toggles,
+    DANGEROUS_TOOLS,
+    SAFE_TOOLS,
+)
+from app.core.tool_permission_controller import ToolPermissionController
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
@@ -97,6 +105,7 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
+from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
@@ -247,13 +256,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
         self._window_id = str(uuid.uuid4())[:8]
 
+        # 🛡️ 工具权限控制器（per-window 多窗口隔离）
+        # 必须在 backend.initialize 之前创建并注入,engine 启动时会读取
+        self._tool_permission_controller = ToolPermissionController(self)
+
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
         self.backend = ChatBackend()
+        # 注入工具权限控制器（在 initialize 之前,engine 创建时会用到）
+        self.backend.set_tool_permission_controller(self._tool_permission_controller)
         self.backend.initialize(
             get_model_config=self._get_current_model_config,
             workdir=str(Path(__file__).parent.parent.parent),
         )
+        # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
+        # 此时 controller 还没建好,需要延迟绑定)
+        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
+            self._tool_control_card.set_controller(self._tool_permission_controller)
         # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
         self.backend.set_subagent_model_resolver(self._resolve_subagent_model_config)
         # 连接插件热更新信号
@@ -636,6 +655,15 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(
             self._window_id,
             ContainerType.BOTTOM,
+            "tool_control",
+            self._tool_control_card,
+            system_card=True,
+        )
+        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
+
+        mgr.register_card(
+            self._window_id,
+            ContainerType.BOTTOM,
             "auto_loop_config",
             self._auto_loop_config_card,
             system_card=True,
@@ -847,6 +875,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._update_model_selector_btn()
             except Exception:
                 pass  # 忽略模型复制失败
+
+            # ── 多窗口隔离：复制工具权限设置(user + active + agent 状态) ──
+            try:
+                if (
+                    hasattr(self, "_tool_permission_controller")
+                    and hasattr(new_instance, "_tool_permission_controller")
+                ):
+                    new_instance._tool_permission_controller.copy_state_from(
+                        self._tool_permission_controller
+                    )
+            except Exception:
+                pass  # 忽略权限复制失败
 
             # 设置 session 初始化的标志，避免重复创建新 session
             # 并标记为新会话模式，跳过历史会话恢复
@@ -1778,6 +1818,25 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
+        # 工具控制卡片（controller 由 _tool_permission_controller 在后续 set_controller 注入）
+        self._tool_control_card = ToolControlCardFrame(self)
+        # 🛡️ 如果 controller 已存在（__init__ 中在 super 之前创建时），立即绑定
+        if hasattr(self, "_tool_permission_controller") and self._tool_permission_controller is not None:
+            self._tool_control_card.set_controller(self._tool_permission_controller)
+        self._tool_control_card.setObjectName("toolControlCard")
+        self._tool_control_card.setMinimumHeight(250)
+        self._tool_control_card.setVisible(False)
+        self._tool_control_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("tool_control", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._tool_control_card.togglesChanged.connect(
+            lambda _: self._refresh_tool_toggle_btn()
+        )
+        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
+
         # 模型选择卡片（底部卡片形式）
         self._model_selector_card = BaseSettingsCard("", "", self)
         self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
@@ -1941,6 +2000,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "mcp_edit",
             "hook_edit",
             "project_selector",
+            "tool_control",
         ):
             self._card_manager.on_card_shown(
                 self._window_id, _cid, lambda cid: self._on_system_card_opened(cid)
@@ -2158,10 +2218,73 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_provider_name = ""
         self._current_model_name = ""
 
-        # 智能体切换（无边框）
-        self._agent_switch_widget = self._create_agent_switch_buttons()
-        self._agent_switch_widget.setFixedHeight(28)
-        toolbar_layout.addWidget(self._agent_switch_widget)
+        # ===== 工具开关双色分段按钮 =====
+        self._tool_toggle_btn = QWidget(toolbar_widget)
+        self._tool_toggle_btn.setFixedHeight(26)
+        self._tool_toggle_btn.setCursor(Qt.PointingHandCursor)
+        Colors.refresh()
+        self._tool_toggle_btn.setStyleSheet(f"""
+            background: {Colors.TOOLBAR_BG};
+            border: none;
+            border-radius: 8px;
+        """)
+        self._tool_toggle_btn.mousePressEvent = lambda e: self._toggle_tool_control_card()
+        tt_layout = QHBoxLayout(self._tool_toggle_btn)
+        tt_layout.setContentsMargins(6, 0, 6, 0)
+        tt_layout.setSpacing(0)
+
+        # 图标
+        tt_icon = QLabel("🔧")
+        tt_icon.setStyleSheet("background: transparent; border: none; font-size: 13px;")
+        tt_layout.addWidget(tt_icon)
+        tt_layout.addSpacing(4)
+
+        # 左：危险工具数（暗红）
+        self._tool_danger_label = QLabel("0")
+        self._tool_danger_label.setAlignment(Qt.AlignCenter)
+        self._tool_danger_label.setFixedHeight(20)
+        self._tool_danger_label.setStyleSheet(f"""
+            background: {Colors.STATUS_DANGER_BG_DARK};
+            color: white; font-weight: 700;
+            border: none; border-top-left-radius: 4px; border-bottom-left-radius: 4px;
+            padding: 0 8px;
+            {font_size_css(13)} {get_font_family_css()}
+        """)
+        tt_layout.addWidget(self._tool_danger_label)
+
+        # 右：安全工具数（暗绿）
+        self._tool_safe_label = QLabel("0")
+        self._tool_safe_label.setAlignment(Qt.AlignCenter)
+        self._tool_safe_label.setFixedHeight(20)
+        self._tool_safe_label.setStyleSheet(f"""
+            background: {Colors.SUCCESS_DARK};
+            color: white; font-weight: 700;
+            border: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px;
+            padding: 0 8px;
+            {font_size_css(13)} {get_font_family_css()}
+        """)
+        tt_layout.addWidget(self._tool_safe_label)
+
+        # 恢复按钮（仅 agent 覆盖时显示，不打开卡片即可恢复）
+        self._tool_restore_btn = QPushButton("↺", self._tool_toggle_btn)
+        self._tool_restore_btn.setFixedSize(20, 20)
+        self._tool_restore_btn.setCursor(Qt.PointingHandCursor)
+        self._tool_restore_btn.setToolTip("取消 agent 覆盖，恢复用户工具权限")
+        self._tool_restore_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: none;
+                color: #ff9500; {font_size_css(13)} {get_font_family_css()}
+                font-weight: bold; padding: 0;
+            }}
+            QPushButton:hover {{
+                color: #ffb84d;
+            }}
+        """)
+        self._tool_restore_btn.setVisible(False)
+        self._tool_restore_btn.clicked.connect(lambda: self._on_tool_restore())
+        tt_layout.addWidget(self._tool_restore_btn)
+
+        toolbar_layout.addWidget(self._tool_toggle_btn)
 
         toolbar_layout.addStretch(1)
 
@@ -2285,6 +2408,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始定位工具栏（resizeEvent 会持续更新）
         self._position_bottom_toolbar()
+
+        # 初始刷新工具开关按钮
+        self._refresh_tool_toggle_btn()
 
     def _position_bottom_toolbar(self):
         """将底部工具栏绝对定位到窗口底部 36px。
@@ -4131,6 +4257,61 @@ class OpenAIChatToolWindow(ToolWindow):
                 top_window.activateWindow()
                 top_window.raise_()
 
+    def _toggle_tool_control_card(self):
+        """切换工具控制卡片的显示"""
+        if not self._card_manager.is_card_visible("tool_control", self._window_id):
+            # 通知 card 从 controller 拉取最新状态
+            self._tool_control_card.set_toggles(
+                self._tool_permission_controller.get_toggles()
+            )
+        self._card_manager.toggle_card("tool_control", self._window_id)
+
+    def _refresh_tool_toggle_btn(self):
+        """刷新工具开关按钮上的数字和 agent 覆盖指示"""
+        toggles = self._tool_permission_controller.get_toggles()
+        dangerous, safe = get_tool_counts(toggles)
+        self._tool_danger_label.setText(str(dangerous))
+        self._tool_safe_label.setText(str(safe))
+
+        # agent 覆盖 → 整个按钮背景变色
+        Colors.refresh()
+        agent_name = self._tool_permission_controller.get_active_agent_name()
+        if agent_name:
+            tooltip = (
+                f"🔧 工具权限 | 危险 {dangerous} 安全 {safe}\n"
+                f"🤖 由智能体「{agent_name}」控制，点击查看详情"
+            )
+            self._tool_toggle_btn.setStyleSheet(f"""
+                background: rgba(255,149,0,0.12);
+                border: 1px solid rgba(255,149,0,0.25);
+                border-radius: 8px;
+            """)
+        else:
+            tooltip = (
+                f"🔧 工具控制 | 危险 {dangerous} 安全 {safe}\n点击查看详情"
+            )
+            self._tool_toggle_btn.setStyleSheet(f"""
+                background: {Colors.TOOLBAR_BG};
+                border: none;
+                border-radius: 8px;
+            """)
+        # 给按钮及其所有子 label 挂 tooltip（子控件会阻挡父控件的 tooltip 传播）
+        self._tool_toggle_btn.setToolTip(tooltip)
+        self._tool_danger_label.setToolTip(tooltip)
+        self._tool_safe_label.setToolTip(tooltip)
+        # 恢复按钮显隐
+        self._tool_restore_btn.setVisible(bool(agent_name))
+
+    def _on_tool_restore(self):
+        """工具按钮上的恢复点击：恢复用户权限设置"""
+        if not hasattr(self, "_tool_permission_controller") or not self._tool_permission_controller:
+            return
+        self._tool_permission_controller.restore_user()
+        # 刷新卡片和按钮
+        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
+            self._tool_control_card.refresh()
+        self._refresh_tool_toggle_btn()
+
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
         current_name = (
@@ -4174,165 +4355,6 @@ class OpenAIChatToolWindow(ToolWindow):
             config.pop(pop_key, None)
 
         self._model_config_popup.set_config(current_name, config)
-
-    def _create_agent_switch_buttons(self) -> QWidget:
-        """创建智能体切换按钮 - 单胶囊设计，中间用分隔线"""
-        Colors.refresh()
-        container = QWidget()
-        container.setFixedHeight(26)
-        container.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
-            border: none;
-            border-radius: 8px;
-        """)
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(0)
-
-        # 加载智能体列表
-        agents = self.backend.get_primary_agents() if self.backend else []
-
-        # 如果没有智能体，显示占位文本
-        if not agents:
-            placeholder = QLabel("无可用智能体")
-            placeholder.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.CARD_PLACEHOLDER_TEXT};
-                    font-size: 12px;
-                    padding: 0 12px;
-                    {get_font_family_css()}
-                }}
-            """)
-            layout.addWidget(placeholder)
-            return container
-
-        # 默认选中的智能体
-        default_agent = getattr(self, "_current_agent", "plan")
-
-        self._agent_buttons = {}
-        self._agent_btn_group = QButtonGroup()
-        self._agent_btn_group.buttonClicked[int].connect(self._on_agent_btn_clicked)
-
-        # 默认样式
-        default_style = self._build_agent_btn_style(active=False)
-
-        # 选中样式
-        selected_style = self._build_agent_btn_style(active=True)
-
-        for i, agent in enumerate(agents):
-            # 添加分隔线（在按钮之前，除了第一个）
-            if i > 0:
-                sep = QFrame()
-                sep.setFrameShape(QFrame.VLine)
-                sep.setFixedWidth(1)
-                Colors.refresh()
-                sep.setStyleSheet(
-                    f"background: {Colors.AGENT_BTN_SEPARATOR}; margin: 4px 0;"
-                )
-                layout.addWidget(sep)
-
-            btn = QPushButton(agent.name)
-            btn.setFixedHeight(22)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setCheckable(True)
-            btn.setStyleSheet(default_style)
-            btn.setToolTip(agent.description)
-
-            self._agent_btn_group.addButton(btn, i)
-            self._agent_buttons[agent.name] = {
-                "btn": btn,
-                "style": default_style,
-                "selected_style": selected_style,
-            }
-            layout.addWidget(btn)
-
-            # 如果是默认选中的智能体，则选中它
-            if agent.name == default_agent:
-                btn.setChecked(True)
-                btn.setStyleSheet(selected_style)
-
-        # 如果没有匹配默认智能体，选中第一个
-        if default_agent not in self._agent_buttons and agents:
-            btn = self._agent_buttons[agents[0].name]["btn"]
-            btn.setChecked(True)
-            btn.setStyleSheet(selected_style)
-            self._current_agent = agents[0].name
-
-        return container
-
-    def _on_agent_btn_clicked(self, btn_id: int):
-        """智能体按钮点击处理"""
-        agents = self.backend.get_primary_agents()
-        if btn_id >= len(agents):
-            return
-
-        agent = agents[btn_id]
-        agent_name = agent.name
-
-        logger.info(
-            f"[_on_agent_btn_clicked] btn_id={btn_id}, agent_name={agent_name}, _current_agent before={self._current_agent}"
-        )
-
-        # 更新按钮样式
-        for name, data in self._agent_buttons.items():
-            btn = data["btn"]
-            if name == agent_name:
-                btn.setStyleSheet(data["selected_style"])
-            else:
-                btn.setStyleSheet(data["style"])
-
-        # 触发智能体切换
-        self._on_agent_changed(agent_name)
-
-    def _build_agent_btn_style(self, active: bool = False) -> str:
-        """构建智能体按钮样式（动态从 Colors 读取）"""
-        Colors.refresh()
-        if active:
-            return f"""
-                QPushButton {{
-                    background: {Colors.AGENT_BTN_BG_ACTIVE};
-                    color: {Colors.AGENT_BTN_TEXT_ACTIVE};
-                    border: none;
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-size: 12px;
-                    font-weight: 600;
-                    {get_font_family_css()}
-                }}
-                QPushButton:hover {{
-                    background: {Colors.AGENT_BTN_BG_ACTIVE};
-                }}
-            """
-        return f"""
-            QPushButton {{
-                background: transparent;
-                color: {Colors.AGENT_BTN_TEXT};
-                border: none;
-                border-radius: 8px;
-                padding: 4px 12px;
-                font-size: 12px;
-                font-weight: 500;
-                {get_font_family_css()}
-            }}
-            QPushButton:hover {{
-                background: rgba(255, 255, 255, 0.05);
-                color: {Colors.TEXT_PRIMARY};
-            }}
-        """
-
-    def _refresh_agent_button_styles(self):
-        """刷新所有智能体按钮样式（响应主题切换）"""
-        if not hasattr(self, "_agent_buttons"):
-            return
-        Colors.refresh()
-        for name, data in self._agent_buttons.items():
-            is_active = name == self._current_agent
-            new_style = self._build_agent_btn_style(active=is_active)
-            if is_active:
-                data["selected_style"] = new_style
-            else:
-                data["style"] = new_style
-            data["btn"].setStyleSheet(new_style)
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
@@ -5041,7 +5063,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 border: none;
                 border-radius: 8px;
             """)
-        self._refresh_agent_button_styles()
         # 刷新设置卡片
         for card in self.findChildren(BaseSettingsCard):
             if hasattr(card, "refresh_style"):
@@ -5116,6 +5137,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._memory_card_popup, "refresh_style"
         ):
             self._memory_card_popup.refresh_style()
+        # 刷新工具控制卡片主题
+        if hasattr(self, "_tool_control_card") and hasattr(
+            self._tool_control_card, "refresh_style"
+        ):
+            self._tool_control_card.refresh_style()
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -5200,8 +5226,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if not self.backend.agent_manager:
             return
+
+        # ⚠️ 即使按钮组不存在（工具开关模式下智能体切换 UI 已移除），
+        # 仍需同步 _current_agent 到 ChatEngine，否则 PermissionResolver 会使用错误的默认 agent
         if not hasattr(self, "_agent_btn_group"):
-            return  # 按钮组还未创建
+            self._current_agent = getattr(self, "_current_agent", "build")
+            if self.backend.chat_engine:
+                self.backend.set_current_agent(self._current_agent)
+                logger.info(
+                    f"[_load_agent_list] No button group, synced ChatEngine._current_agent = {self._current_agent}"
+                )
+            return
 
         self._suppress_agent_intro = True
         agents = self.backend.get_primary_agents()
@@ -6874,6 +6909,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend._current_project = session_project
         self._project_label.setText(session_project)
         self._refresh_project_branch_style()
+        # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(session_project)
 
         # 自动切换到该会话关联的 worktree
         # 规则：会话有 worktree_path → 切到该 worktree
@@ -8489,7 +8527,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 同步项目
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
+            self.backend._current_project = session_project
             self._project_label.setText(session_project)
+            self._refresh_project_branch_style()
+            # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_current_project(session_project)
             self._refresh_project_branch_style()
             # 自动切换到该会话关联的 worktree
             # 规则：会话有 worktree_path → 切到该 worktree
@@ -8651,6 +8694,37 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._on_send_clicked(user_text=question.strip())
 
+    def _apply_agent_command_permissions(self, agent_name: str):
+        """智能体命令(非子智能体)执行时,自动注入其设定的工具权限
+
+        Args:
+            agent_name: 智能体名(对应 Agent 数据类的 name)
+        """
+        from app.core.agent import AgentManager
+        agent_manager = AgentManager.get_instance()
+        if agent_manager is None:
+            logger.warning("[AgentCommand] AgentManager 未初始化,跳过权限注入")
+            return
+
+        agent = agent_manager.get_agent(agent_name)
+        if agent is None:
+            logger.warning(f"[AgentCommand] 未找到智能体 '{agent_name}',跳过权限注入")
+            return
+
+        # 注入 agent 的工具权限到当前窗口的 controller
+        self._tool_permission_controller.apply_agent(
+            agent_name=agent_name,
+            agent_tools=dict(agent.tools or {}),
+            agent_permission=dict(agent.permission or {}),
+        )
+        logger.info(
+            f"[AgentCommand] 已注入智能体 '{agent_name}' 的工具权限"
+        )
+
+        # 主动刷新工具控制卡片(确保立即显示 agent 权限,避免信号时序问题)
+        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
+            self._tool_control_card.refresh()
+
     def _on_send_clicked(self, user_text: str = ""):
         if getattr(self, "_is_destroyed", False):
             return
@@ -8710,6 +8784,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     return
                 case CommandType.PROMPT | CommandType.AGENT:
+                    # 智能体命令(非子智能体)：自动注入其设定的工具权限
+                    # PROMPT 和 AGENT 类型均可触发（用户可能在卡片选了"提示词"而非"智能体"）
+                    self._apply_agent_command_permissions(cmd_result.command_name)
                     # 提示词替换命令：prompt_sections 按参数过滤 body 段落
                     selected_text = cmd_mgr.select_prompt(cmd_result.command_name,
                                                          cmd_result.remainder)
@@ -10643,6 +10720,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label.setText(project)
         self._refresh_project_branch_style()
         self._update_branch()
+        # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(project)
         # 保存到配置
         self.cfg.current_project.value = project
         self.cfg.save()
@@ -10691,6 +10771,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._update_branch()
             self.cfg.current_project.value = default_project
             self.cfg.save()
+            # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_current_project(default_project)
             self._create_new_session()
         else:
             self._current_history_project = self._current_project

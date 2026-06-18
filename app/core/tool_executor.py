@@ -12,6 +12,7 @@ from loguru import logger
 from typing import Dict, List, Optional, Callable
 
 from app.core.hook_manager import HookDecision
+from app.core.message_content import content_to_text
 
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
@@ -327,7 +328,7 @@ class ToolExecutor:
             if session and hasattr(session, 'messages'):
                 for msg in reversed(session.messages):
                     if msg.get('role') == 'user':
-                        current_message_text = msg.get('content', '')
+                        current_message_text = content_to_text(msg.get('content', ''))
                         break
 
         self._backend.hook_manager.trigger_event(
@@ -494,7 +495,7 @@ class ToolExecutor:
                 if session and hasattr(session, 'messages'):
                     for msg in reversed(session.messages):
                         if msg.get('role') == 'user':
-                            current_message_text = msg.get('content', '')
+                            current_message_text = content_to_text(msg.get('content', ''))
                             break
             
             # 同步执行 PreToolUse hooks

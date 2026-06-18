@@ -17,6 +17,13 @@ from loguru import logger
 from app.tools.automation import AutomationTools
 # Import all tool modules
 from app.tools.diagnostics_tools import DiagnosticsTools
+from app.tools.tool_classifier import (
+    classify_tool_danger,
+    get_tool_counts,
+    get_default_toggles,
+    DANGEROUS_TOOLS,
+    SAFE_TOOLS,
+)
 from app.tools.file_tools import FileTools
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult

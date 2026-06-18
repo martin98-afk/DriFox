@@ -130,7 +130,10 @@ class ChatBackend(QObject):
         
         # 状态
         self._initialized = False
-        
+
+        # per-window 工具权限控制器（由 main_widget 在 initialize 之前注入）
+        self._tool_permission_controller = None
+
         # Gateway 组件
         self._gateway_manager = None
         self._gateway_engine: Optional[GatewayEngine] = None
@@ -145,7 +148,16 @@ class ChatBackend(QObject):
     @property
     def session_manager(self) -> SessionManager:
         return self._session_manager
-    
+
+    @property
+    def tool_permission_controller(self):
+        """per-window 工具权限控制器（主窗口注入,供 engine 读取）"""
+        return self._tool_permission_controller
+
+    def set_tool_permission_controller(self, controller):
+        """注入 per-window 工具权限控制器(必须在 initialize 之前调用)"""
+        self._tool_permission_controller = controller
+
     @property
     def chat_engine(self) -> ChatEngine:
         return self._chat_engine
