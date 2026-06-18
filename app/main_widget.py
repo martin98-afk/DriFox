@@ -68,6 +68,13 @@ from app.core import (
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.tool_popup import ToolWindow
+from app.tools.tool_classifier import (
+    classify_tool_danger,
+    get_tool_counts,
+    get_default_toggles,
+    DANGEROUS_TOOLS,
+    SAFE_TOOLS,
+)
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
@@ -97,6 +104,7 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
+from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
@@ -632,6 +640,15 @@ class OpenAIChatToolWindow(ToolWindow):
             system_card=True,
         )
         self._bottom_card_container.add_card("model_config", self._model_config_card)
+
+        mgr.register_card(
+            self._window_id,
+            ContainerType.BOTTOM,
+            "tool_control",
+            self._tool_control_card,
+            system_card=True,
+        )
+        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
 
         mgr.register_card(
             self._window_id,
@@ -1778,6 +1795,17 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
+        # 工具控制卡片
+        self._tool_control_card = ToolControlCardFrame(self)
+        self._tool_control_card.setObjectName("toolControlCard")
+        self._tool_control_card.setVisible(False)
+        self._tool_control_card.closed.connect(
+            lambda: self._card_manager.hide_card("tool_control", self._window_id)
+        )
+        self._tool_control_card.togglesChanged.connect(
+            lambda _: self._refresh_tool_toggle_btn()
+        )
+
         # 模型选择卡片（底部卡片形式）
         self._model_selector_card = BaseSettingsCard("", "", self)
         self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
@@ -2158,6 +2186,53 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_provider_name = ""
         self._current_model_name = ""
 
+        # ===== 工具开关双色分段按钮 =====
+        self._tool_toggle_btn = QWidget(toolbar_widget)
+        self._tool_toggle_btn.setFixedHeight(26)
+        self._tool_toggle_btn.setCursor(Qt.PointingHandCursor)
+        Colors.refresh()
+        self._tool_toggle_btn.setStyleSheet(f"""
+            background: {Colors.TOOLBAR_BG};
+            border: none;
+            border-radius: 8px;
+        """)
+        self._tool_toggle_btn.mousePressEvent = lambda e: self._toggle_tool_control_card()
+        tt_layout = QHBoxLayout(self._tool_toggle_btn)
+        tt_layout.setContentsMargins(6, 0, 6, 0)
+        tt_layout.setSpacing(0)
+
+        # 图标
+        tt_icon = QLabel("🔧")
+        tt_icon.setStyleSheet("background: transparent; border: none; font-size: 13px;")
+        tt_layout.addWidget(tt_icon)
+        tt_layout.addSpacing(4)
+
+        # 左：危险工具数
+        self._tool_danger_label = QLabel("0")
+        self._tool_danger_label.setAlignment(Qt.AlignCenter)
+        self._tool_danger_label.setFixedHeight(20)
+        self._tool_danger_label.setStyleSheet(f"""
+            background: {Colors.STATUS_DANGER_BG};
+            color: white; font-size: 11px; font-weight: 700;
+            border: none; border-top-left-radius: 4px; border-bottom-left-radius: 4px;
+            padding: 0 8px;
+        """)
+        tt_layout.addWidget(self._tool_danger_label)
+
+        # 右：安全工具数
+        self._tool_safe_label = QLabel("0")
+        self._tool_safe_label.setAlignment(Qt.AlignCenter)
+        self._tool_safe_label.setFixedHeight(20)
+        self._tool_safe_label.setStyleSheet(f"""
+            background: {Colors.SUCCESS};
+            color: white; font-size: 11px; font-weight: 700;
+            border: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px;
+            padding: 0 8px;
+        """)
+        tt_layout.addWidget(self._tool_safe_label)
+
+        toolbar_layout.addWidget(self._tool_toggle_btn)
+
         toolbar_layout.addStretch(1)
 
         # 右侧功能按钮组（无边框，间距加宽）
@@ -2280,6 +2355,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始定位工具栏（resizeEvent 会持续更新）
         self._position_bottom_toolbar()
+
+        # 初始刷新工具开关按钮
+        self._refresh_tool_toggle_btn()
 
     def _position_bottom_toolbar(self):
         """将底部工具栏绝对定位到窗口底部 36px。
@@ -4125,6 +4203,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     top_window.showNormal()
                 top_window.activateWindow()
                 top_window.raise_()
+
+    def _toggle_tool_control_card(self):
+        """切换工具控制卡片的显示"""
+        if not self._card_manager.is_card_visible("tool_control", self._window_id):
+            settings = Settings.get_instance()
+            toggles = dict(settings.tool_toggles.value)
+            self._tool_control_card.set_toggles(toggles)
+        self._card_manager.toggle_card("tool_control", self._window_id)
+
+    def _refresh_tool_toggle_btn(self):
+        """刷新工具开关按钮上的数字"""
+        settings = Settings.get_instance()
+        toggles = dict(settings.tool_toggles.value)
+        dangerous, safe = get_tool_counts(toggles)
+        self._tool_danger_label.setText(str(dangerous))
+        self._tool_safe_label.setText(str(safe))
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
