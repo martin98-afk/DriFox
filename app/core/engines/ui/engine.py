@@ -47,7 +47,7 @@ class UIEngine(BaseEngine):
         self._get_memory_context = get_memory_context
         self._backend = backend
         self._callbacks: Dict[str, Callable] = {}
-        self._current_agent: Optional[str] = "plan"
+        self._current_agent: Optional[str] = "build"
 
         # API 模式专用：直接回调（绕过 Qt 信号-槽，避免跨线程事件循环问题）
         self._worker_callbacks = worker_callbacks or {}
@@ -126,7 +126,7 @@ class UIEngine(BaseEngine):
     @property
     def current_agent(self) -> str:
         """获取当前 Agent"""
-        return self._current_agent or "plan"
+        return self._current_agent or "build"
 
     def set_current_agent(self, value: str):
         """设置当前 Agent"""
@@ -164,6 +164,34 @@ class UIEngine(BaseEngine):
     # ========== 权限检查 ==========
 
     def _check_tool_permission(self, tool_name: str, arguments: dict) -> str:
+        # ========== 工具开关过滤（优先于 Agent 权限检查） ==========
+        # 前移至此以接入 PermissionStrategy.INTERACTIVE 的 ask/deny 对话框机制。
+        # 此前在 ToolExecutor 中检查，"ask" 只能返回错误文本，无法弹出确认对话框。
+        from app.utils.config import Settings
+        from app.tools.tool_classifier import get_default_toggles, DANGEROUS_TOOLS, SAFE_TOOLS
+
+        check_name = tool_name
+        if tool_name.startswith("mcp__"):
+            parts = tool_name.split("__", 2)
+            check_name = parts[2] if len(parts) > 2 else tool_name
+
+        settings = Settings.get_instance()
+        toggles = dict(settings.tool_toggles.value)
+
+        all_known = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+        defaults = get_default_toggles(all_known)
+        if check_name not in toggles:
+            toggles[check_name] = defaults.get(check_name, True)
+
+        is_enabled = toggles.get(check_name, True)
+        if not is_enabled:
+            behavior = settings.tool_off_behavior.value
+            logger.info(
+                f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}"
+            )
+            return behavior  # "deny" 或 "ask"，由 ConversationExecutor 的 INTERACTIVE 策略驱动对话框
+        # ========== 工具开关过滤结束 ==========
+
         agent_manager = self._get_agent_manager()
         if not agent_manager or not self._current_agent:
             return "allow"
@@ -253,9 +281,9 @@ class UIEngine(BaseEngine):
     def switch_agent(self, agent_name: Optional[str]):
         agent_manager = self._get_agent_manager()
         if agent_name is None or agent_name.lower() in ("default", "通用"):
-            self._current_agent = "plan"
-            logger.info("[ChatEngine] Switched to default agent: plan")
-            self._emit("agent_switched", "plan")
+            self._current_agent = "build"
+            logger.info("[ChatEngine] Switched to default agent: build")
+            self._emit("agent_switched", "build")
             return
 
         agent = agent_manager.get_agent(agent_name)

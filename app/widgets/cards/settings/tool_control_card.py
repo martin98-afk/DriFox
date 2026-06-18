@@ -26,6 +26,7 @@ TOOL_GROUPS = [
     ("🖱 桌面控制", ["mouse", "keyboard"]),
     ("☁️ 文件上传", ["upload_file"]),
     ("📝 状态修改", ["edit_project_note", "todowrite", "stage_files"]),
+    ("🤖 子智能体", ["subagent_para", "subagent_dag"]),
     ("✅ 安全操作", sorted(SAFE_TOOLS)),
 ]
 
@@ -42,6 +43,8 @@ TOOL_DESCRIPTIONS = {
     "edit_project_note": "编辑项目笔记",
     "todowrite": "创建/更新待办",
     "stage_files": "标记相关文件",
+    "subagent_para": "并行启动子智能体",
+    "subagent_dag": "DAG工作流子智能体",
 }
 
 OFF_BEHAVIOR_OPTIONS = [
@@ -61,7 +64,6 @@ class ToolControlCardContent(QWidget):
         self._toggles: dict = {}
         self._toggle_widgets: dict = {}
         self._group_switches: dict = {}
-        self._stats_label: QLabel = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -84,7 +86,6 @@ class ToolControlCardContent(QWidget):
                 item.widget().deleteLater()
         self._toggle_widgets.clear()
         self._group_switches.clear()
-        self._stats_label = None
 
         # 确保所有工具都在 toggles 中
         all_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
@@ -93,10 +94,6 @@ class ToolControlCardContent(QWidget):
             if name not in self._toggles:
                 self._toggles[name] = defaults[name]
 
-        # 统计行
-        self._stats_label = self._make_stats_label()
-        self._layout.addWidget(self._stats_label)
-
         # 按组构建
         for group_name, tool_names in TOOL_GROUPS:
             self._build_group(group_name, tool_names)
@@ -104,15 +101,7 @@ class ToolControlCardContent(QWidget):
         self._layout.addStretch()
 
     def _refresh_stats(self):
-        """仅刷新统计行文本 + 各整组开关状态（不全量重建）"""
-        if self._stats_label:
-            dangerous, safe = get_tool_counts(self._toggles)
-            self._stats_label.setText(
-                f"<span style='color:#ff5050;font-weight:600;'>{dangerous}</span>"
-                f"<span style='color:#888;'> 危险 · </span>"
-                f"<span style='color:#22c55e;font-weight:600;'>{safe}</span>"
-                f"<span style='color:#888;'> 安全</span>"
-            )
+        """仅刷新各整组开关状态（不全量重建）"""
         # 刷新每个组的整组开关状态
         for group_name, tool_names in TOOL_GROUPS:
             gs = self._group_switches.get(group_name)
@@ -121,20 +110,6 @@ class ToolControlCardContent(QWidget):
                 gs.blockSignals(True)
                 gs.setChecked(all_on)
                 gs.blockSignals(False)
-
-    def _make_stats_label(self) -> QLabel:
-        dangerous, safe = get_tool_counts(self._toggles)
-        Colors.refresh()
-        label = QLabel(
-            f"<span style='color:#ff5050;font-weight:600;'>{dangerous}</span>"
-            f"<span style='color:#888;'> 危险 · </span>"
-            f"<span style='color:#22c55e;font-weight:600;'>{safe}</span>"
-            f"<span style='color:#888;'> 安全</span>"
-        )
-        label.setStyleSheet(
-            "font-size:12px; background:transparent; border:none; padding: 2px 0 4px 0;"
-        )
-        return label
 
     def _build_group(self, group_name: str, tool_names: list):
         """构建一个工具组"""
@@ -185,7 +160,7 @@ class ToolControlCardContent(QWidget):
         body = QWidget()
         body.setStyleSheet("background: transparent; border: none;")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(10, 6, 10, 8)
+        body_layout.setContentsMargins(10, 6, 14, 8)
         body_layout.setSpacing(3)
 
         for tool_name in tool_names:
@@ -219,7 +194,7 @@ class ToolControlCardContent(QWidget):
         name_label.setStyleSheet(
             "color: #ccc; font-size: 12px; background: transparent; border: none;"
         )
-        name_label.setFixedWidth(105)
+        name_label.setFixedWidth(80)
         row_layout.addWidget(name_label)
 
         desc = TOOL_DESCRIPTIONS.get(tool_name, "")
@@ -227,6 +202,7 @@ class ToolControlCardContent(QWidget):
         desc_label.setStyleSheet(
             "color: #666; font-size: 10px; background: transparent; border: none;"
         )
+        desc_label.setMaximumWidth(90)
         row_layout.addWidget(desc_label)
         row_layout.addStretch()
 
@@ -279,7 +255,8 @@ class ToolControlCardFrame(SystemCardFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.set_height_mode("content")
+        self.set_height_mode("proportional")
+        self.setMinimumHeight(250)
 
         self.title_label.setText("🔧 工具控制")
         self.icon_label.hide()
@@ -301,6 +278,8 @@ class ToolControlCardFrame(SystemCardFrame):
 
         self._card = ToolControlCardContent(self)
         self._content_layout.addWidget(self._card)
+        # 增大内容区水平边距，防止 SwitchButton 被卡片边框裁剪
+        self._content_layout.setContentsMargins(8, 2, 8, 2)
 
         self._card.togglesChanged.connect(self.togglesChanged.emit)
         self._card.togglesChanged.connect(lambda t: self._refresh_stats(t))

@@ -536,42 +536,6 @@ class ToolExecutor:
             if missing:
                 return ToolResult(False, error=f"Missing required arguments: {missing}")
 
-        # ========== 工具开关过滤 ==========
-        from app.utils.config import Settings
-        from app.tools.tool_classifier import classify_tool_danger, get_default_toggles, DANGEROUS_TOOLS, SAFE_TOOLS
-
-        # 确定基准工具名（MCP 工具取短名分类）
-        check_name = tool_name
-        if tool_name.startswith("mcp__"):
-            parts = tool_name.split("__", 2)
-            check_name = parts[2] if len(parts) > 2 else tool_name
-
-        settings = Settings.get_instance()
-        toggles = dict(settings.tool_toggles.value)
-
-        all_known = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
-        defaults = get_default_toggles(all_known)
-        if check_name not in toggles:
-            toggles[check_name] = defaults.get(check_name, True)
-
-        is_enabled = toggles.get(check_name, True)
-        if not is_enabled:
-            behavior = settings.tool_off_behavior.value
-            logger.info(
-                f"[ToolExecutor] Tool '{tool_name}' disabled by user. Behavior: {behavior}"
-            )
-            if behavior == "deny":
-                return ToolResult(
-                    False,
-                    error=f"工具 '{tool_name}' 已被用户禁用。请在工具控制面板中重新开启。"
-                )
-            elif behavior == "ask":
-                return ToolResult(
-                    False,
-                    error=f"工具 '{tool_name}' 需要用户确认（已在控制面板中关闭，等待启用）。"
-                )
-        # ========== 工具开关过滤结束 ==========
-
         # 文件操作前记录（用于撤销）
         file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
 

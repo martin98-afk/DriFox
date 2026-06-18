@@ -1799,7 +1799,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_control_card = ToolControlCardFrame(self)
         self._tool_control_card.setObjectName("toolControlCard")
         self._tool_control_card.setMinimumHeight(250)
-        self._tool_control_card.set_height_mode('content')
         self._tool_control_card.setVisible(False)
         self._tool_control_card.closed.connect(
             lambda: (
@@ -5144,8 +5143,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if not self.backend.agent_manager:
             return
+
+        # ⚠️ 即使按钮组不存在（工具开关模式下智能体切换 UI 已移除），
+        # 仍需同步 _current_agent 到 ChatEngine，否则 PermissionResolver 会使用错误的默认 agent
         if not hasattr(self, "_agent_btn_group"):
-            return  # 按钮组还未创建
+            self._current_agent = getattr(self, "_current_agent", "build")
+            if self.backend.chat_engine:
+                self.backend.set_current_agent(self._current_agent)
+                logger.info(
+                    f"[_load_agent_list] No button group, synced ChatEngine._current_agent = {self._current_agent}"
+                )
+            return
 
         self._suppress_agent_intro = True
         agents = self.backend.get_primary_agents()
