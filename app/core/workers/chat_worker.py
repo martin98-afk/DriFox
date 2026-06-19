@@ -937,6 +937,11 @@ class OpenAIChatWorker(QThread):
                     self._last_persist_stats = None
 
                 response_sequence = self._build_response_message_sequence(tool_results)
+                # 🔧 修复：消息序列构建完成后立即释放 _response_chunks
+                # 流式文本 chunk 已全部合并到 response_sequence 和 full_response 中，
+                # _response_chunks deque 不再需要，提前释放避免在整个工具执行期间
+                # （_execute_all_tools 可能耗时较长）持有几十 MB 的文本 chunk。
+                self._response_chunks.clear()
                 current_messages.extend(response_sequence)
                 current_session_messages.extend(response_sequence)
                 self._current_session_messages = list(current_session_messages)

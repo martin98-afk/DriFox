@@ -677,6 +677,14 @@ class HistoryManager:
         count = 0
         
         for session in sessions:
+            session_id = session.get("session_id", "")
+
+            # 🛡️ 如果 messages 为空（轻量模式），通过 session_id 懒加载完整数据
+            if not session.get("messages") and session_id:
+                full_session = self.get_session_by_session_id(session_id)
+                if full_session and full_session.get("messages"):
+                    session = full_session
+
             title = session.get("title", "未命名")
             last_time = session.get("last_time", datetime.now().strftime("%Y-%m-%d"))
             session_id = session.get("session_id", "unknown")
@@ -709,6 +717,15 @@ class HistoryManager:
         """归档历史记录"""
         if 0 <= index < len(self._history_sessions):
             session = self._history_sessions[index]
+
+            # 🛡️ 如果 messages 为空（轻量模式），通过 session_id 懒加载完整数据
+            if not session.get("messages"):
+                session_id = session.get("session_id", "")
+                if session_id:
+                    full_session = self.get_session_by_session_id(session_id)
+                    if full_session and full_session.get("messages"):
+                        session = full_session
+
             title = session.get("title", "未命名")
             last_time = session.get("last_time", datetime.now().strftime("%Y-%m-%d"))
             session_id = session.get("session_id", "unknown")
