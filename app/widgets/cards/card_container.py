@@ -25,6 +25,7 @@ class CardContainer(QWidget):
     # 容器动画会与这些交互产生约一个动画时长的高度延迟 / 抖动。
     # 声明后，容器高度会直接 snap 到目标值，不再走 QPropertyAnimation。
     NO_ANIMATION_PROP = "noContainerAnimation"
+    _expand_retry_count = 0  # 类变量：防止 _do_expand 无限重试
 
     def __init__(self, container_type: ContainerType):
         super().__init__()
@@ -150,8 +151,16 @@ class CardContainer(QWidget):
             if natural_h <= 0:
                 # 兜底：layout 没算出高度（布局管道尚未完成测量），
                 # 延迟重试，让 Qt 在下一轮事件循环完成几何计算后再展开
+                CardContainer._expand_retry_count += 1
+                if CardContainer._expand_retry_count >= 5:
+                    # 重试 5 次仍为 0，强行 snap 到最小高度兜底
+                    # （防止 layout cache 持续过期的极端情况导致卡片不可见）
+                    CardContainer._expand_retry_count = 0
+                    self.setMaximumHeight(self._layout.minimumSize().height())
+                    return
                 QTimer.singleShot(0, self._do_expand)
                 return
+            CardContainer._expand_retry_count = 0
             current_h = self.height()
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:

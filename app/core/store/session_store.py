@@ -404,9 +404,15 @@ class SessionStore:
         return None
 
     def get_sessions(self, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """获取会话列表"""
+        """获取会话列表（包含完整 messages）"""
         if self._session_repo:
             return self._session_repo.get_all(limit, offset)
+        return []
+
+    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据"""
+        if self._session_repo:
+            return self._session_repo.get_all_lightweight(limit, offset)
         return []
 
     def delete_session(self, session_id: str) -> bool:

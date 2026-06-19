@@ -224,17 +224,6 @@ class SessionManager(QObject):
         self._touch_session(session.session_id)
         self._evict_if_needed()
 
-        # 内存泄漏修复：在创建新会话时清理缓存
-        try:
-            from app.core.message_content import consolidate_messages
-            if hasattr(consolidate_messages, 'cache_clear'):
-                consolidate_messages.cache_clear()
-                from loguru import logger
-                logger.debug("[SessionManager] 已清理缓存 (创建新会话)")
-        except Exception as e:
-            from loguru import logger
-            logger.warning(f"[SessionManager] 清理缓存失败: {e}")
-
         return session
 
     def get_current_session(self) -> Optional[ChatSession]:
@@ -300,17 +289,6 @@ class SessionManager(QObject):
             self._touch_session(session.session_id)
             # 如果超过最大缓存数，淘汰最久未访问的非当前会话
             self._evict_if_needed()
-
-        # 内存泄漏修复：在会话切换时清理缓存
-        try:
-            from app.core.message_content import consolidate_messages
-            if hasattr(consolidate_messages, 'cache_clear'):
-                consolidate_messages.cache_clear()
-                from loguru import logger
-                logger.debug(f"[SessionManager] 已清理缓存 (切换到会话 {index})")
-        except Exception as e:
-            from loguru import logger
-            logger.warning(f"[SessionManager] 清理缓存失败: {e}")
 
     def get_session_names(self) -> List[str]:
         return [s.name for s in self.sessions]

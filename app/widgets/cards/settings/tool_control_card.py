@@ -16,7 +16,7 @@ from qfluentwidgets import SwitchButton, ComboBox
 from app.tools.tool_classifier import (
     DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles,
 )
-from app.utils.design_tokens import Colors, ComboBoxStyles, font_size_css
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.elided_label import _ElidedLabel

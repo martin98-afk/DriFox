@@ -205,6 +205,83 @@ class SessionRepository:
             logger.error(f"[SessionRepository] get_sessions 异常: {e}")
             return []
 
+    def get_all_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """获取所有会话的轻量列表（不含 messages），用于启动加载和历史列表展示。
+
+        避免 SELECT * 一次性反序列化全部 messages JSON（可达数十 MB），
+        仅在用户点击某个会话时按需加载 messages。
+        """
+        if not self.is_initialized:
+            return []
+
+        try:
+            success, rows = self._execute(
+                f'SELECT session_id, title, project, system_prompt, '
+                f'compaction_state, compaction_cache, message_count, '
+                f'user_edited_title, worktree_path, created_at, updated_at '
+                f'FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?',
+                (limit, offset)
+            )
+            if success:
+                return [self._row_to_session_lightweight(row) for row in rows]
+            return []
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
+            return []
+
+    def _row_to_session_lightweight(self, row) -> Dict:
+        """将数据库行转换为不含 messages 的轻量会话字典"""
+        if not row:
+            return {}
+
+        if hasattr(row, 'keys'):
+            d = {k: row[k] for k in row.keys()}
+        elif isinstance(row, dict):
+            d = dict(row)
+        else:
+            return {}
+
+        compaction_state = {}
+        compaction_cache = {}
+
+        try:
+            state_raw = d.get("compaction_state", "{}")
+            if isinstance(state_raw, str):
+                compaction_state = json.loads(state_raw) if state_raw else {}
+            elif isinstance(state_raw, dict):
+                compaction_state = state_raw
+        except Exception:
+            pass
+
+        try:
+            cache_raw = d.get("compaction_cache", "{}")
+            if isinstance(cache_raw, str):
+                compaction_cache = json.loads(cache_raw) if cache_raw else {}
+            elif isinstance(cache_raw, dict):
+                compaction_cache = cache_raw
+        except Exception:
+            pass
+
+        raw_title = d.get("title", "") or ""
+        return {
+            "session_id": d.get("session_id", ""),
+            "name": raw_title,
+            "title": raw_title,
+            "topic_summary": raw_title,
+            "project": d.get("project", "默认项目"),
+            "messages": [],  # 懒加载：不在启动时加载
+            "system_prompt": d.get("system_prompt", ""),
+            "compaction_state": compaction_state,
+            "compaction_cache": compaction_cache,
+            "message_count": d.get("message_count", 0),
+            "created_at": d.get("created_at", ""),
+            "updated_at": d.get("updated_at", ""),
+            "worktree_path": d.get("worktree_path", "") or "",
+            "last_time": d.get("updated_at", ""),
+            "saved_at": d.get("created_at", ""),
+            "user_edited_title": d.get("user_edited_title", False),
+        }
+
     def get_by_project(self, project: str, limit: int = 100) -> List[Dict]:
         """获取指定项目的会话列表"""
         if not self.is_initialized:

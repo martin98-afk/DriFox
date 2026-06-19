@@ -770,7 +770,7 @@ class AgentManager:
 
 ## Available Tools
 Use the tools available to you based on your permissions."""
-        return "\n\n".join(part for part in [global_contract, role_constraints, fallback_header, base_prompt] if part)
+        return "\n\n".join(part for part in [global_contract, role_constraints, fallback_header, base_prompt, subagents_info] if part)
 
     def get_unified_system_prompt(self) -> str:
         return """# LLM Chatter

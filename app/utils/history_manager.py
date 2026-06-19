@@ -369,8 +369,9 @@ class HistoryManager:
                     self._use_sqlite = True
                     logger.info(f"[HistoryManager] SQLite 存储已启用")
 
-                    # 从 SQLite 加载
-                    self._history_sessions = self._session_store.get_sessions(limit=500)
+                    # 💡 内存优化：使用轻量模式加载，不含完整 messages 数据
+                    # 每条的 messages 在启动时为空列表，仅在显示具体会话时按需加载
+                    self._history_sessions = self._session_store.get_sessions_lightweight(limit=500)
 
                     # 去重
                     self._deduplicate_history_sessions()
@@ -951,6 +952,13 @@ class HistoryManager:
     def get_session_by_index(self, index: int) -> Optional[List[Dict]]:
         if 0 <= index < len(self._history_sessions):
             session = self._history_sessions[index]
+            # 💡 如果 messages 为空（轻量模式），通过 session_id 懒加载
+            if not session.get("messages"):
+                session_id = session.get("session_id")
+                if session_id:
+                    full_session = self.get_session_by_session_id(session_id)
+                    if full_session:
+                        session = full_session
             fallback_ts = (
                 session.get("last_time")
                 or session.get("saved_at")
@@ -977,12 +985,22 @@ class HistoryManager:
         return None
 
     def get_session_by_session_id(self, session_id: str) -> Optional[Dict]:
-        """根据 session_id 获取会话（内存优先，SQLite 兜底）"""
+        """根据 session_id 获取会话（内存优先，SQLite 兜底）
+
+        💡 内存优化：如果内存缓存的 messages 为空（轻量模式），
+        自动从 SQLite 按需加载并回填，避免启动时一次性反序列化所有消息。
+        """
         if not session_id:
             return None
         # 1. 先从内存缓存查找（快速路径）
         for session in self._history_sessions:
             if session.get("session_id") == session_id:
+                # 如果 messages 为空（轻量模式），从 SQLite 懒加载
+                if not session.get("messages") and self._session_store and self._session_store.is_initialized:
+                    full = self._session_store.get_session(session_id)
+                    if full:
+                        session["messages"] = full.get("messages", [])
+                        session["message_count"] = full.get("message_count", len(session["messages"]))
                 return session
         # 2. 内存没有则直接查 SQLite（跨窗口同步最新数据）
         if self._session_store and self._session_store.is_initialized:
@@ -990,7 +1008,11 @@ class HistoryManager:
         return None
 
     def get_session_messages(self, session_id: str) -> Optional[List[Dict]]:
-        """根据 session_id 获取会话的消息列表"""
+        """根据 session_id 获取会话的消息列表
+
+        💡 内存优化：委托 get_session_by_session_id 处理懒加载，
+        避免启动时一次性反序列化所有消息。
+        """
         session = self.get_session_by_session_id(session_id)
         if session:
             return session.get("messages", [])
