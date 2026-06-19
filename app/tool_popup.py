@@ -882,6 +882,14 @@ class ToolPopupDialog(QDialog):
             event.ignore()
             self.hide()
 
+            # 🔧 内存泄漏修复：隐藏到托盘时停止位置保存 timer
+            # 避免隐藏后 timer 仍在运行，持续触发回调
+            if hasattr(self, '_geometry_save_timer'):
+                try:
+                    self._geometry_save_timer.stop()
+                except Exception:
+                    pass
+
             # 确保托盘图标存在
             if not tray_manager._tray_icon.isVisible():
                 tray_manager._tray_icon.show()
@@ -901,12 +909,22 @@ class ToolPopupDialog(QDialog):
             if self._lock_btn_widget:
                 self._lock_btn_widget.hide()
 
-            # 通知 tool_instance 标记为已销毁，防止异步回调继续执行
+            # 通知 tool_instance 执行完整的关闭清理流程
             try:
                 from PyQt5 import sip
 
                 if self.tool_instance and not sip.isdeleted(self.tool_instance):
-                    self.tool_instance._is_destroyed = True
+                    # 🔧 内存泄漏修复：触发 tool_instance 的 closeEvent，
+                    # 确保 Timer 停止、信号断开、Backend 清理等全部执行
+                    # （仅设置 _is_destroyed 不够，会跳过资源释放）
+                    try:
+                        from PyQt5.QtGui import QCloseEvent
+                        close_ev = QCloseEvent()
+                        self.tool_instance.closeEvent(close_ev)
+                    except Exception as e:
+                        logger.warning(f"[ToolPopupDialog] tool_instance.closeEvent 失败: {e}")
+                        # 兜底：至少标记已销毁
+                        self.tool_instance._is_destroyed = True
                     # 通知父窗口移除引用，防止内存泄漏
                     if hasattr(self.tool_instance, "_popup_refs"):
                         refs = list(self.tool_instance._popup_refs)

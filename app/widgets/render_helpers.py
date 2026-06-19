@@ -700,6 +700,42 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
             <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
         </div>"""
 
+    # ── bg_start / bg_stop: 与 bash 同样的终端风格（命令头 + 状态体） ──
+    if tool_name == "bg_start":
+        cmd = tool_args.get("command", "")
+        header = f"bg_start command={escape(cmd[:120])}" if cmd else "bg_start"
+        return f"""
+        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+                $ <span style="color:#c9d1d9;">{escape(header)}</span>
+            </div>
+            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+        </div>"""
+
+    if tool_name == "bg_stop":
+        task_id = tool_args.get("task_id", "")
+        header = f"bg_stop task_id={task_id}" if task_id else "bg_stop"
+        return f"""
+        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+                $ <span style="color:#c9d1d9;">{escape(header)}</span>
+            </div>
+            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+        </div>"""
+
+    # ── bg_logs: 与 bash 同样的终端风格（任务标识头 + 日志体） ──
+    if tool_name == "bg_logs":
+        task_id = tool_args.get("task_id", "")
+        lines = tool_args.get("lines", 100)
+        header = f"bg_logs task_id={task_id} lines={lines}"
+        return f"""
+        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+                $ <span style="color:#c9d1d9;">{escape(header)}</span>
+            </div>
+            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+        </div>"""
+
     # ── read: 代码预览（文件路径头 + 内容体） ──
     if tool_name in ("read", "todoread", "read_project_note"):
         path_hint = tool_args.get("path") or tool_args.get("file_path") or ""
@@ -899,7 +935,8 @@ def render_tool_block(
 
     # ── 通用文本输出工具：bash/read/grep/webfetch/websearch/diagnostics 等 ──
     _RAW_OUTPUT_TOOLS = frozenset({
-        "bash", "read", "todoread", "read_project_note",
+        "bash", "bg_start", "bg_logs", "bg_stop",
+        "read", "todoread", "read_project_note",
         "grep", "glob", "list", "scan_repo", "stage_files",
         "webfetch", "websearch",
         "get_diagnostics",

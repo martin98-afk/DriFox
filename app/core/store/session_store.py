@@ -273,6 +273,7 @@ class SessionStore:
                 self._migrate_remove_canvas_id()
                 self._migrate_add_user_edited_title_column()
                 self._migrate_add_worktree_path_column()
+                self._migrate_add_preview_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -379,6 +380,30 @@ class SessionStore:
         except Exception as e:
             logger.warning(f"[SessionStore] worktree_path 列迁移失败(可能已存在): {e}")
 
+    def _migrate_add_preview_column(self):
+        """迁移：添加 preview 列（如果不存在）
+
+        preview 存储会话预览文本（最后一条用户消息的前 50 字符），
+        使历史列表加载时无需反序列化完整 messages JSON。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "preview" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 preview 列")
+                self._db.execute_sql(
+                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN preview TEXT DEFAULT ''"
+                )
+                # 迁移后回填现有会话的 preview（从 messages 中提取）
+                self._db.execute_sql(
+                    f"UPDATE {self.TABLE_NAME} SET preview = '' WHERE preview IS NULL"
+                )
+                logger.info("[SessionStore] preview 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] preview 列迁移失败(可能已存在): {e}")
+
     @property
     def is_initialized(self) -> bool:
         return self._initialized and self._db is not None and self._db.is_connected
@@ -404,9 +429,15 @@ class SessionStore:
         return None
 
     def get_sessions(self, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """获取会话列表"""
+        """获取会话列表（包含完整 messages）"""
         if self._session_repo:
             return self._session_repo.get_all(limit, offset)
+        return []
+
+    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据"""
+        if self._session_repo:
+            return self._session_repo.get_all_lightweight(limit, offset)
         return []
 
     def delete_session(self, session_id: str) -> bool:

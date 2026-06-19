@@ -270,16 +270,24 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         detail = f" {url}" if url else (f" ref={ref}" if ref else "")
         return f"[{tool_name}]{detail} ({content_len:,} chars result)"
 
-    if tool_name in ("web_search", "search"):
+    if tool_name in ("web_search", "search", "websearch"):
         query = args.get("query", "?")
-        return f"[web_search] query='{query}' ({content_len:,} chars result)"
+        return f"[{tool_name}] query='{query}' ({content_len:,} chars result)"
 
-    if tool_name in ("web_fetch", "web_extract", "fetch"):
+    if tool_name in ("web_fetch", "web_extract", "fetch", "webfetch"):
+        # webfetch 用 url (str)，web_fetch/fetch 用 urls (list)
+        url = args.get("url", "")
         urls = args.get("urls", [])
-        url_desc = urls[0] if isinstance(urls, list) and urls else "?"
-        if isinstance(urls, list) and len(urls) > 1:
-            url_desc += f" (+{len(urls) - 1} more)"
-        return f"[web_fetch] {url_desc} ({content_len:,} chars)"
+        url_desc = ""
+        if url:
+            url_desc = url
+        elif isinstance(urls, list) and urls:
+            url_desc = urls[0]
+            if len(urls) > 1:
+                url_desc += f" (+{len(urls) - 1} more)"
+        else:
+            url_desc = "?"
+        return f"[{tool_name}] {url_desc} ({content_len:,} chars)"
 
     if tool_name in ("delegate_task", "subagent", "agent"):
         goal = args.get("goal", "")

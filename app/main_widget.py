@@ -2935,7 +2935,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 拼接子智能体任务描述：默认任务 + 用户补充说明（如果有）
-        base_task = "请压缩当前对话上下文，生成工作摘要"
+        base_task = "请压缩当前对话上下文，生成详细的工作摘要"
         task_description = (
             f"{base_task}。用户补充说明：{user_hint}" if user_hint else base_task
         )
@@ -5417,7 +5417,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._visible_batch_end = 0
         # 停止虚拟滚动定时器，防止 processEvents 或其他时机触发回收旧卡片
         self._virtual_scroll_timer.stop()
+
+        # 💡 内存优化：新建会话时清理全局 LRU 缓存，释放旧会话渲染/估算数据
+        _cleanup_global_lru_caches()
+
         session = self.backend.create_session()
+
+        # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
+        # 在 create_session 之后执行，确保 _evict_if_needed 已淘汰旧会话
+        self._release_inactive_session_messages()
         self._current_session_id = session.session_id
         self._history_preview_messages = None
         self._clear_chat_area()
@@ -5434,6 +5442,28 @@ class OpenAIChatToolWindow(ToolWindow):
 
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))
         self._refresh_context_usage_indicator()
+
+    def _release_inactive_session_messages(self):
+        """释放非活跃会话在 HistoryManager 中的消息数据。
+
+        从长对话新建会话后，旧会话的消息数据仍缓存在 HistoryManager._history_sessions
+        中占用内存。将其标记为可释放（messages 置空），后续访问时从 SQLite 按需重载。
+        """
+        if not hasattr(self, 'session_manager') or not self.session_manager:
+            return
+        active_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
+        released = 0
+        try:
+            for session in self.history_manager._history_sessions:
+                sid = session.get("session_id")
+                if sid and sid not in active_ids and session.get("messages"):
+                    session["messages"] = []
+                    released += 1
+            if released:
+                from loguru import logger
+                logger.debug(f"[Memory] 已释放 {released} 个非活跃会话的消息数据")
+        except Exception:
+            pass
 
     def _display_current_session(self):
         session = self.session_manager.get_current_session()
@@ -6883,6 +6913,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         self.backend.reset_session_state()
+
+        # 💡 内存优化：加载历史会话时清理 LRU 缓存
+        _cleanup_global_lru_caches()
 
         history_list = self.history_manager.get_history_list(self._current_project)
         if index < 0 or index >= len(history_list):
@@ -8506,6 +8539,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 清理旧会话的卡片
         self._cache_current_session_cards()
+        # 💡 内存优化：会话切换时清理 LRU 缓存
+        _cleanup_global_lru_caches()
         # 只重置会话状态，保留 tool_executor
         self.backend.reset_session_state()
 
@@ -10201,10 +10236,26 @@ class OpenAIChatToolWindow(ToolWindow):
         # 先填充内容再展开容器：否则 CardContainer._do_expand 在空内容上读 sizeHint
         # 算出错误高度并锁住，后续 updateGeometry + QTimer.singleShot 排在同一帧事件循环
         # 里竞争，sizeHint 可能仍是过期的，导致卡片偶尔不显示/被裁切（需手动 resize 兜底）
+        #
+        # 🛠️ 第二次调用（同轮多工具迭代）：_render_current → _recycle_options 会
+        #   复用旧 option widgets + 创建新的 custom input widget，内部布局被大范围
+        #   修改但 layout cache 没有 invalidate。_do_expand 读 sizeHint 时拿到过期
+        #   值（0 或极小），容器跳过展开卡在 0 高度，直到 resize 触发完整 layout pass。
+        #   显式 invalidate + updateGeometry 强制清除缓存，确保 _do_expand 读到
+        #   正确高度。
         self._question_floating_widget.setUpdatesEnabled(False)
         self._question_floating_widget.show_question(questions)
         self._question_floating_widget.setUpdatesEnabled(True)
+        self._question_floating_widget.layout().invalidate()
+        self._question_floating_widget.updateGeometry()
         self._card_manager.show_card("question", self._window_id)
+
+        # 🛡️ 安全网：延迟 200ms 后重试展开容器，防止 layout cache 过期导致卡片不显示
+        # （偶现 bug：提问卡片不出现，resize 后恢复 —— 原因是 _do_expand 读到
+        #  sizeHint=0 且重试计数器被跨容器共享耗尽。已修复重试计数器为实例变量，
+        #  此安全网作为兜底保障。）
+        QTimer.singleShot(200, self._bottom_card_container._schedule_expand)
+
         question_text = questions[0].get("question", "") if questions else ""
         self._notify_if_inactive("需要回答问题", question_text[:100])
 
@@ -10357,7 +10408,14 @@ class OpenAIChatToolWindow(ToolWindow):
             self._restore_after_question_close()
             return
         self._question_floating_widget.setUpdatesEnabled(True)
+        # 🛠️ 同 _on_question_asked 的 layout cache invalidate，防止第二次权限请求
+        # 时 _do_expand 读到过期 sizeHint 导致卡片不显示
+        self._question_floating_widget.layout().invalidate()
+        self._question_floating_widget.updateGeometry()
         self._card_manager.show_card("question", self._window_id)
+
+        # 🛡️ 同 _on_question_asked 的安全网：延迟重试展开容器
+        QTimer.singleShot(200, self._bottom_card_container._schedule_expand)
 
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
@@ -11190,15 +11248,41 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
 
-        # 显式停止滚动相关 timer，避免在 closeEvent 之后还触发滚动回调
-        # 访问已删除的 chat_scroll_area（守卫是第二道防线）
-        for timer_attr in ("_scroll_bottom_timer", "_bottom_anchor_timer"):
+        # 显式停止所有窗口级 timer，避免在 closeEvent 之后还触发回调
+        # 访问已删除的 widget（_is_destroyed 守卫是第二道防线）
+        for timer_attr in (
+            "_scroll_bottom_timer", "_bottom_anchor_timer",
+            "_virtual_scroll_timer", "_resize_debounce_timer",
+            "_resize_complete_timer", "_scroll_sync_timer",
+        ):
             timer = getattr(self, timer_attr, None)
             if timer is not None:
                 try:
                     timer.stop()
                 except Exception:
                     pass
+        # 条件性 timer（可能未创建）
+        for timer_attr in ("_coding_plan_refresh_timer", "_subagent_log_cleanup_timer"):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        # 🔧 内存泄漏修复：停止窗口级 ThreadPool
+        if hasattr(self, "_gen_thread_pool") and self._gen_thread_pool:
+            try:
+                self._gen_thread_pool.waitForDone(1000)
+            except Exception:
+                pass
+
+        # 🔧 内存泄漏修复：清理 AutoLoop Worker
+        if getattr(self, "_is_auto_loop_running", False) or getattr(self, "_auto_loop_worker", None):
+            try:
+                self._cleanup_auto_loop_state("窗口关闭")
+            except Exception:
+                pass
 
         # 从全局实例列表中移除
         try:
@@ -11217,6 +11301,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 停止所有正在进行的流式输出 + 清理窗口独有资源（不影响其他窗口）
         if hasattr(self, "backend") and self.backend:
+            # 🔧 内存泄漏修复：先断开信号连接，防止闭包持有窗口引用
+            for signal_pair in (
+                ("plugin_changed", "_on_plugin_hot_reload"),
+            ):
+                try:
+                    sig = getattr(self.backend, signal_pair[0], None)
+                    slot = getattr(self, signal_pair[1], None)
+                    if sig is not None and slot is not None:
+                        sig.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+
             try:
                 self.backend.stop_streaming()
                 self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
@@ -11808,6 +11904,33 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
+
+
+def _cleanup_global_lru_caches():
+    """清理全局 LRU 缓存，释放旧会话渲染/估算占用的内存。
+
+    在新建会话、切换会话时调用，避免缓存的 HTML 渲染结果和 token 估算值累积。
+    """
+    try:
+        from app.widgets.message_card import clear_global_render_cache
+        clear_global_render_cache()
+    except Exception:
+        pass
+    try:
+        from app.core.token_estimator import estimate_tokens
+        estimate_tokens.cache_clear()
+    except Exception:
+        pass
+    try:
+        from app.widgets.message_card import _render_tool_block_content
+        _render_tool_block_content.cache_clear()
+    except Exception:
+        pass
+    try:
+        from app.tools.file_tools import _compile_grep_pattern
+        _compile_grep_pattern.cache_clear()
+    except Exception:
+        pass
 
 
 def _compact_process_heap_after_cleanup():

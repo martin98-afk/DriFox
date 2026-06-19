@@ -79,6 +79,8 @@ class ContextBudgetAllocator:
             if len(self._system_tokens_cache) > 64:
                 # 清除最旧的条目
                 self._system_tokens_cache.pop(next(iter(self._system_tokens_cache)))
+                from loguru import logger
+                logger.warning(f"[ContextBuilder] Token 缓存超限 (大小={len(self._system_tokens_cache)})")
         return self._system_tokens_cache[cache_key]
 
     def build_messages(

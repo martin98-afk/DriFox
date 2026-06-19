@@ -10,6 +10,7 @@ import os
 import re
 import httpx
 import html2text
+import threading
 
 from pathlib import Path
 from typing import Optional
@@ -34,13 +35,35 @@ _DEFAULT_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
+# ========== 性能优化：复用 httpx 连接池 ==========
+_HTTP_CLIENT_LOCK = threading.Lock()
+_HTTP_CLIENT: Optional[httpx.Client] = None
+
+def _get_http_client() -> httpx.Client:
+    """获取共享的 httpx 客户端（懒加载，线程安全，带连接池复用）"""
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        with _HTTP_CLIENT_LOCK:
+            if _HTTP_CLIENT is None:
+                _HTTP_CLIENT = httpx.Client(
+                    timeout=30,
+                    follow_redirects=True,
+                    headers=_DEFAULT_HEADERS,
+                    limits=httpx.Limits(
+                        max_keepalive_connections=8,
+                        max_connections=16,
+                        keepalive_expiry=60,
+                    ),
+                )
+    return _HTTP_CLIENT
+
 
 def _fetch_html_content(url: str) -> tuple[httpx.Response, str]:
-    """获取网页内容的共享函数"""
-    with httpx.Client(timeout=30, follow_redirects=True, headers=_DEFAULT_HEADERS) as client:
-        response = client.get(url)
-        response.raise_for_status()
-        return response, response.text
+    """获取网页内容（使用共享的 httpx 客户端，复用连接池）"""
+    client = _get_http_client()
+    response = client.get(url)
+    response.raise_for_status()
+    return response, response.text
 
 
 class WebTools:
@@ -132,6 +155,12 @@ class WebTools:
         if api_key == "your-serpapi-key-here" or not api_key:
             return self._search_duckduckgo_sync(query, num_results)
 
+        # 快速格式校验：SerpAPI key 是字母数字组合，长度通常 > 20
+        # 不匹配时直接跳过，避免无效 key 浪费网络请求
+        if not re.fullmatch(r'[A-Za-z0-9]{20,}', api_key):
+            logger.warning(f"SerpAPI key 格式异常（长度={len(api_key)}），跳过重试")
+            return self._search_duckduckgo_sync(query, num_results)
+
         try:
             proxies = None
             http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
@@ -145,13 +174,22 @@ class WebTools:
                 "api_key": api_key,
             }
 
-            response = httpx.get(
-                "https://serpapi.com/search",
-                params=params,
-                proxies=proxies,
-                timeout=30,
-                follow_redirects=True,
-            )
+            client = _get_http_client()
+            if proxies:
+                # SerpAPI 需要单独的 proxy 配置时创建临时客户端
+                response = httpx.get(
+                    "https://serpapi.com/search",
+                    params=params,
+                    proxies=proxies,
+                    timeout=8,
+                    follow_redirects=True,
+                )
+            else:
+                response = client.get(
+                    "https://serpapi.com/search",
+                    params=params,
+                    timeout=8,
+                )
 
             if response.status_code == 401:
                 logger.warning("SerpAPI key invalid, falling back to DuckDuckGo")
@@ -194,12 +232,10 @@ class WebTools:
         """DuckDuckGo 同步搜索"""
         try:
             url = "https://html.duckduckgo.com/html/"
-            r = httpx.get(
+            client = _get_http_client()
+            r = client.get(
                 url,
                 params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (compatible)"},
-                timeout=30,
-                follow_redirects=True,
             )
             titles = _TITLE_PATTERN.findall(r.text)
             snippets = _SNIPPET_PATTERN.findall(r.text)

@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from loguru import logger
 
+from app.core.store.serde import serialize, deserialize
+
 
 class SessionRepository:
     """会话数据仓储，处理会话的 CRUD 操作"""
@@ -48,33 +50,33 @@ class SessionRepository:
         else:
             return {}
 
-        # 解析 JSON 字段
+        # 解析 JSON 字段（使用 serde 自动处理 zstd 压缩 + 旧数据兼容）
         messages = []
         compaction_state = {}
         compaction_cache = {}
 
         try:
-            msg_raw = d.get("messages", "[]")
-            if isinstance(msg_raw, str):
-                messages = json.loads(msg_raw)
+            msg_raw = d.get("messages")
+            if isinstance(msg_raw, (str, bytes)):
+                messages = deserialize(msg_raw) or []
             elif isinstance(msg_raw, list):
                 messages = msg_raw
         except Exception as e:
             logger.warning(f"Failed to deserialize session messages: {e}")
 
         try:
-            state_raw = d.get("compaction_state", "{}")
-            if isinstance(state_raw, str):
-                compaction_state = json.loads(state_raw) if state_raw else {}
+            state_raw = d.get("compaction_state")
+            if isinstance(state_raw, (str, bytes)):
+                compaction_state = deserialize(state_raw) or {}
             elif isinstance(state_raw, dict):
                 compaction_state = state_raw
         except Exception as e:
             logger.warning(f"Failed to deserialize compaction_state: {e}")
 
         try:
-            cache_raw = d.get("compaction_cache", "{}")
-            if isinstance(cache_raw, str):
-                compaction_cache = json.loads(cache_raw) if cache_raw else {}
+            cache_raw = d.get("compaction_cache")
+            if isinstance(cache_raw, (str, bytes)):
+                compaction_cache = deserialize(cache_raw) or {}
             elif isinstance(cache_raw, dict):
                 compaction_cache = cache_raw
         except Exception as e:
@@ -132,21 +134,24 @@ class SessionRepository:
                 # 优先使用 topic_summary（UI/Agent生成），其次 name（Gateway创建），兜底空字符串
                 "title": session.get("topic_summary") or session.get("name") or session.get("title", ""),
                 "project": session.get("project", "默认项目"),
-                "messages": json.dumps(session.get("messages", [])).decode('utf-8'),
+                # 使用 serde 透明压缩（zstd + 格式魔数），DB 体积减少 50-80%
+                "messages": serialize(session.get("messages", [])),
                 "system_prompt": session.get("system_prompt", ""),
-                "compaction_state": json.dumps(session.get("compaction_state", {})).decode('utf-8'),
-                "compaction_cache": json.dumps(session.get("compaction_cache", {})).decode('utf-8'),
+                "compaction_state": serialize(session.get("compaction_state", {})),
+                "compaction_cache": serialize(session.get("compaction_cache", {})),
                 "message_count": session.get("message_count", 0),
                 "user_edited_title": user_edited,
                 "worktree_path": session.get("worktree_path", "") or "",
+                "preview": session.get("preview", "") or "",
             }
 
             success, result = self._execute(f'''
                 INSERT OR REPLACE INTO {self.TABLE_NAME}
                 (session_id, title, project, messages, system_prompt,
                  compaction_state, compaction_cache, message_count, user_edited_title,
-                 worktree_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                 worktree_path, preview, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, 
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             ''', (
@@ -160,6 +165,7 @@ class SessionRepository:
                 session_data["message_count"],
                 session_data["user_edited_title"],
                 session_data["worktree_path"],
+                session_data["preview"],
                 session_id,  # for coalesce
                 now,  # created_at default
                 now,  # updated_at
@@ -204,6 +210,85 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] get_sessions 异常: {e}")
             return []
+
+    def get_all_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """获取所有会话的轻量列表（不含 messages），用于启动加载和历史列表展示。
+
+        避免 SELECT * 一次性反序列化全部 messages JSON（可达数十 MB），
+        仅在用户点击某个会话时按需加载 messages。
+        """
+        if not self.is_initialized:
+            return []
+
+        try:
+            success, rows = self._execute(
+                f'SELECT session_id, title, project, system_prompt, '
+                f'compaction_state, compaction_cache, message_count, '
+                f'user_edited_title, worktree_path, preview, '
+                f'created_at, updated_at '
+                f'FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?',
+                (limit, offset)
+            )
+            if success:
+                return [self._row_to_session_lightweight(row) for row in rows]
+            return []
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
+            return []
+
+    def _row_to_session_lightweight(self, row) -> Dict:
+        """将数据库行转换为不含 messages 的轻量会话字典"""
+        if not row:
+            return {}
+
+        if hasattr(row, 'keys'):
+            d = {k: row[k] for k in row.keys()}
+        elif isinstance(row, dict):
+            d = dict(row)
+        else:
+            return {}
+
+        compaction_state = {}
+        compaction_cache = {}
+
+        try:
+            state_raw = d.get("compaction_state")
+            if isinstance(state_raw, (str, bytes)):
+                compaction_state = deserialize(state_raw) or {}
+            elif isinstance(state_raw, dict):
+                compaction_state = state_raw
+        except Exception:
+            pass
+
+        try:
+            cache_raw = d.get("compaction_cache")
+            if isinstance(cache_raw, (str, bytes)):
+                compaction_cache = deserialize(cache_raw) or {}
+            elif isinstance(cache_raw, dict):
+                compaction_cache = cache_raw
+        except Exception:
+            pass
+
+        raw_title = d.get("title", "") or ""
+        return {
+            "session_id": d.get("session_id", ""),
+            "name": raw_title,
+            "title": raw_title,
+            "topic_summary": raw_title,
+            "project": d.get("project", "默认项目"),
+            "messages": [],  # 懒加载：不在启动时加载
+            "system_prompt": d.get("system_prompt", ""),
+            "compaction_state": compaction_state,
+            "compaction_cache": compaction_cache,
+            "message_count": d.get("message_count", 0),
+            "preview": d.get("preview", "") or "",  # 从 DB 读取预览文本
+            "created_at": d.get("created_at", ""),
+            "updated_at": d.get("updated_at", ""),
+            "worktree_path": d.get("worktree_path", "") or "",
+            "last_time": d.get("updated_at", ""),
+            "saved_at": d.get("created_at", ""),
+            "user_edited_title": d.get("user_edited_title", False),
+        }
 
     def get_by_project(self, project: str, limit: int = 100) -> List[Dict]:
         """获取指定项目的会话列表"""

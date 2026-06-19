@@ -8,7 +8,7 @@
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Python](https://img.shields.io/badge/Python-3.14%2B-blue)
 ![License](https://img.shields.io/github/license/martin98-afk/DriFox)
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
@@ -57,7 +57,7 @@
 ## 快速开始
 
 ### 环境要求
-- Python 3.10+
+- Python 3.14+
 - PyQt5 >= 5.15.0
 
 ### 安装（推荐 uv）

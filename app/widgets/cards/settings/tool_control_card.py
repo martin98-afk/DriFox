@@ -434,10 +434,6 @@ class ToolControlCardFrame(SystemCardFrame):
         # 刷新内容区 widget（全量重建以应用新样式）
         if hasattr(self, "_card") and self._card is not None:
             self._card.refresh_style()
-        # 刷新行为下拉框样式
-        self._behavior_combo.setStyleSheet(f"""
-            background: rgba(255,149,0,0.12); {font_size_css(11)} {get_font_family_css()}
-        """)
         self.update()
 
     def _on_behavior_changed(self, idx: int):

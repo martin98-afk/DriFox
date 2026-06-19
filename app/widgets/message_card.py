@@ -113,7 +113,8 @@ _TOOL_ARGS_LINE_PATTERN = re.compile(r"args:\s*(\{[^}]*\})")
 _TOOL_SUCCESS_PATTERN = re.compile(r"^success:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_ID_PATTERN = re.compile(r"^tool_call_id:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_RESULT_PATTERN = re.compile(r"^result:\s*(.*)$", re.MULTILINE)
-_NEXT_FIELD_PATTERN = re.compile(r"\n\w+:")
+# 只匹配实际字段名，避免日志内容中的“状态: running”等屏蔽结果
+_NEXT_FIELD_PATTERN = re.compile(r"\n(?:success|tool_call_id|diff|echarts):")
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
@@ -4666,7 +4667,7 @@ class MessageCard(SimpleCardWidget):
         bar.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(6, 0, 6, 0)
-        layout.setSpacing(3)
+        layout.setSpacing(0)
 
         accent = self._theme["accent"]
         font_css = get_font_family_css()

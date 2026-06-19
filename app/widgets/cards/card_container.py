@@ -34,6 +34,7 @@ class CardContainer(QWidget):
         self._window_id: Optional[str] = None  # 多窗口隔离
         self._expand_timer: Optional[QTimer] = None  # 防抖展开定时器
         self._expand_animation: Optional[QPropertyAnimation] = None  # 展开/折叠动画
+        self._expand_retry_count = 0  # 实例变量：防止 _do_expand 无限重试（每个容器独立计数）
         self._setup_ui()
     
     def _setup_ui(self):
@@ -150,8 +151,16 @@ class CardContainer(QWidget):
             if natural_h <= 0:
                 # 兜底：layout 没算出高度（布局管道尚未完成测量），
                 # 延迟重试，让 Qt 在下一轮事件循环完成几何计算后再展开
+                self._expand_retry_count += 1
+                if self._expand_retry_count >= 5:
+                    # 重试 5 次仍为 0，强行 snap 到最小高度兜底
+                    # （防止 layout cache 持续过期的极端情况导致卡片不可见）
+                    self._expand_retry_count = 0
+                    self.setMaximumHeight(self._layout.minimumSize().height())
+                    return
                 QTimer.singleShot(0, self._do_expand)
                 return
+            self._expand_retry_count = 0
             current_h = self.height()
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:

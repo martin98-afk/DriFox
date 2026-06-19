@@ -91,9 +91,8 @@ class SystemCardFrame(QFrame):
         # 标签按钮容器
         self._tab_buttons_container = QHBoxLayout()
         self._tab_buttons_container.setSpacing(1)
-        self._header_layout.addLayout(self._tab_buttons_container)
-
         self._header_layout.addStretch()
+        self._header_layout.addLayout(self._tab_buttons_container)
 
         # 搜索框容器（默认隐藏）
         self._search_container = QHBoxLayout()
