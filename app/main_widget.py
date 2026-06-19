@@ -10249,6 +10249,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.layout().invalidate()
         self._question_floating_widget.updateGeometry()
         self._card_manager.show_card("question", self._window_id)
+
+        # 🛡️ 安全网：延迟 200ms 后重试展开容器，防止 layout cache 过期导致卡片不显示
+        # （偶现 bug：提问卡片不出现，resize 后恢复 —— 原因是 _do_expand 读到
+        #  sizeHint=0 且重试计数器被跨容器共享耗尽。已修复重试计数器为实例变量，
+        #  此安全网作为兜底保障。）
+        QTimer.singleShot(200, self._bottom_card_container._schedule_expand)
+
         question_text = questions[0].get("question", "") if questions else ""
         self._notify_if_inactive("需要回答问题", question_text[:100])
 
@@ -10406,6 +10413,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.layout().invalidate()
         self._question_floating_widget.updateGeometry()
         self._card_manager.show_card("question", self._window_id)
+
+        # 🛡️ 同 _on_question_asked 的安全网：延迟重试展开容器
+        QTimer.singleShot(200, self._bottom_card_container._schedule_expand)
 
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记

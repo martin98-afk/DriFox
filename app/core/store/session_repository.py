@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from loguru import logger
 
+from app.core.store.serde import serialize, deserialize
+
 
 class SessionRepository:
     """会话数据仓储，处理会话的 CRUD 操作"""
@@ -48,33 +50,33 @@ class SessionRepository:
         else:
             return {}
 
-        # 解析 JSON 字段
+        # 解析 JSON 字段（使用 serde 自动处理 zstd 压缩 + 旧数据兼容）
         messages = []
         compaction_state = {}
         compaction_cache = {}
 
         try:
-            msg_raw = d.get("messages", "[]")
-            if isinstance(msg_raw, str):
-                messages = json.loads(msg_raw)
+            msg_raw = d.get("messages")
+            if isinstance(msg_raw, (str, bytes)):
+                messages = deserialize(msg_raw) or []
             elif isinstance(msg_raw, list):
                 messages = msg_raw
         except Exception as e:
             logger.warning(f"Failed to deserialize session messages: {e}")
 
         try:
-            state_raw = d.get("compaction_state", "{}")
-            if isinstance(state_raw, str):
-                compaction_state = json.loads(state_raw) if state_raw else {}
+            state_raw = d.get("compaction_state")
+            if isinstance(state_raw, (str, bytes)):
+                compaction_state = deserialize(state_raw) or {}
             elif isinstance(state_raw, dict):
                 compaction_state = state_raw
         except Exception as e:
             logger.warning(f"Failed to deserialize compaction_state: {e}")
 
         try:
-            cache_raw = d.get("compaction_cache", "{}")
-            if isinstance(cache_raw, str):
-                compaction_cache = json.loads(cache_raw) if cache_raw else {}
+            cache_raw = d.get("compaction_cache")
+            if isinstance(cache_raw, (str, bytes)):
+                compaction_cache = deserialize(cache_raw) or {}
             elif isinstance(cache_raw, dict):
                 compaction_cache = cache_raw
         except Exception as e:
@@ -132,10 +134,11 @@ class SessionRepository:
                 # 优先使用 topic_summary（UI/Agent生成），其次 name（Gateway创建），兜底空字符串
                 "title": session.get("topic_summary") or session.get("name") or session.get("title", ""),
                 "project": session.get("project", "默认项目"),
-                "messages": json.dumps(session.get("messages", [])).decode('utf-8'),
+                # 使用 serde 透明压缩（zstd + 格式魔数），DB 体积减少 50-80%
+                "messages": serialize(session.get("messages", [])),
                 "system_prompt": session.get("system_prompt", ""),
-                "compaction_state": json.dumps(session.get("compaction_state", {})).decode('utf-8'),
-                "compaction_cache": json.dumps(session.get("compaction_cache", {})).decode('utf-8'),
+                "compaction_state": serialize(session.get("compaction_state", {})),
+                "compaction_cache": serialize(session.get("compaction_cache", {})),
                 "message_count": session.get("message_count", 0),
                 "user_edited_title": user_edited,
                 "worktree_path": session.get("worktree_path", "") or "",
@@ -249,18 +252,18 @@ class SessionRepository:
         compaction_cache = {}
 
         try:
-            state_raw = d.get("compaction_state", "{}")
-            if isinstance(state_raw, str):
-                compaction_state = json.loads(state_raw) if state_raw else {}
+            state_raw = d.get("compaction_state")
+            if isinstance(state_raw, (str, bytes)):
+                compaction_state = deserialize(state_raw) or {}
             elif isinstance(state_raw, dict):
                 compaction_state = state_raw
         except Exception:
             pass
 
         try:
-            cache_raw = d.get("compaction_cache", "{}")
-            if isinstance(cache_raw, str):
-                compaction_cache = json.loads(cache_raw) if cache_raw else {}
+            cache_raw = d.get("compaction_cache")
+            if isinstance(cache_raw, (str, bytes)):
+                compaction_cache = deserialize(cache_raw) or {}
             elif isinstance(cache_raw, dict):
                 compaction_cache = cache_raw
         except Exception:

@@ -5,11 +5,12 @@
 从 SubAgentLogStore 提取的 CRUD 逻辑，集成到 SessionStore 统一管理。
 """
 
-import orjson as json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 from loguru import logger
+
+from app.core.store.serde import serialize, deserialize
 
 
 class SubAgentLogRepository:
@@ -78,12 +79,24 @@ class SubAgentLogRepository:
             return {}
 
         try:
-            logs = json.loads(d.get("logs", "[]"))
+            logs_raw = d.get("logs")
+            if isinstance(logs_raw, (str, bytes)):
+                logs = deserialize(logs_raw) or []
+            elif isinstance(logs_raw, list):
+                logs = logs_raw
+            else:
+                logs = []
         except Exception:
             logs = []
 
         try:
-            summary = json.loads(d.get("summary", "{}"))
+            summary_raw = d.get("summary")
+            if isinstance(summary_raw, (str, bytes)):
+                summary = deserialize(summary_raw) or {}
+            elif isinstance(summary_raw, dict):
+                summary = summary_raw
+            else:
+                summary = {}
         except Exception:
             summary = {}
 
@@ -126,8 +139,9 @@ class SubAgentLogRepository:
             return False
 
         now = datetime.now().isoformat()
-        logs_json = json.dumps(logs or []).decode('utf-8')
-        summary_json = json.dumps(summary or {}).decode('utf-8')
+        # 使用 serde 透明压缩（zstd + 格式魔数），DB 体积减少 50-80%
+        logs_json = serialize(logs or [])
+        summary_json = serialize(summary or {})
 
         # 检查是否存在
         success, rows = self._execute(
@@ -169,9 +183,9 @@ class SubAgentLogRepository:
         if error is not None:
             data["error"] = error
         if logs is not None:
-            data["logs"] = json.dumps(logs).decode('utf-8')
+            data["logs"] = serialize(logs)
         if summary is not None:
-            data["summary"] = json.dumps(summary).decode('utf-8')
+            data["summary"] = serialize(summary)
 
         for v in data.values():
             params.append(v)

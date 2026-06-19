@@ -2321,16 +2321,16 @@ class OpenAIChatWorker(QThread):
             # ====== 发射 tool_call_started ======
             self._emit_tool_started(tool_call_id, tool_name, arguments, round_id)
 
-            # ====== 处理 question 工具 ======
-            if tool_name == "question":
-                return self._handle_question_tool(tool_call_id, arguments)
-
-            # ====== 权限检查 ======
+            # ====== 权限检查（统一检查所有工具，包括 question）======
             should_continue = self._check_permission(tool_name, arguments, tool_call_id, round_id, results)
             if not should_continue:
                 return None  # 取消
             if results and results[-1] and results[-1].get("tool_call_id") == tool_call_id:
                 continue  # 权限拒绝，跳过执行
+
+            # ====== 处理 question 工具 ======
+            if tool_name == "question":
+                return self._handle_question_tool(tool_call_id, arguments)
 
             # ====== 执行工具 ======
             result_obj, result_content, success = self._execute_tool(
