@@ -139,14 +139,16 @@ class SessionRepository:
                 "message_count": session.get("message_count", 0),
                 "user_edited_title": user_edited,
                 "worktree_path": session.get("worktree_path", "") or "",
+                "preview": session.get("preview", "") or "",
             }
 
             success, result = self._execute(f'''
                 INSERT OR REPLACE INTO {self.TABLE_NAME}
                 (session_id, title, project, messages, system_prompt,
                  compaction_state, compaction_cache, message_count, user_edited_title,
-                 worktree_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                 worktree_path, preview, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, 
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             ''', (
@@ -160,6 +162,7 @@ class SessionRepository:
                 session_data["message_count"],
                 session_data["user_edited_title"],
                 session_data["worktree_path"],
+                session_data["preview"],
                 session_id,  # for coalesce
                 now,  # created_at default
                 now,  # updated_at
@@ -218,7 +221,8 @@ class SessionRepository:
             success, rows = self._execute(
                 f'SELECT session_id, title, project, system_prompt, '
                 f'compaction_state, compaction_cache, message_count, '
-                f'user_edited_title, worktree_path, created_at, updated_at '
+                f'user_edited_title, worktree_path, preview, '
+                f'created_at, updated_at '
                 f'FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?',
                 (limit, offset)
             )
@@ -274,6 +278,7 @@ class SessionRepository:
             "compaction_state": compaction_state,
             "compaction_cache": compaction_cache,
             "message_count": d.get("message_count", 0),
+            "preview": d.get("preview", "") or "",  # 从 DB 读取预览文本
             "created_at": d.get("created_at", ""),
             "updated_at": d.get("updated_at", ""),
             "worktree_path": d.get("worktree_path", "") or "",

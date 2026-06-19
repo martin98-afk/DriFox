@@ -6914,6 +6914,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.backend.reset_session_state()
 
+        # 💡 内存优化：加载历史会话时清理 LRU 缓存
+        _cleanup_global_lru_caches()
+
         history_list = self.history_manager.get_history_list(self._current_project)
         if index < 0 or index >= len(history_list):
             return
@@ -11911,6 +11914,11 @@ def _cleanup_global_lru_caches():
     try:
         from app.widgets.message_card import _render_tool_block_content
         _render_tool_block_content.cache_clear()
+    except Exception:
+        pass
+    try:
+        from app.tools.file_tools import _compile_grep_pattern
+        _compile_grep_pattern.cache_clear()
     except Exception:
         pass
 
