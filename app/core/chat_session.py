@@ -121,14 +121,6 @@ class ChatSession:
         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.message_count = len(self.messages)
 
-        # 内存泄漏修复：监控消息数量
-        if self.message_count > MAX_SESSION_MESSAGES:
-            from loguru import logger
-            logger.warning(
-                f"[ChatSession] 会话消息数量过多: {self.message_count} > {MAX_SESSION_MESSAGES} "
-                f"(session_id={self.session_id})"
-            )
-
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
         # 同步更新 name，使 DB 保存时 title 字段一致

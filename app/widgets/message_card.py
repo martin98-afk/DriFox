@@ -4078,6 +4078,14 @@ class CodeWebViewer(QWebEngineView):
         清理 CodeWebViewer 持有的资源，防止内存泄漏。
         应该在删除 viewer 前调用，或者在 deleteLater 中自动调用。
         """
+        # 🔧 内存修复：移除全局事件过滤器，防止 QApplication 持有对已销毁
+        # CodeWebViewer 实例的引用，导致 GC 无法回收且事件循环误调用已释放对象
+        try:
+            from PyQt5.QtWidgets import QApplication
+            QApplication.instance().removeEventFilter(self)
+        except Exception:
+            pass
+
         # 停止所有定时器
         timers_to_stop = [
             self._render_timer,
