@@ -16,7 +16,6 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool
 from loguru import logger
 
 from app.core.store import SessionStore
-from app.core.engines.gateway import GatewayEngine
 from app.core.agent import AgentManager
 from app.core.engines.ui import ChatEngine
 from app.core.chat_session import SessionManager, ChatSession
@@ -320,6 +319,7 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] ChatEngine 创建完成")
 
         # 创建 GatewayEngine（全局单例，多个窗口共享）
+        from app.core.engines.gateway import GatewayEngine
         self._gateway_engine = GatewayEngine.get_instance(
             get_model_config=get_model_config,
             tool_executor=self._tool_executor,
