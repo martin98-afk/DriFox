@@ -2935,7 +2935,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 拼接子智能体任务描述：默认任务 + 用户补充说明（如果有）
-        base_task = "请压缩当前对话上下文，生成工作摘要"
+        base_task = "请压缩当前对话上下文，生成详细的工作摘要"
         task_description = (
             f"{base_task}。用户补充说明：{user_hint}" if user_hint else base_task
         )
@@ -11190,15 +11190,41 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
 
-        # 显式停止滚动相关 timer，避免在 closeEvent 之后还触发滚动回调
-        # 访问已删除的 chat_scroll_area（守卫是第二道防线）
-        for timer_attr in ("_scroll_bottom_timer", "_bottom_anchor_timer"):
+        # 显式停止所有窗口级 timer，避免在 closeEvent 之后还触发回调
+        # 访问已删除的 widget（_is_destroyed 守卫是第二道防线）
+        for timer_attr in (
+            "_scroll_bottom_timer", "_bottom_anchor_timer",
+            "_virtual_scroll_timer", "_resize_debounce_timer",
+            "_resize_complete_timer", "_scroll_sync_timer",
+        ):
             timer = getattr(self, timer_attr, None)
             if timer is not None:
                 try:
                     timer.stop()
                 except Exception:
                     pass
+        # 条件性 timer（可能未创建）
+        for timer_attr in ("_coding_plan_refresh_timer", "_subagent_log_cleanup_timer"):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        # 🔧 内存泄漏修复：停止窗口级 ThreadPool
+        if hasattr(self, "_gen_thread_pool") and self._gen_thread_pool:
+            try:
+                self._gen_thread_pool.waitForDone(1000)
+            except Exception:
+                pass
+
+        # 🔧 内存泄漏修复：清理 AutoLoop Worker
+        if getattr(self, "_is_auto_loop_running", False) or getattr(self, "_auto_loop_worker", None):
+            try:
+                self._cleanup_auto_loop_state("窗口关闭")
+            except Exception:
+                pass
 
         # 从全局实例列表中移除
         try:
@@ -11223,6 +11249,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.backend.cleanup()
             except Exception:
                 pass
+
+            # 🔧 内存泄漏修复：断开信号连接，防止闭包持有窗口引用
+            for signal_pair in (
+                ("plugin_changed", "_on_plugin_hot_reload"),
+            ):
+                try:
+                    sig = getattr(self.backend, signal_pair[0], None)
+                    slot = getattr(self, signal_pair[1], None)
+                    if sig is not None and slot is not None:
+                        sig.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
 
         # 标记初始化已完成（防止窗口在初始化期间关闭导致竞态条件）
         self._initialization_in_progress = False

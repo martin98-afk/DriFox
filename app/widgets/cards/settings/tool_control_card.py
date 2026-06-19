@@ -16,7 +16,7 @@ from qfluentwidgets import SwitchButton, ComboBox
 from app.tools.tool_classifier import (
     DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles,
 )
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, ComboBoxStyles, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.elided_label import _ElidedLabel
@@ -434,10 +434,6 @@ class ToolControlCardFrame(SystemCardFrame):
         # 刷新内容区 widget（全量重建以应用新样式）
         if hasattr(self, "_card") and self._card is not None:
             self._card.refresh_style()
-        # 刷新行为下拉框样式
-        self._behavior_combo.setStyleSheet(f"""
-            background: rgba(255,149,0,0.12); {font_size_css(11)} {get_font_family_css()}
-        """)
         self.update()
 
     def _on_behavior_changed(self, idx: int):

@@ -1,6 +1,7 @@
 from PyQt5.QtCore import Qt, QStringListModel
 from PyQt5.QtWidgets import QCompleter
 from qfluentwidgets import EditableComboBox
+
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import font_size_css
 
@@ -12,10 +13,10 @@ class SearchableEditableComboBox(EditableComboBox):
         super().__init__(parent)
         self._max_visible_items = max_visible_items
 
-        # 设置深色样式 + 全局字体
+        # 设置深色样式 + 全局字体（背景色统一半透明）
         self.setStyleSheet(f"""
             QLineEdit {{
-                background-color: #2d2d2d;
+                background-color: rgba(45, 45, 45, 180);
                 color: #ffffff;
                 border: 1px solid #3a3a3a;
                 border-radius: 4px;
@@ -43,6 +44,9 @@ class SearchableEditableComboBox(EditableComboBox):
 
         # 2. 使用标准的 setCompleter 方法注册
         self.setCompleter(self._search_completer)
+
+        # 3. 设置补全弹出列表样式（半透明）
+        self._style_completer_popup()
 
         # 内部维护一个纯文本列表用于同步
         self._item_texts = []
@@ -119,3 +123,68 @@ class SearchableEditableComboBox(EditableComboBox):
                 idx_list = self._item_texts.index(old_text)
                 self._item_texts[idx_list] = new_text
                 self._update_completer_model()
+
+    # ── 弹出列表样式（半透明） ─────────────────────────────
+
+    _DROPDOWN_STYLE = """
+        QListWidget#comboListWidget {
+            background-color: rgba(42, 42, 46, 180);
+            color: #ffffff;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            padding: 4px;
+            outline: none;
+        }
+        QListWidget#comboListWidget::item {
+            padding: 6px 14px 6px 12px;
+            min-height: 36px;
+            border-radius: 3px;
+            color: #ffffff;
+        }
+        QListWidget#comboListWidget::item:hover {
+            background-color: rgba(255, 255, 255, 0.08);
+        }
+        QListWidget#comboListWidget::item:selected {
+            background-color: #f59e0b;
+            color: white;
+        }
+    """
+
+    def _style_completer_popup(self):
+        """给补全弹出列表设置半透明样式"""
+        try:
+            popup = self._search_completer.popup()
+            popup.setStyleSheet(f"""
+                QAbstractItemView {{
+                    background-color: rgba(42, 42, 46, 180);
+                    color: #ffffff;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 4px;
+                    padding: 4px;
+                    outline: none;
+                }}
+                QAbstractItemView::item {{
+                    padding: 6px 14px 6px 12px;
+                    min-height: 36px;
+                    border-radius: 3px;
+                    color: #ffffff;
+                }}
+                QAbstractItemView::item:hover {{
+                    background-color: rgba(255, 255, 255, 0.08);
+                }}
+                QAbstractItemView::item:selected {{
+                    background-color: #f59e0b;
+                    color: white;
+                }}
+            """)
+        except Exception:
+            pass
+
+    def _createComboMenu(self):
+        """重写：创建下拉菜单时注入半透明样式"""
+        menu = super()._createComboMenu()
+        try:
+            menu.view.setStyleSheet(self._DROPDOWN_STYLE)
+        except Exception:
+            pass
+        return menu

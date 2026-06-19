@@ -19,6 +19,9 @@ from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
 
+# 内存泄漏修复：会话消息数软限制
+MAX_SESSION_MESSAGES = 500
+
 # 默认最大缓存会话数（内存中同时保留的会话）
 DEFAULT_MAX_CACHED_SESSIONS = 15
 
@@ -118,6 +121,14 @@ class ChatSession:
         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.message_count = len(self.messages)
 
+        # 内存泄漏修复：监控消息数量
+        if self.message_count > MAX_SESSION_MESSAGES:
+            from loguru import logger
+            logger.warning(
+                f"[ChatSession] 会话消息数量过多: {self.message_count} > {MAX_SESSION_MESSAGES} "
+                f"(session_id={self.session_id})"
+            )
+
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
         # 同步更新 name，使 DB 保存时 title 字段一致
@@ -212,6 +223,18 @@ class SessionManager(QObject):
         self.current_index = len(self.sessions) - 1
         self._touch_session(session.session_id)
         self._evict_if_needed()
+
+        # 内存泄漏修复：在创建新会话时清理缓存
+        try:
+            from app.core.message_content import consolidate_messages
+            if hasattr(consolidate_messages, 'cache_clear'):
+                consolidate_messages.cache_clear()
+                from loguru import logger
+                logger.debug("[SessionManager] 已清理缓存 (创建新会话)")
+        except Exception as e:
+            from loguru import logger
+            logger.warning(f"[SessionManager] 清理缓存失败: {e}")
+
         return session
 
     def get_current_session(self) -> Optional[ChatSession]:
@@ -277,6 +300,17 @@ class SessionManager(QObject):
             self._touch_session(session.session_id)
             # 如果超过最大缓存数，淘汰最久未访问的非当前会话
             self._evict_if_needed()
+
+        # 内存泄漏修复：在会话切换时清理缓存
+        try:
+            from app.core.message_content import consolidate_messages
+            if hasattr(consolidate_messages, 'cache_clear'):
+                consolidate_messages.cache_clear()
+                from loguru import logger
+                logger.debug(f"[SessionManager] 已清理缓存 (切换到会话 {index})")
+        except Exception as e:
+            from loguru import logger
+            logger.warning(f"[SessionManager] 清理缓存失败: {e}")
 
     def get_session_names(self) -> List[str]:
         return [s.name for s in self.sessions]

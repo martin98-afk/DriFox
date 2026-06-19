@@ -747,7 +747,7 @@ class AgentManager:
         # 场景1: 主智能体自身运行（primary mode，is_subagent_call=False）
         # 场景2: 主智能体通过 subagent_para 调用子智能体（子智能体看到任务描述，is_subagent_call=True）
         # 场景3: 子智能体独立运行（subagent mode，is_subagent_call=False）
-
+        subagents_info = ""
         if is_subagent_call:
             # 场景2：被主智能体调用，子智能体看到的是任务描述
             role_constraints = subagent_constraints
@@ -756,14 +756,12 @@ class AgentManager:
             role_constraints = primary_constraints
             # 主智能体需要动态注入可用子智能体列表
             subagents_info = self.get_available_subagents_for_prompt()
-            if subagents_info:
-                global_contract = global_contract + "\n\n" + subagents_info
 
         # 【缓存优化】稳定前缀在前：global_contract + role_constraints 不随 Agent 变化
         # agent.prompt 放在后面作为动态后缀，切换 Agent 时不影响前缀缓存命中
         if agent.prompt:
             return "\n\n".join(
-                part for part in [global_contract, role_constraints, agent.prompt, base_prompt] if part
+                part for part in [global_contract, role_constraints, agent.prompt, base_prompt, subagents_info] if part
             )
 
         # Fallback 提示词（同样遵循稳定前缀在前原则）

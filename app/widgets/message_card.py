@@ -4667,7 +4667,7 @@ class MessageCard(SimpleCardWidget):
         bar.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(6, 0, 6, 0)
-        layout.setSpacing(3)
+        layout.setSpacing(0)
 
         accent = self._theme["accent"]
         font_css = get_font_family_css()
