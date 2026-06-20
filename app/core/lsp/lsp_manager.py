@@ -102,7 +102,8 @@ class LspManager:
     # ── 初始化 ──────────────────────────────────────────────────
 
     def initialize(self, workspace_root: str, lsp_configs: Optional[List[Dict[str, Any]]] = None) -> None:
-        # 幂等：仅当已初始化且配置为空时跳过（热重载通过 _on_refresh 传配置触发）
+        # 幂等：已初始化 + 已有客户端 + 未传入新配置时跳过
+        # 热重载通过 _on_refresh 传入非空 lsp_configs 强制走完整重建路径
         if self._initialized and self._clients and not lsp_configs:
             logger.debug("[LspManager] 已初始化，无新配置，跳过")
             return
@@ -332,7 +333,7 @@ class LspManager:
         if not diags:
             return None
 
-        # 只保留 Error + Warning，按行号排序
+        # 只保留 Error + Warning，按 (行, 列) 排序
         filtered = [
             d for d in diags
             if d.get("severity", "") in ("error", "Error", "warning", "Warning")

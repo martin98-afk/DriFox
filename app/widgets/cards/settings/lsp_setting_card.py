@@ -22,7 +22,6 @@ from qfluentwidgets import (
     ExpandSettingCard,
     StrongBodyLabel,
     PushButton,
-    FluentIcon,
     InfoBar,
     InfoBarPosition,
     SwitchButton,
@@ -135,8 +134,6 @@ class LspServerRow(CardWidget):
 class LspListSettingCard(ExpandSettingCard):
     """LSP 语言服务器状态卡片 — 展示已注册的 LSP 服务器及其运行状态"""
 
-    _hotUpdateRequested = pyqtSignal()
-
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
         super().__init__(icon, title, content, parent)
@@ -168,7 +165,7 @@ class LspListSettingCard(ExpandSettingCard):
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
         self.view.setStyleSheet("background-color: transparent;")
 
-        # 自动诊断开关（标题栏右侧，刷新按钮左边）
+        # 自动诊断开关
         self._auto_diag_row = QWidget(self)
         self._auto_diag_row.setStyleSheet("background-color: transparent;")
         row_layout = QHBoxLayout(self._auto_diag_row)
@@ -193,29 +190,6 @@ class LspListSettingCard(ExpandSettingCard):
         row_layout.addWidget(self._auto_diag_switch)
 
         self.addWidget(self._auto_diag_row)
-
-        # 刷新按钮
-        self.refreshButton = PushButton("刷新", self, FluentIcon.SYNC)
-        self.refreshButton.clicked.connect(self._on_refresh)
-        self.addWidget(self.refreshButton)
-
-    def _on_refresh(self):
-        """手动刷新：重新从 PluginManager 加载配置并重建列表，保持运行中的服务不中断"""
-        try:
-            from app.core.plugin_manager import PluginManager
-            pm = PluginManager.get_instance()
-            if pm.is_initialized():
-                mgr = self._get_lsp_manager()
-                if mgr:
-                    cfgs = pm.get_lsp_configs()
-                    mgr.initialize(mgr._workspace_root, cfgs)
-                    mgr.start_all_background()
-                    logger.info(f"[LspCard] 手动刷新完成，已注册 {len(mgr._clients)} 个服务器")
-        except Exception as e:
-            logger.error(f"[LspCard] 刷新配置失败: {e}")
-
-        self._rebuild()
-        QTimer.singleShot(300, self._refresh_status)
 
     def _on_auto_diag_toggled(self, checked: bool):
         """自动诊断开关切换"""
@@ -281,17 +255,23 @@ class LspListSettingCard(ExpandSettingCard):
         apply_font_size_to_widget(self, 14)
 
     def _refresh_status(self):
-        """定时刷新运行状态指示灯（轻量更新，不重建列表）"""
+        """定时刷新——配置变化时自动重建列表，否则只更新状态灯"""
         mgr = self._get_lsp_manager()
         if not mgr:
             return
 
+        # 检测 LSP 配置是否发生变化（插件热重载增删了服务器）
+        current_names = set(mgr._clients.keys())
+        card_names = set(self._rows.keys())
+        if current_names != card_names:
+            self._rebuild()
+            return
+
+        # 只更新现有的运行/安装状态
         for name, row in self._rows.items():
             client = mgr._clients.get(name)
             if client:
-                # 更新运行状态
                 row.set_running(client.is_running)
-                # 更新安装状态（如果之前未安装，现在可能已安装）
                 if not client.is_running and not client.is_command_available():
                     row._install_hint = client.config.install_hint
 

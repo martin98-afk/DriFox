@@ -393,9 +393,9 @@ class ToolExecutor:
             return result
 
         if not diag_result:
-            # 无诊断问题（或 CLI 超时/不可用）：追加简短确认
+            # diag_result 为 None 表示 CLI 返回空或不可用（工具未安装/超时/真无问题）
             result.content = (
-                f"{result.content}\n\n[LSP 自动诊断] ✅ 无问题"
+                f"{result.content}\n\n[LSP 自动诊断] 未发现问题"
             )
         else:
             result.content = (
