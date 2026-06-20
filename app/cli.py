@@ -20,6 +20,94 @@ import json as stdjson
 from typing import Optional
 
 from PyQt5.QtCore import QEventLoop
+from loguru import logger
+
+# CLI 独立版本号（与主应用版本解耦，可按需独立递增）
+CLI_VERSION = "0.2.12"
+
+# ANSI 颜色码
+_CYAN = "\033[36m"
+_YELLOW = "\033[33m"
+_ORANGE = "\033[38;5;214m"
+_GRAY = "\033[90m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _build_banner(model_info: str = "") -> str:
+    """构造 DriFox ASCII banner（Claude Code 风格 + 飘狐元素）
+
+    Args:
+        model_info: 当前模型描述，如 "DeepSeek · deepseek-chat"
+                    为空则不显示该行
+    """
+    fox_lines = [
+        "    /\\_/\\\\  ",
+        "   ( o.o ) ",
+        "    > ^ <  ",
+    ]
+    if model_info:
+        right_lines = [
+            (f"{_BOLD}飘狐 · 轻量化 AI 桌面对话助手{_RESET}", fox_lines[0]),
+            (f"{_CYAN}v{CLI_VERSION} · {model_info}{_RESET}", fox_lines[1]),
+            ("", fox_lines[2]),
+        ]
+    else:
+        right_lines = [
+            (f"{_BOLD}飘狐 · 轻量化 AI 桌面对话助手{_RESET}", fox_lines[0]),
+            (f"{_CYAN}v{CLI_VERSION}{_RESET}", fox_lines[1]),
+            ("", fox_lines[2]),
+        ]
+
+    ascii_art = f"""{_ORANGE}
+   ██████╗ ██████╗ ██╗███████╗ ██████╗ ██╗  ██╗{_RESET}
+{_ORANGE}   ██╔══██╗██╔══██╗██║██╔════╝██╔═══██╗╚██╗██╔╝{_RESET}
+{_ORANGE}   ██║  ██║██████╔╝██║█████╗  ██║   ██║ ╚███╔╝{_RESET}
+{_ORANGE}   ██║  ██║██╔══██╗██║██╔══╝  ██║   ██║ ██╔██╗{_RESET}
+{_ORANGE}   ██████╔╝██║  ██║██║██║     ╚██████╔╝██╔╝ ██╗{_RESET}
+{_ORANGE}   ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝      ╚═════╝ ╚═╝  ╚═╝{_RESET}"""
+
+    fox_block_lines = []
+    for right, left in right_lines:
+        fox_block_lines.append(f"  {_GRAY}{left}{_RESET}  {right}")
+
+    fox_block = "\n".join(fox_block_lines)
+
+    return (
+        ascii_art
+        + "\n\n"
+        + fox_block
+        + f"\n{_GRAY}────────────────────────────────────────────────{_RESET}\n"
+        + f"  {_YELLOW}/help{_RESET}  ·  {_YELLOW}/clear{_RESET}  ·  {_YELLOW}/quit{_RESET}                          "
+        + f"{_DIM}输入问题直接开始对话{_RESET}\n"
+    )
+
+
+def _print_banner(model_info: str = "") -> None:
+    """打印 DriFox banner 到 stdout"""
+    print(_build_banner(model_info))
+
+
+def _resolve_model_info() -> str:
+    """从 Settings 读取当前模型描述，用于 banner 显示。
+
+    返回 "Provider · Model" 格式的字符串；配置缺失时返回空串。
+    """
+    try:
+        from app.utils.config import Settings
+        settings = Settings.get_instance()
+        saved = dict(settings.llm_saved_providers.value or {})
+        selected = settings.llm_selected_model.value or ""
+        if selected and selected in saved:
+            cfg = saved[selected]
+            pname = cfg.get("provider_name", "") or "unknown"
+            mname = cfg.get("模型名称", "") or "?"
+            return f"{pname} · {mname}"
+    except Exception:
+        pass
+    return ""
+
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -56,6 +144,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=False,
         help="JSON 格式输出（仅 oneshot 模式）",
     )
+    chat_parser.add_argument(
+        "-p", "--provider",
+        type=str,
+        default=None,
+        help="选择模型服务商（名称或关键词，如 'deepseek'、'硅基'），不指定则使用上次选择的",
+    )
+    chat_parser.add_argument(
+        "-m", "--model",
+        type=str,
+        default=None,
+        help="指定模型名称（如 'deepseek-chat'、'gpt-4o'），覆盖服务商默认模型",
+    )
+    chat_parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="覆盖 API Base URL",
+    )
+    chat_parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="覆盖 API Key",
+    )
+    chat_parser.add_argument(
+        "--no-banner",
+        action="store_true",
+        default=False,
+        help="不显示 ASCII banner（仅 REPL 模式）",
+    )
 
     # === doctor 子命令 ===
     subparsers.add_parser("doctor", help="环境诊断")
@@ -63,11 +181,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # === status 子命令 ===
     subparsers.add_parser("status", help="查看系统状态")
 
+    # === providers 子命令 ===
+    providers_parser = subparsers.add_parser("providers", help="列出已配置的模型服务商")
+    providers_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="JSON 格式输出",
+    )
+
     return parser
 
 
 def main():
     """CLI 主入口"""
+    # 禁用所有 loguru 输出，避免与大模型 stdout 混杂
+    logger.remove()
+
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -83,17 +213,44 @@ def main():
         _run_doctor()
     elif subcommand == "status":
         _run_status()
+    elif subcommand == "providers":
+        _run_providers(args)
     else:
         parser.print_help()
 
 
 def _show_version():
-    """显示版本号"""
+    """显示版本号
+
+    优先级：
+    1. 已安装包元数据 pip install → importlib.metadata
+    2. pyproject.toml（开发模式 pip install -e .）
+    3. CLI_VERSION 常量（兜底）
+    """
+    # 优先从已安装包元数据读取
     try:
-        from app.constants import __version__
-    except ImportError:
-        __version__ = "0.2.8-dev"
-    print(f"DriFox v{__version__}")
+        from importlib.metadata import version
+        v = version("drifox-cli")
+        print(f"DriFox v{v}")
+        return
+    except Exception:
+        pass
+    # 开发模式：从 pyproject.toml 读取
+    try:
+        import tomllib
+        from pathlib import Path
+        pyproject = Path(__file__).parent.parent / "pyproject.toml"
+        if pyproject.exists():
+            with open(pyproject, "rb") as f:
+                data = tomllib.load(f)
+            v = data.get("project", {}).get("version", "")
+            if v:
+                print(f"DriFox v{v}")
+                return
+    except Exception:
+        pass
+    # 兜底：使用 CLI 独立版本号
+    print(f"DriFox v{CLI_VERSION}")
 
 
 def _run_chat(args):
@@ -107,8 +264,14 @@ def _run_chat(args):
         # 不传入 sys.argv 以避免解析冲突
         app = QApplication([])
 
-    # 初始化后端
-    backend = _init_headless_backend(args.workdir)
+    # 初始化后端（支持 provider/model 覆盖）
+    backend = _init_headless_backend(
+        args.workdir,
+        provider_override=args.provider,
+        model_override=args.model,
+        api_base_override=args.api_base,
+        api_key_override=args.api_key,
+    )
     if not backend:
         print("错误: 后端初始化失败", file=sys.stderr)
         sys.exit(1)
@@ -119,10 +282,21 @@ def _run_chat(args):
         _run_repl(backend, args)
 
 
-def _init_headless_backend(workdir: Optional[str] = None):
+def _init_headless_backend(
+    workdir: Optional[str] = None,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
+    api_base_override: Optional[str] = None,
+    api_key_override: Optional[str] = None,
+):
     """初始化无头后端
 
     复用 ChatBackend 的所有核心组件，只是不连接 UI 信号。
+    
+    provider_override: 按名称/关键词匹配服务商（如 'deepseek'、'硅基'），None=使用已选
+    model_override: 覆盖模型名称（如 'deepseek-chat'），None=使用服务商默认
+    api_base_override: 覆盖 API Base URL
+    api_key_override: 覆盖 API Key
     """
     try:
         from app.core.backend import ChatBackend
@@ -134,28 +308,60 @@ def _init_headless_backend(workdir: Optional[str] = None):
         backend = ChatBackend()
 
         def get_model_config():
-            """从配置构建模型配置（简化版，不依赖 UI 的 _valid_configs）"""
+            """从配置构建模型配置"""
             saved = dict(settings.llm_saved_providers.value or {})
             selected = settings.llm_selected_model.value or ""
 
-            # 尝试用 selected key 查找已保存的 provider 配置
-            if selected and selected in saved:
-                cfg = dict(saved[selected])
-                # 确保必要字段存在
-                cfg.setdefault("provider", cfg.get("provider_name", "openai"))
-                cfg.setdefault("模型名称", cfg.get("模型名称", cfg.get("model", "gpt-4")))
-                cfg.setdefault("API_KEY", cfg.get("api_key", settings.llm_api_key.value or ""))
-                cfg.setdefault("APIBase", cfg.get("base_url", settings.llm_api_base.value))
-                return cfg
+            config_id = selected
 
-            # 兜底：从 Settings 基本配置构建
+            # ---- provider 覆盖：按名称/关键词匹配 ----
+            if provider_override:
+                matched = _match_provider(provider_override, saved, selected)
+                if matched:
+                    config_id = matched
+                else:
+                    print(f"\033[33m警告: 未找到匹配的服务商「{provider_override}」，使用当前配置\033[0m",
+                          file=sys.stderr)
+
+            # ---- 根据 config_id 获取配置 ----
+            if config_id and config_id in saved:
+                cfg = dict(saved[config_id])
+            else:
+                cfg = {}
+
+            # ---- model 覆盖 ----
+            final_model = model_override or cfg.get("模型名称", cfg.get("model", "gpt-4"))
+
+            # ---- api_base 覆盖 ----
+            base_url = (
+                api_base_override
+                or cfg.get("API_URL")
+                or cfg.get("base_url")
+                or settings.llm_api_base.value
+            )
+
+            # ---- api_key 覆盖 ----
+            api_key = (
+                api_key_override
+                or cfg.get("API_KEY")
+                or cfg.get("api_key")
+                or settings.llm_api_key.value
+                or ""
+            )
+
             return {
-                "provider": "openai",
-                "模型名称": settings.llm_model.value or "gpt-4",
-                "API_KEY": settings.llm_api_key.value or "",
-                "APIBase": settings.llm_api_base.value or "https://api.openai.com/v1",
-                "最大Token": settings.llm_max_tokens.value or 4096,
-                "温度": settings.llm_temperature.value or 0.7,
+                "provider": cfg.get("provider", cfg.get("provider_name", "openai")),
+                "provider_name": cfg.get("provider_name", "openai"),
+                "模型名称": final_model,
+                "API_KEY": api_key,
+                # NOTE: chat_worker 读取的是 "API_URL" 而非 "APIBase"
+                "API_URL": base_url,
+                "最大Token": cfg.get("最大Token", cfg.get("max_tokens", settings.llm_max_tokens.value or 4096)),
+                "温度": cfg.get("温度", cfg.get("temperature", settings.llm_temperature.value or 0.7)),
+                "认证方式": cfg.get("认证方式", "bearer"),
+                "思考模式": cfg.get("思考模式"),
+                "思考预算": cfg.get("思考预算"),
+                "思考等级": cfg.get("思考等级"),
             }
 
         backend.initialize(
@@ -168,6 +374,36 @@ def _init_headless_backend(workdir: Optional[str] = None):
         import traceback
         traceback.print_exc()
         return None
+
+
+def _match_provider(keyword: str, saved: dict, current: str) -> Optional[str]:
+    """按关键词匹配服务商 config_id。
+
+    匹配优先级：
+    1. config_id 精确匹配
+    2. provider_name 精确/部分匹配（大小写不敏感）
+    3. 模型名称部分匹配
+    """
+    kw = keyword.lower()
+
+    # 精确匹配 config_id
+    if kw in saved:
+        return kw
+
+    candidates = []
+    for cid, info in saved.items():
+        pname = (info.get("provider_name", "") or "").lower()
+        mname = (info.get("模型名称", "") or "").lower()
+        display = (info.get("name", "") or "").lower()
+
+        if kw == pname or kw == display:
+            return cid
+        if kw in pname or kw in display or kw in mname:
+            candidates.append(cid)
+
+    if candidates:
+        return candidates[0]
+    return None
 
 
 def _run_oneshot(backend, args):
@@ -284,11 +520,9 @@ def _run_repl(backend, args):
     }
     backend.set_all_callbacks(callbacks)
 
-    print("\033[36m" + "=" * 50 + "\033[0m")
-    print("\033[36m  DriFox CLI 交互模式\033[0m")
-    print("\033[36m  输入 /help 查看命令，/quit 退出\033[0m")
-    print("\033[36m" + "=" * 50 + "\033[0m")
-    print()
+    # 展示 ASCII banner（除非 --no-banner）
+    if not args.no_banner:
+        _print_banner(model_info=_resolve_model_info())
 
     try:
         while not _pending_exit[0]:
@@ -399,7 +633,7 @@ def _run_status():
             cfg = saved[selected]
             print(f"当前模型:  {cfg.get('模型名称', '未设置')}")
             print(f"Provider:  {cfg.get('provider_name', '未设置')}")
-            print(f"Base URL:  {cfg.get('APIBase', '未设置')}")
+            print(f"Base URL:  {cfg.get('API_URL', '未设置')}")
             print(f"API Key:   {'已设置' if cfg.get('API_KEY') else '未设置'}")
         else:
             print(f"当前模型:  {settings.llm_model.value or '未设置'}")
@@ -409,6 +643,76 @@ def _run_status():
         print(f"配置读取失败: {e}")
 
     print()
+
+
+def _run_providers(args):
+    """列出已配置的模型服务商"""
+    try:
+        from app.utils.config import Settings
+        from app.constants import FREE_PROVIDERS
+
+        settings = Settings.get_instance()
+        saved = dict(settings.llm_saved_providers.value or {})
+        selected = settings.llm_selected_model.value or ""
+
+        if args.json:
+            output = []
+            for cid, info in saved.items():
+                entry = {
+                    "config_id": cid,
+                    "provider_name": info.get("provider_name", ""),
+                    "model": info.get("模型名称", ""),
+                    "api_url": info.get("API_URL", ""),
+                    "api_key_set": bool(info.get("API_KEY", "")),
+                    "is_active": cid == selected,
+                }
+                output.append(entry)
+            print(stdjson.dumps(output, ensure_ascii=False, indent=2))
+            return
+
+        print("\033[36m=== 已配置的模型服务商 ===\033[0m")
+        print()
+
+        if not saved:
+            print("  (暂无已保存的服务商配置)")
+            print()
+            print("  可用内置服务商:")
+            for pname in FREE_PROVIDERS:
+                default_model = FREE_PROVIDERS[pname].get("模型名称", "")
+                print(f"    \033[33m{pname}\033[0m  \033[90m({default_model})\033[0m")
+            print()
+            print("  使用方式: drifox chat -p \"服务商名称\" -z \"你好\"")
+            print()
+            return
+
+        for cid, info in sorted(saved.items()):
+            pname = info.get("provider_name", cid)
+            mname = info.get("模型名称", info.get("model", ""))
+            url = info.get("API_URL", "")
+            has_key = bool(info.get("API_KEY", ""))
+            display_name = info.get("name", "") or pname
+
+            indicator = "\033[32m▶\033[0m" if cid == selected else " "
+            key_status = "\033[32m✓\033[0m" if has_key else "\033[31m未设置\033[0m"
+
+            print(f"  {indicator} \033[1m{display_name}\033[0m")
+            print(f"        模型: {mname}")
+            print(f"        URL:  {url}")
+            print(f"        Key:  {key_status}")
+            if cid == selected:
+                print(f"        (\033[32m当前选中\033[0m)")
+            print()
+
+        print(f"共 {len(saved)} 个服务商配置")
+        print()
+        print("使用方式:")
+        print("  drifox chat -p \"服务商名关键词\" -z \"你好\"    # 指定服务商")
+        print("  drifox chat -m \"模型名\" -z \"你好\"            # 指定模型")
+        print("  drifox chat -p deepseek -m deepseek-chat -z \"你好\"")
+        print()
+
+    except Exception as e:
+        print(f"获取服务商列表失败: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

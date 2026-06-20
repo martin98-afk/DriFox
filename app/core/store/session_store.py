@@ -13,6 +13,7 @@
 - 损坏隔离
 """
 
+import os
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
@@ -270,6 +271,8 @@ class SessionStore:
                 return
 
             try:
+                # 确保数据库目录存在（新用户首次运行场景）
+                os.makedirs(self._db_dir, exist_ok=True)
                 # 使用 DatabaseManager（单例模式）
                 self._db = DatabaseManager()
                 self._db.connect(self._db_path)

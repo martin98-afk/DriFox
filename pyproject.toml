@@ -1,26 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "drifox"
-version = "0.2.6"
-description = "DriFox - AI Chat Desktop Application"
+name = "drifox-cli"
+version = "0.2.12"
+description = "DriFox 飘狐 — 轻量化 AI 桌面对话助手 CLI 版"
 readme = "README.md"
 requires-python = ">=3.14"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "98-afk", email = "98-afk@drifox.com"}
 ]
-keywords = ["ai", "chat", "llm", "desktop", "pyqt5"]
+keywords = ["ai", "cli", "chat", "llm", "agent"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
-    "Topic :: Communications :: Chat",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Utilities",
 ]
 
-# 核心运行时依赖
 dependencies = [
     "PyQt5>=5.15.0,<5.15.16",
     "PyQtWebEngine>=5.15.0,<5.15.7",
@@ -34,26 +37,24 @@ dependencies = [
     "PyYAML>=6.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
-    "psutil",
     "markdown",
     "pygments",
     "requests",
     "orjson>=3.8.0",
-    "pypinyin",
-    # 桌面自动化 (pynput + mss 组合)
+    # 桌面自动化 (pynput + mss)
     "pynput>=1.7.6",
     "mss>=9.0.1",
     # MCP (Model Context Protocol)
     "mcp>=1.0.0",
     # 插件热更新
+    "psutil",
     "watchfiles>=1.0.0",
     "aiohttp",
-    # LSP 集成 (Language Server Protocol)
+    # LSP 集成
     "pygls>=2.0.0",
     "lsprotocol",
 ]
 
-# 可选依赖 - Gateway 通讯平台
 [project.optional-dependencies]
 gateway = [
     "dingtalk-stream>=0.20",
@@ -63,43 +64,24 @@ gateway = [
     "lark-oapi>=1.0",
     "aiohttp>=3.9.0",
 ]
-# 开发依赖
 dev = [
-    "pyinstaller>=6.16.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
-    "mypy>=1.0.0",
-]
-# 全部依赖
-all = [
-    "drifox[gateway,dev]",
-]
-
-# UV 依赖组（与 optional-dependencies 一致）
-[dependency-groups]
-dev = [
-    "pyinstaller>=6.16.0",
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]
 
-# 构建系统配置
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+[project.scripts]
+drifox = "app.cli:main"
 
-# 打包配置
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
+include = ["app*", "plugins*"]
+
+[tool.setuptools.package-data]
+"app" = ["py.typed"]
+"plugins" = ["**/*"]
 
 # uv 多平台依赖解析配置
-# 声明项目需要支持的目标平台，确保 uv lock 生成的锁文件兼容所有平台
 [tool.uv]
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -107,9 +89,3 @@ required-environments = [
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
     "sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
-
-# 打包为单文件应用 (Windows)
-[tool.pyinstaller.name]
-onefile = true
-console = false
-name = "Drifox"
