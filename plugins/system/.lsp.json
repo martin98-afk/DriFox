@@ -14,6 +14,7 @@
         },
         "startupTimeout": 10000,
         "maxRestarts": 3,
-        "transport": "stdio"
+        "transport": "stdio",
+        "installHint": "uv pip install pyright"
     }
 }

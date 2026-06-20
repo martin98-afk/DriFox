@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from typing import Dict
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QMessageBox,
 )
 from loguru import logger
 from qfluentwidgets import (
@@ -21,6 +22,8 @@ from qfluentwidgets import (
     StrongBodyLabel,
     PushButton,
     FluentIcon,
+    InfoBar,
+    InfoBarPosition,
 )
 
 from app.utils.config import Settings
@@ -34,12 +37,16 @@ from app.widgets.elided_label import _ElidedLabel
 
 
 class LspServerRow(CardWidget):
-    """LSP 服务器单行展示：状态点 + 名称 + 扩展名列表"""
+    """LSP 服务器单行展示：状态点 + 名称 + 扩展名列表 + [安装按钮]"""
 
-    def __init__(self, name: str, extensions: list, is_running: bool, parent=None):
+    installRequested = pyqtSignal(str, str)  # (server_name, install_hint)
+
+    def __init__(self, name: str, extensions: list, is_running: bool,
+                 install_hint: str = "", parent=None):
         super().__init__(parent)
         self._name = name
         self._extensions = extensions
+        self._install_hint = install_hint
         self._setup_ui()
         self.set_running(is_running)
 
@@ -52,6 +59,9 @@ class LspServerRow(CardWidget):
                 f"background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("运行中")
+            # 运行中隐藏安装按钮
+            if hasattr(self, '_install_btn'):
+                self._install_btn.setVisible(False)
         else:
             self._status_dot.setText("●")
             self._status_dot.setStyleSheet(
@@ -59,6 +69,9 @@ class LspServerRow(CardWidget):
                 f"background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("未启动")
+            # 未运行时，若未安装则显示安装按钮
+            if hasattr(self, '_install_btn'):
+                self._install_btn.setVisible(bool(self._install_hint))
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -96,12 +109,29 @@ class LspServerRow(CardWidget):
         ext_label.setToolTip(", ".join(self._extensions))
         layout.addWidget(ext_label, 1)
 
+        # 安装按钮（仅当有 installHint 时创建，不占用空间直到可见）
+        self._install_btn = PushButton("安装", self)
+        self._install_btn.setFixedWidth(56)
+        self._install_btn.setFixedHeight(24)
+        self._install_btn.setStyleSheet(
+            f"font-size: {scale_font_size(11)}px; "
+            f"padding: 2px 8px;"
+        )
+        self._install_btn.setToolTip(
+            f"执行: {self._install_hint}" if self._install_hint else "未提供安装命令"
+        )
+        self._install_btn.clicked.connect(
+            lambda: self.installRequested.emit(self._name, self._install_hint)
+        )
+        self._install_btn.setVisible(False)
+        layout.addWidget(self._install_btn)
+
 
 # ── LSP 列表卡片 ────────────────────────────────────────────────
 
 
 class LspListSettingCard(ExpandSettingCard):
-    """LSP 语言服务器状态卡片 — 只读展示已注册的 LSP 服务器"""
+    """LSP 语言服务器状态卡片 — 展示已注册的 LSP 服务器及其运行状态"""
 
     _hotUpdateRequested = pyqtSignal()
 
@@ -142,9 +172,8 @@ class LspListSettingCard(ExpandSettingCard):
         self.addWidget(self.refreshButton)
 
     def _on_refresh(self):
-        """手动刷新：重新从 PluginManager 加载配置并重建列表"""
+        """手动刷新：重新从 PluginManager 加载配置并重建列表，保持运行中的服务不中断"""
         try:
-            # 重新加载 LSP 配置
             from app.core.plugin_manager import PluginManager
             pm = PluginManager.get_instance()
             if pm.is_initialized():
@@ -152,6 +181,8 @@ class LspListSettingCard(ExpandSettingCard):
                 if mgr:
                     cfgs = pm.get_lsp_configs()
                     mgr.initialize(mgr._workspace_root, cfgs)
+                    mgr.start_all_background()
+                    logger.info(f"[LspCard] 手动刷新完成，已注册 {len(mgr._clients)} 个服务器")
         except Exception as e:
             logger.error(f"[LspCard] 刷新配置失败: {e}")
 
@@ -182,7 +213,19 @@ class LspListSettingCard(ExpandSettingCard):
         else:
             for name, client in mgr._clients.items():
                 exts = list(client.config.extension_to_language.keys())
-                row = LspServerRow(name, exts, client.is_running, self.view)
+                # 检查二进制是否可用
+                is_installed = client.is_command_available()
+                install_hint = (
+                    "" if is_installed
+                    else client.config.install_hint
+                )
+                row = LspServerRow(
+                    name, exts,
+                    client.is_running,
+                    install_hint=install_hint,
+                    parent=self.view,
+                )
+                row.installRequested.connect(self._on_install_requested)
                 self._rows[name] = row
                 self.viewLayout.addWidget(row)
 
@@ -208,7 +251,116 @@ class LspListSettingCard(ExpandSettingCard):
         for name, row in self._rows.items():
             client = mgr._clients.get(name)
             if client:
+                # 更新运行状态
                 row.set_running(client.is_running)
+                # 更新安装状态（如果之前未安装，现在可能已安装）
+                if not client.is_running and not client.is_command_available():
+                    row._install_hint = client.config.install_hint
+
+    def _on_install_requested(self, server_name: str, install_hint: str):
+        """处理安装按钮点击 — 在终端中执行安装命令"""
+        if not install_hint:
+            InfoBar.warning(
+                title="安装命令不可用",
+                content=f"LSP 服务器「{server_name}」未提供安装命令。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self,
+            )
+            return
+
+        # 将 installHint 中的 pip 替换为当前环境的包管理器
+        # 优先 uv（项目标准），其次 python -m pip，最后原样
+        import sys
+        import shutil
+        _cmd = install_hint
+        if _cmd.startswith("pip "):
+            pkg = _cmd[4:]  # "install pyright"
+            if shutil.which("uv"):
+                _cmd = f"uv pip {pkg}"
+            elif shutil.which("pip"):
+                _cmd = install_hint  # 原样
+            else:
+                _python = sys.executable
+                _cmd = f'"{_python}" -m pip {pkg}'
+
+        # 确认对话框
+        reply = QMessageBox.question(
+            self,
+            f"安装 LSP 服务器 — {server_name}",
+            f"即将在终端中执行以下安装命令：\n\n"
+            f"    {_cmd}\n\n"
+            f"安装完成后请点击「刷新」按钮重新连接。\n\n"
+            f"是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        import subprocess
+        import os
+
+        try:
+            if sys.platform == "win32":
+                # start "" cmd /k  — 空标题，避免引号嵌套解析错误
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "", "cmd", "/k", _cmd],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            elif sys.platform == "darwin":
+                # macOS: 用 osascript 打开 Terminal
+                script = (
+                    f'tell application "Terminal" to do script "{_cmd}"'
+                )
+                subprocess.Popen(["osascript", "-e", script])
+            else:
+                # Linux: 尝试常见终端模拟器
+                terminals = ["gnome-terminal", "konsole", "xfce4-terminal", "xterm"]
+                launched = False
+                for term in terminals:
+                    if os.system(f"which {term} > /dev/null 2>&1") == 0:
+                        if term == "gnome-terminal":
+                            subprocess.Popen([term, "--", "bash", "-c", f"{_cmd}; exec bash"])
+                        else:
+                            subprocess.Popen([term, "-e", f"{_cmd}; exec bash"])
+                        launched = True
+                        break
+                if not launched:
+                    InfoBar.error(
+                        title="无法找到终端",
+                        content=f"请手动在终端中执行: {_cmd}",
+                        orient=Qt.Horizontal,
+                        isClosable=True,
+                        position=InfoBarPosition.TOP,
+                        duration=8000,
+                        parent=self,
+                    )
+                    return
+
+            InfoBar.success(
+                title=f"正在安装 {server_name}",
+                content=f"已在终端中打开安装进程。完成后请点击「刷新」按钮。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self,
+            )
+        except Exception as e:
+            logger.error(f"[LspCard] 安装启动失败: {e}")
+            InfoBar.error(
+                title="安装启动失败",
+                content=str(e),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=8000,
+                parent=self,
+            )
 
     def showEvent(self, event):
         """卡片显示时恢复状态轮询"""

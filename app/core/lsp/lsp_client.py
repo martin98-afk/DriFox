@@ -382,6 +382,10 @@ class LspClient:
         """设置诊断推送回调"""
         self._diag_callback = cb
 
+    def is_command_available(self) -> bool:
+        """检查 LSP 服务器可执行文件是否在 PATH 中"""
+        return self._resolve_command() is not None
+
     # ── 内部 ─────────────────────────────────────────────────────
 
     def _resolve_command(self) -> Optional[str]:

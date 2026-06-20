@@ -36,6 +36,7 @@ class LspServerConfig:
     max_restarts: int = 3
     transport: str = "stdio"            # stdio | socket
     plugin_name: str = ""               # 来源插件名
+    install_hint: str = ""              # 安装提示命令，如 "npm install -g pyright"
 
     @classmethod
     def from_dict(cls, name: str, data: Dict[str, Any], plugin_name: str = "") -> "LspServerConfig":
@@ -65,6 +66,7 @@ class LspServerConfig:
             max_restarts=data.get("maxRestarts", 3),
             transport=data.get("transport", "stdio"),
             plugin_name=plugin_name,
+            install_hint=data.get("installHint", ""),
         )
 
 
