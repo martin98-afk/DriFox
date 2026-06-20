@@ -373,6 +373,9 @@ class Settings(QConfig):
     gitee_path = ConfigItem("Gitee", "Path", "drifox")
     gitee_branch = ConfigItem("Gitee", "Branch", "master")
 
+    # ========== LSP 配置 ==========
+    lsp_auto_diagnose = ConfigItem("LSP", "AutoDiagnose", False, BoolValidator())
+
     # ========== 工具开关控制 ==========
     tool_toggles = ConfigItem("Tools", "Toggles", {})
     tool_off_behavior = ConfigItem("Tools", "OffBehavior", "deny")

@@ -187,6 +187,19 @@ class LspManager:
     def sync_get_diagnostics(self, file_path: str, timeout: float = 15.0) -> Optional[str]:
         return self._submit(self.get_diagnostics_for_file(file_path), timeout)
 
+    def sync_quick_diagnostics(self, file_path: str, timeout: float = 5.0) -> Optional[str]:
+        """快速诊断：跳过 LSP 协议握手，直接走 CLI 工具获取诊断
+
+        与 sync_get_diagnostics 的区别：
+        - 不 did_open / wait_diagnostics / did_close（节省 ~5s 空等）
+        - 直接调用 CLI 工具（pyright --outputjson）
+        - 紧凑输出：只报 Error + Warning，15 条上限，每条消息 120 字符截断
+        - 默认 5s 超时（CLI 工具通常秒级完成）
+
+        适用场景：自动诊断（文件编辑后即时反馈）
+        """
+        return self._submit(self._quick_diagnostics(file_path), timeout)
+
     def sync_document_symbols(self, file_path: str, timeout: float = 10.0) -> Optional[list]:
         return self._submit(self.document_symbols(file_path), timeout)
 
@@ -238,6 +251,93 @@ class LspManager:
         return "\n".join(lines)
 
     # ── 被动诊断 ──────────────────────────────────────────────
+
+    async def _quick_diagnostics(self, file_path: str) -> Optional[str]:
+        """快速诊断：跳过 LSP 协议，直接 CLI + 紧凑格式化"""
+        client = self.get_client_for_file(file_path)
+        if not client:
+            return None
+        return await self._run_cli_compact(file_path, client.config.command)
+
+    @staticmethod
+    async def _run_cli_compact(file_path: str, command: str) -> Optional[str]:
+        """CLI 调用 + 紧凑输出：只报 Error/Warning，15 条上限，每条截断 120 字符，总长 2000"""
+        import asyncio.subprocess
+
+        cli_cmd = "pyright" if "pyright" in command.lower() else command
+        if sys.platform == "win32":
+            args = ["cmd", "/c", cli_cmd, file_path, "--outputjson"]
+        else:
+            args = [cli_cmd, file_path, "--outputjson"]
+        subprocess_kwargs = {}
+        if sys.platform == "win32":
+            subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **subprocess_kwargs,
+            )
+            stdout, _stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=5.0
+            )
+            if not stdout:
+                return None
+
+            import orjson as json
+            data = json.loads(stdout)
+            diags = data.get("generalDiagnostics", [])
+            if not diags:
+                return None
+
+            # 只保留 Error + Warning，按行号排序
+            filtered = [
+                d for d in diags
+                if d.get("severity", "") in ("error", "Error", "warning", "Warning")
+            ]
+            if not filtered:
+                return None
+
+            filtered.sort(key=lambda d: (
+                d.get("range", {}).get("start", {}).get("line", 0),
+                d.get("range", {}).get("start", {}).get("character", 0),
+            ))
+
+            fname = os.path.basename(file_path)
+            err_count = sum(1 for d in filtered if d.get("severity", "") in ("error", "Error"))
+            warn_count = len(filtered) - err_count
+            parts = []
+            if err_count:
+                parts.append(f"{err_count} errors")
+            if warn_count:
+                parts.append(f"{warn_count} warnings")
+
+            lines = [f"[LSP Quick] {fname} ({', '.join(parts)}):"]
+
+            for d in filtered[:15]:
+                rng = d.get("range", {}).get("start", {})
+                ln = rng.get("line", 0) + 1
+                col = rng.get("character", 0) + 1
+                sev = d.get("severity", "err")[:4]
+                msg = d.get("message", "")
+                if len(msg) > 120:
+                    msg = msg[:117] + "..."
+                lines.append(f"  {ln}:{col} [{sev}] {msg}")
+
+            if len(filtered) > 15:
+                lines.append(f"  ... ({len(filtered) - 15} more omitted)")
+
+            result = "\n".join(lines)
+            if len(result) > 2000:
+                result = result[:1997] + "..."
+
+            return result
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            return None
 
     async def get_diagnostics_for_file(self, file_path: str) -> Optional[str]:
         """AI 主动获取某文件的诊断（LSP push 不可靠，用 CLI 回退）"""

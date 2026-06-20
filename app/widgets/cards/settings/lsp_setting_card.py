@@ -13,21 +13,23 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
-    QMessageBox,
+    QWidget,
 )
 from loguru import logger
 from qfluentwidgets import (
     CardWidget,
+    Dialog,
     ExpandSettingCard,
     StrongBodyLabel,
     PushButton,
     FluentIcon,
     InfoBar,
     InfoBarPosition,
+    SwitchButton,
 )
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, scale_font_size, font_size_css
+from app.utils.design_tokens import Colors, scale_font_size, font_size_css, SwitchStyles
 from app.utils.design_tokens import apply_font_size_to_widget
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.elided_label import _ElidedLabel
@@ -161,10 +163,36 @@ class LspListSettingCard(ExpandSettingCard):
             return None
 
     def _setup_ui(self):
-        self.viewLayout.setSpacing(2)
+        self.viewLayout.setSpacing(0)
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
         self.view.setStyleSheet("background-color: transparent;")
+
+        # 自动诊断开关（底部栏，刷新按钮左边）
+        self._auto_diag_row = QWidget(self)
+        self._auto_diag_row.setStyleSheet("background-color: transparent;")
+        row_layout = QHBoxLayout(self._auto_diag_row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(2)
+
+        diag_desc = QLabel("编辑后自动诊断")
+        diag_desc.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; "
+            f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
+        diag_desc.setToolTip(
+            "开启后，write / edit / multi_edit 编辑文件时，"
+            "若文件后缀命中已注册 LSP 服务器，自动运行诊断并随编辑结果返回"
+        )
+        row_layout.addWidget(diag_desc)
+
+        self._auto_diag_switch = SwitchButton(self._auto_diag_row)
+        SwitchStyles.configure(self._auto_diag_switch)
+        self._auto_diag_switch.setChecked(self.cfg.lsp_auto_diagnose.value)
+        self._auto_diag_switch.checkedChanged.connect(self._on_auto_diag_toggled)
+        row_layout.addWidget(self._auto_diag_switch)
+
+        self.addWidget(self._auto_diag_row)
 
         # 刷新按钮
         self.refreshButton = PushButton("刷新", self, FluentIcon.SYNC)
@@ -189,6 +217,11 @@ class LspListSettingCard(ExpandSettingCard):
         self._rebuild()
         QTimer.singleShot(300, self._refresh_status)
 
+    def _on_auto_diag_toggled(self, checked: bool):
+        """自动诊断开关切换"""
+        self.cfg.lsp_auto_diagnose.value = checked
+        self.cfg.save()
+
     def _rebuild(self):
         """重建列表（清空 + 重新创建行）"""
         was_expanded = self.isExpand
@@ -200,6 +233,11 @@ class LspListSettingCard(ExpandSettingCard):
             item = self.viewLayout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+        # 更新开关状态（与配置同步）
+        self._auto_diag_switch.blockSignals(True)
+        self._auto_diag_switch.setChecked(self.cfg.lsp_auto_diagnose.value)
+        self._auto_diag_switch.blockSignals(False)
 
         mgr = self._get_lsp_manager()
         if not mgr or not mgr._clients:
@@ -286,19 +324,21 @@ class LspListSettingCard(ExpandSettingCard):
                 _python = sys.executable
                 _cmd = f'"{_python}" -m pip {pkg}'
 
-        # 确认对话框
-        reply = QMessageBox.question(
-            self,
+        # 确认对话框（使用 qfluentwidgets.Dialog，自动应用 Fluent 主题色，
+        # 避免 PyQt5 原生 QMessageBox 在深色主题下显示为系统默认全黑窗口）
+        w = Dialog(
             f"安装 LSP 服务器 — {server_name}",
             f"即将在终端中执行以下安装命令：\n\n"
             f"    {_cmd}\n\n"
             f"安装完成后请点击「刷新」按钮重新连接。\n\n"
             f"是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            self.window(),
         )
+        w.yesButton.setText("确定")
+        w.cancelButton.setText("取消")
+        w.setContentCopyable(True)  # 安装命令可选中复制
 
-        if reply != QMessageBox.Yes:
+        if not w.exec_():
             return
 
         import subprocess

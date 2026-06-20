@@ -337,6 +337,78 @@ class ToolExecutor:
             current_message=current_message_text,
         )
 
+    # ========== 自动 LSP 诊断（文件编辑后） ==========
+
+    def _try_auto_lsp_diagnose(
+        self, tool_name: str, args: dict, result: "ToolResult"
+    ) -> "ToolResult":
+        """文件编辑成功后，若开启自动诊断则运行 LSP 诊断并追加到结果
+
+        Args:
+            tool_name: 工具名 (write/edit/multi_edit)
+            args: 工具参数
+            result: 原始工具结果
+
+        Returns:
+            追加了诊断信息的结果（或原始结果）
+        """
+        # 1. 检查自动诊断开关
+        try:
+            from app.utils.config import Settings
+            cfg = Settings.get_instance()
+            if not cfg.lsp_auto_diagnose.value:
+                return result
+        except Exception:
+            return result
+
+        # 2. 获取文件路径并解析
+        file_path = args.get("path")
+        if not file_path:
+            return result
+
+        try:
+            if hasattr(self._builtin_tools, "_file_tools"):
+                from app.tools.file_tools import _resolve_path
+                full_path = _resolve_path(self._builtin_tools.workdir, file_path)
+            else:
+                from pathlib import Path
+                p = Path(file_path)
+                full_path = p if p.is_absolute() else (Path(self._workdir or ".") / p).resolve()
+        except Exception:
+            return result
+
+        # 3. 检查是否有对应的 LSP 客户端
+        try:
+            from app.core.lsp.lsp_manager import LspManager
+            lsp_mgr = LspManager.get_instance()
+            client = lsp_mgr.get_client_for_file(str(full_path))
+            if not client:
+                return result  # 无对应 LSP 服务器
+        except Exception:
+            return result
+
+        # 4. 运行快速诊断（跳过 LSP 协议握手，直接 CLI）
+        try:
+            diag_result = lsp_mgr.sync_quick_diagnostics(str(full_path), timeout=5.0)
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 自动 LSP 快速诊断失败: {e}")
+            return result
+
+        if not diag_result:
+            # 无诊断问题（或 CLI 超时/不可用）：追加简短确认
+            result.content = (
+                f"{result.content}\n\n[LSP 自动诊断] ✅ 无问题"
+            )
+        else:
+            result.content = (
+                f"{result.content}\n\n{diag_result}"
+            )
+
+        logger.debug(
+            f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}"
+        )
+        return result
+
     def set_memory_manager(self, memory_manager):
         if self._builtin_tools:
             self._builtin_tools.set_memory_manager(memory_manager)
@@ -736,6 +808,10 @@ class ToolExecutor:
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
                     self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
                 
+                # 自动 LSP 诊断：文件编辑成功后，若开启则自动诊断
+                if result and result.success and tool_name in ("write", "edit", "multi_edit"):
+                    result = self._try_auto_lsp_diagnose(tool_name, args, result)
+
                 # Trigger PostToolUse hook（统一方法，含结果回填）
                 self._trigger_post_tool_use(tool_name, args, result)
 

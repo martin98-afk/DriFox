@@ -50,6 +50,26 @@ TOOL_DESCRIPTIONS = {
     "stage_files": "标记相关文件",
     "subagent_para": "并行启动子智能体",
     "subagent_dag": "DAG工作流子智能体",
+    # 安全工具
+    "read": "读取文件内容",
+    "grep": "正则搜索文件内容",
+    "list": "列出目录内容",
+    "glob": "通配符查找文件",
+    "scan_repo": "扫描仓库生成摘要",
+    "webfetch": "获取网页内容",
+    "websearch": "网络关键词搜索",
+    "bg_logs": "查看后台任务日志",
+    "bg_list": "列出后台任务状态",
+    "screenshot": "截取屏幕截图",
+    "get_diagnostics": "获取代码诊断信息",
+    "read_project_note": "读取项目笔记",
+    "todoread": "读取待办列表",
+    "question": "向用户提问确认",
+    "skill": "加载指定技能",
+    "list_skills": "列出可用技能",
+    "subagent_status": "查询子智能体状态",
+    "mcp_list_servers": "列出MCP服务器",
+    "lsp": "LSP代码智能操作",
 }
 
 OFF_BEHAVIOR_OPTIONS = [
