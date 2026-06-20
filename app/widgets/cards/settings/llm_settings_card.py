@@ -262,7 +262,7 @@ class LLMSettingsCard(SystemCardFrame):
         # LSP 语言服务器状态
         from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
         self.lspListCard = LspListSettingCard(
-            icon=get_icon("LSP"),
+            icon=get_icon("lsp"),
             title="LSP 语言服务器",
             content="代码智能与诊断",
             parent=self,

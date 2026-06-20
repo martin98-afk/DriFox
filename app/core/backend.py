@@ -456,7 +456,6 @@ class ChatBackend(QObject):
             logger.info(f"[ChatBackend] PluginManager 初始化完成，"
                        f"已加载 {len(pm.list_plugins())} 个插件，"
                        f"智能体 {len(self._agent_manager.list_agents())} 个")
-                logger.error(f"[ChatBackend] LspManager 初始化失败: {e}")
 
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")

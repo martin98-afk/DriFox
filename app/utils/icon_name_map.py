@@ -10,6 +10,7 @@ ICON_NAME_TO_FILE = {
     "gemini-ai": "gemini-ai.svg",
     "groq": "groq.svg",
     "hooks": "hooks.svg",
+    "lsp": "lsp.svg",
     "MCP": "MCP.svg",
     "MiniMax": "MiniMax.svg",
     "Ollama": "Ollama.svg",
