@@ -288,11 +288,8 @@ class LspClient:
             logger.error(f"[LspClient:{self.config.name}] documentSymbol 失败: {e}")
             return None
 
-    async def get_diagnostics(self, file_path: str) -> list:
-        """获取已缓存的诊断（不发起新请求）"""
-        return [d for d in self._diagnostics if file_path in _get(d, "uri", "")]
-        # 如果没有匹配，可能是 uri 格式不同，返回全部
-        # return list(self._diagnostics)
+    # get_diagnostics 已删除：URI 路径格式 vs 本地路径格式不兼容，且无人调用。
+    # 诊断统一走 LspManager.get_diagnostics_for_file() (did_open + wait / CLI fallback)。
 
     # ── 文件同步 ─────────────────────────────────────────────────
 

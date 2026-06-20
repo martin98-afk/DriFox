@@ -100,7 +100,16 @@ class LspManager:
     # ── 初始化 ──────────────────────────────────────────────────
 
     def initialize(self, workspace_root: str, lsp_configs: Optional[List[Dict[str, Any]]] = None) -> None:
+        # 幂等：仅当已初始化且配置为空时跳过（热重载通过 _on_refresh 传配置触发）
+        if self._initialized and self._clients and not lsp_configs:
+            logger.debug("[LspManager] 已初始化，无新配置，跳过")
+            return
         self._workspace_root = workspace_root
+        # 停止旧客户端再清空（热重载场景下防止孤儿进程）
+        if self._clients:
+            self._ensure_loop()
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(self.stop_all(), self._loop)
         self._clients.clear()
         self._ext_map.clear()
 
@@ -213,7 +222,7 @@ class LspManager:
             diagnostics,
             key=lambda d: (sev_order.get(d.get("severity", "Hint"), 99), d.get("line", 0)),
         )
-        lines = [f"[LSP Diagnostc] {fname} ({len(sorted_diags)} issue(s)):"]
+        lines = [f"[LSP Diagnostic] {fname} ({len(sorted_diags)} issue(s)):"]
         for d in sorted_diags[:30]:
             sev = d.get("severity", "?")[:4].lower()
             ln = d.get("line", "?")
@@ -222,6 +231,8 @@ class LspManager:
             code = d.get("code", "")
             code_str = f" ({code})" if code else ""
             lines.append(f"  {ln}:{col} [{sev}] {msg}{code_str}")
+        if len(sorted_diags) > 30:
+            lines.append(f"  ... ({len(sorted_diags) - 30} more issues truncated)")
         return "\n".join(lines)
 
     # ── 被动诊断 ──────────────────────────────────────────────
@@ -239,6 +250,8 @@ class LspManager:
                 return self._format_diagnostics(file_path, diags)
         except Exception:
             pass
+        finally:
+            await client.did_close(file_path)  # 回收 LSP 服务器打开文件集合
         # 回退：使用 CLI 获取诊断
         return await self._cli_diagnostics(file_path, client.config.command)
 

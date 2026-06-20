@@ -96,8 +96,8 @@ class BuiltinTools(QObject):
         self._tools["diagnostics"] = DiagnosticsTools(self)
         self._tools["automation"] = AutomationTools(self)
 
-        # LSP 工具集成（懒初始化，等 LspManager 准备好后再用）
-        self._lsp_tools = LspToolsIntegration(LspManager.get_instance())
+        # LSP 工具集成
+        self._lsp_tools = LspToolsIntegration(LspManager.get_instance(), owner=self)
         self._tools["lsp"] = self._lsp_tools
 
         # Expose properties for backward compatibility

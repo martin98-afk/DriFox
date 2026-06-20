@@ -19,10 +19,17 @@ def _make_result(success: bool, content=None, error: Optional[str] = None):
 class LspToolsIntegration:
     """LSP 工具集成 — 桥接 LspManager 与 BuiltinTools/ToolExecutor"""
 
-    def __init__(self, lsp_manager=None):
+    def __init__(self, lsp_manager=None, owner=None):
         from app.core.lsp.lsp_manager import LspManager
         self._manager = lsp_manager or LspManager.get_instance()
-        self.workdir: Optional[Path] = None
+        self._owner = owner  # BuiltinTools 引用，用于动态读取 workdir
+
+    @property
+    def workdir(self):
+        """动态从 owner 读取工作目录（多项目切换安全）"""
+        if self._owner:
+            return self._owner.workdir
+        return None
 
     # ═══════════════════════════════════════════════════════════
     # 统一入口
