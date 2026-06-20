@@ -441,6 +441,24 @@ class ChatBackend(QObject):
             logger.info(f"[ChatBackend] PluginManager 初始化完成，"
                        f"已加载 {len(pm.list_plugins())} 个插件，"
                        f"智能体 {len(self._agent_manager.list_agents())} 个")
+
+            # ── 初始化 LSP 管理器 ────────────────────────────────────
+            try:
+                from app.core.lsp.lsp_manager import LspManager
+                lsp_mgr = LspManager.get_instance()
+                lsp_configs = pm.get_lsp_configs()
+                # workdir: 优先从 tool_executor 获取，否则用当前目录
+                workdir = os.getcwd()
+                if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                    workdir = str(self._tool_executor._workdir)
+                lsp_mgr.initialize(workdir, lsp_configs)
+                logger.info(f"[ChatBackend] LspManager 初始化完成，"
+                           f"已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
+                # 后台启动所有已安装的 LSP 服务器（未安装的静默跳过）
+                lsp_mgr.start_all_background()
+            except Exception as e:
+                logger.error(f"[ChatBackend] LspManager 初始化失败: {e}")
+
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
 
@@ -882,6 +900,12 @@ class ChatBackend(QObject):
             if component == "mcp":
                 result["mcp"] = True
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
+
+            # 8. LSP 配置：PluginManager 已在 rescan_plugin 中更新
+            #    LspManager 通过 pm.get_lsp_configs() 读取，下次初始化时自动生效
+            if component == "lsp":
+                result["lsp"] = True
+                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' LSP config reloaded (lazy)")
 
             logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
                        f"agents={result['agents']}, commands={result['commands']}, "

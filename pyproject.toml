@@ -47,7 +47,10 @@ dependencies = [
     "mcp>=1.0.0",
     # 插件热更新
     "watchfiles>=1.0.0",
-    "aiohttp"
+    "aiohttp",
+    # LSP 集成 (Language Server Protocol)
+    "pygls>=2.0.0",
+    "lsprotocol",
 ]
 
 # 可选依赖 - Gateway 通讯平台

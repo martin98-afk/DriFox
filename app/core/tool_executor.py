@@ -436,6 +436,8 @@ class ToolExecutor:
         "mouse": ["action"],
         "keyboard": ["action"],
         "screenshot": [],
+        # LSP 工具
+        "lsp": ["operation"],
     }
 
     def execute(self, tool_name: str, args: dict, call_id: str = None) -> ToolResult:
@@ -700,6 +702,14 @@ class ToolExecutor:
                     tuple(args.get("region", []))
                     if args.get("region") else None
                 ),
+            ),
+            # ========== LSP 工具 ==========
+            "lsp": lambda: self._builtin_tools._lsp_tools.lsp(
+                path=args.get("path", ""),
+                operation=args.get("operation", "diagnostics"),
+                line=int(args.get("line", 0) or 0),
+                column=int(args.get("column", 0) or 0),
+                language=args.get("language"),
             ),
         }
 
