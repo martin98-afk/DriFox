@@ -168,14 +168,14 @@ class LspListSettingCard(ExpandSettingCard):
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
         self.view.setStyleSheet("background-color: transparent;")
 
-        # 自动诊断开关（底部栏，刷新按钮左边）
+        # 自动诊断开关（标题栏右侧，刷新按钮左边）
         self._auto_diag_row = QWidget(self)
         self._auto_diag_row.setStyleSheet("background-color: transparent;")
         row_layout = QHBoxLayout(self._auto_diag_row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(2)
 
-        diag_desc = QLabel("编辑后自动诊断")
+        diag_desc = QLabel("自动诊断")
         diag_desc.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; "
             f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"

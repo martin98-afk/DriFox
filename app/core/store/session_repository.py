@@ -171,11 +171,48 @@ class SessionRepository:
                 now,  # updated_at
             ))
 
+            if success:
+                # INSERT OR REPLACE = DELETE 旧行 + INSERT 新行，旧页全部进 freelist
+                # 高频率 save（每次用户发消息+Agent 回复）叠加 zstd 压缩后 blob
+                # 大小波动（50KB~500KB），持续制造不可复用的空闲页。
+                # 此处检测 freelist 是否超过安全阈值（5000 页 ≈ 20MB），超过则
+                # 增量回收 500 页（≈2MB），防止 freelist 滚雪球到 GB 级。
+                self._reclaim_freelist_if_needed()
+
             return success
 
         except Exception as e:
             logger.error(f"[SessionRepository] save_session 异常: {e}")
             return False
+
+    def _reclaim_freelist_if_needed(self, threshold_pages: int = 5000,
+                                     reclaim_pages: int = 500):
+        """
+        空闲页超过阈值时增量回收，防止 freelist 滚雪球
+
+        INSERT OR REPLACE 的 DELETE→INSERT 路径将旧 blob 页全部释放进
+        freelist，高频率 save（每次对话回合 2 次）叠加 zstd 压缩后大小波动
+        （50KB~500KB）持续制造不可复用空闲页。用户截断/子任务清理等大型
+        DELETE 操作一次性释放数千页，必须及时回收。
+
+        每次最多回收 reclaim_pages 页（≈2MB @ 4KB page），避免阻塞 UI。
+        incremental_vacuum 仅在 auto_vacuum=INCREMENTAL 时实际回收，
+        否则静默跳过。
+
+        Args:
+            threshold_pages: freelist 超过此页数才触发回收（默认 5000 页 ≈ 20MB）
+            reclaim_pages:  单次回收最多页数（默认 500 页 ≈ 2MB）
+        """
+        try:
+            ok, rows = self._execute('PRAGMA freelist_count')
+            if not ok or not rows:
+                return
+            freelist = list(rows[0].values())[0] if isinstance(rows[0], dict) else rows[0]
+            if freelist < threshold_pages:
+                return
+            self._execute(f'PRAGMA incremental_vacuum({reclaim_pages})')
+        except Exception:
+            pass  # auto_vacuum 未启用时静默跳过，不阻塞保存流程
 
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话"""

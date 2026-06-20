@@ -260,8 +260,20 @@ class LspManager:
         return await self._run_cli_compact(file_path, client.config.command)
 
     @staticmethod
-    async def _run_cli_compact(file_path: str, command: str) -> Optional[str]:
-        """CLI 调用 + 紧凑输出：只报 Error/Warning，15 条上限，每条截断 120 字符，总长 2000"""
+    async def _run_cli(
+        file_path: str,
+        command: str,
+        timeout: float,
+    ) -> tuple[Optional[list], str, bool, str]:
+        """调用 LSP CLI 工具，解析 JSON 输出。
+
+        Returns:
+            (diags, stderr_text, timed_out, error_msg)
+            - diags: 来自 generalDiagnostics 的诊断列表（解析失败或无输出时为 None）
+            - stderr_text: stderr 解码文本（截断 500 字符）
+            - timed_out: 子进程是否超时
+            - error_msg: 异常信息（成功或超时为空字符串）
+        """
         import asyncio.subprocess
 
         cli_cmd = "pyright" if "pyright" in command.lower() else command
@@ -280,64 +292,88 @@ class LspManager:
                 stderr=asyncio.subprocess.PIPE,
                 **subprocess_kwargs,
             )
-            stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=5.0
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
             )
-            if not stdout:
-                return None
+        except asyncio.TimeoutError:
+            return None, "", True, ""
+        except Exception as e:
+            return None, "", False, str(e)
 
+        stderr_text = stderr.decode("utf-8", errors="replace")[:500] if stderr else ""
+
+        if not stdout:
+            return None, stderr_text, False, ""
+
+        try:
             import orjson as json
             data = json.loads(stdout)
-            diags = data.get("generalDiagnostics", [])
-            if not diags:
-                return None
+        except Exception as e:
+            return None, stderr_text, False, f"JSON 解析失败: {e}"
 
-            # 只保留 Error + Warning，按行号排序
-            filtered = [
-                d for d in diags
-                if d.get("severity", "") in ("error", "Error", "warning", "Warning")
-            ]
-            if not filtered:
-                return None
+        return data.get("generalDiagnostics", []), stderr_text, False, ""
 
-            filtered.sort(key=lambda d: (
-                d.get("range", {}).get("start", {}).get("line", 0),
-                d.get("range", {}).get("start", {}).get("character", 0),
-            ))
-
-            fname = os.path.basename(file_path)
-            err_count = sum(1 for d in filtered if d.get("severity", "") in ("error", "Error"))
-            warn_count = len(filtered) - err_count
-            parts = []
-            if err_count:
-                parts.append(f"{err_count} errors")
-            if warn_count:
-                parts.append(f"{warn_count} warnings")
-
-            lines = [f"[LSP Quick] {fname} ({', '.join(parts)}):"]
-
-            for d in filtered[:15]:
-                rng = d.get("range", {}).get("start", {})
-                ln = rng.get("line", 0) + 1
-                col = rng.get("character", 0) + 1
-                sev = d.get("severity", "err")[:4]
-                msg = d.get("message", "")
-                if len(msg) > 120:
-                    msg = msg[:117] + "..."
-                lines.append(f"  {ln}:{col} [{sev}] {msg}")
-
-            if len(filtered) > 15:
-                lines.append(f"  ... ({len(filtered) - 15} more omitted)")
-
-            result = "\n".join(lines)
-            if len(result) > 2000:
-                result = result[:1997] + "..."
-
-            return result
-        except asyncio.TimeoutError:
+    @staticmethod
+    async def _run_cli_compact(file_path: str, command: str) -> Optional[str]:
+        """CLI 调用 + 紧凑输出：只报 Error/Warning，15 条上限，每条截断 120 字符，总长 2000"""
+        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli(
+            file_path, command, timeout=5.0
+        )
+        if timed_out:
+            logger.debug(f"[LspManager] CLI 诊断超时 (5s): {file_path}")
             return None
-        except Exception:
+        if error_msg:
+            logger.debug(f"[LspManager] CLI 诊断异常: {error_msg}")
             return None
+        if stderr_text and not diags:
+            # stdout 为空但 stderr 有信息（如 pyright 未安装、配置错误）— 不再静默丢弃
+            logger.warning(f"[LspManager] CLI stderr: {stderr_text}")
+            return None
+        if not diags:
+            return None
+
+        # 只保留 Error + Warning，按行号排序
+        filtered = [
+            d for d in diags
+            if d.get("severity", "") in ("error", "Error", "warning", "Warning")
+        ]
+        if not filtered:
+            return None
+
+        filtered.sort(key=lambda d: (
+            d.get("range", {}).get("start", {}).get("line", 0),
+            d.get("range", {}).get("start", {}).get("character", 0),
+        ))
+
+        fname = os.path.basename(file_path)
+        err_count = sum(1 for d in filtered if d.get("severity", "") in ("error", "Error"))
+        warn_count = len(filtered) - err_count
+        parts = []
+        if err_count:
+            parts.append(f"{err_count} errors")
+        if warn_count:
+            parts.append(f"{warn_count} warnings")
+
+        lines = [f"[LSP Quick] {fname} ({', '.join(parts)}):"]
+
+        for d in filtered[:15]:
+            rng = d.get("range", {}).get("start", {})
+            ln = rng.get("line", 0) + 1
+            col = rng.get("character", 0) + 1
+            sev = d.get("severity", "err")[:4]
+            msg = d.get("message", "")
+            if len(msg) > 120:
+                msg = msg[:117] + "..."
+            lines.append(f"  {ln}:{col} [{sev}] {msg}")
+
+        if len(filtered) > 15:
+            lines.append(f"  ... ({len(filtered) - 15} more omitted)")
+
+        result = "\n".join(lines)
+        if len(result) > 2000:
+            result = result[:1997] + "..."
+
+        return result
 
     async def get_diagnostics_for_file(self, file_path: str) -> Optional[str]:
         """AI 主动获取某文件的诊断（LSP push 不可靠，用 CLI 回退）"""
@@ -360,52 +396,30 @@ class LspManager:
     @staticmethod
     async def _cli_diagnostics(file_path: str, command: str) -> Optional[str]:
         """CLI 回退：直接调用 LSP 命令行工具获取诊断"""
-        import asyncio.subprocess
-        # pyright-langserver → pyright (CLI 工具)
-        cli_cmd = "pyright" if "pyright" in command.lower() else command
-        # Windows: .cmd 需要 cmd /c 前缀
-        if sys.platform == "win32":
-            args = ["cmd", "/c", cli_cmd, file_path, "--outputjson"]
-        else:
-            args = [cli_cmd, file_path, "--outputjson"]
-        subprocess_kwargs = {}
-        if sys.platform == "win32":
-            subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **subprocess_kwargs,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=30.0
-            )
-            if stdout:
-                import orjson as json
-                data = json.loads(stdout)
-                diags = data.get("generalDiagnostics", [])
-                if not diags:
-                    return None
-                fname = os.path.basename(file_path)
-                lines = [f"[LSP Diagnostc] {fname} ({len(diags)} issue(s)):"]
-                for d in diags[:30]:
-                    rng = d.get("range", {}).get("start", {})
-                    ln = rng.get("line", 0) + 1
-                    col = rng.get("character", 0) + 1
-                    sev = d.get("severity", "error")
-                    msg = d.get("message", "")
-                    rule = d.get("rule", "")
-                    code_str = f" ({rule})" if rule else ""
-                    lines.append(f"  {ln}:{col} [{sev}] {msg}{code_str}")
-                return "\n".join(lines)
-            if stderr:
-                return f"(LSP CLI 错误: {stderr.decode()[:500]})"
-            return None
-        except asyncio.TimeoutError:
+        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli(
+            file_path, command, timeout=30.0
+        )
+        if timed_out:
             return "(LSP CLI 超时)"
-        except Exception as e:
-            return f"(LSP CLI 失败: {e})"
+        if error_msg:
+            return f"(LSP CLI 失败: {error_msg})"
+        if not diags:
+            if stderr_text:
+                return f"(LSP CLI 错误: {stderr_text})"
+            return None
+
+        fname = os.path.basename(file_path)
+        lines = [f"[LSP Diagnostc] {fname} ({len(diags)} issue(s)):"]
+        for d in diags[:30]:
+            rng = d.get("range", {}).get("start", {})
+            ln = rng.get("line", 0) + 1
+            col = rng.get("character", 0) + 1
+            sev = d.get("severity", "error")
+            msg = d.get("message", "")
+            rule = d.get("rule", "")
+            code_str = f" ({rule})" if rule else ""
+            lines.append(f"  {ln}:{col} [{sev}] {msg}{code_str}")
+        return "\n".join(lines)
 
     # ── 透明代理 LSP 操作 ─────────────────────────────────────
 

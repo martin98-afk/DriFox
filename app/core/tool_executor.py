@@ -17,7 +17,10 @@ from app.core.message_content import content_to_text
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
 
+from app.core.lsp.lsp_manager import LspManager
 from app.tools import BuiltinTools, ToolResult
+from app.tools.file_tools import _resolve_path
+from app.utils.config import Settings
 from app.utils.file_operation_recorder import (
     FileOperationRecorder,
 )
@@ -354,11 +357,11 @@ class ToolExecutor:
         """
         # 1. 检查自动诊断开关
         try:
-            from app.utils.config import Settings
             cfg = Settings.get_instance()
             if not cfg.lsp_auto_diagnose.value:
                 return result
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[ToolExecutor] 自动诊断开关读取失败: {e}")
             return result
 
         # 2. 获取文件路径并解析
@@ -367,24 +370,19 @@ class ToolExecutor:
             return result
 
         try:
-            if hasattr(self._builtin_tools, "_file_tools"):
-                from app.tools.file_tools import _resolve_path
-                full_path = _resolve_path(self._builtin_tools.workdir, file_path)
-            else:
-                from pathlib import Path
-                p = Path(file_path)
-                full_path = p if p.is_absolute() else (Path(self._workdir or ".") / p).resolve()
-        except Exception:
+            full_path = _resolve_path(self._builtin_tools.workdir, file_path)
+        except Exception as e:
+            logger.debug(f"[ToolExecutor] 自动诊断路径解析失败: {e}")
             return result
 
         # 3. 检查是否有对应的 LSP 客户端
         try:
-            from app.core.lsp.lsp_manager import LspManager
             lsp_mgr = LspManager.get_instance()
             client = lsp_mgr.get_client_for_file(str(full_path))
             if not client:
                 return result  # 无对应 LSP 服务器
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[ToolExecutor] 自动诊断 LSP 路由失败: {e}")
             return result
 
         # 4. 运行快速诊断（跳过 LSP 协议握手，直接 CLI）
