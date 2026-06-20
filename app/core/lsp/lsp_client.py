@@ -19,6 +19,8 @@ import asyncio
 import concurrent.futures
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -122,7 +124,10 @@ class LspClient:
             # 启动子进程
             args = [exe, *self.config.args]
             logger.debug(f"[LspClient:{self.config.name}] 启动: {' '.join(args)}")
-            await self._client.start_io(*args)
+            start_kwargs = {}
+            if sys.platform == "win32":
+                start_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            await self._client.start_io(*args, **start_kwargs)
 
             # initialize 握手
             root = Path(self.workspace_root)

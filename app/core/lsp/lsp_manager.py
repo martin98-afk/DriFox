@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -259,7 +261,6 @@ class LspManager:
     async def _cli_diagnostics(file_path: str, command: str) -> Optional[str]:
         """CLI 回退：直接调用 LSP 命令行工具获取诊断"""
         import asyncio.subprocess
-        import sys
         # pyright-langserver → pyright (CLI 工具)
         cli_cmd = "pyright" if "pyright" in command.lower() else command
         # Windows: .cmd 需要 cmd /c 前缀
@@ -267,11 +268,15 @@ class LspManager:
             args = ["cmd", "/c", cli_cmd, file_path, "--outputjson"]
         else:
             args = [cli_cmd, file_path, "--outputjson"]
+        subprocess_kwargs = {}
+        if sys.platform == "win32":
+            subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **subprocess_kwargs,
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=30.0
@@ -308,22 +313,42 @@ class LspManager:
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
-        return await client.go_to_definition(file_path, line, column)
+        await client.did_open(file_path)
+        await asyncio.sleep(0.3)
+        try:
+            return await client.go_to_definition(file_path, line, column)
+        finally:
+            await client.did_close(file_path)
 
     async def find_references(self, file_path: str, line: int, column: int) -> Optional[list]:
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
-        return await client.find_references(file_path, line, column)
+        await client.did_open(file_path)
+        await asyncio.sleep(0.3)
+        try:
+            return await client.find_references(file_path, line, column)
+        finally:
+            await client.did_close(file_path)
 
     async def hover(self, file_path: str, line: int, column: int) -> Optional[str]:
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
-        return await client.hover(file_path, line, column)
+        await client.did_open(file_path)
+        await asyncio.sleep(0.3)
+        try:
+            return await client.hover(file_path, line, column)
+        finally:
+            await client.did_close(file_path)
 
     async def document_symbols(self, file_path: str) -> Optional[list]:
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
-        return await client.document_symbols(file_path)
+        await client.did_open(file_path)
+        await asyncio.sleep(0.3)
+        try:
+            return await client.document_symbols(file_path)
+        finally:
+            await client.did_close(file_path)
