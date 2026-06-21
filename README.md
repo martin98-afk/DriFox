@@ -73,14 +73,18 @@ pip install uv  # 或参考 https://docs.astral.sh/uv/#installation
 uv sync
 
 # 如需安装可选组件，选择以下之一：
-uv sync --group gateway   # 通讯平台（钉钉/Telegram/Discord/飞书/Slack）
-uv sync --group dev       # 开发工具（pytest/ruff/mypy/pyinstaller）
-uv sync --all-groups      # 全部安装
+uv sync --group gateway     # 通讯平台（钉钉/Telegram/Discord/飞书/Slack）
+uv sync --group dev         # 开发工具（pytest/black/ruff/mypy）
+uv sync --group build       # 跨平台打包（pyinstaller）
+uv sync --group mac-build   # macOS 专用打包（pyinstaller + dmgbuild + Pillow，用于生成 DMG）
+uv sync --all-groups        # 全部安装
 ```
 
 > **可选依赖组说明**：
 > - `gateway` — 多平台通讯适配（钉钉、Telegram、Discord、Slack、飞书）
-> - `dev` — 开发与构建工具
+> - `dev` — 开发工具（pytest / black / ruff / mypy）
+> - `build` — 跨平台打包（pyinstaller）
+> - `mac-build` — macOS 专用打包（pyinstaller + dmgbuild + Pillow，用于生成 DMG）
 >
 > 不指定组则只装核心依赖，功能不受影响。
 

@@ -3,6 +3,7 @@ import platform
 import plistlib
 import subprocess
 import tempfile
+import time
 import glob
 import weakref
 
@@ -13,7 +14,6 @@ from qfluentwidgets import (
     InfoBarPosition,
     InfoBarIcon,
     PrimaryPushButton,
-    MessageBox,
 )
 
 from app.utils.config import Settings
@@ -217,24 +217,11 @@ class UpdateChecker(QWidget):
         self.download_thread.start()
 
     def _handle_download_finished(self):
-        """下载完成：按平台提示用户安装"""
+        """下载完成：直接开始安装（不再弹窗确认）"""
         if self.progress_dialog:
             self.progress_dialog.close()
 
-        # 专业软件的最后确认：询问是否关闭程序并安装
-        system = platform.system().lower()
-        title = "下载完成"
-        content = (
-            "安装包已准备就绪，是否立即关闭程序并升级？"
-            if system == "windows"
-            else "新版本已下载，是否立即关闭程序并自动升级？"
-        )
-        msg_box = MessageBox(title, content, self.parent_widget() or self)
-        msg_box.yesButton.setText(self.tr("现在安装"))
-        msg_box.cancelButton.setText(self.tr("稍后手动安装"))
-
-        if msg_box.exec():
-            self._run_installer()
+        self._run_installer()
 
     def _run_installer(self):
         """启动安装向导（Windows 运行 exe，macOS 自动升级）"""
@@ -297,6 +284,13 @@ class UpdateChecker(QWidget):
         # 使用 ditto 拷贝（保留代码签名、资源分支等 macOS 元数据）
         subprocess.run(["ditto", src_app, dst_app], check=True)
 
+        # 去除 quarantine（隔离）属性，避免 Gatekeeper 阻止自动启动
+        subprocess.run(
+            ["xattr", "-dr", "com.apple.quarantine", dst_app],
+            check=False,
+            capture_output=True,
+        )
+
         # 4. 卸载 DMG
         subprocess.run(["hdiutil", "detach", "-quiet", mount_point], capture_output=True)
 
@@ -306,8 +300,10 @@ class UpdateChecker(QWidget):
         except OSError:
             pass
 
-        # 6. 启动新版本（open 会自动使用新路径的 .app）
-        subprocess.Popen(["open", dst_app])
+        # 6. 启动新版本：使用 open -a 确保可靠启动，无视 quarantine
+        subprocess.Popen(["open", "-a", dst_app])
+        # 给 LaunchServices 一点时间完成应用启动请求
+        time.sleep(0.5)
 
     def _cancel_download(self):
         if self.download_thread:
