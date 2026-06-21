@@ -44,6 +44,20 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def _resolve_placeholders(obj: Any, mapping: Dict[str, str]) -> Any:
+    """递归替换 dict/list/str 中的 ``${key}`` 占位符。深拷贝，不修改原对象。"""
+    if isinstance(obj, dict):
+        return {k: _resolve_placeholders(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_placeholders(v, mapping) for v in obj]
+    if isinstance(obj, str):
+        out = obj
+        for k, v in mapping.items():
+            out = out.replace(f"${{{k}}}", v)
+        return out
+    return obj
+
+
 class LspClient:
     """单个 LSP 服务器客户端"""
 
@@ -368,6 +382,63 @@ class LspClient:
             )
         except Exception as e:
             logger.error(f"[LspClient:{self.config.name}] didClose 失败: {e}")
+
+    async def request_full_diagnostics(self, file_path: str) -> None:
+        """主动触发服务器对文件做完整语义分析。
+
+        行为由插件 ``.lsp.json`` 的 ``triggerDiagnostics`` 字段声明——
+        核心客户端**不**内置任何 server 特定协议（如 typescript 的
+        ``typescript.tsserverRequest/geterr``、deno 的 ``deno.cache`` 等
+        都应在插件 .lsp.json 中声明）。
+
+        配置示例（typescript 插件的 .lsp.json）::
+
+            "triggerDiagnostics": {
+                "method": "workspace/executeCommand",
+                "command": "typescript.tsserverRequest",
+                "arguments": {
+                    "type": "geterr",
+                    "arguments": {
+                        "delay": 0,
+                        "files": ["${file}"]
+                    }
+                }
+            }
+
+        ``"${file}"`` 占位符会被替换为 ``file_path`` 绝对路径。
+        未配置 ``triggerDiagnostics`` 的 server 直接 no-op。
+        """
+        if not self.is_running or not lsp:
+            return
+        trigger = getattr(self.config, "trigger_diagnostics", None)
+        if not trigger:
+            return
+        method = trigger.get("method", "workspace/executeCommand")
+        try:
+            raw_args = trigger.get("arguments", {})
+            resolved_args = _resolve_placeholders(raw_args, {"file": file_path})
+            if method == "workspace/executeCommand":
+                args = resolved_args if isinstance(resolved_args, list) else [resolved_args]
+                await self._client.protocol.send_request_async(
+                    lsp.WORKSPACE_EXECUTE_COMMAND,
+                    lsp.ExecuteCommandParams(
+                        command=trigger.get("command", ""),
+                        arguments=args,
+                    ),
+                )
+            else:
+                logger.debug(
+                    f"[LspClient:{self.config.name}] 未知 trigger method: {method}"
+                )
+                return
+            logger.debug(
+                f"[LspClient:{self.config.name}] 已触发诊断: "
+                f"method={method}, file={os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logger.debug(
+                f"[LspClient:{self.config.name}] request_full_diagnostics 失败: {e}"
+            )
 
     async def wait_diagnostics(self, timeout: float = 10.0) -> list:
         """等待诊断结果（使用 loop-bound Future 确保多线程安全）

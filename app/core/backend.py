@@ -1011,9 +1011,30 @@ class ChatBackend(QObject):
                 # MCP：PluginManager 已更新，UI 懒加载
                 result["mcp"] = bool(comps.get("mcp"))
 
+                # LSP：新增插件带 lsp 组件时，调用 LspManager.initialize 全量注册并后台启动
+                # （与 _reload_single_plugin 中 component == "lsp" 分支保持一致）
+                if comps.get("lsp"):
+                    try:
+                        from app.core.lsp.lsp_manager import LspManager
+                        lsp_mgr = LspManager.get_instance()
+                        lsp_configs = pm.get_lsp_configs()
+                        workdir = os.getcwd()
+                        if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                            workdir = str(self._tool_executor._workdir)
+                        lsp_mgr.initialize(workdir, lsp_configs)
+                        lsp_mgr.start_all_background()
+                        result["lsp"] = True
+                        logger.info(
+                            f"[ChatBackend] Plugin '{name}' LSP 热重载完成，"
+                            f"已注册 {len(lsp_mgr._clients)} 个服务器"
+                        )
+                    except Exception as e:
+                        logger.error(f"[ChatBackend] Plugin '{name}' LSP 热重载失败: {e}")
+
                 logger.info(f"[ChatBackend] 增量重载「{name}」完成: "
                            f"agents={result['agents']}, commands={result['commands']}, "
-                           f"themes={result['themes']}, skills={result['skills']}, mcp={result['mcp']}")
+                           f"themes={result['themes']}, skills={result['skills']}, "
+                           f"mcp={result['mcp']}, lsp={result['lsp']}")
                 return result
 
             # ── 全量重载（多插件变更/移除/覆盖，或非 watchfiles 触发） ──

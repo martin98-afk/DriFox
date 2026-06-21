@@ -430,6 +430,8 @@ class PluginManager:
                     detected_components[comp_name] = True
             if (plugin_dir / ".mcp.json").exists():
                 detected_components["mcp"] = True
+            if (plugin_dir / ".lsp.json").exists():
+                detected_components["lsp"] = True
 
             if "components" not in manifest or not manifest["components"]:
                 manifest["components"] = detected_components

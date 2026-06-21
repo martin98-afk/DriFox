@@ -37,6 +37,13 @@ class LspServerConfig:
     transport: str = "stdio"            # stdio | socket
     plugin_name: str = ""               # 来源插件名
     install_hint: str = ""              # 安装提示命令，如 "npm install -g pyright"
+    # ── 高级字段：诊断触发（可选） ──
+    trigger_diagnostics: Optional[Dict[str, Any]] = None
+    # 通过 .lsp.json 的 ``triggerDiagnostics`` 声明如何主动触发诊断
+    # （如 typescript-language-server 需要 workspace/executeCommand + geterr）
+    cli_fallback: Optional[Dict[str, Any]] = None
+    # 通过 .lsp.json 的 ``cliFallback`` 声明 LSP 失败时的 CLI 兜底
+    # 字段：command、argsTemplate（支持 ${file}）、parser（tsc/pyright/raw）
 
     @classmethod
     def from_dict(cls, name: str, data: Dict[str, Any], plugin_name: str = "") -> "LspServerConfig":
@@ -67,6 +74,8 @@ class LspServerConfig:
             transport=data.get("transport", "stdio"),
             plugin_name=plugin_name,
             install_hint=data.get("installHint", ""),
+            trigger_diagnostics=data.get("triggerDiagnostics"),
+            cli_fallback=data.get("cliFallback"),
         )
 
 
