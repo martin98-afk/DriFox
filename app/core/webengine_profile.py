@@ -3,8 +3,13 @@
 共享 QWebEngineProfile 管理模块。
 
 所有 WebEngine 视图（消息渲染、差异对比）使用同一个 Profile，
-从而共享 Chromium 浏览器进程、缓存、Cookie 与 localStorage，
-减少内存占用并确保跨视图状态一致。
+共享 Cookie、缓存与 localStorage，确保跨视图状态一致。
+
+注意：Profile 与 Chromium renderer 进程是两个不同的概念。
+- Profile：逻辑分组，决定缓存/Cookie/Storage 等用户数据的共享范围。
+- Renderer 进程：由 Chromium 调度，每张卡片（CodeWebViewer）独立一个进程
+  （见 main.py 的 QTWEBENGINE_CHROMIUM_FLAGS 设置）。
+因此这里保留共享 Profile，但每张卡片在浏览器内核层是隔离渲染的。
 """
 
 from typing import Optional

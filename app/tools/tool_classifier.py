@@ -25,6 +25,7 @@ SAFE_TOOLS = frozenset({
     "question", "skill", "list_skills",               # 交互/技能
     "subagent_status",                                # 子智能体（只读查询）
     "mcp_list_servers",                               # MCP列表
+    "lsp",                                            # LSP 工具（只读）
 })
 
 

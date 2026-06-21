@@ -17,7 +17,10 @@ from app.core.message_content import content_to_text
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
 
+from app.core.lsp.lsp_manager import LspManager
 from app.tools import BuiltinTools, ToolResult
+from app.tools.file_tools import _resolve_path
+from app.utils.config import Settings
 from app.utils.file_operation_recorder import (
     FileOperationRecorder,
 )
@@ -337,6 +340,73 @@ class ToolExecutor:
             current_message=current_message_text,
         )
 
+    # ========== 自动 LSP 诊断（文件编辑后） ==========
+
+    def _try_auto_lsp_diagnose(
+        self, tool_name: str, args: dict, result: "ToolResult"
+    ) -> "ToolResult":
+        """文件编辑成功后，若开启自动诊断则运行 LSP 诊断并追加到结果
+
+        Args:
+            tool_name: 工具名 (write/edit/multi_edit)
+            args: 工具参数
+            result: 原始工具结果
+
+        Returns:
+            追加了诊断信息的结果（或原始结果）
+        """
+        # 1. 检查自动诊断开关
+        try:
+            cfg = Settings.get_instance()
+            if not cfg.lsp_auto_diagnose.value:
+                return result
+        except Exception as e:
+            logger.debug(f"[ToolExecutor] 自动诊断开关读取失败: {e}")
+            return result
+
+        # 2. 获取文件路径并解析
+        file_path = args.get("path")
+        if not file_path:
+            return result
+
+        try:
+            full_path = _resolve_path(self._builtin_tools.workdir, file_path)
+        except Exception as e:
+            logger.debug(f"[ToolExecutor] 自动诊断路径解析失败: {e}")
+            return result
+
+        # 3. 检查是否有对应的 LSP 客户端
+        try:
+            lsp_mgr = LspManager.get_instance()
+            client = lsp_mgr.get_client_for_file(str(full_path))
+            if not client:
+                return result  # 无对应 LSP 服务器
+        except Exception as e:
+            logger.debug(f"[ToolExecutor] 自动诊断 LSP 路由失败: {e}")
+            return result
+
+        # 4. 运行快速诊断（跳过 LSP 协议握手，直接 CLI）
+        try:
+            diag_result = lsp_mgr.sync_quick_diagnostics(str(full_path), timeout=5.0)
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 自动 LSP 快速诊断失败: {e}")
+            return result
+
+        if not diag_result:
+            # diag_result 为 None 表示 CLI 返回空或不可用（工具未安装/超时/真无问题）
+            result.content = (
+                f"{result.content}\n\n[LSP 自动诊断] 未发现问题"
+            )
+        else:
+            result.content = (
+                f"{result.content}\n\n{diag_result}"
+            )
+
+        logger.debug(
+            f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}"
+        )
+        return result
+
     def set_memory_manager(self, memory_manager):
         if self._builtin_tools:
             self._builtin_tools.set_memory_manager(memory_manager)
@@ -436,6 +506,8 @@ class ToolExecutor:
         "mouse": ["action"],
         "keyboard": ["action"],
         "screenshot": [],
+        # LSP 工具
+        "lsp": ["operation"],
     }
 
     def execute(self, tool_name: str, args: dict, call_id: str = None) -> ToolResult:
@@ -701,6 +773,14 @@ class ToolExecutor:
                     if args.get("region") else None
                 ),
             ),
+            # ========== LSP 工具 ==========
+            "lsp": lambda: self._builtin_tools._lsp_tools.lsp(
+                path=args.get("path", ""),
+                operation=args.get("operation", "diagnostics"),
+                line=int(args.get("line", 0) or 0),
+                column=int(args.get("column", 0) or 0),
+                language=args.get("language"),
+            ),
         }
 
         # ========== 工具执行前的有效性检查 ==========
@@ -726,6 +806,10 @@ class ToolExecutor:
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
                     self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
                 
+                # 自动 LSP 诊断：文件编辑成功后，若开启则自动诊断
+                if result and result.success and tool_name in ("write", "edit", "multi_edit"):
+                    result = self._try_auto_lsp_diagnose(tool_name, args, result)
+
                 # Trigger PostToolUse hook（统一方法，含结果回填）
                 self._trigger_post_tool_use(tool_name, args, result)
 

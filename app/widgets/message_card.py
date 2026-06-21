@@ -87,6 +87,7 @@ from app.utils.design_tokens import current_theme, scale_font_size, Colors, font
 from app.widgets.render_helpers import (
     render_tool_block,
     _TOOL_ICON_MAP,
+    _get_tool_icon,
 )
 
 # ======== Markdown 实例 ========
@@ -889,7 +890,9 @@ def _render_tool_streaming_block(
         icon = "🤖"
         title_color = "#9C27B0"
     else:
-        icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+        # 流式阶段 tool_args 尚未收齐，_get_tool_icon 退化为查 _TOOL_ICON_MAP 默认值
+        # （lsp 默认 📋，未知工具 🔧）
+        icon = _get_tool_icon(tool_name)
         title_color = "#FFA500"
 
     # spinner 由 CSS data-streaming 控制可见性，完成态时通过 CSS 过渡淡出
@@ -4078,6 +4081,14 @@ class CodeWebViewer(QWebEngineView):
         清理 CodeWebViewer 持有的资源，防止内存泄漏。
         应该在删除 viewer 前调用，或者在 deleteLater 中自动调用。
         """
+        # 🔧 内存修复：移除全局事件过滤器，防止 QApplication 持有对已销毁
+        # CodeWebViewer 实例的引用，导致 GC 无法回收且事件循环误调用已释放对象
+        try:
+            from PyQt5.QtWidgets import QApplication
+            QApplication.instance().removeEventFilter(self)
+        except Exception:
+            pass
+
         # 停止所有定时器
         timers_to_stop = [
             self._render_timer,

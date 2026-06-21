@@ -259,6 +259,16 @@ class LLMSettingsCard(SystemCardFrame):
         )
         content_layout.addWidget(self.mcpListCard)
 
+        # LSP 语言服务器状态
+        from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
+        self.lspListCard = LspListSettingCard(
+            icon=get_icon("lsp"),
+            title="LSP 语言服务器",
+            content="代码智能与诊断",
+            parent=self,
+        )
+        content_layout.addWidget(self.lspListCard)
+
         # ---- 通用设置分隔标签 ----
         self._sep_common_label = self._make_sep_label("通用设置")
         self._section_anchors["common"] = self._sep_common_label

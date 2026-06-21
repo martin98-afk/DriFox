@@ -16,7 +16,6 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool
 from loguru import logger
 
 from app.core.store import SessionStore
-from app.core.engines.gateway import GatewayEngine
 from app.core.agent import AgentManager
 from app.core.engines.ui import ChatEngine
 from app.core.chat_session import SessionManager, ChatSession
@@ -320,6 +319,7 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] ChatEngine 创建完成")
 
         # 创建 GatewayEngine（全局单例，多个窗口共享）
+        from app.core.engines.gateway import GatewayEngine
         self._gateway_engine = GatewayEngine.get_instance(
             get_model_config=get_model_config,
             tool_executor=self._tool_executor,
@@ -438,9 +438,25 @@ class ChatBackend(QObject):
                 # 启动插件文件变更监听（热更新，仅启动一次）
                 self._start_plugin_watcher()
 
+                # ── 初始化 LSP 管理器（仅首次，多窗口共享单例）──
+                try:
+                    from app.core.lsp.lsp_manager import LspManager
+                    lsp_mgr = LspManager.get_instance()
+                    lsp_configs = pm.get_lsp_configs()
+                    workdir = os.getcwd()
+                    if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                        workdir = str(self._tool_executor._workdir)
+                    lsp_mgr.initialize(workdir, lsp_configs)
+                    logger.info(f"[ChatBackend] LspManager 初始化完成，"
+                               f"已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
+                    lsp_mgr.start_all_background()
+                except Exception as e:
+                    logger.error(f"[ChatBackend] LspManager 初始化失败: {e}")
+
             logger.info(f"[ChatBackend] PluginManager 初始化完成，"
                        f"已加载 {len(pm.list_plugins())} 个插件，"
                        f"智能体 {len(self._agent_manager.list_agents())} 个")
+
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
 
@@ -720,10 +736,11 @@ class ChatBackend(QObject):
         if not plugin_path:
             return ""
 
-        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp"}
+        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp"}
         # 插件根目录的关键文件 → 映射到对应组件
         ROOT_FILE_COMPONENTS = {
             ".mcp.json": "mcp",
+            ".lsp.json": "lsp",
         }
 
         for _, change_path in changes:
@@ -745,7 +762,7 @@ class ChatBackend(QObject):
 
         Args:
             plugin_name: 插件名（空字符串表示全量重载）
-            component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp）
+            component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp/lsp）
         """
         try:
             if plugin_name:
@@ -777,6 +794,7 @@ class ChatBackend(QObject):
         - "themes"   → 重载主题
         - "skills"   → 重载技能（PluginManager 已更新，UI 下次调用 get_local_skills() 自动生效）
         - "mcp"      → 重载 MCP 配置（PluginManager 已更新，UI 下次调用 get_mcp_servers() 自动生效）
+        - "lsp"      → 热重载 LSP 配置（停止旧服务 → 加载新配置 → 启动新服务）
         - ""         → 跳过（根目录文件变更如 README/LICENSE，不影响运行时）
 
         Args:
@@ -787,7 +805,7 @@ class ChatBackend(QObject):
             {"agents": int, "commands": bool, "themes": bool, "skills": bool, "mcp": bool}
         """
         result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
-                        "skills": False, "mcp": False}
+                        "skills": False, "mcp": False, "lsp": False}
 
         try:
             from app.core.plugin_manager import PluginManager
@@ -883,10 +901,30 @@ class ChatBackend(QObject):
                 result["mcp"] = True
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
 
+            # 8. LSP 配置：热重载 LSP 服务器
+            #    重新初始化 LspManager（停止旧服务 → 解析新配置 → 启动新服务）
+            if component == "lsp":
+                try:
+                    from app.core.lsp.lsp_manager import LspManager
+                    lsp_mgr = LspManager.get_instance()
+                    lsp_configs = pm.get_lsp_configs()
+                    workdir = os.getcwd()
+                    if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                        workdir = str(self._tool_executor._workdir)
+                    lsp_mgr.initialize(workdir, lsp_configs)
+                    lsp_mgr.start_all_background()
+                    result["lsp"] = True
+                    logger.info(
+                        f"[ChatBackend] Plugin '{plugin_name}' LSP 热重载完成，"
+                        f"已注册 {len(lsp_mgr._clients)} 个服务器"
+                    )
+                except Exception as e:
+                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 热重载失败: {e}")
+
             logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
                        f"agents={result['agents']}, commands={result['commands']}, "
                        f"themes={result['themes']}, skills={result['skills']}, "
-                       f"mcp={result['mcp']}")
+                       f"mcp={result['mcp']}, lsp={result.get('lsp', False)}")
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin '{plugin_name}': {e}")
 
@@ -904,7 +942,7 @@ class ChatBackend(QObject):
             各子系统的重载结果
         """
         result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
-                        "skills": False, "mcp": False}
+                        "skills": False, "mcp": False, "lsp": False}
 
         try:
             from app.core.plugin_manager import PluginManager
@@ -1009,9 +1047,27 @@ class ChatBackend(QObject):
             # 6. MCP 配置：PluginManager 已更新，UI 通过 get_mcp_servers() 懒加载
             result["mcp"] = True
 
+            # 7. LSP 配置：重新初始化 LspManager（停止旧服务 → 加载新配置 → 启动新服务）
+            try:
+                from app.core.lsp.lsp_manager import LspManager
+                lsp_mgr = LspManager.get_instance()
+                lsp_configs = pm.get_lsp_configs()
+                workdir = os.getcwd()
+                if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                    workdir = str(self._tool_executor._workdir)
+                lsp_mgr.initialize(workdir, lsp_configs)
+                lsp_mgr.start_all_background()
+                result["lsp"] = True
+                logger.info(
+                    f"[ChatBackend] LSP 全量重载完成，"
+                    f"已注册 {len(lsp_mgr._clients)} 个服务器"
+                )
+            except Exception as e:
+                logger.error(f"[ChatBackend] LSP 全量重载失败: {e}")
+
             logger.info(f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
                        f"commands={result['commands']}, themes={result['themes']}, "
-                       f"skills={result['skills']}, mcp={result['mcp']}")
+                       f"skills={result['skills']}, mcp={result['mcp']}, lsp={result.get('lsp', False)}")
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
 

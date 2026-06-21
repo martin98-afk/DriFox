@@ -30,6 +30,8 @@ from app.tools.result import ToolResult
 from app.tools.task_tools import TaskTools
 from app.tools.terminal_tools import TerminalTools
 from app.tools.web_tools import WebTools
+from app.core.lsp.lsp_tools import LspToolsIntegration
+from app.core.lsp.lsp_manager import LspManager
 
 
 class BuiltinTools(QObject):
@@ -93,6 +95,10 @@ class BuiltinTools(QObject):
         self._tools["task"] = TaskTools(self)
         self._tools["diagnostics"] = DiagnosticsTools(self)
         self._tools["automation"] = AutomationTools(self)
+
+        # LSP 工具集成
+        self._lsp_tools = LspToolsIntegration(LspManager.get_instance(), owner=self)
+        self._tools["lsp"] = self._lsp_tools
 
         # Expose properties for backward compatibility
         self._file_tools = file_tools
@@ -1077,6 +1083,55 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "lsp",
+            "description": (
+                "通过 LSP 语言服务器（Language Server Protocol）执行代码智能操作。\n"
+                "\n"
+                "支持的操作类型（operation 参数）：\n"
+                "- diagnostics: 获取文件诊断（错误/警告/提示）\n"
+                "- documentSymbols: 获取文件符号列表（类/函数/变量）\n"
+                "- goToDefinition: 跳转到符号定义位置\n"
+                "- findReferences: 查找符号的所有引用\n"
+                "- hover: 获取光标位置符号的文档/类型信息\n"
+                "- listServers: 列出已注册的 LSP 服务器及其状态\n"
+                "\n"
+                "line/column 从 1 开始计数。diagnostics 和 listServers 不需要 line/column。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "文件路径（listServers 操作不需要但可忽略）",
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "diagnostics",
+                            "documentSymbols",
+                            "goToDefinition",
+                            "findReferences",
+                            "hover",
+                            "listServers",
+                        ],
+                        "description": "操作类型",
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "行号（diagnostics/listServers 不需要）",
+                    },
+                    "column": {
+                        "type": "integer",
+                        "description": "列号（diagnostics/listServers/documentSymbols 不需要）",
+                    },
+                },
+                "required": ["path", "operation"],
+            },
+        },
+    },
 ]
 
 
@@ -1132,5 +1187,22 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         if mcp_schemas:
             schemas.extend(mcp_schemas)
             logger.info(f"[BuiltinTools] 注入 {len(mcp_schemas)} 个 MCP 工具 schema")
+
+    # 动态注入 LSP 服务器状态到 lsp 工具描述
+    try:
+        from app.core.lsp.lsp_manager import LspManager
+        lsp_mgr = LspManager.get_instance()
+        clients = lsp_mgr._clients
+        if clients:
+            running = [n for n, c in clients.items() if c.is_running]
+            status_text = (
+                f"当前已启动的 LSP 服务器: {', '.join(running) if running else '(无)'}。"
+            )
+            for schema in schemas:
+                if schema["function"]["name"] == "lsp":
+                    schema["function"]["description"] += f"\n\n{status_text}"
+                    break
+    except Exception:
+        pass
 
     return schemas

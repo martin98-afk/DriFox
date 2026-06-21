@@ -13,6 +13,7 @@
 - 损坏隔离
 """
 
+import os
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
@@ -75,13 +76,24 @@ class SessionStore:
 
     @classmethod
     def mark_clean_shutdown(cls):
-        """标记数据库正常关闭，下次启动跳过完整性检查"""
+        """标记数据库正常关闭，并增量回收剩余空闲页
+
+        1. 写入 clean_shutdown.flag 跳过下次启动的完整性检查
+        2. 调用 compact_database() 分 3 批回收剩余 freelist（每批 1000 页 ≈ 4MB）
+        """
         try:
             from app.utils.utils import get_app_data_dir
             flag_path = Path(get_app_data_dir()) / cls._CLEAN_SHUTDOWN_FLAG
             flag_path.write_text("1", encoding="utf-8")
         except Exception:
             pass
+
+        # 增量回收剩余空闲页（需 auto_vacuum=INCREMENTAL 已激活）
+        instance = cls._instance
+        if instance is not None:
+            for _ in range(3):
+                if not instance.compact_database(max_pages=1000):
+                    break
 
     def _check_and_repair_database(self):
         """检查并修复损坏的 SQLite 数据库
@@ -174,6 +186,81 @@ class SessionStore:
         except Exception as e:
             logger.error(f"[SessionStore] 数据库修复失败: {e}")
 
+    def _check_auto_vacuum_status(self):
+        """检测 auto_vacuum=INCREMENTAL 是否对当前数据库真正生效
+
+        SQLite 限制: 已存在的数据库必须先 VACUUM 一次, INCREMENTAL 模式才会真正
+        开始跟踪历史 freelist. 如果未生效, 启动时打印一次性提示, 引导用户跑一次
+        VACUUM (例如执行 .drifox/_vacuum.py 脚本).
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            success, result = self._db.execute_sql('PRAGMA auto_vacuum')
+            if not success or not result:
+                return
+            current = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
+            if current == 'incremental':
+                # 检查 freelist 是否还有很多 (> 50MB 提示用户首次 VACUUM)
+                success2, result2 = self._db.execute_sql('PRAGMA freelist_count')
+                if success2 and result2:
+                    freelist = list(result2[0].values())[0] if isinstance(result2[0], dict) else 0
+                    page_size = 4096
+                    success3, result3 = self._db.execute_sql('PRAGMA page_size')
+                    if success3 and result3:
+                        page_size = list(result3[0].values())[0] or 4096
+                    freelist_mb = freelist * page_size / 1024 / 1024
+                    if freelist_mb > 50:
+                        logger.warning(
+                            f"[SessionStore] auto_vacuum=INCREMENTAL 已启用, "
+                            f"但历史 freelist 累积 {freelist_mb:.0f}MB 尚未进入回收队列. "
+                            f"建议关闭软件后执行一次 VACUUM 启用 (例如: python .drifox/_vacuum.py)"
+                        )
+                    else:
+                        logger.info(f"[SessionStore] auto_vacuum=INCREMENTAL 已生效, 当前 freelist={freelist_mb:.1f}MB")
+            else:
+                logger.warning(
+                    f"[SessionStore] auto_vacuum={current} (期望 incremental). "
+                    f"INCREMENTAL 模式未生效, 不会自动回收空闲页."
+                )
+        except Exception as e:
+            logger.debug(f"[SessionStore] auto_vacuum 状态检测失败: {e}")
+
+    def compact_database(self, max_pages: int = 1000) -> bool:
+        """增量回收空闲页 (PRAGMA incremental_vacuum)
+
+        适合在应用退出时调用, 每次最多回收 max_pages 页 (默认 1000 页 ≈ 4MB).
+        比 VACUUM 友好的地方: 分批执行, 不会长时间阻塞数据库.
+
+        Returns:
+            bool: 是否成功执行 (auto_vacuum 未启用时返回 False)
+        """
+        if not self._db or not self._db.is_connected:
+            return False
+        try:
+            # 先检查 auto_vacuum 模式
+            success, result = self._db.execute_sql('PRAGMA auto_vacuum')
+            if not success or not result:
+                return False
+            current = list(result[0].values())[0] if isinstance(result[0], dict) else 'none'
+            if current != 'incremental':
+                logger.debug(f"[SessionStore] auto_vacuum={current}, 跳过 incremental_vacuum")
+                return False
+
+            self._db.execute_sql(f'PRAGMA incremental_vacuum({max_pages})')
+            # 回收后查询实际归还了多少
+            success2, result2 = self._db.execute_sql('PRAGMA freelist_count')
+            if success2 and result2:
+                remaining = list(result2[0].values())[0] if isinstance(result2[0], dict) else 0
+                logger.info(
+                    f"[SessionStore] 增量回收完成 (本批 {max_pages} 页), "
+                    f"剩余 freelist={remaining} 页 (≈{remaining*4/1024:.1f}MB)"
+                )
+            return True
+        except Exception as e:
+            logger.warning(f"[SessionStore] 增量回收失败: {e}")
+            return False
+
     def _init_schema(self):
         """初始化数据库和表结构"""
         if self._initialized:
@@ -184,6 +271,8 @@ class SessionStore:
                 return
 
             try:
+                # 确保数据库目录存在（新用户首次运行场景）
+                os.makedirs(self._db_dir, exist_ok=True)
                 # 使用 DatabaseManager（单例模式）
                 self._db = DatabaseManager()
                 self._db.connect(self._db_path)
@@ -193,11 +282,25 @@ class SessionStore:
                 self._check_and_repair_database()
                 # ================================================
 
+                # ========== 读取文件头真实的 auto_vacuum 值 ==========
+                # 必须在设置任何 PRAGMA 之前读取，否则读到的是当前连接的值而非文件头
+                _file_auto_vacuum = None
+                try:
+                    _ok, _rows = self._db.execute_sql('PRAGMA auto_vacuum')
+                    if _ok and _rows:
+                        _file_auto_vacuum = str(list(_rows[0].values())[0]).lower()
+                except Exception:
+                    _file_auto_vacuum = None
+                # ======================================================
+
                 # ========== WAL 模式优化：提升并发读写性能 ==========
                 self._db.execute_sql('PRAGMA journal_mode=WAL')
                 self._db.execute_sql('PRAGMA synchronous=NORMAL')
                 self._db.execute_sql('PRAGMA cache_size=-64000')
                 self._db.execute_sql('PRAGMA temp_store=MEMORY')
+                # 先设连接级 INCREMENTAL（若文件头已是 INCREMENTAL 则直接生效；
+                # 若文件头是 NONE，后续 _activate_incremental_auto_vacuum 执行 VACUUM 后永久写入）
+                self._db.execute_sql('PRAGMA auto_vacuum=INCREMENTAL')
                 # ======================================================
 
                 # 创建会话表
@@ -282,6 +385,23 @@ class SessionStore:
                 self._subagent_log_repo = SubAgentLogRepository(self._db)
                 self._input_history_repo = InputHistoryRepository(self._db)
                 self._input_history_repo.create_table()
+
+                # 一次性激活：若文件头 auto_vacuum 不是 INCREMENTAL，执行 VACUUM 永久写入
+                # (必须在所有建表/迁移完成后执行，确保 VACUUM 基于完整 schema 重建)
+                if _file_auto_vacuum and _file_auto_vacuum != 'incremental':
+                    logger.info(
+                        f"[SessionStore] 文件头 auto_vacuum={_file_auto_vacuum}, "
+                        f"执行一次性 VACUUM 永久激活 INCREMENTAL..."
+                    )
+                    try:
+                        self._db.execute_sql('PRAGMA auto_vacuum=INCREMENTAL')
+                        self._db.execute_sql('VACUUM')
+                        logger.info("[SessionStore] INCREMENTAL 模式已永久激活")
+                    except Exception as _e:
+                        logger.warning(f"[SessionStore] 首次激活 INCREMENTAL 失败: {_e}")
+
+                # 检测 auto_vacuum 是否对当前数据库生效
+                self._check_auto_vacuum_status()
 
                 self._initialized = True
                 logger.info("[SessionStore] 初始化完成（仓储模式）")

@@ -132,6 +132,9 @@ elif platform.system() == "Darwin":
 
 # 需显式声明的隐藏导入（因 importlib.import_module() 动态加载而无法被 PyInstaller 自动检测）
 _hidden_imports = [
+    # app.core.__getattr__ 懒加载导入（importlib.import_module 动态调用，PyInstaller 无法自动发现）
+    "app.core.backend",
+    # gateway adapter 模块（也是 importlib.import_module 动态加载）
     "app.gateway.adapters.wecom",
     "app.gateway.adapters.dingtalk",
     "app.gateway.adapters.telegram",

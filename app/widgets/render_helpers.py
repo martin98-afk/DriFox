@@ -515,7 +515,35 @@ _TOOL_ICON_MAP = {
     "screenshot": "📸",
     "mouse": "🖱️",
     "keyboard": "⌨️",
+    # LSP 工具（默认 = listServers 列表图标；具体 operation 由 _get_tool_icon 解析）
+    "lsp": "📋",
 }
+
+
+# LSP 工具 operation → 图标
+# 让 lsp 工具折叠框在调用 diagnostics / goToDefinition / hover 等操作时显示对应的语义图标，
+# 与 get_diagnostics / read 等独立工具的渲染风格一致。
+_LSP_OPERATION_ICON_MAP = {
+    "diagnostics":      "🩺",  # 诊断（与 get_diagnostics 一致）
+    "documentSymbols":  "🔣",  # 符号列表
+    "goToDefinition":   "➡️",  # 跳转定义
+    "findReferences":   "🔗",  # 引用
+    "hover":            "💬",  # 悬浮文档
+    "listServers":      "📋",  # 服务器列表
+}
+
+
+def _get_tool_icon(tool_name: str, tool_args: dict = None) -> str:
+    """根据工具名（必要时结合 tool_args）查找图标
+
+    普通工具直接查 _TOOL_ICON_MAP；
+    LSP 工具按 operation 参数切换图标（diagnostics→🩺, hover→💬 等）。
+    """
+    if tool_name == "lsp" and tool_args:
+        operation = tool_args.get("operation", "")
+        if operation in _LSP_OPERATION_ICON_MAP:
+            return _LSP_OPERATION_ICON_MAP[operation]
+    return _TOOL_ICON_MAP.get(tool_name, "🔧")
 
 
 def _extract_screenshot_image_path(result: str) -> str:
@@ -656,7 +684,7 @@ def _render_inline_tool(
             f'<span style="color: {status_color}; font-weight: bold; '
             f'margin-left: 6px;">{status_text}</span>'
         )
-    icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+    icon = _get_tool_icon(tool_name, tool_args)
     natural_preview = _format_natural_preview(tool_name, tool_args)
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
     return f"""<div class="tool-block"{tc_id_attr} style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
@@ -813,7 +841,7 @@ def render_tool_block(
         title_color = "#9C27B0"
     else:
         # 从图标映射表查找，未找到则用默认扳手图标
-        icon = _TOOL_ICON_MAP.get(tool_name, "🔧")
+        icon = _get_tool_icon(tool_name, tool_args)
         title_color = "#FFA500"
 
     # 子智能体任务特殊处理

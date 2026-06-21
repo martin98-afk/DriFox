@@ -375,6 +375,8 @@ class PluginManager:
                         components[comp_name] = True
                 if (item / ".mcp.json").exists():
                     components["mcp"] = True
+                if (item / ".lsp.json").exists():
+                    components["lsp"] = True
                 if "components" not in manifest or not manifest["components"]:
                     manifest["components"] = components
                 elif isinstance(manifest["components"], dict):
@@ -613,6 +615,51 @@ class PluginManager:
     # ============================================================
     # 内部辅助
     # ============================================================
+
+    def get_lsp_configs(self) -> List[dict]:
+        """获取所有插件的 .lsp.json LSP 配置
+
+        扫描已启用插件 + 额外扫描没有 manifest 但有 .lsp.json 的目录。
+
+        Returns:
+            [{"plugin": "pyright-lsp", "config": {"pyright": {...}}}, ...]
+        """
+        import json
+
+        configs = []
+        seen_plugins = set()
+
+        # 1. 扫描已启用插件
+        for plugin in self._iter_enabled_plugins():
+            seen_plugins.add(plugin.name)
+            lsp_file = plugin.path / ".lsp.json"
+            if lsp_file.exists():
+                try:
+                    with open(lsp_file, "r", encoding="utf-8") as f:
+                        configs.append({"plugin": plugin.name, "config": json.load(f)})
+                except Exception as e:
+                    logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
+
+        # 2. 额外扫描：用户插件目录下没有 manifest 但有 .lsp.json 的目录
+        if self._app_data_dir:
+            user_plugins_dir = self._app_data_dir / self._USER_PLUGIN_DIR_NAME
+            if user_plugins_dir.exists():
+                for item in user_plugins_dir.iterdir():
+                    if not item.is_dir():
+                        continue
+                    if item.name in seen_plugins:
+                        continue
+                    lsp_file = item / ".lsp.json"
+                    if not lsp_file.exists():
+                        continue
+                    try:
+                        with open(lsp_file, "r", encoding="utf-8") as f:
+                            configs.append({"plugin": item.name, "config": json.load(f)})
+                        logger.debug(f"[PluginManager] 发现独立 LSP 配置: {item.name}")
+                    except Exception as e:
+                        logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
+
+        return configs
 
     def _get_md_files(self, subdir: str) -> List[Path]:
         """从所有已启用插件获取某子目录下的 .md 文件"""

@@ -75,7 +75,7 @@ class FunctionCommandHandlers:
 # 解析结果缓存（避免每次启动重解析 60+ .md 文件）
 # ============================================================
 
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 _cache_disabled = False  # 调试用，设为 True 跳过缓存
 
 
@@ -178,6 +178,7 @@ def _serialize_params(params: list) -> list:
                 "param_type": getattr(p, 'param_type', 'flag'),
                 "required": getattr(p, 'required', False),
                 "mutex_group": getattr(p, 'mutex_group', ''),
+                "value_options": list(getattr(p, 'value_options', []) or []),
             })
         elif isinstance(p, dict):
             result.append({
@@ -186,9 +187,10 @@ def _serialize_params(params: list) -> list:
                 "param_type": p.get("param_type", "flag"),
                 "required": p.get("required", False),
                 "mutex_group": p.get("mutex_group", ""),
+                "value_options": list(p.get("value_options", []) or []),
             })
         else:
-            result.append({"name": str(p), "description": "", "param_type": "flag", "required": False, "mutex_group": ""})
+            result.append({"name": str(p), "description": "", "param_type": "flag", "required": False, "mutex_group": "", "value_options": []})
     return result
 
 
@@ -202,6 +204,7 @@ def _deserialize_params(params: list) -> list:
             param_type=p.get("param_type", "flag"),
             required=p.get("required", False),
             mutex_group=p.get("mutex_group", ""),
+            value_options=p.get("value_options", []),
         ))
     return result
 
@@ -306,7 +309,7 @@ def _parse_raw_params_to_command_params(raw: any, mutex_groups: dict = None) -> 
                 mutex_group=mutex_map.get(name, ""),
             ))
     elif isinstance(raw, list):
-        # 格式 1：数组 [{name, desc, mutex, ...}]
+        # 格式 1：数组 [{name, desc, mutex, enum/value_options, ...}]
         for p in raw:
             if isinstance(p, str):
                 # 列表元素是纯字符串 → 视为 positional 参数名
@@ -322,21 +325,28 @@ def _parse_raw_params_to_command_params(raw: any, mutex_groups: dict = None) -> 
             parsed = _parse_param_name(name)
             name = parsed["name"]
             desc = p.get("desc", p.get("description", ""))
-            # 自动推断 param_type
-            if name.startswith("--") and name.endswith("="):
-                ptype = "value"
-            elif name.startswith("--"):
-                ptype = "flag"
-            else:
-                ptype = "positional"
+            # 显式 param_type 优先，否则自动推断
+            ptype = p.get("param_type", "")
+            if not ptype:
+                if name.startswith("--") and name.endswith("="):
+                    ptype = "value"
+                elif name.startswith("--"):
+                    ptype = "flag"
+                else:
+                    ptype = "positional"
             # 显式 required 优先，否则从 [] 推断
             required = p.get("required", parsed["required"])
             # 互斥组：优先使用数组格式中的 mutex 字段，回退到 mutex_groups 映射
             mg = p.get("mutex", mutex_map.get(name, ""))
+            # 提取 value_options：优先 value_options，回退到 enum
+            value_options = p.get("value_options", p.get("enum", []))
+            if not isinstance(value_options, list):
+                value_options = []
             params.append(CommandParameter(
                 name=name, description=desc,
                 param_type=ptype, required=required,
                 mutex_group=mg,
+                value_options=value_options,
             ))
 
     return params

@@ -6658,6 +6658,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 widget.set_resize_preview_mode(True)
             widget.sync_width()
 
+        # 🔧 内存修复：添加新卡片后触发虚拟滚动回收，
+        # 否则离屏的旧 MessageCard（含 QWebEngineView）仅在手动滚动时才被回收，
+        # 长时间主动聊天会导致大量卡片堆积在布局中，WebEngine 内存持续增长
+        self._virtual_scroll_timer.start()
+
     def _archive_history_session(self, index: int):
         history_list = self.history_manager.get_history_list(self._current_project)
         if index < 0 or index >= len(history_list):

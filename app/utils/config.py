@@ -239,7 +239,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.2.7"
+    current_version = "v0.2.10"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -372,6 +372,9 @@ class Settings(QConfig):
     gitee_repo = ConfigItem("Gitee", "Repo", "canvas-mind-components")
     gitee_path = ConfigItem("Gitee", "Path", "drifox")
     gitee_branch = ConfigItem("Gitee", "Branch", "master")
+
+    # ========== LSP 配置 ==========
+    lsp_auto_diagnose = ConfigItem("LSP", "AutoDiagnose", False, BoolValidator())
 
     # ========== 工具开关控制 ==========
     tool_toggles = ConfigItem("Tools", "Toggles", {})
