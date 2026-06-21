@@ -2168,7 +2168,12 @@ class CodeWebViewer(QWebEngineView):
                     padding: 6px 14px 0 14px; 
                     max-height: {self.MAX_HEIGHT}px;
                     overflow-x: hidden;
-                    overflow-y: auto;
+                    /* 🐛 修复：overflow: overlay 使滚动条浮在内容上方（不占布局宽度），
+                       避免内容高度在 MAX_HEIGHT 阈值附近时滚动条出现/消失导致 viewport
+                       宽度变化 → 文字重排 → 高度震荡循环。
+                       Qt 5.15.2 (Chromium 87) 仍支持此非标准值。若浏览器不支持则自动
+                       降级为 auto（第二行声明因不认识的值被忽略，第一行 auto 生效）。 */
+                    overflow-y: overlay;
                 }}
                 {scrollbar_css}
 
@@ -3512,16 +3517,14 @@ class CodeWebViewer(QWebEngineView):
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
                 js_code = (
-                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失
-                    # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
-                    # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
+                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失。
+                    # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
+                    # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
+                    # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
                     "(function(){"
                     "var _sbs=[];"
-                    "var _cp=document.getElementById('content-placeholder');"
-                    "var _childrenArr=Array.from(_cp.children);"
                     "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
-                    "idx:_childrenArr.indexOf(el)});"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                     "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
@@ -3529,9 +3532,7 @@ class CodeWebViewer(QWebEngineView):
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
                     "var _bk=_t.firstElementChild;if(_bk){"
-                    "var _ref=_c.children[b.idx];"
-                    "if(_ref)_c.insertBefore(_bk,_ref);"
-                    "else _c.appendChild(_bk);}}});}"
+                    "_c.appendChild(_bk);}}});}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -3562,16 +3563,14 @@ class CodeWebViewer(QWebEngineView):
             # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
             # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
             # 因找不到流式块而追加重复的 data-tool-injected 块）
-            # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
-            # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
+            # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
+            # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
+            # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
-                "var _cp=document.getElementById('content-placeholder');"
-                "var _childrenArr=Array.from(_cp.children);"
                 "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
-                "idx:_childrenArr.indexOf(el)});"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
@@ -3579,9 +3578,7 @@ class CodeWebViewer(QWebEngineView):
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
-                "var _ref=_c.children[b.idx];"
-                "if(_ref)_c.insertBefore(_bk,_ref);"
-                "else _c.appendChild(_bk);}}});}"
+                "_c.appendChild(_bk);}}});}"
                 "})();"
             )
             self.page().runJavaScript(js_code)

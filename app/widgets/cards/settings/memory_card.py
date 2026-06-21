@@ -914,7 +914,7 @@ class MemoryCardContent(QWidget):
         self._docs_empty_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         Colors.refresh()
         self._docs_empty_hint.setStyleSheet(
-            f"background: transparent; color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)} padding: 20px;"
+            f"background: transparent; color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(15)} padding: 20px;"
         )
         self._docs_empty_hint.setVisible(False)
         docs_layout.addWidget(self._docs_empty_hint, 1, 0, Qt.AlignCenter)
