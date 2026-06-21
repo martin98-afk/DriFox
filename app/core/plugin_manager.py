@@ -254,11 +254,16 @@ class PluginManager:
         用于 watchfiles 热更新：已知变更属于某个插件时，
         只刷新该插件而不扫描全量插件。
 
+        对于 _plugins 中尚不存在的新插件，自动在所有插件目录中
+        搜索匹配后扫描注册（避免调用方需要先全量 rescan）。
+
         Args:
-            name: 插件名称。如果插件已不存在（目录被删除），则从 _plugins 移除。
+            name: 插件名称。如果插件不存在且目录被删除，则静默返回。
         """
         old = self._plugins.get(name)
         if not old:
+            # 新插件：在已知插件目录中搜索并注册
+            self._discover_and_register(name)
             return
 
         plugin_dir = old.path
@@ -276,6 +281,47 @@ class PluginManager:
             # manifest 已不存在
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
+
+    def _discover_and_register(self, name: str) -> Optional[PluginInfo]:
+        """在已知插件目录中按名称搜索新插件，找到后扫描并注册到 _plugins
+
+        搜索顺序：系统插件 → Claude 插件 → 用户插件（优先级同 rescan）。
+        找到第一个匹配目录即停止。
+
+        Args:
+            name: 插件名称
+
+        Returns:
+            注册后的 PluginInfo，未找到返回 None
+        """
+        # 定义搜索目录及对应类型（按优先级从低到高）
+        search_dirs: List[tuple] = [
+            (self._SYSTEM_PLUGIN_DIR, "system"),
+        ]
+        for d in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
+            search_dirs.append((d, "claude"))
+        if self._app_data_dir:
+            search_dirs.append((self._app_data_dir / self._USER_PLUGIN_DIR_NAME, "user"))
+
+        for base_dir, plugin_type in search_dirs:
+            if not base_dir.exists():
+                continue
+            target = base_dir / name
+            if not target.is_dir():
+                continue
+            info = self._scan_one_plugin_dir(target, plugin_type)
+            if info is not None:
+                self._plugins[name] = info
+                # 同步 Settings 启用状态（新插件默认启用）
+                self._restore_enabled_from_settings()
+                logger.info(f"[PluginManager] 发现并注册新插件 '{name}' ({plugin_type})")
+                return info
+            # 目录存在但没有 manifest（.drifox-plugin/plugin.json）
+            # 此时目录存在但插件格式不对，继续搜索其他目录
+            continue
+
+        # 循环结束未找到 → 注册未发生，无需同步 Settings
+        return None
 
     # ============================================================
     # 启用/禁用
@@ -662,6 +708,29 @@ class PluginManager:
                         logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
 
         return configs
+
+    def get_plugin_lsp_config(self, plugin_name: str) -> Optional[dict]:
+        """获取指定单个插件的 LSP 配置（增量重载用）
+
+        只读取该插件的 .lsp.json，不遍历其他插件目录。
+
+        Returns:
+            {"plugin": name, "config": {...}} 或 None（无 .lsp.json 或读取失败）
+        """
+        import json
+
+        plugin = self._plugins.get(plugin_name)
+        if not plugin:
+            return None
+        lsp_file = plugin.path / ".lsp.json"
+        if not lsp_file.exists():
+            return None
+        try:
+            with open(lsp_file, "r", encoding="utf-8") as f:
+                return {"plugin": plugin_name, "config": json.load(f)}
+        except Exception as e:
+            logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
+            return None
 
     def _get_md_files(self, subdir: str) -> List[Path]:
         """从所有已启用插件获取某子目录下的 .md 文件"""

@@ -108,11 +108,17 @@ class LspManager:
             logger.debug("[LspManager] 已初始化，无新配置，跳过")
             return
         self._workspace_root = workspace_root
-        # 停止旧客户端再清空（热重载场景下防止孤儿进程）
+        # 停止旧客户端再清空 — 同步等待 stop_all 完成，消除竞态条件
         if self._clients:
             self._ensure_loop()
             if self._loop:
-                asyncio.run_coroutine_threadsafe(self.stop_all(), self._loop)
+                try:
+                    future = asyncio.run_coroutine_threadsafe(self.stop_all(), self._loop)
+                    future.result(timeout=10.0)  # 同步等待所有旧服务器真正停止
+                except concurrent.futures.TimeoutError:
+                    logger.warning("[LspManager] 停止旧服务器超时，强制清空")
+                except Exception as e:
+                    logger.error(f"[LspManager] 停止旧服务器异常: {e}")
         self._clients.clear()
         self._ext_map.clear()
 
@@ -165,6 +171,93 @@ class LspManager:
         for client in self._clients.values():
             await client.stop()
         logger.info("[LspManager] 所有 LSP 服务器已停止")
+
+    # ── 增量热重载 ───────────────────────────────────────────
+
+    def add_plugin_servers(self, plugin_name: str, config_data: dict) -> int:
+        """增量注册并启动一个插件的 LSP 服务器，不影响已有服务器
+
+        用于新增插件的增量热重载场景：
+        - 只注册该插件新增的服务器（跳过已存在的同名服务器）
+        - 新服务器注册后立即后台启动（不阻塞调用线程）
+        - 已有服务器不受影响
+
+        Args:
+            plugin_name: 插件名称
+            config_data: .lsp.json 的配置内容（{server_name: {...}}）
+
+        Returns:
+            成功注册的服务器数量（后台启动中，不一定全部启动成功）
+        """
+        self._ensure_loop()
+        if self._loop is None:
+            logger.warning("[LspManager] 事件循环未就绪，无法增量添加服务器")
+            return 0
+
+        count = 0
+        for server_name, server_data in config_data.items():
+            if server_name in self._clients:
+                logger.debug(f"[LspManager] 服务器 {server_name} 已存在，跳过增量注册")
+                continue
+            try:
+                config = LspServerConfig.from_dict(server_name, server_data, plugin_name)
+                client = LspClient(config, self._workspace_root)
+                self._clients[server_name] = client
+                for ext, lang in config.extension_to_language.items():
+                    self._ext_map[ext.lower()] = server_name
+                logger.debug(
+                    f"[LspManager] 增量注册 {server_name} ({plugin_name}): "
+                    f"ext={list(config.extension_to_language.keys())}"
+                )
+                # 后台启动新服务器（不阻塞调用线程）
+                asyncio.run_coroutine_threadsafe(client.start(), self._loop)
+                logger.info(f"[LspManager] ✅ 增量启动 {server_name} ({plugin_name})")
+                count += 1
+            except Exception as e:
+                logger.error(f"[LspManager] 增量注册 {plugin_name}/{server_name} 失败: {e}")
+        if count:
+            logger.info(f"[LspManager] 增量添加 {count} 个服务器 (来自 {plugin_name})")
+        return count
+
+    def remove_plugin_servers(self, plugin_name: str) -> int:
+        """移除并停止指定插件的所有 LSP 服务器
+
+        用于插件被删除或 .lsp.json 被移除时的增量清理场景：
+        - 只停止并移除属于该插件的服务器
+        - 其他插件服务器不受影响
+
+        Args:
+            plugin_name: 插件名称
+
+        Returns:
+            移除的服务器数量
+        """
+        self._ensure_loop()
+        if self._loop is None:
+            return 0
+
+        to_remove = [
+            name for name, client in self._clients.items()
+            if client.config.plugin_name == plugin_name
+        ]
+        if not to_remove:
+            return 0
+
+        for name in to_remove:
+            client = self._clients.pop(name, None)
+            if client:
+                try:
+                    # 后台停止，不阻塞调用线程
+                    asyncio.run_coroutine_threadsafe(client.stop(), self._loop)
+                except Exception as e:
+                    logger.warning(f"[LspManager] 停止 {name} 异常: {e}")
+
+        # 批量清理 ext_map
+        remove_set = set(to_remove)
+        self._ext_map = {ext: s for ext, s in self._ext_map.items() if s not in remove_set}
+
+        logger.info(f"[LspManager] 已移除 {len(to_remove)} 个服务器 (来自 {plugin_name}): {to_remove}")
+        return len(to_remove)
 
     async def _ensure_started(self, client: LspClient) -> bool:
         if client.is_running:
