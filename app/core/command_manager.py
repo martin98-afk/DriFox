@@ -275,6 +275,37 @@ class CommandManager:
 
         return result
 
+    @staticmethod
+    def parse_param_value(text: str, param_name: str) -> Optional[str]:
+        """从文本中提取 --key=value 参数的实际值
+
+        Args:
+            text: 输入文本（如 "/lsp-install --language=python --list"）
+            param_name: 参数名（如 "--language="）
+
+        Returns:
+            参数值（如 "python"），未找到返回 None
+
+        支持带引号的值：--model="Azure OpenAI:gpt-4o"
+        """
+        if not text or not param_name:
+            return None
+
+        clean_name = param_name.rstrip("=")
+        # 匹配 --key= 开头的参数值段
+        pattern = re.escape(clean_name) + r'=(\S+)'
+        m = re.search(pattern, text)
+        if not m:
+            return None
+
+        raw_val = m.group(1)
+        # 去掉尾部紧跟的 "、'、空格（处理 --key="value" 或 --key=value"）
+        raw_val = raw_val.rstrip('"\'')
+        # 如果值以引号开头，去掉首尾引号
+        if raw_val.startswith('"') or raw_val.startswith("'"):
+            raw_val = raw_val[1:].rstrip('"\'')
+        return raw_val
+
     def is_builtin_command(self, text: str) -> bool:
         """判断输入文本是否匹配某个已注册的内置命令"""
         name = self.parse_command_name(text)
@@ -445,10 +476,13 @@ class CommandManager:
         """根据参数从 body 中过滤出匹配的段落，返回精简后的提示词
 
         工作方式：
-        - prompt_sections 定义参数→标记 ID 的映射，如 {--list: "list"}
+        - prompt_sections 定义参数→标记 ID 的映射
+          - 扁平映射：{--list: "list", --all: "all"}
+          - 嵌套枚举映射：{--language=: {python: "lang-python", rust: "lang-rust"}}
+            此时从 remainder 中提取 --language= 的实际值，按值查表
         - body 中用 `<!-- section:id -->` / `<!-- end -->` 标记段落
         - 匹配的参数只取对应的标记段，不匹配的段被滤除
-        - 无匹配时返回 None，调用方使用完整 body（向后兼容）
+        - 无 prompt_sections 时返回 None，调用方使用完整 body（向后兼容）
 
         Args:
             command_name: 命令名
@@ -479,20 +513,28 @@ class CommandManager:
         for param in cmd.parameters:
             if param.name not in active_params:
                 continue
-            marker = cmd.prompt_sections.get(param.name)
-            if not marker:
+            marker_raw = cmd.prompt_sections.get(param.name)
+            if not marker_raw:
                 continue
             mg = param_to_mg.get(param.name, "")
             if mg:
                 if mg in matched_groups:
                     continue
                 matched_groups.add(mg)
-            want_markers.add(marker)
 
-        if not want_markers:
-            return None
+            # 支持嵌套枚举映射：{--language=: {python: "lang-python", ...}}
+            if isinstance(marker_raw, dict) and param.param_type == "value":
+                param_value = self.parse_param_value(remainder, param.name)
+                if param_value and param_value in marker_raw:
+                    want_markers.add(marker_raw[param_value])
+                # else: 值不匹配 → 跳过此参数（不添加任何 section）
+            else:
+                want_markers.add(str(marker_raw))
 
         # 从 body 中过滤出需要的段落
+        # 即使 want_markers 为空也执行过滤——移除所有 section 标记块，只保留公共内容
+        # 修复：之前 want_markers 为空时 return None，导致传参但无匹配 section 时
+        # 完整 body（含所有 section）被发送给 AI
         return self._build_filtered_body(cmd.prompt_text, want_markers)
 
     @staticmethod

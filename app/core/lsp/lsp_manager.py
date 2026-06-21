@@ -185,8 +185,37 @@ class LspManager:
 
     # ── 同步接口（供 lsp_tools.py 调用）────────────────────────
 
-    def sync_get_diagnostics(self, file_path: str, timeout: float = 15.0) -> Optional[str]:
-        return self._submit(self.get_diagnostics_for_file(file_path), timeout)
+    def sync_get_diagnostics(self, file_path: str, timeout: float = 40.0):
+        """同步获取诊断（区分状态）
+
+        Returns:
+            (status, payload) 元组
+            - ('ok', str | None)     : 成功。str 为诊断文本，None 表示真无诊断
+            - ('no_client', str)     : 无对应 LSP 客户端（扩展名未注册）
+            - ('start_failed', str)  : LSP 客户端启动失败
+            - ('timeout', str)       : 操作超时
+            - ('error', str)         : 协程异常
+        """
+        self._ensure_loop()
+        if self._loop is None:
+            return ("no_client", "事件循环未启动")
+        client = self.get_client_for_file(file_path)
+        if not client:
+            return ("no_client", f"无 LSP 客户端处理 {os.path.basename(file_path)}")
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self.get_diagnostics_for_file(file_path), self._loop
+            )
+            result = future.result(timeout=timeout)
+            if not client.is_running:
+                return ("start_failed", "LSP 客户端启动失败（可执行文件缺失？）")
+            return ("ok", result)
+        except concurrent.futures.TimeoutError:
+            logger.error(f"[LspManager] diagnostics 超时 ({timeout}s): {file_path}")
+            return ("timeout", str(timeout))
+        except Exception as e:
+            logger.error(f"[LspManager] diagnostics 异常: {e}")
+            return ("error", str(e))
 
     def sync_quick_diagnostics(self, file_path: str, timeout: float = 5.0) -> Optional[str]:
         """快速诊断：跳过 LSP 协议握手，直接走 CLI 工具获取诊断
@@ -253,12 +282,40 @@ class LspManager:
 
     # ── 被动诊断 ──────────────────────────────────────────────
 
+    @staticmethod
+    def _has_cli_mode(command: str) -> bool:
+        """判断 LSP 服务器是否支持 CLI 诊断模式（--outputjson）。
+
+        目前只有 pyright 支持 CLI 模式；typescript-language-server 等
+        必须走完整 LSP 协议。
+        """
+        return "pyright" in command.lower()
+
     async def _quick_diagnostics(self, file_path: str) -> Optional[str]:
-        """快速诊断：跳过 LSP 协议，直接 CLI + 紧凑格式化"""
+        """快速诊断
+
+        - pyright（有 CLI 模式）：直接 CLI + 紧凑格式化（5s 超时）
+        - 其他服务器（无 CLI 模式）：走完整 LSP 协议（10s 超时）
+        """
         client = self.get_client_for_file(file_path)
         if not client:
             return None
-        return await self._run_cli_compact(file_path, client.config.command)
+        if self._has_cli_mode(client.config.command):
+            return await self._run_cli_compact(file_path, client.config.command)
+
+        # 非 pyright：必须走 LSP 协议
+        if not await self._ensure_started(client):
+            return None
+        await client.did_open(file_path)
+        try:
+            diags = await client.wait_diagnostics(timeout=20.0)
+            if diags:
+                return self._format_diagnostics(file_path, diags)
+        except Exception:
+            pass
+        finally:
+            await client.did_close(file_path)
+        return None
 
     @staticmethod
     async def _run_cli(
@@ -377,22 +434,32 @@ class LspManager:
         return result
 
     async def get_diagnostics_for_file(self, file_path: str) -> Optional[str]:
-        """AI 主动获取某文件的诊断（LSP push 不可靠，用 CLI 回退）"""
+        """AI 主动获取某文件的诊断
+
+        策略：
+        - pyright（有 CLI 模式）：LSP push 5s，失败回退 CLI
+        - 其他服务器（无 CLI 模式）：LSP push 30s，强制走纯协议
+        """
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
+        has_cli = self._has_cli_mode(client.config.command)
+        push_timeout = 5.0 if has_cli else 30.0
+
         # 尝试 LSP push 诊断
         await client.did_open(file_path)
         try:
-            diags = await client.wait_diagnostics(timeout=5.0)
+            diags = await client.wait_diagnostics(timeout=push_timeout)
             if diags:
                 return self._format_diagnostics(file_path, diags)
         except Exception:
             pass
         finally:
             await client.did_close(file_path)  # 回收 LSP 服务器打开文件集合
-        # 回退：使用 CLI 获取诊断
-        return await self._cli_diagnostics(file_path, client.config.command)
+        # 回退：仅 pyright 可用 CLI 模式
+        if has_cli:
+            return await self._cli_diagnostics(file_path, client.config.command)
+        return None  # 非 pyright：无 CLI 回退，干净返回 None
 
     @staticmethod
     async def _cli_diagnostics(file_path: str, command: str) -> Optional[str]:

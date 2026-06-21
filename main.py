@@ -61,12 +61,13 @@ def main():
         QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
-    # Chromium flags：所有 WebEngine 视图共享同一个渲染进程，
-    # 防止大量消息卡片创建多个渲染进程导致内存膨胀
+    # Chromium flags：每个 CodeWebViewer 独立一个 Chromium renderer 进程，
+    # 卡片销毁时对应的 renderer 进程会被回收，从而真正释放内存。
+    # --renderer-process-limit=8 作为进程池上限，防止极端场景下进程数无限膨胀。
     import os as _os
-    _chromium_flags = ["--renderer-process-limit=1"]
+    _chromium_flags = ["--renderer-process-limit=8"]
     # macOS 上额外启用 in-process-GPU，防止多窗口时 GPU 子进程
-    # 冲突导致的 SIGTRAP/SIGBUS 崩溃
+    # 冲突导致的 SIGTRAP/SIGBUS 崩溃；独立 renderer 进程后该冲突更可能触发，必须保留
     if platform.system() == "Darwin":
         _chromium_flags.append("--in-process-gpu")
     if "QTWEBENGINE_CHROMIUM_FLAGS" not in _os.environ:

@@ -83,10 +83,15 @@ class LspToolsIntegration:
     # ═══════════════════════════════════════════════════════════
 
     def _do_diagnostics(self, fp: str):
-        result = self._manager.sync_get_diagnostics(fp, timeout=15.0)
-        if result:
-            return _make_result(True, content=result)
-        return _make_result(True, content=f"(无诊断问题: {os.path.basename(fp)})")
+        status, payload = self._manager.sync_get_diagnostics(fp, timeout=40.0)
+        if status == "ok":
+            if payload:
+                return _make_result(True, content=payload)
+            return _make_result(True, content=f"(无诊断问题: {os.path.basename(fp)})")
+        # 状态异常：把"为什么失败"显式告诉 LLM，避免静默误判为"无问题"
+        from loguru import logger
+        logger.warning(f"[LspTools] diagnostics 状态={status}: {payload}")
+        return _make_result(False, error=f"[LSP] 诊断失败 ({status}): {payload}")
 
     def _do_symbols(self, fp: str):
         symbols = self._manager.sync_document_symbols(fp, timeout=10.0)

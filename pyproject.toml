@@ -53,6 +53,8 @@ dependencies = [
     # LSP 集成
     "pygls>=2.0.0",
     "lsprotocol",
+    # 中文历史记录的拼音首字母搜索
+    "pypinyin>=0.49.0",
 ]
 
 [project.optional-dependencies]

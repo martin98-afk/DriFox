@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -61,6 +62,7 @@ class LspClient:
         self._diag_callback: Optional[Callable[[str, list], None]] = None
         self._diag_future: Optional[asyncio.Future] = None
         self._diagnostics: List[Dict[str, Any]] = []
+        self._last_diag_time: float = 0.0  # 最近一次 publishDiagnostics 推送时间（monotonic）
         self._restart_count = 0
 
     # ── 生命周期 ──────────────────────────────────────────────────
@@ -106,6 +108,7 @@ class LspClient:
                             "uri": file_uri,
                         })
                     self._diagnostics = diags
+                    self._last_diag_time = time.monotonic()
                     if self._diag_future and not self._diag_future.done():
                         self._diag_future.set_result(diags)
                     logger.debug(
@@ -367,7 +370,18 @@ class LspClient:
             logger.error(f"[LspClient:{self.config.name}] didClose 失败: {e}")
 
     async def wait_diagnostics(self, timeout: float = 10.0) -> list:
-        """等待诊断结果（使用 loop-bound Future 确保多线程安全）"""
+        """等待诊断结果（使用 loop-bound Future 确保多线程安全）
+
+        快路径优化：如果 server 在最近 5s 内已推过 publishDiagnostics，
+        直接返回缓存，避免无谓等待 30s（典型场景：被动监听 didChange
+        后再调 sync_get_diagnostics，server 已经推过了）。
+        """
+        if (
+            self._diagnostics
+            and getattr(self, "_last_diag_time", 0.0) > 0
+            and (time.monotonic() - self._last_diag_time) < 5.0
+        ):
+            return list(self._diagnostics)
         loop = asyncio.get_running_loop()
         self._diag_future = loop.create_future()
         try:
