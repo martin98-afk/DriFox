@@ -92,7 +92,7 @@ class LspClient:
             # 注册诊断回调
             if lsp:
                 @self._client.feature(lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)
-                def _on_diag(client_ls, params):
+                def _on_diag(ls, params):
                     diags = []
                     items = _get(params, "diagnostics", [])
                     file_uri = _get(params, "uri", "")
@@ -120,9 +120,9 @@ class LspClient:
                         self._diag_callback(file_uri, diags)
 
                 @self._client.feature("window/logMessage")
-                def _on_log(client_ls, params):
+                def _on_log(ls, params):
                     msg = _get(params, "message", str(params))
-                    logger.debug(f"[LspClient:{self.config.name}] pyright: {msg[:200]}")
+                    logger.debug(f"[LspClient:{self.config.name}] LSP server: {msg[:200]}")
 
             # 启动子进程
             args = [exe, *self.config.args]
