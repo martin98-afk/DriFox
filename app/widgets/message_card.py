@@ -859,7 +859,7 @@ _THINK_SNAKE_SVG = (
 # 页脚 Review 按钮 SVG：放大镜 + 对勾，象征"审查"。
 # 使用 currentColor 让 QPainter 在渲染时统一着色以匹配主题。
 _REVIEW_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" '
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" '
     'fill="none" stroke="currentColor" stroke-width="2.2" '
     'stroke-linecap="round" stroke-linejoin="round">'
     '<circle cx="11" cy="11" r="6.5"/>'
@@ -4755,27 +4755,21 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
-        # Review 按钮（紧贴差异统计右侧，SVG 渲染），点击触发 code-reviewer 子智能体
-        review_btn = QLabel(self)
+        # Review 按钮（紧贴差异统计右侧，emoji 🔍），点击触发 code-reviewer 子智能体
+        review_btn = QLabel("🔍", self)
         review_btn.setObjectName("footer_review_btn")
         review_btn.setStyleSheet(
-            "QLabel {"
-            " background: transparent; padding: 0px 1px; margin: 0px;"
-            " border-radius: 3px;"
-            " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); }"
+            f"QLabel {{"
+            f" background: transparent; padding: 0px 2px; margin: 0px;"
+            f" border-radius: 3px; font-size: {scale_font_size(11)}px;"
+            f" color: {accent};"
+            f" }}"
+            f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
         )
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
         review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
-        # 预渲染 SVG pixmap：14×14 逻辑像素（与 1px 对称 padding 一起填满 16×16 容器，最大化视觉占比）
-        dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
-        review_btn._review_svg = _REVIEW_SVG
-        review_btn._review_color = accent
-        review_btn._review_pixmap = _render_svg_pixmap(_REVIEW_SVG, 14, accent, dpr=dpr)
-        review_btn.setPixmap(review_btn._review_pixmap)
-        # 逻辑像素 16×16（含 1px 对称 padding），物理像素已由 setDevicePixelRatio 处理
-        review_btn.setFixedSize(16, 16)
+        review_btn.adjustSize()
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
@@ -4886,17 +4880,15 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setVisible(True)
 
         # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
-        # SVG 渲染比较重（QPixmap + QSvgRenderer + QPainter），只在颜色真的变化时才重建，
-        # 避免每次 add_diff_stats 都白白花一笔
         if self._footer_review_btn:
-            cached_color = getattr(self._footer_review_btn, "_review_color", None)
-            if cached_color != accent:
-                dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
-                svg_str = getattr(self._footer_review_btn, "_review_svg", _REVIEW_SVG)
-                new_pixmap = _render_svg_pixmap(svg_str, 14, accent, dpr=dpr)
-                self._footer_review_btn._review_color = accent
-                self._footer_review_btn._review_pixmap = new_pixmap
-                self._footer_review_btn.setPixmap(new_pixmap)
+            self._footer_review_btn.setStyleSheet(
+                f"QLabel {{"
+                f" background: transparent; padding: 0px 2px; margin: 0px;"
+                f" border-radius: 3px; font-size: {scale_font_size(11)}px;"
+                f" color: {accent};"
+                f" }}"
+                f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
+            )
             self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
