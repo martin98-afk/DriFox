@@ -5783,8 +5783,14 @@ class MessageCard(SimpleCardWidget):
             self._content_data = ensure_content_blocks(content)
             rendered = content_to_markdown(self._content_data)
         else:
-            self._content_data = str(content or "")
-            rendered = self._content_data
+            # 用户消息支持 multimodal 内容（含图片块的列表）
+            if isinstance(content, list):
+                # 使用 content_to_text 正确提取文本，图片块转为 [图片] 占位符
+                self._content_data = content
+                rendered = content_to_text(content)
+            else:
+                self._content_data = str(content or "")
+                rendered = self._content_data
 
         if not self._lazy_rendered:
             # 懒渲染阶段，保存内容等待进入可视区域
@@ -5986,6 +5992,8 @@ class MessageCard(SimpleCardWidget):
     def get_plain_text(self) -> str:
         if self.role == "assistant":
             return content_to_text(self._content_data, include_tool_results=True)
+        if isinstance(self._content_data, list):
+            return content_to_text(self._content_data)
         return str(self._content_data or "")
 
     def run_js(self, js_code: str):

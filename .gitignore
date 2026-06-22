@@ -30,6 +30,10 @@ Thumbs.db
 /tests/
 # Build artifacts
 dist/
+# 但保留 CI 构建和 ISS 编译所需文件
+!dist/installer.iss
+!dist/ChineseSimplified.isl
+!dist/drifox.ico
 *.spec
 check_format.py
 debug_*.py
