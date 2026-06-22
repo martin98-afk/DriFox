@@ -27,11 +27,13 @@ class HookItem(QWidget):
     edited = pyqtSignal(int)  # 发送 hook 索引
     toggled = pyqtSignal(int, bool)  # 索引, 启用状态
     
-    def __init__(self, event_name: str, hook_data: dict, index: int, parent=None):
+    def __init__(self, event_name: str, hook_data: dict, index: int, parent=None,
+                 is_readonly: bool = False):
         super().__init__(parent=parent)
         self.event_name = event_name
         self.hook_data = hook_data
         self.index = index
+        self._is_readonly = is_readonly
         self._setup_ui()
     
     def _setup_ui(self):
@@ -61,16 +63,28 @@ class HookItem(QWidget):
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(self.hook_data.get("enabled", True))
         
-        # 编辑 / 删除按钮
+        # 编辑 / 删除按钮（只读 hook 禁用编辑/删除）
         self.editBtn = ToolButton(FluentIcon.EDIT)
         self.editBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
-        self.editBtn.setStyleSheet(ButtonStyles.tool_button())
-        self.editBtn.clicked.connect(lambda: self.edited.emit(self.index))
-        
         self.delBtn = ToolButton(FluentIcon.CLOSE)
         self.delBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
-        self.delBtn.setStyleSheet(ButtonStyles.tool_button())
-        self.delBtn.clicked.connect(lambda: self.removed.emit(self.index))
+        if self._is_readonly:
+            # 只读 hook：禁用按钮，提示需通过源文件编辑
+            self.editBtn.setEnabled(False)
+            self.editBtn.setToolTip("插件 Hook 为只读，请在插件源文件中编辑")
+            self.editBtn.setStyleSheet(
+                ButtonStyles.tool_button() + " QToolButton { opacity: 0.4; }"
+            )
+            self.delBtn.setEnabled(False)
+            self.delBtn.setToolTip("插件 Hook 为只读，请在插件源文件中删除")
+            self.delBtn.setStyleSheet(
+                ButtonStyles.tool_button() + " QToolButton { opacity: 0.4; }"
+            )
+        else:
+            self.editBtn.setStyleSheet(ButtonStyles.tool_button())
+            self.editBtn.clicked.connect(lambda: self.edited.emit(self.index))
+            self.delBtn.setStyleSheet(ButtonStyles.tool_button())
+            self.delBtn.clicked.connect(lambda: self.removed.emit(self.index))
         
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(48, 0, 16, 0)
@@ -347,9 +361,10 @@ class HookListSettingCard(ExpandSettingCard):
             for rule_index, rule in enumerate(rules):
                 hooks = rule.get("hooks", [])
                 for hook_index, hook in enumerate(hooks):
-                    item = HookItem(event_name, hook, hook_index, self.view)
-                    # 只读 hooks：允许开关操作，但持久化到技能自己的配置文件
+                    # 只读 hooks：允许开关操作，但编辑/删除按钮禁用
                     is_readonly = rule.get("_readonly", False)
+                    item = HookItem(event_name, hook, hook_index, self.view,
+                                    is_readonly=is_readonly)
                     # 使用闭包捕获正确的变量值
                     item.removed.connect(
                         lambda idx, en=event_name, ri=rule_index: self._remove_hook(en, ri, idx)

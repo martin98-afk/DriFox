@@ -341,6 +341,8 @@ class UIEngine(BaseEngine):
         hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
 
         if hook_mgr:
+            # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
+            _do_trigger(hook_mgr, "UserPromptSubmit", {"message": user_text})
             _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
         session.add_user_message(content=content_to_store)
         if hook_mgr:

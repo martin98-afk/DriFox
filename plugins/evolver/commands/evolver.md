@@ -53,14 +53,15 @@ memory/                   ← 进化记忆目录（由 Hook 自动生成）
 ---
 
 ## 子命令详情
-
+<!-- section:status -->
 ### `--status` — 查看状态
 
 检查：
 1. `evolver` CLI 是否可用（`evolver --version`）
 2. `memory/` 目录是否存在，统计各日志文件行数
 3. 是否有 `.env` 配置了 EvoMap Hub（可选）
-
+<!-- end -->
+<!-- section:run -->
 ### `--run` — 单次进化
 
 执行 `evolver` 命令，输出 GEP 进化 prompt：
@@ -73,14 +74,16 @@ npx --yes @evomap/evolver
 - 扫描到的信号数
 - 匹配的 Gene/Capsule
 - GEP prompt（可直接复制使用）
-
+<!-- end -->
+<!-- section:review -->
 ### `--review` — 审查模式
 
 ```bash
 npx --yes @evomap/evolver --review
 ```
 生成进化 prompt 后等待人工确认，适用于重要变更前审查。
-
+<!-- end -->
+<!-- section:loop -->
 ### `--loop` — 持续进化
 
 ```bash
@@ -89,18 +92,21 @@ npx --yes @evomap/evolver --loop
 在后台持续运行进化循环。如需终止，用户可 Ctrl+C 或关闭终端。
 > **注意**：--loop 输出的 sessions_spawn(...) 指令是纯文本，不会被 DriFox 自动执行。
 > 如需自动应用进化，将 Evolver 集成到支持该协议的宿主运行时（如 OpenClaw）中。
-
+<!-- end -->
+<!-- section:install -->
 ### `--install` — 安装/检查
 
 ```bash
 npm install -g @evomap/evolver
 ```
 检测 Node.js 是否可用，安装后验证。
-
+<!-- end -->
+<!-- section:log -->
 ### `--log` — 查看进化日志
 
 查看 `memory/evolution_YYYY-MM-DD.jsonl` 最近的 5 条进化记录。
 如果日志不存在，提示尚无进化记录。
+<!-- end -->
 
 ---
 

@@ -415,10 +415,13 @@ class PluginManager:
                     manifest.setdefault("version", manifest.get("version", "0.0.0"))
 
                 # 自动检测组件：扫描目录结构（两种格式都做，保证新增目录能被识别）
+                # hooks 组件需同时存在 hooks/ 目录和 hooks/hooks.json 文件
                 components = {}
-                for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
+                for comp_name in ("commands", "agents", "skills", "themes"):
                     if (item / comp_name).exists():
                         components[comp_name] = True
+                if (item / "hooks").exists() and (item / "hooks" / "hooks.json").exists():
+                    components["hooks"] = True
                 if (item / ".mcp.json").exists():
                     components["mcp"] = True
                 if (item / ".lsp.json").exists():
@@ -470,10 +473,13 @@ class PluginManager:
 
             # 自动检测插件目录中实际存在的组件子目录，补充到 manifest 的 components 中
             # 两种格式都做 auto-detect，确保新增目录（如 themes/）能被热更新识别
+            # hooks 组件需同时存在 hooks/ 目录和 hooks/hooks.json 文件
             detected_components = {}
-            for comp_name in ("commands", "agents", "skills", "themes", "hooks"):
+            for comp_name in ("commands", "agents", "skills", "themes"):
                 if (plugin_dir / comp_name).exists():
                     detected_components[comp_name] = True
+            if (plugin_dir / "hooks").exists() and (plugin_dir / "hooks" / "hooks.json").exists():
+                detected_components["hooks"] = True
             if (plugin_dir / ".mcp.json").exists():
                 detected_components["mcp"] = True
             if (plugin_dir / ".lsp.json").exists():

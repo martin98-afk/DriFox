@@ -662,8 +662,8 @@ class HookManager:
             # 更新监控时间
             self._config_watchers[config_file] = current_mtime
             
-            # 重新注册 (保留技能注册)
-            self.register_hooks_from_json("__global__", "", config, config_file)
+            # 重新注册 (保留技能注册，skill_name 统一用 "user-custom")
+            self.register_hooks_from_json("user-custom", "", config, config_file)
             
             logger.info(f"[HookManager] Hot reloaded hooks from {config_file}")
             return True
@@ -785,11 +785,13 @@ class HookManager:
             signals = HookWorkerSignals()
             worker = HookWorker(hook, cwd, signals, context.get("event_name", ""), context)
             
-            if self._on_finished_callback:
+            # 仅在 hook 声明 add_output_to_context=True 时才连接完成回调
+            if hook.add_output_to_context and self._on_finished_callback:
                 signals.finished.connect(self._on_finished_callback)
             
             self._thread_pool.start(worker)
-            logger.info(f"[HookManager] Hook triggered (async): {context.get('event_name')}")
+            logger.debug(f"[HookManager] Hook triggered (async): {context.get('event_name')} "
+                        f"(add_output_to_context={hook.add_output_to_context})")
             
             return HookExecutionResult(success=True, output="")
         else:
@@ -1067,8 +1069,8 @@ class HookManager:
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
 
-            # 先注销旧的全局 hooks
-            self.unregister_skill_hooks("__global__")
+            # 先注销旧的全局 hooks（统一用 "user-custom" skill_name）
+            self.unregister_skill_hooks("user-custom")
 
             # 清除 _config_watchers 中的条目，避免去重检查拦截重新注册
             if config_file in self._config_watchers:
@@ -1076,7 +1078,7 @@ class HookManager:
 
             # 重新注册
             skill_root = str(Path(config_file).parent)
-            self.register_hooks_from_json("__global__", skill_root, config, config_file)
+            self.register_hooks_from_json("user-custom", skill_root, config, config_file)
             logger.info(f"[HookManager] Reloaded global hooks from {config_file}")
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")

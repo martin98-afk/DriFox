@@ -243,8 +243,8 @@ class ChatBackend(QObject):
             
             hook_output = f"<hook event=\"{event_name}\">\n{output}\n</hook>"
             
-            # SessionStart 和 PreUserMessage 添加到消息列表
-            add_to_messages = event_name in ("SessionStart", "PreUserMessage", "PostUserMessage")
+            # SessionStart / UserPromptSubmit / PreUserMessage / PostUserMessage 添加到消息列表
+            add_to_messages = event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage")
             
             if add_to_messages:
                 session = self.get_current_session()
@@ -281,13 +281,13 @@ class ChatBackend(QObject):
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             global_hooks_file = pm.get_global_hooks_file()
-            if global_hooks_file.exists() and "__global__" not in self._hook_manager._skill_to_hooks:
+            if global_hooks_file.exists() and "user-custom" not in self._hook_manager._skill_to_hooks:
                 try:
                     with open(global_hooks_file, 'rb') as f:
                         config = json.loads(f.read())
                     skill_root = str(global_hooks_file.parent)
                     count = self._hook_manager.register_hooks_from_json(
-                        "__global__", skill_root, config, str(global_hooks_file)
+                        "user-custom", skill_root, config, str(global_hooks_file)
                     )
                     if count > 0:
                         logger.info(f"[ChatBackend] Loaded {count} global hooks from {global_hooks_file}")
@@ -1288,6 +1288,14 @@ class ChatBackend(QObject):
     
     def stop_streaming(self):
         """停止流式输出（同步方式，可能阻塞 UI 线程）"""
+        # 触发 Stop hook（同步执行，确保 hook 在流停止前完成）
+        if self._hook_manager:
+            self._hook_manager.trigger_event(
+                "Stop",
+                context={"project_root": os.getcwd()},
+                current_message="",
+                trigger_async=False,  # 同步：确保 ralph-loop 等 hook 在 stop 前完成
+            )
         if self._chat_engine:
             return self._chat_engine.stop()
 
