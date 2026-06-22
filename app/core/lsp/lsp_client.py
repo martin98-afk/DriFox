@@ -97,7 +97,10 @@ class LspClient:
         # 查找可执行文件
         exe = self._resolve_command()
         if not exe:
-            logger.warning(f"[LspClient:{self.config.name}] 未找到可执行文件: {self.config.command}")
+            hint = f", install_hint={self.config.install_hint}" if self.config.install_hint else ""
+            logger.warning(
+                f"[LspClient:{self.config.name}] 未找到可执行文件: {self.config.command}{hint}"
+            )
             return False
 
         try:
@@ -479,10 +482,33 @@ class LspClient:
         # 如果是绝对路径，直接使用
         if Path(cmd).is_absolute():
             return cmd
-        # 在 PATH 中查找
-        found = shutil.which(cmd)
-        if found:
-            return found
+        candidates = [cmd]
+        if sys.platform == "win32" and not cmd.lower().endswith(".exe"):
+            candidates.append(f"{cmd}.exe")
+
+        repo_root = Path(__file__).resolve().parents[3]
+        venv_roots = {
+            Path(sys.executable).resolve().parent,
+            Path.cwd() / ".venv" / "Scripts",
+            repo_root / ".venv" / "Scripts",
+        }
+        if sys.platform != "win32":
+            venv_roots.update(
+                {
+                    Path(sys.executable).resolve().parent,
+                    Path.cwd() / ".venv" / "bin",
+                    repo_root / ".venv" / "bin",
+                }
+            )
+
+        for name in candidates:
+            found = shutil.which(name)
+            if found:
+                return found
+            for root in venv_roots:
+                candidate = root / name
+                if candidate.exists():
+                    return str(candidate)
         return None
 
     def _guess_lang(self, file_path: str) -> str:

@@ -48,7 +48,9 @@ from PyQt5.QtGui import (
     QBrush,
     QLinearGradient,
     QPainterPath,
+    QPixmap,
 )
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
 from app.core.webengine_profile import create_transient_web_profile
 from PyQt5.QtWidgets import (
@@ -852,6 +854,46 @@ _THINK_SNAKE_SVG = (
     ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
     '</svg>'
 )
+
+
+# 页脚 Review 按钮 SVG：放大镜 + 对勾，象征"审查"。
+# 使用 currentColor 让 QPainter 在渲染时统一着色以匹配主题。
+_REVIEW_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2.2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="11" cy="11" r="6.5"/>'
+    '<line x1="20" y1="20" x2="15.8" y2="15.8"/>'
+    '<polyline points="8.2 11.2 10.4 13.4 13.8 9.6"/>'
+    '</svg>'
+)
+
+
+def _render_svg_pixmap(svg_str: str, size: int, color: str) -> "QPixmap":
+    """把内嵌 SVG 渲染为指定颜色的 QPixmap（用于 QLabel 显示）。
+
+    Args:
+        svg_str: 完整 SVG 字符串（内部使用 stroke="currentColor"）
+        size: 目标像素尺寸（正方形）
+        color: 应用颜色（与 _theme["accent"] 保持一致）
+
+    Returns:
+        已着色的 QPixmap，背景透明
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    renderer = QSvgRenderer(svg_str.encode("utf-8"))
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        renderer.render(painter)
+        # 用 SourceIn 模式把 currentColor 替换为目标颜色
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), QColor(color))
+    finally:
+        painter.end()
+    return pixmap
 
 
 def _render_tool_streaming_block(
@@ -4459,6 +4501,7 @@ class MessageCard(SimpleCardWidget):
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
+    reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # provider_name, model_name — 用户点击页脚模型标签时触发
@@ -4509,6 +4552,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_elapsed_label: Optional[QLabel] = None
         self._footer_tokens_label: Optional[QLabel] = None
         self._footer_diff_stats_label: Optional[QLabel] = None
+        self._footer_review_btn: Optional[QLabel] = None
         self._footer_sep1: Optional[QLabel] = None
         self._footer_sep2: Optional[QLabel] = None
         # 耗时实时计时器
@@ -4702,6 +4746,25 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
+        # Review 按钮（紧贴差异统计右侧，SVG 渲染），点击触发 code-reviewer 子智能体
+        review_btn = QLabel(self)
+        review_btn.setStyleSheet(
+            f"background: transparent; padding: 0px 2px 0px 4px; margin: 0px;"
+        )
+        review_btn.setCursor(Qt.PointingHandCursor)
+        review_btn.setVisible(False)
+        review_btn.setToolTip("用 reviewer 子智能体快速审查本次修改")
+        review_btn.setProperty("round_index_ref", True)  # 占位，确保 _disconnect_all_signals 不报错
+        # 渲染 SVG pixmap：14×14，使用主题 accent 着色
+        review_btn._review_svg = _REVIEW_SVG
+        review_btn._review_color = accent
+        review_btn._review_pixmap = _render_svg_pixmap(_REVIEW_SVG, 14, accent)
+        review_btn.setPixmap(review_btn._review_pixmap)
+        review_btn.setFixedSize(18, 14)
+        review_btn.mousePressEvent = lambda e: self._emit_review_requested()
+        self._footer_review_btn = review_btn
+        layout.addWidget(review_btn)
+
         layout.addStretch()
 
         # Token 消耗
@@ -4787,6 +4850,9 @@ class MessageCard(SimpleCardWidget):
             return
         if files_count == 0 and additions == 0 and deletions == 0:
             self._footer_diff_stats_label.setVisible(False)
+            # 同步隐藏 Review 按钮（没有 diff 时审查无意义）
+            if self._footer_review_btn:
+                self._footer_review_btn.setVisible(False)
             return
 
         accent = self._theme.get("accent", "#888888")
@@ -4803,6 +4869,16 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setText(html)
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
         self._footer_diff_stats_label.setVisible(True)
+
+        # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
+        if self._footer_review_btn:
+            new_pixmap = _render_svg_pixmap(
+                getattr(self._footer_review_btn, "_review_svg", _REVIEW_SVG),
+                14,
+                accent,
+            )
+            self._footer_review_btn.setPixmap(new_pixmap)
+            self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
                         seen_files: set = None):
@@ -5585,6 +5661,12 @@ class MessageCard(SimpleCardWidget):
         round_idx = self._round_index if self._round_index is not None else -1
         msg_idx = self._message_index if self._message_index is not None else -1
         self.cardDiffRequested.emit(round_idx, msg_idx)
+
+    def _emit_review_requested(self):
+        """发射页脚 Review 按钮点击信号"""
+        round_idx = self._round_index if self._round_index is not None else -1
+        msg_idx = self._message_index if self._message_index is not None else -1
+        self.reviewRequested.emit(round_idx, msg_idx)
 
     def _update_height(self, h):
         target_height = max(40, h)
@@ -6487,6 +6569,7 @@ class MessageCard(SimpleCardWidget):
             self.toolDiffRequested,
             self.subAgentLogRequested,
             self.cardDiffRequested,
+            self.reviewRequested,
             self.saveFileRequested,
             self.lazyRenderCompleted,
         ]

@@ -7073,6 +7073,7 @@ class OpenAIChatToolWindow(ToolWindow):
             on_card_diff=self._on_card_diff_requested,
             on_save_file=self._on_save_file_requested,
             on_subagent_log=self._on_subagent_log_requested,
+            on_review=self._on_review_requested,
             immediate_render=scroll,  # 流式(scroll=True)立即渲染，加载(scroll=False)走懒渲染队列
         )
 
@@ -7650,6 +7651,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _delete_message(self, card: MessageCard):
         if card.role != "user":
             return
+
+        # 🛡️ 删除前中断正在进行的流式输出，防止 worker 的过期消息覆盖 session
+        if self._is_streaming:
+            self._on_stop_clicked()
 
         # === 缓存删除数据，用于撤销恢复（只缓存一步）===
         session = self.session_manager.get_current_session()
@@ -8342,6 +8347,194 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[LLMChatter] 显示卡片差异失败: {e}")
             InfoBar.error(
                 "差异显示失败",
+                str(e),
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    def _on_review_requested(self, round_index: int, message_index: int = -1):
+        """
+        处理页脚 Review 按钮点击：收集该 round 内所有工具的文件修改，
+        生成统一 diff 文本，作为任务描述触发 code-reviewer 子智能体快速审查。
+
+        Args:
+            round_index: 用户回合索引
+            message_index: 消息在 _message_batch 中的索引（fallback）
+        """
+        if round_index < 0 and message_index < 0:
+            return
+
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        # 复用 _on_card_diff_requested 的 round_index 合法性校验 + fallback 推导
+        from app.core.message_content import consolidate_messages, get_user_round_ranges
+
+        canonical_messages = consolidate_messages(session.messages)
+        round_ranges = get_user_round_ranges(canonical_messages)
+        if round_index < 0 or round_index >= len(round_ranges):
+            logger.debug(
+                f"[card-review] round_index={round_index} out of range ({len(round_ranges)}), recomputing"
+            )
+            round_index = -1
+
+        if round_index < 0 and message_index >= 0:
+            computed = 0
+            for idx in range(message_index):
+                if (
+                    idx < len(self._message_batch)
+                    and self._message_batch[idx]
+                    and self._message_batch[idx][0].get("role") == "user"
+                ):
+                    computed += 1
+            if computed < len(round_ranges):
+                round_index = computed
+
+        if round_index < 0 or round_index >= len(round_ranges):
+            logger.warning(f"[card-review] cannot determine valid round_index")
+            return
+
+        session_id = session.session_id
+
+        if not self.backend.tool_executor or not self.backend.file_recorder:
+            InfoBar.error(
+                "审查失败",
+                "file_recorder 未初始化",
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        try:
+            from app.widgets.ui_helpers import (
+                collect_operations_for_round,
+                read_backup_files,
+            )
+
+            all_call_ids = self._get_tool_call_ids_in_round(round_index)
+            logger.debug(f"[card-review] round_index={round_index}, call_ids={all_call_ids}")
+
+            if not all_call_ids:
+                InfoBar.warning(
+                    "无差异信息",
+                    "此对话没有可审查的文件修改",
+                    duration=3000,
+                    parent=self,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            all_operations = collect_operations_for_round(
+                self.backend.file_recorder, session_id, all_call_ids
+            )
+
+            if not all_operations:
+                InfoBar.warning(
+                    "无差异信息",
+                    "此对话没有可审查的文件修改，或备份信息已丢失",
+                    duration=3000,
+                    parent=self,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 收集统一 diff 文本（每个文件一段 unified diff），用于注入 review 任务描述
+            import difflib
+            from app.widgets.ui_helpers import normalize_lines
+
+            diff_text_parts: list[str] = []
+            file_summaries: list[str] = []
+            for op in all_operations:
+                backup_path = op.get("backup_path", "")
+                file_path = op.get("file_path", "")
+                tool_name = op.get("tool_name", "")
+                if not backup_path:
+                    continue
+                # 只审查写/编辑类工具，跳过读取类
+                if tool_name not in ("write", "edit", "multi_edit"):
+                    continue
+                try:
+                    old_content, new_content, backup_file = read_backup_files(backup_path)
+                except Exception:
+                    continue
+
+                old_lines = normalize_lines(old_content)
+                new_lines = normalize_lines(new_content)
+                diff_iter = difflib.unified_diff(
+                    old_lines,
+                    new_lines,
+                    fromfile=f"a/{file_path or backup_file.name}",
+                    tofile=f"b/{file_path or backup_file.name}",
+                    lineterm="\n",
+                )
+                diff_text = "".join(diff_iter)
+                if diff_text:
+                    diff_text_parts.append(diff_text)
+                    file_summaries.append(file_path or backup_file.name)
+
+            if not diff_text_parts:
+                InfoBar.warning(
+                    "无可审查内容",
+                    "本轮所有文件修改均无可对比的差异",
+                    duration=3000,
+                    parent=self,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            # 拼接统一 diff（截断以避免超长任务描述撑爆 prompt）
+            combined_diff = "\n".join(diff_text_parts)
+            MAX_DIFF_CHARS = 60_000
+            truncated = len(combined_diff) > MAX_DIFF_CHARS
+            if truncated:
+                combined_diff = combined_diff[:MAX_DIFF_CHARS] + "\n\n... (diff 已截断，仅展示前 60KB)"
+
+            # 构造 review 子智能体任务描述
+            files_bullet = "\n".join(f"- `{p}`" for p in file_summaries[:50])
+            if len(file_summaries) > 50:
+                files_bullet += f"\n... 及其他 {len(file_summaries) - 50} 个文件"
+
+            task_description = (
+                "请对以下 `code-reviewer` 任务进行快速代码审查：\n\n"
+                "## 范围\n"
+                "本轮（user round）涉及以下文件修改：\n"
+                f"{files_bullet}\n\n"
+                "## 审查重点\n"
+                "1. 计划对齐：实现是否符合本轮用户意图？\n"
+                "2. 代码质量：命名、错误处理、类型安全、可维护性\n"
+                "3. 架构与设计：是否遵循现有架构与 SOLID 原则\n"
+                "4. 安全/性能：潜在漏洞、明显的性能问题\n"
+                "5. 文档与规范：注释、命名是否符合项目规范\n\n"
+                "## 文件差异（unified diff）\n"
+                "```diff\n"
+                f"{combined_diff}\n"
+                "```\n\n"
+                "请按 Critical / Important / Suggestions 三档分类输出结论，"
+                "并对每条问题给出具体文件:行号与可执行的修复建议。"
+            )
+
+            # 触发 review 子智能体
+            self._execute_subagent_task(
+                agent_name="code-reviewer",
+                task_description=task_description,
+                with_context=False,
+            )
+
+            InfoBar.success(
+                "Review 已启动",
+                f"code-reviewer 子智能体正在审查 {len(file_summaries)} 个文件",
+                duration=2500,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+        except Exception as e:
+            logger.error(f"[LLMChatter] 触发 review 子智能体失败: {e}")
+            InfoBar.error(
+                "Review 失败",
                 str(e),
                 duration=3000,
                 parent=self,
@@ -10093,6 +10286,22 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         self._history_preview_messages = None
+
+        # 🛡️ 检查截断哨兵：若在 worker 运行期间发生了删除/截断，丢弃 worker 的过期数据
+        sentinel = self._truncation_sentinel
+        if (
+            sentinel
+            and sentinel.get("session_id") == session.session_id
+        ):
+            from loguru import logger
+            logger.warning(
+                "[MessagesUpdated] 检测到截断哨兵，丢弃 worker 返回的过期消息："
+                f"worker_len={len(messages)}, current_len={len(session.messages)}, "
+                f"session_id={session.session_id[:8]}"
+            )
+            self._truncation_sentinel = None
+            return
+
         # 注意：preserve_compaction=False
         # worker 送回来的 current_session_messages 是原始未压缩消息，
         # 保留旧的压缩缓存会导致 state 不一致（缓存说"已压缩"但消息已膨胀）。
