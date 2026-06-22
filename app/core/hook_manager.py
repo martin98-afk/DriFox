@@ -102,9 +102,16 @@ class Hook:
     @classmethod
     def from_dict(cls, d: dict) -> 'Hook':
         conditions = [HookCondition.from_dict(c) for c in d.get("conditions", [])]
+        hook_type = d.get("type", "command")
+        # 根据类型规范化 command 值：优先取专用字段，再 fallback 到 command
+        command = d.get("command", "")
+        if hook_type == "python":
+            command = d.get("function") or command
+        elif hook_type == "http":
+            command = d.get("url") or command
         return cls(
-            type=d.get("type", "command"),
-            command=d.get("command", ""),
+            type=hook_type,
+            command=command,
             cwd=d.get("cwd"),
             add_output_to_context=d.get("add_output_to_context", True),
             skill_root=d.get("skill_root", ""),
@@ -117,7 +124,7 @@ class Hook:
             allowed_env_vars=d.get("allowedEnvVars"),
             function=d.get("function"),
             function_args=d.get("function_args"),
-            config_file=d.get("config_file"),  # 添加 config_file 字段
+            config_file=d.get("config_file"),
         )
     
     def to_dict(self) -> dict:
@@ -823,7 +830,10 @@ class HookManager:
                         success = True
                 
                 elif hook.type == HookType.PYTHON.value:
-                    if hook.function and hook.function in self._registered_functions:
+                    if not hook.function:
+                        output = "No function specified"
+                        success = False
+                    elif hook.function in self._registered_functions:
                         func = self._registered_functions[hook.function]
                         args = hook.function_args or {}
                         args.update({"event": context.get("event_name"), "context": context})
@@ -831,8 +841,30 @@ class HookManager:
                         output = result if isinstance(result, str) else json.dumps(result)
                         success = True
                     else:
-                        output = f"Function not registered: {hook.function}"
-                        success = False
+                        # 回退：尝试 importlib.import_module (module.path:function_name)
+                        try:
+                            parts = hook.function.rsplit(":", 1)
+                            if len(parts) != 2:
+                                output = f"Function not registered (invalid path): {hook.function}"
+                                success = False
+                            else:
+                                module_path, func_name = parts
+                                import importlib
+                                module = importlib.import_module(module_path)
+                                func = getattr(module, func_name, None)
+                                if not callable(func):
+                                    output = f"Function not found: {hook.function}"
+                                    success = False
+                                else:
+                                    args = hook.function_args or {}
+                                    args["event"] = context.get("event_name")
+                                    args["context"] = context
+                                    result = func(**args)
+                                    output = result if isinstance(result, str) else json.dumps(result)
+                                    success = True
+                        except Exception as e:
+                            output = f"Python hook failed: {str(e)}"
+                            success = False
                         
                 # 检查决策（支持 JSON decision 和 exit code 2 两种方式）
                 decision = HookDecision.CONTINUE
@@ -1083,6 +1115,35 @@ class HookManager:
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")
 
+    def reload_all_plugin_hooks(self):
+        """重新加载所有已启用插件的 hooks（不碰 user-custom 全局 hooks）
+
+        用于卡片 _save_hooks() 后同步插件 hooks 的最新文件内容。
+        """
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return
+            for plugin in pm.get_enabled_plugins():
+                if plugin.name == "user-custom":
+                    # user-custom 由 reload_global_hooks 单独管理，跳过
+                    continue
+                hooks_dir = plugin.path / "hooks"
+                hooks_file = hooks_dir / "hooks.json"
+                if not hooks_dir.exists() or not hooks_dir.is_dir():
+                    continue
+                # 先注销旧的，清除去重缓存
+                self.unregister_skill_hooks(plugin.name)
+                if hooks_file.exists():
+                    self._clear_config_watcher(str(hooks_file))
+                # 重新注册
+                count = self.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+                if count > 0:
+                    logger.debug(f"[HookManager] Reloaded {count} hooks for plugin {plugin.name}")
+        except Exception as e:
+            logger.error(f"[HookManager] Failed to reload all plugin hooks: {e}")
+
     def load_hooks_from_directory(self, agents_dir: Path) -> int:
         """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)"""
         count = 0
@@ -1161,12 +1222,16 @@ class HookManager:
             for skill_dir in skills_dir.iterdir():
                 if not skill_dir.is_dir():
                     continue
-                self.unregister_skill_hooks(skill_dir.name)
+                # 使用 __skill__ 前缀命名空间，避免与同名的插件 hooks 冲突
+                # 例如插件 evolver 注册 skill_name="evolver"
+                # 而技能 evolver 注册 skill_name="__skill__evolver"
+                self.unregister_skill_hooks(f"__skill__{skill_dir.name}")
 
         for skill_dir in skills_dir.iterdir():
             if not skill_dir.is_dir():
                 continue
-            skill_name = skill_dir.name
+            # 使用 __skill__ 前缀，避免与插件 hooks 共享同一 skill_name
+            skill_name = f"__skill__{skill_dir.name}"
 
             # 加载 hooks.json
             hooks_file = skill_dir / "hooks" / "hooks.json"
@@ -1212,7 +1277,8 @@ class HookManager:
             return 0
 
         body = parts[2]
-        skill_name = skill_dir.name
+        # 使用 __skill__ 前缀，与 load_hooks_from_skills 保持一致
+        skill_name = f"__skill__{skill_dir.name}"
 
         # 查找 <hooks> 块
         hooks_pattern = r'<hooks>(.*?)</hooks>'

@@ -40,13 +40,31 @@ class HookItem(QWidget):
         self.setStyleSheet("background-color: transparent;")
         self.hBoxLayout = QHBoxLayout(self)
         
-        # 命令显示（截断到 50 字符）
-        command = self.hook_data.get("command", self.hook_data.get("url", ""))
-        display_cmd = command[:50] + ("..." if len(command) > 50 else "")
+        # 根据 hook 类型选取正确的显示字段
+        hook_type = self.hook_data.get("type", "command")
+        if hook_type == "python":
+            raw_text = self.hook_data.get("function", "") or ""
+        elif hook_type == "http":
+            raw_text = self.hook_data.get("url", "") or ""
+        else:
+            raw_text = self.hook_data.get("command", "") or ""
+        display_cmd = raw_text[:50] + ("..." if len(raw_text) > 50 else "")
         self.commandLabel = _ElidedLabel(display_cmd, self)
         self.commandLabel.setObjectName("titleLabel")
         self.commandLabel.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(13)}px;")
         self.commandLabel.setMinimumWidth(40)
+        
+        # 类型标签
+        type_colors = {"command": "#4CAF50", "http": "#FF9800", "python": "#2196F3"}
+        type_color = type_colors.get(hook_type, "#888")
+        type_labels = {"command": "CMD", "http": "HTTP", "python": "PY"}
+        self.typeLabel = QLabel(type_labels.get(hook_type, hook_type.upper()), self)
+        self.typeLabel.setStyleSheet(
+            f"background-color: {type_color}; color: white; "
+            f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
+            f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
+        )
+        self.typeLabel.setFixedHeight(18)
         
         # Matcher 标签
         matcher = self.hook_data.get("matcher", "")
@@ -88,6 +106,8 @@ class HookItem(QWidget):
         
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(48, 0, 16, 0)
+        self.hBoxLayout.addWidget(self.typeLabel, 0)
+        self.hBoxLayout.addSpacing(8)
         self.hBoxLayout.addWidget(self.commandLabel, 1)
         self.hBoxLayout.addWidget(self.matcherLabel, 0)
         self.hBoxLayout.addSpacing(12)
@@ -176,17 +196,34 @@ class HookEditCard(QWidget):
         hook_type = d.get("type", "command")
         self.typeCombo.setCurrentText(hook_type)
         self.eventCombo.setCurrentText(d.get("event", "PreToolUse"))
-        self.commandEdit.setText(d.get("command", d.get("url", "")))
+        # 根据类型选择正确的字段加载
+        if hook_type == "python":
+            self.commandEdit.setText(d.get("function", "") or "")
+        elif hook_type == "http":
+            self.commandEdit.setText(d.get("url", "") or "")
+        else:
+            self.commandEdit.setText(d.get("command", "") or "")
         self.matcherEdit.setText(d.get("matcher", ""))
     
     def get_values(self) -> dict:
-        return {
+        hook_type = self.typeCombo.currentText()
+        value = self.commandEdit.text().strip()
+        result = {
             "event": self.eventCombo.currentText(),
-            "type": self.typeCombo.currentText(),
-            "command": self.commandEdit.text().strip(),
+            "type": hook_type,
+            "command": value,  # 始终保留 command 字段，保证 _add_hook/_update_hook 兼容
             "matcher": self.matcherEdit.text().strip(),
             "enabled": True
         }
+        # 清理旧专用字段，避免类型切换时残留
+        result.pop("function", None)
+        result.pop("url", None)
+        # 根据类型存入正确字段，供 Hook.to_dict() 等场景正确取用
+        if hook_type == "python":
+            result["function"] = value
+        elif hook_type == "http":
+            result["url"] = value
+        return result
     
     def _on_save(self):
         values = self.get_values()
@@ -259,7 +296,7 @@ class HookListSettingCard(ExpandSettingCard):
             # 按 (matcher, is_skill) 分组：skill hook 和 global hook 即使 matcher 相同也不合并
             rule_map = {}  # (matcher, is_skill) -> list of hook dicts
             for hook in flat_hooks:
-                matcher = hook.get("matcher", "")
+                matcher = hook.get("matcher", "") or ""
                 is_skill = self._is_skill_hook(hook, global_resolved)
                 key = (matcher, is_skill)
                 if key not in rule_map:
@@ -287,7 +324,7 @@ class HookListSettingCard(ExpandSettingCard):
             return str(self.hooks_config_file) not in cf  # fallback: 字符串包含判断
     
     def _save_hooks(self):
-        """保存全局 hooks 到配置文件（watchfiles 热更新自动检测文件变更并重载）"""
+        """保存全局 hooks 到配置文件并立即同步 HookManager 内存"""
         # 过滤掉 _readonly 的 skill hooks
         save_data = {}
         for event_name, rules in self.all_hooks.items():
@@ -298,7 +335,11 @@ class HookListSettingCard(ExpandSettingCard):
         self.hooks_config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.hooks_config_file, 'w', encoding='utf-8') as f:
             json.dump({"hooks": save_data}, f, indent=2, ensure_ascii=False)
-        # 写文件后 watchfiles 会自动检测到变更，触发热更新重载 hooks
+        # 写文件后立即同步 HookManager 内存，不等待 watchfiles 防抖
+        # 这样 _toggle_hook / _remove_hook / _add_hook 后调用 _refresh(reload=True)
+        # 从 HookManager 读到的一定是最新的数据。
+        if self._hook_manager:
+            self._hook_manager.reload_global_hooks(str(self.hooks_config_file))
     
     def _setup_ui(self):
         self.viewLayout.setSpacing(0)
@@ -398,10 +439,15 @@ class HookListSettingCard(ExpandSettingCard):
             "command": command,
             "enabled": enabled
         }
+        # 根据类型同步存储专用字段，保证 Hook.to_dict() 能正确读取
+        if hook_type == "python":
+            hook_data["function"] = command
+        elif hook_type == "http":
+            hook_data["url"] = command
         
         new_rule = {"hooks": [hook_data]}
-        if matcher:
-            new_rule["matcher"] = matcher
+        # 始终设置 matcher 键（即使为空字符串），避免与 matcher=None 混淆
+        new_rule["matcher"] = matcher or ""
         
         self.all_hooks[event].append(new_rule)
         
@@ -409,6 +455,17 @@ class HookListSettingCard(ExpandSettingCard):
         self._save_hooks()
         self._refresh(reload=False)
         self.hooksChanged.emit()
+
+    @staticmethod
+    def _get_hook_effective_command(hook: dict) -> str:
+        """根据 hook 类型获取有效的命令/函数值，统一匹配"""
+        t = hook.get("type", "command")
+        if t == "python":
+            return hook.get("function", "") or hook.get("command", "") or ""
+        elif t == "http":
+            return hook.get("url", "") or hook.get("command", "") or ""
+        else:
+            return hook.get("command", "") or ""
 
     def _update_hook(self, original_event: str, original_command: str, original_matcher: str, new_values: dict):
         """更新已有 hook（根据原始信息查找并替换）"""
@@ -420,7 +477,7 @@ class HookListSettingCard(ExpandSettingCard):
                 rule_matcher = rule.get("matcher", "")
                 hooks = rule.get("hooks", [])
                 for hi, hook in enumerate(hooks):
-                    if (hook.get("command", "") == original_command
+                    if (self._get_hook_effective_command(hook) == original_command
                             and event_name == original_event
                             and rule_matcher == original_matcher):
                         event = new_values.get("event", original_event)
@@ -437,14 +494,24 @@ class HookListSettingCard(ExpandSettingCard):
                             if event not in self.all_hooks:
                                 self.all_hooks[event] = []
                             new_hook = {"type": hook_type, "command": command, "enabled": enabled}
-                            new_rule = {"hooks": [new_hook]}
-                            if matcher:
-                                new_rule["matcher"] = matcher
+                            if hook_type == "python":
+                                new_hook["function"] = command
+                            elif hook_type == "http":
+                                new_hook["url"] = command
+                            new_rule = {"hooks": [new_hook], "matcher": matcher or ""}
                             self.all_hooks[event].append(new_rule)
                         else:
+                            # 更新前清理旧专用字段
+                            hook.pop("function", None)
+                            hook.pop("url", None)
                             hook["type"] = hook_type
                             hook["command"] = command
                             hook["enabled"] = enabled
+                            # 根据类型同步专用字段
+                            if hook_type == "python":
+                                hook["function"] = command
+                            elif hook_type == "http":
+                                hook["url"] = command
                         break
                 else:
                     continue
@@ -504,10 +571,11 @@ class HookListSettingCard(ExpandSettingCard):
                             self._hook_manager.set_hook_enabled(event, hook_event_index, enabled)
                     else:
                         # 全局 hook：保存到全局配置文件
-                        # 不调 _refresh()：_load_hooks 从 HookManager 读数据，
-                        # 但 _save_hooks 没有更新 HookManager 内存，读到的仍是旧状态，
-                        # 导致刚刚修改的 enabled 被覆盖回旧值，开关弹回原位。
+                        # _save_hooks() 会立即同步 HookManager 内存（reload_global_hooks），
+                        # 所以再调 _refresh(reload=False) 不会读到旧数据导致开关弹回。
                         self._save_hooks()
+                        # 刷新 UI 确保数据一致性（利用 self.all_hooks 已修改的状态渲染）
+                        self._refresh(reload=False)
                     
                     self.hooksChanged.emit()
     

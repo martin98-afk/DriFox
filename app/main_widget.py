@@ -3810,9 +3810,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self._settings_popup, "hookListCard"):
             original = self._hook_edit_popup.get_original_data()
             if original:
-                # 编辑已有 hook
+                # 编辑已有 hook：根据类型从正确字段取 original_command
                 orig_event = original.get("_event", values["event"])
-                orig_command = original.get("command", "")
+                orig_type = original.get("type", "command")
+                if orig_type == "python":
+                    orig_command = original.get("function", "") or original.get("command", "")
+                elif orig_type == "http":
+                    orig_command = original.get("url", "") or original.get("command", "")
+                else:
+                    orig_command = original.get("command", "")
                 orig_matcher = original.get("matcher", "")
                 self._settings_popup.hookListCard._update_hook(
                     original_event=orig_event,

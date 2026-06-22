@@ -9,7 +9,7 @@ import os
 from typing import Dict
 
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
-from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextDocument, QKeyEvent
+from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QKeyEvent
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -50,6 +50,7 @@ class EntryInputLineEdit(LineEdit):
 
 from app.utils.design_tokens import scale_font_size, font_size_css, Colors
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.elided_label import _ElidedLabel
 from app.utils.git_worktree import GitWorktreeDetector
 from app.widgets.worktree_section import WorktreeSectionWidget
 from app.widgets.cards.settings.project_selector_card import (
@@ -140,13 +141,11 @@ class EntryMemoryItemWidget(QWidget):
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
 
-        self.content_label = BodyLabel(self._content, self.text_widget)
-        self.content_label.setWordWrap(True)
-        self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.content_label.setMinimumWidth(0)
+        Colors.refresh()
+        self.content_label = _ElidedLabel(self._content, self.text_widget)
         self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
         self.content_label.setStyleSheet(
-            f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
+            f"color: {Colors.TEXT_PRIMARY}; padding: 4px; {get_font_family_css()} {font_size_css(12)}"
         )
         text_layout.addWidget(self.content_label)
 
@@ -207,26 +206,13 @@ class EntryMemoryItemWidget(QWidget):
         main_layout.addWidget(self.switch)
 
     def sizeHint(self):
-        """根据实际宽度计算自适应高度，支持文本自动换行"""
-        width = self.width()
-        if width <= 0:
-            return QSize(0, 44)
-
-        buttons_width = 100
-        content_width = width - 16 - 6 - buttons_width
-        if content_width < 20:
-            content_width = 20
-
+        """单行省略预览 + 编辑模式自适应高度"""
         if self._editing and self.edit_widget.isVisible():
             edit_height = self.edit_text.height()
             return QSize(0, max(44, edit_height + 16))
 
-        doc = QTextDocument()
-        doc.setPlainText(self._content)
-        doc.setDefaultFont(self.content_label.font())
-        doc.setTextWidth(content_width)
-        text_height = int(doc.size().height()) + 16
-        return QSize(0, max(44, text_height))
+        # 单行省略：固定高度，字体 12px + padding 8px(上下) = 行高 28px，但保持最小 44px
+        return QSize(0, 44)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
