@@ -869,18 +869,27 @@ _REVIEW_SVG = (
 )
 
 
-def _render_svg_pixmap(svg_str: str, size: int, color: str) -> "QPixmap":
+def _render_svg_pixmap(
+    svg_str: str,
+    size: int,
+    color: str,
+    dpr: float = 1.0,
+) -> "QPixmap":
     """把内嵌 SVG 渲染为指定颜色的 QPixmap（用于 QLabel 显示）。
 
     Args:
         svg_str: 完整 SVG 字符串（内部使用 stroke="currentColor"）
-        size: 目标像素尺寸（正方形）
+        size: 逻辑像素尺寸（正方形）
         color: 应用颜色（与 _theme["accent"] 保持一致）
+        dpr: devicePixelRatio（HiDPI 屏上 >1.0）。默认 1.0。
 
     Returns:
-        已着色的 QPixmap，背景透明
+        已着色的 QPixmap，背景透明。物理像素 = size*dpr，已 setDevicePixelRatio(dpr)。
     """
-    pixmap = QPixmap(size, size)
+    dpr = dpr if dpr > 0 else 1.0
+    physical = max(1, int(round(size * dpr)))
+    pixmap = QPixmap(physical, physical)
+    pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.transparent)
     renderer = QSvgRenderer(svg_str.encode("utf-8"))
     painter = QPainter(pixmap)
@@ -4748,19 +4757,25 @@ class MessageCard(SimpleCardWidget):
 
         # Review 按钮（紧贴差异统计右侧，SVG 渲染），点击触发 code-reviewer 子智能体
         review_btn = QLabel(self)
+        review_btn.setObjectName("footer_review_btn")
         review_btn.setStyleSheet(
-            f"background: transparent; padding: 0px 2px 0px 4px; margin: 0px;"
+            "QLabel {"
+            " background: transparent; padding: 0px 1px; margin: 0px;"
+            " border-radius: 3px;"
+            " }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); }"
         )
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
-        review_btn.setToolTip("用 reviewer 子智能体快速审查本次修改")
-        review_btn.setProperty("round_index_ref", True)  # 占位，确保 _disconnect_all_signals 不报错
-        # 渲染 SVG pixmap：14×14，使用主题 accent 着色
+        review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
+        # 预渲染 SVG pixmap：14×14 逻辑像素（与 1px 对称 padding 一起填满 16×16 容器，最大化视觉占比）
+        dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
         review_btn._review_svg = _REVIEW_SVG
         review_btn._review_color = accent
-        review_btn._review_pixmap = _render_svg_pixmap(_REVIEW_SVG, 14, accent)
+        review_btn._review_pixmap = _render_svg_pixmap(_REVIEW_SVG, 14, accent, dpr=dpr)
         review_btn.setPixmap(review_btn._review_pixmap)
-        review_btn.setFixedSize(18, 14)
+        # 逻辑像素 16×16（含 1px 对称 padding），物理像素已由 setDevicePixelRatio 处理
+        review_btn.setFixedSize(16, 16)
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
@@ -4871,13 +4886,17 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setVisible(True)
 
         # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
+        # SVG 渲染比较重（QPixmap + QSvgRenderer + QPainter），只在颜色真的变化时才重建，
+        # 避免每次 add_diff_stats 都白白花一笔
         if self._footer_review_btn:
-            new_pixmap = _render_svg_pixmap(
-                getattr(self._footer_review_btn, "_review_svg", _REVIEW_SVG),
-                14,
-                accent,
-            )
-            self._footer_review_btn.setPixmap(new_pixmap)
+            cached_color = getattr(self._footer_review_btn, "_review_color", None)
+            if cached_color != accent:
+                dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
+                svg_str = getattr(self._footer_review_btn, "_review_svg", _REVIEW_SVG)
+                new_pixmap = _render_svg_pixmap(svg_str, 14, accent, dpr=dpr)
+                self._footer_review_btn._review_color = accent
+                self._footer_review_btn._review_pixmap = new_pixmap
+                self._footer_review_btn.setPixmap(new_pixmap)
             self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
@@ -5657,13 +5676,21 @@ class MessageCard(SimpleCardWidget):
         self._retry_status_widget.setVisible(True)
 
     def _emit_card_diff_requested(self):
-        """发射卡片差异请求信号"""
+        """发射卡片差异请求信号
+
+        Signal:
+            cardDiffRequested(int round_index, int message_index)
+        """
         round_idx = self._round_index if self._round_index is not None else -1
         msg_idx = self._message_index if self._message_index is not None else -1
         self.cardDiffRequested.emit(round_idx, msg_idx)
 
     def _emit_review_requested(self):
-        """发射页脚 Review 按钮点击信号"""
+        """发射页脚 Review 按钮点击信号（触发 code-reviewer 子智能体快速审查）
+
+        Signal:
+            reviewRequested(int round_index, int message_index)
+        """
         round_idx = self._round_index if self._round_index is not None else -1
         msg_idx = self._message_index if self._message_index is not None else -1
         self.reviewRequested.emit(round_idx, msg_idx)

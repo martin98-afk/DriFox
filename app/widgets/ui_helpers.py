@@ -1229,7 +1229,7 @@ def truncate_and_remove_round(
     Args:
         session: ChatSession 对象
         round_index: round 索引
-        round_ranges: round 范围列表
+        round_ranges: round 范围列表（基于规范消息的索引）
         remove_cards_func: 删除卡片的函数
         
     Returns:
@@ -1238,9 +1238,12 @@ def truncate_and_remove_round(
     if round_index < 0 or round_index >= len(round_ranges):
         return False, 0, 0
     
+    from app.core import consolidate_messages
+
     start_idx, end_idx = round_ranges[round_index]
-    old_count = len(session.messages)
-    new_messages = session.messages[:start_idx] + session.messages[end_idx:]
+    canonical = consolidate_messages(session.messages)
+    old_count = len(canonical)
+    new_messages = canonical[:start_idx] + canonical[end_idx:]
     new_count = len(new_messages)
     
     session.set_messages(new_messages, preserve_compaction=False)

@@ -6114,6 +6114,59 @@ class OpenAIChatToolWindow(ToolWindow):
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
 
+    def _rebuild_batch_cards_from_layout(self) -> None:
+        """
+        从 chat_layout 中存活卡片按顺序重建 _batch_cards。
+
+        删除中间 round 后，_message_batch 已被 group_messages_for_display 截断为新长度，
+        但 chat_layout 中后面 round 的卡片（如 c_u2）仍存活。
+
+        不能用 _sync_batch_structures 的裁剪逻辑（_batch_cards[:new_len]），
+        因为这会丢掉仍存活但 batch_idx 已偏移的后面 round 卡片，
+        导致后续它们的 _round_index 永远无法被 _refresh_all_cards_round_index 更新。
+
+        策略：
+        1. 重置 _batch_cards 为 len(_message_batch) 个 None
+        2. 遍历 chat_layout 中所有存活的非 welcome MessageCard（按 layout 顺序）
+        3. 按顺序分配到 _batch_cards，同步更新每个 card 的 _message_index
+        """
+        new_len = len(self._message_batch)
+        new_batch_cards: List[Optional[List[MessageCard]]] = [None] * new_len
+
+        # 收集 layout 中所有存活的非 welcome MessageCard（按 layout 顺序）
+        alive_cards: List[MessageCard] = []
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not item or not item.widget():
+                continue
+            widget = item.widget()
+            if not isinstance(widget, MessageCard):
+                continue
+            if getattr(widget, "_is_welcome", False):
+                continue
+            if sip.isdeleted(widget):
+                continue
+            alive_cards.append(widget)
+
+        # 按 layout 顺序分配到 _batch_cards
+        for batch_idx, card in enumerate(alive_cards):
+            if batch_idx >= new_len:
+                # 防御：layout 卡片数不应超过 _message_batch 长度
+                logger.warning(
+                    f"[Delete] _rebuild_batch_cards_from_layout: alive cards "
+                    f"({len(alive_cards)}) > _message_batch length ({new_len}), "
+                    f"dropping card at layout position {batch_idx}"
+                )
+                break
+            new_batch_cards[batch_idx] = [card]
+            card._message_index = batch_idx
+
+        self._batch_cards = new_batch_cards
+        logger.debug(
+            f"[Delete] _rebuild_batch_cards_from_layout: "
+            f"{len(alive_cards)} alive cards → {new_len} batch slots"
+        )
+
     def _fix_new_card_message_index(self, user_text: str = None):
         """
         为布局中尚未设置 _message_index 的卡片分配正确的 batch index。
@@ -7652,12 +7705,21 @@ class OpenAIChatToolWindow(ToolWindow):
         if card.role != "user":
             return
 
-        # 🛡️ 删除前中断正在进行的流式输出，防止 worker 的过期消息覆盖 session
-        if self._is_streaming:
+        session = self.session_manager.get_current_session()
+        was_streaming = self._is_streaming
+
+        # 🛡️ 设置截断哨兵，必须领先于 _on_stop_clicked，防止 worker 的 finished_with_messages
+        # 信号在 _delete_user_round 截断 session 后到达并覆盖新消息。
+        # 哨兵会在 _on_finalize_complete（流式场景）或下方（非流式场景）清除。
+        if was_streaming and session:
+            self._truncation_sentinel = {
+                "session_id": session.session_id,
+                "messages_len": len(session.messages),
+                "set_at": time.time(),
+            }
             self._on_stop_clicked()
 
         # === 缓存删除数据，用于撤销恢复（只缓存一步）===
-        session = self.session_manager.get_current_session()
         if session and card._round_index is not None:
             try:
                 canonical_messages = consolidate_messages(session.messages)
@@ -7667,7 +7729,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     msg_count = end_idx - start_idx
                     self._undo_delete_cache = {
                         "session_id": session.session_id,
-                        "messages": list(session.messages[start_idx:end_idx]),
+                        "messages": list(canonical_messages[start_idx:end_idx]),
                         "insert_index": start_idx,
                         "count": msg_count,
                     }
@@ -7676,6 +7738,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 执行删除
         self._delete_user_round(card)
+
+        # 非流式场景：_on_finalize_complete 不会运行，手动清除哨兵
+        if not was_streaming:
+            self._truncation_sentinel = None
 
         # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
         if self._undo_delete_cache:
@@ -7861,12 +7927,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # === 3. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
-        # 同步裁剪 _batch_cards 长度，防止旧引用残留
-        new_len = len(self._message_batch)
-        if new_len > len(self._batch_cards):
-            self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
-        elif new_len < len(self._batch_cards):
-            self._batch_cards = self._batch_cards[:new_len]
+        # 重建 _batch_cards：从 layout 中存活卡片按顺序分配到对应 batch 位置
+        # 不能简单裁剪（_batch_cards[:new_len]），因为删除中间 round 后，
+        # 后面 round 的卡片（如 c_u2）仍在 layout 中但会被裁剪掉，
+        # 导致后续这些卡片的 _round_index 永远无法被 _refresh_all_cards_round_index 更新。
+        self._rebuild_batch_cards_from_layout()
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
@@ -8371,6 +8436,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 复用 _on_card_diff_requested 的 round_index 合法性校验 + fallback 推导
         from app.core.message_content import consolidate_messages, get_user_round_ranges
+        # difflib 是标准库，移出 try 块以便失败时给出明确的诊断（不会被业务异常吞掉）
+        import difflib
 
         canonical_messages = consolidate_messages(session.messages)
         round_ranges = get_user_round_ranges(canonical_messages)
@@ -8412,6 +8479,7 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.widgets.ui_helpers import (
                 collect_operations_for_round,
                 read_backup_files,
+                normalize_lines,
             )
 
             all_call_ids = self._get_tool_call_ids_in_round(round_index)
@@ -8442,8 +8510,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
 
             # 收集统一 diff 文本（每个文件一段 unified diff），用于注入 review 任务描述
-            import difflib
-            from app.widgets.ui_helpers import normalize_lines
+
+            # 写工具白名单：只审查产生文件内容改动的工具（write/edit/multi_edit 之外，
+            # 兼容 str_replace_editor / apply_patch 这类常见别名；读取类不在此列）
+            WRITE_TOOLS = {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
 
             diff_text_parts: list[str] = []
             file_summaries: list[str] = []
@@ -8453,12 +8523,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 tool_name = op.get("tool_name", "")
                 if not backup_path:
                     continue
-                # 只审查写/编辑类工具，跳过读取类
-                if tool_name not in ("write", "edit", "multi_edit"):
+                if tool_name not in WRITE_TOOLS:
                     continue
                 try:
                     old_content, new_content, backup_file = read_backup_files(backup_path)
-                except Exception:
+                except Exception as exc:
+                    # 不要静默吞掉：让问题可追溯；保留旧行为（继续审查其他文件）
+                    logger.warning(
+                        f"[card-review] 跳过文件 {file_path or backup_path}: 读取备份失败 {exc}"
+                    )
                     continue
 
                 old_lines = normalize_lines(old_content)
@@ -8485,12 +8558,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 return
 
-            # 拼接统一 diff（截断以避免超长任务描述撑爆 prompt）
-            combined_diff = "\n".join(diff_text_parts)
+            # 拼接统一 diff（用 \n\n 分隔文件，避免相邻文件首尾粘连导致 diff 块解析歧义）
+            combined_diff = "\n\n".join(diff_text_parts)
             MAX_DIFF_CHARS = 60_000
             truncated = len(combined_diff) > MAX_DIFF_CHARS
+            truncation_note = ""
             if truncated:
+                # 先记录原始长度，再截断，否则截断后 len(combined_diff) ≈ MAX_DIFF_CHARS 会输出废话
+                original_len = len(combined_diff)
                 combined_diff = combined_diff[:MAX_DIFF_CHARS] + "\n\n... (diff 已截断，仅展示前 60KB)"
+                truncation_note = (
+                    f"\n\n> ⚠️ 差异已截断（原始 {original_len:,} 字符，仅展示前 "
+                    f"{MAX_DIFF_CHARS:,} 字符）"
+                )
 
             # 构造 review 子智能体任务描述
             files_bullet = "\n".join(f"- `{p}`" for p in file_summaries[:50])
@@ -8511,7 +8591,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 "## 文件差异（unified diff）\n"
                 "```diff\n"
                 f"{combined_diff}\n"
-                "```\n\n"
+                "```"
+                f"{truncation_note}\n\n"
                 "请按 Critical / Important / Suggestions 三档分类输出结论，"
                 "并对每条问题给出具体文件:行号与可执行的修复建议。"
             )
@@ -8523,9 +8604,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 with_context=False,
             )
 
+            # InfoBar 提示也带上截断信息，避免用户误以为审查了完整 diff
+            success_msg = f"code-reviewer 子智能体正在审查 {len(file_summaries)} 个文件"
+            if truncated:
+                success_msg += f"（diff 已截断至 {MAX_DIFF_CHARS // 1000}KB）"
             InfoBar.success(
                 "Review 已启动",
-                f"code-reviewer 子智能体正在审查 {len(file_summaries)} 个文件",
+                success_msg,
                 duration=2500,
                 parent=self,
                 position=InfoBarPosition.BOTTOM,
@@ -9135,6 +9220,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 非函数命令：检查是否正在流式输出
         if self._is_streaming:
             self._on_stop_clicked()
+
+        # 清除截断哨兵，避免拦截新对话的首条响应
+        self._truncation_sentinel = None
 
         self._hide_welcome_cards()
 
@@ -10285,9 +10373,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        self._history_preview_messages = None
-
         # 🛡️ 检查截断哨兵：若在 worker 运行期间发生了删除/截断，丢弃 worker 的过期数据
+        # 注意：不清除哨兵，由 _on_finalize_complete 负责清除；
+        # 若提前清除，_on_finalize_complete 的哨兵检查会失效，
+        # 导致其调用 _on_messages_updated(interrupted_messages) 覆盖正确截断的会话。
         sentinel = self._truncation_sentinel
         if (
             sentinel
@@ -10299,9 +10388,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"worker_len={len(messages)}, current_len={len(session.messages)}, "
                 f"session_id={session.session_id[:8]}"
             )
-            self._truncation_sentinel = None
             return
 
+        self._history_preview_messages = None
         # 注意：preserve_compaction=False
         # worker 送回来的 current_session_messages 是原始未压缩消息，
         # 保留旧的压缩缓存会导致 state 不一致（缓存说"已压缩"但消息已膨胀）。
