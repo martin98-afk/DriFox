@@ -4736,19 +4736,22 @@ class MessageCard(SimpleCardWidget):
         self._footer_bar = bar
         bar.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(6, 0, 6, 0)
+        # 水平 8 让两端对称，垂直 0 配合统一字号后整体更紧凑
+        layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(0)
 
         accent = self._theme["accent"]
         font_css = get_font_family_css()
+        # 统一所有 footer 元素字号为 10px（原 9px 文字 + 11px emoji 混用 → 基线错位）
         label_style = (
-            f"{font_css} font-size: {scale_font_size(9)}px; "
+            f"{font_css} font-size: {scale_font_size(10)}px; "
             f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
         )
 
         # 差异统计（左对齐，极简风格，点击弹出差异弹窗）
         diff_l = QLabel("", self)
         diff_l.setStyleSheet(label_style)
+        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
@@ -4756,16 +4759,18 @@ class MessageCard(SimpleCardWidget):
         layout.addWidget(diff_l)
 
         # Review 按钮（紧贴差异统计右侧，emoji 🔍），点击触发 code-reviewer 子智能体
+        # 字号与文字保持一致（10px），避免 emoji 与 9px 文字基线错位
         review_btn = QLabel("🔍", self)
         review_btn.setObjectName("footer_review_btn")
         review_btn.setStyleSheet(
             f"QLabel {{"
             f" background: transparent; padding: 0px 2px; margin: 0px;"
-            f" border-radius: 3px; font-size: {scale_font_size(11)}px;"
+            f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
             f" color: {accent};"
             f" }}"
             f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
         )
+        review_btn.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
         review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
@@ -4779,6 +4784,7 @@ class MessageCard(SimpleCardWidget):
         # Token 消耗
         tokens_l = QLabel("", self)
         tokens_l.setStyleSheet(label_style)
+        tokens_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         tokens_l.setVisible(False)
         self._footer_tokens_label = tokens_l
         layout.addWidget(tokens_l)
@@ -4786,6 +4792,7 @@ class MessageCard(SimpleCardWidget):
         # 分隔点 1（token ↔ 耗时）
         sep1 = QLabel("·", self)
         sep1.setStyleSheet(label_style)
+        sep1.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         sep1.setVisible(False)
         self._footer_sep1 = sep1
         layout.addWidget(sep1)
@@ -4793,6 +4800,7 @@ class MessageCard(SimpleCardWidget):
         # 耗时
         elapsed_l = QLabel("", self)
         elapsed_l.setStyleSheet(label_style)
+        elapsed_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         elapsed_l.setVisible(False)
         self._footer_elapsed_label = elapsed_l
         layout.addWidget(elapsed_l)
@@ -4800,6 +4808,7 @@ class MessageCard(SimpleCardWidget):
         # 分隔点 2（耗时 ↔ 模型）
         sep2 = QLabel("·", self)
         sep2.setStyleSheet(label_style)
+        sep2.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         sep2.setVisible(False)
         self._footer_sep2 = sep2
         layout.addWidget(sep2)
@@ -4810,6 +4819,7 @@ class MessageCard(SimpleCardWidget):
         model_l.setStyleSheet(
             f"{label_style}"
         )
+        model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
         model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
@@ -4884,7 +4894,7 @@ class MessageCard(SimpleCardWidget):
             self._footer_review_btn.setStyleSheet(
                 f"QLabel {{"
                 f" background: transparent; padding: 0px 2px; margin: 0px;"
-                f" border-radius: 3px; font-size: {scale_font_size(11)}px;"
+                f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
                 f" color: {accent};"
                 f" }}"
                 f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"

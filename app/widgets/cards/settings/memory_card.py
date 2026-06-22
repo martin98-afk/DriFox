@@ -420,8 +420,24 @@ class UrlInputDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         self.vBoxLayout.addLayout(btn_layout)
 
-        # 初始大小（最小尺寸约束，允许内容自适应伸展）
-        self.widget.setMinimumSize(420, 220)
+        # 固定 widget 大小，避免被 MaskDialogBase 拉伸到与父窗口同步
+        # （MaskDialogBase 强制 dialog 大小 = parent 大小，无 setMaximumSize 时
+        #   QFrame 默认 sizePolicy 允许拉伸，widget 会被撑成全屏）
+        self.widget.setFixedSize(420, 220)
+        # 初始居中显示；后续 dialog resize 时通过 _center_widget 保持居中
+        self._center_widget()
+
+    def _center_widget(self):
+        """让 widget 在 dialog 中保持居中（MaskDialogBase 不自动居中）"""
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        # 先调 super 让 MaskDialogBase 把 windowMask 同步到 dialog 大小，
+        # 然后重新居中 widget
+        super().resizeEvent(e)
+        self._center_widget()
 
     def _on_accept(self):
         url = self.url_input.text().strip()
