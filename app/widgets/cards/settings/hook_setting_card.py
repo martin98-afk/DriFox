@@ -3,6 +3,7 @@
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtGui import QIcon
@@ -17,44 +18,52 @@ from qfluentwidgets import (
 
 from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.utils.design_tokens import scale_font_size, Sizes, ButtonStyles, SwitchStyles
-from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel, EDIT_CARD_STYLE, _make_row, NoWheelComboBox
-from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, _make_row, NoWheelComboBox
+from app.widgets.elided_label import _ElidedLabel
+
+
+# 事件顺序定义
+HOOK_EVENT_ORDER = [
+    "SessionStart", "PreUserMessage", "PostUserMessage",
+    "PreAssistantMessage", "PostAssistantMessage",
+    "PreToolUse", "PostToolUse"
+]
 
 
 class HookItem(QWidget):
     """单个 Hook 条目"""
-    removed = pyqtSignal(int)  # 发送 hook 索引
-    edited = pyqtSignal(int)  # 发送 hook 索引
-    toggled = pyqtSignal(int, bool)  # 索引, 启用状态
+    removed = pyqtSignal(str)  # hook_id
+    edited = pyqtSignal(str)   # hook_id
+    toggled = pyqtSignal(str, bool)  # hook_id, enabled
     
-    def __init__(self, event_name: str, hook_data: dict, index: int, parent=None,
-                 is_readonly: bool = False):
+    def __init__(self, hook_data: dict, parent=None):
         super().__init__(parent=parent)
-        self.event_name = event_name
-        self.hook_data = hook_data
-        self.index = index
-        self._is_readonly = is_readonly
+        self.hook_id = hook_data.get("id", "")
+        self._hook_data = hook_data
         self._setup_ui()
     
     def _setup_ui(self):
         self.setStyleSheet("background-color: transparent;")
         self.hBoxLayout = QHBoxLayout(self)
         
-        # 根据 hook 类型选取正确的显示字段
-        hook_type = self.hook_data.get("type", "command")
-        if hook_type == "python":
-            raw_text = self.hook_data.get("function", "") or ""
-        elif hook_type == "http":
-            raw_text = self.hook_data.get("url", "") or ""
+        # 来源标签（彩色小 tag）
+        source_type = self._hook_data.get("_source_type", "user")
+        display_name = self._hook_data.get("_display_name", "自定义")
+        source_color = {"plugin": "#e74c3c", "skill": "#3498db", "user": "#2ecc71"}.get(source_type, "#888")
+        if source_type == "user":
+            source_text = "自定义"
         else:
-            raw_text = self.hook_data.get("command", "") or ""
-        display_cmd = raw_text[:50] + ("..." if len(raw_text) > 50 else "")
-        self.commandLabel = _ElidedLabel(display_cmd, self)
-        self.commandLabel.setObjectName("titleLabel")
-        self.commandLabel.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(13)}px;")
-        self.commandLabel.setMinimumWidth(40)
+            source_text = display_name[:12] + ("…" if len(display_name) > 12 else "")
+        self.sourceLabel = QLabel(source_text, self)
+        self.sourceLabel.setStyleSheet(
+            f"background-color: {source_color}; color: white; "
+            f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
+            f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
+        )
+        self.sourceLabel.setFixedHeight(18)
         
         # 类型标签
+        hook_type = self._hook_data.get("type", "command")
         type_colors = {"command": "#4CAF50", "http": "#FF9800", "python": "#2196F3"}
         type_color = type_colors.get(hook_type, "#888")
         type_labels = {"command": "CMD", "http": "HTTP", "python": "PY"}
@@ -66,57 +75,56 @@ class HookItem(QWidget):
         )
         self.typeLabel.setFixedHeight(18)
         
-        # Matcher 标签
-        matcher = self.hook_data.get("matcher", "")
-        if matcher:
-            self.matcherLabel = QLabel(matcher, self)
-            self.matcherLabel.setStyleSheet(
-                f"background-color: #E0E0E0; color: #666; {get_font_family_css()} font-size: {scale_font_size(11)}px; padding: 2px 6px; border-radius: 4px;"
-            )
-        else:
-            self.matcherLabel = QLabel("")
+        # 命令文本
+        display_cmd = self._get_effective_command()
+        self.commandLabel = _ElidedLabel(display_cmd, self)
+        self.commandLabel.setObjectName("titleLabel")
+        self.commandLabel.setStyleSheet(
+            f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
+        )
+        self.commandLabel.setMinimumWidth(40)
         
-        # 启用开关
+        # 开关
         self.switch = SwitchButton(self)
         SwitchStyles.configure(self.switch)
-        self.switch.setChecked(self.hook_data.get("enabled", True))
+        self.switch.setChecked(self._hook_data.get("enabled", True))
         
-        # 编辑 / 删除按钮（只读 hook 禁用编辑/删除）
+        # 编辑/删除按钮（所有来源都可用）
         self.editBtn = ToolButton(FluentIcon.EDIT)
         self.editBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
+        self.editBtn.setStyleSheet(ButtonStyles.tool_button())
+        self.editBtn.clicked.connect(lambda: self.edited.emit(self.hook_id))
+        
         self.delBtn = ToolButton(FluentIcon.CLOSE)
         self.delBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
-        if self._is_readonly:
-            # 只读 hook：禁用按钮，提示需通过源文件编辑
-            self.editBtn.setEnabled(False)
-            self.editBtn.setToolTip("插件 Hook 为只读，请在插件源文件中编辑")
-            self.editBtn.setStyleSheet(
-                ButtonStyles.tool_button() + " QToolButton { opacity: 0.4; }"
-            )
-            self.delBtn.setEnabled(False)
-            self.delBtn.setToolTip("插件 Hook 为只读，请在插件源文件中删除")
-            self.delBtn.setStyleSheet(
-                ButtonStyles.tool_button() + " QToolButton { opacity: 0.4; }"
-            )
-        else:
-            self.editBtn.setStyleSheet(ButtonStyles.tool_button())
-            self.editBtn.clicked.connect(lambda: self.edited.emit(self.index))
-            self.delBtn.setStyleSheet(ButtonStyles.tool_button())
-            self.delBtn.clicked.connect(lambda: self.removed.emit(self.index))
+        self.delBtn.setStyleSheet(ButtonStyles.tool_button())
+        self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
         
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(48, 0, 16, 0)
+        self.hBoxLayout.addWidget(self.sourceLabel, 0)
+        self.hBoxLayout.addSpacing(6)
         self.hBoxLayout.addWidget(self.typeLabel, 0)
         self.hBoxLayout.addSpacing(8)
         self.hBoxLayout.addWidget(self.commandLabel, 1)
-        self.hBoxLayout.addWidget(self.matcherLabel, 0)
         self.hBoxLayout.addSpacing(12)
         self.hBoxLayout.addWidget(self.switch, 0)
         self.hBoxLayout.addWidget(self.editBtn, 0)
         self.hBoxLayout.addWidget(self.delBtn, 0)
         self.hBoxLayout.setAlignment(Qt.AlignVCenter)
         
-        self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.index, checked))
+        self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.hook_id, checked))
+    
+    def _get_effective_command(self) -> str:
+        """根据 type 取正确字段"""
+        t = self._hook_data.get("type", "command")
+        if t == "python":
+            raw = self._hook_data.get("function", "") or self._hook_data.get("command", "") or ""
+        elif t == "http":
+            raw = self._hook_data.get("url", "") or self._hook_data.get("command", "") or ""
+        else:
+            raw = self._hook_data.get("command", "") or ""
+        return raw
 
 
 class HookEditCard(QWidget):
@@ -149,11 +157,7 @@ class HookEditCard(QWidget):
 
         # ── 事件 ──
         self.eventCombo = NoWheelComboBox()
-        self.eventCombo.addItems([
-            "SessionStart", "PreUserMessage", "PostUserMessage",
-            "PreAssistantMessage", "PostAssistantMessage",
-            "PreToolUse", "PostToolUse"
-        ])
+        self.eventCombo.addItems(HOOK_EVENT_ORDER)
         row, _ = _make_row("事件:", self.eventCombo)
         main_layout.addLayout(row)
 
@@ -198,9 +202,9 @@ class HookEditCard(QWidget):
         self.eventCombo.setCurrentText(d.get("event", "PreToolUse"))
         # 根据类型选择正确的字段加载
         if hook_type == "python":
-            self.commandEdit.setText(d.get("function", "") or "")
+            self.commandEdit.setText(d.get("function", "") or d.get("command", "") or "")
         elif hook_type == "http":
-            self.commandEdit.setText(d.get("url", "") or "")
+            self.commandEdit.setText(d.get("url", "") or d.get("command", "") or "")
         else:
             self.commandEdit.setText(d.get("command", "") or "")
         self.matcherEdit.setText(d.get("matcher", ""))
@@ -211,14 +215,14 @@ class HookEditCard(QWidget):
         result = {
             "event": self.eventCombo.currentText(),
             "type": hook_type,
-            "command": value,  # 始终保留 command 字段，保证 _add_hook/_update_hook 兼容
+            "command": value,
             "matcher": self.matcherEdit.text().strip(),
             "enabled": True
         }
         # 清理旧专用字段，避免类型切换时残留
         result.pop("function", None)
         result.pop("url", None)
-        # 根据类型存入正确字段，供 Hook.to_dict() 等场景正确取用
+        # 根据类型存入正确字段
         if hook_type == "python":
             result["function"] = value
         elif hook_type == "http":
@@ -242,7 +246,7 @@ class HookListSettingCard(ExpandSettingCard):
     
     hooksChanged = pyqtSignal()
     showAddHookCard = pyqtSignal()  # 显示添加 Hook 卡片
-    showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (event_name, hook_data)
+    showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (hook_id, hook_data)
     
     def __init__(self, icon: QIcon, title: str, content: str = None, parent=None, home=None,
                  hook_manager=None):
@@ -250,96 +254,21 @@ class HookListSettingCard(ExpandSettingCard):
         self._hook_manager = hook_manager
         super().__init__(icon, title, content, parent)
         self.title = title
-        self.all_hooks = {}
-        # 从 PluginManager 获取全局 hooks 文件路径
-        self._init_hooks_file()
+        self.grouped_hooks = {"plugin": {}, "skill": {}, "user": {}}
+        self._hooks_config_file = self._get_global_hooks_file()
         self._setup_ui()
         self._refresh()
-
-    def _init_hooks_file(self):
-        """从 PluginManager 获取全局 hooks 文件路径"""
+    
+    def _get_global_hooks_file(self) -> Path:
+        """获取全局 hooks 文件路径"""
         try:
             from app.core.plugin_manager import PluginManager
             pm = PluginManager.get_instance()
             if pm.is_initialized():
-                self.hooks_config_file = pm.get_global_hooks_file()
-                return
-        except (ImportError, Exception):
+                return pm.get_global_hooks_file()
+        except Exception:
             pass
-        # 回退
-        from app.utils.utils import get_app_data_dir
-        self.hooks_config_file = get_app_data_dir() / "hooks" / "hooks.json"
-    
-    def _load_hooks(self):
-        """从 HookManager 加载所有 hooks（文件 hooks + 技能 hooks），转为规则格式"""
-        self.all_hooks = {"SessionStart": [], "PreUserMessage": [], "PostUserMessage": [],
-                          "PreAssistantMessage": [], "PostAssistantMessage": [],
-                          "PreToolUse": [], "PostToolUse": []}
-        
-        if not self._hook_manager:
-            return
-        
-        # 获取所有 hooks（扁平格式）
-        hm_hooks = self._hook_manager.get_all_hooks()
-        global_config = str(self.hooks_config_file)
-        
-        # 计算 global_config 的 resolved 路径（一次性）
-        try:
-            global_resolved = Path(global_config).resolve()
-        except Exception:
-            global_resolved = Path(global_config)
-        
-        for event_name, flat_hooks in hm_hooks.items():
-            if event_name not in self.all_hooks:
-                self.all_hooks[event_name] = []
-            
-            # 按 (matcher, is_skill) 分组：skill hook 和 global hook 即使 matcher 相同也不合并
-            rule_map = {}  # (matcher, is_skill) -> list of hook dicts
-            for hook in flat_hooks:
-                matcher = hook.get("matcher", "") or ""
-                is_skill = self._is_skill_hook(hook, global_resolved)
-                key = (matcher, is_skill)
-                if key not in rule_map:
-                    rule_map[key] = []
-                rule_map[key].append(hook)
-            
-            for (matcher, is_skill), hooks in rule_map.items():
-                rule_entry = {
-                    "matcher": matcher,
-                    "hooks": hooks,
-                }
-                if is_skill:
-                    rule_entry["_readonly"] = True
-                self.all_hooks[event_name].append(rule_entry)
-    
-    def _is_skill_hook(self, hook: dict, global_resolved: Path) -> bool:
-        """判断 hook 是否来自技能目录（而非全局配置文件）"""
-        cf = hook.get("config_file")
-        if not cf:
-            return False  # 没有 config_file 的当作全局 hook
-        try:
-            cf_resolved = Path(cf).resolve()
-            return cf_resolved != global_resolved
-        except Exception:
-            return str(self.hooks_config_file) not in cf  # fallback: 字符串包含判断
-    
-    def _save_hooks(self):
-        """保存全局 hooks 到配置文件并立即同步 HookManager 内存"""
-        # 过滤掉 _readonly 的 skill hooks
-        save_data = {}
-        for event_name, rules in self.all_hooks.items():
-            filtered_rules = [r for r in rules if not r.get("_readonly", False)]
-            if filtered_rules:
-                save_data[event_name] = filtered_rules
-
-        self.hooks_config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.hooks_config_file, 'w', encoding='utf-8') as f:
-            json.dump({"hooks": save_data}, f, indent=2, ensure_ascii=False)
-        # 写文件后立即同步 HookManager 内存，不等待 watchfiles 防抖
-        # 这样 _toggle_hook / _remove_hook / _add_hook 后调用 _refresh(reload=True)
-        # 从 HookManager 读到的一定是最新的数据。
-        if self._hook_manager:
-            self._hook_manager.reload_global_hooks(str(self.hooks_config_file))
+        return get_app_data_dir() / "plugins" / "user-custom" / "hooks" / "hooks.json"
     
     def _setup_ui(self):
         self.viewLayout.setSpacing(0)
@@ -348,24 +277,17 @@ class HookListSettingCard(ExpandSettingCard):
         
         self.addButton = PushButton("添加", self, FluentIcon.ADD)
         self.addButton.setObjectName("_hook_add_btn")
-        
         self.addButton.clicked.connect(self.showAddHookCard.emit)
         
         self.addWidget(self.addButton)
-        
         self._update_button_position()
-        
-        # 事件分组
-        self._render_hooks()
     
     def _update_button_position(self):
         """将 addButton 移到卡片头部 expandButton 左侧"""
         card = self.card
         if not hasattr(card, 'hBoxLayout'):
             return
-        # 先从原始位置移除
         card.hBoxLayout.removeWidget(self.addButton)
-        # 找到 expandButton 位置，在其前面插入
         for i in range(card.hBoxLayout.count()):
             item = card.hBoxLayout.itemAt(i)
             if item.widget() == card.expandButton:
@@ -375,23 +297,72 @@ class HookListSettingCard(ExpandSettingCard):
                 card.hBoxLayout.insertSpacing(i + 1, 4)
                 break
     
+    def _refresh(self, reload=True):
+        """刷新 hook 列表"""
+        was_expanded = self.isExpand
+        if reload:
+            self._load_hooks()
+        
+        # 清空 viewLayout
+        while self.viewLayout.count():
+            item = self.viewLayout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        
+        self._render_hooks()
+        
+        from PyQt5.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+        self.viewLayout.activate()
+        self.view.updateGeometry()
+        
+        self._adjustViewSize()
+        if was_expanded:
+            h = self.viewLayout.sizeHint().height()
+            if h > 0:
+                self.setFixedHeight(self.card.height() + h)
+    
+    def _load_hooks(self):
+        """从 HookManager 加载分组后的 hooks"""
+        self.grouped_hooks = {"plugin": {}, "skill": {}, "user": {}}
+        if self._hook_manager:
+            self.grouped_hooks = self._hook_manager.get_all_hooks_grouped()
+    
     def _render_hooks(self):
-        """渲染所有 hooks（数据已统一为规则格式）"""
-        has_visible = any(rules for event_name, rules in self.all_hooks.items() if rules)
-        if not has_visible:
+        """按事件分组渲染 hooks"""
+        # 收集所有有 hook 的事件
+        has_any = False
+        for source in ("plugin", "skill", "user"):
+            source_hooks = self.grouped_hooks.get(source, {})
+            for event in HOOK_EVENT_ORDER:
+                if source_hooks.get(event):
+                    has_any = True
+                    break
+        
+        if not has_any:
             empty_label = QLabel("暂无 Hooks，点击「+ 添加」创建", self.view)
-            empty_label.setStyleSheet(f"color: #888; {get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 16px;")
+            empty_label.setStyleSheet(
+                f"color: #888; {get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 16px;"
+            )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
             return
         
-        for event_name, rules in self.all_hooks.items():
-            if not rules:
+        # 按事件顺序渲染
+        for event in HOOK_EVENT_ORDER:
+            event_hooks = []
+            for source in ("plugin", "skill", "user"):
+                hooks = self.grouped_hooks.get(source, {}).get(event, [])
+                for h in hooks:
+                    h = dict(h)  # 深拷贝避免修改原数据
+                    event_hooks.append(h)
+            
+            if not event_hooks:
                 continue
             
-            # 数据已统一为规则格式: [{"matcher": "...", "hooks": [...]}, ...]
             # 事件标题
-            header = QLabel(f"Event: {event_name}", self.view)
+            header = QLabel(f"Event: {event}", self.view)
             header.setStyleSheet(
                 f"background-color: #F0F0F0; color: #333; font-weight: bold; "
                 f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 48px;"
@@ -399,214 +370,87 @@ class HookListSettingCard(ExpandSettingCard):
             self.viewLayout.addWidget(header)
             
             # Hook 条目
-            for rule_index, rule in enumerate(rules):
-                hooks = rule.get("hooks", [])
-                for hook_index, hook in enumerate(hooks):
-                    # 只读 hooks：允许开关操作，但编辑/删除按钮禁用
-                    is_readonly = rule.get("_readonly", False)
-                    item = HookItem(event_name, hook, hook_index, self.view,
-                                    is_readonly=is_readonly)
-                    # 使用闭包捕获正确的变量值
-                    item.removed.connect(
-                        lambda idx, en=event_name, ri=rule_index: self._remove_hook(en, ri, idx)
-                    )
-                    item.edited.connect(
-                        lambda idx, en=event_name, ri=rule_index, hi=hook_index, hk=hook, rl=rule: self._edit_hook(en, ri, hi, hk, rl)
-                    )
-                    item.toggled.connect(
-                        lambda idx, enabled, en=event_name, ri=rule_index, hi=hook_index: self._toggle_hook(en, ri, hi, enabled)
-                    )
-                    self.viewLayout.addWidget(item)
+            for hook_data in event_hooks:
+                hook_id = hook_data.get("id", "")
+                item = HookItem(hook_data, self.view)
+                item.removed.connect(lambda hid: self._delete_hook_by_id(hid))
+                item.edited.connect(lambda hid: self._edit_hook_by_id(hid))
+                item.toggled.connect(lambda hid, enabled: self._toggle_hook_by_id(hid, enabled))
+                self.viewLayout.addWidget(item)
     
-    def _get_hook_index(self, event_name, rule_index, hook_index):
-        """计算 hook 在事件内的索引（与 HookManager.set_hook_enabled 的事件内索引保持一致）"""
-        total = 0
-        rules = self.all_hooks.get(event_name, [])
-        for ri, rule in enumerate(rules):
-            for hi, hook in enumerate(rule.get("hooks", [])):
-                if ri == rule_index and hi == hook_index:
-                    return total
-                total += 1
-        return -1
+    def _edit_hook_by_id(self, hook_id: str):
+        """在所有分组中查找 hook 数据并发出编辑信号"""
+        for source in ("plugin", "skill", "user"):
+            for event, hooks in list(self.grouped_hooks.get(source, {}).items()):
+                for h in hooks:
+                    if h.get("id") == hook_id:
+                        hook_with_event = dict(h)
+                        hook_with_event["_event"] = event
+                        hook_with_event["_source_type"] = source
+                        self.showEditHookCard.emit(hook_id, hook_with_event)
+                        return
+    
+    def _delete_hook_by_id(self, hook_id: str):
+        """删除 hook"""
+        if self._hook_manager:
+            self._hook_manager.delete_hook_by_id(hook_id)
+            self._refresh(reload=True)
+            self.hooksChanged.emit()
+    
+    def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
+        """切换 hook 启用状态"""
+        if self._hook_manager:
+            self._hook_manager.toggle_hook_by_id(hook_id, enabled)
+            self._refresh(reload=True)
+            self.hooksChanged.emit()
     
     def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command", enabled: bool = True):
-        """添加新 hook（直接修改 self.all_hooks 并持久化）"""
-        if event not in self.all_hooks:
-            self.all_hooks[event] = []
-        
-        hook_data = {
+        """添加新 hook（写入 user-custom hooks 文件）"""
+        # 构建 hook 条目
+        hook_id = uuid4().hex
+        hook_entry = {
+            "id": hook_id,
             "type": hook_type,
             "command": command,
+            "matcher": matcher or "",
             "enabled": enabled
         }
-        # 根据类型同步存储专用字段，保证 Hook.to_dict() 能正确读取
         if hook_type == "python":
-            hook_data["function"] = command
+            hook_entry["function"] = command
         elif hook_type == "http":
-            hook_data["url"] = command
+            hook_entry["url"] = command
         
-        new_rule = {"hooks": [hook_data]}
-        # 始终设置 matcher 键（即使为空字符串），避免与 matcher=None 混淆
-        new_rule["matcher"] = matcher or ""
+        # 加载/创建配置文件
+        config_file = self._hooks_config_file
+        config_file.parent.mkdir(parents=True, exist_ok=True)
         
-        self.all_hooks[event].append(new_rule)
-        
-        # 先保存到文件
-        self._save_hooks()
-        self._refresh(reload=False)
-        self.hooksChanged.emit()
-
-    @staticmethod
-    def _get_hook_effective_command(hook: dict) -> str:
-        """根据 hook 类型获取有效的命令/函数值，统一匹配"""
-        t = hook.get("type", "command")
-        if t == "python":
-            return hook.get("function", "") or hook.get("command", "") or ""
-        elif t == "http":
-            return hook.get("url", "") or hook.get("command", "") or ""
+        if config_file.exists():
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except Exception:
+                config = {}
         else:
-            return hook.get("command", "") or ""
-
-    def _update_hook(self, original_event: str, original_command: str, original_matcher: str, new_values: dict):
-        """更新已有 hook（根据原始信息查找并替换）"""
-        # 查找原始 hook 所在规则和位置
-        for event_name, rules in list(self.all_hooks.items()):
-            for ri, rule in enumerate(rules):
-                if rule.get("_readonly", False):
-                    continue
-                rule_matcher = rule.get("matcher", "")
-                hooks = rule.get("hooks", [])
-                for hi, hook in enumerate(hooks):
-                    if (self._get_hook_effective_command(hook) == original_command
-                            and event_name == original_event
-                            and rule_matcher == original_matcher):
-                        event = new_values.get("event", original_event)
-                        command = new_values.get("command", "")
-                        matcher = new_values.get("matcher", "")
-                        hook_type = new_values.get("type", "command")
-                        enabled = new_values.get("enabled", True)
-
-                        if event != original_event or matcher != original_matcher:
-                            # 事件或 matcher 变了，移动到新位置
-                            hooks.pop(hi)
-                            if not hooks:
-                                rules.pop(ri)
-                            if event not in self.all_hooks:
-                                self.all_hooks[event] = []
-                            new_hook = {"type": hook_type, "command": command, "enabled": enabled}
-                            if hook_type == "python":
-                                new_hook["function"] = command
-                            elif hook_type == "http":
-                                new_hook["url"] = command
-                            new_rule = {"hooks": [new_hook], "matcher": matcher or ""}
-                            self.all_hooks[event].append(new_rule)
-                        else:
-                            # 更新前清理旧专用字段
-                            hook.pop("function", None)
-                            hook.pop("url", None)
-                            hook["type"] = hook_type
-                            hook["command"] = command
-                            hook["enabled"] = enabled
-                            # 根据类型同步专用字段
-                            if hook_type == "python":
-                                hook["function"] = command
-                            elif hook_type == "http":
-                                hook["url"] = command
-                        break
-                else:
-                    continue
-                break
-
-        self._save_hooks()
+            config = {"hooks": {}}
+        
+        raw_hooks = config.get("hooks", config)
+        
+        # 追加到对应事件
+        if event not in raw_hooks:
+            raw_hooks[event] = []
+        
+        raw_hooks[event].append({
+            "matcher": matcher or "",
+            "hooks": [hook_entry]
+        })
+        
+        # 写文件
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        # 同步 HookManager 内存
+        if self._hook_manager:
+            self._hook_manager.reload_global_hooks(str(config_file))
+        
         self._refresh(reload=False)
         self.hooksChanged.emit()
-
-    def _edit_hook(self, event: str, rule_index: int, hook_index: int, hook: dict, rule: dict):
-        """编辑 hook：只读的 skill hook 不可编辑，发出编辑信号"""
-        if rule.get("_readonly", False):
-            return
-        # 将事件名附带到 hook 数据中传递
-        hook_with_event = dict(hook)
-        hook_with_event["_event"] = event
-        self.showEditHookCard.emit(event, hook_with_event)
-
-    def _remove_hook(self, event: str, rule_index: int, hook_index: int):
-        """删除 hook（直接修改 self.all_hooks 并持久化）"""
-        if event in self.all_hooks:
-            rules = self.all_hooks[event]
-            if rule_index < len(rules):
-                rule = rules[rule_index]
-                # 不允许删除只读 skill hooks
-                if rule.get("_readonly", False):
-                    return
-                hooks = rule.get("hooks", [])
-                if hook_index < len(hooks):
-                    hooks.pop(hook_index)
-                    # 如果规则没有 hooks 了，移除规则
-                    if not hooks:
-                        rules.pop(rule_index)
-                    # 如果事件没有规则了，移除事件
-                    if not rules:
-                        del self.all_hooks[event]
-                    
-                    # 先保存到文件
-                    self._save_hooks()
-                    self._refresh(reload=False)
-                    self.hooksChanged.emit()
-    
-    def _toggle_hook(self, event: str, rule_index: int, hook_index: int, enabled: bool):
-        """切换 hook 启用状态（直接修改 self.all_hooks 并持久化）"""
-        if event in self.all_hooks:
-            rules = self.all_hooks[event]
-            if rule_index < len(rules):
-                rule = rules[rule_index]
-                hooks = rule.get("hooks", [])
-                if hook_index < len(hooks):
-                    hooks[hook_index]["enabled"] = enabled
-                    
-                    if rule.get("_readonly", False):
-                        # 技能 hook：通过 HookManager 保存到技能的 config_file
-                        hook_event_index = self._get_hook_index(event, rule_index, hook_index)
-                        if self._hook_manager and hook_event_index >= 0:
-                            self._hook_manager.set_hook_enabled(event, hook_event_index, enabled)
-                    else:
-                        # 全局 hook：保存到全局配置文件
-                        # _save_hooks() 会立即同步 HookManager 内存（reload_global_hooks），
-                        # 所以再调 _refresh(reload=False) 不会读到旧数据导致开关弹回。
-                        self._save_hooks()
-                        # 刷新 UI 确保数据一致性（利用 self.all_hooks 已修改的状态渲染）
-                        self._refresh(reload=False)
-                    
-                    self.hooksChanged.emit()
-    
-    def _refresh(self, reload=True):
-        """刷新 hook 列表（保留添加/刷新按钮和展开状态）
-
-        Args:
-            reload: True 时从 HookManager 重新加载数据；
-                    False 时保留当前 self.all_hooks 直接重新渲染（用于操作后刷新）
-        """
-        was_expanded = self.isExpand
-        if reload:
-            self._load_hooks()
-        # 稳妥方式清空 viewLayout：takeAt + 删除 widget
-        while self.viewLayout.count():
-            item = self.viewLayout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        # 重新渲染
-        self._render_hooks()
-        
-        # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确
-        from PyQt5.QtCore import QCoreApplication
-        QCoreApplication.processEvents()
-        self.viewLayout.activate()
-        self.view.updateGeometry()
-        
-        # 调整展开区域高度
-        self._adjustViewSize()
-        # 恢复展开状态：直接强制刷新高度，不用 setExpand（已展开时是空操作）
-        if was_expanded:
-            h = self.viewLayout.sizeHint().height()
-            if h > 0:
-                self.setFixedHeight(self.card.height() + h)
