@@ -49,6 +49,12 @@ def extract_project_initials(name: str) -> str:
         initials = ''.join(p[0].upper() for p in parts[:2])
         if initials:
             return initials
+    
+    if '-' in name:
+        parts = [p for p in name.split('-') if p]
+        initials = ''.join(p[0].upper() for p in parts[:2])
+        if initials:
+            return initials
 
     # ── 驼峰/帕斯卡：提取大写字母 ──
     uppers = [c for c in name if c.isupper()]

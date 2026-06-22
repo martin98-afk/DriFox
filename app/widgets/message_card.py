@@ -48,9 +48,11 @@ from PyQt5.QtGui import (
     QBrush,
     QLinearGradient,
     QPainterPath,
+    QPixmap,
 )
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
-from app.core.webengine_profile import get_shared_web_profile
+from app.core.webengine_profile import create_transient_web_profile
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -852,6 +854,55 @@ _THINK_SNAKE_SVG = (
     ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
     '</svg>'
 )
+
+
+# 页脚 Review 按钮 SVG：放大镜 + 对勾，象征"审查"。
+# 使用 currentColor 让 QPainter 在渲染时统一着色以匹配主题。
+_REVIEW_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2.2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="11" cy="11" r="6.5"/>'
+    '<line x1="20" y1="20" x2="15.8" y2="15.8"/>'
+    '<polyline points="8.2 11.2 10.4 13.4 13.8 9.6"/>'
+    '</svg>'
+)
+
+
+def _render_svg_pixmap(
+    svg_str: str,
+    size: int,
+    color: str,
+    dpr: float = 1.0,
+) -> "QPixmap":
+    """把内嵌 SVG 渲染为指定颜色的 QPixmap（用于 QLabel 显示）。
+
+    Args:
+        svg_str: 完整 SVG 字符串（内部使用 stroke="currentColor"）
+        size: 逻辑像素尺寸（正方形）
+        color: 应用颜色（与 _theme["accent"] 保持一致）
+        dpr: devicePixelRatio（HiDPI 屏上 >1.0）。默认 1.0。
+
+    Returns:
+        已着色的 QPixmap，背景透明。物理像素 = size*dpr，已 setDevicePixelRatio(dpr)。
+    """
+    dpr = dpr if dpr > 0 else 1.0
+    physical = max(1, int(round(size * dpr)))
+    pixmap = QPixmap(physical, physical)
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.transparent)
+    renderer = QSvgRenderer(svg_str.encode("utf-8"))
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        renderer.render(painter)
+        # 用 SourceIn 模式把 currentColor 替换为目标颜色
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), QColor(color))
+    finally:
+        painter.end()
+    return pixmap
 
 
 def _render_tool_streaming_block(
@@ -1843,7 +1894,8 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        self._page = ConsoleMonitorPage(get_shared_web_profile(), self)
+        self._profile = create_transient_web_profile(self)
+        self._page = ConsoleMonitorPage(self._profile, self)
         self.setPage(self._page)
 
         # 启用本地文件访问，支持 markdown 图片显示
@@ -2168,7 +2220,12 @@ class CodeWebViewer(QWebEngineView):
                     padding: 6px 14px 0 14px; 
                     max-height: {self.MAX_HEIGHT}px;
                     overflow-x: hidden;
-                    overflow-y: auto;
+                    /* 🐛 修复：overflow: overlay 使滚动条浮在内容上方（不占布局宽度），
+                       避免内容高度在 MAX_HEIGHT 阈值附近时滚动条出现/消失导致 viewport
+                       宽度变化 → 文字重排 → 高度震荡循环。
+                       Qt 5.15.2 (Chromium 87) 仍支持此非标准值。若浏览器不支持则自动
+                       降级为 auto（第二行声明因不认识的值被忽略，第一行 auto 生效）。 */
+                    overflow-y: overlay;
                 }}
                 {scrollbar_css}
 
@@ -3512,16 +3569,14 @@ class CodeWebViewer(QWebEngineView):
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
                 js_code = (
-                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失
-                    # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
-                    # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
+                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失。
+                    # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
+                    # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
+                    # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
                     "(function(){"
                     "var _sbs=[];"
-                    "var _cp=document.getElementById('content-placeholder');"
-                    "var _childrenArr=Array.from(_cp.children);"
                     "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
-                    "idx:_childrenArr.indexOf(el)});"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                     "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
@@ -3529,9 +3584,7 @@ class CodeWebViewer(QWebEngineView):
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
                     "var _bk=_t.firstElementChild;if(_bk){"
-                    "var _ref=_c.children[b.idx];"
-                    "if(_ref)_c.insertBefore(_bk,_ref);"
-                    "else _c.appendChild(_bk);}}});}"
+                    "_c.appendChild(_bk);}}});}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -3562,16 +3615,14 @@ class CodeWebViewer(QWebEngineView):
             # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
             # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
             # 因找不到流式块而追加重复的 data-tool-injected 块）
-            # [粘底修复] 保存每个工具块的子节点索引（原始位置），恢复时 insertBefore
-            # 到对应位置而非 appendChild 到末尾，避免工具块异常"粘"在底部。
+            # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
+            # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
+            # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
-                "var _cp=document.getElementById('content-placeholder');"
-                "var _childrenArr=Array.from(_cp.children);"
                 "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,"
-                "idx:_childrenArr.indexOf(el)});"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
@@ -3579,9 +3630,7 @@ class CodeWebViewer(QWebEngineView):
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
-                "var _ref=_c.children[b.idx];"
-                "if(_ref)_c.insertBefore(_bk,_ref);"
-                "else _c.appendChild(_bk);}}});}"
+                "_c.appendChild(_bk);}}});}"
                 "})();"
             )
             self.page().runJavaScript(js_code)
@@ -4148,6 +4197,14 @@ class CodeWebViewer(QWebEngineView):
         except (RuntimeError, AttributeError):
             pass
 
+        # 清理一次性 profile
+        try:
+            if hasattr(self, '_profile'):
+                self._profile.deleteLater()
+                del self._profile
+        except (RuntimeError, AttributeError):
+            pass
+
         # 清理代码块缓存
         if hasattr(self, '_code_block_cache'):
             self._code_block_cache.clear()
@@ -4453,6 +4510,7 @@ class MessageCard(SimpleCardWidget):
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
+    reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # provider_name, model_name — 用户点击页脚模型标签时触发
@@ -4503,6 +4561,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_elapsed_label: Optional[QLabel] = None
         self._footer_tokens_label: Optional[QLabel] = None
         self._footer_diff_stats_label: Optional[QLabel] = None
+        self._footer_review_btn: Optional[QLabel] = None
         self._footer_sep1: Optional[QLabel] = None
         self._footer_sep2: Optional[QLabel] = None
         # 耗时实时计时器
@@ -4696,6 +4755,31 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
+        # Review 按钮（紧贴差异统计右侧，SVG 渲染），点击触发 code-reviewer 子智能体
+        review_btn = QLabel(self)
+        review_btn.setObjectName("footer_review_btn")
+        review_btn.setStyleSheet(
+            "QLabel {"
+            " background: transparent; padding: 0px 1px; margin: 0px;"
+            " border-radius: 3px;"
+            " }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); }"
+        )
+        review_btn.setCursor(Qt.PointingHandCursor)
+        review_btn.setVisible(False)
+        review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
+        # 预渲染 SVG pixmap：14×14 逻辑像素（与 1px 对称 padding 一起填满 16×16 容器，最大化视觉占比）
+        dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
+        review_btn._review_svg = _REVIEW_SVG
+        review_btn._review_color = accent
+        review_btn._review_pixmap = _render_svg_pixmap(_REVIEW_SVG, 14, accent, dpr=dpr)
+        review_btn.setPixmap(review_btn._review_pixmap)
+        # 逻辑像素 16×16（含 1px 对称 padding），物理像素已由 setDevicePixelRatio 处理
+        review_btn.setFixedSize(16, 16)
+        review_btn.mousePressEvent = lambda e: self._emit_review_requested()
+        self._footer_review_btn = review_btn
+        layout.addWidget(review_btn)
+
         layout.addStretch()
 
         # Token 消耗
@@ -4781,6 +4865,9 @@ class MessageCard(SimpleCardWidget):
             return
         if files_count == 0 and additions == 0 and deletions == 0:
             self._footer_diff_stats_label.setVisible(False)
+            # 同步隐藏 Review 按钮（没有 diff 时审查无意义）
+            if self._footer_review_btn:
+                self._footer_review_btn.setVisible(False)
             return
 
         accent = self._theme.get("accent", "#888888")
@@ -4797,6 +4884,20 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setText(html)
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
         self._footer_diff_stats_label.setVisible(True)
+
+        # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
+        # SVG 渲染比较重（QPixmap + QSvgRenderer + QPainter），只在颜色真的变化时才重建，
+        # 避免每次 add_diff_stats 都白白花一笔
+        if self._footer_review_btn:
+            cached_color = getattr(self._footer_review_btn, "_review_color", None)
+            if cached_color != accent:
+                dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
+                svg_str = getattr(self._footer_review_btn, "_review_svg", _REVIEW_SVG)
+                new_pixmap = _render_svg_pixmap(svg_str, 14, accent, dpr=dpr)
+                self._footer_review_btn._review_color = accent
+                self._footer_review_btn._review_pixmap = new_pixmap
+                self._footer_review_btn.setPixmap(new_pixmap)
+            self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
                         seen_files: set = None):
@@ -5575,10 +5676,24 @@ class MessageCard(SimpleCardWidget):
         self._retry_status_widget.setVisible(True)
 
     def _emit_card_diff_requested(self):
-        """发射卡片差异请求信号"""
+        """发射卡片差异请求信号
+
+        Signal:
+            cardDiffRequested(int round_index, int message_index)
+        """
         round_idx = self._round_index if self._round_index is not None else -1
         msg_idx = self._message_index if self._message_index is not None else -1
         self.cardDiffRequested.emit(round_idx, msg_idx)
+
+    def _emit_review_requested(self):
+        """发射页脚 Review 按钮点击信号（触发 code-reviewer 子智能体快速审查）
+
+        Signal:
+            reviewRequested(int round_index, int message_index)
+        """
+        round_idx = self._round_index if self._round_index is not None else -1
+        msg_idx = self._message_index if self._message_index is not None else -1
+        self.reviewRequested.emit(round_idx, msg_idx)
 
     def _update_height(self, h):
         target_height = max(40, h)
@@ -5786,8 +5901,14 @@ class MessageCard(SimpleCardWidget):
             self._content_data = ensure_content_blocks(content)
             rendered = content_to_markdown(self._content_data)
         else:
-            self._content_data = str(content or "")
-            rendered = self._content_data
+            # 用户消息支持 multimodal 内容（含图片块的列表）
+            if isinstance(content, list):
+                # 使用 content_to_text 正确提取文本，图片块转为 [图片] 占位符
+                self._content_data = content
+                rendered = content_to_text(content)
+            else:
+                self._content_data = str(content or "")
+                rendered = self._content_data
 
         if not self._lazy_rendered:
             # 懒渲染阶段，保存内容等待进入可视区域
@@ -5989,6 +6110,8 @@ class MessageCard(SimpleCardWidget):
     def get_plain_text(self) -> str:
         if self.role == "assistant":
             return content_to_text(self._content_data, include_tool_results=True)
+        if isinstance(self._content_data, list):
+            return content_to_text(self._content_data)
         return str(self._content_data or "")
 
     def run_js(self, js_code: str):
@@ -6473,6 +6596,7 @@ class MessageCard(SimpleCardWidget):
             self.toolDiffRequested,
             self.subAgentLogRequested,
             self.cardDiffRequested,
+            self.reviewRequested,
             self.saveFileRequested,
             self.lazyRenderCompleted,
         ]

@@ -44,6 +44,20 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def _resolve_placeholders(obj: Any, mapping: Dict[str, str]) -> Any:
+    """递归替换 dict/list/str 中的 ``${key}`` 占位符。深拷贝，不修改原对象。"""
+    if isinstance(obj, dict):
+        return {k: _resolve_placeholders(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_placeholders(v, mapping) for v in obj]
+    if isinstance(obj, str):
+        out = obj
+        for k, v in mapping.items():
+            out = out.replace(f"${{{k}}}", v)
+        return out
+    return obj
+
+
 class LspClient:
     """单个 LSP 服务器客户端"""
 
@@ -83,7 +97,10 @@ class LspClient:
         # 查找可执行文件
         exe = self._resolve_command()
         if not exe:
-            logger.warning(f"[LspClient:{self.config.name}] 未找到可执行文件: {self.config.command}")
+            hint = f", install_hint={self.config.install_hint}" if self.config.install_hint else ""
+            logger.warning(
+                f"[LspClient:{self.config.name}] 未找到可执行文件: {self.config.command}{hint}"
+            )
             return False
 
         try:
@@ -92,7 +109,7 @@ class LspClient:
             # 注册诊断回调
             if lsp:
                 @self._client.feature(lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)
-                def _on_diag(client_ls, params):
+                def _on_diag(ls, params):
                     diags = []
                     items = _get(params, "diagnostics", [])
                     file_uri = _get(params, "uri", "")
@@ -120,9 +137,9 @@ class LspClient:
                         self._diag_callback(file_uri, diags)
 
                 @self._client.feature("window/logMessage")
-                def _on_log(client_ls, params):
+                def _on_log(ls, params):
                     msg = _get(params, "message", str(params))
-                    logger.debug(f"[LspClient:{self.config.name}] pyright: {msg[:200]}")
+                    logger.debug(f"[LspClient:{self.config.name}] LSP server: {msg[:200]}")
 
             # 启动子进程
             args = [exe, *self.config.args]
@@ -369,6 +386,63 @@ class LspClient:
         except Exception as e:
             logger.error(f"[LspClient:{self.config.name}] didClose 失败: {e}")
 
+    async def request_full_diagnostics(self, file_path: str) -> None:
+        """主动触发服务器对文件做完整语义分析。
+
+        行为由插件 ``.lsp.json`` 的 ``triggerDiagnostics`` 字段声明——
+        核心客户端**不**内置任何 server 特定协议（如 typescript 的
+        ``typescript.tsserverRequest/geterr``、deno 的 ``deno.cache`` 等
+        都应在插件 .lsp.json 中声明）。
+
+        配置示例（typescript 插件的 .lsp.json）::
+
+            "triggerDiagnostics": {
+                "method": "workspace/executeCommand",
+                "command": "typescript.tsserverRequest",
+                "arguments": {
+                    "type": "geterr",
+                    "arguments": {
+                        "delay": 0,
+                        "files": ["${file}"]
+                    }
+                }
+            }
+
+        ``"${file}"`` 占位符会被替换为 ``file_path`` 绝对路径。
+        未配置 ``triggerDiagnostics`` 的 server 直接 no-op。
+        """
+        if not self.is_running or not lsp:
+            return
+        trigger = getattr(self.config, "trigger_diagnostics", None)
+        if not trigger:
+            return
+        method = trigger.get("method", "workspace/executeCommand")
+        try:
+            raw_args = trigger.get("arguments", {})
+            resolved_args = _resolve_placeholders(raw_args, {"file": file_path})
+            if method == "workspace/executeCommand":
+                args = resolved_args if isinstance(resolved_args, list) else [resolved_args]
+                await self._client.protocol.send_request_async(
+                    lsp.WORKSPACE_EXECUTE_COMMAND,
+                    lsp.ExecuteCommandParams(
+                        command=trigger.get("command", ""),
+                        arguments=args,
+                    ),
+                )
+            else:
+                logger.debug(
+                    f"[LspClient:{self.config.name}] 未知 trigger method: {method}"
+                )
+                return
+            logger.debug(
+                f"[LspClient:{self.config.name}] 已触发诊断: "
+                f"method={method}, file={os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logger.debug(
+                f"[LspClient:{self.config.name}] request_full_diagnostics 失败: {e}"
+            )
+
     async def wait_diagnostics(self, timeout: float = 10.0) -> list:
         """等待诊断结果（使用 loop-bound Future 确保多线程安全）
 
@@ -408,10 +482,33 @@ class LspClient:
         # 如果是绝对路径，直接使用
         if Path(cmd).is_absolute():
             return cmd
-        # 在 PATH 中查找
-        found = shutil.which(cmd)
-        if found:
-            return found
+        candidates = [cmd]
+        if sys.platform == "win32" and not cmd.lower().endswith(".exe"):
+            candidates.append(f"{cmd}.exe")
+
+        repo_root = Path(__file__).resolve().parents[3]
+        venv_roots = {
+            Path(sys.executable).resolve().parent,
+            Path.cwd() / ".venv" / "Scripts",
+            repo_root / ".venv" / "Scripts",
+        }
+        if sys.platform != "win32":
+            venv_roots.update(
+                {
+                    Path(sys.executable).resolve().parent,
+                    Path.cwd() / ".venv" / "bin",
+                    repo_root / ".venv" / "bin",
+                }
+            )
+
+        for name in candidates:
+            found = shutil.which(name)
+            if found:
+                return found
+            for root in venv_roots:
+                candidate = root / name
+                if candidate.exists():
+                    return str(candidate)
         return None
 
     def _guess_lang(self, file_path: str) -> str:

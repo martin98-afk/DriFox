@@ -108,11 +108,17 @@ class LspManager:
             logger.debug("[LspManager] 已初始化，无新配置，跳过")
             return
         self._workspace_root = workspace_root
-        # 停止旧客户端再清空（热重载场景下防止孤儿进程）
+        # 停止旧客户端再清空 — 同步等待 stop_all 完成，消除竞态条件
         if self._clients:
             self._ensure_loop()
             if self._loop:
-                asyncio.run_coroutine_threadsafe(self.stop_all(), self._loop)
+                try:
+                    future = asyncio.run_coroutine_threadsafe(self.stop_all(), self._loop)
+                    future.result(timeout=10.0)  # 同步等待所有旧服务器真正停止
+                except concurrent.futures.TimeoutError:
+                    logger.warning("[LspManager] 停止旧服务器超时，强制清空")
+                except Exception as e:
+                    logger.error(f"[LspManager] 停止旧服务器异常: {e}")
         self._clients.clear()
         self._ext_map.clear()
 
@@ -165,6 +171,93 @@ class LspManager:
         for client in self._clients.values():
             await client.stop()
         logger.info("[LspManager] 所有 LSP 服务器已停止")
+
+    # ── 增量热重载 ───────────────────────────────────────────
+
+    def add_plugin_servers(self, plugin_name: str, config_data: dict) -> int:
+        """增量注册并启动一个插件的 LSP 服务器，不影响已有服务器
+
+        用于新增插件的增量热重载场景：
+        - 只注册该插件新增的服务器（跳过已存在的同名服务器）
+        - 新服务器注册后立即后台启动（不阻塞调用线程）
+        - 已有服务器不受影响
+
+        Args:
+            plugin_name: 插件名称
+            config_data: .lsp.json 的配置内容（{server_name: {...}}）
+
+        Returns:
+            成功注册的服务器数量（后台启动中，不一定全部启动成功）
+        """
+        self._ensure_loop()
+        if self._loop is None:
+            logger.warning("[LspManager] 事件循环未就绪，无法增量添加服务器")
+            return 0
+
+        count = 0
+        for server_name, server_data in config_data.items():
+            if server_name in self._clients:
+                logger.debug(f"[LspManager] 服务器 {server_name} 已存在，跳过增量注册")
+                continue
+            try:
+                config = LspServerConfig.from_dict(server_name, server_data, plugin_name)
+                client = LspClient(config, self._workspace_root)
+                self._clients[server_name] = client
+                for ext, lang in config.extension_to_language.items():
+                    self._ext_map[ext.lower()] = server_name
+                logger.debug(
+                    f"[LspManager] 增量注册 {server_name} ({plugin_name}): "
+                    f"ext={list(config.extension_to_language.keys())}"
+                )
+                # 后台启动新服务器（不阻塞调用线程）
+                asyncio.run_coroutine_threadsafe(client.start(), self._loop)
+                logger.info(f"[LspManager] ✅ 增量启动 {server_name} ({plugin_name})")
+                count += 1
+            except Exception as e:
+                logger.error(f"[LspManager] 增量注册 {plugin_name}/{server_name} 失败: {e}")
+        if count:
+            logger.info(f"[LspManager] 增量添加 {count} 个服务器 (来自 {plugin_name})")
+        return count
+
+    def remove_plugin_servers(self, plugin_name: str) -> int:
+        """移除并停止指定插件的所有 LSP 服务器
+
+        用于插件被删除或 .lsp.json 被移除时的增量清理场景：
+        - 只停止并移除属于该插件的服务器
+        - 其他插件服务器不受影响
+
+        Args:
+            plugin_name: 插件名称
+
+        Returns:
+            移除的服务器数量
+        """
+        self._ensure_loop()
+        if self._loop is None:
+            return 0
+
+        to_remove = [
+            name for name, client in self._clients.items()
+            if client.config.plugin_name == plugin_name
+        ]
+        if not to_remove:
+            return 0
+
+        for name in to_remove:
+            client = self._clients.pop(name, None)
+            if client:
+                try:
+                    # 后台停止，不阻塞调用线程
+                    asyncio.run_coroutine_threadsafe(client.stop(), self._loop)
+                except Exception as e:
+                    logger.warning(f"[LspManager] 停止 {name} 异常: {e}")
+
+        # 批量清理 ext_map
+        remove_set = set(to_remove)
+        self._ext_map = {ext: s for ext, s in self._ext_map.items() if s not in remove_set}
+
+        logger.info(f"[LspManager] 已移除 {len(to_remove)} 个服务器 (来自 {plugin_name}): {to_remove}")
+        return len(to_remove)
 
     async def _ensure_started(self, client: LspClient) -> bool:
         if client.is_running:
@@ -283,13 +376,13 @@ class LspManager:
     # ── 被动诊断 ──────────────────────────────────────────────
 
     @staticmethod
-    def _has_cli_mode(command: str) -> bool:
-        """判断 LSP 服务器是否支持 CLI 诊断模式（--outputjson）。
+    def _has_cli_mode(config) -> bool:
+        """判断 LSP 服务器是否配置了 CLI 诊断兜底（通过 .lsp.json 的 ``cliFallback``）。
 
-        目前只有 pyright 支持 CLI 模式；typescript-language-server 等
-        必须走完整 LSP 协议。
+        配置驱动的判定 — 不再硬编码 server command 名匹配。
+        未配置 cliFallback 的 server 必须走完整 LSP 协议。
         """
-        return "pyright" in command.lower()
+        return bool(getattr(config, "cli_fallback", None))
 
     async def _quick_diagnostics(self, file_path: str) -> Optional[str]:
         """快速诊断
@@ -300,8 +393,8 @@ class LspManager:
         client = self.get_client_for_file(file_path)
         if not client:
             return None
-        if self._has_cli_mode(client.config.command):
-            return await self._run_cli_compact(file_path, client.config.command)
+        if self._has_cli_mode(client.config):
+            return await self._run_cli_compact(file_path, client.config)
 
         # 非 pyright：必须走 LSP 协议
         if not await self._ensure_started(client):
@@ -318,31 +411,14 @@ class LspManager:
         return None
 
     @staticmethod
-    async def _run_cli(
-        file_path: str,
-        command: str,
-        timeout: float,
+    async def _run_cli_with_args(
+        args: list, timeout: float,
     ) -> tuple[Optional[list], str, bool, str]:
-        """调用 LSP CLI 工具，解析 JSON 输出。
-
-        Returns:
-            (diags, stderr_text, timed_out, error_msg)
-            - diags: 来自 generalDiagnostics 的诊断列表（解析失败或无输出时为 None）
-            - stderr_text: stderr 解码文本（截断 500 字符）
-            - timed_out: 子进程是否超时
-            - error_msg: 异常信息（成功或超时为空字符串）
-        """
+        """通用 CLI 调用 + JSON 解析（pyright 风格）。由 cli_fallback 调度。"""
         import asyncio.subprocess
-
-        cli_cmd = "pyright" if "pyright" in command.lower() else command
-        if sys.platform == "win32":
-            args = ["cmd", "/c", cli_cmd, file_path, "--outputjson"]
-        else:
-            args = [cli_cmd, file_path, "--outputjson"]
         subprocess_kwargs = {}
         if sys.platform == "win32":
             subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -357,25 +433,116 @@ class LspManager:
             return None, "", True, ""
         except Exception as e:
             return None, "", False, str(e)
-
         stderr_text = stderr.decode("utf-8", errors="replace")[:500] if stderr else ""
-
         if not stdout:
             return None, stderr_text, False, ""
-
         try:
-            import orjson as json
-            data = json.loads(stdout)
+            import orjson as _orjson
+            data = _orjson.loads(stdout)
         except Exception as e:
             return None, stderr_text, False, f"JSON 解析失败: {e}"
-
         return data.get("generalDiagnostics", []), stderr_text, False, ""
 
     @staticmethod
-    async def _run_cli_compact(file_path: str, command: str) -> Optional[str]:
-        """CLI 调用 + 紧凑输出：只报 Error/Warning，15 条上限，每条截断 120 字符，总长 2000"""
-        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli(
-            file_path, command, timeout=5.0
+    async def _raw_cli_diagnostics(file_path: str, args: list) -> Optional[str]:
+        """通用 CLI 调用 + 原始 stdout 返回（不解析）。"""
+        import asyncio.subprocess
+        subprocess_kwargs = {}
+        if sys.platform == "win32":
+            subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **subprocess_kwargs,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            return "(CLI 超时 30s)"
+        except Exception as e:
+            return f"(CLI 失败: {e})"
+        text = stdout.decode("utf-8", errors="replace")
+        if not text.strip():
+            stderr_text = stderr.decode("utf-8", errors="replace")[:200]
+            return f"[CLI stderr] {os.path.basename(file_path)}:\n{stderr_text}" if stderr_text else None
+        return f"[CLI] {os.path.basename(file_path)}:\n{text[:2000]}"
+
+    @staticmethod
+    async def _tsc_text_diagnostics(file_path: str, args: list) -> Optional[str]:
+        """解析 tsc --noEmit 文本输出::
+
+            file.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.
+        """
+        import re
+        import asyncio.subprocess
+        subprocess_kwargs = {}
+        if sys.platform == "win32":
+            subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **subprocess_kwargs,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            return "(tsc CLI 超时 30s)"
+        except Exception as e:
+            return f"(tsc CLI 失败: {e})"
+        text = stdout.decode("utf-8", errors="replace")
+        if not text.strip():
+            return None
+        pattern = re.compile(
+            r"^(.+?)\((\d+),(\d+)\):\s+(error|warning|info|hint)\s+(TS\d+):\s+(.+)$",
+            re.MULTILINE,
+        )
+        diags: List[Dict[str, Any]] = []
+        for m in pattern.finditer(text):
+            line_n = int(m.group(2))
+            col_n = int(m.group(3))
+            diags.append({
+                "range": {"start": {"line": line_n - 1, "character": col_n - 1}},
+                "severity": m.group(4),
+                "message": m.group(6),
+                "code": m.group(5),
+            })
+        if not diags:
+            return f"[tsc] {os.path.basename(file_path)}:\n{text[:2000]}"
+        return LspManager._format_diagnostics(file_path, diags)
+
+    @staticmethod
+    async def _run_cli_compact(file_path: str, config) -> Optional[str]:
+        """CLI 调用 + 紧凑输出。优先使用 config.cli_fallback 配置；否则回退到 config.command。
+
+        由 ``cli_fallback.parser`` 决定解析方式：
+        - "tsc"：解析 tsc --noEmit 文本输出
+        - "pyright"：解析 pyright --outputjson JSON 输出
+        - "raw"：返回原始 stdout
+        """
+        cf = getattr(config, "cli_fallback", None) or {}
+        parser = cf.get("parser", "raw")
+        cli_cmd = cf.get("command") or config.command
+        if sys.platform == "win32" and not cli_cmd.lower().endswith((".cmd", ".bat", ".exe")):
+            base_args = ["cmd", "/c", cli_cmd]
+        else:
+            base_args = [cli_cmd]
+        args = list(base_args)
+        for tmpl in cf.get("argsTemplate", []):
+            args.append(tmpl.replace("${file}", file_path))
+
+        if parser == "tsc":
+            return await LspManager._tsc_text_diagnostics(file_path, args)
+
+        # raw / pyright 走原 pyright JSON 路径（pyright 路径也会被 raw 覆盖，
+        # 因为 _run_cli_with_args 对非 JSON 输出返回空 diags，效果等同 raw）
+        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli_with_args(
+            args, timeout=5.0
         )
         if timed_out:
             logger.debug(f"[LspManager] CLI 诊断超时 (5s): {file_path}")
@@ -439,15 +606,18 @@ class LspManager:
         策略：
         - pyright（有 CLI 模式）：LSP push 5s，失败回退 CLI
         - 其他服务器（无 CLI 模式）：LSP push 30s，强制走纯协议
+        - 被动型 server：通过 ``triggerDiagnostics`` 配置主动触发
         """
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
-        has_cli = self._has_cli_mode(client.config.command)
+        has_cli = self._has_cli_mode(client.config)
         push_timeout = 5.0 if has_cli else 30.0
 
         # 尝试 LSP push 诊断
         await client.did_open(file_path)
+        # 对"被动型" server 显式触发完整分析（由插件 triggerDiagnostics 配置驱动）
+        await client.request_full_diagnostics(file_path)
         try:
             diags = await client.wait_diagnostics(timeout=push_timeout)
             if diags:
@@ -456,38 +626,51 @@ class LspManager:
             pass
         finally:
             await client.did_close(file_path)  # 回收 LSP 服务器打开文件集合
-        # 回退：仅 pyright 可用 CLI 模式
+        # 回退：插件通过 .lsp.json 的 cliFallback 声明
         if has_cli:
-            return await self._cli_diagnostics(file_path, client.config.command)
-        return None  # 非 pyright：无 CLI 回退，干净返回 None
+            return await LspManager._cli_dispatch(file_path, client.config)
+        return None  # 无 CLI 回退配置，干净返回 None
 
     @staticmethod
-    async def _cli_diagnostics(file_path: str, command: str) -> Optional[str]:
-        """CLI 回退：直接调用 LSP 命令行工具获取诊断"""
-        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli(
-            file_path, command, timeout=30.0
-        )
-        if timed_out:
-            return "(LSP CLI 超时)"
-        if error_msg:
-            return f"(LSP CLI 失败: {error_msg})"
-        if not diags:
-            if stderr_text:
-                return f"(LSP CLI 错误: {stderr_text})"
-            return None
+    async def _cli_dispatch(file_path: str, config) -> Optional[str]:
+        """CLI 兜底的分发器。由 ``cliFallback.parser`` 决定解析器。"""
+        cf = getattr(config, "cli_fallback", None) or {}
+        parser = cf.get("parser", "raw")
+        cli_cmd = cf.get("command") or config.command
+        if sys.platform == "win32" and not cli_cmd.lower().endswith((".cmd", ".bat", ".exe")):
+            base_args = ["cmd", "/c", cli_cmd]
+        else:
+            base_args = [cli_cmd]
+        args = list(base_args)
+        for tmpl in cf.get("argsTemplate", []):
+            args.append(tmpl.replace("${file}", file_path))
 
-        fname = os.path.basename(file_path)
-        lines = [f"[LSP Diagnostc] {fname} ({len(diags)} issue(s)):"]
-        for d in diags[:30]:
-            rng = d.get("range", {}).get("start", {})
-            ln = rng.get("line", 0) + 1
-            col = rng.get("character", 0) + 1
-            sev = d.get("severity", "error")
-            msg = d.get("message", "")
-            rule = d.get("rule", "")
-            code_str = f" ({rule})" if rule else ""
-            lines.append(f"  {ln}:{col} [{sev}] {msg}{code_str}")
-        return "\n".join(lines)
+        if parser == "tsc":
+            return await LspManager._tsc_text_diagnostics(file_path, args)
+        if parser == "pyright":
+            diags, _, timed_out, error_msg = await LspManager._run_cli_with_args(
+                args, timeout=30.0
+            )
+            if timed_out:
+                return "(LSP CLI 超时)"
+            if error_msg:
+                return f"(LSP CLI 失败: {error_msg})"
+            if not diags:
+                return None
+            fname = os.path.basename(file_path)
+            lines = [f"[LSP Diagnostc] {fname} ({len(diags)} issue(s)):"]
+            for d in diags[:30]:
+                rng = d.get("range", {}).get("start", {})
+                ln = rng.get("line", 0) + 1
+                col = rng.get("character", 0) + 1
+                sev = d.get("severity", "error")
+                msg = d.get("message", "")
+                rule = d.get("rule", "")
+                code_str = f" ({rule})" if rule else ""
+                lines.append(f"  {ln}:{col} [{sev}] {msg}{code_str}")
+            return "\n".join(lines)
+        # raw / 兜底
+        return await LspManager._raw_cli_diagnostics(file_path, args)
 
     # ── 透明代理 LSP 操作 ─────────────────────────────────────
 

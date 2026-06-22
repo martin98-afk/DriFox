@@ -53,26 +53,6 @@ def main():
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
-    # OpenGL 共享上下文设置
-    # AA_DontCreateNativeWidgetSiblings：macOS 上启用会导致 Cocoa 插件问题，跳过
-    # AA_ShareOpenGLContexts：macOS 也必须启用，否则创建第二个 QWebEngineView
-    #   时 Chromium GPU 进程会触发 SIGTRAP（trace trap）崩溃
-    if platform.system() != "Darwin":
-        QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
-    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
-
-    # Chromium flags：每个 CodeWebViewer 独立一个 Chromium renderer 进程，
-    # 卡片销毁时对应的 renderer 进程会被回收，从而真正释放内存。
-    # --renderer-process-limit=8 作为进程池上限，防止极端场景下进程数无限膨胀。
-    import os as _os
-    _chromium_flags = ["--renderer-process-limit=8"]
-    # macOS 上额外启用 in-process-GPU，防止多窗口时 GPU 子进程
-    # 冲突导致的 SIGTRAP/SIGBUS 崩溃；独立 renderer 进程后该冲突更可能触发，必须保留
-    if platform.system() == "Darwin":
-        _chromium_flags.append("--in-process-gpu")
-    if "QTWEBENGINE_CHROMIUM_FLAGS" not in _os.environ:
-        _os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(_chromium_flags)
-
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 提前导入，确保在 app 创建之前触发
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401

@@ -1229,7 +1229,7 @@ def truncate_and_remove_round(
     Args:
         session: ChatSession 对象
         round_index: round 索引
-        round_ranges: round 范围列表
+        round_ranges: round 范围列表（基于规范消息的索引）
         remove_cards_func: 删除卡片的函数
         
     Returns:
@@ -1238,9 +1238,12 @@ def truncate_and_remove_round(
     if round_index < 0 or round_index >= len(round_ranges):
         return False, 0, 0
     
+    from app.core import consolidate_messages
+
     start_idx, end_idx = round_ranges[round_index]
-    old_count = len(session.messages)
-    new_messages = session.messages[:start_idx] + session.messages[end_idx:]
+    canonical = consolidate_messages(session.messages)
+    old_count = len(canonical)
+    new_messages = canonical[:start_idx] + canonical[end_idx:]
     new_count = len(new_messages)
     
     session.set_messages(new_messages, preserve_compaction=False)
@@ -1261,7 +1264,10 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
         DiffViewerWindow 实例
     """
     from app.utils.diff_viewer import DiffViewerWindow
-    
+
+    logger.debug(
+        f"[DiffViewer] show_diff_viewer title={title}, html_len={len(html or '')}"
+    )
     viewer = DiffViewerWindow(parent=parent, title=title)
     viewer.load_html(html)
     viewer.show()
@@ -1720,6 +1726,7 @@ def create_assistant_card_widget(
     on_card_diff=None,
     on_save_file=None,
     on_subagent_log=None,
+    on_review=None,
     immediate_render: bool = False,
 ) -> Any:
     """
@@ -1737,6 +1744,7 @@ def create_assistant_card_widget(
         on_card_diff: 卡片差异回调
         on_save_file: 保存文件回调
         on_subagent_log: 子智能体日志回调
+        on_review: 页脚 Review 按钮回调（收到信号时触发 code-reviewer 子智能体）
         immediate_render: 是否立即创建 QWebEngineView。流式输出需要 True；
                          会话加载设为 False，由懒渲染队列统一控制。
 
@@ -1751,7 +1759,7 @@ def create_assistant_card_widget(
         card.ensure_rendered()
         if card.viewer is not None:
             card.viewer._install_dialog_filter()
-    
+
     if on_action:
         card.actionRequested.connect(on_action)
     if on_context_action:
@@ -1764,6 +1772,8 @@ def create_assistant_card_widget(
         card.saveFileRequested.connect(on_save_file)
     if on_subagent_log:
         card.subAgentLogRequested.connect(on_subagent_log)
+    if on_review:
+        card.reviewRequested.connect(on_review)
 
     return card
 

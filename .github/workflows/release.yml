@@ -1,0 +1,222 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']                   # 推送 v0.2.9 这类 tag 自动触发
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag（例如 v0.2.9，需已存在）"
+        required: true
+
+permissions:
+  contents: write                   # 创建 Release 必需
+
+jobs:
+  # ════════════════════════════════════════════════
+  # Job 1: Windows (PyInstaller + Inno Setup)
+  # ════════════════════════════════════════════════
+  build-windows:
+    name: Windows (PyInstaller + Inno Setup)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.5.x
+          enable-cache: true
+          cache-suffix: "uv-win"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync dependencies
+        run: uv sync --all-groups
+
+      # ── 解析版本号 ──
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          v="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$v" >> "$GITHUB_OUTPUT"
+          echo "💡 Version: $v"
+
+      # ── PyInstaller ──
+      - name: PyInstaller build
+        run: uv run python build.py
+
+      - name: Verify PyInstaller output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/Drifox/Drifox.exe")) {
+            Write-Error "❌ PyInstaller 没有产出 dist/Drifox/Drifox.exe"
+            exit 1
+          }
+          Write-Host "✅ PyInstaller 打包成功"
+
+      # ── Inno Setup ──
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress --limit-output
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          Write-Host "💡 编译安装包，版本号: $tag"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "❌ Inno Setup 编译失败 (exit code: $LASTEXITCODE)"
+            exit 1
+          }
+
+      - name: Verify installer output
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $installer = "dist/output/Drifox-Setup-$tag.exe"
+          if (-not (Test-Path $installer)) {
+            Write-Error "❌ 安装包未生成: $installer"
+            exit 1
+          }
+          Write-Host "✅ 安装包: $((Get-Item $installer).Length / 1MB) MB"
+
+      # ── 校验和 ──
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $installer = "dist/output/Drifox-Setup-$tag.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Setup-$tag.exe"
+          Write-Host "✅ SHA256: $hash"
+
+      - name: Upload artifact (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Drifox-Windows-${{ steps.version.outputs.tag }}
+          path: dist/output/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ════════════════════════════════════════════════
+  # Job 2: macOS (PyInstaller + DMG)
+  # ════════════════════════════════════════════════
+  build-macos:
+    name: macOS (PyInstaller + DMG)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.5.x
+          enable-cache: true
+          cache-suffix: "uv-mac"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync dependencies (build + mac-build)
+        run: uv sync --group build --group mac-build
+
+      # ── 解析版本号 ──
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          v="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$v" >> "$GITHUB_OUTPUT"
+          echo "💡 Version: $v"
+
+      # ── PyInstaller ──
+      - name: PyInstaller build
+        run: uv run python build.py
+        env:
+          PYINSTALLER_ARCH: arm64
+
+      - name: Verify PyInstaller output
+        shell: bash
+        run: |
+          if [ ! -d "dist/Drifox.app" ]; then
+            echo "❌ PyInstaller 没有产出 dist/Drifox.app"
+            exit 1
+          fi
+          echo "✅ PyInstaller 打包成功"
+
+      # ── DMG ──
+      - name: Build DMG
+        run: uv run python create_dmg.py
+
+      - name: Verify DMG output
+        shell: bash
+        run: |
+          if [ ! -f "dist/Drifox.dmg" ]; then
+            echo "❌ DMG 未生成: dist/Drifox.dmg"
+            exit 1
+          fi
+          echo "✅ DMG: $(du -h dist/Drifox.dmg | cut -f1)"
+
+      # ── 校验和 ──
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          sha256sum dist/Drifox.dmg | tee dist/SHA256SUMS
+
+      # ── 上传产物 ──
+      - name: Upload artifact (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Drifox-macOS-${{ steps.version.outputs.tag }}
+          path: |
+            dist/Drifox.dmg
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  # ════════════════════════════════════════════════
+  # Job 3: 发布 GitHub Release（仅 push tag 时触发）
+  # ════════════════════════════════════════════════
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push'
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts (flat dir)
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.exe" -o -name "*.dmg" -o -name "SHA256SUMS" \) \
+            -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Create / Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "DriFox ${{ github.ref_name }}"
+          draft: false
+          prerelease: >-
+            ${{
+              contains(github.ref_name, 'rc') ||
+              contains(github.ref_name, 'beta') ||
+              contains(github.ref_name, 'alpha') ||
+              contains(github.ref_name, 'test')
+            }}
+          generate_release_notes: true
+          files: |
+            release-assets/Drifox-Setup-*.exe
+            release-assets/Drifox.dmg
+            release-assets/SHA256SUMS

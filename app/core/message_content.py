@@ -297,7 +297,7 @@ def content_to_text(content: Any, include_tool_results: bool = False) -> str:
                 texts.append(text)
         elif block_type in ("image_url", "input_image", "image"):
             # 图片块转为文本占位符
-            texts.append("[图片]")
+            continue
         elif include_tool_results and block_type == "tool_result":
             name = str(block.get("name", "tool"))
             result = str(block.get("result", ""))

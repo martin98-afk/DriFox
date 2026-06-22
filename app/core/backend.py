@@ -105,7 +105,9 @@ class ChatBackend(QObject):
     plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
     # 后台线程请求主线程执行插件重载（内部信号）
     _hot_reload_requested = pyqtSignal(str, str)  # (插件名, 组件), ""=全量/空组件=全部组件
-    
+    # _watch_loop 检测到新插件时，用此 sentinel 作为 plugin_name 标记走增量加载路径
+    _NEW_PLUGIN_SENTINEL = "__NEW__"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -649,14 +651,20 @@ class ChatBackend(QObject):
                                 f"[ChatBackend] 检测到新插件「{new_name}」文件变更，"
                                 f"请求增量重载..."
                             )
+                            # 预填充 dedup cache，防止路径索引重建后同一批 watch 事件
+                            # 的剩余部分以已知插件路径再次触发（ghost trigger）
+                            _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
+                            # 发射新插件标记，走 _reload_new_plugin 增量路径
+                            # 只扫描这一个插件目录，不触发全量 rescan
+                            self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
                         else:
                             logger.info(
                                 f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: "
                                 f"{relevant_changes[0][1]}"
                             )
-                        # 注意：此处不调用 _rebuild_prefixes()，因为 pm.rescan() 还没执行
-                        # 路径重建改在 _on_hot_reload_requested 重载完成后进行
-                        self._hot_reload_requested.emit("", "")
+                            # 注意：此处不调用 _rebuild_prefixes()，因为 pm.rescan() 还没执行
+                            # 路径重建改在 _on_hot_reload_requested 重载完成后进行
+                            self._hot_reload_requested.emit("", "")
             except Exception as e:
                 logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
 
@@ -761,11 +769,17 @@ class ChatBackend(QObject):
         """主线程中执行的插件热更新
 
         Args:
-            plugin_name: 插件名（空字符串表示全量重载）
+            plugin_name: 插件名
+                - "" (空) → 全量重载（走 reload_plugin_subsystems）
+                - _NEW_PLUGIN_SENTINEL → 新增插件（component 参数存储插件名）
+                - 其他 → 已知插件的增量重载（component 为具体组件名或 "" 表示根目录变更）
             component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp/lsp）
         """
         try:
-            if plugin_name:
+            if plugin_name == self._NEW_PLUGIN_SENTINEL:
+                # 新增插件：只扫描这一个插件目录，增量加载其组件
+                result = self._reload_new_plugin(component)
+            elif plugin_name:
                 result = self._reload_single_plugin(plugin_name, component)
             else:
                 result = self.reload_plugin_subsystems()
@@ -783,6 +797,104 @@ class ChatBackend(QObject):
         if prefixes_ref is not None:
             prefixes_ref[0] = self._build_plugin_path_index()
 
+    def _reload_new_plugin(self, plugin_name: str) -> dict:
+        """增量加载新增插件的所有组件，不重启已有子系统
+
+        与 _reload_single_plugin 的区别：
+        - 由 _watch_loop 检测到全新插件时调用（emit "__NEW__"）
+        - 只扫描这一个插件目录（避免全量 rescan）
+        - 只注册/启动该插件新增的 LSP 服务器（不碰已有的）
+        - 不触发全量 rescan 也就不触发全量 reload_plugin_subsystems
+
+        Args:
+            plugin_name: 新增插件名
+
+        Returns:
+            {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
+             "skills": bool, "mcp": bool, "lsp": bool}
+        """
+        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
+                        "skills": False, "mcp": False, "lsp": False}
+
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
+                return result
+
+            # 1. 只重新扫描这一个插件目录（不走全量 rescan）
+            pm.rescan_plugin(plugin_name)
+
+            plugin = pm.get_plugin(plugin_name)
+            if not plugin:
+                logger.warning(f"[ChatBackend] New plugin '{plugin_name}' not found after scan")
+                return result
+
+            comps = plugin.components
+            logger.info(f"[ChatBackend] 检测到新插件「{plugin_name}」，执行增量加载")
+
+            # 2. 智能体 + hooks
+            if comps.get("agents") and self._agent_manager:
+                result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
+
+            if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
+                self._agent_manager.reload_plugin_hooks(plugin_name)
+
+            # 3. 命令
+            if comps.get("commands") and not result["commands"]:
+                try:
+                    from app.core.builtin_commands import reload_all_commands
+                    reload_all_commands()
+                    result["commands"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+            # 4. 主题
+            if comps.get("themes"):
+                try:
+                    from app.utils.theme_manager import theme_manager
+                    from app.utils.config import update_theme_options
+                    theme_manager.reload()
+                    update_theme_options()
+                    result["themes"] = True
+                except (ImportError, Exception) as e:
+                    logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+            # 5. 技能 / MCP：懒加载，只需标记
+            result["skills"] = bool(comps.get("skills"))
+            result["mcp"] = bool(comps.get("mcp"))
+
+            # 6. LSP：增量注册，不重启已有服务器
+            if comps.get("lsp"):
+                try:
+                    from app.core.lsp.lsp_manager import LspManager
+                    lsp_mgr = LspManager.get_instance()
+                    lsp_config = pm.get_plugin_lsp_config(plugin_name)
+                    if lsp_config:
+                        count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
+                        result["lsp"] = count > 0
+                    logger.info(
+                        f"[ChatBackend] Plugin '{plugin_name}' LSP 增量加载完成"
+                    )
+                except Exception as e:
+                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量加载失败: {e}")
+
+            logger.info(f"[ChatBackend] 新插件增量加载「{plugin_name}」完成: "
+                       f"agents={result['agents']}, commands={result['commands']}, "
+                       f"themes={result['themes']}, skills={result['skills']}, "
+                       f"mcp={result['mcp']}, lsp={result['lsp']}")
+        except Exception as e:
+            logger.error(f"[ChatBackend] Failed to reload new plugin '{plugin_name}': {e}")
+
+        return result
+
     def _reload_single_plugin(self, plugin_name: str, component: str = "") -> dict:
         """增量重载单个插件（不清除其他插件的数据）
 
@@ -794,7 +906,7 @@ class ChatBackend(QObject):
         - "themes"   → 重载主题
         - "skills"   → 重载技能（PluginManager 已更新，UI 下次调用 get_local_skills() 自动生效）
         - "mcp"      → 重载 MCP 配置（PluginManager 已更新，UI 下次调用 get_mcp_servers() 自动生效）
-        - "lsp"      → 热重载 LSP 配置（停止旧服务 → 加载新配置 → 启动新服务）
+        - "lsp"      → 热重载 LSP 配置（使用增量 API：先移除旧服务 → 再注册新服务）
         - ""         → 跳过（根目录文件变更如 README/LICENSE，不影响运行时）
 
         Args:
@@ -843,6 +955,25 @@ class ChatBackend(QObject):
                 result["hooks"] = True
                 result["skills"] = True
                 result["mcp"] = True
+
+                # LSP：重新初始化 LspManager（停止旧服务 → 仅加载剩余插件的新配置 → 启动新服务）
+                try:
+                    from app.core.lsp.lsp_manager import LspManager
+                    lsp_mgr = LspManager.get_instance()
+                    lsp_configs = pm.get_lsp_configs()
+                    workdir = os.getcwd()
+                    if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                        workdir = str(self._tool_executor._workdir)
+                    lsp_mgr.initialize(workdir, lsp_configs)
+                    lsp_mgr.start_all_background()
+                    result["lsp"] = True
+                    logger.info(
+                        f"[ChatBackend] Plugin '{plugin_name}' LSP 已清理，"
+                        f"剩余 {len(lsp_mgr._clients)} 个服务器"
+                    )
+                except Exception as e:
+                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 清理失败: {e}")
+
                 return result
 
             # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
@@ -902,24 +1033,24 @@ class ChatBackend(QObject):
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
 
             # 8. LSP 配置：热重载 LSP 服务器
-            #    重新初始化 LspManager（停止旧服务 → 解析新配置 → 启动新服务）
+            #    使用增量 API：先移除该插件旧的所有 LSP 服务器，再注册新的
+            #    不走 LspManager.initialize 全量重建路径
             if component == "lsp":
                 try:
                     from app.core.lsp.lsp_manager import LspManager
                     lsp_mgr = LspManager.get_instance()
-                    lsp_configs = pm.get_lsp_configs()
-                    workdir = os.getcwd()
-                    if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
-                        workdir = str(self._tool_executor._workdir)
-                    lsp_mgr.initialize(workdir, lsp_configs)
-                    lsp_mgr.start_all_background()
-                    result["lsp"] = True
+                    # 先移除旧服务器（如果 .lsp.json 被删除也需要清理）
+                    lsp_mgr.remove_plugin_servers(plugin_name)
+                    # 再注册并启动新服务器（如果 .lsp.json 还存在）
+                    lsp_config = pm.get_plugin_lsp_config(plugin_name)
+                    if lsp_config:
+                        count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
+                        result["lsp"] = count > 0
                     logger.info(
-                        f"[ChatBackend] Plugin '{plugin_name}' LSP 热重载完成，"
-                        f"已注册 {len(lsp_mgr._clients)} 个服务器"
+                        f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载完成"
                     )
                 except Exception as e:
-                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 热重载失败: {e}")
+                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载失败: {e}")
 
             logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
                        f"agents={result['agents']}, commands={result['commands']}, "
@@ -1011,9 +1142,26 @@ class ChatBackend(QObject):
                 # MCP：PluginManager 已更新，UI 懒加载
                 result["mcp"] = bool(comps.get("mcp"))
 
+                # LSP：新增插件带 lsp 组件时，使用增量 API 只注册该新增插件的服务器
+                # 不重启已有服务器，不走 LspManager.initialize 全量重建路径
+                if comps.get("lsp"):
+                    try:
+                        from app.core.lsp.lsp_manager import LspManager
+                        lsp_mgr = LspManager.get_instance()
+                        lsp_config = pm.get_plugin_lsp_config(name)
+                        if lsp_config:
+                            count = lsp_mgr.add_plugin_servers(name, lsp_config["config"])
+                            result["lsp"] = count > 0
+                        logger.info(
+                            f"[ChatBackend] Plugin '{name}' LSP 增量加载完成"
+                        )
+                    except Exception as e:
+                        logger.error(f"[ChatBackend] Plugin '{name}' LSP 增量加载失败: {e}")
+
                 logger.info(f"[ChatBackend] 增量重载「{name}」完成: "
                            f"agents={result['agents']}, commands={result['commands']}, "
-                           f"themes={result['themes']}, skills={result['skills']}, mcp={result['mcp']}")
+                           f"themes={result['themes']}, skills={result['skills']}, "
+                           f"mcp={result['mcp']}, lsp={result['lsp']}")
                 return result
 
             # ── 全量重载（多插件变更/移除/覆盖，或非 watchfiles 触发） ──

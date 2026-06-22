@@ -23,11 +23,25 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from loguru import logger
 from PyQt5.QtWidgets import QDialog, QHBoxLayout
-from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtCore import Qt, QUrl, QTimer
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
-from app.core.webengine_profile import get_shared_web_profile
+from app.core.webengine_profile import create_transient_web_profile
+
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 _HUNK_HEADER_PATTERN = re.compile(r"@@ -(\d+),?\d* \+(\d+),?\d* @@")
+
+
+def _get_rss_mb() -> Optional[float]:
+    if psutil is None:
+        return None
+    try:
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except Exception:
+        return None
 
 
 # ==========================================================================
@@ -1221,43 +1235,112 @@ class DiffViewerWindow:
         cls._instances.clear()
 
     def __init__(self, parent=None, title: str = "文件差异对比"):
+        self._disposed = False
+        self._current_html = None
         self._window = QDialog(parent)
         self._window.setWindowTitle(title)
         self._window.resize(1300, 850)
+        self._window.setAttribute(Qt.WA_DeleteOnClose, True)
         if parent:
             self._window.setWindowFlags(self._window.windowFlags() | Qt.WindowModal)
         layout = QHBoxLayout(self._window)
         layout.setContentsMargins(0, 0, 0, 0)
         self._webview = QWebEngineView()
-        self._page = _DiffWebPage(get_shared_web_profile(), self._webview)
+        self._profile = create_transient_web_profile(self._window)
+        self._page = _DiffWebPage(self._profile, self._webview)
         self._webview.setPage(self._page)
         layout.addWidget(self._webview)
         self._window.destroyed.connect(lambda: self._on_closed())
         self._instances.append(self)
+        rss_mb = _get_rss_mb()
+        if rss_mb is None:
+            logger.debug(f"[DiffViewer] init title={title}")
+        else:
+            logger.debug(f"[DiffViewer] init title={title}, rss={rss_mb:.1f}MB")
+
+    def _clear_web_content(self):
+        if not hasattr(self, "_webview") or self._webview is None:
+            return
+
+        try:
+            page = self._webview.page()
+            if page:
+                try:
+                    page.runJavaScript("delete window._dm;delete window._lf;")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self._webview.setHtml("")
+        except Exception:
+            pass
+
+    def _log_rss(self, stage: str):
+        rss_mb = _get_rss_mb()
+        if rss_mb is None:
+            logger.debug(f"[DiffViewer] {stage}")
+        else:
+            logger.debug(f"[DiffViewer] {stage}, rss={rss_mb:.1f}MB")
+
+    def _dispose(self):
+        if self._disposed:
+            return
+        self._disposed = True
+        self._log_rss("dispose_begin")
+        self._clear_web_content()
+        self._current_html = None
+        if self in self._instances:
+            self._instances.remove(self)
+
+        try:
+            if hasattr(self, "_webview") and self._webview is not None:
+                self._webview.deleteLater()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_profile") and self._profile is not None:
+                self._profile.deleteLater()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_window") and self._window is not None:
+                self._window.deleteLater()
+        except Exception:
+            pass
+        self._page = None
+        self._profile = None
+        self._webview = None
+        self._window = None
+        self._log_rss("dispose_end")
 
     def _on_closed(self):
-        page = self._webview.page()
-        if page:
-            try: page.runJavaScript("delete window._dm;delete window._lf;")
-            except Exception: pass
-        try: self._webview.setHtml("")
-        except Exception: pass
-        self._current_html = None
-        if self in self._instances: self._instances.remove(self)
+        self._dispose()
 
     def load_html(self, html_content: str):
+        html_len = len(html_content or "")
+        self._log_rss(f"load_html_begin html_len={html_len}")
         self._webview.setHtml(html_content or "")
-        self._current_html = html_content
+        self._current_html = None
+        self._log_rss(f"load_html_called html_len={html_len}")
+        QTimer.singleShot(
+            1000, lambda: self._log_rss(f"load_html_post_1s html_len={html_len}")
+        )
 
     def show(self):
         self._window.show(); self._window.raise_(); self._window.activateWindow()
 
     def close(self):
-        page = self._webview.page()
-        if page:
-            try: page.runJavaScript("delete window._dm;delete window._lf;")
-            except Exception: pass
-        self._webview.setHtml(""); self._current_html = None; self._window.close()
+        try:
+            self._current_html = None
+            self._clear_web_content()
+            if self._window is not None:
+                self._window.close()
+            else:
+                self._dispose()
+        except Exception:
+            pass
 
     @property
     def widget(self):
