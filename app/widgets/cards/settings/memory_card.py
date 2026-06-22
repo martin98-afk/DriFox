@@ -30,6 +30,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     ListWidget,
     TextEdit,
+    MaskDialogBase,
+    PushButton,
 )
 
 
@@ -302,6 +304,139 @@ class EntryMemoryItemWidget(QWidget):
         self.edit_text.setText(self._content)
 
 
+class UrlInputDialog(MaskDialogBase):
+    """美观的 URL 输入对话框"""
+
+    urlConfirmed = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        # 对话框内容区背景
+        # MaskDialogBase.widget 是 QFrame，用 objectName 选择器精确命中自身，
+        # 避免 .QFrame 选择器误染所有子 QFrame（如 LineEdit 内部 QFrame 背景）。
+        self.widget.setObjectName("urlDialogWidget")
+        self.widget.setStyleSheet(f"""
+            #urlDialogWidget {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        # 主布局
+        self.vBoxLayout = QVBoxLayout(self.widget)
+        self.vBoxLayout.setContentsMargins(24, 24, 24, 24)
+        self.vBoxLayout.setSpacing(12)
+
+        # 标题
+        title_label = BodyLabel("🔗 添加 URL 链接", self.widget)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(16)}"
+        )
+        self.vBoxLayout.addWidget(title_label)
+
+        # 说明文字
+        hint_label = BodyLabel("请输入网页链接，添加为关键文档引用", self.widget)
+        hint_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+        )
+        self.vBoxLayout.addWidget(hint_label)
+
+        # 输入框
+        self.url_input = LineEdit(self.widget)
+        self.url_input.setPlaceholderText("https://example.com")
+        self.url_input.setText("https://")
+        self.url_input.setFixedHeight(36)
+        self.url_input.setClearButtonEnabled(True)
+        self.url_input.setStyleSheet(f"""
+            LineEdit {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
+                border: 1px solid {Colors.INPUT_BORDER};
+                color: {Colors.INPUT_TEXT};
+                padding: 4px 12px;
+                border-radius: 6px;
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            LineEdit:focus {{
+                border-color: {Colors.INFO};
+            }}
+        """)
+        # 回车键确认
+        self.url_input.returnPressed.connect(self._on_accept)
+        self.url_input.setFocus()
+        self.vBoxLayout.addWidget(self.url_input)
+
+        # 按钮行
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+        btn_layout.addStretch()
+
+        # 取消按钮
+        cancel_btn = PushButton("取消", self.widget)
+        cancel_btn.setStyleSheet(f"""
+            PushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.close)
+
+        # 确认按钮
+        confirm_btn = PrimaryPushButton("添加", self.widget)
+        confirm_btn.setStyleSheet(f"""
+            PrimaryPushButton {{
+                background-color: {Colors.INFO};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PrimaryPushButton:hover {{
+                background-color: {Colors.SEND_BTN_END};
+            }}
+        """)
+        confirm_btn.clicked.connect(self._on_accept)
+
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(confirm_btn)
+        self.vBoxLayout.addLayout(btn_layout)
+
+        # 初始大小（最小尺寸约束，允许内容自适应伸展）
+        self.widget.setMinimumSize(420, 220)
+
+    def _on_accept(self):
+        url = self.url_input.text().strip()
+        if not url or url in ('https://', 'http://', ''):
+            return
+        self.urlConfirmed.emit(url)
+        self.close()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.url_input.setFocus()
+        # 选中输入框中的文本（方便直接粘贴覆盖）
+        self.url_input.selectAll()
+
+
 class KeyDocumentItemWidget(QWidget):
     """关键文档项组件"""
 
@@ -310,6 +445,11 @@ class KeyDocumentItemWidget(QWidget):
     open_folder = pyqtSignal(str)  # folder_path
     setAsWorkingDir = pyqtSignal(str)  # file_path
     worktreeChanged = pyqtSignal(str, str)  # (original_folder, worktree_path)
+
+    @staticmethod
+    def _is_url(path: str) -> bool:
+        """判断路径是否为 URL"""
+        return bool(path and (path.startswith('http://') or path.startswith('https://')))
 
     def __init__(
         self,
@@ -323,13 +463,17 @@ class KeyDocumentItemWidget(QWidget):
         super().__init__(parent)
         self.doc_id = doc_id
         self.file_path = file_path
-        self._is_folder = os.path.isdir(file_path) if file_path else False
+        self._is_url = self._is_url(file_path)
+        self._is_folder = (os.path.isdir(file_path) if file_path and not self._is_url else False)
         self._is_working_dir = is_working_dir and self._is_folder
         self._init_ui(file_name, file_path, added_by)
 
     def _get_icon(self, file_name: str, file_path: str) -> str:
         """根据文件类型获取对应图标，文件夹单独处理"""
         import os
+        # URL 链接
+        if self._is_url:
+            return "🔗"
         # 先判断是否是文件夹
         if os.path.isdir(file_path):
             return "📁"
@@ -413,7 +557,14 @@ class KeyDocumentItemWidget(QWidget):
         icon_label = BodyLabel(icon, self)
         icon_label.setStyleSheet(f"{font_size_css(16)} padding: 0 4px;")
 
-        name_label = BodyLabel(file_name, self)
+        # URL 使用域名作为名称，非 URL 使用文件名
+        display_name = file_name
+        if self._is_url and file_path:
+            from urllib.parse import urlparse
+            parsed = urlparse(file_path)
+            domain = parsed.netloc or file_path
+            display_name = domain
+        name_label = BodyLabel(display_name, self)
         name_label.setWordWrap(False)
         name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         name_label.setMinimumWidth(0)
@@ -424,12 +575,19 @@ class KeyDocumentItemWidget(QWidget):
         main_layout.addWidget(icon_label)
         main_layout.addWidget(name_label)
 
-        # 显示绝对路径（自动中间省略，窗口缩小时优先压缩）
+        # 显示绝对路径/URL（自动中间省略，窗口缩小时优先压缩）
         self._path_label = BodyLabel("", self)
         Colors.refresh()
-        self._path_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
-        )
+        path_display = self.file_path
+        if self._is_url:
+            # URL 显示完整链接，颜色用链接色
+            self._path_label.setStyleSheet(
+                f"color: {Colors.INFO}; {get_font_family_css()} {font_size_css(10)} text-decoration: underline;"
+            )
+        else:
+            self._path_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
+            )
         self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
         self._path_label.setWordWrap(False)
         self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -461,7 +619,10 @@ class KeyDocumentItemWidget(QWidget):
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
-        self.open_btn.setToolTip("打开所在文件夹")
+        if self._is_url:
+            self.open_btn.setToolTip("在浏览器中打开链接")
+        else:
+            self.open_btn.setToolTip("打开所在文件夹")
         self.open_btn.clicked.connect(lambda: self.open_folder.emit(self.file_path))
 
         self.remove_btn = TransparentToolButton(FluentIcon.DELETE, self)
@@ -885,6 +1046,13 @@ class MemoryCardContent(QWidget):
         self.add_folder_btn.clicked.connect(self._on_add_folder_clicked)
         toolbar_layout.addWidget(self.add_folder_btn)
 
+        # 添加 URL 链接按钮
+        self.add_url_btn = TransparentToolButton(FluentIcon.LINK, toolbar)
+        self.add_url_btn.setFixedSize(24, 24)
+        self.add_url_btn.setToolTip("添加 URL 链接")
+        self.add_url_btn.clicked.connect(self._on_add_url_clicked)
+        toolbar_layout.addWidget(self.add_url_btn)
+
         docs_layout.addWidget(toolbar, 0, 0)
 
         # ── 文档列表（无边框，由外层容器统一虚线边框）──
@@ -946,6 +1114,33 @@ class MemoryCardContent(QWidget):
         )
         if folder:
             self._on_files_dropped([folder])
+
+    def _on_add_url_clicked(self):
+        """点击添加 URL 链接按钮"""
+        from app.utils.design_tokens import Colors
+        dialog = UrlInputDialog(self.window())
+        dialog.urlConfirmed.connect(self._on_url_confirmed)
+        dialog.exec_()
+
+    def _on_url_confirmed(self, url: str):
+        """URL 确认后的处理"""
+        url = url.strip()
+        # 补全协议前缀
+        if not (url.startswith('http://') or url.startswith('https://')):
+            url = 'https://' + url
+        # 验证 URL 基本格式
+        if '.' not in url.replace('https://', '').replace('http://', ''):
+            from qfluentwidgets import InfoBar
+            InfoBar.warning(
+                title='URL 格式不正确',
+                content='请输入有效的网页链接（如 https://example.com）',
+                parent=self
+            )
+            return
+        memory_mgr = self._get_memory_manager()
+        if memory_mgr:
+            memory_mgr.add_key_document(self._current_project, url, "manual")
+        self._load_key_documents()
 
     def _on_tab_changed(self, tab_key: str):
         """切换 Tab"""
@@ -1478,10 +1673,15 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _open_folder(self, path: str):
-        """打开文件或文件夹"""
+        """打开文件/文件夹/URL"""
         import subprocess
         import os
+        import webbrowser
         try:
+            # URL 链接：在浏览器中打开
+            if path and (path.startswith('http://') or path.startswith('https://')):
+                webbrowser.open(path)
+                return
             # 优先判断路径类型
             if os.path.isdir(path):
                 # 文件夹：直接打开

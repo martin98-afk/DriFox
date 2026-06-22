@@ -310,10 +310,13 @@ class MemoryManagerCore:
             for doc in docs:
                 file_name = doc.get("file_name", "")
                 file_path = doc.get("file_path", "")
+                is_url = file_path and (file_path.startswith('http://') or file_path.startswith('https://'))
                 is_wd = file_path == wd_path
                 if is_wd:
                     has_root_doc = True
                     lines.append(f"- {file_name} （项目根目录）./")
+                elif is_url:
+                    lines.append(f"- 🔗 [{file_name}]({file_path})")
                 else:
                     try:
                         rel = Path(file_path).relative_to(Path(wd_path))

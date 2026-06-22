@@ -1,0 +1,16 @@
+{
+    "name": "evolver",
+    "description": "Evolver 自进化引擎集成插件 — 基于 GEP 协议的 AI Agent 进化能力。捕获会话经验，通过 Hook 自动触发进化循环，让 DriFox 越用越强。",
+    "version": "1.0.0",
+    "author": {
+        "name": "EvoMap"
+    },
+    "homepage": "https://evomap.ai",
+    "license": "GPL-3.0-or-later",
+    "type": "user",
+    "components": {
+        "commands": true,
+        "hooks": true,
+        "skills": true
+    }
+}
