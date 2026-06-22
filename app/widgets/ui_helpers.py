@@ -1261,7 +1261,10 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
         DiffViewerWindow 实例
     """
     from app.utils.diff_viewer import DiffViewerWindow
-    
+
+    logger.debug(
+        f"[DiffViewer] show_diff_viewer title={title}, html_len={len(html or '')}"
+    )
     viewer = DiffViewerWindow(parent=parent, title=title)
     viewer.load_html(html)
     viewer.show()

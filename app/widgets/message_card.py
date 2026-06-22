@@ -50,7 +50,7 @@ from PyQt5.QtGui import (
     QPainterPath,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
-from app.core.webengine_profile import get_shared_web_profile
+from app.core.webengine_profile import create_transient_web_profile
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -1843,7 +1843,8 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        self._page = ConsoleMonitorPage(get_shared_web_profile(), self)
+        self._profile = create_transient_web_profile(self)
+        self._page = ConsoleMonitorPage(self._profile, self)
         self.setPage(self._page)
 
         # 启用本地文件访问，支持 markdown 图片显示
@@ -4142,6 +4143,14 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, '_page'):
                 self._page.deleteLater()
                 del self._page
+        except (RuntimeError, AttributeError):
+            pass
+
+        # 清理一次性 profile
+        try:
+            if hasattr(self, '_profile'):
+                self._profile.deleteLater()
+                del self._profile
         except (RuntimeError, AttributeError):
             pass
 

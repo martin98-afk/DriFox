@@ -285,6 +285,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.history_manager = self.backend.history_manager
         self.session_store = self.backend.session_store
         self.session_manager = self.backend.session_manager
+        # 会话卡片缓存只保存轻量状态快照，不再保存整组 QWidget / QWebEngineView 对象
         self._session_card_cache: Dict[str, Dict[str, Any]] = {}
         self._current_history_project: Optional[str] = None  # 当前历史面板项目过滤
         self._welcome_card_cache: Dict[str, MessageCard] = {}
@@ -5425,7 +5426,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
         # 在 create_session 之后执行，确保 _evict_if_needed 已淘汰旧会话
-        self._release_inactive_session_messages()
         self._current_session_id = session.session_id
         self._history_preview_messages = None
         self._clear_chat_area()
@@ -5439,6 +5439,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget.clear()
         self._question_tool_call_id = None
         self._load_agent_list()
+        self._release_inactive_session_messages()
 
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))
         self._refresh_context_usage_indicator()
@@ -5794,6 +5795,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._visible_batch_start = 0
         self._visible_batch_end = 0
         self._is_loading_history_batches = False
+        self._pending_lazy_cards.clear()
+        self._lazy_batch_timer_active = False
         while self.chat_layout.count():
             item = self.chat_layout.takeAt(0)
             if item.widget():
@@ -5826,6 +5829,18 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         # 从布局中取出所有 widgets
         widgets = self._take_chat_widgets()
+        self._pending_lazy_cards.clear()
+        self._lazy_batch_timer_active = False
+
+        current_session = self.session_manager.get_current_session()
+        if current_session:
+            self._session_card_cache[current_session.session_id] = {
+                "batch_count": len(self._message_batch),
+                "visible_batch_start": self._visible_batch_start,
+                "visible_batch_end": self._visible_batch_end,
+                "has_widgets": bool(widgets),
+                "cached_at": time.time(),
+            }
 
         # 彻底删除所有卡片及其子资源
         for widget in widgets:
@@ -5833,24 +5848,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 调用卡片自己的 cleanup 方法
                 widget.cleanup()
             widget.deleteLater()
-
-        # 清理可能残留的卡片缓存，并清理卡片对象
-        session = self.session_manager.get_current_session()
-        if session:
-            cache_entry = self._session_card_cache.pop(session.session_id, None)
-            if cache_entry and isinstance(cache_entry, dict):
-                cards = cache_entry.get("cards", [])
-                for card in cards:
-                    if hasattr(card, "cleanup"):
-                        try:
-                            card.cleanup()
-                        except Exception:
-                            pass
-                    if hasattr(card, "deleteLater"):
-                        try:
-                            card.deleteLater()
-                        except Exception:
-                            pass
 
         # 清理全局 Markdown 渲染 LRU 缓存（缓存的 HTML 字符串可达数 MB）
         clear_global_render_cache()
@@ -5884,15 +5881,31 @@ class OpenAIChatToolWindow(ToolWindow):
         cache_entry = self._session_card_cache.get(session.session_id)
         if not cache_entry:
             return False
-        cached_cards = (
-            cache_entry.get("cards") if isinstance(cache_entry, dict) else None
-        )
-        if not cached_cards:
+        if not isinstance(cache_entry, dict):
+            self._session_card_cache.pop(session.session_id, None)
+            return False
+        cached_cards = cache_entry.pop("cards", None)
+        if cached_cards:
+            for card in cached_cards:
+                if hasattr(card, "cleanup"):
+                    try:
+                        card.cleanup()
+                    except Exception:
+                        pass
+                if hasattr(card, "deleteLater"):
+                    try:
+                        card.deleteLater()
+                    except Exception:
+                        pass
+            self._session_card_cache.pop(session.session_id, None)
             return False
         batch_count = len(group_messages_for_display(session.messages))
         if cache_entry.get("batch_count") != batch_count:
             self._session_card_cache.pop(session.session_id, None)
             return False
+
+        # 轻量快照只保留元信息，实际恢复仍由 session.messages 重建
+        return False
 
         alive_cards, removed = filter_alive_cards(cached_cards)
         if removed:
@@ -6962,6 +6975,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._restore_main_repo()
 
         self._display_current_session()
+        self._release_inactive_session_messages()
 
         # 刷新历史会话卡片
         if self._history_card.isVisible():
@@ -8564,6 +8578,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             restored = create_session_from_record(session_record, messages, title)
             init_after_loading_session(self, restored, session_id, title, self.backend)
+            self._release_inactive_session_messages()
             # 同步项目
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
@@ -8584,6 +8599,7 @@ class OpenAIChatToolWindow(ToolWindow):
             elif not worktree_path and current_wt:
                 self._restore_main_repo()
             self._display_current_session()
+            self._release_inactive_session_messages()
             self._hide_welcome_cards()
         else:
             # fallback: session_id 不在 history_manager 中，尝试 SessionManager
@@ -8591,6 +8607,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if session.session_id == session_id:
                     self.backend.switch_session(i)
                     self._display_current_session()
+                    self._release_inactive_session_messages()
                     self._hide_welcome_cards()
                     return
             logger.warning(f"未找到 session_id: {session_id}")

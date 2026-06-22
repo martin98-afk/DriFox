@@ -67,3 +67,14 @@ def get_shared_web_profile() -> QWebEngineProfile:
             "请先在 main.py 中调用 init_shared_web_profile()。"
         )
     return _shared_profile
+
+
+def create_transient_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfile:
+    """创建一次性 WebEngine Profile。
+
+    该 profile 不使用持久化缓存和 cookies，适合短生命周期的预览窗口。
+    """
+    profile = QWebEngineProfile(parent)
+    profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
+    profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
+    return profile
