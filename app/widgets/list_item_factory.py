@@ -3,7 +3,7 @@
 ListItem 工厂函数 - 使用组合模式生成通用列表项组件
 
 解决列表项组件高度重复的问题：
-- FontItem, PackageItem, SkillItem, HookItem, ProviderItem 等高度相似
+- 各类自定义 Item（SkillItem、HookItem、ProviderItem 等）高度相似
 - 统一高度、样式、hover、按钮位置等模式
 
 使用工厂函数而非继承，保持灵活性。
@@ -116,8 +116,6 @@ def create_text_item(
     """
     创建简单的文本列表项（带可选的删除按钮）
     
-    替代: FontItem, PackageItem
-    
     Args:
         parent: 父组件
         text: 显示文本
@@ -184,9 +182,9 @@ def create_dual_label_item(
 ) -> QWidget:
     """
     创建双标签列表项（主标签 + 次标签 + 可选开关）
-    
+
     替代: SkillItem, HookItem
-    
+
     Args:
         parent: 父组件
         primary_text: 主标签文本（通常在左侧加粗）

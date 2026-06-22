@@ -304,16 +304,49 @@ class EntryMemoryItemWidget(QWidget):
         self.edit_text.setText(self._content)
 
 
-class UrlInputDialog(MaskDialogBase):
-    """美观的 URL 输入对话框"""
+class SingleInputDialog(MaskDialogBase):
+    """单输入弹框：标题 + 可选提示 + 1 个输入框 + 确认/取消按钮。
 
+    修复 MaskDialogBase 默认 widget 被拉伸到父窗口的问题：
+    - widget 大小固定（不跟随父窗口 resize 拉伸）
+    - 始终居中显示
+
+    Usage:
+        dialog = SingleInputDialog(
+            title="🔗 添加 URL 链接",
+            hint="请输入网页链接，添加为关键文档引用",   # 可选
+            placeholder="https://example.com",
+            default_text="https://",                       # 可选
+            confirm_text="添加",
+            cancel_text="取消",
+            parent=parent,
+        )
+        dialog.confirmed.connect(handler)
+        dialog.exec_()
+    """
+
+    # 通用信号
+    confirmed = pyqtSignal(str)
+    # 兼容旧 URL 场景的别名
     urlConfirmed = pyqtSignal(str)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._init_ui()
+    DEFAULT_WIDTH = 420
+    DEFAULT_HEIGHT = 220
 
-    def _init_ui(self):
+    def __init__(
+        self,
+        title: str,
+        placeholder: str = "",
+        hint: str = "",
+        default_text: str = "",
+        confirm_text: str = "确认",
+        cancel_text: str = "取消",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._init_ui(title, hint, placeholder, default_text, confirm_text, cancel_text)
+
+    def _init_ui(self, title, hint, placeholder, default_text, confirm_text, cancel_text):
         Colors.refresh()
         self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
         self.setClosableOnMaskClicked(True)
@@ -323,9 +356,9 @@ class UrlInputDialog(MaskDialogBase):
         # 对话框内容区背景
         # MaskDialogBase.widget 是 QFrame，用 objectName 选择器精确命中自身，
         # 避免 .QFrame 选择器误染所有子 QFrame（如 LineEdit 内部 QFrame 背景）。
-        self.widget.setObjectName("urlDialogWidget")
+        self.widget.setObjectName("singleInputDialogWidget")
         self.widget.setStyleSheet(f"""
-            #urlDialogWidget {{
+            #singleInputDialogWidget {{
                 background-color: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
@@ -338,26 +371,30 @@ class UrlInputDialog(MaskDialogBase):
         self.vBoxLayout.setSpacing(12)
 
         # 标题
-        title_label = BodyLabel("🔗 添加 URL 链接", self.widget)
+        title_label = BodyLabel(title, self.widget)
         title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(16)}"
         )
         self.vBoxLayout.addWidget(title_label)
 
-        # 说明文字
-        hint_label = BodyLabel("请输入网页链接，添加为关键文档引用", self.widget)
-        hint_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
-        )
-        self.vBoxLayout.addWidget(hint_label)
+        # 提示文字（可选）
+        self.hint_label = None
+        if hint:
+            self.hint_label = BodyLabel(hint, self.widget)
+            self.hint_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+            )
+            self.vBoxLayout.addWidget(self.hint_label)
 
         # 输入框
-        self.url_input = LineEdit(self.widget)
-        self.url_input.setPlaceholderText("https://example.com")
-        self.url_input.setText("https://")
-        self.url_input.setFixedHeight(36)
-        self.url_input.setClearButtonEnabled(True)
-        self.url_input.setStyleSheet(f"""
+        self.input = LineEdit(self.widget)
+        if placeholder:
+            self.input.setPlaceholderText(placeholder)
+        if default_text:
+            self.input.setText(default_text)
+        self.input.setFixedHeight(36)
+        self.input.setClearButtonEnabled(True)
+        self.input.setStyleSheet(f"""
             LineEdit {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
@@ -372,9 +409,9 @@ class UrlInputDialog(MaskDialogBase):
             }}
         """)
         # 回车键确认
-        self.url_input.returnPressed.connect(self._on_accept)
-        self.url_input.setFocus()
-        self.vBoxLayout.addWidget(self.url_input)
+        self.input.returnPressed.connect(self._on_accept)
+        self.input.setFocus()
+        self.vBoxLayout.addWidget(self.input)
 
         # 按钮行
         btn_layout = QHBoxLayout()
@@ -382,7 +419,7 @@ class UrlInputDialog(MaskDialogBase):
         btn_layout.addStretch()
 
         # 取消按钮
-        cancel_btn = PushButton("取消", self.widget)
+        cancel_btn = PushButton(cancel_text, self.widget)
         cancel_btn.setStyleSheet(f"""
             PushButton {{
                 background-color: {Colors.CARD_BG.format(alpha=180)};
@@ -400,7 +437,7 @@ class UrlInputDialog(MaskDialogBase):
         cancel_btn.clicked.connect(self.close)
 
         # 确认按钮
-        confirm_btn = PrimaryPushButton("添加", self.widget)
+        confirm_btn = PrimaryPushButton(confirm_text, self.widget)
         confirm_btn.setStyleSheet(f"""
             PrimaryPushButton {{
                 background-color: {Colors.INFO};
@@ -423,7 +460,7 @@ class UrlInputDialog(MaskDialogBase):
         # 固定 widget 大小，避免被 MaskDialogBase 拉伸到与父窗口同步
         # （MaskDialogBase 强制 dialog 大小 = parent 大小，无 setMaximumSize 时
         #   QFrame 默认 sizePolicy 允许拉伸，widget 会被撑成全屏）
-        self.widget.setFixedSize(420, 220)
+        self.widget.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         # 初始居中显示；后续 dialog resize 时通过 _center_widget 保持居中
         self._center_widget()
 
@@ -440,17 +477,22 @@ class UrlInputDialog(MaskDialogBase):
         self._center_widget()
 
     def _on_accept(self):
-        url = self.url_input.text().strip()
-        if not url or url in ('https://', 'http://', ''):
+        text = self.input.text().strip()
+        if not text:
             return
-        self.urlConfirmed.emit(url)
+        self.confirmed.emit(text)
+        self.urlConfirmed.emit(text)  # 兼容旧用法
         self.close()
 
     def showEvent(self, e):
         super().showEvent(e)
-        self.url_input.setFocus()
+        self.input.setFocus()
         # 选中输入框中的文本（方便直接粘贴覆盖）
-        self.url_input.selectAll()
+        self.input.selectAll()
+
+
+# 向后兼容别名（旧的 URL 引用代码）
+UrlInputDialog = SingleInputDialog
 
 
 class KeyDocumentItemWidget(QWidget):
@@ -1133,9 +1175,16 @@ class MemoryCardContent(QWidget):
 
     def _on_add_url_clicked(self):
         """点击添加 URL 链接按钮"""
-        from app.utils.design_tokens import Colors
-        dialog = UrlInputDialog(self.window())
-        dialog.urlConfirmed.connect(self._on_url_confirmed)
+        dialog = SingleInputDialog(
+            title="🔗 添加 URL 链接",
+            hint="请输入网页链接，添加为关键文档引用",
+            placeholder="https://example.com",
+            default_text="https://",
+            confirm_text="添加",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(self._on_url_confirmed)
         dialog.exec_()
 
     def _on_url_confirmed(self, url: str):
