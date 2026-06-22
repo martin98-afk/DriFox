@@ -91,6 +91,8 @@ class ToolControlCardContent(QWidget):
         self._controller = controller  # ToolPermissionController
         self._toggle_widgets: dict = {}
         self._group_switches: dict = {}
+        self._group_labels: dict = {}  # group_name -> (QLabel, tool_names) 用于刷新"启用数/总数"
+        self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
         self._setup_ui()
 
         if self._controller:
@@ -103,12 +105,16 @@ class ToolControlCardContent(QWidget):
             self._bind_controller(controller)
 
     def _bind_controller(self, controller):
-        """连接 controller 信号,初始化 UI"""
+        """连接 controller 信号,初始化 UI
+
+        注意:不立即 _rebuild(),因为此时 widget 还没显示。
+        等首次 show_content() 时再构建(惰性渲染)。
+        期间 controller 信号已连接,_toggle_widgets 为空时 _apply_toggles 是 no-op,
+        不会丢更新 — 首次 _rebuild 会从 controller 拉最新数据。
+        """
         controller.togglesChanged.connect(self._on_active_toggles_changed)
         controller.behaviorChanged.connect(self._on_active_behavior_changed)
         controller.activeAgentChanged.connect(lambda _: self._on_active_agent_changed())
-        # 初始渲染（全量构建 widget，后续信号触发走 _apply_toggles 轻量更新）
-        self._rebuild()
 
     def _on_active_toggles_changed(self, toggles):
         """controller 通知 active toggles 变化(智能体激活/恢复/用户编辑)"""
@@ -135,24 +141,34 @@ class ToolControlCardContent(QWidget):
         self._apply_toggles()
 
     def refresh(self):
-        """从 controller 强制刷新 UI(供 main_widget 在关键节点主动调用)"""
-        if self._controller is None:
+        """从 controller 强制刷新 UI(供 main_widget 在关键节点主动调用)
+
+        未构建时不做事 — 等首次 show_content 时会从 controller 拉最新数据。
+        """
+        if self._controller is None or not self._built:
             return
         self._apply_toggles()
 
     def refresh_style(self):
-        """主题/字体变更时重建全部 widget 以应用新样式"""
+        """主题/字体变更时重建全部 widget 以应用新样式
+
+        未构建时跳过 — 等下次 show_content 时会自动重建以应用新样式。
+        """
+        if not self._built:
+            return
         self._rebuild()
 
     def _rebuild(self):
         """全量重建内容"""
         from loguru import logger
+        self._built = True  # 标记已构建
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._toggle_widgets.clear()
         self._group_switches.clear()
+        self._group_labels.clear()
 
         # 从 controller 获取当前生效的 toggles
         if self._controller:
@@ -190,7 +206,7 @@ class ToolControlCardContent(QWidget):
                 sw.setChecked(enabled)
                 sw.blockSignals(False)
 
-        # 更新整组开关
+        # 更新整组开关 + 组标题"启用数/总数"
         for group_name, tool_names in TOOL_GROUPS:
             gs = self._group_switches.get(group_name)
             if gs:
@@ -199,6 +215,13 @@ class ToolControlCardContent(QWidget):
                     gs.blockSignals(True)
                     gs.setChecked(all_on)
                     gs.blockSignals(False)
+            label_info = self._group_labels.get(group_name)
+            if label_info:
+                label, names = label_info
+                enabled_count = sum(1 for t in names if toggles.get(t, True))
+                new_text = f"{group_name} ({enabled_count}/{len(names)})"
+                if label.text() != new_text:
+                    label.setText(new_text)
 
     def _refresh_stats(self):
         """仅刷新各整组开关状态(不全量重建)"""
@@ -241,13 +264,15 @@ class ToolControlCardContent(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 8, 10, 8)
 
-        label = QLabel(f"{group_name} ({len(tool_names)})")
+        enabled_count = sum(1 for t in tool_names if all_toggles.get(t, True))
+        label = QLabel(f"{group_name} ({enabled_count}/{len(tool_names)})")
         label.setStyleSheet(
             f"color: #ddd; font-weight: 600; background: transparent; border: none; "
             f"{font_size_css(12)} {get_font_family_css()}"
         )
         header_layout.addWidget(label)
         header_layout.addStretch()
+        self._group_labels[group_name] = (label, list(tool_names))
 
         # 整组开关
         all_on = all(all_toggles.get(t, True) for t in tool_names)
@@ -353,8 +378,15 @@ class ToolControlCardContent(QWidget):
         self.togglesChanged.emit(self._controller.get_toggles())
 
     def show_content(self):
-        """卡片显示时刷新(从 controller 拉取最新状态)"""
-        self._rebuild()
+        """卡片显示时刷新(从 controller 拉取最新状态)
+
+        惰性构建:首次显示才全量 _rebuild(),后续走 _apply_toggles 轻量更新。
+        避免每次打开卡片都重建 33 个 SwitchButton 导致 ~200ms 卡顿。
+        """
+        if not self._built:
+            self._rebuild()
+        else:
+            self._apply_toggles()
 
     def hide_content(self):
         pass
