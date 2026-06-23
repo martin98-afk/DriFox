@@ -336,6 +336,16 @@ class LLMSettingsCard(SystemCardFrame):
         self._setup_font_card()
         content_layout.addWidget(self.llmFontCard)
 
+        # 桌宠显示开关
+        self.petCard = SwitchSettingCard(
+            FluentIcon.HEART,
+            "桌宠显示",
+            "在主窗口上显示像素小狐桌宠",
+            configItem=self.cfg.pet_enabled,
+            parent=self,
+        )
+        content_layout.addWidget(self.petCard)
+
         # ---- 版本更新分隔标签 ----
         self._sep_update_label = self._make_sep_label("版本更新")
         self._section_anchors["update"] = self._sep_update_label

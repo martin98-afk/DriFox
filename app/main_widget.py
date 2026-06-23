@@ -1433,6 +1433,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if Settings.get_instance().pet_enabled.value:
             self._init_pixel_pet()
 
+        # 桌宠显示开关的实时响应
+        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
+
         session_bar_layout = QHBoxLayout()
 
         # ===== 项目+分支组合控件（一体感布局） =====
@@ -4219,6 +4222,19 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[PixelPet] 初始化失败: {e}")
             self.pixel_pet = None
+
+    def _on_pet_enabled_changed(self, enabled: bool) -> None:
+        """桌宠显示开关实时响应"""
+        from app.utils.config import Settings
+        if enabled:
+            if self.pixel_pet is None:
+                self._init_pixel_pet()
+            else:
+                self.pixel_pet.show()
+                self.pixel_pet.raise_()
+        else:
+            if self.pixel_pet is not None:
+                self.pixel_pet.hide()
 
     # ══════════════════════════════════════════════════════════════
 
