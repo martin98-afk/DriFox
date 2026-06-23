@@ -448,11 +448,11 @@ class PixelPetWidget(QWidget):
         """入场欢迎：从下方弹入"""
         if self.parent() and self._current_state == "idle":
             pw, ph = self.parent().width(), self.parent().height()
-            target_x = pw - self.width() - 8
+            target_x = pw - self.width() - 12
             # 计算目标 Y：站在发送按钮上
             btn_top = self._get_send_button_top()
             if btn_top is not None:
-                target_y = btn_top - 42
+                target_y = btn_top - 41
             else:
                 target_y = ph - self.height() - 100
             self.move(target_x, ph)  # 从底部开始
@@ -835,12 +835,11 @@ class PixelPetWidget(QWidget):
         if not self.parent():
             return None
         try:
-            # 递归查找所有子控件中的 SendableTextEdit
-            from app.widgets.bottom_input_area import SendableTextEdit
-            for child in self.parent().findChildren((SendableTextEdit,)):
-                if hasattr(child, 'send_btn'):
-                    sb = child.send_btn
-                    if sb.isVisible():
+            for child in self.parent().children():
+                cls_name = type(child).__name__
+                if "InputArea" in cls_name or "Input" in cls_name or "bottom" in cls_name.lower():
+                    if hasattr(child, 'send_btn'):
+                        sb = child.send_btn
                         local_pos = sb.mapTo(self.parent(), QPoint(0, 0))
                         return local_pos.y()
         except Exception:
@@ -852,15 +851,14 @@ class PixelPetWidget(QWidget):
         if self._dragging:
             return
 
-        margin = 8
+        margin = 12
         target_x = parent_width - self.width() - margin
 
         # 找到发送按钮，让桌宠脚底站在它上边缘
         btn_top = self._get_send_button_top()
         if btn_top is not None:
-            # 像素狐狸脚底在 widget 内的偏移：16×16 中脚底在 y=13，3x 缩放 = px 39~41
-            # 所以脚底视觉底部 = widget_top + 41，对齐 btn_top - 1（留 1px 空隙）
-            feet_offset = 42
+            # 像素狐狸脚底在 widget 内的偏移量（16×16 中脚在 y=13，缩放后 13*3=39，+2px 空隙）
+            feet_offset = 41
             target_y = btn_top - feet_offset
         else:
             # fallback: 右下角，输入区域上方
