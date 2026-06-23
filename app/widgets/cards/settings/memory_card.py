@@ -9,7 +9,7 @@ import os
 from typing import Dict
 
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
-from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QTextDocument, QKeyEvent
+from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QKeyEvent
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -30,6 +30,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     ListWidget,
     TextEdit,
+    MaskDialogBase,
+    PushButton,
 )
 
 
@@ -48,6 +50,7 @@ class EntryInputLineEdit(LineEdit):
 
 from app.utils.design_tokens import scale_font_size, font_size_css, Colors
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.elided_label import _ElidedLabel
 from app.utils.git_worktree import GitWorktreeDetector
 from app.widgets.worktree_section import WorktreeSectionWidget
 from app.widgets.cards.settings.project_selector_card import (
@@ -138,13 +141,11 @@ class EntryMemoryItemWidget(QWidget):
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
 
-        self.content_label = BodyLabel(self._content, self.text_widget)
-        self.content_label.setWordWrap(True)
-        self.content_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.content_label.setMinimumWidth(0)
+        Colors.refresh()
+        self.content_label = _ElidedLabel(self._content, self.text_widget)
         self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
         self.content_label.setStyleSheet(
-            f"padding: 4px; {get_font_family_css()} {font_size_css(12)}"
+            f"color: {Colors.TEXT_PRIMARY}; padding: 4px; {get_font_family_css()} {font_size_css(12)}"
         )
         text_layout.addWidget(self.content_label)
 
@@ -205,26 +206,13 @@ class EntryMemoryItemWidget(QWidget):
         main_layout.addWidget(self.switch)
 
     def sizeHint(self):
-        """根据实际宽度计算自适应高度，支持文本自动换行"""
-        width = self.width()
-        if width <= 0:
-            return QSize(0, 44)
-
-        buttons_width = 100
-        content_width = width - 16 - 6 - buttons_width
-        if content_width < 20:
-            content_width = 20
-
+        """单行省略预览 + 编辑模式自适应高度"""
         if self._editing and self.edit_widget.isVisible():
             edit_height = self.edit_text.height()
             return QSize(0, max(44, edit_height + 16))
 
-        doc = QTextDocument()
-        doc.setPlainText(self._content)
-        doc.setDefaultFont(self.content_label.font())
-        doc.setTextWidth(content_width)
-        text_height = int(doc.size().height()) + 16
-        return QSize(0, max(44, text_height))
+        # 单行省略：固定高度，字体 12px + padding 8px(上下) = 行高 28px，但保持最小 44px
+        return QSize(0, 44)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -302,6 +290,197 @@ class EntryMemoryItemWidget(QWidget):
         self.edit_text.setText(self._content)
 
 
+class SingleInputDialog(MaskDialogBase):
+    """单输入弹框：标题 + 可选提示 + 1 个输入框 + 确认/取消按钮。
+
+    修复 MaskDialogBase 默认 widget 被拉伸到父窗口的问题：
+    - widget 大小固定（不跟随父窗口 resize 拉伸）
+    - 始终居中显示
+
+    Usage:
+        dialog = SingleInputDialog(
+            title="🔗 添加 URL 链接",
+            hint="请输入网页链接，添加为关键文档引用",   # 可选
+            placeholder="https://example.com",
+            default_text="https://",                       # 可选
+            confirm_text="添加",
+            cancel_text="取消",
+            parent=parent,
+        )
+        dialog.confirmed.connect(handler)
+        dialog.exec_()
+    """
+
+    # 通用信号
+    confirmed = pyqtSignal(str)
+    # 兼容旧 URL 场景的别名
+    urlConfirmed = pyqtSignal(str)
+
+    DEFAULT_WIDTH = 420
+    DEFAULT_HEIGHT = 220
+
+    def __init__(
+        self,
+        title: str,
+        placeholder: str = "",
+        hint: str = "",
+        default_text: str = "",
+        confirm_text: str = "确认",
+        cancel_text: str = "取消",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._init_ui(title, hint, placeholder, default_text, confirm_text, cancel_text)
+
+    def _init_ui(self, title, hint, placeholder, default_text, confirm_text, cancel_text):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        # 对话框内容区背景
+        # MaskDialogBase.widget 是 QFrame，用 objectName 选择器精确命中自身，
+        # 避免 .QFrame 选择器误染所有子 QFrame（如 LineEdit 内部 QFrame 背景）。
+        self.widget.setObjectName("singleInputDialogWidget")
+        self.widget.setStyleSheet(f"""
+            #singleInputDialogWidget {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        # 主布局
+        self.vBoxLayout = QVBoxLayout(self.widget)
+        self.vBoxLayout.setContentsMargins(24, 24, 24, 24)
+        self.vBoxLayout.setSpacing(12)
+
+        # 标题
+        title_label = BodyLabel(title, self.widget)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(16)}"
+        )
+        self.vBoxLayout.addWidget(title_label)
+
+        # 提示文字（可选）
+        self.hint_label = None
+        if hint:
+            self.hint_label = BodyLabel(hint, self.widget)
+            self.hint_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+            )
+            self.vBoxLayout.addWidget(self.hint_label)
+
+        # 输入框
+        self.input = LineEdit(self.widget)
+        if placeholder:
+            self.input.setPlaceholderText(placeholder)
+        if default_text:
+            self.input.setText(default_text)
+        self.input.setFixedHeight(36)
+        self.input.setClearButtonEnabled(True)
+        self.input.setStyleSheet(f"""
+            LineEdit {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
+                border: 1px solid {Colors.INPUT_BORDER};
+                color: {Colors.INPUT_TEXT};
+                padding: 4px 12px;
+                border-radius: 6px;
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            LineEdit:focus {{
+                border-color: {Colors.INFO};
+            }}
+        """)
+        # 回车键确认
+        self.input.returnPressed.connect(self._on_accept)
+        self.input.setFocus()
+        self.vBoxLayout.addWidget(self.input)
+
+        # 按钮行
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+        btn_layout.addStretch()
+
+        # 取消按钮
+        cancel_btn = PushButton(cancel_text, self.widget)
+        cancel_btn.setStyleSheet(f"""
+            PushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.close)
+
+        # 确认按钮
+        confirm_btn = PrimaryPushButton(confirm_text, self.widget)
+        confirm_btn.setStyleSheet(f"""
+            PrimaryPushButton {{
+                background-color: {Colors.INFO};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PrimaryPushButton:hover {{
+                background-color: {Colors.SEND_BTN_END};
+            }}
+        """)
+        confirm_btn.clicked.connect(self._on_accept)
+
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(confirm_btn)
+        self.vBoxLayout.addLayout(btn_layout)
+
+        # 固定 widget 大小，避免被 MaskDialogBase 拉伸到与父窗口同步
+        # （MaskDialogBase 强制 dialog 大小 = parent 大小，无 setMaximumSize 时
+        #   QFrame 默认 sizePolicy 允许拉伸，widget 会被撑成全屏）
+        self.widget.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        # 初始居中显示；后续 dialog resize 时通过 _center_widget 保持居中
+        self._center_widget()
+
+    def _center_widget(self):
+        """让 widget 在 dialog 中保持居中（MaskDialogBase 不自动居中）"""
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        # 先调 super 让 MaskDialogBase 把 windowMask 同步到 dialog 大小，
+        # 然后重新居中 widget
+        super().resizeEvent(e)
+        self._center_widget()
+
+    def _on_accept(self):
+        text = self.input.text().strip()
+        if not text:
+            return
+        self.confirmed.emit(text)
+        self.urlConfirmed.emit(text)  # 兼容旧用法
+        self.close()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.input.setFocus()
+        # 选中输入框中的文本（方便直接粘贴覆盖）
+        self.input.selectAll()
+
+
+# 向后兼容别名（旧的 URL 引用代码）
+UrlInputDialog = SingleInputDialog
+
+
 class KeyDocumentItemWidget(QWidget):
     """关键文档项组件"""
 
@@ -310,6 +489,11 @@ class KeyDocumentItemWidget(QWidget):
     open_folder = pyqtSignal(str)  # folder_path
     setAsWorkingDir = pyqtSignal(str)  # file_path
     worktreeChanged = pyqtSignal(str, str)  # (original_folder, worktree_path)
+
+    @staticmethod
+    def _is_url(path: str) -> bool:
+        """判断路径是否为 URL"""
+        return bool(path and (path.startswith('http://') or path.startswith('https://')))
 
     def __init__(
         self,
@@ -323,13 +507,17 @@ class KeyDocumentItemWidget(QWidget):
         super().__init__(parent)
         self.doc_id = doc_id
         self.file_path = file_path
-        self._is_folder = os.path.isdir(file_path) if file_path else False
+        self._is_url = self._is_url(file_path)
+        self._is_folder = (os.path.isdir(file_path) if file_path and not self._is_url else False)
         self._is_working_dir = is_working_dir and self._is_folder
         self._init_ui(file_name, file_path, added_by)
 
     def _get_icon(self, file_name: str, file_path: str) -> str:
         """根据文件类型获取对应图标，文件夹单独处理"""
         import os
+        # URL 链接
+        if self._is_url:
+            return "🔗"
         # 先判断是否是文件夹
         if os.path.isdir(file_path):
             return "📁"
@@ -413,7 +601,14 @@ class KeyDocumentItemWidget(QWidget):
         icon_label = BodyLabel(icon, self)
         icon_label.setStyleSheet(f"{font_size_css(16)} padding: 0 4px;")
 
-        name_label = BodyLabel(file_name, self)
+        # URL 使用域名作为名称，非 URL 使用文件名
+        display_name = file_name
+        if self._is_url and file_path:
+            from urllib.parse import urlparse
+            parsed = urlparse(file_path)
+            domain = parsed.netloc or file_path
+            display_name = domain
+        name_label = BodyLabel(display_name, self)
         name_label.setWordWrap(False)
         name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         name_label.setMinimumWidth(0)
@@ -424,12 +619,19 @@ class KeyDocumentItemWidget(QWidget):
         main_layout.addWidget(icon_label)
         main_layout.addWidget(name_label)
 
-        # 显示绝对路径（自动中间省略，窗口缩小时优先压缩）
+        # 显示绝对路径/URL（自动中间省略，窗口缩小时优先压缩）
         self._path_label = BodyLabel("", self)
         Colors.refresh()
-        self._path_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
-        )
+        path_display = self.file_path
+        if self._is_url:
+            # URL 显示完整链接，颜色用链接色
+            self._path_label.setStyleSheet(
+                f"color: {Colors.INFO}; {get_font_family_css()} {font_size_css(10)} text-decoration: underline;"
+            )
+        else:
+            self._path_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
+            )
         self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
         self._path_label.setWordWrap(False)
         self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -461,7 +663,10 @@ class KeyDocumentItemWidget(QWidget):
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
-        self.open_btn.setToolTip("打开所在文件夹")
+        if self._is_url:
+            self.open_btn.setToolTip("在浏览器中打开链接")
+        else:
+            self.open_btn.setToolTip("打开所在文件夹")
         self.open_btn.clicked.connect(lambda: self.open_folder.emit(self.file_path))
 
         self.remove_btn = TransparentToolButton(FluentIcon.DELETE, self)
@@ -885,6 +1090,13 @@ class MemoryCardContent(QWidget):
         self.add_folder_btn.clicked.connect(self._on_add_folder_clicked)
         toolbar_layout.addWidget(self.add_folder_btn)
 
+        # 添加 URL 链接按钮
+        self.add_url_btn = TransparentToolButton(FluentIcon.LINK, toolbar)
+        self.add_url_btn.setFixedSize(24, 24)
+        self.add_url_btn.setToolTip("添加 URL 链接")
+        self.add_url_btn.clicked.connect(self._on_add_url_clicked)
+        toolbar_layout.addWidget(self.add_url_btn)
+
         docs_layout.addWidget(toolbar, 0, 0)
 
         # ── 文档列表（无边框，由外层容器统一虚线边框）──
@@ -946,6 +1158,40 @@ class MemoryCardContent(QWidget):
         )
         if folder:
             self._on_files_dropped([folder])
+
+    def _on_add_url_clicked(self):
+        """点击添加 URL 链接按钮"""
+        dialog = SingleInputDialog(
+            title="🔗 添加 URL 链接",
+            hint="请输入网页链接，添加为关键文档引用",
+            placeholder="https://example.com",
+            default_text="https://",
+            confirm_text="添加",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(self._on_url_confirmed)
+        dialog.exec_()
+
+    def _on_url_confirmed(self, url: str):
+        """URL 确认后的处理"""
+        url = url.strip()
+        # 补全协议前缀
+        if not (url.startswith('http://') or url.startswith('https://')):
+            url = 'https://' + url
+        # 验证 URL 基本格式
+        if '.' not in url.replace('https://', '').replace('http://', ''):
+            from qfluentwidgets import InfoBar
+            InfoBar.warning(
+                title='URL 格式不正确',
+                content='请输入有效的网页链接（如 https://example.com）',
+                parent=self
+            )
+            return
+        memory_mgr = self._get_memory_manager()
+        if memory_mgr:
+            memory_mgr.add_key_document(self._current_project, url, "manual")
+        self._load_key_documents()
 
     def _on_tab_changed(self, tab_key: str):
         """切换 Tab"""
@@ -1478,10 +1724,15 @@ class MemoryCardContent(QWidget):
         self._load_key_documents()
 
     def _open_folder(self, path: str):
-        """打开文件或文件夹"""
+        """打开文件/文件夹/URL"""
         import subprocess
         import os
+        import webbrowser
         try:
+            # URL 链接：在浏览器中打开
+            if path and (path.startswith('http://') or path.startswith('https://')):
+                webbrowser.open(path)
+                return
             # 优先判断路径类型
             if os.path.isdir(path):
                 # 文件夹：直接打开

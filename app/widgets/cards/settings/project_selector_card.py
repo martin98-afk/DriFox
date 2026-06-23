@@ -3,6 +3,8 @@
 项目选择卡片内容 - 卡片形式展示所有项目，支持选择、新建、归档
 替代原来的 ProjectSelectorPopup 弹窗
 """
+import colorsys
+import zlib
 from typing import Dict
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -67,28 +69,19 @@ def extract_project_initials(name: str) -> str:
     return name.upper()
 
 
-# 项目颜色调色板（12 色，色相均匀分布，每 30° 一跳）
-# 从红色 (0°) 开始，经橙黄绿青蓝紫玫红回到深橙 (330°)
-# 深色主题优化版：所有颜色 HSL 亮度 ≥ 51%，确保在 #212126 深色背景上清晰可见
-# 同时作为方形头像背景时白色文字仍具可读性（亮度 ≤ 63%）
-PROJECT_COLORS = [
-    "#ef5350",  # 红    0°  (L:62%, 原 #e53935 L:55%)
-    "#ff9800",  # 橙   30°  (L:56%, 原 #f57c00 L:48%)
-    "#ffc107",  # 琥珀 60°  (L:58%, 原 #fdd835 L:66%)
-    "#9ccc65",  # 亮绿 90°  (L:60%, 原 #7cb342 L:48%)
-    "#66bb6a",  # 绿  120°  (L:57%, 原 #43a047 L:45%)
-    "#4db6ac",  # 墨绿150°  (L:51%, 原 #00897b L:27%) ★
-    "#26c6da",  # 青  180°  (L:55%, 原 #00acc1 L:37%) ★
-    "#42a5f5",  # 蓝  210°  (L:61%, 原 #1e88e5 L:51%)
-    "#5c6bc0",  # 靛蓝240°  (L:56%, 原 #3949ab L:45%) ★
-    "#ab47bc",  # 紫  270°  (L:51%, 原 #8e24aa L:40%) ★
-    "#ec407a",  # 玫红300°  (L:59%, 原 #d81b60 L:47%)
-    "#ff7043",  # 深橙330°  (L:63%, 原 #ff5722 L:56%)
-]
-
-
 def get_project_color(name: str, alpha: int = 255) -> str:
-    """根据项目名计算固定颜色（确定性哈希分配）
+    """根据项目名计算固定颜色（HSL 全空间哈希）
+
+    旧实现：仅在 12 色调色板中取色 → 项目超过 ~30 个即发生明显撞色
+    （生日悖论），尤其是首字母相同或前缀相近的项目。
+
+    新实现：在 HSL 圆柱上从完整字符串 zlib.crc32 直接采样：
+      - H ∈ [0°, 360°)   → 色相覆盖整圈，永不局限于 12 离散点
+      - S ∈ [55%, 85%]   → 足够鲜艳，避免灰色
+      - L ∈ [50%, 65%]   → 在 #212126 深色背景上清晰；白字仍可读
+
+    采样自同一 CRC32 的不同 bit 段（H 低位、S 中位、L 高位），
+    保证首字母相同 / 前缀相近的项目也能得到不同颜色。
 
     使用 zlib.crc32 替代内置 hash()，避免 Python 的
     进程间随机化种子（PYTHONHASHSEED）导致每次启动颜色不一致。
@@ -100,13 +93,14 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     Returns:
         RGBA 颜色字符串，如 "rgba(33, 139, 255, 255)"
     """
-    import zlib
-    color_index = zlib.crc32(name.encode("utf-8")) % len(PROJECT_COLORS)
-    hex_color = PROJECT_COLORS[color_index]
-    r = int(hex_color[1:3], 16)
-    g = int(hex_color[3:5], 16)
-    b = int(hex_color[5:7], 16)
-    return f"rgba({r}, {g}, {b}, {alpha})"
+    crc = zlib.crc32(name.encode("utf-8"))
+    # 三个分量取自 CRC32 不同 bit 段，相关性低
+    h = crc % 360                  # 0-359°  色相
+    s = 55 + ((crc >> 8)  % 31)    # 55-85%  饱和度
+    l = 50 + ((crc >> 16) % 16)    # 50-65%  亮度
+
+    r, g, b = colorsys.hls_to_rgb(h / 360.0, l / 100.0, s / 100.0)
+    return f"rgba({int(round(r * 255))}, {int(round(g * 255))}, {int(round(b * 255))}, {alpha})"
 
 
 class _SquareAvatar(QWidget):

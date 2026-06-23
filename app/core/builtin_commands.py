@@ -75,7 +75,7 @@ class FunctionCommandHandlers:
 # 解析结果缓存（避免每次启动重解析 60+ .md 文件）
 # ============================================================
 
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 _cache_disabled = False  # 调试用，设为 True 跳过缓存
 
 
@@ -517,6 +517,7 @@ def register_all_commands():
             "prompt_text": cmd.get("prompt_text", ""),
             "parameters": _serialize_params(cmd.get("parameters", [])),
             "shortcut": cmd.get("shortcut", ""),
+            "prompt_sections": cmd.get("prompt_sections", {}),
         })
     serialized_agents = []
     for ag in agents:

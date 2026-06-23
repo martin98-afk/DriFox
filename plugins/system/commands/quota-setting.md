@@ -109,21 +109,34 @@ prompt_sections:
 
 **所需字段**：`cookie`、`server_id`、`workspace_id`
 
+**关键经验**：直接导航到 Go 页面不会触发 `/_server` 请求。必须先导航到工作区首页（Zen 页），然后**点击 Go 导航链接**，此时会发出**两个** `/_server?id=` 请求，**第二个**才是正确的 server_id。
+
 **步骤详解**：
 
 ```
 0. workspace_id 不提前询问用户（登录后才能看到）。如果用户消息中已含 `wrk_xxx` 或 opencode.ai/workspace/wrk_xxx URL 则用正则提取。
-1. 构造目标 URL：有 workspace_id → opencode.ai/workspace/{id}/go，否则 → opencode.ai
+1. 【导航到工作区首页】构造目标 URL（有 workspace_id → opencode.ai/workspace/{id}，否则 → opencode.ai），不要直接跳到 /go 页
 2. mcp__playwright__browser_navigate(url=目标URL)
-3. 等待登录（轮询 5 秒间隔，最长 timeout 秒）：URL 含 /workspace/wrk_ 或 snapshot 出现 "Coding Plan"/"5h"/"Weekly"/"Monthly"
-4. 提取 workspace_id（从 URL 正则提取）
-5. 刷新 Go 页 + 捕获 `/_server` 请求：
-   5.1 先查 network_requests 能否捡到 `/_server` → 有则跳到 7.2
-   5.2 否则用 browser_run_code_unsafe 注册 request 监听器后重新导航
+3. 等待登录（轮询 5 秒间隔，最长 timeout 秒）：URL 含 /workspace/wrk_ 或 snapshot 出现模型列表/BYOK/计费导航
+4. 提取 workspace_id（从 URL 正则提取 wrk_xxx）
+5. 【关键】点击 Go 导航链接 + 捕获 `/_server` 请求：
+   5.1 用 browser_run_code_unsafe 注册 request 监听器（监听含 /_server?id= 的请求）
+   5.2 用 page.click('a[href*="/go"]') 或类似选择器点击 Go 导航链接（**不要直接 navigate 到 /go 路径**）
+   5.3 等待 3-5 秒确保两个 `/_server` 请求都发出
+   5.4 提取**第二个**请求的 id 参数作为 server_id（第一个请求的 id 是旧的/错误的）
+   5.5 兜底方案：如果监听未捕获到，从 page HTML 中搜索 `<form action="/_server?id=xxx"` 提取 server_id
 6. 抓取 cookie：browser_run_code_unsafe + page.context().cookies('https://opencode.ai')
-7. 提取 server_id：从 `/_server` URL 的 id query 参数提取（64 字符 SHA256）
-8. 组装结果：{"cookie": "...", "server_id": "...", "workspace_id": "..."}
+7. 组装结果：{"cookie": "...", "server_id": "...", "workspace_id": "..."}
 ```
+
+> ⚠️ 经验教训：**务必通过点击 Go 导航链接来触发 `/_server` 请求**，而非直接导航。直接访问 `/go` URL 会导致页面复用缓存，不会发出 `/_server` 请求，导致 server_id 无法捕获或捕获到旧值。
+
+**OpenCode 特有错误处理**：
+
+| 错误场景 | 应对 |
+|---------|------|
+| 只捕获到一个 `/_server` 请求 | 检查是否直接 navigate 到了 /go 路径。按步骤 5 操作：导航到工作区首页 → **点击 Go 链接**（而非 navigate），才会触发两个 `/_server` 请求 |
+| server_id 不正确（用户反馈） | 大概率是取了**第一个** `/_server` 请求的 id。正确的 server_id 在**第二次**请求中。重新按 5.1-5.4 的点击流程捕获，取第二个请求的 id 参数 |
 
 **字段填充提示**：
 

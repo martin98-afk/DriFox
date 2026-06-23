@@ -2067,8 +2067,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area = SendableTextEdit(self._input_card)
         self.input_area._agent_combo.hide()
         self.input_area._initializing = False
-        self.input_area.setFixedHeight(52)
-        self.input_area.setPlaceholderText("给 DriFox 发送消息...")
+        # self.input_area.setFixedHeight(52)
         setFont(self.input_area, scale_font_size(15))
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
@@ -3782,7 +3781,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._card_manager.show_card("hook_edit", self._window_id)
 
-    def _show_hook_edit_card(self, event: str, hook_data: dict):
+    def _show_hook_edit_card(self, hook_id: str, hook_data: dict):
         """显示编辑 Hook 卡片"""
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
@@ -3809,18 +3808,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("settings", self._window_id)
         if hasattr(self._settings_popup, "hookListCard"):
             original = self._hook_edit_popup.get_original_data()
-            if original:
-                # 编辑已有 hook
-                orig_event = original.get("_event", values["event"])
-                orig_command = original.get("command", "")
-                orig_matcher = original.get("matcher", "")
-                self._settings_popup.hookListCard._update_hook(
-                    original_event=orig_event,
-                    original_command=orig_command,
-                    original_matcher=orig_matcher,
-                    new_values=values,
-                )
-            else:
+            hook_id = original.get("id", "") if original else ""
+            hm = self._settings_popup.hookListCard._hook_manager
+            
+            if hook_id and hm:
+                # 编辑已有 hook（edit_hook_by_id 内部处理事件变更移动逻辑）
+                hm.edit_hook_by_id(hook_id, values)
+                hm.reload_global_hooks(str(self._settings_popup.hookListCard._hooks_config_file))
+                self._settings_popup.hookListCard._refresh(reload=True)
+            elif hm:
                 # 新增 hook
                 self._settings_popup.hookListCard._add_hook(
                     event=values["event"],
@@ -3844,7 +3840,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 先重新加载 HookManager 内存（从文件读取）
                 if hook_card._hook_manager:
                     hook_card._hook_manager.reload_global_hooks(
-                        str(hook_card.hooks_config_file)
+                        str(hook_card._hooks_config_file)
                     )
                 hook_card._refresh(reload=True)
         self._card_manager.show_card("settings", self._window_id)
@@ -4907,7 +4903,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if hasattr(self._settings_popup, "hookListCard"):
                     card = self._settings_popup.hookListCard
                     if card._hook_manager:
-                        card._hook_manager.reload_global_hooks(str(card.hooks_config_file))
+                        card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
                     logger.debug("[HotReload] hooks card refreshed")
             except Exception as e:

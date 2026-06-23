@@ -15,7 +15,6 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QSizePolicy, QDialog,
-    QLineEdit,
 )
 from loguru import logger
 
@@ -287,70 +286,23 @@ class _AddWorktreeRow(QWidget):
         layout.addStretch()
 
     def _on_add(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("新建 Worktree")
-        dialog.setFixedSize(360, 140)
-        dialog.setStyleSheet(f"""
-            QDialog {{
-                background-color: {Colors.CONTENT_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-            }}
-            QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QLineEdit {{
-                background-color: {Colors.CONTENT_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                padding: 6px 10px;
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QLineEdit:focus {{ border-color: {Colors.BORDER_ACCENT}; }}
-            QPushButton {{
-                background-color: {Colors.BORDER_ACCENT};
-                color: white; border: none;
-                border-radius: 4px; padding: 6px 18px;
-                {get_font_family_css()} {font_size_css(12)}
-                min-width: 60px;
-            }}
-            QPushButton#cancelBtn {{
-                background: transparent; color: {Colors.TEXT_SECONDARY};
-                border: 1px solid {Colors.BORDER};
-            }}
-            QPushButton#cancelBtn:hover {{ background-color: {Colors.HOVER_BG}; }}
-        """)
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
 
-        vl = QVBoxLayout(dialog)
-        vl.setContentsMargins(16, 16, 16, 16)
-        vl.setSpacing(8)
-
-        vl.addWidget(QLabel(f"从 <b>{self._current_branch}</b> 创建新分支："))
-
-        edit = QLineEdit(dialog)
-        edit.setText(f"{self._repo_name}/")
-        edit.setFocus()
-        vl.addWidget(edit)
-
-        bl = QHBoxLayout()
-        bl.addStretch()
-        c = QPushButton("取消", dialog)
-        c.setObjectName("cancelBtn")
-        c.clicked.connect(dialog.reject)
-        bl.addWidget(c)
-        ok = QPushButton("创建", dialog)
-        ok.clicked.connect(dialog.accept)
-        bl.addWidget(ok)
-        vl.addLayout(bl)
-
-        edit.returnPressed.connect(dialog.accept)
-
-        if dialog.exec_() != QDialog.Accepted:
+        # 注意：parent 必须传顶层窗口（self.window()）。
+        # 如果传 self（_AddWorktreeRow，24px 高），MaskDialogBase 会把
+        # dialog 强制设成 100×24，widget（420×220）溢出导致看不见。
+        dialog = SingleInputDialog(
+            title="新建 Worktree",
+            hint=f"从 <b>{self._current_branch}</b> 创建新分支：",
+            default_text=f"{self._repo_name}/",
+            confirm_text="创建",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        if not dialog.exec_():
             return
 
-        branch = edit.text().strip()
+        branch = dialog.input.text().strip()
         if branch:
             self.createRequested.emit(branch, self._current_branch)
 

@@ -67,7 +67,7 @@ class KeyDocumentsRepository:
         
         Args:
             project: 项目名称
-            file_path: 文件路径
+            file_path: 文件路径或 URL
             added_by: 添加方式 ('manual' 或 'stage_files')
         
         Returns:
@@ -78,9 +78,16 @@ class KeyDocumentsRepository:
         self._migrate()
         
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # 统一路径分隔符
+        # 统一路径分隔符（仅限本地路径，不影响 URL）
         file_path = str(file_path).replace("\\", "/")
-        file_name = os.path.basename(file_path)
+        # 对 URL 提取域名作为文件名，本地路径使用 basename
+        is_url = file_path.startswith(('http://', 'https://'))
+        if is_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(file_path)
+            file_name = parsed.netloc or file_path
+        else:
+            file_name = os.path.basename(file_path)
         doc_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{hashlib.md5(file_path.encode()).hexdigest()[:8]}"
         
         try:

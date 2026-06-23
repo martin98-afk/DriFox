@@ -1,6 +1,7 @@
 # 大模型输入框
 import math
 import os
+import random
 import tempfile
 import uuid
 from pathlib import Path
@@ -29,6 +30,83 @@ from qfluentwidgets import TextEdit, TransparentToolButton
 from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
 
+# ======== 输入框 placeholder 定时轮播 tips ========
+PLACEHOLDER_TIPS = [
+    # ════ 基本输入 ════
+    "拖拽文件到输入框即可快速分析",
+    "Shift+Enter 换行，Enter 发送",
+    "输入框为空时按 ↑/↓ 切换历史输入",
+    "输入 @ 快速引用项目文件",
+    "输入 / 查看内建指令",
+
+    # ════ 快捷键 ════
+    "Ctrl+N 新建对话，Ctrl+L 清空会话",
+    "Ctrl+Shift+G 重排分组窗口",
+    "Shift+esc 拆散所有分组",
+    "Shift+点击窗口头添加分组",
+
+    # ════ 项目 ════
+    "点击顶部项目名切换/新建/归档项目",
+    "项目笔记自动关联，切换项目即切换笔记",
+    "文档中添加文件夹作为工具工作目录",
+
+    # ════ 模型与参数 ════
+    "点击顶部模型名快速切换模型",
+    "温度/最大Token影响回复风格",
+
+    # ════ 技能系统 ════
+    "@brainstorming 集思广益",
+    "@git-commit 生成规范提交信息",
+    "@skill-creator 创建自定义技能",
+    "@minimax-image-understanding 分析图片",
+
+    # ════ 代码与工具 ════
+    "代码块右上角可复制或保存文件",
+    "工具结果点击「查看差异」对比修改",
+    "工具悬浮框显示执行详情",
+    "撤销按钮可单独撤销编辑操作",
+
+    # ════ 窗口与布局 ════
+    "右上角「新建窗口」并发处理多任务",
+    "「分支」按钮复制会话到新窗口",
+    "右下角展开历史会话卡片继续对话",
+    "记忆管理让 AI 记住你的偏好",
+
+    # ════ 消息卡片页脚 ════
+    "页脚：📄N差异 | 🔍审查 | Token | 耗时 | 模型",
+    "点击 📄N 查看文件修改对比",
+    "点击 🔍 用 code-reviewer 审查修改",
+    "点击 Token 查看上下文详情与预算",
+    "点击模型名快速切换对应服务商和模型",
+
+    # ════ 高级功能 ════
+    "点击上下文指示器查看 Token 详情",
+    "子智能体协作处理复杂任务",
+    "长对话自动启用上下文压缩省 Token",
+    "历史会话自动保存，关闭不丢失",
+
+    # ════ MCP 系统 ════
+    "系统设置中配置 MCP Server 扩展能力",
+    "MCP 工具连接后自动可用",
+    "npx server-filesystem 让 AI 读写文件",
+    "npx @playwright/mcp 让 AI 操作浏览器",
+    "npx server-github 让 AI 访问 GitHub",
+
+    # ════ 内建指令 ════
+    "/new 新建会话 /branch 创建分支",
+    "/init 笔记 /review 审查 /theme 主题色",
+    "/compact 手动触发上下文压缩",
+    "/ 命令支持 #skill 和 #agent 过滤",
+    "/ 搜索支持 | 和 & 组合关键字",
+
+    # ════ 文件提及 ════
+    "@ 搜索支持 | 和 & 组合筛选",
+    "@ 模糊匹配：rqrmnts 也能找到 requirements.txt",
+]
+
+# 轮播间隔（毫秒）
+_PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
+
 
 class SendableTextEdit(TextEdit):
     sendMessageRequested = pyqtSignal()
@@ -55,13 +133,14 @@ class SendableTextEdit(TextEdit):
 
         self._setup_glow_effect()
         self._apply_input_style()
-        self.setPlaceholderText("给 DriFox 发送消息，Enter 发送")
+        # placeholder 仅用 tips 轮播，不用通用提示语
+        self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
         self.setAcceptRichText(False)
         self.setLineWrapMode(TextEdit.WidgetWidth)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(52)
+        self.setMinimumHeight(42)
         self.setMaximumHeight(180)
-        self.setFixedHeight(52)
+        self.setFixedHeight(42)
 
         self._agent_combo = ComboBox(self)
         self._agent_combo.setFixedSize(75, 28)
@@ -135,6 +214,13 @@ class SendableTextEdit(TextEdit):
         self._setting_history_text: bool = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
+        # placeholder 定时轮播 tips
+        self._placeholder_tip_index = 0
+        self._placeholder_tip_timer = QTimer(self)
+        self._placeholder_tip_timer.setInterval(_PLACEHOLDER_ROTATE_INTERVAL_MS)
+        self._placeholder_tip_timer.timeout.connect(self._rotate_placeholder_tip)
+        self._placeholder_tip_timer.start()
+
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
 
@@ -162,6 +248,12 @@ class SendableTextEdit(TextEdit):
 
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
+
+    def _rotate_placeholder_tip(self):
+        """轮播 placeholder tips"""
+        if not self.toPlainText():
+            self._placeholder_tip_index = (self._placeholder_tip_index + 1) % len(PLACEHOLDER_TIPS)
+            self.setPlaceholderText(PLACEHOLDER_TIPS[self._placeholder_tip_index])
 
     def set_command_card(self, card):
         """注入命令卡片引用（由 main_widget 创建并注册）"""

@@ -60,7 +60,7 @@ class Agent:
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),
-            mode=data.get("mode"),
+            mode=data.get("mode", "subagent"),
             permission=data.get("permission", {}),
             temperature=data.get("temperature"),
             steps=data.get("steps"),

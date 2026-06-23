@@ -8,7 +8,7 @@ from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLo
 from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 from app.widgets.cards.settings.mcp_setting_card import MCPEditCard
 from app.widgets.cards.settings.hook_setting_card import HookEditCard, HookListSettingCard
-from app.widgets.cards.settings.list_setting_card import FontListSettingCard, SkillListSettingCard, PackageListSettingCard
+from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.project_selector_card import ProjectSelectorCardContent
@@ -26,9 +26,7 @@ __all__ = [
     "MCPEditCard",
     "HookEditCard",
     "HookListSettingCard",
-    "FontListSettingCard",
     "SkillListSettingCard",
-    "PackageListSettingCard",
     "ProviderListSettingCard",
     "ProviderEditCard",
     "ProjectSelectorCardContent",

@@ -121,84 +121,7 @@ _NEXT_FIELD_PATTERN = re.compile(r"\n(?:success|tool_call_id|diff|echarts):")
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
-# ======== 欢迎卡片随机 Tips ========
-WELCOME_TIPS = [
-    # ===== 文件与输入 =====
-    "💡 拖拽文件到输入框即可快速分析",
-    "💡 Shift+Enter 换行，Enter 发送消息",
-    "💡 输入框为空时按 ↑/↓ 键可快速切换历史输入记录",
-
-    # ===== 会话管理 =====
-    "💡 Ctrl+N 快速新建对话，Ctrl+L 清空当前会话",
-    "💡 历史会话自动保存，关闭窗口也不丢失",
-    "💡 长对话会自动启用「上下文压缩」优化 Token",
-
-    # ===== 项目功能 =====
-    "💡 点击顶部项目名称可切换/新建/归档项目，不同项目数据隔离",
-    "💡 项目笔记自动关联当前项目，切换项目自动切换笔记内容",
-    "💡 关键文档中添加文件夹可作为工具的工作目录，相对路径以此为准",
-
-    # ===== 模型与参数 =====
-    "💡 点击模型名称可快速切换大模型",
-    "💡 模型参数影响回复风格（温度/最大Token），多试试找到你的风格",
-    "💡 不同智能体擅长不同任务：Plan 规划、Build 构建、Explore 探索",
-
-    # ===== 技能系统 =====
-    "💡 输入 @ 可快速选择技能，触发 AI 专项能力",
-    "💡 @brainstorming 集思广益，@writing-plans 制定计划",
-    "💡 @git-commit 自动分析改动生成规范提交信息",
-    "💡 @skill-creator 创建新的自定义技能扩展",
-    "💡 @minimax-image-understanding 分析图片内容",
-
-    # ===== 代码与文件 =====
-    "💡 代码块右上角有复制和保存按钮，点击即可",
-    "💡 工具执行结果可点击「查看差异」对比文件修改",
-    "💡 工具悬浮框会显示正在执行的工具，点击可查看详情",
-    "💡 用户卡片的撤销按钮可以单独撤销单个编辑操作",
-    "💡 用户卡片的撤销按钮会将会话重置到对应卡片之前",
-
-    # ===== 窗口与布局 =====
-    "💡 右上角「新建窗口」按钮可创建并发会话，多任务同时进行",
-    "💡 右上角「分支」按钮可复制当前会话到新窗口",
-    "💡 右下角可展开历史会话卡片，点击继续历史对话",
-    "💡 Shift+点击窗口头添加分组，分组窗口同步移动",
-    "💡 Shift+esc 将所有以分组窗口拆散",
-    "💡 Ctrl+Shift+G 一键重新排列所有分组窗口",
-
-    # ===== 高级功能 =====
-    "💡 记忆管理让 AI 更懂你的偏好和习惯",
-    "💡 点击上下文指示器可查看 Token 使用详情",
-    "💡 子智能体可协助处理复杂任务，观察其工作过程",
-
-    # ===== MCP 系统 =====
-    "💡 在系统设置中配置 MCP Server，可扩展 AI 的工具能力",
-    "💡 MCP 工具自动获取工具信息，连接后即可直接调用",
-    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-filesystem 可让 AI 读写本地文件",
-    "💡 常用MCP服务： npx -y @colbymchenry/codegraph serve --mcp 可以构建本地代码知识图谱",
-    "💡 常用MCP服务： npx -y @modelcontextprotocol/server-github 可让 AI 访问github",
-    "💡 常用MCP服务： npx -y @playwright/mcp@latest --isolated 可让 AI 操作浏览器",
-
-    # ===== 内建指令 =====
-    "💡 输入 / 可查看所有内建指令，快速调用常用功能",
-    "💡 /new 新建会话、/new-window 新建窗口、/branch 创建分支",
-    "💡 /init 初始化项目笔记、/review 审查代码改动、/theme 设计主题色",
-    "💡 /compact 手动触发上下文压缩，减少 Token 消耗",
-    "💡 输入 / 还会显示从 agents 目录加载的自定义智能体命令",
-    "💡 智能体命令加 `--subagent + 任务描述` 可在子智能体中执行任务",
-
-    # ===== 文件提及卡片 =====
-    "💡 输入 @ 可浏览项目文件，↑/↓ 导航，Enter 选中文件快速引用",
-    "💡 @ 文件搜索支持 | 和 & 多关键字：@doc|config&json 组合筛选文件",
-    "💡 @ 文件搜索支持模糊匹配：输入 rqrmnts 也能找到 requirements.txt",
-
-    # ===== 命令卡片类别过滤 =====
-    "💡 / 命令搜索支持 | 和 & 多关键字：/find|search&replace 组合查找",
-    "💡 / 命令支持类别过滤：#skill 只看技能、#agent 只看智能体",
-    "💡 / 命令还可组合：#skill tdd 搜索名含「tdd」的技能",
-    "💡 / 命令类别可多选：type:skill|type:agent 显示技能和智能体",
-]
-
-# ======== 欢迎卡片欢迎语 ========
+# ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
 WELCOME_GREETINGS = [
     "你好！我是 Drifox 飘狐 🦊",
     "嗨！有什么我可以帮你的吗？",
@@ -859,7 +782,7 @@ _THINK_SNAKE_SVG = (
 # 页脚 Review 按钮 SVG：放大镜 + 对勾，象征"审查"。
 # 使用 currentColor 让 QPainter 在渲染时统一着色以匹配主题。
 _REVIEW_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" '
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" '
     'fill="none" stroke="currentColor" stroke-width="2.2" '
     'stroke-linecap="round" stroke-linejoin="round">'
     '<circle cx="11" cy="11" r="6.5"/>'
@@ -1640,11 +1563,6 @@ def clear_global_render_cache():
     超过 50KB 的大文本渲染会直接绕过缓存，因此缓存条目规模可控。
     """
     _render_markdown_to_html_cached_impl.cache_clear()
-
-
-def get_random_tip() -> str:
-    """获取随机 Tips"""
-    return random.choice(WELCOME_TIPS)
 
 
 def get_random_greeting() -> str:
@@ -4736,46 +4654,45 @@ class MessageCard(SimpleCardWidget):
         self._footer_bar = bar
         bar.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(6, 0, 6, 0)
+        # 水平 8 让两端对称，垂直 0 配合统一字号后整体更紧凑
+        layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(0)
 
         accent = self._theme["accent"]
         font_css = get_font_family_css()
+        # 统一所有 footer 元素字号为 10px（原 9px 文字 + 11px emoji 混用 → 基线错位）
         label_style = (
-            f"{font_css} font-size: {scale_font_size(9)}px; "
+            f"{font_css} font-size: {scale_font_size(10)}px; "
             f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
         )
 
         # 差异统计（左对齐，极简风格，点击弹出差异弹窗）
         diff_l = QLabel("", self)
         diff_l.setStyleSheet(label_style)
+        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
-        # Review 按钮（紧贴差异统计右侧，SVG 渲染），点击触发 code-reviewer 子智能体
-        review_btn = QLabel(self)
+        # Review 按钮（紧贴差异统计右侧，emoji 🔍），点击触发 code-reviewer 子智能体
+        # 字号与文字保持一致（10px），避免 emoji 与 9px 文字基线错位
+        review_btn = QLabel("🔍", self)
         review_btn.setObjectName("footer_review_btn")
         review_btn.setStyleSheet(
-            "QLabel {"
-            " background: transparent; padding: 0px 1px; margin: 0px;"
-            " border-radius: 3px;"
-            " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); }"
+            f"QLabel {{"
+            f" background: transparent; padding: 0px 2px; margin: 0px;"
+            f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
+            f" color: {accent};"
+            f" }}"
+            f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
         )
+        review_btn.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
         review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
-        # 预渲染 SVG pixmap：14×14 逻辑像素（与 1px 对称 padding 一起填满 16×16 容器，最大化视觉占比）
-        dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
-        review_btn._review_svg = _REVIEW_SVG
-        review_btn._review_color = accent
-        review_btn._review_pixmap = _render_svg_pixmap(_REVIEW_SVG, 14, accent, dpr=dpr)
-        review_btn.setPixmap(review_btn._review_pixmap)
-        # 逻辑像素 16×16（含 1px 对称 padding），物理像素已由 setDevicePixelRatio 处理
-        review_btn.setFixedSize(16, 16)
+        review_btn.adjustSize()
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
@@ -4785,6 +4702,7 @@ class MessageCard(SimpleCardWidget):
         # Token 消耗
         tokens_l = QLabel("", self)
         tokens_l.setStyleSheet(label_style)
+        tokens_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         tokens_l.setVisible(False)
         self._footer_tokens_label = tokens_l
         layout.addWidget(tokens_l)
@@ -4792,6 +4710,7 @@ class MessageCard(SimpleCardWidget):
         # 分隔点 1（token ↔ 耗时）
         sep1 = QLabel("·", self)
         sep1.setStyleSheet(label_style)
+        sep1.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         sep1.setVisible(False)
         self._footer_sep1 = sep1
         layout.addWidget(sep1)
@@ -4799,6 +4718,7 @@ class MessageCard(SimpleCardWidget):
         # 耗时
         elapsed_l = QLabel("", self)
         elapsed_l.setStyleSheet(label_style)
+        elapsed_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         elapsed_l.setVisible(False)
         self._footer_elapsed_label = elapsed_l
         layout.addWidget(elapsed_l)
@@ -4806,6 +4726,7 @@ class MessageCard(SimpleCardWidget):
         # 分隔点 2（耗时 ↔ 模型）
         sep2 = QLabel("·", self)
         sep2.setStyleSheet(label_style)
+        sep2.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         sep2.setVisible(False)
         self._footer_sep2 = sep2
         layout.addWidget(sep2)
@@ -4816,6 +4737,7 @@ class MessageCard(SimpleCardWidget):
         model_l.setStyleSheet(
             f"{label_style}"
         )
+        model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
         model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
@@ -4886,17 +4808,15 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setVisible(True)
 
         # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
-        # SVG 渲染比较重（QPixmap + QSvgRenderer + QPainter），只在颜色真的变化时才重建，
-        # 避免每次 add_diff_stats 都白白花一笔
         if self._footer_review_btn:
-            cached_color = getattr(self._footer_review_btn, "_review_color", None)
-            if cached_color != accent:
-                dpr = self.devicePixelRatio() if hasattr(self, "devicePixelRatio") else 1.0
-                svg_str = getattr(self._footer_review_btn, "_review_svg", _REVIEW_SVG)
-                new_pixmap = _render_svg_pixmap(svg_str, 14, accent, dpr=dpr)
-                self._footer_review_btn._review_color = accent
-                self._footer_review_btn._review_pixmap = new_pixmap
-                self._footer_review_btn.setPixmap(new_pixmap)
+            self._footer_review_btn.setStyleSheet(
+                f"QLabel {{"
+                f" background: transparent; padding: 0px 2px; margin: 0px;"
+                f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
+                f" color: {accent};"
+                f" }}"
+                f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
+            )
             self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
@@ -6682,9 +6602,8 @@ def create_welcome_card(
 
 """
 
-    # 随机选择欢迎语和 Tips
+    # 随机选择欢迎语
     greeting = get_random_greeting()
-    tip = get_random_tip()
 
     # 构建历史会话链接（两列表格：最近会话 | 最多消息）
     history_section = ""
@@ -6725,8 +6644,6 @@ def create_welcome_card(
     welcome_md = f"""### 👋 {greeting}
 
 ---
-
-**{tip}**
 
 {history_section}
 """

@@ -15,7 +15,7 @@ from app.tools.result import ToolResult
 from app.core.message_content import to_api_message
 from app.core.tool_call_parser import smart_parse_arguments
 
-from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
+from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject, QTimer
 from openai import OpenAI
 
 from app.core.provider_profile import get_provider_profile
@@ -100,6 +100,7 @@ class SubAgentExecutor(QThread):
         self._last_result = None
         self._execution_error = None
         self._start_time: Optional[float] = None  # Unix timestamp, 访问用 @property
+        self._last_activity_time: float = time.time()  # 最后活跃时间戳（日志/API/工具），供外部 stall 检测
         # 日志存储: [{"type": "progress"|"thinking"|"ai_response"|"tool_call"|"tool_result"|"finish", "content": str, "timestamp": float}]
         self._logs: List[Dict] = []
         self._tool_call_count = 0
@@ -125,6 +126,10 @@ class SubAgentExecutor(QThread):
     def execution_error(self) -> Optional[str]:
         """获取执行错误（供 SubAgentManager 使用）"""
         return self._execution_error
+
+    def get_last_activity_time(self) -> float:
+        """获取最后活跃时间戳（供 SubAgentManager stall 检测使用）"""
+        return self._last_activity_time
 
     def set_log_store_callback(self, callback):
         """设置日志存储回调"""
@@ -231,14 +236,17 @@ class SubAgentExecutor(QThread):
     def _add_log(self, log_type: str, content: str, extra: dict = None):
         """记录日志"""
         import time
+        now = time.time()
         log_entry = {
             "type": log_type,
             "content": content,
-            "timestamp": time.time(),
+            "timestamp": now,
         }
         if extra:
             log_entry.update(extra)
         self._logs.append(log_entry)
+        # 每次输出日志都刷新活跃时间（供外部 stall 检测）
+        self._last_activity_time = now
         # 实时保存到数据库
         log_callback = getattr(self, '_log_store_callback', None)
         if log_callback:
@@ -378,6 +386,9 @@ class SubAgentExecutor(QThread):
         while not self._is_cancelled:
             if self._is_cancelled:
                 return ""
+
+            # 每次迭代开始前刷新活跃时间（即将调 API，算作活跃）
+            self._last_activity_time = time.time()
 
             # 检查是否达到最大迭代次数（触发强制结束并总结）
             iteration_count += 1
@@ -684,6 +695,8 @@ class SubAgentExecutor(QThread):
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
             QCoreApplication.processEvents()
 
+            # 工具执行也算活跃（避免 stall 检测器误杀）
+            self._last_activity_time = time.time()
             result = self.tool_executor.execute(tool_name, arguments)
             result_content = str(result) if result else ""
             success = getattr(result, "success", True) if result else False
@@ -736,6 +749,12 @@ class SubAgentManager(QObject):
         # 当前会话 ID（用于隔离不同会话的子智能体任务）
         self._current_session_id: str = ""
 
+        # ========== 日志活力度 Stall 检测 ==========
+        self._stall_timeout: int = 180  # 日志静默超时秒数（默认 3 分钟）
+        self._stall_timer = QTimer(self)
+        self._stall_timer.setInterval(10000)  # 每 10 秒检查一次
+        self._stall_timer.timeout.connect(self._check_stalled_tasks)
+
         # DAG 回调延后连接：监听自己的 task_started，在此时连接 DAG 回调到 executor
         # （与 UI 回调 _on_sub_agent_task_started 完全相同的连接时机）
         self.task_started.connect(self._on_dag_task_started_slot)
@@ -773,6 +792,97 @@ class SubAgentManager(QObject):
             )
         except Exception as e:
             logger.error(f"[SubAgentManager] 保存任务到数据库失败: {e}")
+
+    # ========== 日志活力度 Stall 检测 ==========
+
+    def start_stall_detector(self):
+        """启动 stall 检测定时器（默认在 SubAgentManager 初始化时未启动，由外部调用）"""
+        if not self._stall_timer.isActive():
+            self._stall_timer.start()
+            logger.info("[SubAgentManager] Stall 检测器已启动")
+
+    def stop_stall_detector(self):
+        """停止 stall 检测定时器"""
+        if self._stall_timer.isActive():
+            self._stall_timer.stop()
+            logger.info("[SubAgentManager] Stall 检测器已停止")
+
+    def set_stall_timeout(self, seconds: int):
+        """设置日志静默超时阈值（最少 30 秒）"""
+        self._stall_timeout = max(30, seconds)
+        logger.info(f"[SubAgentManager] Stall 超时已设置为 {self._stall_timeout}s")
+
+    def _check_stalled_tasks(self):
+        """
+        检查所有运行中任务的最后活跃时间，如果日志静默超过 stall_timeout 则 cancel。
+        由 QTimer 定时触发（默认每 10 秒）。
+        """
+        import time
+        now = time.time()
+        for task_id in list(self._running_tasks.keys()):
+            executor = self._running_tasks.get(task_id)
+            if not executor or not executor.isRunning():
+                continue
+
+            last_activity = executor.get_last_activity_time()
+            if not last_activity:
+                continue
+
+            idle_time = now - last_activity
+            if idle_time <= self._stall_timeout:
+                continue
+
+            # 检测到 stall（日志静默超时）
+            error_msg = (
+                f"Task stalled: no log activity for {int(idle_time)}s "
+                f"(timeout={self._stall_timeout}s)"
+            )
+            logger.warning(
+                f"[SubAgentManager] ⚠️ Task {task_id[:8]} ({executor.agent_name}) "
+                f"stalled for {int(idle_time)}s, cancelling"
+            )
+
+            # 1. Cancel executor
+            executor.cancel()
+
+            # 2. 写入 finished_tasks
+            agent_name = executor.agent_name
+            task_description = executor.task_description
+            logs = executor.get_logs()
+            task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
+            self._finished_tasks[task_id] = {
+                "result": "",
+                "error": error_msg,
+                "agent_name": agent_name,
+                "task_description": task_description,
+                "session_id": task_session_id,
+                "logs": logs,
+            }
+
+            # 3. 保存数据库（status="stalled"）
+            self._save_task_to_store(
+                task_id, agent_name, task_description,
+                "stalled", "", error_msg, logs,
+                session_id=task_session_id,
+            )
+
+            # 4. 通知 DAG（如果有）
+            self._notify_dag_task_failed(task_id, error_msg)
+
+            # 5. 通知 UI
+            try:
+                self.task_finished.emit(task_id, "")
+            except Exception as e:
+                logger.error(
+                    f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}"
+                )
+
+            # 6. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
+            #    注意：executor 线程可能还在运行（卡在 API 调用中），
+            #    但已经从管理器角度"移除"了，后续 finished_with_result 回调
+            #    会因 task_id 不在 running_tasks 而被安全忽略。
+            if task_id in self._running_tasks:
+                del self._running_tasks[task_id]
 
     def execute_task(
             self,
