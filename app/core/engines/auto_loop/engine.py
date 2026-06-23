@@ -10,12 +10,12 @@ AutoLoop 循环引擎 — 管理循环状态、迭代追踪、完成信号检测
 import re
 import time
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 from loguru import logger
 
-from app.core.engines.base import BaseEngine
 from app.core.engines.auto_loop.config import AutoLoopConfig
+from app.core.engines.base import BaseEngine
 
 
 class LoopState:
@@ -502,7 +502,7 @@ class AutoLoopEngine(BaseEngine):
                     return notes_path.read_text(encoding="utf-8")
                 except Exception:
                     pass
-        
+
         # 兜底：找最新的时间戳目录
         if self.config.project_path:
             archive_root = Path(self.config.project_path) / ".autoloop" / "archive"

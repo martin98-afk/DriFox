@@ -3,13 +3,11 @@
 单实例守护 - 确保程序只运行一个实例
 重复启动时，通过 IPC 通知已有实例显示窗口
 """
-import platform
 from typing import Optional
 
-from PyQt5.QtCore import QObject, pyqtSignal
-from PyQt5.QtCore import QSharedMemory
-from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 from loguru import logger
+from PyQt5.QtCore import QObject, QSharedMemory, pyqtSignal
+from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 
 
 class SingleInstanceGuard(QObject):

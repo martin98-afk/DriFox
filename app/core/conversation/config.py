@@ -1,9 +1,10 @@
 # app/core/conversation/config.py
-from typing import Dict as DictType
-from loguru import logger
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
+from typing import Dict as DictType
+
+from loguru import logger
 
 
 class PermissionStrategy(Enum):

@@ -14,28 +14,38 @@ Gateway 通讯平台设置卡片
 import threading
 
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
+    QFormLayout,
     QHBoxLayout,
     QLineEdit,
     QVBoxLayout,
     QWidget,
-    QFormLayout, )
+)
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
     ExpandSettingCard,
+    FluentIcon,
+    IconWidget,
+    InfoBar,
+    InfoBarPosition,
     PrimaryPushButton,
     PushButton,
-    SwitchButton,
     StrongBodyLabel,
+    SwitchButton,
     ToolButton,
-    FluentIcon, IconWidget,
 )
-from qfluentwidgets import InfoBar, InfoBarPosition
 
-from app.utils.design_tokens import Colors, ButtonStyles, SwitchStyles, Sizes, CardStyles, font_size_css, scale_font_size
+from app.utils.design_tokens import (
+    ButtonStyles,
+    CardStyles,
+    Colors,
+    Sizes,
+    SwitchStyles,
+    font_size_css,
+)
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.floating.command_card import _ElidedLabel
 
@@ -150,7 +160,7 @@ class PlatformStatusRow(CardWidget):
         self._is_connected = False
         self._setup_ui()
         self._load_config()
-        
+
         # 定时刷新状态
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._refresh_status_from_manager)
@@ -220,15 +230,15 @@ class PlatformStatusRow(CardWidget):
             get_gateway_config().set_platform_enabled(self._resolve_enum(), checked)
         except Exception as e:
             logger.warning(f"[PlatformStatusRow] Save enabled error: {e}")
-        
+
         self.enabledChanged.emit(self._platform, checked)
-        
+
         # 根据开关状态自动连接或断开
         if checked:
             self._do_connect()
         else:
             self._do_disconnect()
-    
+
     def set_error(self, error_msg: str):
         """外部设置错误信息"""
         self._is_connecting = False
@@ -244,7 +254,7 @@ class PlatformStatusRow(CardWidget):
         """执行连接"""
         if self._is_connecting:
             return
-        
+
         self._is_connecting = True
         self._update_status_safe(False, None, connecting=True)  # 显示连接中
         platform_enum = self._resolve_enum()
@@ -257,7 +267,7 @@ class PlatformStatusRow(CardWidget):
                     self._update_status_safe(False, "管理器未就绪")
                     self._is_connecting = False
                     return
-                
+
                 success = manager.start_platform(platform_enum)
                 # 立即重置 _is_connecting（不等刷新回调），让后续操作能立即执行
                 self._is_connecting = False
@@ -274,7 +284,7 @@ class PlatformStatusRow(CardWidget):
         """执行断开"""
         if self._is_connecting:
             return
-        
+
         self._is_connecting = True
         platform_enum = self._resolve_enum()
 
@@ -308,7 +318,7 @@ class PlatformStatusRow(CardWidget):
                 platform_status = status.get("platforms", {}).get(self._platform, {})
                 connected = platform_status.get("connected", False)
                 error = platform_status.get("error")
-                
+
                 # 重置连接状态
                 self._is_connecting = False
                 self._is_connected = connected
@@ -316,7 +326,7 @@ class PlatformStatusRow(CardWidget):
             else:
                 self._is_connecting = False
                 self._update_status(False, "管理器未就绪")
-        
+
         except Exception as e:
             self._is_connecting = False
             self._update_status(False, f"获取状态失败: {e}")
@@ -398,7 +408,7 @@ class PlatformEditCard(QWidget):
         try:
             from app.gateway.config import get_gateway_config
             self._config = get_gateway_config().get_platform_config(self._resolve_enum(self._platform))
-        except Exception as e:
+        except Exception:
             self._config = None
 
     def _init_ui(self):
@@ -478,8 +488,8 @@ class PlatformEditCard(QWidget):
     def _on_save(self):
         """保存配置"""
         try:
-            from app.gateway.config import get_gateway_config
             from app.gateway.base import Platform, PlatformConfig
+            from app.gateway.config import get_gateway_config
 
             config_helper = get_gateway_config()
             platform_enum = self._resolve_enum(self._platform)
@@ -642,8 +652,8 @@ class GatewaySettingCard(ExpandSettingCard):
     def _refresh(self):
         """刷新状态"""
         try:
-            from app.gateway.config import get_gateway_config
             from app.gateway.base import Platform
+            from app.gateway.config import get_gateway_config
 
             config_helper = get_gateway_config()
             mapping = {

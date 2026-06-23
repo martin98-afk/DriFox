@@ -7,11 +7,12 @@
 - JavaScript/TypeScript: ESLint 检查
 - 通用: grep 搜索错误关键词
 """
-import orjson as json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
+
+import orjson as json
 
 from app.tools.result import ToolResult
 

@@ -9,7 +9,8 @@ Worker 只发事件，调用方自行订阅。
 import threading
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Dict, List, Any, Optional
+from typing import Any, Callable, Dict, List
+
 from loguru import logger
 
 
@@ -18,25 +19,25 @@ class WorkerEvent(Enum):
     # 文本内容事件
     CONTENT_RECEIVED = auto()      # 收到文本内容片段
     REASONING_RECEIVED = auto()    # 收到思考内容（DeepSeek）
-    
+
     # 完成事件
     FINISHED = auto()              # 对话完成（兼容旧接口）
     FINISHED_WITH_CONTENT = auto() # 对话完成（含完整文本）
     FINISHED_WITH_MESSAGES = auto() # 对话完成（含完整消息列表）
-    
+
     # 工具调用事件
     TOOL_CALL_STARTED = auto()     # 工具调用开始
     TOOL_RESULT_RECEIVED = auto()  # 工具结果返回
     TOOL_CALL_STREAM = auto()      # 工具调用流式片段（tool_call_id, name, chunk, type）
-    
+
     # 交互事件
     QUESTION_ASKED = auto()        # 需要用户回答问题
     PERMISSION_REQUESTED = auto()  # 需要用户授权权限
-    
+
     # 状态事件
     COMPACTION_STATUS = auto()    # 压缩状态变化
     ERROR = auto()                 # 发生错误
-    
+
     # 兼容旧接口（保留 signal name 映射）
     _SIGNAL_NAME_MAP = {
         CONTENT_RECEIVED: "content_received",
@@ -106,11 +107,11 @@ class WorkerEventBus:
     线程安全：所有公开方法使用 threading.Lock 保护 _handlers，
     防止跨线程 emit() 与 clear() 的并发数据竞争。
     """
-    
+
     def __init__(self):
         self._handlers: Dict[WorkerEvent, List[Callable]] = {}
         self._lock = threading.Lock()
-    
+
     def subscribe(self, event: WorkerEvent, handler: Callable) -> None:
         """订阅事件
         
@@ -123,13 +124,13 @@ class WorkerEventBus:
                 self._handlers[event] = []
             if handler not in self._handlers[event]:
                 self._handlers[event].append(handler)
-    
+
     def unsubscribe(self, event: WorkerEvent, handler: Callable) -> None:
         """取消订阅"""
         with self._lock:
             if event in self._handlers and handler in self._handlers[event]:
                 self._handlers[event].remove(handler)
-    
+
     def emit(self, event: WorkerEvent, *args, **kwargs) -> None:
         """广播事件到所有订阅者
         
@@ -147,12 +148,12 @@ class WorkerEventBus:
                 handler(*args, **kwargs)
             except Exception as e:
                 logger.error(f"[EventBus] Handler error for {event.name}: {e}")
-    
+
     def clear(self) -> None:
         """清空所有订阅"""
         with self._lock:
             self._handlers.clear()
-    
+
     def has_subscribers(self, event: WorkerEvent) -> bool:
         """检查是否有订阅者"""
         with self._lock:

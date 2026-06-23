@@ -3,10 +3,10 @@
 关键文档仓储模块 - 专门负责项目关键文档路径的持久化
 """
 
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
 import hashlib
 import os
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -76,7 +76,7 @@ class KeyDocumentsRepository:
         if not self._ensure_table():
             return False
         self._migrate()
-        
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # 统一路径分隔符（仅限本地路径，不影响 URL）
         file_path = str(file_path).replace("\\", "/")
@@ -89,7 +89,7 @@ class KeyDocumentsRepository:
         else:
             file_name = os.path.basename(file_path)
         doc_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{hashlib.md5(file_path.encode()).hexdigest()[:8]}"
-        
+
         try:
             success, _ = self._execute(f'''
                 INSERT OR IGNORE INTO {self.TABLE_NAME} 
@@ -240,7 +240,7 @@ class KeyDocumentsRepository:
         """
         if not self.is_initialized:
             return False
-        
+
         try:
             success, _ = self._execute(
                 f'DELETE FROM {self.TABLE_NAME} WHERE id = ?',
@@ -264,7 +264,7 @@ class KeyDocumentsRepository:
         """
         if not self.is_initialized:
             return False
-        
+
         file_path = str(file_path).replace("\\", "/")
         try:
             success, _ = self._execute(
@@ -288,7 +288,7 @@ class KeyDocumentsRepository:
         """
         if not self.is_initialized:
             return 0
-        
+
         try:
             success, result = self._execute(
                 f'DELETE FROM {self.TABLE_NAME} WHERE project = ?',
@@ -310,7 +310,7 @@ class KeyDocumentsRepository:
         """
         if not self.is_initialized:
             return []
-        
+
         try:
             success, rows = self._execute(
                 f'SELECT DISTINCT project FROM {self.TABLE_NAME}'
@@ -334,7 +334,7 @@ class KeyDocumentsRepository:
         """
         if not self.is_initialized:
             return 0
-        
+
         try:
             success, result = self._execute(
                 f'SELECT COUNT(*) FROM {self.TABLE_NAME} WHERE project = ?',

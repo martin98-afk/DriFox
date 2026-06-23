@@ -2,9 +2,10 @@
 """
 输入历史仓储 - 管理用户输入历史记录（支持附件路径）
 """
-import orjson
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Optional
+
+import orjson
 
 
 class InputHistoryRepository:
@@ -20,7 +21,6 @@ class InputHistoryRepository:
     def _ensure_attachments_column(self):
         """迁移：为旧表追加 attachments TEXT 列（JSON 数组）"""
         try:
-            from app.utils.db_manager import DatabaseManager
             self._db.execute_sql(
                 f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN attachments TEXT DEFAULT '[]'"
             )

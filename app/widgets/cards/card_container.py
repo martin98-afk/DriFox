@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
-from PyQt5.QtCore import QEvent, QTimer, QPropertyAnimation, QEasingCurve, Qt
-from loguru import logger
+
+from PyQt5.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QTimer
+from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
@@ -36,26 +36,26 @@ class CardContainer(QWidget):
         self._expand_animation: Optional[QPropertyAnimation] = None  # 展开/折叠动画
         self._expand_retry_count = 0  # 实例变量：防止 _do_expand 无限重试（每个容器独立计数）
         self._setup_ui()
-    
+
     def _setup_ui(self):
         """初始化UI"""
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.setMinimumHeight(0)
         self.setMaximumHeight(0)  # 默认折叠
-        
+
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
-    
+
     @property
     def container_type(self) -> ContainerType:
         return self._container_type
-    
+
     def bind_card_manager(self, card_manager: CardManager, window_id: str):
         """绑定 CardManager（多窗口隔离）"""
         self._card_manager = card_manager
         self._window_id = window_id
-    
+
     def _is_expanded(self) -> bool:
         """容器是否已展开"""
         return self.maximumHeight() >= self._EXPAND_MAX
@@ -75,13 +75,13 @@ class CardContainer(QWidget):
         if card_id not in self._cards:
             return
         self._schedule_expand()
-    
+
     def _on_card_hidden(self, card_id: str):
         """某张卡片被隐藏"""
         if card_id not in self._cards:
             return
         self._schedule_expand()
-    
+
     def _schedule_expand(self):
         """防抖调度：有可见卡片则展开，否则折叠
 
@@ -114,7 +114,7 @@ class CardContainer(QWidget):
         else:
             # 无可见卡片：通过 timer 折叠（延迟一点没关系）
             self._expand_timer.start()
-    
+
     def _do_expand(self):
         """执行展开/折叠动画（200ms 缓动，OutCubic）
 
@@ -207,33 +207,33 @@ class CardContainer(QWidget):
                         pass
             self._expand_animation.finished.connect(_on_done)
         self._expand_animation.start()
-    
+
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器，并注册专属回调"""
         self._cards[card_id] = card_widget
         self._layout.addWidget(card_widget)
         card_widget.setVisible(False)
         card_widget.installEventFilter(self)
-        
+
         # 注册此卡片专属的回调（传入 window_id 用于多窗口隔离）
         if self._card_manager and self._window_id:
             self._card_manager.on_card_shown(self._window_id, card_id, self._on_card_shown)
             self._card_manager.on_card_hidden(self._window_id, card_id, self._on_card_hidden)
-        
+
         # 连接卡片内部高度变化信号 → 容器重新展开（支持拖拽、自适应等动态高度）
         if hasattr(card_widget, 'heightChanged'):
             card_widget.heightChanged.connect(self._schedule_expand)
-    
+
     def remove_card(self, card_id: str):
         """从容器移除卡片"""
         if card_id not in self._cards:
             return
-        
+
         widget = self._cards[card_id]
         widget.removeEventFilter(self)
         self._layout.removeWidget(widget)
         del self._cards[card_id]
-        
+
         if len(self._cards) == 0:
             self.setMaximumHeight(0)
 
@@ -250,7 +250,7 @@ class TopCardContainer(CardContainer):
 
 class BottomCardContainer(CardContainer):
     """下方卡片容器 - 底部直角设计，与输入框视觉融合"""
-    
+
     def __init__(self):
         super().__init__(ContainerType.BOTTOM)
         self.setStyleSheet("""
@@ -259,7 +259,7 @@ class BottomCardContainer(CardContainer):
                 border: none;
             }
         """)
-    
+
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片并修正底部圆角，使其与下方输入框视觉融合"""
         # 修正卡片底部圆角为直角

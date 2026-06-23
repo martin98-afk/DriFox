@@ -21,56 +21,54 @@ import math
 import os
 import random
 import re
-import sip
 import time
 import urllib.parse
 from datetime import datetime
 from functools import lru_cache
 from html import escape
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import orjson as json
+import sip
 from loguru import logger
-from PyQt5.QtCore import (
-    Qt,
-    QTimer,
-    QTimerEvent,
-    pyqtSignal,
-    QUrl,
-    QVariantAnimation,
-    QEasingCurve,
-)
-from PyQt5.QtGui import (
-    QWheelEvent,
-    QPainter,
-    QPen,
-    QColor,
-    QBrush,
-    QLinearGradient,
-    QPainterPath,
-    QPixmap,
-)
-from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
-from app.core.webengine_profile import create_transient_web_profile
-from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QFrame,
-    QSizePolicy,
-    QTextEdit,
-    QMenu,
-)
 from markdown import Markdown
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
-from pygments.lexers import get_lexer_by_name, TextLexer
+from pygments.lexers import TextLexer, get_lexer_by_name
+from PyQt5.QtCore import (
+    QEasingCurve,
+    Qt,
+    QTimer,
+    QTimerEvent,
+    QUrl,
+    QVariantAnimation,
+    pyqtSignal,
+)
+from PyQt5.QtGui import (
+    QBrush,
+    QColor,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QWheelEvent,
+)
+from PyQt5.QtSvg import QSvgRenderer
+from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
+from PyQt5.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
-    FluentIcon,
     ToolTipFilter,
-    TransparentToolButton, getIconColor,
+    TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
@@ -84,12 +82,19 @@ from app.core import (
     ensure_content_blocks,
 )
 from app.core.message_content import make_tool_result_block
+from app.core.webengine_profile import create_transient_web_profile
+from app.utils.design_tokens import (
+    Colors,
+    _get_global_font,
+    current_theme,
+    fade_in_widget,
+    font_size_css,
+    scale_font_size,
+)
 from app.utils.utils import get_font_family_css, get_icon
-from app.utils.design_tokens import current_theme, scale_font_size, Colors, font_size_css, _get_global_font, fade_in_widget
 from app.widgets.render_helpers import (
-    render_tool_block,
-    _TOOL_ICON_MAP,
     _get_tool_icon,
+    render_tool_block,
 )
 
 # ======== Markdown 实例 ========
@@ -928,7 +933,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
         <span>思考中...</span>
     </span>
 </div>'''
-    
+
 
 
 def _render_think_block_lightweight(content: str, completed: bool = True) -> str:
@@ -966,7 +971,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         <span>思考中...</span>
     </span>
 </div>'''
-    
+
 
 
 def _inject_think_cards(md_text: str, completed: bool = True) -> str:
@@ -1688,8 +1693,8 @@ class ConsoleMonitorPage(QWebEnginePage):
             elif "open_url:" in msg:
                 try:
                     url_str = msg.split("open_url:", 1)[1]
-                    from PyQt5.QtGui import QDesktopServices
                     from PyQt5.QtCore import QUrl
+                    from PyQt5.QtGui import QDesktopServices
 
                     QDesktopServices.openUrl(QUrl(url_str))
                 except Exception:
@@ -1775,7 +1780,6 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
-        from typing import List
         self._markdown_text = ""
         self._streaming = True
         self._is_js_ready = False
@@ -3745,6 +3749,7 @@ class CodeWebViewer(QWebEngineView):
         (isValid()=False)，需要手动解析提取 r/g/b 后用 QColor(r, g, b) 构造。
         """
         import re
+
         from PyQt5.QtGui import QColor
         parent = self.parent()
         while parent:
@@ -3779,7 +3784,7 @@ class CodeWebViewer(QWebEngineView):
         Returns:
             填充实心卡片背景 + 绘制 source 的合成 pixmap
         """
-        from PyQt5.QtGui import QPixmap, QPainter
+        from PyQt5.QtGui import QPainter, QPixmap
         if width <= 0 or height <= 0:
             return source
         result = QPixmap(width, height)
@@ -3802,9 +3807,10 @@ class CodeWebViewer(QWebEngineView):
         - 单次 200ms 等待 + processEvents() 强制布局（替代 400ms×2）
         - grab(QRect) 显式指定区域，避免 setFixedHeight 后未生效导致漏抓
         """
-        from PyQt5.QtCore import QEventLoop, QTimer, QRect, QPoint
-        from PyQt5.QtWidgets import QApplication
         import json as json_mod
+
+        from PyQt5.QtCore import QEventLoop, QPoint, QRect, QTimer
+        from PyQt5.QtWidgets import QApplication
 
         page = self.page()
         view_w = self.width()
@@ -3888,7 +3894,7 @@ class CodeWebViewer(QWebEngineView):
         把 pixmap 按高度均匀切成 N 段，从左到右水平拼接。
         N 的选择使最终拼接图的宽高比尽量接近 3:2。
         """
-        from PyQt5.QtGui import QPixmap, QPainter
+        from PyQt5.QtGui import QPainter, QPixmap
 
         w = pixmap.width()
         h = pixmap.height()
@@ -3941,7 +3947,6 @@ class CodeWebViewer(QWebEngineView):
 
     def _export_as_image(self, file_path: str):
         """将当前消息内容导出为 PNG 图片（全内容截取 + 智能拼接）"""
-        from PyQt5.QtGui import QPixmap
 
         # 1. 截取全内容大图
         full = self._capture_full_content()

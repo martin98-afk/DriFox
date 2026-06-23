@@ -10,13 +10,19 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QFrame, QLineEdit, QSizePolicy,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
-from qfluentwidgets import (
-    StrongBodyLabel, TransparentToolButton, FluentIcon, PrimaryToolButton)
+from qfluentwidgets import FluentIcon, PrimaryToolButton, StrongBodyLabel, TransparentToolButton
 
 from app.utils.design_tokens import Colors, TabStyles, font_size_css
-from app.utils.utils import get_unified_font, get_icon, get_font_family_css
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
 class SystemCardFrame(QFrame):

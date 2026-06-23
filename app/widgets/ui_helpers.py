@@ -16,16 +16,15 @@ UI 辅助模块 - 从 main_widget.py 提取的 UI 辅助方法
 import re
 import time
 from datetime import datetime
-from typing import Optional, List, Any, Tuple, Callable
+from typing import Any, Callable, List, Optional, Tuple
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from app.utils.design_tokens import Colors, font_size_css
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QLabel, QWidget, QLineEdit, QHBoxLayout
 from loguru import logger
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
+from app.utils.design_tokens import Colors, font_size_css
 from app.widgets import MessageCard
-
 
 __all__ = [
     # 代码保存辅助
@@ -185,11 +184,11 @@ def get_default_save_filename(lang: str, code: str) -> str:
     """
     lang_lower = lang.lower() if lang else ""
     ext = get_language_extension(lang)
-    
+
     # 特殊文件名
     if lang_lower in ("dockerfile", "makefile"):
         return lang_lower
-        
+
     return extract_code_suggested_filename(code, ext)
 
 
@@ -205,16 +204,17 @@ def export_messages_to_markdown(messages: list, timestamp: str = None) -> str:
         Markdown 格式的对话内容
     """
     from datetime import datetime
+
     from app.core import content_to_text
-    
+
     if timestamp is None:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    lines = [f"# 对话记录\n\n", f"导出时间: {timestamp}\n\n"]
-    
+
+    lines = ["# 对话记录\n\n", f"导出时间: {timestamp}\n\n"]
+
     for msg in messages:
         role = msg.get("role")
-        
+
         if role == "user":
             content = content_to_text(msg.get("content", ""))
             lines.append(f"## 用户\n\n{content}\n\n")
@@ -229,7 +229,7 @@ def export_messages_to_markdown(messages: list, timestamp: str = None) -> str:
             arguments = msg.get("arguments", {})
             content = msg.get("content", "")
             success = msg.get("success", True)
-            
+
             lines.append(f"## 工具调用: {tool_name}\n\n")
             if tool_call_id:
                 lines.append(f"**Call ID**: `{tool_call_id}`\n\n")
@@ -238,7 +238,7 @@ def export_messages_to_markdown(messages: list, timestamp: str = None) -> str:
             if content:
                 lines.append(f"**结果** ({'成功' if success else '失败'}):\n```\n{content}\n```\n\n")
             lines.append("---\n\n")
-    
+
     return "".join(lines)
 
 
@@ -326,11 +326,11 @@ def setup_background_label(viewport: QLabel, parent: Optional[object] = None) ->
         配置好的背景标签
     """
     from PyQt5.QtWidgets import QGraphicsOpacityEffect
-    
+
     bg_label = QLabel(viewport)
     bg_label.setPixmap(QPixmap(":/icons/fox_bg.png"))
     bg_label.setScaledContents(True)
-    
+
     opacity_effect = QGraphicsOpacityEffect(bg_label)
     opacity_effect.setOpacity(0.1)
     bg_label.setGraphicsEffect(opacity_effect)
@@ -338,7 +338,7 @@ def setup_background_label(viewport: QLabel, parent: Optional[object] = None) ->
     bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
     bg_label.resize(viewport.size())
     bg_label.show()
-    
+
     return bg_label
 
 
@@ -418,7 +418,7 @@ def cleanup_stale_card_cache(
     # 如果缓存过大，移除最旧的缓存
     if len(session_card_cache) <= max_size:
         return
-        
+
     current_ids = all_session_ids & set(session_card_cache.keys())
     for sid in list(session_card_cache.keys()):
         if sid not in current_ids:
@@ -556,21 +556,21 @@ def read_backup_files(backup_path: str) -> tuple:
         (old_content, new_content, backup_file) 或抛出异常
     """
     from pathlib import Path
-    
+
     backup_file = Path(backup_path)
     after_backup_path = str(backup_file.with_suffix('.after.bak'))
-    
+
     # 检查编辑后备份是否存在
     after_backup_file = Path(after_backup_path)
     if not after_backup_file.exists():
         raise FileNotFoundError("编辑后备份文件不存在")
-    
+
     # 读取文件
     with open(backup_path, 'r', encoding='utf-8', errors='replace') as f:
         old_content = f.read()
     with open(after_backup_path, 'r', encoding='utf-8', errors='replace') as f:
         new_content = f.read()
-    
+
     return old_content, new_content, backup_file
 
 
@@ -587,11 +587,12 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
         HTML 报告字符串
     """
     import difflib
+
     from app.utils.diff_viewer import DiffHtmlGenerator
-    
+
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
-    
+
     diff = difflib.unified_diff(
         old_lines,
         new_lines,
@@ -599,7 +600,7 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
         tofile=backup_file.name,
         lineterm='\n'
     )
-    
+
     diff_output = ''.join(diff)
     return DiffHtmlGenerator.generate_html_report(diff_output, "")
 
@@ -615,23 +616,24 @@ def generate_multi_file_diff_html(operations: list) -> str:
         HTML 报告字符串
     """
     import difflib
+
     from app.utils.diff_viewer import DiffHtmlGenerator
-    
+
     diff_parts = []
-    
+
     for op in operations:
         backup_path = op.get("backup_path", "")
         if not backup_path:
             continue
-        
+
         try:
             old_content, new_content, backup_file = read_backup_files(backup_path)
         except Exception:
             continue
-        
+
         old_lines = normalize_lines(old_content)
         new_lines = normalize_lines(new_content)
-        
+
         diff = difflib.unified_diff(
             old_lines,
             new_lines,
@@ -642,7 +644,7 @@ def generate_multi_file_diff_html(operations: list) -> str:
         diff_output = ''.join(diff)
         if diff_output:
             diff_parts.append(diff_output)
-    
+
     combined_diff = ''.join(diff_parts)
     return DiffHtmlGenerator.generate_html_report(combined_diff, "")
 
@@ -663,7 +665,7 @@ def build_node_preview_data(messages: list, content_getter: Optional[Callable] =
     """
     if content_getter is None:
         content_getter = _get_content_to_text()
-        
+
     node_data = []
     current_user_msg = None
 
@@ -704,17 +706,17 @@ def find_widgets_to_remove_for_round(
     """
     if round_index >= user_card_count:
         return []
-    
+
     widgets_to_remove = []
     user_card_idx = 0
     removing = False
-    
+
     for i in range(chat_layout.count()):
         item = chat_layout.itemAt(i)
         if not item or not item.widget():
             continue
         widget = item.widget()
-        
+
         if not hasattr(widget, 'role'):
             continue
         if getattr(widget, "_is_welcome", False):
@@ -731,7 +733,7 @@ def find_widgets_to_remove_for_round(
             user_card_idx += 1
         elif widget.role == "assistant" and removing:
             widgets_to_remove.append(widget)
-    
+
     return widgets_to_remove
 
 
@@ -752,17 +754,17 @@ def find_widgets_to_remove_from_round(
         需要删除的卡片列表
     """
     from loguru import logger
-    
+
     widgets_to_remove = []
     user_card_idx = 0
     removing = False
-    
+
     for i in range(chat_layout.count()):
         item = chat_layout.itemAt(i)
         if not item or not item.widget():
             continue
         widget = item.widget()
-        
+
         if not hasattr(widget, 'role'):
             continue
         if getattr(widget, "_is_welcome", False):
@@ -777,7 +779,7 @@ def find_widgets_to_remove_from_round(
             user_card_idx += 1
         elif widget.role == "assistant" and removing:
             widgets_to_remove.append(widget)
-    
+
     # 关键修复：检查删除数量是否与预期相符
     if cards_to_remove_hint > 0 and len(widgets_to_remove) < cards_to_remove_hint:
         logger.warning(
@@ -785,7 +787,7 @@ def find_widgets_to_remove_from_round(
             f"expected {cards_to_remove_hint}. round_index={round_index}. "
             f"This may indicate some cards are not in current layout (lazy loaded)."
         )
-    
+
     return widgets_to_remove
 
 
@@ -820,8 +822,8 @@ def find_last_assistant_card(chat_layout) -> Any:
         最后一个 assistant 卡片，或 None
     """
     # 延迟导入避免循环依赖
-    
-    
+
+
     for i in range(chat_layout.count() - 1, -1, -1):
         item = chat_layout.itemAt(i)
         if not item or not item.widget():
@@ -847,8 +849,8 @@ def count_user_cards_in_layout(chat_layout) -> int:
         用户消息卡片数量
     """
     # 延迟导入避免循环依赖
-    
-    
+
+
     count = 0
     for i in range(chat_layout.count()):
         item = chat_layout.itemAt(i)
@@ -875,8 +877,8 @@ def collect_message_cards_from_layout(
         卡片列表
     """
     # 延迟导入避免循环依赖
-    
-    
+
+
     cards = []
     for i in range(chat_layout.count()):
         item = chat_layout.itemAt(i)
@@ -904,8 +906,8 @@ def collect_user_card_widgets(chat_layout) -> list:
         用户卡片 widget 列表
     """
     # 延迟导入避免循环依赖
-    
-    
+
+
     widgets = []
     for i in range(chat_layout.count()):
         item = chat_layout.itemAt(i)
@@ -930,10 +932,10 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
         ChatSession 实例
     """
     from app.core import ChatSession
-    
+
     session_id = session_record.get("session_id")
     title = title or session_record.get("name") or "历史对话"
-    
+
     return ChatSession.from_dict({
         "session_id": session_id,
         "name": title,
@@ -945,8 +947,8 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
 
 
 def collect_operations_for_round(
-    file_recorder, 
-    session_id: str, 
+    file_recorder,
+    session_id: str,
     call_ids: list
 ) -> list:
     """
@@ -1054,13 +1056,13 @@ def get_round_message_indices(session, round_index: int) -> tuple:
         (start_idx, end_idx) 或 (None, None)
     """
     from app.core import consolidate_messages, get_user_round_ranges
-    
+
     canonical_messages = consolidate_messages(session.messages)
     round_ranges = get_user_round_ranges(canonical_messages)
-    
+
     if round_index < 0 or round_index >= len(round_ranges):
         return None, None
-        
+
     return round_ranges[round_index]
 
 
@@ -1077,15 +1079,15 @@ def create_new_session_state(old_session_manager=None, old_chat_engine=None) -> 
     """
     # 延迟导入避免循环依赖
     from app.core import SessionManager
-    
+
     session_manager = SessionManager()
     session_manager.create_new_session()
     new_session = session_manager.get_current_session()
     new_session_id = new_session.session_id
-    
+
     if old_chat_engine and hasattr(old_chat_engine, "set_session_manager"):
         old_chat_engine.set_session_manager(session_manager)
-    
+
     return {
         "session_manager": session_manager,
         "new_session": new_session,
@@ -1120,7 +1122,7 @@ def truncate_messages_at_round(session, round_index: int, round_ranges: list) ->
     """
     if round_index < 0 or round_index >= len(round_ranges):
         return False
-        
+
     cutoff_index = round_ranges[round_index][0]
     session.set_messages(
         session.messages[:cutoff_index], preserve_compaction=False
@@ -1237,7 +1239,7 @@ def truncate_and_remove_round(
     """
     if round_index < 0 or round_index >= len(round_ranges):
         return False, 0, 0
-    
+
     from app.core import consolidate_messages
 
     start_idx, end_idx = round_ranges[round_index]
@@ -1245,9 +1247,9 @@ def truncate_and_remove_round(
     old_count = len(canonical)
     new_messages = canonical[:start_idx] + canonical[end_idx:]
     new_count = len(new_messages)
-    
+
     session.set_messages(new_messages, preserve_compaction=False)
-    
+
     return True, old_count, new_count
 
 
@@ -1367,7 +1369,7 @@ def restore_input_from_card(input_area, card) -> None:
         card: 消息卡片
     """
     from PyQt5.QtGui import QTextCursor
-    
+
     user_input = card.get_plain_text()
     input_area.setPlainText(user_input)
     input_area.moveCursor(QTextCursor.End)
@@ -1418,7 +1420,7 @@ def find_user_round_index(session, user_text: str, timestamp: str) -> int:
     """
     if not session or not hasattr(session, 'messages'):
         return -1
-    
+
     round_index = 0
     for msg in session.messages:
         if msg.get("role") == "user":
@@ -1432,13 +1434,13 @@ def find_user_round_index(session, user_text: str, timestamp: str) -> int:
                     if isinstance(item, dict) and item.get("type") == "text":
                         content = item.get("text", "")
                         break
-            
+
             # 通过时间戳或内容匹配
             msg_timestamp = msg.get("timestamp", "")
             if msg_timestamp == timestamp or (user_text and user_text in str(content)):
                 return round_index
             round_index += 1
-    
+
     return -1
 
 
@@ -1564,7 +1566,7 @@ def build_node_preview_from_session(
         节点预览数据列表
     """
     from app.core import consolidate_messages
-    
+
     messages = consolidate_messages(session.messages)
     return build_node_preview_data(messages, content_to_text_func, max_len)
 
@@ -1581,13 +1583,13 @@ def get_first_file_operation(operations: list) -> tuple:
     """
     if not operations:
         return False, None, None
-    
+
     op = operations[0]
     backup_path = op.get("backup_path", "")
-    
+
     if not backup_path:
         return False, None, None
-    
+
     return True, backup_path, op
 
 
@@ -1657,14 +1659,14 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         if not is_widget_alive(widget):
             logger.warning(f"[DELETE] Widget already deleted: {widget}")
             continue
-        
+
         # 调用清理方法（如果有的话）
         if call_cleanup and hasattr(widget, 'cleanup'):
             try:
                 widget.cleanup()
             except Exception as e:
                 logger.warning(f"[DELETE] Widget cleanup failed: {e}")
-        
+
         # 从 layout 移除
         layout_removed = False
         for i in range(chat_layout.count()):
@@ -1673,14 +1675,14 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
                 chat_layout.removeItem(item)
                 layout_removed = True
                 break
-        
+
         if layout_removed:
             widget.deleteLater()
             deleted += 1
             logger.info(f"[DELETE] Widget deleted: role={widget.role}")
         else:
             logger.warning(f"[DELETE] Widget not found in layout: role={widget.role}")
-    
+
     return deleted
 
 
@@ -1698,10 +1700,10 @@ def find_last_tool_call_id_after_round(messages: list, round_ranges: list, round
     """
     if round_index < 0 or round_index >= len(round_ranges):
         return None
-    
+
     # 获取该 round 之后的所有消息的 start index
     _, end_idx = round_ranges[round_index]
-    
+
     # 查找 end_idx 之后的所有 tool_call_id
     last_call_id = None
     for i in range(end_idx, len(messages)):
@@ -1710,7 +1712,7 @@ def find_last_tool_call_id_after_round(messages: list, round_ranges: list, round
             call_id = msg.get("tool_call_id")
             if call_id:
                 last_call_id = call_id
-    
+
     return last_call_id
 
 
@@ -1797,7 +1799,7 @@ def calculate_scroll_progress(
         (progress, visible_index)
     """
     anchor_y = visible_top + max(viewport_height / 2, 1)
-    
+
     if len(widget_tops) == 1:
         return 0.0, 0
     elif anchor_y <= widget_tops[0]:

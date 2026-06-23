@@ -6,12 +6,12 @@ UI 渲染辅助函数
 import difflib
 import hashlib
 import os
-
-import orjson as json
 import re
 from html import escape
 
-from app.utils.design_tokens import scale_font_size, _get_global_font, Colors
+import orjson as json
+
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
 # 预编译正则表达式（模块级别缓存，避免重复编译）
@@ -98,13 +98,13 @@ def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
     """
     if not tool_args:
         return ""
-    
+
     # 按值的长度排序（短的优先），确保重要的简短参数优先显示
     sorted_args = sorted(tool_args.items(), key=lambda x: len(str(x[1])))
-    
+
     parts = []
     total_len = 0
-    
+
     for key, value in sorted_args:
         # 清理值中的特殊字符
         value_str = _truncate_value(value)
@@ -113,7 +113,7 @@ def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
         value_str = value_str.replace("\n", "\\n")
         # 构建参数片段
         part = f"{key}={value_str}"
-        
+
         # 检查加上分隔符后是否会超过限制
         if parts:
             next_len = total_len + len(part) + 2  # +2 for "; "
@@ -128,18 +128,18 @@ def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
                 else:
                     parts.append("...")
                 break
-        
+
         parts.append(part)
         total_len += len(part) + 2
-        
+
         # 再次检查是否超过总长度
         if total_len > max_total_len:
             break
-    
+
     result = "; ".join(parts)
     if len(result) > max_total_len:
         result = result[:max_total_len] + "..."
-    
+
     return result
 
 
@@ -149,7 +149,7 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
     前几行是参数（key=value 形式），最后一行是结果。
     """
     rows = []
-    
+
     # 根据成功/失败状态确定颜色
     if success is False:
         row_class = "args-row result-row result-fail"
@@ -160,7 +160,7 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
     else:
         row_class = "args-row result-row"
         key_color = "#9C9C9C"
-    
+
     # 参数行
     if tool_args:
         for key, value in tool_args.items():
@@ -170,24 +170,24 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
                 value_str = json.dumps(value).decode('utf-8')
             else:
                 value_str = str(value)
-            
+
             value_str = _escape_text_for_plain(value_str)
-            
+
             # 截断过长的值
             max_value_len = 200
             if len(value_str) > max_value_len:
                 value_str = value_str[:max_value_len] + "..."
-            
+
             escaped_key = escape(key)
             escaped_value = escape(value_str)
-            
+
             rows.append(f'<div class="args-row">'
                         f'<span class="args-key">{escaped_key}</span>'
                         f'<span class="args-value">{escaped_value}</span>'
                         f'</div>')
     else:
         rows.append('<div class="args-row empty">无参数</div>')
-    
+
     # 结果行（最后一行）
     result_label = "调用子智能体" if is_sub_agent_task else "结果"
     if result:
@@ -204,7 +204,7 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
                     f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
                     f'<span class="args-value" style="color: #666; font-style: italic;">无结果</span>'
                     f'</div>')
-    
+
     return f'<div class="args-table">{"".join(rows)}</div>'
 
 
@@ -214,7 +214,7 @@ def _parse_subagent_task_ids(result: str) -> str:
     """
     if not result:
         return ""
-    
+
     # 尝试解析 JSON
     try:
         data = json.loads(result)
@@ -226,13 +226,13 @@ def _parse_subagent_task_ids(result: str) -> str:
             return ",".join(data)
     except (json.JSONDecodeError, TypeError):
         pass
-    
+
     # 尝试从文本中提取 task_id（UUID 格式）
     # 使用预编译的 _UUID_PATTERN
     matches = _UUID_PATTERN.findall(result)
     if matches:
         return ",".join(matches)
-    
+
     return ""
 
 
@@ -938,7 +938,7 @@ def render_tool_block(
                 {diff_body}
             </div>
         </div>"""
-    
+
     # ── ECharts 图表区 ──
     echarts_html = ""
     if echarts:
@@ -1051,29 +1051,29 @@ def render_hook_block(event_name: str, content: str, collapsed: bool = True) -> 
     """渲染 Hook 输出块（折叠样式）"""
     icon = "⚡"
     title_color = "#00BCD4"
-    
+
     # 事件名称格式化
     event_display = event_name.replace("Pre", "Pre ").replace("Post", "Post ")
-    
+
     # 预览文本
     max_preview = 50
     if len(content) > max_preview:
         content_preview = content[:max_preview].replace("\n", " ") + "..."
     else:
         content_preview = content.replace("\n", " ")
-    
+
     # 生成唯一 block_key
     block_key = "hook-" + hashlib.md5(f"{event_name}:{content[:50]}".encode()).hexdigest()[:8]
-    
+
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
-    
+
     expanded_content = f"""
     <div class="hook-content" style="padding: 10px 12px; font-family: {_get_global_font()}, Consolas, monospace; font-size: {scale_font_size(12)}px; color: #e0e0e0; white-space: pre-wrap; word-break: break-word; line-height: 1.5; {get_font_family_css()}">
         {escape(content)}
     </div>
     """
-    
+
     return f"""<div class="cm-collapsible hook-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-hook-event="{escape(event_name)}" style="margin: 4px 0; background: transparent; border: 1px solid rgba(0, 188, 212, 0.2); border-left: 3px solid {title_color}; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary hook-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 5px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 100px; flex: 0 0 auto;">

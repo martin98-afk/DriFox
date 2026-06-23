@@ -12,16 +12,14 @@
 - 实际压缩逻辑委托给 HistoryCompactor，避免重复
 """
 
-import anyio
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
-from loguru import logger
+import anyio
 
-from app.core.message_content import consolidate_messages, _extract_text_content
+from app.core.message_content import _extract_text_content, consolidate_messages
 from app.core.token_estimator import count_messages_tokens
 from app.utils.config import Settings
-
 
 # 预算分配常量
 SYSTEM_PROMPT_RESERVE_RATIO = 0.15  # 预留 15% 给系统提示（含技能、记忆等）

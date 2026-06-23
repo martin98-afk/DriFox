@@ -242,7 +242,7 @@ class CommandManager:
 
     @staticmethod
     def parse_active_params(text: str) -> Set[str]:
-        """从输入文本中提取已存在的参数名
+        r"""从输入文本中提取已存在的参数名
 
         匹配规则：
         - --key=value → "--key="

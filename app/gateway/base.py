@@ -12,6 +12,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar
+
 from loguru import logger
 
 from app.utils.utils import get_app_data_dir
@@ -50,7 +51,7 @@ class MessageEvent:
     # 消息内容
     text: str = ""
     message_type: MessageType = MessageType.TEXT
-    
+
     # 来源信息
     message_id: str = ""
     chat_id: str = ""
@@ -58,22 +59,22 @@ class MessageEvent:
     user_name: str = ""
     platform: Platform = Platform.WECOM
     chat_type: str = "dm"  # dm / group
-    
+
     # 媒体附件
     media_urls: List[str] = field(default_factory=list)
     media_types: List[str] = field(default_factory=list)
-    
+
     # 时间戳
     timestamp: datetime = field(default_factory=datetime.now)
-    
+
     # 额外数据
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
+
     @property
     def is_command(self) -> bool:
         """检查是否为命令消息"""
         return self.text.startswith("/")
-    
+
     @property
     def command_name(self) -> Optional[str]:
         """获取命令名称"""
@@ -84,7 +85,7 @@ class MessageEvent:
         if raw and "@" in raw:
             raw = raw.split("@", 1)[0]
         return raw
-    
+
     @property
     def command_args(self) -> str:
         """获取命令参数"""
@@ -114,43 +115,43 @@ class ChatInfo:
     avatar: Optional[str] = None
 
 
-@dataclass 
+@dataclass
 class PlatformConfig:
     """平台配置"""
     enabled: bool = False
     platform: Platform = Platform.WECOM
-    
+
     # 企业微信配置
     bot_id: Optional[str] = None
     secret: Optional[str] = None
     websocket_url: Optional[str] = None
-    
+
     # 钉钉配置
     client_id: Optional[str] = None
     client_secret: Optional[str] = None
-    
+
     # 通用配置（适用于 Telegram、Discord 等）
     token: Optional[str] = None
-    
+
     # 通用配置
     extra: Dict[str, Any] = field(default_factory=dict)
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any], platform: Platform) -> "PlatformConfig":
         """从字典创建配置"""
         config = cls(enabled=data.get("enabled", False), platform=platform)
-        
+
         if platform == Platform.WECOM:
             config.bot_id = data.get("bot_id") or os.getenv("WECOM_BOT_ID")
             config.secret = data.get("secret") or os.getenv("WECOM_SECRET")
             config.websocket_url = data.get("websocket_url") or os.getenv(
-                "WECOM_WEBSOCKET_URL", 
+                "WECOM_WEBSOCKET_URL",
                 "wss://openws.work.weixin.qq.com"
             )
         elif platform == Platform.DINGTALK:
             config.client_id = data.get("client_id") or os.getenv("DINGTALK_CLIENT_ID")
             config.client_secret = data.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET")
-        
+
         config.extra = data.get("extra", {})
         return config
 
@@ -170,14 +171,14 @@ class BasePlatformAdapter(ABC):
     3. 发送消息/媒体
     4. 管理连接状态
     """
-    
+
     # 子类应该设置这些类属性
     platform: Platform = Platform.WECOM
     name: str = "Base Platform"
-    
+
     # 最大消息长度（子平台可覆盖）
     MAX_MESSAGE_LENGTH: int = 4096
-    
+
     def __init__(self, config: PlatformConfig, message_handler: Optional[MessageHandler] = None):
         """
         初始化适配器
@@ -191,28 +192,28 @@ class BasePlatformAdapter(ABC):
         self._running = False
         self._connected = False
         self._last_error: Optional[str] = None
-        
+
         # 会话活跃状态
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
-        
+
         # 消息去重：记录当前正在处理的消息 ID，防止平台重复投递
         self._active_message_ids: Dict[str, str] = {}  # session_key -> message_id
-    
+
     @property
     def is_connected(self) -> bool:
         """检查是否已连接"""
         return self._connected
-    
+
     @property
     def last_error(self) -> Optional[str]:
         """获取最后的错误信息"""
         return self._last_error
-    
+
     def set_message_handler(self, handler: MessageHandler) -> None:
         """设置消息处理器"""
         self._message_handler = handler
-    
+
     @abstractmethod
     async def connect(self) -> bool:
         """
@@ -222,12 +223,12 @@ class BasePlatformAdapter(ABC):
             True 如果连接成功
         """
         pass
-    
+
     @abstractmethod
     async def disconnect(self) -> None:
         """断开与平台的连接"""
         pass
-    
+
     @abstractmethod
     async def send(self, chat_id: str, content: str, **kwargs) -> SendResult:
         """
@@ -242,7 +243,7 @@ class BasePlatformAdapter(ABC):
             SendResult
         """
         pass
-    
+
     async def send_image(self, chat_id: str, image_path: str, **kwargs) -> SendResult:
         """
         发送图片
@@ -253,7 +254,7 @@ class BasePlatformAdapter(ABC):
             success=False,
             error="Platform does not support native image sending"
         )
-    
+
     async def send_file(self, chat_id: str, file_path: str, **kwargs) -> SendResult:
         """
         发送文件
@@ -264,7 +265,7 @@ class BasePlatformAdapter(ABC):
             success=False,
             error="Platform does not support native file sending"
         )
-    
+
     async def send_voice(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
         """
         发送语音
@@ -367,7 +368,7 @@ class BasePlatformAdapter(ABC):
             ChatInfo
         """
         pass
-    
+
     async def handle_message(self, event: MessageEvent) -> None:
         """
         处理接收到的消息
@@ -378,15 +379,15 @@ class BasePlatformAdapter(ABC):
         if not self._message_handler:
             logger.warning(f"[{self.name}] No message handler configured")
             return
-        
+
         session_key = self._get_session_key(event)
-        
+
         # 消息去重：如果正在处理的消息 ID 与新消息相同，丢弃重复投递
         active_msg_id = self._active_message_ids.get(session_key)
         if active_msg_id and event.message_id and active_msg_id == event.message_id:
             logger.info(f"[{self.name}] Dropping duplicate message {event.message_id[:12]} for session: {session_key}")
             return
-        
+
         # 检查是否有活跃会话
         if session_key in self._active_sessions:
             # 活跃会话中：排队消息，但跳过与当前处理中相同 ID 的重复消息
@@ -397,7 +398,7 @@ class BasePlatformAdapter(ABC):
             self._pending_messages[session_key] = event
             self._active_sessions[session_key].set()
             return
-        
+
         # 启动新会话处理
         self._active_sessions[session_key] = asyncio.Event()
         if event.message_id:
@@ -409,7 +410,7 @@ class BasePlatformAdapter(ABC):
         finally:
             self._active_sessions.pop(session_key, None)
             self._active_message_ids.pop(session_key, None)
-            
+
             # 处理待处理消息（跳过与刚完成的重复消息）
             if session_key in self._pending_messages:
                 pending = self._pending_messages.pop(session_key)
@@ -419,11 +420,11 @@ class BasePlatformAdapter(ABC):
                     logger.info(f"[{self.name}] Dropping pending duplicate {pending.message_id[:12]} after session completed: {session_key}")
                     return
                 await self.handle_message(pending)
-    
+
     def _get_session_key(self, event: MessageEvent) -> str:
         """获取会话键"""
         return f"{event.platform.value}:{event.chat_id}"
-    
+
     def truncate_message(self, content: str, max_length: Optional[int] = None) -> List[str]:
         """
         截断长消息
@@ -438,16 +439,16 @@ class BasePlatformAdapter(ABC):
         limit = max_length or self.MAX_MESSAGE_LENGTH
         if len(content) <= limit:
             return [content]
-        
+
         chunks = []
         remaining = content
         while remaining:
             chunk = remaining[:limit]
             remaining = remaining[limit:]
             chunks.append(chunk)
-        
+
         return chunks
-    
+
     async def start(self) -> bool:
         """
         启动适配器
@@ -457,21 +458,21 @@ class BasePlatformAdapter(ABC):
         """
         if self._running:
             return True
-        
+
         success = await self.connect()
         if success:
             self._running = True
             self._connected = True
             logger.info(f"[{self.name}] Started")
         return success
-    
+
     async def stop(self) -> None:
         """
         停止适配器
         """
         if not self._running:
             return
-        
+
         self._running = False
         await self.disconnect()
         self._connected = False

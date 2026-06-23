@@ -360,7 +360,7 @@ wheels = [
 
 [[package]]
 name = "drifox"
-version = "0.2.9"
+version = "0.2.10"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
@@ -390,7 +390,7 @@ dependencies = [
     { name = "watchfiles", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 all = [
     { name = "aiohttp", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
     { name = "black", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
@@ -431,70 +431,52 @@ mac-build = [
     { name = "pyinstaller", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 
-[package.dev-dependencies]
-build = [
-    { name = "pyinstaller", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-]
-dev = [
-    { name = "black", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-    { name = "mypy", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-    { name = "pytest", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-    { name = "pytest-asyncio", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-    { name = "ruff", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-]
-mac-build = [
-    { name = "dmgbuild", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-    { name = "pillow", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-    { name = "pyinstaller", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "aiohttp" },
-    { name = "aiohttp", marker = "extra == 'gateway'", specifier = ">=3.9.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
-    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "dingtalk-stream", marker = "extra == 'gateway'", specifier = ">=0.20" },
-    { name = "discord-py", marker = "extra == 'gateway'", specifier = ">=2.0" },
-    { name = "dmgbuild", marker = "extra == 'mac-build'" },
-    { name = "drifox", extras = ["gateway", "dev", "build", "mac-build"], marker = "extra == 'all'" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "html2text", specifier = ">=2020.1.16" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "lark-oapi", marker = "extra == 'gateway'", specifier = ">=1.0" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "lsprotocol" },
     { name = "markdown" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mss", specifier = ">=9.0.1" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "orjson", specifier = ">=3.8.0" },
-    { name = "pillow", marker = "extra == 'mac-build'" },
     { name = "psutil" },
     { name = "pygls", specifier = ">=2.0.0" },
     { name = "pygments" },
-    { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.16.0" },
-    { name = "pyinstaller", marker = "extra == 'mac-build'", specifier = ">=6.16.0" },
     { name = "pynput", specifier = ">=1.7.6" },
     { name = "pypinyin" },
     { name = "pyqt-fluent-widgets" },
     { name = "pyqt5", specifier = ">=5.15.0,<5.15.16" },
     { name = "pyqtwebengine", specifier = ">=5.15.0,<5.15.7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "python-telegram-bot", marker = "extra == 'gateway'", specifier = ">=20.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qtpy", specifier = ">=2.0.0" },
     { name = "requests" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "slack-sdk", marker = "extra == 'gateway'", specifier = ">=3.0" },
     { name = "uvicorn", specifier = ">=0.23.0" },
     { name = "watchfiles", specifier = ">=1.0.0" },
 ]
-provides-extras = ["gateway", "dev", "build", "mac-build", "all"]
 
 [package.metadata.requires-dev]
+all = [
+    { name = "aiohttp", specifier = ">=3.9.0" },
+    { name = "black", specifier = ">=23.0.0" },
+    { name = "dingtalk-stream", specifier = ">=0.20" },
+    { name = "discord-py", specifier = ">=2.0" },
+    { name = "dmgbuild" },
+    { name = "lark-oapi", specifier = ">=1.0" },
+    { name = "mypy", specifier = ">=1.0.0" },
+    { name = "pillow" },
+    { name = "pyinstaller", specifier = ">=6.16.0" },
+    { name = "pytest", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "python-telegram-bot", specifier = ">=20.0" },
+    { name = "ruff", specifier = ">=0.1.0" },
+    { name = "slack-sdk", specifier = ">=3.0" },
+]
 build = [{ name = "pyinstaller", specifier = ">=6.16.0" }]
 dev = [
     { name = "black", specifier = ">=23.0.0" },
@@ -502,6 +484,14 @@ dev = [
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
     { name = "ruff", specifier = ">=0.1.0" },
+]
+gateway = [
+    { name = "aiohttp", specifier = ">=3.9.0" },
+    { name = "dingtalk-stream", specifier = ">=0.20" },
+    { name = "discord-py", specifier = ">=2.0" },
+    { name = "lark-oapi", specifier = ">=1.0" },
+    { name = "python-telegram-bot", specifier = ">=20.0" },
+    { name = "slack-sdk", specifier = ">=3.0" },
 ]
 mac-build = [
     { name = "dmgbuild" },

@@ -11,42 +11,41 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
 import orjson as json
 import sip
-
-from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable
+from loguru import logger
 from PyQt5.QtCore import (
+    QEvent,
+    Qt,
+    QThreadPool,
     QTimer,
     pyqtSignal,
-    QThreadPool,
-    Qt,
-    QEvent,
 )
-from PyQt5.QtGui import QPixmap, QColor
+from PyQt5.QtGui import QColor, QPixmap
 from PyQt5.QtWidgets import (
-    QVBoxLayout,
-    QHBoxLayout,
     QApplication,
-    QWidget,
+    QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
+    QHBoxLayout,
     QLabel,
     QPushButton,
-    QButtonGroup,
-    QFrame,
     QScrollArea,
     QSizePolicy,
-    QGraphicsDropShadowEffect,
+    QVBoxLayout,
+    QWidget,
 )
-from loguru import logger
 from qfluentwidgets import (
-    setFont,
     FluentIcon,
-    SingleDirectionScrollArea,
-    TransparentToolButton,
     InfoBar,
     InfoBarPosition,
     PushButton,
+    SingleDirectionScrollArea,
+    TransparentToolButton,
+    setFont,
 )
 
 from app.constants import (
@@ -59,32 +58,28 @@ from app.constants import (
 from app.core import (
     ChatBackend,
     ChatSession,
+    TopicSummaryTask,
     consolidate_messages,
     content_to_text,
-    group_messages_for_display,
     get_user_round_ranges,
-    TopicSummaryTask,
+    group_messages_for_display,
 )
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
+from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
 from app.tools.tool_classifier import (
-    classify_tool_danger,
     get_tool_counts,
-    get_default_toggles,
-    DANGEROUS_TOOLS,
-    SAFE_TOOLS,
 )
-from app.core.tool_permission_controller import ToolPermissionController
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
+    apply_font_size_to_widget,
     font_size_css,
     scale_font_size,
-    apply_font_size_to_widget,
 )
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_icon, get_font_family_css
+from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
     AttachmentChip,
@@ -92,10 +87,10 @@ from app.widgets.bottom_input_area import (
     SendableTextEdit,
 )
 from app.widgets.cards import (
+    BottomCardContainer,
     CardManager,
     ContainerType,
     TopCardContainer,
-    BottomCardContainer,
 )
 from app.widgets.cards.floating.command_card import CommandCard
 from app.widgets.cards.floating.file_mention_card import FileMentionCard
@@ -105,7 +100,6 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
-from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
@@ -128,8 +122,8 @@ from app.widgets.cards.settings.mcp_setting_card import (
     MCPEditCard,
 )
 from app.widgets.cards.settings.memory_card import (
-    MemoryCardContent,
     TAB_KEY_DOCUMENTS,
+    MemoryCardContent,
 )
 from app.widgets.cards.settings.model_config_card import (
     ModelConfigCard,
@@ -138,12 +132,15 @@ from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
 )
 from app.widgets.cards.settings.project_selector_card import (
-    ProjectSelectorCardContent, get_project_color,
-    _SquareAvatar, extract_project_initials,
+    ProjectSelectorCardContent,
+    _SquareAvatar,
+    extract_project_initials,
+    get_project_color,
 )
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
 from app.widgets.coding_plan_ring import (
     CodingPlanRing,
 )
@@ -158,33 +155,33 @@ from app.widgets.file_undo_dialog import (
 )
 from app.widgets.message_card import (
     MessageCard,
-    create_welcome_card,
     clear_global_render_cache,
+    create_welcome_card,
 )
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
     add_message_to_layout,
-    refresh_history_card_if_visible,
-    init_new_session_after_archive,
-    clear_and_show_welcome,
-    refresh_session_view,
-    save_or_archive_session,
-    invalidate_session_card_cache,
-    delete_widgets_from_layout,
-    init_after_loading_session,
-    setup_user_card_signals,
-    post_append_user_message,
-    create_assistant_card_widget,
-    scroll_to_bottom_if_streaming,
     build_node_preview_from_session,
-    truncate_and_remove_round,
-    log_deletion_stats,
-    restore_input_from_card,
+    clear_and_show_welcome,
+    create_assistant_card_widget,
+    delete_widgets_from_layout,
     find_last_tool_call_id_after_round,
-    get_first_file_operation,
-    show_diff_viewer,
-    render_batch_to_assistant_card,
     find_user_round_index,
+    get_first_file_operation,
+    init_after_loading_session,
+    init_new_session_after_archive,
+    invalidate_session_card_cache,
+    log_deletion_stats,
+    post_append_user_message,
+    refresh_history_card_if_visible,
+    refresh_session_view,
+    render_batch_to_assistant_card,
+    restore_input_from_card,
+    save_or_archive_session,
+    scroll_to_bottom_if_streaming,
+    setup_user_card_signals,
+    show_diff_viewer,
+    truncate_and_remove_round,
 )
 
 
@@ -495,8 +492,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""
         from app.gateway import (
-            LLMAPIService,
             APISessionHandler,
+            LLMAPIService,
             is_service_running,
         )
 
@@ -942,6 +939,7 @@ class OpenAIChatToolWindow(ToolWindow):
         except BaseException:
             # 极端情况（如 KeyboardInterrupt）也要兜底，防止 pyqt5_err_print → qFatal → abort
             import traceback
+
             from loguru import logger as _log
             _log.error(f"[_duplicate_window] 未预期的异常: {traceback.format_exc()}")
 
@@ -1376,7 +1374,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def setup_ui(self):
         Colors.refresh()
         # 注册自身为 ThemeManager 的刷新目标，热重载时自动级联
-        from app.utils.theme_manager import theme_manager
         theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
@@ -1857,6 +1854,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         # 操作按钮移到标题栏
         from qfluentwidgets import FluentIcon
+
         from app.utils.utils import get_icon
 
         self._model_selector_card.add_header_button(
@@ -2620,9 +2618,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
         self._clear_command_shortcuts()
 
-        from app.core.command_manager import CommandManager, CommandType
-        from PyQt5.QtWidgets import QShortcut
         from PyQt5.QtGui import QKeySequence
+        from PyQt5.QtWidgets import QShortcut
+
+        from app.core.command_manager import CommandManager, CommandType
 
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
@@ -3810,7 +3809,7 @@ class OpenAIChatToolWindow(ToolWindow):
             original = self._hook_edit_popup.get_original_data()
             hook_id = original.get("id", "") if original else ""
             hm = self._settings_popup.hookListCard._hook_manager
-            
+
             if hook_id and hm:
                 # 编辑已有 hook（edit_hook_by_id 内部处理事件变更移动逻辑）
                 hm.edit_hook_by_id(hook_id, values)
@@ -4189,8 +4188,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
         try:
-            from app.utils.theme_manager import theme_manager
             from app.utils.design_tokens import Colors
+            from app.utils.theme_manager import theme_manager
 
             Colors.refresh()
             bg_config = theme_manager.get_theme_background(
@@ -4278,7 +4277,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"🔧 工具权限 | 危险 {dangerous} 安全 {safe}\n"
                 f"🤖 由智能体「{agent_name}」控制，点击查看详情"
             )
-            self._tool_toggle_btn.setStyleSheet(f"""
+            self._tool_toggle_btn.setStyleSheet("""
                 background: rgba(255,149,0,0.12);
                 border: 1px solid rgba(255,149,0,0.25);
                 border-radius: 8px;
@@ -4746,8 +4745,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _execute_skill_toggle(self, skill_name: str, enable: bool):
         """执行技能启用/禁用（FUNCTION 命令，不发送消息给 LLM）"""
-        from app.utils.config import Settings
         from qfluentwidgets import InfoBar, InfoBarPosition
+
+        from app.utils.config import Settings
 
         cfg = Settings.get_instance()
         enabled_skills = cfg.llm_enabled_skills.value.copy() if cfg.llm_enabled_skills.value else []
@@ -4943,7 +4943,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
-        from app.utils.theme_manager import theme_manager
 
         colors = theme_manager.get_current_colors()
 
@@ -7902,7 +7901,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if round_index < 0 or round_index >= len(round_ranges):
             logger.warning(f"[DELETE] Invalid round_index: {round_index}")
             # [DEBUG-diagnose-welcome] 记录无效 round_index
-            logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round: INVALID round_index, will return without showing welcome")
+            logger.info("[DEBUG-diagnose-welcome] _delete_user_round: INVALID round_index, will return without showing welcome")
             # 仍显示撤销卡片（缓存已设置）
             if self._undo_delete_cache:
                 self._card_manager.show_card("undo_delete", self._window_id)
@@ -7913,7 +7912,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if not success:
             # [DEBUG-diagnose-welcome] 记录 truncate 失败
-            logger.info(f"[DEBUG-diagnose-welcome] _delete_user_round: truncate_and_remove_round FAILED")
+            logger.info("[DEBUG-diagnose-welcome] _delete_user_round: truncate_and_remove_round FAILED")
             return
 
         log_deletion_stats(round_index, len(widgets_to_remove), old_count, new_count)
@@ -8355,7 +8354,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
 
         if round_index < 0 or round_index >= len(round_ranges):
-            logger.warning(f"[card-diff] cannot determine valid round_index")
+            logger.warning("[card-diff] cannot determine valid round_index")
             return
 
         session_id = session.session_id
@@ -8431,9 +8430,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 复用 _on_card_diff_requested 的 round_index 合法性校验 + fallback 推导
-        from app.core.message_content import consolidate_messages, get_user_round_ranges
         # difflib 是标准库，移出 try 块以便失败时给出明确的诊断（不会被业务异常吞掉）
         import difflib
+
+        from app.core.message_content import consolidate_messages, get_user_round_ranges
 
         canonical_messages = consolidate_messages(session.messages)
         round_ranges = get_user_round_ranges(canonical_messages)
@@ -8456,7 +8456,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 round_index = computed
 
         if round_index < 0 or round_index >= len(round_ranges):
-            logger.warning(f"[card-review] cannot determine valid round_index")
+            logger.warning("[card-review] cannot determine valid round_index")
             return
 
         session_id = session.session_id
@@ -8474,8 +8474,8 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from app.widgets.ui_helpers import (
                 collect_operations_for_round,
-                read_backup_files,
                 normalize_lines,
+                read_backup_files,
             )
 
             all_call_ids = self._get_tool_call_ids_in_round(round_index)
@@ -9130,7 +9130,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
         if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
-            from app.utils.config import Settings
 
             parts = user_text[1:].split(maxsplit=1)
             if parts:
@@ -9411,8 +9410,10 @@ class OpenAIChatToolWindow(ToolWindow):
           --create=X → 进入创建子智能体工作流，AI 自动在 user-custom 插件下生成 agent md 文件
         """
         import re
-        from app.utils.config import Settings
+
         from qfluentwidgets import InfoBar, InfoBarPosition
+
+        from app.utils.config import Settings
 
         args = (args or "").strip()
 
@@ -9582,8 +9583,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_subagents_param_description(self):
         """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
+        from app.core.command_manager import CommandManager
         from app.utils.config import Settings
-        from app.core.command_manager import CommandManager, CommandType
 
         cfg = Settings.get_instance()
         saved = cfg.llm_subagent_default_model.value or ""
@@ -11413,7 +11414,7 @@ class OpenAIChatToolWindow(ToolWindow):
             f"[MainWidget] 已自动切换到 worktree: {worktree_path}（项目: {project}）"
         )
 
-    
+
     def _restore_main_repo(self):
         """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
 

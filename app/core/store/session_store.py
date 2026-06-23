@@ -16,13 +16,14 @@
 import os
 import threading
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
 from app.core.store.file_operation_repository import FileOperationRepository
 from app.core.store.input_history_repo import InputHistoryRepository
 from app.core.store.memory_repository import MemoryRepository
+
 # 导入子模块
 from app.core.store.session_repository import SessionRepository
 from app.core.store.subagent_log_repository import SubAgentLogRepository
@@ -64,14 +65,14 @@ class SessionStore:
         self._local = threading.local()
         self._init_lock = threading.Lock()
         self._initialized = False
-        
+
         # 初始化子模块（将在 _init_schema 中完成）
         self._session_repo: Optional[SessionRepository] = None
         self._memory_repo: Optional[MemoryRepository] = None
         self._file_op_repo: Optional[FileOperationRepository] = None
         self._subagent_log_repo: Optional[SubAgentLogRepository] = None
         self._input_history_repo: Optional[InputHistoryRepository] = None
-        
+
         self._init_schema()
 
     @classmethod
@@ -113,9 +114,9 @@ class SessionStore:
         if not self._db or not self._db.is_connected:
             logger.warning("[SessionStore] 数据库未连接，跳过检查")
             return
-        
+
         db_path = Path(self._db.db_path)
-        
+
         # 检查是否为正常关闭后的首次启动
         clean_shutdown = False
         try:
@@ -125,7 +126,7 @@ class SessionStore:
                 flag_path.unlink(missing_ok=True)
         except Exception:
             pass
-        
+
         try:
             # 检查 WAL 模式
             success, result = self._db.execute_sql('PRAGMA journal_mode')
@@ -133,11 +134,11 @@ class SessionStore:
                 logger.warning("[SessionStore] 无法读取 journal_mode")
                 return
             journal_mode = list(result[0].values())[0] if result else 'unknown'
-            
+
             # 获取数据库路径信息
             wal_path = db_path.with_suffix('.db-wal')
             shm_path = db_path.with_suffix('.db-shm')
-            
+
             if journal_mode == 'wal':
                 # WAL 模式下检查是否需要同步
                 try:
@@ -145,7 +146,7 @@ class SessionStore:
                     logger.debug("[SessionStore] WAL 检查点执行完成")
                 except Exception as e:
                     logger.warning(f"[SessionStore] WAL 检查点失败: {e}")
-                    
+
                     # 删除 WAL/SHM 文件强制同步
                     for p in [(wal_path, "WAL"), (shm_path, "SHM")]:
                         if p[0].exists():
@@ -154,12 +155,12 @@ class SessionStore:
                                 logger.info(f"[SessionStore] 已删除损坏的 {p[1]} 文件")
                             except Exception as e2:
                                 logger.warning(f"[SessionStore] 无法删除 {p[1]} 文件: {e2}")
-            
+
             # 正常关闭后跳过完整行检查（PRAGMA integrity_check 在数据库较大时较慢）
             if clean_shutdown:
                 logger.debug("[SessionStore] 上次正常关闭，跳过完整性检查")
                 return
-            
+
             # 尝试执行完整性检查
             try:
                 success, result = self._db.execute_sql('PRAGMA integrity_check')
@@ -172,7 +173,7 @@ class SessionStore:
                         logger.debug("[SessionStore] 数据库完整性检查通过")
             except Exception as e:
                 logger.warning(f"[SessionStore] 完整性检查异常: {e}")
-                
+
         except Exception as e:
             logger.warning(f"[SessionStore] 数据库检查异常（继续初始化）: {e}")
 
@@ -596,17 +597,17 @@ class SessionStore:
         try:
             # 删除会话（直接 SQL，不经过 repo 层）
             self._execute(
-                f'DELETE FROM sessions WHERE project = ?',
+                'DELETE FROM sessions WHERE project = ?',
                 (project_name,)
             )
             # 删除关键文档
             self._execute(
-                f'DELETE FROM key_documents WHERE project = ?',
+                'DELETE FROM key_documents WHERE project = ?',
                 (project_name,)
             )
             # 删除旧版项目笔记
             self._execute(
-                f'DELETE FROM project_notes WHERE project = ?',
+                'DELETE FROM project_notes WHERE project = ?',
                 (project_name,)
             )
             logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")
@@ -704,8 +705,9 @@ class SessionStore:
 
     def migrate_memories_from_json(self, json_path: str) -> int:
         """从 JSON 文件迁移记忆到 SQLite"""
-        from app.utils.utils import deserialize_from_json
         import json as json_module
+
+        from app.utils.utils import deserialize_from_json
 
         if not self.is_initialized:
             return 0

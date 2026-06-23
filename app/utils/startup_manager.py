@@ -31,7 +31,7 @@ def _get_app_exe_path() -> str:
     """
     if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
         return str(Path(sys.executable).resolve())
-    
+
     # 开发环境：尝试 pythonw，回退到 python
     python_path = Path(sys.executable).resolve()
     pythonw_path = python_path.with_name("pythonw.exe")

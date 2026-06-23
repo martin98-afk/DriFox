@@ -5,9 +5,9 @@
 重构为无分类的简单条目记忆结构。
 """
 
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
 import hashlib
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -45,7 +45,7 @@ class MemoryRepository:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'"
             )
             has_old_table = success and rows and len(rows) > 0
-            
+
             if has_old_table:
                 # 检查旧表是否有 category 列
                 success, cols = self._execute("PRAGMA table_info(memories)")
@@ -56,7 +56,7 @@ class MemoryRepository:
                         if isinstance(col, (list, tuple)) and len(col) > 1 and col[1] == 'category':
                             has_category = True
                             break
-                
+
                 if has_category:
                     # 创建新表并迁移数据
                     self._execute(f'''
@@ -78,7 +78,7 @@ class MemoryRepository:
                     ''')
                     logger.info("[MemoryRepository] 已迁移旧记忆数据到新表")
                     return True
-            
+
             # 直接创建新表
             success, _ = self._execute(f'''
                 CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
@@ -93,7 +93,7 @@ class MemoryRepository:
                 )
             ''')
             return success
-            
+
         except Exception as e:
             logger.error(f"[MemoryRepository] _ensure_table 异常: {e}")
             return False
@@ -408,7 +408,7 @@ class MemoryRepository:
                     f'SELECT * FROM {self.TABLE_NAME} ORDER BY confidence DESC LIMIT ?',
                     (limit,)
                 )
-            
+
             if success and rows:
                 return [self._row_to_memory(row) for row in rows]
             return []

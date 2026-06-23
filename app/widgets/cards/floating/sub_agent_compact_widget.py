@@ -7,16 +7,21 @@
 import time
 from typing import Dict
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
-from PyQt5.QtGui import QPixmap, QPainter
+from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSizePolicy, QApplication, QFrame,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 from app.utils.design_tokens import Colors
-from app.utils.utils import get_unified_font, get_font_family_css
+from app.utils.utils import get_font_family_css, get_unified_font
 
 
 class _RotatingIcon(QWidget):

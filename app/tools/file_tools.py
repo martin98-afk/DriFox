@@ -10,15 +10,16 @@
 - 搜索：grep, scan_repo
 - 批量编辑：multi_edit（支持多次替换）
 """
+import difflib
 import fnmatch
-import re
-from typing import Dict, List, Optional
-from pathlib import Path
 import os
+import re
 from functools import lru_cache
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from loguru import logger
-import difflib
+
 from app.tools.result import ToolResult
 
 MAX_GREP_CONTENT_LENGTH = 15000
@@ -210,6 +211,7 @@ class FileTools:
         """
         try:
             from pathlib import Path
+
             from app.utils.utils import get_app_data_dir
 
             p = Path(file_path)

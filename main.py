@@ -39,11 +39,10 @@ sys.path.insert(0, project_root)
 
 def main():
     """启动 LLM Chatter"""
-    import platform
+    from loguru import logger
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QApplication
-    from loguru import logger
-    from app.utils import icons_rc
+
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
     # 这些设置必须在任何 Qt 模块导入之前或 QApplication 创建之前完成
@@ -57,9 +56,8 @@ def main():
     # 提前导入，确保在 app 创建之前触发
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
-    from app.utils.utils import get_app_data_dir
     # 迁移旧版本数据（打包版从安装目录迁到用户 home 目录）
-    from app.utils.utils import migrate_app_data_if_needed
+    from app.utils.utils import get_app_data_dir, migrate_app_data_if_needed
     migrate_app_data_if_needed()
 
     # 设置日志 (使用统一路径获取方法，DMG 只读时也需要可写)
@@ -93,8 +91,8 @@ def main():
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
     # PyQt5 默认：信号槽中 Python 异常 → pyqt5_err_print() → qFatal() → abort()
     # 自定义处理器将 qFatal 转换为日志，防止整个进程崩溃
-    from PyQt5.QtCore import qInstallMessageHandler, QtMsgType
     from loguru import logger as _logger
+    from PyQt5.QtCore import QtMsgType, qInstallMessageHandler
 
     def _qt_message_handler(msg_type, msg_context, msg_text):
         if msg_type == QtMsgType.QtFatalMsg:
@@ -124,7 +122,7 @@ def main():
             _logger.error(f"  Object: {unraisable.object!r}")
         _logger.error(f"  Err: {unraisable.err_msg}")
     sys.unraisablehook = _unraisable_hook
-    
+
     # 禁用默认退出行为（让最后一个窗口隐藏到托盘而不是退出）
     app.setQuitOnLastWindowClosed(False)
 
@@ -184,8 +182,9 @@ def main():
     # 创建并显示窗口 - 直接使用 ToolPopupDialog
     logger.info("LLM Chatter 启动中...")
 
-    from app.main_widget import OpenAIChatToolWindow
     from PyQt5.QtWidgets import QWidget
+
+    from app.main_widget import OpenAIChatToolWindow
 
     # 创建模拟的 homepage
     class FakePage(QWidget):

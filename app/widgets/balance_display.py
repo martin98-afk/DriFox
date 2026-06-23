@@ -2,14 +2,14 @@
 """
 余额显示组件 - 支持 DeepSeek 和 SiliconFlow
 """
-import requests
 from typing import Optional
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel
-from PyQt5.QtGui import QColor
-from app.utils.utils import get_font_family_css
-from app.utils.design_tokens import scale_font_size
 
+import requests
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
+
+from app.utils.design_tokens import scale_font_size
+from app.utils.utils import get_font_family_css
 
 # 支持余额查询的服务商及其接口
 BALANCE_APIS = {
@@ -31,7 +31,7 @@ SUPPORTED_PROVIDERS = list(BALANCE_APIS.keys())
 
 class BalanceDisplay(QWidget):
     """余额显示组件"""
-    
+
     # 信号：当余额更新时发出
     balance_updated = pyqtSignal(float, str)  # balance, currency
 
@@ -41,18 +41,18 @@ class BalanceDisplay(QWidget):
         self._currency = "¥"
         self._loading = False
         self._current_provider = ""
-        
+
         # 布局：图标 + 金额
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(4)
         layout.setAlignment(Qt.AlignVCenter)
-        
+
         # 余额图标
         self._icon_label = QLabel("💰", self)
         self._icon_label.setFixedWidth(16)
         self._icon_label.setAlignment(Qt.AlignCenter)
-        
+
         # 金额标签
         self._balance_label = QLabel("", self)
         self._balance_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -66,33 +66,33 @@ class BalanceDisplay(QWidget):
                 padding: 0px;
             }}
         """)
-        
+
         layout.addWidget(self._icon_label)
         layout.addWidget(self._balance_label)
-        
+
         # 初始隐藏
         self.setVisible(False)
         self.setFixedHeight(20)
-        
+
         # 定时器用于延迟加载
         self._load_timer = QTimer(self)
         self._load_timer.setSingleShot(True)
         self._load_timer.timeout.connect(self._do_fetch_balance)
-        
+
         self.setToolTip("余额查询")
 
     def set_provider(self, provider_name: str, api_key: Optional[str] = None, api_url: Optional[str] = None):
         """设置当前服务商并加载余额"""
         # 先停止之前的定时器，避免显示混乱
         self._load_timer.stop()
-        
+
         # 如果不是支持的服务商，隐藏组件
         if provider_name not in SUPPORTED_PROVIDERS:
             self.setVisible(False)
             self._balance = None
             self._current_provider = ""
             return
-        
+
         api_key = api_key or ""
         if not api_key:
             self.setVisible(False)
@@ -100,18 +100,18 @@ class BalanceDisplay(QWidget):
             self._current_provider = ""
             self.setToolTip("未配置 API Key")
             return
-        
+
         # 立即显示加载状态
         self._balance_label.setText("...")
         self._icon_label.setText("⏳")
         self.setVisible(True)
-        
+
         # 延迟加载，避免频繁切换时多次请求
         self._current_provider = provider_name
         self._provider_name = provider_name
         self._api_key = api_key
         self._load_timer.start(200)  # 200ms 延迟
-        
+
     def refresh(self):
         """手动刷新余额（对话完成后调用）"""
         if self._current_provider:
@@ -177,7 +177,7 @@ class BalanceDisplay(QWidget):
         """从响应数据中提取余额"""
         try:
             balance_key = config["balance_key"]
-            
+
             if balance_key == "total_balance":
                 # DeepSeek: {"balance_infos": [{"total_balance": "0.92", ...}]}
                 balance_infos = data.get("balance_infos", [])
@@ -203,7 +203,7 @@ class BalanceDisplay(QWidget):
 
         balance = self._balance
         color = "#5aa9ff"  # 默认蓝色
-        
+
         # 根据余额大小设置颜色
         if balance < 0:
             # 欠费或余额为负 - 红色

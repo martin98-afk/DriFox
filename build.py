@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
-import shutil
 import platform
+import shutil
 from pathlib import Path
 
 import PyInstaller.__main__
@@ -241,7 +241,7 @@ def post_build_cleanup(dist_path):
 
 
 if __name__ == "__main__":
-    print(f"[Build] Starting PyInstaller build for Drifox...")
+    print("[Build] Starting PyInstaller build for Drifox...")
 
     # 执行打包
     PyInstaller.__main__.run(params)

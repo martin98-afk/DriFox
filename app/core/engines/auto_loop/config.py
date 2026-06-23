@@ -2,8 +2,7 @@
 """
 AutoLoop 配置数据类
 """
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass

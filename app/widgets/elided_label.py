@@ -5,7 +5,6 @@ ElidedLabel - 自动根据可用宽度省略文本的 QLabel（中间省略）
 从 mcp_setting_card._ElidedLabel 提取为共享模块，消除多处重复定义。
 """
 import html
-
 from typing import List
 
 from PyQt5.QtCore import Qt

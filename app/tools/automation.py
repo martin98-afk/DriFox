@@ -24,8 +24,9 @@ from loguru import logger
 from app.tools.result import ToolResult
 
 try:
-    from pynput.mouse import Controller as MouseController, Button
     from pynput import keyboard as _kb_module
+    from pynput.mouse import Button
+    from pynput.mouse import Controller as MouseController
     _HAS_PYNPUT = True
 except ImportError:  # 依赖未装时不崩溃, 仅工具不可用
     _HAS_PYNPUT = False

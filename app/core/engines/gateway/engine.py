@@ -14,15 +14,15 @@ GatewayEngine — Gateway 专用引擎，与 UI 的 ChatEngine 完全独立
 - 一次只处理一个 Gateway 消息（单 worker 串行）
 - 共享 ToolExecutor / AgentManager（无状态组件）
 """
-from typing import Callable, Dict, List, Optional, Any
+from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import QObject, pyqtSignal
 from loguru import logger
+from PyQt5.QtCore import QObject, pyqtSignal
 
-from app.core.chat_session import ChatSession, SessionManager
-from app.core.conversation.core import ConversationCore
-from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.chat_session import ChatSession
 from app.core.conversation.adapters import GatewayConversationAdapter
+from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.tools import get_builtin_tools_schema
 from app.utils.config import Settings
@@ -384,7 +384,7 @@ class GatewayEngine(QObject, BaseEngine):
             self.switch_to_session(candidates[0].session_id)
             return f"✅ 已切换到会话: **{candidates[0].name}**"
         elif len(candidates) > 1:
-            lines = [f"找到多个匹配:\n"]
+            lines = ["找到多个匹配:\n"]
             for s in candidates:
                 lines.append(f"- `{s.session_id[:12]}...` **{s.name}**")
             return "\n".join(lines)
@@ -583,7 +583,7 @@ class GatewayEngine(QObject, BaseEngine):
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
             )
 
-        from app.core.conversation.config import filter_interactive_tools, PermissionStrategy
+        from app.core.conversation.config import PermissionStrategy, filter_interactive_tools
         return filter_interactive_tools(tools, PermissionStrategy.AGENT_CONFIG)
 
     # ==================== 持久化 ====================

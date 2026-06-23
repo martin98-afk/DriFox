@@ -5,22 +5,21 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 from qfluentwidgets import (
     ExpandSettingCard,
-    PushButton,
     FluentIcon,
+    PushButton,
     SwitchButton,
     ToolButton,
 )
 
+from app.utils.design_tokens import ButtonStyles, Sizes, SwitchStyles, scale_font_size
 from app.utils.utils import get_app_data_dir, get_font_family_css
-from app.utils.design_tokens import scale_font_size, Sizes, ButtonStyles, SwitchStyles
-from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, _make_row, NoWheelComboBox
+from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
-
 
 # 事件顺序定义（按触发先后排列）
 # - UserPromptSubmit：用户提交原始 prompt，发生在 PreUserMessage 之前
@@ -40,17 +39,17 @@ class HookItem(QWidget):
     removed = pyqtSignal(str)  # hook_id
     edited = pyqtSignal(str)   # hook_id
     toggled = pyqtSignal(str, bool)  # hook_id, enabled
-    
+
     def __init__(self, hook_data: dict, parent=None):
         super().__init__(parent=parent)
         self.hook_id = hook_data.get("id", "")
         self._hook_data = hook_data
         self._setup_ui()
-    
+
     def _setup_ui(self):
         self.setStyleSheet("background-color: transparent;")
         self.hBoxLayout = QHBoxLayout(self)
-        
+
         # 来源标签（彩色小 tag）
         source_type = self._hook_data.get("_source_type", "user")
         display_name = self._hook_data.get("_display_name", "自定义")
@@ -66,7 +65,7 @@ class HookItem(QWidget):
             f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
         )
         self.sourceLabel.setFixedHeight(18)
-        
+
         # 类型标签
         hook_type = self._hook_data.get("type", "command")
         type_colors = {"command": "#4CAF50", "http": "#FF9800", "python": "#2196F3"}
@@ -79,7 +78,7 @@ class HookItem(QWidget):
             f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
         )
         self.typeLabel.setFixedHeight(18)
-        
+
         # 命令文本
         display_cmd = self._get_effective_command()
         self.commandLabel = _ElidedLabel(display_cmd, self)
@@ -88,23 +87,23 @@ class HookItem(QWidget):
             f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
         )
         self.commandLabel.setMinimumWidth(40)
-        
+
         # 开关
         self.switch = SwitchButton(self)
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(self._hook_data.get("enabled", True))
-        
+
         # 编辑/删除按钮（所有来源都可用）
         self.editBtn = ToolButton(FluentIcon.EDIT)
         self.editBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.editBtn.setStyleSheet(ButtonStyles.tool_button())
         self.editBtn.clicked.connect(lambda: self.edited.emit(self.hook_id))
-        
+
         self.delBtn = ToolButton(FluentIcon.CLOSE)
         self.delBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.delBtn.setStyleSheet(ButtonStyles.tool_button())
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
-        
+
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(8, 0, 16, 0)  # ponytail: 左 padding 从 48 缩到 8
         self.hBoxLayout.addWidget(self.sourceLabel, 0)
@@ -117,9 +116,9 @@ class HookItem(QWidget):
         self.hBoxLayout.addWidget(self.editBtn, 0)
         self.hBoxLayout.addWidget(self.delBtn, 0)
         self.hBoxLayout.setAlignment(Qt.AlignVCenter)
-        
+
         self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.hook_id, checked))
-    
+
     def _get_effective_command(self) -> str:
         """根据 type 取正确字段"""
         t = self._hook_data.get("type", "command")
@@ -137,10 +136,10 @@ class HookEditCard(QWidget):
     Hook 编辑卡片（卡片形态）
     类似 MCPEditCard，放在 BaseSettingsCard 中使用
     """
-    
+
     saved = pyqtSignal(dict)
     closed = pyqtSignal()
-    
+
     def __init__(self, hook_data: dict = None, parent=None):
         super().__init__(parent=parent)
         self._hook_data = hook_data or {}
@@ -148,11 +147,11 @@ class HookEditCard(QWidget):
         self._setup_ui()
         if not self._is_new:
             self._load_data()
-    
+
     def get_original_data(self) -> dict:
         """返回原始 hook 数据（编辑时使用），新增时返回空 dict"""
         return dict(self._hook_data) if not self._is_new else {}
-    
+
     def _setup_ui(self):
         self.setStyleSheet(EDIT_CARD_STYLE)
 
@@ -187,7 +186,7 @@ class HookEditCard(QWidget):
 
         # 初始类型
         self._on_type_changed(self.typeCombo.currentText())
-    
+
     def _on_type_changed(self, hook_type: str):
         """根据类型切换标签文本"""
         if hook_type == "http":
@@ -213,7 +212,7 @@ class HookEditCard(QWidget):
         else:
             self.commandEdit.setText(d.get("command", "") or "")
         self.matcherEdit.setText(d.get("matcher", ""))
-    
+
     def get_values(self) -> dict:
         hook_type = self.typeCombo.currentText()
         value = self.commandEdit.text().strip()
@@ -233,13 +232,13 @@ class HookEditCard(QWidget):
         elif hook_type == "http":
             result["url"] = value
         return result
-    
+
     def _on_save(self):
         values = self.get_values()
         if not values["event"] or not values["command"]:
             return
         self.saved.emit(values)
-    
+
     def get_title(self) -> str:
         if self._is_new:
             return "➕ 添加 Hook"
@@ -248,11 +247,11 @@ class HookEditCard(QWidget):
 
 class HookListSettingCard(ExpandSettingCard):
     """Hook 管理设置卡片"""
-    
+
     hooksChanged = pyqtSignal()
     showAddHookCard = pyqtSignal()  # 显示添加 Hook 卡片
     showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (hook_id, hook_data)
-    
+
     def __init__(self, icon: QIcon, title: str, content: str = None, parent=None, home=None,
                  hook_manager=None):
         self.home = home
@@ -263,7 +262,7 @@ class HookListSettingCard(ExpandSettingCard):
         self._hooks_config_file = self._get_global_hooks_file()
         self._setup_ui()
         self._refresh()
-    
+
     def _get_global_hooks_file(self) -> Path:
         """获取全局 hooks 文件路径"""
         try:
@@ -274,19 +273,19 @@ class HookListSettingCard(ExpandSettingCard):
         except Exception:
             pass
         return get_app_data_dir() / "plugins" / "user-custom" / "hooks" / "hooks.json"
-    
+
     def _setup_ui(self):
         self.viewLayout.setSpacing(0)
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
-        
+
         self.addButton = PushButton("添加", self, FluentIcon.ADD)
         self.addButton.setObjectName("_hook_add_btn")
         self.addButton.clicked.connect(self.showAddHookCard.emit)
-        
+
         self.addWidget(self.addButton)
         self._update_button_position()
-    
+
     def _update_button_position(self):
         """将 addButton 移到卡片头部 expandButton 左侧"""
         card = self.card
@@ -301,39 +300,39 @@ class HookListSettingCard(ExpandSettingCard):
                 card.hBoxLayout.insertSpacing(i - 1, 4)
                 card.hBoxLayout.insertSpacing(i + 1, 4)
                 break
-    
+
     def _refresh(self, reload=True):
         """刷新 hook 列表"""
         was_expanded = self.isExpand
         if reload:
             self._load_hooks()
-        
+
         # 清空 viewLayout
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        
+
         self._render_hooks()
-        
+
         from PyQt5.QtCore import QCoreApplication
         QCoreApplication.processEvents()
         self.viewLayout.activate()
         self.view.updateGeometry()
-        
+
         self._adjustViewSize()
         if was_expanded:
             h = self.viewLayout.sizeHint().height()
             if h > 0:
                 self.setFixedHeight(self.card.height() + h)
-    
+
     def _load_hooks(self):
         """从 HookManager 加载分组后的 hooks"""
         self.grouped_hooks = {"plugin": {}, "skill": {}, "user": {}}
         if self._hook_manager:
             self.grouped_hooks = self._hook_manager.get_all_hooks_grouped()
-    
+
     def _render_hooks(self):
         """按事件分组渲染 hooks"""
         # 收集所有有 hook 的事件
@@ -344,7 +343,7 @@ class HookListSettingCard(ExpandSettingCard):
                 if source_hooks.get(event):
                     has_any = True
                     break
-        
+
         if not has_any:
             empty_label = QLabel("暂无 Hooks，点击「+ 添加」创建", self.view)
             empty_label.setStyleSheet(
@@ -353,7 +352,7 @@ class HookListSettingCard(ExpandSettingCard):
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
             return
-        
+
         # 按事件顺序渲染
         for event in HOOK_EVENT_ORDER:
             event_hooks = []
@@ -362,10 +361,10 @@ class HookListSettingCard(ExpandSettingCard):
                 for h in hooks:
                     h = dict(h)  # 深拷贝避免修改原数据
                     event_hooks.append(h)
-            
+
             if not event_hooks:
                 continue
-            
+
             # 事件标题
             header = QLabel(f"Event: {event}", self.view)
             header.setStyleSheet(
@@ -373,7 +372,7 @@ class HookListSettingCard(ExpandSettingCard):
                 f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
             )
             self.viewLayout.addWidget(header)
-            
+
             # Hook 条目
             for hook_data in event_hooks:
                 hook_id = hook_data.get("id", "")
@@ -382,7 +381,7 @@ class HookListSettingCard(ExpandSettingCard):
                 item.edited.connect(lambda hid: self._edit_hook_by_id(hid))
                 item.toggled.connect(lambda hid, enabled: self._toggle_hook_by_id(hid, enabled))
                 self.viewLayout.addWidget(item)
-    
+
     def _edit_hook_by_id(self, hook_id: str):
         """在所有分组中查找 hook 数据并发出编辑信号"""
         for source in ("plugin", "skill", "user"):
@@ -394,21 +393,21 @@ class HookListSettingCard(ExpandSettingCard):
                         hook_with_event["_source_type"] = source
                         self.showEditHookCard.emit(hook_id, hook_with_event)
                         return
-    
+
     def _delete_hook_by_id(self, hook_id: str):
         """删除 hook"""
         if self._hook_manager:
             self._hook_manager.delete_hook_by_id(hook_id)
             self._refresh(reload=True)
             self.hooksChanged.emit()
-    
+
     def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
         """切换 hook 启用状态"""
         if self._hook_manager:
             self._hook_manager.toggle_hook_by_id(hook_id, enabled)
             self._refresh(reload=True)
             self.hooksChanged.emit()
-    
+
     def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command", enabled: bool = True):
         """添加新 hook（写入 user-custom hooks 文件）"""
         # 构建 hook 条目
@@ -424,11 +423,11 @@ class HookListSettingCard(ExpandSettingCard):
             hook_entry["function"] = command
         elif hook_type == "http":
             hook_entry["url"] = command
-        
+
         # 加载/创建配置文件
         config_file = self._hooks_config_file
         config_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         if config_file.exists():
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
@@ -437,25 +436,25 @@ class HookListSettingCard(ExpandSettingCard):
                 config = {}
         else:
             config = {"hooks": {}}
-        
+
         raw_hooks = config.get("hooks", config)
-        
+
         # 追加到对应事件
         if event not in raw_hooks:
             raw_hooks[event] = []
-        
+
         raw_hooks[event].append({
             "matcher": matcher or "",
             "hooks": [hook_entry]
         })
-        
+
         # 写文件
         with open(config_file, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
-        
+
         # 同步 HookManager 内存
         if self._hook_manager:
             self._hook_manager.reload_global_hooks(str(config_file))
-        
+
         self._refresh(reload=True)  # reload=True: 从 HookManager 重新读取 grouped_hooks
         self.hooksChanged.emit()

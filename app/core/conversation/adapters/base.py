@@ -1,6 +1,7 @@
 # app/core/conversation/adapters/base.py
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     from app.core.conversation.executor import ConversationExecutor

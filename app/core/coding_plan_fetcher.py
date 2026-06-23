@@ -11,11 +11,11 @@
 如需添加新服务商，只需实现一个 fetcher 函数并 register()。
 """
 import json
-import time
-import urllib.request
-import urllib.parse
 import re
-from typing import Dict, Any, Optional, Callable
+import time
+import urllib.parse
+import urllib.request
+from typing import Any, Callable, Dict, Optional
 
 # ── 类型 ────────────────────────────────────────────
 # fetcher 签名: (provider_config: dict) -> dict | None

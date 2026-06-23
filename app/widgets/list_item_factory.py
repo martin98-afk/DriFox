@@ -9,31 +9,28 @@ ListItem 工厂函数 - 使用组合模式生成通用列表项组件
 使用工厂函数而非继承，保持灵活性。
 """
 
-from functools import partial
 from typing import Callable, Optional
 
-from PyQt5.QtCore import pyqtSignal, QSize, Qt
-from PyQt5.QtGui import QFontMetrics
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QWidget,
     QHBoxLayout,
-    QVBoxLayout,
     QLabel,
     QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
-    ToolButton,
     FluentIcon,
     SwitchButton,
+    ToolButton,
 )
+
 from app.utils.design_tokens import (
-    ItemStyles,
     Sizes,
     SwitchStyles,
     font_size_css,
 )
 from app.utils.utils import get_font_family_css
-
 
 # ========== 常量 ==========
 ITEM_HEIGHT = 53
@@ -61,10 +58,10 @@ def _get_elided_text(text: str, max_width: int, font_size: int = 12) -> str:
     # 简化：假设平均字符宽度约等于 font_size * 0.6
     avg_char_width = font_size * 0.6
     max_chars = int(max_width / avg_char_width)
-    
+
     if len(text) <= max_chars:
         return text
-    
+
     # 留出省略号位置
     return text[:max(1, max_chars - 3)] + "..."
 
@@ -93,11 +90,11 @@ def create_base_item(
     widget.setFixedHeight(height)
     widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
     widget.setStyleSheet("background-color: transparent;")
-    
+
     layout = QHBoxLayout(widget)
     layout.setContentsMargins(left_margin, 0, right_margin, 0)
     layout.setAlignment(Qt.AlignVCenter)
-    
+
     return widget, layout
 
 
@@ -137,23 +134,23 @@ def create_text_item(
         )
     """
     widget, layout = create_base_item(parent, ITEM_HEIGHT, left_margin, right_margin)
-    
+
     # 文本标签
     display_text = text
     if elide:
         display_text = _get_elided_text(text, max_text_width)
-    
+
     label = QLabel(display_text, widget)
     label.setObjectName("itemLabel")
     if text != display_text:
         label.setToolTip(text)  # 鼠标悬停显示完整文本
     label.setStyleSheet(f"{font_size_css(12)} {get_font_family_css()}")
     layout.addWidget(label, 0, Qt.AlignLeft)
-    
+
     # 添加 stretch 使内容靠左
     layout.addSpacing(16)
     layout.addStretch(1)
-    
+
     # 删除按钮
     if remove_button_visible and on_remove:
         remove_btn = ToolButton(FluentIcon.CLOSE, widget)
@@ -161,7 +158,7 @@ def create_text_item(
         remove_btn.setIconSize(Sizes.TOOL_ICON_SZ)
         remove_btn.clicked.connect(lambda: on_remove(widget))
         layout.addWidget(remove_btn, 0, Qt.AlignRight)
-    
+
     return widget
 
 
@@ -210,12 +207,12 @@ def create_dual_label_item(
         )
     """
     widget, layout = create_base_item(parent, ITEM_HEIGHT, left_margin, right_margin)
-    
+
     # 主标签
     display_primary = primary_text
     if primary_elide:
         display_primary = _get_elided_text(primary_text, primary_width)
-    
+
     primary_label = QLabel(display_primary, widget)
     primary_label.setFixedWidth(primary_width)
     primary_label.setObjectName("primaryLabel")
@@ -225,16 +222,15 @@ def create_dual_label_item(
         f"font-weight: bold; {font_size_css(12)}; {get_font_family_css()}"
     )
     layout.addWidget(primary_label, 0, Qt.AlignLeft)
-    
+
     # 次标签
     display_secondary = secondary_text
     if secondary_elide:
         # 次标签可以更宽一些
-        import inspect
         parent_width = parent.width() if parent and hasattr(parent, 'width') else 500
         secondary_width = parent_width - primary_width - left_margin - right_margin - 80
         display_secondary = _get_elided_text(secondary_text, secondary_width)
-    
+
     secondary_label = QLabel(display_secondary, widget)
     secondary_label.setObjectName("secondaryLabel")
     secondary_label.setStyleSheet(f"color: #888888; {font_size_css(12)}; {get_font_family_css()}")
@@ -242,7 +238,7 @@ def create_dual_label_item(
     if secondary_text != display_secondary:
         secondary_label.setToolTip(secondary_text)
     layout.addWidget(secondary_label, 1, Qt.AlignLeft)
-    
+
     # 开关按钮或删除按钮
     if has_switch and on_toggle:
         switch = SwitchButton(widget)
@@ -255,7 +251,7 @@ def create_dual_label_item(
         remove_btn.setIconSize(Sizes.TOOL_ICON_SZ)
         remove_btn.clicked.connect(lambda: on_remove(widget))
         layout.addWidget(remove_btn, 0, Qt.AlignRight)
-    
+
     return widget
 
 
@@ -290,28 +286,28 @@ def create_icon_text_item(
         QWidget 实例
     """
     widget, layout = create_base_item(parent, ITEM_HEIGHT, left_margin, right_margin)
-    
+
     # 图标
     if icon:
         layout.addWidget(icon, 0, Qt.AlignLeft)
         layout.addSpacing(12)
-    
+
     # 文本区域
     text_layout = QVBoxLayout()
     text_layout.setSpacing(2)
     text_layout.setContentsMargins(0, 0, 0, 0)
-    
+
     main_label = QLabel(text, widget)
     main_label.setStyleSheet(font_size_css(13))
     text_layout.addWidget(main_label)
-    
+
     if subtitle:
         sub_label = QLabel(subtitle, widget)
         sub_label.setStyleSheet(f"color: #888888; {font_size_css(11)}")
         text_layout.addWidget(sub_label)
-    
+
     layout.addLayout(text_layout, 1)
-    
+
     # 删除按钮
     if on_remove:
         layout.addSpacing(8)
@@ -320,11 +316,11 @@ def create_icon_text_item(
         remove_btn.setIconSize(Sizes.TOOL_ICON_SZ)
         remove_btn.clicked.connect(lambda: on_remove(widget))
         layout.addWidget(remove_btn, 0, Qt.AlignRight)
-    
+
     # 点击事件
     if on_click:
         widget.mousePressEvent = lambda e: on_click()
-    
+
     return widget
 
 

@@ -14,13 +14,13 @@ DriFox CLI — 无头模式入口
     - 信号 → stdout 适配器代替 UI 渲染
 """
 import argparse
+import json as stdjson
 import os
 import sys
-import json as stdjson
 from typing import Optional
 
-from PyQt5.QtCore import QEventLoop
 from loguru import logger
+from PyQt5.QtCore import QEventLoop
 
 # CLI 独立版本号（与主应用版本解耦，可按需独立递增）
 CLI_VERSION = "0.2.12"
@@ -256,7 +256,6 @@ def _show_version():
 def _run_chat(args):
     """启动聊天模式"""
     from PyQt5.QtWidgets import QApplication
-    from PyQt5.QtCore import QEventLoop
 
     # 创建无头 QApplication（不创建任何窗口）
     app = QApplication.instance()
@@ -648,8 +647,8 @@ def _run_status():
 def _run_providers(args):
     """列出已配置的模型服务商"""
     try:
-        from app.utils.config import Settings
         from app.constants import FREE_PROVIDERS
+        from app.utils.config import Settings
 
         settings = Settings.get_instance()
         saved = dict(settings.llm_saved_providers.value or {})
@@ -700,7 +699,7 @@ def _run_providers(args):
             print(f"        URL:  {url}")
             print(f"        Key:  {key_status}")
             if cid == selected:
-                print(f"        (\033[32m当前选中\033[0m)")
+                print("        (\033[32m当前选中\033[0m)")
             print()
 
         print(f"共 {len(saved)} 个服务商配置")

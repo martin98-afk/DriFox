@@ -43,7 +43,7 @@ jobs:
 
       - name: Core import check
         run: |
-          uv run python -c "from app.core import core; print('check: imports OK')"
+          uv run python -c "import app.core; from app.core import ChatBackend; print('check: imports OK')"
 
   # ════════════════════════════════════════════════
   # Job 1: Windows (PyInstaller + Inno Setup)

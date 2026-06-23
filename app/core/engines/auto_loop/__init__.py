@@ -7,8 +7,8 @@ AutoLoop 循环引擎 — 自动任务执行循环
 - AutoLoopConfig：配置数据类
 - AutoLoopPromptComposer：Prompt 模板管理器
 """
-from app.core.engines.auto_loop.engine import AutoLoopEngine, LoopState
 from app.core.engines.auto_loop.config import AutoLoopConfig
+from app.core.engines.auto_loop.engine import AutoLoopEngine, LoopState
 from app.core.engines.auto_loop.prompt_composer import AutoLoopPromptComposer
 
 __all__ = ["AutoLoopEngine", "LoopState", "AutoLoopConfig", "AutoLoopPromptComposer"]

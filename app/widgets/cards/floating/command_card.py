@@ -6,23 +6,25 @@
 数据来源：CommandManager 内置命令 + get_local_skills()
 交互方式：↑/↓ 导航，Enter 选中，Esc 关闭
 """
-from typing import List, Dict
-
 import html
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRect
+from typing import Dict, List
+
+from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QFrame, QSizePolicy,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
-from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
+from app.core.command_manager import CommandManager, CommandParameter, CommandType
 from app.utils.design_tokens import Colors, font_size_css
-from app.core.command_manager import CommandManager, CommandType, CommandParameter
+from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.widgets.elided_label import _ElidedLabel
-
-
-
 
 ITEM_HEIGHT = 36       # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数

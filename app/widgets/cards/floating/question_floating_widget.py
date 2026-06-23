@@ -8,16 +8,21 @@
 from functools import partial
 
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent, QSize
+from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-    QScrollArea, QSizePolicy, QWidget, QTextEdit,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_unified_font, get_font_family_css, get_icon
-
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 # ═══════════════════════════════════════════════════════════
 # 单选选项卡片

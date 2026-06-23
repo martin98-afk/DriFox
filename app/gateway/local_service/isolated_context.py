@@ -5,12 +5,13 @@ Gateway 本地微服务 - 隔离上下文
 为 API 调用创建完全独立的环境，与 UI 完全隔离。
 """
 
-import uuid
 import threading
-from typing import Optional, Dict, List, Callable, Any
+import uuid
+from typing import Any, Dict, List, Optional
+
 from loguru import logger
 
-from app.core import SessionManager, ChatSession
+from app.core import ChatSession, SessionManager
 
 
 class IsolatedChatContext:

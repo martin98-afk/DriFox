@@ -16,7 +16,7 @@ Gateway 本地微服务 - HTTP API 服务
 """
 
 import threading
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import orjson as json
 
@@ -96,7 +96,7 @@ class LLMAPIService:
 
     def _setup_routes(self):
         """设置所有路由"""
-        
+
         # ==================== 健康检查 ====================
         @self.app.get("/health")
         async def health_check():
@@ -121,7 +121,7 @@ class LLMAPIService:
                     status_code=503,
                     detail="会话处理器未初始化，请确保 LLMChatter 窗口已打开"
                 )
-            
+
             sessions = handler.list_sessions()
             return {"success": True, "sessions": sessions}
 
@@ -134,15 +134,15 @@ class LLMAPIService:
                     status_code=503,
                     detail="会话处理器未初始化"
                 )
-            
+
             title = ""
             if request:
                 title = request.get("title", "")
-            
+
             session = handler.create_session(title=title)
             if not session:
                 raise HTTPException(status_code=500, detail="创建会话失败")
-            
+
             return {"success": True, "session": session}
 
         @self.app.get("/sessions/{session_id}", response_model=Dict[str, Any])
@@ -151,11 +151,11 @@ class LLMAPIService:
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(status_code=503, detail="会话处理器未初始化")
-            
+
             session = handler.get_session(session_id)
             if not session:
                 raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-            
+
             return {"success": True, "session": session}
 
         @self.app.delete("/sessions/{session_id}", response_model=Dict[str, Any])
@@ -164,7 +164,7 @@ class LLMAPIService:
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(status_code=503, detail="会话处理器未初始化")
-            
+
             if handler.delete_session(session_id):
                 return {"success": True, "message": f"会话 {session_id} 已删除"}
             else:
@@ -215,10 +215,10 @@ class LLMAPIService:
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(status_code=503, detail="会话处理器未初始化")
-            
+
             stream_id = request.get("stream_id") if request else None
             handler.stop_stream(stream_id)
-            
+
             return {"success": True, "message": "已停止流式请求"}
 
         @self.app.get("/config")
@@ -235,7 +235,7 @@ class LLMAPIService:
                         return {"config": safe_config}
                 except Exception as e:
                     logger.error(f"[GatewayLocal] get_config 失败: {e}")
-            
+
             raise HTTPException(status_code=503, detail="配置不可用")
 
     def start(self, background: bool = True):
@@ -256,7 +256,7 @@ class LLMAPIService:
     def _run_server(self):
         """运行服务器"""
         import uvicorn
-        
+
         config = uvicorn.Config(
             self.app,
             host=self.host,
@@ -269,10 +269,10 @@ class LLMAPIService:
         config.autoreload = False
         config.reload = False
         config.use_colors = False
-        
+
         server = uvicorn.Server(config)
         self._running = True
-        
+
         try:
             import asyncio
             loop = asyncio.new_event_loop()

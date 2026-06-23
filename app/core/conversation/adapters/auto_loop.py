@@ -1,6 +1,6 @@
 # app/core/conversation/adapters/auto_loop.py
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 from app.core.conversation.adapters.base import BaseConversationAdapter
 from app.core.conversation.core import ConversationCore

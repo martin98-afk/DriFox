@@ -7,28 +7,34 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QMimeData
+from PyQt5.QtCore import QMimeData, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import (
+    QColor,
+    QFont,
+    QImage,
     QInputMethodEvent,
     QKeyEvent,
     QKeySequence,
-    QTextCursor,
-    QColor,
-    QTextCharFormat,
     QPainter,
     QPainterPath,
     QPen,
-    QImage,
-    QFont,
     QSyntaxHighlighter,
+    QTextCharFormat,
+    QTextCursor,
 )
-from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect
-from PyQt5.QtWidgets import QShortcut, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel
-from qfluentwidgets import FluentIcon, ComboBox, IconWidget
-from qfluentwidgets import TextEdit, TransparentToolButton
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QShortcut,
+    QWidget,
+)
+from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, TransparentToolButton
 
-from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css
 
 # ======== 输入框 placeholder 定时轮播 tips ========
 PLACEHOLDER_TIPS = [

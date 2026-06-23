@@ -13,12 +13,12 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
-from typing import Callable, Optional, Tuple, Union
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
 
+from app.tools.command_safety import classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.result import ToolResult
-from app.tools.command_safety import needs_shell, classify_command, run_safe, run_with_shell
 
 
 def _smart_decode(data: bytes, command: str = "") -> str:
@@ -39,7 +39,7 @@ def _smart_decode(data: bytes, command: str = "") -> str:
     """
     if not data:
         return ""
-    
+
     # 常见现代工具（输出 UTF-8）
     UTF8_TOOLS = frozenset({
         'git', 'npm', 'yarn', 'pnpm', 'node', 'deno', 'bun',
@@ -54,16 +54,16 @@ def _smart_decode(data: bytes, command: str = "") -> str:
         'make', 'cmake', 'ninja', 'meson',
         'npx', 'pip3', 'pipx',
     })
-    
+
     cmd_lower = command.lower().strip()
-    
+
     # 判断是否是已知输出 UTF-8 的工具
     is_utf8_tool = False
     for tool in UTF8_TOOLS:
         if cmd_lower.startswith(tool + ' ') or cmd_lower.startswith(tool + '.exe '):
             is_utf8_tool = True
             break
-    
+
     # 如果命令明确是 UTF-8 工具，优先尝试 UTF-8
     if is_utf8_tool:
         try:
@@ -71,7 +71,7 @@ def _smart_decode(data: bytes, command: str = "") -> str:
         except UnicodeDecodeError:
             # UTF-8 失败，降级到 GBK
             return data.decode('gbk', errors='replace')
-    
+
     # 对于其他命令，优先尝试 UTF-8（现代工具越来越多）
     try:
         decoded = data.decode('utf-8')
@@ -82,7 +82,7 @@ def _smart_decode(data: bytes, command: str = "") -> str:
             return decoded
     except UnicodeDecodeError:
         pass
-    
+
     # 回退到 GBK
     return data.decode('gbk', errors='replace')
 

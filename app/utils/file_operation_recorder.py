@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -70,15 +70,15 @@ class FileOperationRecorder:
         Returns:
             str: 备份文件路径，失败返回 None
         """
-        
-        
+
+
         if not self.is_tracked_operation(tool_name):
             logger.debug(f"[FileRecorder] 工具不在追踪列表: {tool_name}")
             return None
 
         try:
             resolved_path = Path(file_path).resolve()
-            
+
 
             # 如果文件不存在，可能是新建的文件，创建一个空备份文件用于差异比较
             file_existed = resolved_path.exists()
@@ -86,18 +86,18 @@ class FileOperationRecorder:
                 # 创建备份目录
                 backup_dir = self._backup_base_dir / session_id
                 backup_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 # 生成备份文件名
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 safe_name = self._sanitize_filename(resolved_path.name)
                 call_prefix = call_id[:8] if len(call_id) >= 8 else call_id
                 backup_name = f"{safe_name}_{timestamp}_{call_prefix}.bak"
                 backup_path = backup_dir / backup_name
-                
+
                 # 创建一个空的备份文件
                 backup_path.touch()
                 logger.info(f"[FileRecorder] 新文件已创建空备份: {file_path} -> {backup_path}")
-                
+
                 # 记录到数据库
                 self._session_store.record_file_operation(
                     session_id=session_id,
@@ -106,7 +106,7 @@ class FileOperationRecorder:
                     file_path=str(resolved_path),
                     backup_path=str(backup_path)
                 )
-                
+
                 return str(backup_path)
 
             # 创建备份目录
@@ -125,7 +125,7 @@ class FileOperationRecorder:
             logger.info(f"[FileRecorder] 已备份: {file_path} -> {backup_path}")
 
             # 记录到数据库
-            
+
             self._session_store.record_file_operation(
                 session_id=session_id,
                 call_id=call_id,
@@ -133,14 +133,13 @@ class FileOperationRecorder:
                 file_path=str(resolved_path),
                 backup_path=str(backup_path)
             )
-            
+
 
             return str(backup_path)
 
         except Exception as e:
             logger.error(f"[FileRecorder] 备份失败: {e}")
-            import traceback
-            
+
             return None
 
     def record_after_operation(self, session_id: str, call_id: str,
@@ -162,23 +161,23 @@ class FileOperationRecorder:
 
         try:
             resolved_path = Path(file_path).resolve()
-            
+
             # 获取对应的备份路径
             backup_path = self._get_backup_path(session_id, call_id)
             if not backup_path:
                 logger.warning(f"[FileRecorder] 未找到对应的备份路径: session={session_id}, call={call_id}")
                 return None
-            
+
             backup_file = Path(backup_path)
             # 生成编辑后备份路径：xxx.bak -> xxx.after.bak
             after_backup_path = backup_file.with_suffix('.after.bak')
-            
+
             # 如果文件不存在（被删除），创建空文件
             if not resolved_path.exists():
                 after_backup_path.touch()
             else:
                 shutil.copy2(resolved_path, after_backup_path)
-            
+
             logger.info(f"[FileRecorder] 已备份编辑后: {file_path} -> {after_backup_path}")
             return str(after_backup_path)
 
@@ -220,7 +219,7 @@ class FileOperationRecorder:
             if backup_file.exists():
                 backup_file.unlink()
                 logger.debug(f"[FileRecorder] 已删除备份: {backup_file}")
-            
+
             # 删除编辑后备份文件
             after_backup = self._get_after_backup_path(backup_path)
             after_file = Path(after_backup)
@@ -241,14 +240,14 @@ class FileOperationRecorder:
         Returns:
             List[Dict]: 操作列表
         """
-        
+
         operations = self._session_store.get_file_operations_by_call_id(session_id, call_id)
-        
+
         return operations
 
     def get_all_operations_for_session(self, session_id: str) -> List[Dict]:
         """获取指定会话的所有文件操作"""
-        
+
         return self._session_store.get_all_file_operations(session_id)
 
     def rollback_operations(self, operations: List[Dict]) -> RollbackResult:
@@ -293,10 +292,10 @@ class FileOperationRecorder:
                     continue
 
                 backup_file = Path(backup_path)
-                
+
                 # 检查是否是新建文件（备份文件为空）
                 is_new_file = backup_file.stat().st_size == 0
-                
+
                 if is_new_file:
                     # 新建文件的回滚：删除创建的文件
                     resolved_path = Path(file_path)

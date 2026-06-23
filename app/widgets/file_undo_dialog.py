@@ -8,23 +8,25 @@ from typing import Dict, List
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QDialog,
-    QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QCheckBox,
     QListWidget,
     QListWidgetItem,
+    QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
+    PrimaryPushButton,
     PushButton,
+    ToolButton,
     TransparentToolButton,
-    isDarkTheme, PrimaryPushButton, ToolButton,
+    isDarkTheme,
 )
 
-from app.utils.design_tokens import scale_font_size, font_size_css
-from app.utils.utils import get_icon, get_font_family_css
+from app.utils.design_tokens import scale_font_size
+from app.utils.utils import get_font_family_css, get_icon
 
 
 class FileUndoPreviewDialog(QDialog):

@@ -9,29 +9,30 @@ for manual method forwarding in a shallow facade.
 
 import difflib
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
-from PyQt5.QtCore import QObject, pyqtSignal
 from loguru import logger
+from PyQt5.QtCore import QObject, pyqtSignal
 
+from app.core.lsp.lsp_manager import LspManager
+from app.core.lsp.lsp_tools import LspToolsIntegration
 from app.tools.automation import AutomationTools
+
 # Import all tool modules
 from app.tools.diagnostics_tools import DiagnosticsTools
-from app.tools.tool_classifier import (
-    classify_tool_danger,
-    get_tool_counts,
-    get_default_toggles,
-    DANGEROUS_TOOLS,
-    SAFE_TOOLS,
-)
 from app.tools.file_tools import FileTools
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult
 from app.tools.task_tools import TaskTools
 from app.tools.terminal_tools import TerminalTools
+from app.tools.tool_classifier import (
+    DANGEROUS_TOOLS,
+    SAFE_TOOLS,
+    classify_tool_danger,
+    get_default_toggles,
+    get_tool_counts,
+)
 from app.tools.web_tools import WebTools
-from app.core.lsp.lsp_tools import LspToolsIntegration
-from app.core.lsp.lsp_manager import LspManager
 
 
 class BuiltinTools(QObject):
@@ -1155,11 +1156,11 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
 
     # 动态生成 subagent_para 工具描述
     subagent_para_desc = (
-        f"批量分发多个子智能体任务（并行执行）。**调用本工具后绝对不能主动停下来等待结果**——子智能体在后台异步运行，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，届时再使用 subagent_status 获取结果。\n\n"
-        f"【强制行为】调用 subagent_para 返回后，你必须二选一：\n"
-        f"1. 继续调用其他工具执行下一步工作（例如启动其他并行子任务、处理剩余工作）；\n"
-        f"2. 如果所有任务已派发完毕、不再有工具可调，直接停止调用工具并输出总结，结束本轮循环。\n\n"
-        f"【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
+        "批量分发多个子智能体任务（并行执行）。**调用本工具后绝对不能主动停下来等待结果**——子智能体在后台异步运行，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，届时再使用 subagent_status 获取结果。\n\n"
+        "【强制行为】调用 subagent_para 返回后，你必须二选一：\n"
+        "1. 继续调用其他工具执行下一步工作（例如启动其他并行子任务、处理剩余工作）；\n"
+        "2. 如果所有任务已派发完毕、不再有工具可调，直接停止调用工具并输出总结，结束本轮循环。\n\n"
+        "【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
     )
     if subagent_names:
         subagent_para_desc += (

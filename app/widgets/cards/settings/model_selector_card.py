@@ -2,18 +2,22 @@
 """
 模型选择卡片内容 - 底部卡片形式展示所有服务商的模型列表
 """
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QSizePolicy, QApplication,
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
-from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
-
 
 # item 高度常量
 _ITEM_HEIGHT = 34  # ModelItem 高度

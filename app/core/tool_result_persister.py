@@ -27,7 +27,6 @@ from loguru import logger
 
 from app.utils.utils import get_app_data_dir
 
-
 # ============================================================
 # 阈值常量 (与 Claude Code 对齐)
 # ============================================================

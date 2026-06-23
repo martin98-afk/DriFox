@@ -16,7 +16,6 @@ LSP 客户端 — 基于 pygls 2.x JsonRPCClient 的单语言服务器连接
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import os
 import shutil
 import subprocess
@@ -28,9 +27,9 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 
 try:
-    from pygls.client import JsonRPCClient
     from lsprotocol import types as lsp
-except ImportError as e:
+    from pygls.client import JsonRPCClient
+except ImportError:
     JsonRPCClient = None  # type: ignore[assignment]
     lsp = None  # type: ignore[assignment]
 

@@ -86,7 +86,7 @@ def _get_encoder(encoding_name: str):
     """获取编码器实例 (带缓存)"""
     if not _TIKTOKEN_AVAILABLE:
         return None
-    
+
     try:
         return tiktoken.get_encoding(encoding_name)
     except Exception:
@@ -106,22 +106,22 @@ def _fast_estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    
+
     text_len = len(text)
-    
+
     # 统计中文字符
     chinese_chars = len(_CHINESE_PATTERN.findall(text))
     non_chinese = text_len - chinese_chars
-    
+
     # 中文每2字符算1 token，英文/其他每4字符算1 token
     # 同时与实际长度比较，取较小值保守估算
     estimated = chinese_chars // 2 + non_chinese // 4
-    
+
     # 保守：确保不会超过原始文本长度太多
     # 对于中文，我们认为1:1是上限；对于英文，1:3是上限
     max_estimate = max(chinese_chars, non_chinese // 3)
     estimated = min(estimated, max_estimate)
-    
+
     return max(1, estimated)
 
 
@@ -151,7 +151,7 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     """
     if not text:
         return 0
-    
+
     # 尝试使用 tiktoken
     encoder = _get_encoder(_get_encoding_name(model))
     if encoder:
@@ -160,7 +160,7 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
             return len(tokens)
         except Exception:
             pass
-    
+
     # 降级到快速估算
     return _fast_estimate_tokens(text)
 
@@ -190,20 +190,20 @@ def count_messages_tokens(
     """
     if not messages:
         return 0
-    
+
     total = 0
-    
+
     # 消息 overhead
     total += len(messages) * 4
-    
+
     for msg in messages:
         if not isinstance(msg, dict):
             continue
-            
+
         role = msg.get("role", "")
         if role:
             total += estimate_tokens(str(role), model)
-        
+
         # content 处理
         content = msg.get("content")
         if content is None:
@@ -222,12 +222,12 @@ def count_messages_tokens(
                 elif item.get("type") == "image_url":
                     # 图片 token 估算 (简化版)
                     total += 85  # 图片基准开销
-        
+
         # reasoning_content 处理 (DeepSeek V4 / GLM-5 thinking mode)
         reasoning = msg.get("reasoning_content")
         if reasoning and isinstance(reasoning, str):
             total += estimate_tokens(reasoning, model)
-        
+
         # tool_calls 处理
         tool_calls = msg.get("tool_calls")
         if tool_calls and isinstance(tool_calls, list):
@@ -242,19 +242,19 @@ def count_messages_tokens(
                     total += estimate_tokens(str(name), model)
                 if args:
                     total += estimate_tokens(str(args), model)
-        
+
         # tool_call_id 处理
         tool_call_id = msg.get("tool_call_id")
         if tool_call_id:
             total += estimate_tokens(str(tool_call_id), model)
-    
+
     # 工具定义 tokens
     if tools:
         total += count_tools_tokens(tools, model)
-    
+
     # 模型 tokenizer 校正系数（cl100k_base → 实际模型编码补偿）
     total = int(total * _get_model_token_ratio(model))
-    
+
     # 确保返回值非负（防御性编程）
     return max(0, total)
 
@@ -272,34 +272,34 @@ def count_tools_tokens(tools: List[Dict], model: str = "gpt-4") -> int:
     """
     if not tools:
         return 0
-    
+
     total = 0
-    
+
     for tool in tools:
         if not isinstance(tool, dict):
             continue
-        
+
         tool_type = tool.get("type", "function")
         total += 8 if tool_type else 0
-        
+
         function = tool.get("function", {})
         if function:
             total += 14
-            
+
             name = function.get("name", "")
             if name:
                 total += estimate_tokens(name, model)
-            
+
             desc = function.get("description", "")
             if desc:
                 total += estimate_tokens(desc, model)
-            
+
             # parameters JSON string
             params = function.get("parameters")
             if params:
                 params_str = str(params)
                 total += estimate_tokens(params_str, model)
-    
+
     return total
 
 
@@ -323,10 +323,10 @@ def count_response_tokens(
     """
     # 响应 overhead
     overhead = 3  # completion message overhead
-    
+
     if max_tokens is not None:
         return prompt_tokens + overhead + max_tokens
-    
+
     # 根据模型估算最大值
     limits = {
         "gpt-4": 8192,
@@ -334,7 +334,7 @@ def count_response_tokens(
         "gpt-3.5-turbo": 4096,
         "claude-3": 4096,
     }
-    
+
     default_limit = limits.get(model.lower(), 4096)
     return prompt_tokens + overhead + default_limit
 
@@ -359,24 +359,24 @@ def truncate_text_to_token_limit(
     """
     if not text:
         return text
-    
+
     current_tokens = estimate_tokens(text, model)
     if current_tokens <= max_tokens:
         return text
-    
+
     # 二分查找截断点
     left, right = 0, len(text)
-    
+
     while left < right:
         mid = (left + right) // 2
         truncated = text[:mid]
         tokens = estimate_tokens(truncated, model)
-        
+
         if tokens > max_tokens:
             right = mid - 1
         else:
             left = mid + 1
-    
+
     result = text[:left]
     if suffix and left < len(text):
         # 保留 suffix 的空间
@@ -388,39 +388,39 @@ def truncate_text_to_token_limit(
             result += suffix
         else:
             result = suffix
-    
+
     return result
 
 
 class TokenCounter:
     """Token 计数器类 - 带状态和缓存"""
-    
+
     def __init__(self, model: str = "gpt-4"):
         self.model = model
         self._cache: Dict[str, int] = {}
         self._cache_enabled = True
         self._miss_count = 0
         self._hit_count = 0
-    
+
     def count(self, text: str, use_cache: bool = True) -> int:
         """计数 (带可选缓存)"""
         if not text:
             return 0
-        
+
         if use_cache and self._cache_enabled:
             cache_key = hash(text)
             if cache_key in self._cache:
                 self._hit_count += 1
                 return self._cache[cache_key]
             self._miss_count += 1
-        
+
         tokens = estimate_tokens(text, self.model)
-        
+
         if use_cache and self._cache_enabled and self._miss_count < 100:
             self._cache[hash(text)] = tokens
-        
+
         return tokens
-    
+
     def count_messages(
         self,
         messages: List[Dict],
@@ -428,13 +428,13 @@ class TokenCounter:
     ) -> int:
         """计数消息列表"""
         return count_messages_tokens(messages, self.model, tools)
-    
+
     def clear_cache(self):
         """清空缓存"""
         self._cache.clear()
         self._miss_count = 0
         self._hit_count = 0
-    
+
     @property
     def cache_hit_rate(self) -> float:
         """缓存命中率"""
@@ -442,7 +442,7 @@ class TokenCounter:
         if total == 0:
             return 0.0
         return self._hit_count / total
-    
+
     def enable_cache(self, enabled: bool = True):
         """启用/禁用缓存"""
         self._cache_enabled = enabled

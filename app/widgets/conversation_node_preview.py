@@ -1,6 +1,6 @@
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint
-from PyQt5.QtGui import QPainter, QPen, QBrush, QColor
-from PyQt5.QtWidgets import QWidget, QToolTip
+from PyQt5.QtCore import QPoint, Qt, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QPainter, QPen
+from PyQt5.QtWidgets import QToolTip, QWidget
 
 
 class ConversationNodePreview(QWidget):

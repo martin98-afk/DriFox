@@ -14,10 +14,10 @@ from typing import Any, Dict, List, Optional
 
 from app.gateway.base import (
     BasePlatformAdapter,
-    Platform,
-    PlatformConfig,
     MessageEvent,
     MessageType,
+    Platform,
+    PlatformConfig,
     SendResult,
 )
 
@@ -34,8 +34,8 @@ def check_feishu_requirements() -> bool:
         return True
     try:
         import lark_oapi
-        from lark_oapi.ws import Client as FeishuWSClient
         from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
+        from lark_oapi.ws import Client as FeishuWSClient
         LARK_AVAILABLE = True
         return True
     except ImportError:
@@ -50,17 +50,17 @@ class FeishuAdapter(BasePlatformAdapter):
     使用飞书开放平台 WebSocket 模式进行消息收发。
     需要安装 lark-oapi: pip install lark-oapi
     """
-    
+
     MAX_MESSAGE_LENGTH = 2000
-    
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.FEISHU)
-        
+
         self._app_id = config.extra.get("app_id") or ""
         self._app_secret = config.extra.get("app_secret") or ""
         self._encrypt_key = config.extra.get("encrypt_key") or ""
         self._verification_token = config.extra.get("verification_token") or ""
-        
+
         self._ws_client = None
         self._running = False
         self._reconnect_attempts = 0
@@ -68,22 +68,22 @@ class FeishuAdapter(BasePlatformAdapter):
         self._message_handler = None
         self._feishu_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        
+
         # 独立的事件循环，用于执行消息处理（不与 WS client 的循环冲突）
         self._handler_loop: Optional[asyncio.AbstractEventLoop] = None
         self._handler_loop_thread: Optional[threading.Thread] = None
-    
+
     def set_message_handler(self, handler) -> None:
         """设置消息处理器"""
         self._message_handler = handler
-    
+
     async def connect(self) -> bool:
         """连接到飞书 WebSocket"""
         if not check_feishu_requirements():
             logger.error("[Feishu] Dependencies not available. Run: pip install lark-oapi")
             self._last_error = "依赖不可用"
             return False
-        
+
         # 从配置重新获取（确保最新）
         from app.gateway.config import get_gateway_config
         cfg = get_gateway_config().get_platform_config(Platform.FEISHU)
@@ -91,18 +91,18 @@ class FeishuAdapter(BasePlatformAdapter):
         self._app_secret = cfg.extra.get("app_secret") or ""
         self._encrypt_key = cfg.extra.get("encrypt_key") or ""
         self._verification_token = cfg.extra.get("verification_token") or ""
-        
+
         if not self._app_id or not self._app_secret:
             logger.error("[Feishu] app_id and app_secret are required")
             self._last_error = "缺少 app_id 或 app_secret"
             return False
-        
+
         try:
             import lark_oapi as lark
+            from lark_oapi.core.const import FEISHU_DOMAIN
             from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
             from lark_oapi.ws import Client as FeishuWSClient
-            from lark_oapi.core.const import FEISHU_DOMAIN, LARK_DOMAIN
-            
+
             # 创建事件处理器
             # 关键：直接传递 encrypt_key 和 verification_token（即使是空字符串）
             # 不要传 dummy 值！SDK 的 _do_without_validation 方法（WebSocket 使用）
@@ -113,7 +113,7 @@ class FeishuAdapter(BasePlatformAdapter):
             ).register_p2_im_message_receive_v1(
                 self._on_feishu_message
             ).build()
-            
+
             # 创建 WebSocket 客户端 - 传入 domain 参数
             self._ws_client = FeishuWSClient(
                 app_id=self._app_id,
@@ -122,13 +122,13 @@ class FeishuAdapter(BasePlatformAdapter):
                 event_handler=handler,
                 domain=FEISHU_DOMAIN,  # 明确指定域名
             )
-            
+
             # 启动独立的事件循环线程，用于执行消息处理回调
             # 注意：WS client 的 on_message 回调在 WS 线程的事件循环中执行，
             # 不能直接在回调里调用 asyncio.run()（会冲突），
             # 所以需要独立的 loop 来执行 message_handler
             self._start_handler_loop()
-            
+
             # 在独立线程中启动 WS client
             self._stop_event.clear()
             self._feishu_thread = threading.Thread(
@@ -137,22 +137,22 @@ class FeishuAdapter(BasePlatformAdapter):
                 daemon=True
             )
             self._feishu_thread.start()
-            
+
             # 等待连接建立
             await asyncio.sleep(2)
-            
+
             self._running = True
             self._connected = True
-            
+
             logger.info("[Feishu] Connected successfully (WebSocket)")
             return True
-            
+
         except Exception as e:
             logger.error("[Feishu] Failed to connect: %s", e)
             import traceback
             traceback.print_exc()
             return False
-    
+
     def _start_handler_loop(self) -> None:
         """启动独立的事件循环线程，用于调度消息处理回调"""
         if self._handler_loop is not None:
@@ -169,7 +169,7 @@ class FeishuAdapter(BasePlatformAdapter):
         """运行消息处理事件循环"""
         asyncio.set_event_loop(self._handler_loop)
         self._handler_loop.run_forever()
-    
+
     def _run_feishu_client(self) -> None:
         """在独立线程中运行飞书客户端
 
@@ -181,14 +181,14 @@ class FeishuAdapter(BasePlatformAdapter):
         """
         try:
             import lark_oapi.ws.client as ws_client_module
-            
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
             # 关键！设置 ws 模块的全局 loop，否则 WS client 内部会使用
             # 模块导入时的原始事件循环（可能是主线程的），导致事件循环冲突
             ws_client_module.loop = loop
-            
+
             # 运行客户端
             try:
                 self._ws_client.start()
@@ -200,10 +200,10 @@ class FeishuAdapter(BasePlatformAdapter):
                     logger.debug("[Feishu] Client stopped (expected): %s", e)
             finally:
                 loop.close()
-                
+
         except Exception as e:
             logger.error("[Feishu] Thread error: %s", e)
-    
+
     def _on_feishu_message(self, data: Any) -> None:
         """处理接收到的飞书消息
 
@@ -306,20 +306,20 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.error("[Feishu] Parse message error: %s", e)
             import traceback
             traceback.print_exc()
-    
+
     async def disconnect(self) -> None:
         """断开连接"""
         self._running = False
         self._connected = False
         self._stop_event.set()
-        
+
         if self._ws_client:
             try:
                 # 飞书 SDK 的 Client 可能使用不同方法停止
                 # 方法1: stop() 方法
                 if hasattr(self._ws_client, 'stop'):
                     self._ws_client.stop()
-                # 方法2: close() 方法  
+                # 方法2: close() 方法
                 elif hasattr(self._ws_client, 'close'):
                     self._ws_client.close()
                 # 方法3: 直接设置运行标志
@@ -330,7 +330,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 pass
             except Exception as e:
                 logger.debug("[Feishu] Disconnect note: %s", e)
-        
+
         # 停止 handler loop
         if self._handler_loop is not None and self._handler_loop.is_running():
             try:
@@ -339,9 +339,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 pass
         self._handler_loop = None
         self._handler_loop_thread = None
-        
+
         logger.info("[Feishu] Disconnected")
-    
+
     async def send(
         self,
         chat_id: str,
@@ -352,44 +352,44 @@ class FeishuAdapter(BasePlatformAdapter):
         """发送消息"""
         if not self._connected:
             return SendResult(success=False, error="Not connected")
-        
+
         try:
             import httpx
-            
+
             # 获取 token
             token = await self._get_access_token()
             if not token:
                 return SendResult(success=False, error="Failed to get access token")
-            
+
             # 分割长消息
             if len(content) > self.MAX_MESSAGE_LENGTH:
                 chunks = self._split_message(content)
             else:
                 chunks = [content]
-            
+
             message_ids = []
-            
+
             async with httpx.AsyncClient() as client:
                 for i, chunk in enumerate(chunks):
                     if len(chunks) > 1:
                         chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
-                    
+
                     headers = {
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
                     }
-                    
+
                     json_data = {
                         "receive_id": chat_id,
                         "msg_type": "text",
                         "content": json.dumps({"text": chunk}),
                     }
-                    
+
                     if reply_to and i == 0:
                         endpoint = f"https://open.feishu.cn/open-apis/im/v1/messages/{reply_to}/reply"
                     else:
                         endpoint = "https://open.feishu.cn/open-apis/im/v1/messages"
-                    
+
                     response = await client.post(
                         endpoint,
                         params={"receive_id_type": "chat_id"},
@@ -397,26 +397,26 @@ class FeishuAdapter(BasePlatformAdapter):
                         json=json_data,
                         timeout=30.0,
                     )
-                    
+
                     if response.status_code == 200:
                         resp_data = response.json()
                         if resp_data.get("code") == 0:
                             message_ids.append(resp_data.get("data", {}).get("message_id", ""))
-            
+
             return SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
             )
-            
+
         except Exception as e:
             logger.error("[Feishu] Send failed: %s", e)
             return SendResult(success=False, error=str(e))
-    
+
     async def _get_access_token(self) -> Optional[str]:
         """获取 tenant access token"""
         try:
             import httpx
-            
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -426,27 +426,27 @@ class FeishuAdapter(BasePlatformAdapter):
                     },
                     timeout=30.0,
                 )
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("code") == 0:
                         return data.get("tenant_access_token")
-            
+
             return None
-            
+
         except Exception as e:
             logger.error("[Feishu] Failed to get access token: %s", e)
             return None
-    
+
     def _split_message(self, content: str) -> List[str]:
         """分割消息"""
         if len(content) <= self.MAX_MESSAGE_LENGTH:
             return [content]
-        
+
         chunks = []
         paragraphs = content.split('\n\n')
         current = ""
-        
+
         for para in paragraphs:
             if len(current) + len(para) + 2 <= self.MAX_MESSAGE_LENGTH:
                 current += ("\n\n" if current else "") + para
@@ -454,12 +454,12 @@ class FeishuAdapter(BasePlatformAdapter):
                 if current:
                     chunks.append(current)
                 current = para
-        
+
         if current:
             chunks.append(current)
-        
+
         return chunks if chunks else [content]
-    
+
     async def send_image(
         self,
         chat_id: str,
@@ -468,7 +468,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """发送图片"""
         return SendResult(success=False, error="Not implemented")
-    
+
     async def send_file(
         self,
         chat_id: str,
@@ -477,7 +477,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """发送文件"""
         return SendResult(success=False, error="Not implemented")
-    
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """获取聊天信息"""
         return {"name": chat_id, "type": "dm"}
