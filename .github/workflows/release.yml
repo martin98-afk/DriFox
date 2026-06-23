@@ -26,7 +26,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: latest
+          version: 0.5.x
           python-version: "3.14"
           enable-cache: true
           cache-suffix: "uv-check"
@@ -59,10 +59,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: latest
-          python-version: "3.14"
+          version: 0.5.x
           enable-cache: true
           cache-suffix: "uv-win"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
 
       - name: Sync dependencies
         run: uv sync --all-groups
@@ -146,10 +148,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: latest
-          python-version: "3.14"
+          version: 0.5.x
           enable-cache: true
           cache-suffix: "uv-mac"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
 
       - name: Sync dependencies (build + mac-build)
         run: uv sync --group build --group mac-build
@@ -226,10 +230,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: latest
-          python-version: "3.14"
+          version: 0.5.x
           enable-cache: true
           cache-suffix: "uv-linux"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
 
       - name: Install system dependencies
         run: |
