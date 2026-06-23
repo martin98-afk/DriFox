@@ -210,16 +210,16 @@ def _remove_items(root, items):
                     os.unlink(target)
                 else:
                     shutil.rmtree(target)
-                print(f"  - 已移除: {folder}")
+                print(f"  - removed: {folder}")
             except Exception as e:
-                print(f"  - 移除 {folder} 失败: {e}")
+                print(f"  - remove {folder} failed: {e}")
 
 
 def post_build_cleanup(dist_path):
-    """打包后的精简逻辑"""
+    """Post-build cleanup to reduce package size"""
     targets = _cleanup_targets(dist_path)
 
-    print("正在精简打包体积...")
+    print("Compacting package size...")
     for t in targets:
         # 判断当前目标类型，选用合适的移除列表
         is_resources = t.endswith("Fframeworks")
@@ -235,9 +235,9 @@ def post_build_cleanup(dist_path):
                 if d in (".mypy_cache", "__pycache__"):
                     try:
                         shutil.rmtree(os.path.join(root, d))
-                        print(f"  - 已移除: {os.path.join(root, d)}")
+                        print(f"  - removed: {os.path.join(root, d)}")
                     except Exception as e:
-                        print(f"  - 移除 {d} 失败: {e}")
+                        print(f"  - remove {d} failed: {e}")
 
 
 if __name__ == "__main__":
@@ -251,5 +251,5 @@ if __name__ == "__main__":
     if os.path.exists(dist_final):
         post_build_cleanup(dist_final)
 
-    print("\n✅ 打包任务顺利完成！")
+    print("\nBuild completed successfully!")
 
