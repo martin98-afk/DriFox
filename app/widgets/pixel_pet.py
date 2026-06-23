@@ -30,7 +30,6 @@
   pet.set_state("idle")           # 恢复正常
 """
 
-import logging
 import random
 from pathlib import Path
 
@@ -46,8 +45,8 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import QWidget
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # =============================================================================
 # 配置常量
@@ -56,7 +55,21 @@ logger = logging.getLogger(__name__)
 FRAME_SIZE = 16  # 每帧像素尺寸
 SCALE = 3  # 渲染倍数 → 48×48 显示
 DISPLAY_SIZE = FRAME_SIZE * SCALE  # 48
-SPRITESHEET = Path(__file__).parent / "pet_sprites.png"
+def _resolve_spritesheet() -> Path:
+    """通过插件系统获取 fox_pet.png 路径"""
+    try:
+        from app.core.plugin_manager import PluginManager
+        plugin_path = PluginManager._SYSTEM_PLUGIN_DIR
+        logger.debug(f"[PixelPet] 系统插件目录: {plugin_path}")
+        if plugin_path is not None:
+            p = Path(plugin_path) / "system" / "pets" / "fox_pet.png"
+            if p.exists():
+                return p
+    except Exception:
+        logger.exception("[PixelPet] 获取 spritesheet 路径失败，使用默认路径")
+
+
+SPRITESHEET = _resolve_spritesheet()
 
 # 状态 → 行索引（扩展为 10 行）
 STATE_ROWS = {
@@ -252,7 +265,7 @@ class PixelPetWidget(QWidget):
                 logger.warning(f"[PixelPet] spritesheet 不存在: {SPRITESHEET}")
                 self._spritesheet = None
         except Exception as e:
-            logger.warning(f"[PixelPet] 加载 spritesheet 失败: {e}")
+            logger.exception(f"[PixelPet] 加载 spritesheet 失败: {e}")
             self._spritesheet = None
 
     # ═══════════════════════════════════════════════════════════

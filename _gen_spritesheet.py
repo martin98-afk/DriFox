@@ -2,6 +2,7 @@
 """重新生成像素狐狸 Spritesheet — 增强版 v2：10状态×12帧，更丰富的动画"""
 
 from PIL import Image
+from pathlib import Path
 
 # ════════════════════════════════════════════════════════════════
 # 调色板
@@ -546,6 +547,6 @@ for f in range(12):
 # ════════════════════════════════════════════════════════════════
 # 保存
 # ════════════════════════════════════════════════════════════════
-out_path = "D:/work/DriFoxx/app/widgets/pet_sprites.png"
+out_path = Path(__file__).parent / "plugins" / "system" / "pets" / "fox_pet.png"
 img.save(out_path)
 print(f"Done: {out_path}  ({W}×{H})")
