@@ -106,7 +106,7 @@ class HookItem(QWidget):
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
         
         self.setFixedHeight(40)
-        self.hBoxLayout.setContentsMargins(48, 0, 16, 0)
+        self.hBoxLayout.setContentsMargins(8, 0, 16, 0)  # ponytail: 左 padding 从 48 缩到 8
         self.hBoxLayout.addWidget(self.sourceLabel, 0)
         self.hBoxLayout.addSpacing(6)
         self.hBoxLayout.addWidget(self.typeLabel, 0)
@@ -370,7 +370,7 @@ class HookListSettingCard(ExpandSettingCard):
             header = QLabel(f"Event: {event}", self.view)
             header.setStyleSheet(
                 f"background-color: #F0F0F0; color: #333; font-weight: bold; "
-                f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 48px;"
+                f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
             )
             self.viewLayout.addWidget(header)
             
@@ -457,5 +457,5 @@ class HookListSettingCard(ExpandSettingCard):
         if self._hook_manager:
             self._hook_manager.reload_global_hooks(str(config_file))
         
-        self._refresh(reload=False)
+        self._refresh(reload=True)  # reload=True: 从 HookManager 重新读取 grouped_hooks
         self.hooksChanged.emit()

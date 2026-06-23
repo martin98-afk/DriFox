@@ -1316,7 +1316,6 @@ class OpenAIChatWorker(QThread):
         model_name = str(self.llm_config.get("模型名称", "") or "")
         caps = get_model_capabilities(model_name)
         if not caps.get("supports_vision"):
-            logger.debug(f"[Vision] Model {model_name} does not support vision, skipping image injection")
             return False
 
         # ---- 收集所有可注入的图片 data_uri ----
@@ -1374,11 +1373,6 @@ class OpenAIChatWorker(QThread):
                         logger.debug(
                             f"[Vision] read 图片注入: mime={mime}, base64_len={len(data)}"
                         )
-                else:
-                    logger.debug(
-                        f"[Vision] read 工具结果无 image_data: "
-                        f"content_preview={str(r.get('content', ''))[:60]}"
-                    )
 
         if not data_uris:
             return False
