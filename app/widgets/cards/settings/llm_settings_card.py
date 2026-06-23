@@ -357,17 +357,6 @@ class LLMSettingsCard(SystemCardFrame):
         )
         content_layout.addWidget(self.petSizeCard)
 
-        # 桌宠空闲行为
-        self.petBehaviorCard = OptionsSettingCard(
-            self.cfg.pet_idle_behavior,
-            FluentIcon.EMOJI_TAB_SYMBOLS,
-            "桌宠空闲行为",
-            "控制桌宠在空闲时的自发动作频率",
-            texts=["最小（仅呼吸）", "正常", "活跃（更频繁）"],
-            parent=self,
-        )
-        content_layout.addWidget(self.petBehaviorCard)
-
         # ---- 版本更新分隔标签 ----
         self._sep_update_label = self._make_sep_label("版本更新")
         self._section_anchors["update"] = self._sep_update_label
@@ -406,7 +395,6 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.llm_api_enabled.valueChanged.connect(self._on_llm_api_enabled_changed)
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
         self.cfg.pet_size.valueChanged.connect(self._on_settings_changed)
-        self.cfg.pet_idle_behavior.valueChanged.connect(self._on_settings_changed)
 
     def _on_tab_changed(self, tab_id: str):
         """Tab 切换时滚动到对应区域"""

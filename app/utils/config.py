@@ -306,7 +306,6 @@ class Settings(QConfig):
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
     pet_size = OptionsConfigItem("UI", "PetSize", "medium", OptionsValidator(["small", "medium", "large"]))
-    pet_idle_behavior = OptionsConfigItem("UI", "PetIdleBehavior", "normal", OptionsValidator(["minimal", "normal", "active"]))
 
     # ========== 会话项目管理 ==========
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")

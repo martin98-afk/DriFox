@@ -513,15 +513,8 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _reset_idle_behavior_timer(self) -> None:
-        from app.utils.config import Settings
-        behavior = Settings.get_instance().pet_idle_behavior.value
-        if behavior == "minimal":
-            return  # 无空闲行为
-        interval = IDLE_BEHAVIOR_INTERVAL_MS
-        if behavior == "active":
-            interval = 5000  # 活跃模式更频繁
         self._idle_behavior_timer.stop()
-        self._idle_behavior_timer.start(interval)
+        self._idle_behavior_timer.start(IDLE_BEHAVIOR_INTERVAL_MS)
 
     def _try_idle_behavior(self) -> None:
         """尝试触发随机空闲行为"""
@@ -922,7 +915,6 @@ class PixelPetWidget(QWidget):
             from app.utils.config import Settings
             cfg = Settings.get_instance()
             cfg.pet_size.valueChanged.connect(self.on_pet_size_changed)
-            cfg.pet_idle_behavior.valueChanged.connect(self._reset_idle_behavior_timer)
         except Exception as e:
             logger.debug(f"[PixelPet] 配置信号连接失败: {e}")
 
