@@ -2067,8 +2067,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area = SendableTextEdit(self._input_card)
         self.input_area._agent_combo.hide()
         self.input_area._initializing = False
-        self.input_area.setFixedHeight(52)
-        self.input_area.setPlaceholderText("给 DriFox 发送消息...")
+        # self.input_area.setFixedHeight(52)
         setFont(self.input_area, scale_font_size(15))
         self.input_area.sendMessageRequested.connect(self._on_send_clicked)
         self.input_area.stopMessageRequested.connect(self._on_stop_clicked)

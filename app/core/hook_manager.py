@@ -420,34 +420,90 @@ class HookWorker(QRunnable):
         except Exception as e:
             return f"HTTP request failed: {str(e)}", False
     
+    @staticmethod
+    def _import_relative_function(function_path: str, config_file: str) -> Optional[Callable]:
+        """从相对模块路径导入函数（.module:func → <config_dir>/module.py 中的 func）
+
+        Args:
+            function_path: 函数路径，如 .evolver_hook:hook_session_start
+            config_file: hooks.json 的完整路径
+
+        Returns:
+            可调用的函数对象，失败返回 None
+        """
+        parts = function_path.rsplit(":", 1)
+        if len(parts) != 2:
+            return None
+
+        module_path, func_name = parts
+        if not module_path.startswith("."):
+            return None  # 非相对路径，让调用方用标准方式处理
+
+        # 标准化：去掉前导点，将点号转为路径分隔符
+        relative_dotted = module_path.lstrip(".")
+        relative_path = relative_dotted.replace(".", "/")
+        py_file = f"{relative_path}.py"
+
+        # 基于 hooks.json 所在目录解析
+        config_dir = Path(config_file).resolve().parent
+        abs_path = config_dir / py_file
+
+        if not abs_path.exists():
+            logger.error(f"[HookWorker] Relative module not found: {abs_path}")
+            return None
+
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                f"_hook_relative_{relative_dotted.replace('/', '_')}",
+                str(abs_path)
+            )
+            if spec is None or spec.loader is None:
+                return None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            func = getattr(module, func_name, None)
+            return func if callable(func) else None
+        except Exception as e:
+            logger.error(f"[HookWorker] Failed to load relative module {abs_path}: {e}")
+            return None
+
     def _execute_python(self) -> tuple:
         """执行 Python 函数"""
         try:
             if not self.hook.function:
                 return "No function specified", False
-            
+
             # 解析函数路径 (module.path:function_name)
             parts = self.hook.function.rsplit(":", 1)
             if len(parts) != 2:
                 return f"Invalid function path: {self.hook.function}", False
-            
+
             module_path, func_name = parts
-            
-            # 动态导入模块
-            import importlib
-            module = importlib.import_module(module_path)
-            func = getattr(module, func_name, None)
-            
+
+            # 相对路径：基于 hooks.json 目录解析
+            func = None
+            if module_path.startswith(".") and self.hook.config_file:
+                func = HookWorker._import_relative_function(
+                    self.hook.function, self.hook.config_file
+                )
+
+            # 标准路径：importlib.import_module
+            if func is None:
+                import importlib
+                module = importlib.import_module(module_path)
+                func = getattr(module, func_name, None)
+
             if not callable(func):
                 return f"Function not found: {self.hook.function}", False
-            
+
             # 执行函数
             args = self.hook.function_args or {}
             args["event"] = self.event_name
             args["context"] = self.context
-            
+
             result = func(**args)
-            
+
             if isinstance(result, str):
                 return result, True
             elif isinstance(result, dict):
@@ -987,7 +1043,7 @@ class HookManager:
                         output = result if isinstance(result, str) else json.dumps(result)
                         success = True
                     else:
-                        # 回退：尝试 importlib.import_module (module.path:function_name)
+                        # 尝试解析 Python 函数
                         try:
                             parts = hook.function.rsplit(":", 1)
                             if len(parts) != 2:
@@ -995,9 +1051,20 @@ class HookManager:
                                 success = False
                             else:
                                 module_path, func_name = parts
-                                import importlib
-                                module = importlib.import_module(module_path)
-                                func = getattr(module, func_name, None)
+                                func = None
+
+                                # 相对路径：基于 hooks.json 目录解析
+                                if module_path.startswith(".") and hook.config_file:
+                                    func = HookWorker._import_relative_function(
+                                        hook.function, hook.config_file
+                                    )
+
+                                # 标准路径：importlib.import_module
+                                if func is None:
+                                    import importlib
+                                    module = importlib.import_module(module_path)
+                                    func = getattr(module, func_name, None)
+
                                 if not callable(func):
                                     output = f"Function not found: {hook.function}"
                                     success = False

@@ -22,11 +22,16 @@ from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, _make_r
 from app.widgets.elided_label import _ElidedLabel
 
 
-# 事件顺序定义
+# 事件顺序定义（按触发先后排列）
+# - UserPromptSubmit：用户提交原始 prompt，发生在 PreUserMessage 之前
+# - Stop：流式输出被 stop_streaming 停止时，同步触发
 HOOK_EVENT_ORDER = [
-    "SessionStart", "PreUserMessage", "PostUserMessage",
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreUserMessage", "PostUserMessage",
     "PreAssistantMessage", "PostAssistantMessage",
-    "PreToolUse", "PostToolUse"
+    "PreToolUse", "PostToolUse",
+    "Stop",
 ]
 
 

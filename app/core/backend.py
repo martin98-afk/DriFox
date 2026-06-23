@@ -352,7 +352,9 @@ class ChatBackend(QObject):
         self._sub_agent_manager.set_session_store(self._session_store)
         # 设置给 ToolExecutor，让工具能访问子智能体
         self._tool_executor.set_sub_agent_manager(self._sub_agent_manager)
-        logger.info("[ChatBackend] SubAgentManager 创建完成")
+        # 启动日志活力度 stall 检测（默认 180s 无日志输出视为卡死）
+        self._sub_agent_manager.start_stall_detector()
+        logger.info("[ChatBackend] SubAgentManager 创建完成（Stall 检测器已启动）")
         
         # 提供设置 history getter 的方法（由 main_widget 在初始化时调用）
         self._sub_agent_history_getter = None
