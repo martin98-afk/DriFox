@@ -154,41 +154,17 @@ argument-hint:
 
 ---
 
-### 阶段 H：发布后更新 Release Notes
+### 阶段 H：验证 Release 内容
 
-CI 构建成功后，GitHub Release 会被自动创建但 Release Notes 是空的（`generate_release_notes: true` 生成的比较简陋）。
+CI 构建成功后，GitHub Release 会被自动创建，Release Body 会自动从 `CHANGELOG.md` 提取。
 
-有两种方式补更新日志：
+> ⚠️ CI 读取的是**推送 tag 时 repo 中已提交的 CHANGELOG.md**，所以阶段 D-E（生成并提交 changelog）必须在打 tag 之前完成。
 
-**方式 A — 通过 GitHub API 更新 Release（推荐）**：
-```bash
-# 1. 获取 Release ID
-RELEASE_ID=$(curl -s \
-  https://api.github.com/repos/martin98-afk/DriFox/releases/tags/<version> \
-  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
-
-# 2. 获取刚生成的 changelog 内容（从 CHANGELOG.md 中提取当前版本的部分）
-BODY=$(python -c "
-with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
-    content = f.read()
-# 提取第一个版本条目（从 ## 到下一个 ## 之前）
-import re
-match = re.search(r'## \[.*?\].*?(?=\n## |\Z)', content, re.DOTALL)
-if match:
-    print(match.group().strip())
-")
-
-# 3. 更新 Release
-curl -X PATCH \
-  -H "Accept: application/vnd.github.v3+json" \
-  -H "Authorization: token <你的 GitHub Token>" \
-  https://api.github.com/repos/martin98-afk/DriFox/releases/$RELEASE_ID \
-  -d "{\"body\": $(python -c "import json; print(json.dumps(\"$BODY\"))")}"
-```
-
-**方式 B — 手动编辑**：
-去 https://github.com/martin98-afk/DriFox/releases/edit/<version>
-把 CHANGELOG.md 中刚生成的当前版本内容复制粘贴进去
+**验证方式**：
+- 自动提取的内容即阶段 D 生成的 CHANGELOG 条目
+- 确认 Release 页面已包含更新日志和构建产物
+  → https://github.com/martin98-afk/DriFox/releases
+- 如果需要手动调整，直接去 Release 页面编辑
 
 ---
 

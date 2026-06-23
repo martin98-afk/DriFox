@@ -14,9 +14,42 @@ permissions:
 
 jobs:
   # ════════════════════════════════════════════════
+  # Job 0: Lint & Import Check（构建前置检查）
+  #         在所有构建之前运行，失败则跳过后续耗时 job
+  # ════════════════════════════════════════════════
+  check:
+    name: Lint & Import Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.5.x
+          enable-cache: true
+          cache-suffix: "uv-check"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync dev dependencies
+        run: uv sync --group dev
+
+      - name: Lint check (ruff)
+        run: uv run ruff check app/ main.py build.py
+
+      - name: Syntax check
+        run: uv run python -c "import ast; ast.parse(open('main.py').read()); print('check: syntax OK')"
+
+      - name: Core import check
+        run: uv run python -c "from app.core import core; print('check: imports OK')"
+
+  # ════════════════════════════════════════════════
   # Job 1: Windows (PyInstaller + Inno Setup)
   # ════════════════════════════════════════════════
   build-windows:
+    needs: [check]
     name: Windows (PyInstaller + Inno Setup)
     runs-on: windows-latest
 
@@ -106,6 +139,7 @@ jobs:
   # ════════════════════════════════════════════════
   build-macos:
     name: macOS (PyInstaller + DMG)
+    needs: [check]
     runs-on: macos-latest
 
     steps:
@@ -189,6 +223,8 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -202,11 +238,31 @@ jobs:
             -exec cp {} release-assets/ \;
           ls -la release-assets/
 
+      - name: Extract changelog for release body
+        shell: bash
+        run: |
+          python -c "
+import re, sys
+with open('CHANGELOG.md') as f:
+    content = f.read()
+# Extract the first version entry (from ## to next ## or EOF)
+match = re.search(r'## .*?(?=\n## |\Z)', content, re.DOTALL)
+if match:
+    body = match.group().strip()
+    with open('release_body.txt', 'w') as f:
+        f.write(body)
+    print('Release body extracted from CHANGELOG.md')
+else:
+    print('WARNING: no version entry found in CHANGELOG.md, using empty body')
+    open('release_body.txt', 'w').close()
+"
+
       - name: Create / Update Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: "DriFox ${{ github.ref_name }}"
+          body_path: release_body.txt
           draft: false
           prerelease: >-
             ${{
@@ -215,7 +271,7 @@ jobs:
               contains(github.ref_name, 'alpha') ||
               contains(github.ref_name, 'test')
             }}
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
             release-assets/Drifox-Setup-*.exe
             release-assets/Drifox.dmg
