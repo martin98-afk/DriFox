@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.2.10] - 2026-06-23
 
-### 5 commits since v0.2.9 | 1 contributor (dingma)
+自上一版本以来的变更 | 提交数：16 · 文件变更：157 · +3730/-2748 | 贡献者：dingma
 
 ---
 
@@ -16,28 +16,33 @@ All notable changes to this project will be documented in this file.
   - 新增 lint 和 import check job，失败则跳过后续构建
   - release job 自动从 `CHANGELOG.md` 提取内容作为 Release Body
 - **drifox-dev 开发技能**: 新增 `plugins/system/skills/drifox-dev/SKILL.md`，提供开发指南文档
-- **命令过滤增强**: 命令卡片支持按多类型过滤和按关键字搜索 (`app/widgets/bottom_input_area.py`, `app/widgets/cards/floating/command_card.py`)
+- **命令过滤增强**: 命令卡片支持按多类型过滤和按关键字搜索
+  - `app/widgets/bottom_input_area.py`、`app/widgets/cards/floating/command_card.py`
+- **Linux 打包与 DMG**: 增强 Linux 打包流程和 DMG 创建逻辑
+  - `build.py`、`create_dmg.py`
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **CI uv 版本与依赖**: 升级 uv 到最新版本以支持 cp314 wheel；移除已废弃的 `libegl1-mesa` 依赖
+- **CI uv 配置**: 指定 uv 版本为 0.5.x，并为所有平台添加 Python 3.14 安装步骤
+- **release.yml**: 修复 YAML 语法错误，并使用 `setup-uv` 的 `python-version` 参数解决 Python 3.14 找不到的问题
+- **CI import check**: 避免 PyQt5 lazy load 触发的 Linux SIGSEGV
+- **pyproject.toml 依赖组**: 修正 `all` 依赖组为 PEP 735 标准 `include-group` 语法
+- **ruff 配置**: 缩窄规则到 E/F 并加入 ignore 列表，适配当前代码库
 - **build.py**: 优化清理脚本的 print 语句，提升日志清晰度
 - **main.py**: 恢复 `from app.utils import icons_rc` 副作用导入（注册 Qt 图标资源）并添加 `# noqa: F401` 防止 ruff 误删
 
 ### ♻️ 代码重构 (Refactoring)
 
 - **pyproject.toml**: 重整依赖组（`[dependency-groups]` 为唯一依赖组定义），添加 ruff 配置；移除 `[project.optional-dependencies]`
-- **build.py**: 增强 Linux 打包流程和 DMG 创建逻辑
 
-### 📚 文档 (Documentation)
+### 🎨 样式改进 (Style)
 
-- **release.md**: 澄清 release content 验证流程
+- **ruff auto-fix**: 自动修复 2133 个可修复 lint 问题，并将规则缩窄到 E/F
 
 ### 🔧 其他 (Chores & Build)
 
 - **`/release` 工作流**: 增加版本号升级阶段（阶段 B），统一修改 3 个版本号文件
-- **CI 修复**: 修复 release.yml 中的 YAML 语法错误、`setup-uv` python-version 配置、import check 触发 PyQt5 SIGSEGV 问题
-- **ruff 配置**: 缩窄规则到 E/F 并加 ignore 列表，适配当前代码库
-- **pyproject.toml**: 修正 `all` 依赖组为 PEP 735 标准 `include-group` 语法
 - **版本号升级**: v0.2.9 → v0.2.10
   - `pyproject.toml` 第 3 行（不带 v）
   - `app/utils/config.py` 第 242 行（带 v）
