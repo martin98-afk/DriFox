@@ -26,7 +26,8 @@ from qfluentwidgets import (
 
 from app.tray_manager import TrayManager
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, font_size_css, get_font_family_css, scale_font_size
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.utils.utils import get_font_family_css
 from app.utils.utils import get_icon
 
 

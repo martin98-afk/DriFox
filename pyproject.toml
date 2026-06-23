@@ -54,7 +54,7 @@ dependencies = [
 ]
 
 # 依赖组（供 uv sync --group / --all-groups 使用）
-# 注意：CI 中 Windows：uv sync --all-groups，macOS：uv sync --group build --group mac-build
+# 注意：CI 中 Windows：uv sync --all-groups，macOS：uv sync --group build --group mac-build，Linux：uv sync --group linux-build
 [dependency-groups]
 dev = [
     "pytest>=7.0.0",
@@ -71,6 +71,9 @@ mac-build = [
     "dmgbuild",
     "Pillow",
 ]
+linux-build = [
+    "pyinstaller>=6.16.0",
+]
 gateway = [
     "dingtalk-stream>=0.20",
     "python-telegram-bot>=20.0",
@@ -83,6 +86,7 @@ all = [
     {include-group = "dev"},
     {include-group = "build"},
     {include-group = "mac-build"},
+    {include-group = "linux-build"},
     {include-group = "gateway"},
 ]
 
