@@ -30,7 +30,34 @@ argument-hint:
 
 ---
 
-### 阶段 B：获取变更历史
+### 阶段 B：版本号升级（统一修改）
+
+版本号涉及 **3 个文件**，必须全部更新，保持统一：
+
+| 文件 | 位置 | 修改内容 | 示例 |
+|------|------|---------|------|
+| `pyproject.toml` | 第 3 行 | `version = "0.2.9"` → `version = "0.2.10"`（**不带 v 前缀**） |
+| `app/utils/config.py` | 第 242 行 | `current_version = "v0.2.9"` → `current_version = "v0.2.10"`（**带 v 前缀**） |
+| `dist/installer.iss` | 第 7 行 | `#define MyAppVersion "v0.2.9"` → `#define MyAppVersion "v0.2.10"`（**带 v 前缀**） |
+
+**执行步骤**：
+```
+1. 用新版号替换 3 个文件中的旧版本字符串
+2. 注意格式差异：
+   - pyproject.toml：不带 v（0.2.10）
+   - config.py：带 v（v0.2.10）
+   - installer.iss：带 v（v0.2.10）
+3. 提交版本升级：
+   git add pyproject.toml app/utils/config.py dist/installer.iss
+   git commit -m "chore: update version to <version> in config and installer files"
+   git push origin dev
+```
+
+> ⚠️ **经验**：如果忘了改某个文件，会导致版本号显示不一致，或 CI 打包后版本号错乱。
+
+---
+
+### 阶段 C：获取变更历史
 
 ```
 1. 找到上一个 tag（最新存在的 tag）
@@ -58,7 +85,7 @@ argument-hint:
 
 ---
 
-### 阶段 C：生成 CHANGELOG.md
+### 阶段 D：生成 CHANGELOG.md
 
 按以下模板生成当前版本的更新日志：
 
@@ -81,14 +108,11 @@ argument-hint:
 - 同类 commit 合并成一条描述
 - 生成后**追加到 CHANGELOG.md 文件头部**（新版本在最上面）
 
-**经验提醒**：
-- 如果 `pyproject.toml` 版本号还是旧的，顺手改成新版号
-- 如果 `app/utils/config.py` 中的 `current_version` 没更新，顺手改
-- 如果 `dist/installer.iss` 中的 `MyAppVersion` 没更新，顺手改
+> ✅ 版本号已在阶段 B 统一更新，这里直接使用即可
 
 ---
 
-### 阶段 D：提交 changelog
+### 阶段 E：提交 changelog
 
 ```
 1. git add CHANGELOG.md
@@ -99,7 +123,7 @@ argument-hint:
 
 ---
 
-### 阶段 E：打 tag 并推送
+### 阶段 F：打 tag 并推送
 
 ```
 1. git tag <version> -m "<version>"
@@ -110,7 +134,7 @@ argument-hint:
 
 ---
 
-### 阶段 F：验证 CI/CD 状态
+### 阶段 G：验证 CI/CD 状态
 
 ```
 1. 等待约 2-3 分钟后检查 Actions 状态
@@ -130,7 +154,7 @@ argument-hint:
 
 ---
 
-### 阶段 G：发布后更新 Release Notes
+### 阶段 H：发布后更新 Release Notes
 
 CI 构建成功后，GitHub Release 会被自动创建但 Release Notes 是空的（`generate_release_notes: true` 生成的比较简陋）。
 
@@ -168,7 +192,7 @@ curl -X PATCH \
 
 ---
 
-### 阶段 H：清理收尾
+### 阶段 I：清理收尾
 
 ```
 1. 确认 Release 页面有更新日志和构建产物
