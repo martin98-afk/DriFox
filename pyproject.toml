@@ -80,10 +80,10 @@ gateway = [
     "aiohttp>=3.9.0",
 ]
 all = [
-    {group = "dev"},
-    {group = "build"},
-    {group = "mac-build"},
-    {group = "gateway"},
+    {include-group = "dev"},
+    {include-group = "build"},
+    {include-group = "mac-build"},
+    {include-group = "gateway"},
 ]
 
 # ruff 配置
