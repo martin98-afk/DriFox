@@ -189,7 +189,7 @@ class PixelPetWidget(QWidget):
         # 恢复 Timer
         self._recover_timer = QTimer(self)
         self._recover_timer.setSingleShot(True)
-        self._recover_timer.timeout.connect(lambda: self.set_state("idle"))
+        self._recover_timer.timeout.connect(self._on_recover)
 
         # 过渡动画跟踪
         self._transition_anim = None
@@ -400,6 +400,12 @@ class PixelPetWidget(QWidget):
             self._animations = []
         self._animations.append(self._transition_anim)
 
+    def _on_recover(self) -> None:
+        """恢复计时器回调：重置宠物状态和 AI 状态跟踪，防止状态卡死"""
+        self._last_ai_state = "idle"
+        if self._current_state in ("success", "error"):
+            self.set_state("idle")
+
     # ═══════════════════════════════════════════════════════════
     # 睡眠/唤醒/深夜模式
     # ═══════════════════════════════════════════════════════════
@@ -442,8 +448,13 @@ class PixelPetWidget(QWidget):
         """入场欢迎：从下方弹入"""
         if self.parent() and self._current_state == "idle":
             pw, ph = self.parent().width(), self.parent().height()
-            target_y = ph - self.height() - self._get_input_area_height() - 8
-            target_x = pw - self.width() - 12
+            target_x = pw - self.width() - 8
+            # 计算目标 Y：站在发送按钮上
+            btn_top = self._get_send_button_top()
+            if btn_top is not None:
+                target_y = btn_top - 42
+            else:
+                target_y = ph - self.height() - 100
             self.move(target_x, ph)  # 从底部开始
             anim = QPropertyAnimation(self, b"geometry", self)
             anim.setDuration(400)
@@ -816,32 +827,45 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
     # 位置自适应
     # ═══════════════════════════════════════════════════════════
+    # 位置自适应 — 站在发送按钮上
+    # ═══════════════════════════════════════════════════════════
 
-    def _get_input_area_height(self) -> int:
-        """动态获取底部输入区域高度"""
+    def _get_send_button_top(self):
+        """返回发送按钮上边缘在父窗口中的 Y 坐标"""
         if not self.parent():
-            return 120
+            return None
         try:
-            # 查找底部输入区域控件
-            for child in self.parent().findChildren((QWidget,), options=Qt.FindChildrenRecursively):
-                name = child.objectName() or ""
-                if "input" in name.lower() or "bottom" in name.lower():
-                    if child.isVisible() and child.y() > self.parent().height() // 2:
-                        return child.height() + 20
+            # 递归查找所有子控件中的 SendableTextEdit
+            from app.widgets.bottom_input_area import SendableTextEdit
+            for child in self.parent().findChildren((SendableTextEdit,)):
+                if hasattr(child, 'send_btn'):
+                    sb = child.send_btn
+                    if sb.isVisible():
+                        local_pos = sb.mapTo(self.parent(), QPoint(0, 0))
+                        return local_pos.y()
         except Exception:
             pass
-        return 120
+        return None
 
     def resize_handle(self, parent_width: int, parent_height: int) -> None:
-        """父窗口大小变化时平滑移动"""
+        """父窗口大小变化时平滑移动 — 桌宠站在发送按钮上边缘"""
         if self._dragging:
             return
-        input_h = self._get_input_area_height()
-        margin = 12
-        target_x = parent_width - self.width() - margin
-        target_y = parent_height - self.height() - input_h - 8
 
-        # 如果距离当前位置较远则动画移动
+        margin = 8
+        target_x = parent_width - self.width() - margin
+
+        # 找到发送按钮，让桌宠脚底站在它上边缘
+        btn_top = self._get_send_button_top()
+        if btn_top is not None:
+            # 像素狐狸脚底在 widget 内的偏移：16×16 中脚底在 y=13，3x 缩放 = px 39~41
+            # 所以脚底视觉底部 = widget_top + 41，对齐 btn_top - 1（留 1px 空隙）
+            feet_offset = 42
+            target_y = btn_top - feet_offset
+        else:
+            # fallback: 右下角，输入区域上方
+            target_y = parent_height - self.height() - 100
+
         if abs(self.x() - target_x) > 20 or abs(self.y() - target_y) > 20:
             self._animate_to(target_x, target_y, duration=300)
         else:

@@ -10516,7 +10516,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_retry_status(
         self, error_type: str, attempt: int, max_retries: int, wait_time: float
     ):
-        """API 重试状态通知 - 更新卡片边框和状态栏"""
+        """API 重试状态通知 - 更新卡片边框和状态栏，同时通知桌宠报错"""
         if getattr(self, "_is_destroyed", False):
             return
         # 🛡️ 不在流式状态时忽略重试信号（说明已停止或不在对话中）
@@ -10531,13 +10531,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_assistant_card.update_retry_status(
                     error_type, attempt, max_retries, wait_time
                 )
+        # 通知桌宠：重试 = 出错了（等待恢复）
+        self._set_ai_state("error")
 
     def _on_retry_resolved(self):
-        """API 重试成功 - 恢复卡片彩虹边框"""
+        """API 重试成功 - 恢复卡片彩虹边框，通知桌宠继续回复"""
         if getattr(self, "_is_destroyed", False):
             return
         if self._current_assistant_card:
             self._current_assistant_card.stop_retry_anim()
+        # 通知桌宠：重试成功，回到 streaming
+        self._set_ai_state("streaming")
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
