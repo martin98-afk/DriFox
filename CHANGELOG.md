@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 - **CI uv 版本与依赖**: 升级 uv 到最新版本以支持 cp314 wheel；移除已废弃的 `libegl1-mesa` 依赖
 - **CI uv 配置**: 使用 `setup-uv` 的 `python-version` 参数自动安装 Python 3.14，避免 uv 0.5.x wheel 解析 bug
 - **release.yml**: 修复 YAML 语法错误，确保 CI 工作流配置正确
+- **macOS 代码签名**: CI 在打包后增加 ad-hoc 签名步骤（`codesign --force --deep --sign -`），解决 PyInstaller 默认产物未签名导致 macOS Gatekeeper 拦截的问题（首次运行仍需右键 → 打开）
 - **CI import check**: 避免 PyQt5 lazy load 触发的 Linux SIGSEGV
 - **pyproject.toml 依赖组**: 修正 `all` 依赖组为 PEP 735 标准 `include-group` 语法
 - **ruff 配置**: 缩窄规则到 E/F 并加入 ignore 列表，适配当前代码库
