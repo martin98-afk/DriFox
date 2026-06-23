@@ -210,19 +210,19 @@ def _remove_items(root, items):
                     os.unlink(target)
                 else:
                     shutil.rmtree(target)
-                print(f"  - 已移除: {folder}")
+                print(f"  [Cleanup] removed: {folder}")
             except Exception as e:
-                print(f"  - 移除 {folder} 失败: {e}")
+                print(f"  [Cleanup] remove {folder} failed: {e}")
 
 
 def post_build_cleanup(dist_path):
-    """打包后的精简逻辑"""
+    """Post-build cleanup to reduce package size"""
     targets = _cleanup_targets(dist_path)
 
-    print("正在精简打包体积...")
+    print("[Build] Compacting package size...")
     for t in targets:
         # 判断当前目标类型，选用合适的移除列表
-        is_resources = t.endswith("Fframeworks")
+        is_resources = t.endswith("Frameworks")
         if is_resources:
             items = to_remove_common + to_remove_macos
         else:
@@ -235,13 +235,13 @@ def post_build_cleanup(dist_path):
                 if d in (".mypy_cache", "__pycache__"):
                     try:
                         shutil.rmtree(os.path.join(root, d))
-                        print(f"  - 已移除: {os.path.join(root, d)}")
+                        print(f"  [Cleanup] removed cache: {os.path.join(root, d)}")
                     except Exception as e:
-                        print(f"  - 移除 {d} 失败: {e}")
+                        print(f"  [Cleanup] remove cache {d} failed: {e}")
 
 
 if __name__ == "__main__":
-    print(f"Starting build for Drifox...")
+    print(f"[Build] Starting PyInstaller build for Drifox...")
 
     # 执行打包
     PyInstaller.__main__.run(params)
@@ -251,5 +251,5 @@ if __name__ == "__main__":
     if os.path.exists(dist_final):
         post_build_cleanup(dist_final)
 
-    print("\n✅ 打包任务顺利完成！")
+    print("[Build] Build completed successfully!")
 
