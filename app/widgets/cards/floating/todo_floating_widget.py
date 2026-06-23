@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QPainter, QColor
-from PyQt5.QtWidgets import (QVBoxLayout, QLabel, QHBoxLayout,
-                              QScrollArea, QSizePolicy, QWidget)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon, TransparentToolButton
 
 from app.utils.design_tokens import Colors

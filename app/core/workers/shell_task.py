@@ -8,7 +8,8 @@ Shell 执行任务 - 异步执行系统命令
 """
 
 from PyQt5.QtCore import QRunnable, pyqtSlot
-from app.tools.command_safety import needs_shell, classify_command, run_safe
+
+from app.tools.command_safety import classify_command, needs_shell
 
 
 class ShellExecutionTask(QRunnable):

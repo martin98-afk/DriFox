@@ -10,20 +10,22 @@
 import fnmatch
 import os
 from pathlib import Path
-from typing import List, Dict, Set
+from typing import Dict, List, Set
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QFileSystemWatcher, QSize
+from PyQt5.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QFrame, QSizePolicy,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
-from app.widgets.elided_label import _ElidedLabel
-
-from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
-
+from app.utils.utils import get_font_family_css
+from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36
 MAX_VISIBLE_ITEMS = 8

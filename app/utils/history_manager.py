@@ -12,17 +12,17 @@ import os
 import re
 import threading
 import uuid
-from pathlib import Path
-import orjson as json
-
 from datetime import datetime
-from typing import Any, Callable, List, Dict, Optional, Tuple
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import orjson as json
 from loguru import logger
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from app.core.message_content import consolidate_messages, content_to_text
 from app.core.store import SessionStore
-from app.utils.utils import get_app_data_dir, serialize_for_json, deserialize_from_json
+from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
 def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
@@ -367,7 +367,7 @@ class HistoryManager:
                 self._session_store = SessionStore.get_instance()
                 if self._session_store.is_initialized:
                     self._use_sqlite = True
-                    logger.info(f"[HistoryManager] SQLite 存储已启用")
+                    logger.info("[HistoryManager] SQLite 存储已启用")
 
                     # 💡 内存优化：使用轻量模式加载，不含完整 messages 数据
                     # 每条的 messages 在启动时为空列表，仅在显示具体会话时按需加载
@@ -602,7 +602,7 @@ class HistoryManager:
         """
         # 先去重
         self._deduplicate_history_sessions()
-        
+
         sessions = self._history_sessions
         if project:
             sessions = [s for s in sessions if s.get("project", "默认项目") == project]
@@ -675,7 +675,7 @@ class HistoryManager:
         # 获取项目下所有会话
         sessions = self.get_history_list(project_name)
         count = 0
-        
+
         for session in sessions:
             session_id = session.get("session_id", "")
 

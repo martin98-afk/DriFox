@@ -9,18 +9,25 @@
 """
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton, QSizePolicy,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
-from qfluentwidgets import SwitchButton, ComboBox
+from qfluentwidgets import ComboBox, SwitchButton
 
 from app.tools.tool_classifier import (
-    DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles,
+    DANGEROUS_TOOLS,
+    SAFE_TOOLS,
+    get_default_toggles,
 )
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.elided_label import _ElidedLabel
-
 
 # =============================================================================
 # 工具分组定义
@@ -177,7 +184,7 @@ class ToolControlCardContent(QWidget):
             logger.info(f"[ToolCard] _rebuild: agent={agent}, toggles_enabled={sum(1 for v in toggles.values() if v)}/{len(toggles)}")
         else:
             toggles = {}
-            logger.info(f"[ToolCard] _rebuild: controller=None!")
+            logger.info("[ToolCard] _rebuild: controller=None!")
 
         # 确保所有工具都在 toggles 中
         all_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)

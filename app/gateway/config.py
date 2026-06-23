@@ -6,8 +6,6 @@ Gateway 配置管理
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
-
 from app.gateway.base import Platform, PlatformConfig
 
 
@@ -22,7 +20,7 @@ class GatewayConfigHelper:
     
     封装统一的 Settings 配置，提供便捷的访问接口。
     """
-    
+
     @staticmethod
     def get_platform_config(platform: Platform) -> PlatformConfig:
         """
@@ -36,7 +34,7 @@ class GatewayConfigHelper:
         """
         from app.utils.config import Settings
         cfg = Settings.get_instance()
-        
+
         if platform == Platform.WECOM:
             return PlatformConfig(
                 enabled=cfg.gateway_wecom_enabled.value,
@@ -100,7 +98,7 @@ class GatewayConfigHelper:
             )
         else:
             return PlatformConfig(enabled=False, platform=platform)
-    
+
     @staticmethod
     def set_platform_config(platform: Platform, config: PlatformConfig) -> None:
         """
@@ -112,7 +110,7 @@ class GatewayConfigHelper:
         """
         from app.utils.config import Settings
         cfg = Settings.get_instance()
-        
+
         if platform == Platform.WECOM:
             cfg.set(cfg.gateway_wecom_enabled, config.enabled, save=True)
             if config.bot_id is not None:
@@ -162,13 +160,13 @@ class GatewayConfigHelper:
                     cfg.set(cfg.gateway_slack_bot_token, config.extra["bot_token"], save=True)
                 if config.extra.get("app_token") is not None:
                     cfg.set(cfg.gateway_slack_app_token, config.extra["app_token"], save=True)
-    
+
     @staticmethod
     def is_platform_enabled(platform: Platform) -> bool:
         """检查平台是否启用"""
         from app.utils.config import Settings
         cfg = Settings.get_instance()
-        
+
         if platform == Platform.WECOM:
             return cfg.gateway_wecom_enabled.value
         elif platform == Platform.DINGTALK:
@@ -184,13 +182,13 @@ class GatewayConfigHelper:
         elif platform == Platform.SLACK:
             return cfg.gateway_slack_enabled.value
         return False
-    
+
     @staticmethod
     def set_platform_enabled(platform: Platform, enabled: bool) -> None:
         """设置平台启用状态"""
         from app.utils.config import Settings
         cfg = Settings.get_instance()
-        
+
         if platform == Platform.WECOM:
             cfg.set(cfg.gateway_wecom_enabled, enabled, save=True)
         elif platform == Platform.DINGTALK:

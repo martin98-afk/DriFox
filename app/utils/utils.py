@@ -12,26 +12,25 @@
 """
 import asyncio  # 用于 AsyncUpdateChecker
 import os
+import re
+import socket
 import sys
 import weakref
+from pathlib import Path
 
 import httpx
 import orjson as json
-import re
-import socket
-from pathlib import Path
-
 import psutil
 import requests
 import yaml
+from loguru import logger
 from PyQt5.QtCore import QThread, pyqtSignal
-from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtGui import QFont, QIcon
 
 from app.utils.config import Settings
-from loguru import logger
 
 try:
-    from pypinyin import pinyin, Style
+    from pypinyin import Style, pinyin
 except ImportError:
     pinyin = None
 
@@ -72,7 +71,7 @@ def get_app_data_dir() -> Path:
 
     # macOS .app: 使用 Application Support（用户可写）
     if sys.platform == 'darwin':
-        from AppKit import NSApplicationSupportDirectory, NSUserDomainMask, NSFileManager
+        from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
         paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
             NSApplicationSupportDirectory, NSUserDomainMask
         )
@@ -119,8 +118,9 @@ def migrate_app_data_if_needed():
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
         return
 
-    from loguru import logger
     import shutil
+
+    from loguru import logger
 
     # 旧路径：安装目录旁（Program Files）
     old_dir = Path(sys._MEIPASS).parent / '.drifox' if hasattr(sys, '_MEIPASS') else None
@@ -162,9 +162,9 @@ def migrate_app_data_if_needed():
     if old_db.exists() and new_db.exists():
         logger.info(f"[迁移] sessions.db: {old_db.stat().st_size} → {new_db.stat().st_size} bytes")
     elif new_db.exists():
-        logger.info(f"[迁移] sessions.db 复制完成")
+        logger.info("[迁移] sessions.db 复制完成")
     else:
-        logger.warning(f"[迁移] sessions.db 未找到，数据可能是空的")
+        logger.warning("[迁移] sessions.db 未找到，数据可能是空的")
 
 
 def get_pinyin_search_keys(text):

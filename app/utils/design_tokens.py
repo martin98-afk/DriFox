@@ -80,8 +80,8 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     # qfluentwidgets SettingCard / ExpandSettingCard 的 titleLabel / contentLabel
     # 使用硬编码 QSS（font: 14px / font: 11px），setFont 无法覆盖，必须用 stylesheet 强制
-    from qfluentwidgets.components.settings.setting_card import SettingCard
     from qfluentwidgets.components.settings.expand_setting_card import ExpandSettingCard
+    from qfluentwidgets.components.settings.setting_card import SettingCard
     from qfluentwidgets.components.widgets.switch_button import SwitchButton
 
     for card in widget.findChildren(SettingCard):
@@ -681,7 +681,6 @@ class CardStyles:
     def edit_card_style() -> str:
         """统一表单输入框样式（供 mcp/hook/provider_edit/gateway 等设置卡片复用）"""
         Colors.refresh()
-        from app.utils.utils import get_font_family_css
         from app.utils.design_tokens import font_size_css
 
         return f"""
@@ -952,8 +951,8 @@ def get_content_bg_style() -> str:
 
 def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     """为 widget 添加淡入动画（透明度 0→1），简洁克制"""
-    from PyQt5.QtWidgets import QGraphicsOpacityEffect
     from PyQt5.QtCore import QPropertyAnimation
+    from PyQt5.QtWidgets import QGraphicsOpacityEffect
 
     effect = QGraphicsOpacityEffect(widget)
     widget.setGraphicsEffect(effect)
@@ -976,8 +975,8 @@ def apply_card_shadow(widget, shadow_type: str = "card"):
             - "glow*": 聚焦发光 halo，颜色取自 Colors.INPUT_FOCUS_BORDER（主题感知），
               alpha / blur_radius 来自对应 token
     """
-    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
     from PyQt5.QtGui import QColor
+    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 
     config = getattr(Shadows, shadow_type.upper(), Shadows.CARD)
     effect = QGraphicsDropShadowEffect(widget)
@@ -997,4 +996,3 @@ def apply_card_shadow(widget, shadow_type: str = "card"):
 
 
 # 从 utils 导入字体家族 CSS 函数供复用
-from app.utils.utils import get_font_family_css

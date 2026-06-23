@@ -1,42 +1,40 @@
 # -*- coding: utf-8 -*-
-from loguru import logger
 import requests
-from PyQt5.QtCore import pyqtSignal, QSize, Qt, QRect, QTimer
-from PyQt5.QtGui import QIcon, QPainter, QColor, QFont
+from loguru import logger
+from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QIcon, QPainter
 from PyQt5.QtWidgets import (
-    QWidget,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
     QVBoxLayout,
-    QPushButton,
+    QWidget,
 )
 from qfluentwidgets import (
-    ToolButton,
-    FluentIcon,
-    PushButton,
-    qconfig,
-    ExpandSettingCard,
     ConfigItem,
     Dialog,
+    ExpandSettingCard,
+    FluentIcon,
     IconWidget,
+    PushButton,
+    ToolButton,
+    qconfig,
 )
 
 from app.constants import (
     PROVIDER_ICONS,
 )
-from app.utils.design_tokens import Colors, Sizes, ButtonStyles
-from app.utils.design_tokens import font_size_css
-from app.utils.utils import get_icon, get_unified_font, get_font_family_css
+from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
 def _is_text_chat_model(model_id: str) -> bool:
     """判断模型是否为文本聊天模型，过滤掉图片、音频、词嵌入等非文本模型"""
     if not model_id:
         return False
-    
+
     model_lower = model_id.lower()
-    
+
     # 非文本模型关键词黑名单
     non_text_keywords = [
         # 图片生成/视觉模型
@@ -50,12 +48,12 @@ def _is_text_chat_model(model_id: str) -> bool:
         # 其他非聊天模型
         'moderation', 'rerank', 'search', 'retrieval',
     ]
-    
+
     # 检查是否包含非文本模型关键词
     for keyword in non_text_keywords:
         if keyword in model_lower:
             return False
-    
+
     return True
 
 
@@ -340,10 +338,10 @@ class ProviderListSettingCard(ExpandSettingCard):
         self.view.setStyleSheet("background-color: transparent;")
         self._refresh_items()
         self.addProviderButton.clicked.connect(self._show_add_dialog)
-        
+
         # 更新展开按钮位置：将按钮放到关闭按钮旁边
         self._update_button_position()
-    
+
     def _update_button_position(self):
         """将添加按钮移到关闭按钮旁边"""
         # 展开卡片的 card 是 HeaderSettingCard，包含 hBoxLayout

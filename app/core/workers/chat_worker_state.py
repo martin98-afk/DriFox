@@ -11,7 +11,7 @@ ChatWorker 状态管理 - 使用 dataclass 统一定义所有状态
 from collections import deque
 from dataclasses import dataclass, field
 from threading import Event
-from typing import Dict, List, Any, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 @dataclass
@@ -103,7 +103,7 @@ class ChatWorkerState:
     tools: List = field(default_factory=list)
     compaction_prompt: str = ""
     compaction_config: Dict = field(default_factory=dict)
-    
+
     # === 状态分组 ===
     api_cache: ApiCacheState = field(default_factory=ApiCacheState)
     tool_call: ToolCallState = field(default_factory=ToolCallState)
@@ -112,20 +112,20 @@ class ChatWorkerState:
     permission: PermissionState = field(default_factory=PermissionState)
     http: HttpClientState = field(default_factory=HttpClientState)
     session: SessionState = field(default_factory=SessionState)
-    
+
     # === 状态标志 ===
     is_cancelled: bool = False
-    
+
     # === 权限缓存 ===
     permission_cache: Any = None  # PermissionCache 实例
-    
+
     # === 事件总线（不清理）===
     event_bus: Any = None
-    
+
     # === 工具执行器引用 ===
     tool_executor: Any = None
     compactor: Any = None
-    
+
     @classmethod
     def from_constructor_args(
         cls,
@@ -178,7 +178,7 @@ class ChatWorkerState:
             tool_executor=tool_executor,
             compactor=compactor,
         )
-    
+
     def reset_pending_response_state(self):
         """
         重置单轮对话结束后的中间状态。
@@ -192,7 +192,7 @@ class ChatWorkerState:
         self.tool_call.calls_buffer = {}
         self.tool_call.waiting_params = {}
         self.tool_call.previewed_ids = set()
-        
+
         # 响应内容（但保留 full_response）
         self.response.content_blocks = []
         self.response.reasoning_content = ""
@@ -200,7 +200,7 @@ class ChatWorkerState:
         # 🔧 修复：清除流式文本 chunks，防止跨迭代累积
         self.response.response_chunks = deque()
         self.response.last_progress_len = {}
-    
+
     def full_cleanup(self):
         """
         彻底清理所有状态，防止内存泄漏。
@@ -215,22 +215,22 @@ class ChatWorkerState:
         """
         # 重置工具调用
         self.tool_call = ToolCallState()
-        
+
         # 重置响应内容
         self.response = ResponseContentState()
-        
+
         # 重置权限
         self.permission = PermissionState()
-        
+
         # 重置 HTTP 客户端
         self.http = HttpClientState()
-        
+
         # 重置 API 缓存
         self.api_cache = ApiCacheState()
-        
+
         # 清空会话消息
         self.session = SessionState()
-        
+
         # 🔧 修复：清空 EventBus 订阅者，防止 handler 闭包引用残留
         if self.event_bus is not None:
             try:
@@ -238,6 +238,6 @@ class ChatWorkerState:
             except Exception:
                 pass
             self.event_bus = None
-        
+
         # 清空工具列表引用
         self.tools = []

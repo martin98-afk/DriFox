@@ -5,14 +5,12 @@
 从 SessionStore 中提取的会话 CRUD 逻辑。
 """
 
-import orjson as json
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from app.core.store.serde import serialize, deserialize
+from app.core.store.serde import deserialize, serialize
 
 
 class SessionRepository:

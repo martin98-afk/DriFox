@@ -1,10 +1,9 @@
-from PyQt5.QtCore import Qt, QStringListModel
+from PyQt5.QtCore import QStringListModel, Qt
 from PyQt5.QtWidgets import QCompleter
 from qfluentwidgets import EditableComboBox
 
-from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import font_size_css
-
+from app.utils.utils import get_font_family_css
 
 MAX_COMBO_VISIBLE_ITEMS = 15  # 下拉框最大同时显示数量
 
@@ -154,28 +153,28 @@ class SearchableEditableComboBox(EditableComboBox):
         """给补全弹出列表设置半透明样式"""
         try:
             popup = self._search_completer.popup()
-            popup.setStyleSheet(f"""
-                QAbstractItemView {{
+            popup.setStyleSheet("""
+                QAbstractItemView {
                     background-color: rgba(42, 42, 46, 180);
                     color: #ffffff;
                     border: 1px solid #3a3a3a;
                     border-radius: 4px;
                     padding: 4px;
                     outline: none;
-                }}
-                QAbstractItemView::item {{
+                }
+                QAbstractItemView::item {
                     padding: 6px 14px 6px 12px;
                     min-height: 36px;
                     border-radius: 3px;
                     color: #ffffff;
-                }}
-                QAbstractItemView::item:hover {{
+                }
+                QAbstractItemView::item:hover {
                     background-color: rgba(255, 255, 255, 0.08);
-                }}
-                QAbstractItemView::item:selected {{
+                }
+                QAbstractItemView::item:selected {
                     background-color: #f59e0b;
                     color: white;
-                }}
+                }
             """)
         except Exception:
             pass

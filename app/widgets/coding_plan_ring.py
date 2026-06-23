@@ -6,12 +6,11 @@
 三层同心圆弧，类似 ContextUsageRing 风格。
 只有数据可用时才显示。
 """
-from PyQt5.QtCore import Qt, QTimer, QPoint, QRectF
-from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics
-from PyQt5.QtWidgets import QWidget, QApplication, QToolTip
+from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
+from PyQt5.QtGui import QColor, QFontMetrics, QPainter, QPen
+from PyQt5.QtWidgets import QApplication, QToolTip, QWidget
 
-from app.utils.design_tokens import _get_global_font, scale_font_size, Colors
-
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 
 # 各层对应的标签和颜色基调
 LAYER_CONFIG = [

@@ -8,7 +8,7 @@
 注意：不使用 ABC 以避免与 PyQt5 QObject 的元类冲突。
 各引擎通过重写方法提供实现，不实现时抛出 NotImplementedError。
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 class BaseEngine:

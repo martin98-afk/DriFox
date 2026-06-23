@@ -3,9 +3,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from app.core.chat_session import SessionManager
-from app.core.history_compactor import HistoryCompactor
-from app.core.conversation.config import PermissionCache
 from app.core.context_builder import ContextBudgetAllocator
+from app.core.conversation.config import PermissionCache
+from app.core.history_compactor import HistoryCompactor
 
 
 @dataclass

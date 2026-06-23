@@ -25,11 +25,10 @@
     该机制与本模块的"内置默认"是两个独立层：内置默认只是初值。
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from app.constants import FREE_PROVIDERS
 from app.core.provider_profile import get_provider_profile
-
 
 # =============================================================================
 # 字段名候选（按这个顺序查 llm_config 里的显式值）

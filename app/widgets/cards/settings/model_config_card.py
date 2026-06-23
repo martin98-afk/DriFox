@@ -11,22 +11,22 @@
 """
 import webbrowser
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     LineEdit,
+    PasswordLineEdit,
     Slider,
     SpinBox,
     SwitchButton,
-    PasswordLineEdit,
-    ComboBox, )
+)
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
-
 
 # =============================================================================
 # 字段分组：定义显示顺序与分类

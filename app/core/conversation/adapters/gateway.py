@@ -1,5 +1,5 @@
 # app/core/conversation/adapters/gateway.py
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict
 
 from app.core.conversation.adapters.base import BaseConversationAdapter
 from app.core.conversation.core import ConversationCore

@@ -21,7 +21,7 @@
 import hashlib
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Callable, Any
+from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
 from loguru import logger
@@ -550,11 +550,11 @@ class HistoryCompactor:
     ):
         self._get_model_config = get_model_config
         self._agent_manager = agent_manager
-        
+
         # HTTP 客户端缓存（性能优化）
         self._compaction_http_client: Optional[OpenAI] = None
         self._compaction_cache_config: Optional[str] = None
-        
+
         # ========== 迭代摘要支持 (参考 Hermes Agent) ==========
         self._previous_summary: Optional[str] = None  # 上一次压缩的摘要
         self._last_summary_error: Optional[str] = None  # 上次摘要失败的错误
@@ -625,13 +625,13 @@ class HistoryCompactor:
         """
         if not messages or budget <= 0:
             return False
-        
+
         soft_limit = self._get_soft_limit(budget)
         current_tokens = count_messages_tokens(messages)
-        
+
         if current_tokens <= soft_limit:
             return False
-        
+
         # ========== 反抖动保护（Hermes Agent） ==========
         # 如果最近两次压缩效果都不好（每次节省 < 10%），跳过压缩
         if hasattr(self, '_ineffective_compression_count') and self._ineffective_compression_count >= 2:
@@ -640,7 +640,7 @@ class HistoryCompactor:
                 f"建议 /new 开始新会话，或手动 /compress。"
             )
             return False
-        
+
         return current_tokens > soft_limit
 
     def compact(
@@ -669,7 +669,7 @@ class HistoryCompactor:
             return [], self._make_state(), self._make_cache()
 
         soft_limit = self._get_soft_limit(budget)
-        
+
         # 消息规范化
         normalized = consolidate_messages(messages)
         if not normalized:
@@ -712,7 +712,7 @@ class HistoryCompactor:
         used_tokens = count_messages_tokens(messages)
         budget_tokens = max(1, budget)
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
-        
+
         return {
             "used_tokens": used_tokens,
             "budget_tokens": budget_tokens,
@@ -897,7 +897,7 @@ class HistoryCompactor:
             msg = normalized[i]
             msg_tokens = msg_tokens_list[i]
             role = msg.get("role")
-            
+
             # 工具调用配对保护
             if role == "assistant":
                 tool_calls = msg.get("tool_calls", [])
@@ -1002,12 +1002,12 @@ class HistoryCompactor:
             remaining_for_summary = 500  # 最小预算
         summary_budget_safe = remaining_for_summary
         compact_summary = self._summarize(
-            compacted, 
+            compacted,
             allow_llm=allow_llm_summary,
             budget=summary_budget_safe,
             compacted_count=len(compacted),
         )
-        
+
         if not compact_summary:
             # 摘要失败，只保留 tail
             return (
@@ -1195,16 +1195,16 @@ class HistoryCompactor:
         """
         if not messages:
             return ""
-        
+
         # 优先 LLM 摘要
         if allow_llm:
             llm_summary = self._summarize_with_llm(messages)
             if llm_summary:
                 return llm_summary
-        
+
         # 启发式截断（遗忘曲线）
         heuristic = self._summarize_heuristic(messages, budget)
-        
+
         # ========== 动态字符上限（预算驱动）==========
         # 目标：让压缩后的总上下文（系统提示 + 摘要 + tail + 新消息）保持在 50%-60%
         # 通过可用预算（剩余可分配 token）反向计算摘要的合理字符上限
@@ -1229,7 +1229,7 @@ class HistoryCompactor:
             head = heuristic[:max_chars // 2]
             tail = heuristic[-max_chars // 2:]
             heuristic = head + "\n\n[摘要因长度限制截断]\n\n" + tail
-        
+
         return heuristic
 
     def _summarize_with_llm(self, messages: List[Dict]) -> str:
@@ -1238,7 +1238,7 @@ class HistoryCompactor:
         api_key = str(llm_config.get("API_KEY", "")).strip()
         base_url = llm_config.get("API_URL") or None
         auth_type = llm_config.get("认证方式", "bearer")
-        
+
         if not api_key and auth_type != "none":
             return ""
 
@@ -1248,10 +1248,10 @@ class HistoryCompactor:
             compaction_config = self._agent_manager.get_agent_config("compaction")
 
         model = str(compaction_config.get("model") or llm_config.get("模型名称", "gpt-4o"))
-        
+
         # 动态 max_tokens
         max_tokens = self._get_summary_max_tokens(model)
-        
+
         client = self._get_http_client(api_key, base_url, auth_type)
 
         req_kwargs = {
@@ -1260,7 +1260,7 @@ class HistoryCompactor:
             "stream": False,
             "max_tokens": max_tokens,
         }
-        
+
         temperature = compaction_config.get("temperature")
         if temperature is not None:
             req_kwargs["temperature"] = temperature
@@ -1277,12 +1277,12 @@ class HistoryCompactor:
                 logger.warning("[Compaction] API 返回空 choices，跳过摘要")
                 return ""
             content = (resp.choices[0].message.content or "").strip()
-            
+
             # 更新迭代摘要缓存
             self._previous_summary = content
             self._last_summary_error = None
             self._compression_count += 1
-            
+
             return content
         except Exception as exc:
             logger.warning(f"[Compactor] LLM summarization failed, fallback to heuristic: {exc}")
@@ -1301,11 +1301,11 @@ class HistoryCompactor:
     def _get_http_client(self, api_key: str, base_url: str, auth_type: str) -> OpenAI:
         """获取或创建 HTTP 客户端（复用）"""
         config_key = f"{auth_type}:{api_key[:8] if api_key else 'none'}:{base_url or 'default'}"
-        
-        if (self._compaction_http_client is not None and 
+
+        if (self._compaction_http_client is not None and
             self._compaction_cache_config == config_key):
             return self._compaction_http_client
-        
+
         self._compaction_http_client = OpenAI(
             api_key=api_key if api_key and auth_type != "none" else "dummy",
             base_url=base_url,
@@ -1347,7 +1347,7 @@ class HistoryCompactor:
             "3. 不要只重复用户原始提问。\n"
             "4. 删除寒暄、重复探索、低价值调试细节。\n"
             "5. 如果信息不足，不要编造。\n\n"
-            f"【待压缩对话】\n" + "\n".join(transcript_lines)
+            "【待压缩对话】\n" + "\n".join(transcript_lines)
         )
 
         prompt = "\n".join(prompt_parts)
@@ -1417,7 +1417,7 @@ class HistoryCompactor:
         for idx, msg in enumerate(messages):
             role = msg.get("role")
             content = cleaned_contents[idx] if idx < len(cleaned_contents) else ""
-            
+
             # ========== 内容过滤 ==========
             # 1. 跳过失败的工具执行
             if role == "tool" and not msg.get("success"):
@@ -1437,7 +1437,7 @@ class HistoryCompactor:
                 stripped = content.strip()
                 if any(er in stripped for er in empty_results) and len(stripped) < 100:
                     continue
-            
+
             # 对于受保护的工具（如 skill），保留完整内容不截断
             is_protected_tool = False
             if role == "tool":
@@ -1491,13 +1491,13 @@ class HistoryCompactor:
         - 最新的消息：约 70%
         """
         content_len = len(content)
-        
+
         # 基础保留比例（遗忘曲线）
         position_ratio = position / max(1, total - 1)
         min_keep = 0.2
         max_keep = 0.7
         keep_ratio = min_keep + (max_keep - min_keep) * (position_ratio ** 0.5)
-        
+
         # 动态目标长度
         if target_total is not None and target_total > 0:
             msg_ratio = ratios[position] if ratios and position < len(ratios) else (1 / total)
@@ -1507,20 +1507,20 @@ class HistoryCompactor:
             keep_length = int(target_quota)
         else:
             keep_length = int(content_len * keep_ratio)
-        
+
         # 限制
         keep_length = min(keep_length, MAX_HISTORY_SNIPPET_CHARS)
         keep_length = max(keep_length, 20)
-        
+
         if keep_length >= content_len:
             return content
-        
+
         # 首尾保留策略
         head_ratio = 0.4
         head_length = int(keep_length * head_ratio)
         tail_length = int(keep_length * head_ratio)
-        
+
         head = content[:head_length]
         tail = content[-tail_length:] if tail_length > 0 else ""
-        
+
         return f"{head}...{tail}"

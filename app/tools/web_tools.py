@@ -8,18 +8,17 @@
 """
 import os
 import re
-import httpx
-import html2text
 import threading
-
 from pathlib import Path
 from typing import Optional
 
+import html2text
+import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
+
 from app.tools.result import ToolResult
 from app.utils.config import Settings
-
 
 # ========== 性能优化：预编译正则表达式 ==========
 _NEWLINE_PATTERN = re.compile(r"\n+")

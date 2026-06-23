@@ -8,16 +8,21 @@ import zlib
 from typing import Dict
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPen
+from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QSizePolicy,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import TransparentToolButton
 
-from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
+
 
 def extract_project_initials(name: str) -> str:
     """从项目名提取最多 2 个字符的缩写
@@ -51,7 +56,7 @@ def extract_project_initials(name: str) -> str:
         initials = ''.join(p[0].upper() for p in parts[:2])
         if initials:
             return initials
-    
+
     if '-' in name:
         parts = [p for p in name.split('-') if p]
         initials = ''.join(p[0].upper() for p in parts[:2])

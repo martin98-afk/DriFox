@@ -4,31 +4,36 @@
 现已迁移到 SystemCardFrame 基类，获得统一头部布局和固定边框
 """
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont, QColor
+from loguru import logger
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QFontComboBox,
 )
-from loguru import logger
 from qfluentwidgets import (
+    ComboBox,
+    FluentIcon,
+    OptionsSettingCard,
+    PrimaryPushButton,
+    SettingCard,
     StrongBodyLabel,
     SwitchSettingCard,
-    OptionsSettingCard,
-    FluentIcon, SettingCard, PrimaryPushButton, ComboBox, )
+)
 
 from app.utils.config import Settings
 from app.utils.design_tokens import (
-    ButtonStyles,
-    ComboBoxStyles,
     FONT_SIZE_OPTIONS,
+    ButtonStyles,
     Colors,
+    ComboBoxStyles,
+    apply_font_size_to_widget,
+    get_ui_font_size,
 )
-from app.utils.design_tokens import get_ui_font_size, apply_font_size_to_widget
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_icon, get_unified_font, get_font_family_css
-from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
@@ -187,7 +192,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.tabChanged.connect(self._on_tab_changed)
 
         self._setup_content()
-        
+
         # 初始化时应用配置中的字体大小和主题样式
         QTimer.singleShot(0, self._refresh_appearance_from_config)
 
@@ -495,8 +500,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _setup_port_card(self):
         """创建端口设置卡片"""
-        from qfluentwidgets import SettingCard, SpinBox
-        from qfluentwidgets import FluentIcon
+        from qfluentwidgets import FluentIcon, SettingCard, SpinBox
 
         class PortSettingCard(SettingCard):
             def __init__(self, title, content, cfg, parent=None):
@@ -558,12 +562,12 @@ class LLMSettingsCard(SystemCardFrame):
         # 刷新字体大小
         actual_size = get_ui_font_size()
         apply_font_size_to_widget(self, actual_size)
-        
+
         # 刷新主题样式
         Colors.refresh()
         if hasattr(self, "refresh_style"):
             self.refresh_style()
-        
+
         # 刷新所有子设置卡片的主题样式
         for frame in self.findChildren(SystemCardFrame):
             if hasattr(frame, "refresh_style"):
@@ -654,9 +658,9 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_llm_api_enabled_changed(self, enabled):
         from app.gateway import (
-            stop_llm_api_service,
-            is_service_running,
             get_llm_api_service,
+            is_service_running,
+            stop_llm_api_service,
         )
 
         if enabled:
@@ -671,9 +675,9 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_llm_api_port_changed(self, port):
         from app.gateway import (
-            stop_llm_api_service,
-            is_service_running,
             get_llm_api_service,
+            is_service_running,
+            stop_llm_api_service,
         )
 
         if self.cfg.llm_api_enabled.value and is_service_running():

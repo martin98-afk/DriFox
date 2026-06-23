@@ -226,7 +226,7 @@ class TaskTools:
     def load_skill(self, name: str) -> ToolResult:
         """加载指定技能"""
         success, content, workspace = utils_load_skill(name)
-        
+
         if success:
             self._loaded_skills[name] = content
             self._skill_workspaces[name] = workspace
@@ -299,7 +299,7 @@ class TaskTools:
                 except ValueError:
                     display = str(resolved)
                 staged.append(display)
-                
+
                 # 自动关联到关键文档
                 if self._key_documents_repo:
                     self._key_documents_repo.add(
@@ -307,14 +307,14 @@ class TaskTools:
                         str(resolved),
                         added_by="stage_files"
                     )
-            
+
             if not staged:
                 return ToolResult(True, content="No files staged")
-            
+
             # 添加关键文档关联提示
             if self._key_documents_repo:
                 return ToolResult(True, content="Staged files:\n" + "\n".join(staged) + f"\n\n[已关联 {len(staged)} 个文件到项目「{self._current_project}」的关键文档]")
-            
+
             return ToolResult(True, content="Staged files:\n" + "\n".join(staged))
         except Exception as e:
             return ToolResult(False, error=f"stage_files error: {str(e)}")

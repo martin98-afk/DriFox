@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 from loguru import logger
 
 from app.core.workers.error_handler.error_classifier import (
+    ClassifiedError,
     ErrorClassifier,
     FailoverReason,
-    ClassifiedError,
     get_error_classifier,
 )
 
@@ -37,12 +37,12 @@ class RetryConfig:
     max_delay: float = 60.0
     backoff_multiplier: float = 2.0
     jitter: bool = True
-    
+
     # 是否启用智能恢复
     enable_context_compression: bool = True
     enable_credential_rotation: bool = False
     enable_model_fallback: bool = False
-    
+
     # 取消检查回调（返回 True 表示应取消重试）
     cancel_check: Optional[Callable[[], bool]] = None
 
@@ -86,7 +86,7 @@ class SmartRetryHelper:
             on_fallback_needed=lambda: switch_model(),
         )
     """
-    
+
     def __init__(
         self,
         error_classifier: Optional[ErrorClassifier] = None,
@@ -94,7 +94,7 @@ class SmartRetryHelper:
     ):
         self._classifier = error_classifier or get_error_classifier()
         self._config = config or RetryConfig()
-        
+
         # 统计
         self._stats = {
             "total_attempts": 0,
@@ -104,7 +104,7 @@ class SmartRetryHelper:
             "fallback_used": 0,
             "failures_by_reason": {},
         }
-    
+
     def execute_with_retry(
         self,
         make_request: Callable[[], T],
@@ -141,10 +141,10 @@ class SmartRetryHelper:
         rotation_attempted = False
         fallback_attempted = False
         compression_applied = False
-        
+
         for attempt in range(self._config.max_retries + 1):
             self._stats["total_attempts"] += 1
-            
+
             # 🛡️ 检查取消
             if self._config.cancel_check and self._config.cancel_check():
                 logger.info("[SmartRetry] 检测到取消，放弃重试")
@@ -157,7 +157,7 @@ class SmartRetryHelper:
                     used_rotation=rotation_attempted,
                     used_fallback=fallback_attempted,
                 )
-            
+
             try:
                 result = make_request()
                 if attempt > 0:
@@ -170,10 +170,10 @@ class SmartRetryHelper:
                     used_rotation=rotation_attempted,
                     used_fallback=fallback_attempted,
                 )
-                
+
             except Exception as e:
                 last_error = e
-                
+
                 # 分类错误
                 classified = self._classifier.classify(
                     e,
@@ -183,12 +183,12 @@ class SmartRetryHelper:
                     context_length=context_length,
                     num_messages=num_messages,
                 )
-                
+
                 # 记录错误类型统计
                 reason_key = classified.reason.value
                 self._stats["failures_by_reason"][reason_key] = \
                     self._stats["failures_by_reason"].get(reason_key, 0) + 1
-                
+
                 # 不需要重试
                 if not classified.should_retry:
                     logger.warning(
@@ -203,7 +203,7 @@ class SmartRetryHelper:
                         used_rotation=rotation_attempted,
                         used_fallback=fallback_attempted,
                     )
-                
+
                 # 处理智能恢复
                 if classified.should_compress and not compression_applied:
                     # 需要压缩上下文
@@ -216,7 +216,7 @@ class SmartRetryHelper:
                         self._stats["compression_used"] += 1
                         compression_attempted = True
                         continue  # 压缩后重试
-                
+
                 if classified.should_rotate_credential and not rotation_attempted:
                     # 需要轮换凭据
                     if on_rotation_needed and self._config.enable_credential_rotation:
@@ -225,7 +225,7 @@ class SmartRetryHelper:
                         self._stats["rotation_used"] += 1
                         rotation_attempted = True
                         continue
-                
+
                 if classified.should_fallback and not fallback_attempted:
                     # 需要切换模型
                     if on_fallback_needed and self._config.enable_model_fallback:
@@ -234,7 +234,7 @@ class SmartRetryHelper:
                         self._stats["fallback_used"] += 1
                         fallback_attempted = True
                         continue
-                
+
                 # 普通的退避重试
                 if attempt < self._config.max_retries:
                     delay = self._calculate_delay(attempt, classified)
@@ -257,7 +257,7 @@ class SmartRetryHelper:
                     logger.error(
                         f"[SmartRetry] 重试次数耗尽，最后错误: {classified.reason.value}"
                     )
-        
+
         return RetryResult(
             success=False,
             error=last_error,
@@ -267,7 +267,7 @@ class SmartRetryHelper:
             used_rotation=rotation_attempted,
             used_fallback=fallback_attempted,
         )
-    
+
     def _calculate_delay(
         self,
         attempt: int,
@@ -276,7 +276,7 @@ class SmartRetryHelper:
         """根据错误类型和重试次数计算延迟"""
         # 根据错误类型调整基础延迟
         base = self._config.base_delay
-        
+
         if classified.reason == FailoverReason.rate_limit:
             # 频率限制：更长的初始延迟
             base = max(base, 5.0)
@@ -289,20 +289,20 @@ class SmartRetryHelper:
         elif classified.reason == FailoverReason.billing:
             # 计费问题：不重试
             base = float("inf")
-        
+
         # 指数退避
         delay = base * (self._config.backoff_multiplier ** attempt)
-        
+
         # 限制最大延迟
         delay = min(delay, self._config.max_delay)
-        
+
         # 添加抖动
         if self._config.jitter:
             import random
             delay = delay * (0.5 + random.random())
-        
+
         return delay
-    
+
     def _cancelable_sleep(self, seconds: float, step: float = 0.5) -> bool:
         """可取消的 sleep，返回 True 表示正常完成，False 表示被取消"""
         elapsed = 0.0
@@ -312,11 +312,11 @@ class SmartRetryHelper:
             time.sleep(min(step, seconds - elapsed))
             elapsed += step
         return True
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         return dict(self._stats)
-    
+
     def reset_stats(self) -> None:
         """重置统计"""
         self._stats = {
@@ -386,7 +386,7 @@ def create_smart_api_call_with_retry(
         API 响应
     """
     classifier = classifier or get_error_classifier()
-    
+
     config = RetryConfig(
         max_retries=max_retries,
         base_delay=retry_delay,
@@ -395,24 +395,24 @@ def create_smart_api_call_with_retry(
         enable_model_fallback=False,
         cancel_check=cancel_check,
     )
-    
+
     helper = SmartRetryHelper(
         error_classifier=classifier,
         config=config,
     )
-    
+
     def make_request():
         return create_func()
-    
+
     result = helper.execute_with_retry(
         make_request,
         provider=provider,
         model=model,
     )
-    
+
     if result.success:
         return result.result
-    
+
     # 重试失败，抛出原始错误
     raise result.error
 

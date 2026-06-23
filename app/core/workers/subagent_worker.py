@@ -2,28 +2,26 @@
 """
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
 """
-import orjson
-import orjson as json
 import re
 import time
-from typing import Dict, List, Optional, Any, Callable
+from typing import Any, Callable, Dict, List, Optional
 
+import orjson
+import orjson as json
 from loguru import logger
+from openai import OpenAI
+from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
-from app.tools.result import ToolResult
 from app.core.message_content import to_api_message
-from app.core.tool_call_parser import smart_parse_arguments
-
-from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject, QTimer
-from openai import OpenAI
-
-from app.core.provider_profile import get_provider_profile
 from app.core.model_capabilities import (
+    get_model_capabilities,
     resolve_context_limit,
     resolve_max_output_tokens,
-    get_model_capabilities,
 )
+from app.core.provider_profile import get_provider_profile
+from app.core.tool_call_parser import smart_parse_arguments
+from app.tools.result import ToolResult
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块

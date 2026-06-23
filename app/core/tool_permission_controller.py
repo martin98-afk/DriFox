@@ -12,14 +12,12 @@
 - 复制/分支窗口:复制 user + active + active_agent_name
 - 启动时:user 从全局 Settings 读取"用户最后修改的偏好"
 """
-from typing import Dict, Optional, Any
-from PyQt5.QtCore import QObject, pyqtSignal
+from typing import Any, Dict, Optional
 
 from loguru import logger
+from PyQt5.QtCore import QObject, pyqtSignal
 
-from app.tools.tool_classifier import (
-    DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles
-)
+from app.tools.tool_classifier import DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles
 from app.utils.config import Settings
 
 

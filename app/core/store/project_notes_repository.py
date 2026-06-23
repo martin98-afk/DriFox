@@ -3,9 +3,9 @@
 项目笔记仓储模块 - 专门负责项目 Markdown 内容的持久化
 """
 
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
 import hashlib
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -62,15 +62,15 @@ class ProjectNotesRepository:
         """
         if not self._ensure_table():
             return False
-        
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # 检查是否存在
         success, rows = self._execute(
             f'SELECT id FROM {self.TABLE_NAME} WHERE project = ?',
             (project,)
         )
-        
+
         if success and rows and len(rows) > 0:
             # 更新
             success, _ = self._execute(
@@ -84,7 +84,7 @@ class ProjectNotesRepository:
                 INSERT INTO {self.TABLE_NAME} (id, project, content, updated_at)
                 VALUES (?, ?, ?, ?)
             ''', (note_id, project, content, now))
-        
+
         return success
 
     def get(self, project: str) -> Optional[Dict]:
@@ -99,7 +99,7 @@ class ProjectNotesRepository:
         """
         if not self.is_initialized:
             return None
-        
+
         try:
             success, rows = self._execute(
                 f'SELECT * FROM {self.TABLE_NAME} WHERE project = ?',
@@ -152,7 +152,7 @@ class ProjectNotesRepository:
         """
         if not self.is_initialized:
             return []
-        
+
         try:
             success, rows = self._execute(
                 f'SELECT DISTINCT project FROM {self.TABLE_NAME} ORDER BY updated_at DESC'
@@ -176,7 +176,7 @@ class ProjectNotesRepository:
         """
         if not self.is_initialized:
             return False
-        
+
         try:
             success, _ = self._execute(
                 f'DELETE FROM {self.TABLE_NAME} WHERE project = ?',

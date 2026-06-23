@@ -6,17 +6,15 @@ WhatsApp 平台适配器 (通过 Twilio)
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import os
 from typing import Any, Dict, List, Optional
+
 from loguru import logger
+
 from app.gateway.base import (
     BasePlatformAdapter,
     Platform,
     PlatformConfig,
-    MessageEvent,
-    MessageType,
     SendResult,
 )
 
@@ -294,54 +292,52 @@ class SlackAdapter(BasePlatformAdapter):
     
     使用 Slack WebSocket 模式进行消息收发。
     """
-    
+
     MAX_MESSAGE_LENGTH = 4000
-    
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SLACK)
-        
+
         self._bot_token = config.extra.get("bot_token") or os.getenv("SLACK_BOT_TOKEN")
         self._app_token = config.extra.get("app_token") or os.getenv("SLACK_APP_TOKEN")
         self._client = None
-    
+
     async def connect(self) -> bool:
         """连接到 Slack"""
         if not self._bot_token:
             logger.error("[Slack] bot_token is required")
             return False
-        
+
         try:
             from slack_sdk import WebClient
-            from slack_sdk.socket_mode import SocketModeClient
-            
+
             # 创建 Web API 客户端
             self._client = WebClient(token=self._bot_token)
-            
+
             # 验证 token
             self._client.auth_test()
-            
+
             self._connected = True
             logger.info("[Slack] Connected successfully")
             return True
-            
+
         except Exception as e:
             logger.error("[Slack] Failed to connect: %s", e)
             return False
-    
+
     async def disconnect(self) -> None:
         """断开连接"""
         if self._client:
             try:
                 if hasattr(self._client, '_session'):
-                    import asyncio
                     # 清理资源
                     pass
             except Exception as e:
                 logger.warning("[Slack] Error during disconnect: %s", e)
-        
+
         self._connected = False
         logger.info("[Slack] Disconnected")
-    
+
     async def send(
         self,
         chat_id: str,
@@ -352,63 +348,63 @@ class SlackAdapter(BasePlatformAdapter):
         """发送消息"""
         if not self._client:
             return SendResult(success=False, error="Not connected")
-        
+
         try:
             # 格式化内容 (使用 Block Kit 格式)
             formatted = self._format_slack_text(content)
-            
+
             # 分割长消息
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
                 chunks = self._split_message(formatted)
             else:
                 chunks = [formatted]
-            
+
             message_ids = []
-            
+
             for i, chunk in enumerate(chunks):
                 kwargs = {
                     "channel": chat_id,
                     "text": chunk,
                 }
-                
+
                 # 添加线程回复
                 if reply_to and i == 0:
                     kwargs["thread_ts"] = reply_to
-                
+
                 response = self._client.chat_postMessage(**kwargs)
                 message_ids.append(response["ts"])
-            
+
             return SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
             )
-            
+
         except Exception as e:
             logger.error("[Slack] Send failed: %s", e)
             return SendResult(success=False, error=str(e))
-    
+
     def _format_slack_text(self, content: str) -> str:
         """格式化 Slack 文本"""
         if not content:
             return content
-        
+
         # Slack 文本格式
         result = content
         # 转换 Markdown 到 Slack 格式
         result = result.replace("**", "*")  # 粗体
         result = result.replace("__", "_")  # 斜体
-        
+
         return result
-    
+
     def _split_message(self, content: str) -> List[str]:
         """分割消息"""
         if len(content) <= self.MAX_MESSAGE_LENGTH:
             return [content]
-        
+
         chunks = []
         paragraphs = content.split('\n\n')
         current = ""
-        
+
         for para in paragraphs:
             if len(current) + len(para) + 2 <= self.MAX_MESSAGE_LENGTH:
                 current += ("\n\n" if current else "") + para
@@ -416,12 +412,12 @@ class SlackAdapter(BasePlatformAdapter):
                 if current:
                     chunks.append(current)
                 current = para
-        
+
         if current:
             chunks.append(current)
-        
+
         return chunks if chunks else [content]
-    
+
     async def send_image(
         self,
         chat_id: str,
@@ -433,21 +429,22 @@ class SlackAdapter(BasePlatformAdapter):
         """发送图片"""
         if not self._client:
             return SendResult(success=False, error="Not connected")
-        
+
         try:
             # 上传图片到 Slack
             if image_url.startswith("http"):
                 # 下载并上传
-                import httpx
-                import tempfile
                 import os
-                
+                import tempfile
+
+                import httpx
+
                 async with httpx.AsyncClient() as client:
                     response = await client.get(image_url, timeout=30.0)
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
                         f.write(response.content)
                         temp_path = f.name
-                
+
                 try:
                     response = self._client.files_upload_v2(
                         channel=chat_id,
@@ -471,11 +468,11 @@ class SlackAdapter(BasePlatformAdapter):
                     success=True,
                     message_id=response.get("file", {}).get("id", ""),
                 )
-            
+
         except Exception as e:
             logger.error("[Slack] Send image failed: %s", e)
             return SendResult(success=False, error=str(e))
-    
+
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """发送 typing 状态"""
         if self._client:
@@ -488,12 +485,12 @@ class SlackAdapter(BasePlatformAdapter):
                 )
             except Exception:
                 pass
-    
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """获取聊天信息"""
         if not self._client:
             return {"name": "Unknown", "type": "dm"}
-        
+
         try:
             response = self._client.conversations_info(channel=chat_id)
             channel = response.get("channel", {})

@@ -21,10 +21,10 @@ PEP 784 zstd API 注意：
 
 from __future__ import annotations
 
+from compression import zstd  # PEP 784, Python 3.14+
 from typing import Any
 
 import orjson
-from compression import zstd  # PEP 784, Python 3.14+
 
 # 格式魔数常量
 _MAGIC_ZSTD = b"ZSTD"  # 新版 zstd 压缩数据

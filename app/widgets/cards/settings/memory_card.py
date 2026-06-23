@@ -8,30 +8,28 @@
 import os
 from typing import Dict
 
-from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer
-from PyQt5.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QColor, QKeyEvent
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QKeyEvent
 from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGridLayout,
-    QListWidgetItem,
     QFileDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QListWidgetItem,
     QSizePolicy,
-    QMenu,
-    QAction,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
-    LineEdit,
-    PrimaryPushButton,
-    SwitchButton,
     FluentIcon,
-    TransparentToolButton,
+    LineEdit,
     ListWidget,
-    TextEdit,
     MaskDialogBase,
+    PrimaryPushButton,
     PushButton,
+    SwitchButton,
+    TextEdit,
+    TransparentToolButton,
 )
 
 
@@ -48,14 +46,16 @@ class EntryInputLineEdit(LineEdit):
         super().keyPressEvent(event)
 
 
-from app.utils.design_tokens import scale_font_size, font_size_css, Colors
-from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.elided_label import _ElidedLabel
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.git_worktree import GitWorktreeDetector
-from app.widgets.worktree_section import WorktreeSectionWidget
+from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.settings.project_selector_card import (
-    get_project_color, _SquareAvatar, extract_project_initials,
+    _SquareAvatar,
+    extract_project_initials,
+    get_project_color,
 )
+from app.widgets.elided_label import _ElidedLabel
+from app.widgets.worktree_section import WorktreeSectionWidget
 
 # Tab 标识
 TAB_ENTRY_MEMORIES = "entries"
@@ -235,7 +235,7 @@ class EntryMemoryItemWidget(QWidget):
         height = max(36, min(doc_height, 200))
         self.edit_text.setFixedHeight(height)
         self._update_item_size()
-    
+
     def _start_edit(self):
         """开始编辑"""
         self._editing = True
@@ -281,7 +281,7 @@ class EntryMemoryItemWidget(QWidget):
         # 继续传递事件
         if event:
             event.ignore()
-    
+
     def _cancel_edit(self):
         """取消编辑"""
         self._editing = False
@@ -521,9 +521,9 @@ class KeyDocumentItemWidget(QWidget):
         # 先判断是否是文件夹
         if os.path.isdir(file_path):
             return "📁"
-        
+
         ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
-        
+
         icon_map = {
             # 代码文件
             'py': '🐍', 'python': '🐍',
@@ -573,7 +573,7 @@ class KeyDocumentItemWidget(QWidget):
             'license': '📜', 'licence': '📜',
             'readme': '📖', 'readme.md': '📖',
         }
-        
+
         return icon_map.get(ext, icon_map.get(file_name.lower(), '📄'))
 
     def _init_ui(self, file_name, file_path, added_by):
@@ -1004,14 +1004,13 @@ class MemoryCardContent(QWidget):
         # 监听内容变化更新统计并触发自动保存（带节流）
         self.notes_editor.textChanged.connect(self._update_notes_stats)
         self.notes_editor.textChanged.connect(self._on_notes_changed)
-        
+
         # 自动保存定时器（节流防频繁保存）
-        from PyQt5.QtCore import QTimer
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.setInterval(300)  # 300ms 去抖后保存
         self._auto_save_timer.timeout.connect(self._save_project_note)
-        
+
         main_layout.addWidget(self.notes_editor, 1)
 
         return widget
@@ -1725,8 +1724,8 @@ class MemoryCardContent(QWidget):
 
     def _open_folder(self, path: str):
         """打开文件/文件夹/URL"""
-        import subprocess
         import os
+        import subprocess
         import webbrowser
         try:
             # URL 链接：在浏览器中打开

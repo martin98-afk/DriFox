@@ -27,46 +27,42 @@ DriFox Gateway 使 AI 能够通过企业微信、钉钉等平台与用户交互�
     await manager.start_all()
 """
 from app.gateway.base import (
-    Platform,
-    MessageType,
-    MessageEvent,
-    SendResult,
-    ChatInfo,
-    PlatformConfig,
     BasePlatformAdapter,
+    ChatInfo,
+    MessageEvent,
+    MessageType,
+    Platform,
+    PlatformConfig,
+    SendResult,
+)
+from app.gateway.config import (
+    get_gateway_config,
 )
 
+# 本地微服务（原 app.api）
+from app.gateway.local_service import (
+    APIHistoryManager,
+    APISessionHandler,
+    IsolatedChatContext,
+    IsolatedContextRegistry,
+    LLMAPIService,
+    StreamContext,
+    ensure_service_running,
+    get_llm_api_service,
+    is_service_running,
+    open_docs,
+    start_llm_api_service,
+    stop_llm_api_service,
+)
 from app.gateway.manager import (
     PlatformManager,
     create_platform_manager,
     get_platform_manager,
 )
-
-from app.gateway.config import (
-    get_gateway_config,
-)
-
+from app.gateway.message_handler import MessageHandler
 from app.gateway.session_manager import (
     GatewaySession,
     GatewaySessionManager,
-)
-
-from app.gateway.message_handler import MessageHandler
-
-# 本地微服务（原 app.api）
-from app.gateway.local_service import (
-    LLMAPIService,
-    get_llm_api_service,
-    ensure_service_running,
-    start_llm_api_service,
-    stop_llm_api_service,
-    is_service_running,
-    open_docs,
-    APISessionHandler,
-    APIHistoryManager,
-    StreamContext,
-    IsolatedChatContext,
-    IsolatedContextRegistry,
 )
 
 __all__ = [
@@ -78,22 +74,22 @@ __all__ = [
     "ChatInfo",
     "PlatformConfig",
     "BasePlatformAdapter",
-    
+
     # 管理器
     "PlatformManager",
     "create_platform_manager",
     "get_platform_manager",
-    
+
     # 配置
     "get_gateway_config",
-    
+
     # 会话
     "GatewaySession",
     "GatewaySessionManager",
-    
+
     # 消息处理
     "MessageHandler",
-    
+
     # 本地微服务
     "LLMAPIService",
     "get_llm_api_service",

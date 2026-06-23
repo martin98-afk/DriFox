@@ -3,13 +3,13 @@
 工具执行器模块 - 统一处理各种工具调用
 """
 import os
-import orjson
 import re
 import threading
 from pathlib import Path
+from typing import Callable, Dict, List, Optional
 
+import orjson
 from loguru import logger
-from typing import Dict, List, Optional, Callable
 
 from app.core.hook_manager import HookDecision
 from app.core.message_content import content_to_text
@@ -225,7 +225,7 @@ class ToolExecutor:
                 logger.info(f"[FileRecorder] 已备份: {full_path} -> {backup_path}")
             else:
                 # 文件不存在（如新建文件 write_file），跳过记录是正常的
-                logger.debug(f"[ToolExecutor] 文件操作记录返回 None")
+                logger.debug("[ToolExecutor] 文件操作记录返回 None")
         except Exception as e:
             # 记录失败不阻塞工具执行
             logger.warning(f"[ToolExecutor] 记录文件操作失败: {e}")
@@ -525,7 +525,7 @@ class ToolExecutor:
         """
         # 检查 ToolExecutor 是否仍然有效（API 模式下 UI 可能已关闭）
         if not self.is_valid():
-            logger.warning(f"[ToolExecutor] ToolExecutor is invalid (UI may be closed)")
+            logger.warning("[ToolExecutor] ToolExecutor is invalid (UI may be closed)")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
         # 🛡️ 防御性补全 mcp__ 前缀：LLM 偶尔可能漏掉前缀
@@ -569,7 +569,7 @@ class ToolExecutor:
                         if msg.get('role') == 'user':
                             current_message_text = content_to_text(msg.get('content', ''))
                             break
-            
+
             # 同步执行 PreToolUse hooks
             results = self._backend.hook_manager.trigger_event(
                 "PreToolUse",
@@ -577,13 +577,13 @@ class ToolExecutor:
                 current_message=current_message_text,
                 trigger_async=False   # 关键：同步执行，才能检测 BLOCK 决策
             )
-            
+
             # 检查是否有 hook 要求跳过工具执行（exit 2 或 JSON {"decision":"block"}）
             for result in results:
                 if result.decision == HookDecision.BLOCK:
                     # Hook 要求跳过工具执行，将 hook 输出作为工具结果回填
                     logger.info(f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}")
-                    
+
                     # 将 hook 输出注入到消息上下文（供 LLM 后续分析）
                     # 🛡️ 跨线程保护：使用 Qt.callLater 确保在主线程执行
                     if result.output and self._backend:
@@ -594,7 +594,7 @@ class ToolExecutor:
                             Qt.QueuedConnection,
                             *({"role": "assistant", "content": hook_output_msg},)
                         )
-                    
+
                     # 返回 hook 输出作为工具结果
                     return ToolResult(
                         True,
@@ -787,7 +787,7 @@ class ToolExecutor:
         # 在 UI 关闭场景下，即使方法开头检查通过，
         # lambda 执行期间 UI 可能被关闭，导致 BuiltinTools 访问崩溃
         if not self.is_valid():
-            logger.warning(f"[ToolExecutor] ToolExecutor became invalid during hook phase")
+            logger.warning("[ToolExecutor] ToolExecutor became invalid during hook phase")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
         executor = tool_map.get(tool_name)
@@ -805,7 +805,7 @@ class ToolExecutor:
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
                     self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
-                
+
                 # 自动 LSP 诊断：文件编辑成功后，若开启则自动诊断
                 if result and result.success and tool_name in ("write", "edit", "multi_edit"):
                     result = self._try_auto_lsp_diagnose(tool_name, args, result)
@@ -835,7 +835,7 @@ class ToolExecutor:
         try:
             mcp_manager = self._builtin_tools._mcp_manager
         except AttributeError:
-            logger.error(f"[ToolExecutor] _mcp_manager not accessible")
+            logger.error("[ToolExecutor] _mcp_manager not accessible")
             return ToolResult(False, error="MCP 管理器不可用")
 
         if not mcp_manager.is_connected:
@@ -845,7 +845,7 @@ class ToolExecutor:
             result = mcp_manager.call_tool_sync(tool_name, args)
         except TimeoutError as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
-            err_result = ToolResult(False, error=f"MCP 工具调用超时，请稍后重试")
+            err_result = ToolResult(False, error="MCP 工具调用超时，请稍后重试")
             self._trigger_post_tool_use(tool_name, args, err_result)
             return err_result
         except Exception as e:

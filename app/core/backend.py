@@ -7,25 +7,21 @@ import asyncio
 import os
 import re
 import time
+from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
-from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable
-
-from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool
 from loguru import logger
+from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
-from app.core.store import SessionStore
 from app.core.agent import AgentManager
+from app.core.chat_session import ChatSession, SessionManager
 from app.core.engines.ui import ChatEngine
-from app.core.chat_session import SessionManager, ChatSession
-from app.core.memory_manager import MemoryManagerCore
 from app.core.hook_manager import HookManager
+from app.core.memory_manager import MemoryManagerCore
+from app.core.store import SessionStore
 from app.core.tool_executor import ToolExecutor
 from app.core.workers.subagent_worker import SubAgentManager
 from app.utils.history_manager import HistoryManager
-from app.utils.utils import get_app_data_dir
-
 
 # 支持的图片扩展名
 _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
@@ -68,36 +64,36 @@ class ChatBackend(QObject):
     2. 暴露统一的 API 给前端（UI 层）
     3. 发出状态变化信号供前端订阅
     """
-    
+
     # ========== 信号定义 ==========
     # 会话相关
     session_created = pyqtSignal(str)  # session_id
     session_changed = pyqtSignal(str)  # session_id
     session_deleted = pyqtSignal(int)  # index
-    
+
     # 消息相关
     message_received = pyqtSignal(dict)  # 新消息
     stream_started = pyqtSignal()
     stream_chunk = pyqtSignal(str)  # 流式内容片段
     stream_finished = pyqtSignal(dict)  # 完成时的消息
     reasoning_content = pyqtSignal(str)  # DeepSeek thinking mode
-    
+
     # 工具相关
     tool_call_started = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
     tool_result_received = pyqtSignal(str, str, dict, bool)  # tool_call_id, name, result, success
-    
+
     # 权限相关
     permission_requested = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
-    
+
     # 错误
     error_occurred = pyqtSignal(str)
-    
+
     # 上下文
     context_updated = pyqtSignal(int, int)  # token_count, limit
-    
+
     # Gateway 状态
     gateway_status_changed = pyqtSignal(dict)  # status dict
-    
+
     # Gateway 消息处理（跨线程）
     gateway_input_received = pyqtSignal(object)  # dict: {text, chat_id, user_id, platform, future}
 
@@ -110,7 +106,7 @@ class ChatBackend(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        
+
         # 核心组件（后端自己创建）
         self._session_manager: Optional[SessionManager] = None
         self._chat_engine: Optional[ChatEngine] = None
@@ -122,13 +118,13 @@ class ChatBackend(QObject):
         self._session_store = None
         self._history_manager = None
         self._current_project = None
-        
+
         # 配置回调
         self._get_model_config: Optional[Callable] = None
-        
+
         # 线程池
         self._thread_pool = QThreadPool()
-        
+
         # 状态
         self._initialized = False
 
@@ -139,13 +135,13 @@ class ChatBackend(QObject):
         self._gateway_manager = None
         self._gateway_engine: Optional[GatewayEngine] = None
         self._gateway_initialized = False
-    
+
     # ========== 属性访问 ==========
 
     @property
     def current_project(self) -> str:
         return self._current_project
-    
+
     @property
     def session_manager(self) -> SessionManager:
         return self._session_manager
@@ -162,27 +158,27 @@ class ChatBackend(QObject):
     @property
     def chat_engine(self) -> ChatEngine:
         return self._chat_engine
-    
+
     @property
     def tool_executor(self) -> ToolExecutor:
         return self._tool_executor
-    
+
     @property
     def agent_manager(self) -> AgentManager:
         return self._agent_manager
-    
+
     @property
     def memory_manager(self) -> MemoryManagerCore:
         return self._memory_manager
-    
+
     @property
     def sub_agent_manager(self):
         return self._sub_agent_manager
-    
+
     @property
     def hook_manager(self) -> Optional[HookManager]:
         return self._hook_manager
-    
+
     @property
     def is_initialized(self) -> bool:
         return self._initialized
@@ -194,9 +190,9 @@ class ChatBackend(QObject):
     @property
     def history_manager(self):
         return self._history_manager
-    
+
     # ========== 初始化 ==========
-    
+
     def initialize(
         self,
         get_model_config: Callable[[], Dict[str, Any]],
@@ -211,41 +207,41 @@ class ChatBackend(QObject):
             workdir: 工作目录
         """
         logger.info("[ChatBackend] 初始化中...")
-        
+
         self._get_model_config = get_model_config
-        
+
         # 1. 创建 SessionManager
         self._session_store = SessionStore.get_instance()
         self._session_manager = SessionManager()
         logger.info("[ChatBackend] SessionManager 创建完成")
-        
+
         # 2. 创建 MemoryManager（全局单例，跨窗口共享）
         self._memory_manager = MemoryManagerCore.get_instance()
         logger.info("[ChatBackend] MemoryManager 创建完成")
-        
+
         # 3. 创建 HookManager（必须在 create_session 之前）
         self._hook_manager = HookManager(self._thread_pool)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
-        
+
         # Hook 完成后，把输出添加到上下文
         def on_hook_finished(event_name: str, output: str, success: bool):
             # 检查 UI 是否仍然有效，防止窗口关闭后 hook 回调访问已销毁的 UI
             if not getattr(self, '_ui_valid', True):
-                logger.debug(f"[HookManager] Hook callback skipped: UI already closed")
+                logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
-            
+
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}，output={output[:100]}...")
-            
+
             # 只有成功执行的 hook 才添加到消息列表
             if not success:
                 return
-            
+
             hook_output = f"<hook event=\"{event_name}\">\n{output}\n</hook>"
-            
+
             # SessionStart / UserPromptSubmit / PreUserMessage / PostUserMessage 添加到消息列表
             add_to_messages = event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage")
-            
+
             if add_to_messages:
                 session = self.get_current_session()
                 if session:
@@ -255,10 +251,10 @@ class ChatBackend(QObject):
                             msg for msg in session.messages
                             if not (msg.get("role") == "assistant" and "<hook " in (msg.get("content") or "") and 'event="PreUserMessage"' in (msg.get("content") or ""))
                         ]
-                    
+
                     # 添加新消息
                     session.add_assistant_message(hook_output)
-                
+
                 # 发送消息给前端显示（仅在 UI 有效时发送，防止窗口关闭后 emit 导致 segfault）
                 if getattr(self, '_ui_valid', True):
                     self.message_received.emit({
@@ -267,10 +263,10 @@ class ChatBackend(QObject):
                     })
                 logger.info(f"[HookManager] Hook added to messages: {event_name}")
         self._hook_manager.set_on_finished_callback(on_hook_finished)
-        
+
         # 4. 创建初始会话（不触发 SessionStart hook，避免重复初始化）
         self.create_session(trigger_hook=False)
-        
+
         # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
         # agents_dir 传 None，智能体从已启用插件动态加载
         self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
@@ -293,7 +289,7 @@ class ChatBackend(QObject):
                         logger.info(f"[ChatBackend] Loaded {count} global hooks from {global_hooks_file}")
                 except Exception as e:
                     logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
-        
+
         # 6. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
         self._tool_executor = ToolExecutor(workdir=workdir, backend=self)
         self._tool_executor.set_memory_manager(self._memory_manager)
@@ -308,7 +304,7 @@ class ChatBackend(QObject):
                 "默认项目"  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
             )
         logger.info("[ChatBackend] ToolExecutor 创建完成")
-        
+
         # 7. 创建 ChatEngine（暂时不传 get_memory_context，后面通过 setter 设置）
         self._chat_engine = ChatEngine(
             session_manager=self._session_manager,
@@ -329,7 +325,7 @@ class ChatBackend(QObject):
             session_store=self._session_store,
         )
         logger.info("[ChatBackend] GatewayEngine 创建完成")
-        
+
         # 创建 SubAgentManager（管理子智能体任务）
         # 使用包装的 get_llm_config：优先使用子智能体默认模型，回退到主模型
         self._subagent_model_resolver: Optional[Callable] = None  # 由 main_widget 设置
@@ -355,10 +351,10 @@ class ChatBackend(QObject):
         # 启动日志活力度 stall 检测（默认 180s 无日志输出视为卡死）
         self._sub_agent_manager.start_stall_detector()
         logger.info("[ChatBackend] SubAgentManager 创建完成（Stall 检测器已启动）")
-        
+
         # 提供设置 history getter 的方法（由 main_widget 在初始化时调用）
         self._sub_agent_history_getter = None
-        
+
         self._get_memory_context_getter = None
 
         self._history_manager = HistoryManager.get_instance()
@@ -371,10 +367,10 @@ class ChatBackend(QObject):
 
         # 10. 初始化 MCP 连接
         self._init_mcp_connections()
-        
+
         self._initialized = True
         logger.info("[ChatBackend] 初始化完成")
-        
+
         # 连接 Gateway 信号（跨线程安全，每个窗口实例连接自己的回调）
         self.gateway_input_received.connect(self._on_gateway_input)
 
@@ -388,12 +384,12 @@ class ChatBackend(QObject):
             logger.debug("[ChatBackend] Gateway 已存在，复用管理器")
         else:
             self._init_gateway_async()
-    
+
     def set_callback(self, name: str, callback: Callable):
         """设置回调（代理到 ChatEngine）"""
         if self._chat_engine:
             self._chat_engine.set_callback(name, callback)
-    
+
     def set_all_callbacks(self, callbacks: Dict[str, Callable]):
         """批量设置回调"""
         if self._chat_engine:
@@ -588,7 +584,7 @@ class ChatBackend(QObject):
 
         def _watch_loop():
             """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
-            logger.debug(f"[ChatBackend] watchfiles 监听线程已启动")
+            logger.debug("[ChatBackend] watchfiles 监听线程已启动")
             try:
                 for changes in watch(
                     *watch_paths,
@@ -861,8 +857,8 @@ class ChatBackend(QObject):
             # 4. 主题
             if comps.get("themes"):
                 try:
-                    from app.utils.theme_manager import theme_manager
                     from app.utils.config import update_theme_options
+                    from app.utils.theme_manager import theme_manager
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
@@ -945,8 +941,8 @@ class ChatBackend(QObject):
                 except (ImportError, Exception) as e:
                     logger.error(f"[ChatBackend] Failed to reload commands after plugin removal: {e}")
                 try:
-                    from app.utils.theme_manager import theme_manager
                     from app.utils.config import update_theme_options
+                    from app.utils.theme_manager import theme_manager
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
@@ -1013,8 +1009,8 @@ class ChatBackend(QObject):
             #    - 实际文件在 themes/ 下变更，theme_manager 必须 reload 才能反映新主题
             if component == "themes":
                 try:
-                    from app.utils.theme_manager import theme_manager
                     from app.utils.config import update_theme_options
+                    from app.utils.theme_manager import theme_manager
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
@@ -1130,8 +1126,8 @@ class ChatBackend(QObject):
                 # 主题
                 if comps.get("themes"):
                     try:
-                        from app.utils.theme_manager import theme_manager
                         from app.utils.config import update_theme_options
+                        from app.utils.theme_manager import theme_manager
                         theme_manager.reload()
                         update_theme_options()
                         result["themes"] = True
@@ -1183,8 +1179,8 @@ class ChatBackend(QObject):
 
             # 4. 重载主题
             try:
-                from app.utils.theme_manager import theme_manager
                 from app.utils.config import update_theme_options
+                from app.utils.theme_manager import theme_manager
                 theme_manager.reload()
                 update_theme_options()
                 result["themes"] = True
@@ -1227,8 +1223,8 @@ class ChatBackend(QObject):
 
     def _discover_mcp_servers(self):
         """自动发现其他工具的 MCP 配置并保存到 user-custom 插件（仅首次运行生效）"""
-        from app.utils.config import Settings
         from app.core.plugin_manager import PluginManager
+        from app.utils.config import Settings
 
         cfg = Settings.get_instance()
 
@@ -1259,8 +1255,8 @@ class ChatBackend(QObject):
 
         MCP 配置完全由插件驱动，从 PluginManager 获取。
         """
-        from app.utils.config import Settings
         from app.core.plugin_manager import PluginManager
+        from app.utils.config import Settings
 
         mcp_manager = self._tool_executor._builtin_tools._mcp_manager
 
@@ -1287,7 +1283,7 @@ class ChatBackend(QObject):
                 + (f", 失败: {failed}" if failed else "")
             ),
         )
-    
+
     def stop_streaming(self):
         """停止流式输出（同步方式，可能阻塞 UI 线程）"""
         # 触发 Stop hook（同步执行，确保 hook 在流停止前完成）
@@ -1322,7 +1318,7 @@ class ChatBackend(QObject):
         if self._chat_engine:
             return self._chat_engine.finalize_stop()
         return []
-    
+
     def cleanup_worker(self):
         """清理 worker"""
         if self._chat_engine:
@@ -1394,41 +1390,41 @@ class ChatBackend(QObject):
         """保存最后一次的缓存统计"""
         self._last_cache_stats = stats
 
-    
+
     def get_context_usage_snapshot(self, session, llm_config) -> Dict:
         """获取上下文使用快照"""
         if self._chat_engine:
             return self._chat_engine.get_context_usage_snapshot(session, llm_config)
         return {}
-    
+
     def switch_agent(self, agent_name: str):
         """切换 Agent"""
         if self._chat_engine:
             self._chat_engine.switch_agent(agent_name)
-    
+
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
         """批准工具调用权限"""
         if self._chat_engine:
             self._chat_engine.approve_tool_permission(tool_call_id, auto_allow, session_allow)
-    
+
     def deny_tool_permission(self, tool_call_id: str):
         """拒绝工具调用权限"""
         if self._chat_engine:
             self._chat_engine.deny_tool_permission(tool_call_id)
-    
+
     def provide_question_answer(self, answer: str):
         """提供问题答案"""
         if self._chat_engine:
             self._chat_engine.provide_question_answer(answer)
-    
+
     def send_message_to_engine(self, text: str, **kwargs) -> bool:
         """发送消息到引擎，支持 _user_content（multimodal list）"""
         if self._chat_engine:
             return self._chat_engine.send_message(text, **kwargs)
         return False
-    
+
     # ========== ToolExecutor 代理方法 ==========
-    
+
     def set_session_context(self, session_id: str):
         """设置会话上下文"""
         if self._tool_executor:
@@ -1436,42 +1432,42 @@ class ChatBackend(QObject):
         # 同步会话 ID 到子智能体管理器，确保子智能体任务按会话隔离
         if self._sub_agent_manager:
             self._sub_agent_manager.set_current_session_id(session_id)
-    
+
     def reset_session_state(self):
         """重置会话状态"""
         if self._tool_executor:
             self._tool_executor.reset_session_state()
-    
+
     def clear_todo_list(self):
         """清空待办列表"""
         if self._tool_executor:
             self._tool_executor.clear_todo_list()
-    
+
     def get_todos(self):
         """获取待办列表（返回副本）"""
         if self._tool_executor:
             return self._tool_executor.get_todos()
         return []
-    
+
     @property
     def file_recorder(self):
         """获取文件操作记录器"""
         if self._tool_executor:
             return getattr(self._tool_executor, 'file_recorder', None)
         return None
-    
+
     def execute_skill(self, method: str, params: Dict):
         """执行技能"""
         if self._tool_executor:
             return self._tool_executor.execute_skill(method, params)
         return None
-    
+
     def set_sub_agent_history_getter(self, getter: Callable[[], List[Dict]]):
         """设置子智能体获取历史消息的回调"""
         self._sub_agent_history_getter = getter
         if self._sub_agent_manager:
             self._sub_agent_manager.set_history_getter(getter)
-    
+
     # ========== MemoryManager 代理方法 ==========
     def get_memory_context_string(self, limit: int = 100) -> str:
         """获取记忆上下文字符串
@@ -1491,46 +1487,46 @@ class ChatBackend(QObject):
                 workdir_override=workdir,
             )
         return ""
-    
+
     def get_user_memories(self, memory_data: Dict = None) -> List[Dict]:
         """获取用户记忆列表（兼容旧接口）"""
         if self._memory_manager:
             return self._memory_manager.get_entry_memories()
         return []
-    
+
     def load_memory_data(self) -> Dict:
         """加载记忆数据"""
         if self._memory_manager:
             return self._memory_manager.load_memory()
         return {"version": "3.0", "user_memories": []}
-    
+
     def add_user_memory(self, content: str, **kwargs):
         """添加用户记忆"""
         if self._memory_manager:
             self._memory_manager.add_entry_memory(content, kwargs.get('source', 'assistant'))
-    
+
     def update_user_memories(self, memories: List[Dict]) -> bool:
         """更新用户记忆"""
         if self._memory_manager:
             return self._memory_manager.save_entry_memories(memories)
         return False
-    
+
     # ========== AgentManager 代理方法 ==========
-    
+
     def get_primary_agents(self) -> List:
         """获取主 Agent 列表"""
         if self._agent_manager:
             return self._agent_manager.list_primary_agents()
         return []
-    
+
     def get_agent(self, name: str):
         """获取指定 Agent"""
         if self._agent_manager:
             return self._agent_manager.get_agent(name)
         return None
-    
+
     # ========== 会话管理 ==========
-    
+
     def create_session(self, trigger_hook: bool = True) -> ChatSession:
         """创建新会话
         
@@ -1539,7 +1535,7 @@ class ChatBackend(QObject):
         """
         session = self._session_manager.create_new_session()
         self.session_created.emit(session.session_id)
-        
+
         # Trigger SessionStart hook
         if trigger_hook and self._hook_manager:
             context = {
@@ -1550,79 +1546,79 @@ class ChatBackend(QObject):
                 context=context,
                 current_message=""
             )
-        
+
         return session
-    
+
     def get_current_session(self) -> Optional[ChatSession]:
         """获取当前会话"""
         return self._session_manager.get_current_session()
-    
+
     def switch_session(self, index: int):
         """切换会话"""
         self._session_manager.switch_to_session(index)
         session = self.get_current_session()
         if session:
             self.session_changed.emit(session.session_id)
-    
+
     def set_current_session(self, session: ChatSession):
         """设置当前会话"""
         self._session_manager.set_current_session(session)
         if session:
             self.session_changed.emit(session.session_id)
-    
+
     def delete_session(self, index: int) -> bool:
         """删除会话"""
         result = self._session_manager.delete_session(index)
         if result:
             self.session_deleted.emit(index)
         return result
-    
+
     def get_all_sessions(self) -> List[ChatSession]:
         """获取所有会话"""
         return self._session_manager.get_all_sessions()
-    
+
     # ========== 对话操作 ==========
-    
+
     def send_message(self, text: str, agent_name: str = None, **kwargs):
         """发送消息"""
         session = self.get_current_session()
         if not session:
             session = self.create_session()
-        
+
         session.add_user_message(text, params=kwargs)
-        
+
         self._chat_engine.send_message(
             text,
             session=session,
             agent_name=agent_name,
         )
-    
+
     # ========== 状态查询 ==========
-    
+
     def get_current_agent(self) -> str:
         """获取当前 Agent"""
         if self._chat_engine:
             return self._chat_engine.current_agent
         return "plan"
-    
+
     def set_current_agent(self, agent_name: str):
         """设置当前 Agent"""
         if self._chat_engine:
             self._chat_engine.set_current_agent(agent_name)
-    
+
     def set_streaming_state(self, is_streaming: bool):
         """设置流式状态"""
         if self._chat_engine:
             self._chat_engine.set_streaming(is_streaming)
-    
+
     def get_context_usage(self) -> tuple:
         """获取上下文使用情况"""
         if self._chat_engine:
             return self._chat_engine.get_context_usage()
         return (0, 0)
-    
+
     # ========== 上下文构建方法 ==========
-    
+
     def _build_memory_context(self, query: str = "", project: str = "默认项目") -> str:
         """构建长期记忆上下文（供 ChatEngine 调用）
         
@@ -1639,7 +1635,7 @@ class ChatBackend(QObject):
             doc_limit=50,
             workdir_override=workdir,
         )
-    
+
     def _build_chat_cards_context(self) -> str:
         """构建卡片上下文"""
         # 如果有 get_chat_cards 回调，调用它
@@ -1648,9 +1644,9 @@ class ChatBackend(QObject):
             if cards:
                 return "\n\n# 已启用的卡片\n" + "\n".join(cards)
         return ""
-    
+
     # ========== Gateway 方法 ==========
-    
+
     def _on_gateway_input(self, data: dict):
         """
         处理 Gateway 发来的消息（在主线程运行）
@@ -1669,8 +1665,10 @@ class ChatBackend(QObject):
         logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
 
         try:
-            from app.gateway.base import Platform as GatewayPlatform, MessageEvent, MessageType
             import asyncio
+
+            from app.gateway.base import MessageEvent, MessageType
+            from app.gateway.base import Platform as GatewayPlatform
 
             gw_platform = GatewayPlatform(platform)
 
@@ -1808,18 +1806,15 @@ class ChatBackend(QObject):
                     future.set_exception(e)
             except Exception:
                 pass
-    
+
     def _init_gateway_async(self):
         """异步初始化 Gateway（后台进行）"""
-        import asyncio
-        from functools import partial
 
         def _do_init():
             try:
                 # 延迟导入，避免主线程加载 adapter 模块（import 有阻塞风险）
-                from app.gateway.config import get_gateway_config
                 from app.gateway.manager import create_platform_manager
-                
+
                 # 创建消息处理回调
                 async def process_message(
                     session_id: str,
@@ -1834,11 +1829,11 @@ class ChatBackend(QObject):
                     # 由于 ChatBackend 在主线程，需要使用 Qt 信号或线程安全的方式
                     # 简化实现：直接返回处理结果
                     return await self._gateway_process_message(session_id, text, platform, chat_id, user_id, **kwargs)
-                
+
                 async def send_message(platform: Any, chat_id: str, content: str, **kwargs) -> Any:
                     """发送消息到平台"""
                     return await self._gateway_send_message(platform, chat_id, content, **kwargs)
-                
+
                 # 创建管理器（PlatformManager 是单例，连接逻辑在其后台事件循环）
                 self._gateway_manager = create_platform_manager(process_message, send_message)
 
@@ -1847,15 +1842,15 @@ class ChatBackend(QObject):
 
                 # 启动连接：纯异步调度，不等待结果（避免 WebSocket 连接慢时卡住后台线程）
                 self._gateway_manager.start_all_async()
-                    
+
             except Exception as e:
                 logger.exception(f"[ChatBackend] Gateway 初始化失败: {e}", exc_info=True)
-        
+
         # 在后台线程运行
         import threading
         t = threading.Thread(target=_do_init, daemon=True)
         t.start()
-    
+
     async def _gateway_process_message(
         self,
         session_id: str,
@@ -1899,7 +1894,7 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[Gateway] AI processing error: {e}")
             return ""
-    
+
     async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:
         """发送消息到平台"""
         from app.gateway.base import SendResult
@@ -1912,10 +1907,10 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[Gateway] Send failed: {e}")
                 return SendResult(success=False, error=str(e))
-        
+
         logger.warning(f"[Gateway] No adapter for platform {platform}")
         return SendResult(success=False, error="No adapter")
-    
+
     async def _gateway_send_image(self, platform: Any, chat_id: str, image_path: str, **kwargs) -> Any:
         """发送图片到平台"""
         from app.gateway.base import SendResult
@@ -1928,14 +1923,14 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[Gateway] Send image failed: {e}")
                 return SendResult(success=False, error=str(e))
-        
+
         logger.warning(f"[Gateway] No adapter for platform {platform}")
         return SendResult(success=False, error="No adapter")
-    
+
     def _start_gateway_async(self):
         """异步启动 Gateway"""
         import threading
-        
+
         def _do_start():
             try:
                 if self._gateway_manager and self._gateway_initialized:
@@ -1943,14 +1938,14 @@ class ChatBackend(QObject):
                     logger.info("[ChatBackend] Gateway 已启动（后台连接中）")
             except Exception as e:
                 logger.error(f"[ChatBackend] Gateway 启动失败: {e}", exc_info=True)
-        
+
         t = threading.Thread(target=_do_start, daemon=True)
         t.start()
-    
+
     def _stop_gateway_async(self):
         """异步停止 Gateway"""
         import threading
-        
+
         def _do_stop():
             try:
                 if self._gateway_manager:
@@ -1958,14 +1953,14 @@ class ChatBackend(QObject):
                     logger.info("[ChatBackend] Gateway 已停止")
             except Exception as e:
                 logger.error(f"[ChatBackend] Gateway 停止失败: {e}", exc_info=True)
-        
+
         t = threading.Thread(target=_do_stop, daemon=True)
         t.start()
-    
+
     def _on_gateway_status_changed(self, status: dict):
         """Gateway 状态变化回调"""
         self.gateway_status_changed.emit(status)
-    
+
     @property
     def gateway_manager(self):
         """获取 Gateway 管理器"""
@@ -1980,17 +1975,17 @@ class ChatBackend(QObject):
     def gateway_initialized(self) -> bool:
         """Gateway 是否已初始化"""
         return self._gateway_initialized
-    
+
     def get_gateway_status(self) -> dict:
         """获取 Gateway 状态"""
         if self._gateway_manager:
             return self._gateway_manager.get_status()
         return {"running": False, "platforms": {}}
-    
+
     def start_gateway(self):
         """启动 Gateway"""
         self._start_gateway_async()
-    
+
     def stop_gateway(self):
         """停止 Gateway"""
         self._stop_gateway_async()

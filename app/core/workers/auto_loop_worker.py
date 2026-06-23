@@ -15,24 +15,23 @@ AutoLoop Worker — 后台循环工作线程
 - 执行阶段：允许所有工具，但每步必须验证通过才能前进
 - 归档阶段：仅允许 read/write 用于清理和归档
 """
-import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable
+from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import QCoreApplication, QThread, pyqtSignal, QEventLoop, QTimer
 from loguru import logger
+from PyQt5.QtCore import QCoreApplication, QEventLoop, QThread, QTimer, pyqtSignal
 
+from app.core.conversation import ConversationExecutor
+from app.core.conversation.adapters import AutoLoopConversationAdapter
+from app.core.conversation.config import ConversationConfig, PermissionStrategy, filter_interactive_tools
+from app.core.conversation.core import ConversationCore
 from app.core.engines.auto_loop import (
     AutoLoopConfig,
     AutoLoopEngine,
-    LoopState,
     AutoLoopPromptComposer,
+    LoopState,
 )
-from app.core.conversation import ConversationExecutor
-from app.core.conversation.core import ConversationCore
-from app.core.conversation.config import ConversationConfig, PermissionStrategy, filter_interactive_tools
-from app.core.conversation.adapters import AutoLoopConversationAdapter
 
 
 class AutoLoopWorker(QThread):
@@ -45,7 +44,7 @@ class AutoLoopWorker(QThread):
     loop_completed = pyqtSignal(str)  # 完成消息
     loop_error = pyqtSignal(str)  # 错误消息
     loop_stopped = pyqtSignal()  # 用户手动停止
-    
+
     # === 阶段变更信号（用于运行卡 UI）===
     phase_changed = pyqtSignal(str)  # "planning" / "executing" / "archiving" / "completed"
 
@@ -55,7 +54,7 @@ class AutoLoopWorker(QThread):
 
     # === Token 实时更新信号（直接更新运行卡 UI）===
     tokens_updated = pyqtSignal(int)  # 追加的 token 数量
-    
+
     # === 消息日志列表信号（用于保存到会话）===
     messages_logged = pyqtSignal(list)  # 发送完整的消息日志列表
 
@@ -75,19 +74,19 @@ class AutoLoopWorker(QThread):
 
         # 执行阶段的步骤追踪
         self._last_step = 0  # 上次完成的步骤
-        
+
         # 汇总的完整消息列表（从每个 ChatWorker 获取，跨轮累积）
         self._all_messages: List[Dict] = []
-        
+
         # 每轮独立的消息列表（每轮开始时清空，仅记录本轮产生的消息）
         self._round_messages: List[Dict] = []
-        
+
         # 上一次 on_messages_updated 的消息 token 数（用于增量累加）
         self._last_message_token_count = 0
-        
+
         # 本轮开始前的消息基数（用于截取本轮新增消息）
         self._prev_message_count = 0
-        
+
         # Worker 同步事件（由 AutoLoopConversationAdapter 管理）
 
     def _configure_tools_for_phase(self, tools_schema: List[Dict]) -> List[Dict]:
@@ -227,7 +226,7 @@ class AutoLoopWorker(QThread):
             sm.sessions.append(auto_loop_session)
             sm.current_index = 0
             sm._touch_session(auto_loop_session.session_id)
-        
+
         # 发送阶段信号：规划中
         self.phase_changed.emit("planning")
         self.log_signal.emit("📋 进入规划阶段：拆解任务...")
@@ -241,11 +240,11 @@ class AutoLoopWorker(QThread):
             self._engine.iteration = iteration
             self.iteration_started.emit(iteration, self._config.max_iterations)
             self._emit_progress()
-            
+
             # 本轮独立消息追踪
             self._prev_message_count = len(self._all_messages)
             self._round_messages = []
-            
+
             # 给主线程时间处理信号并创建 assistant card
             time.sleep(0.2)
 
@@ -444,7 +443,7 @@ class AutoLoopWorker(QThread):
         if count > 0:
             self.log_signal.emit(f"📦 归档已保存至 {archive_dir}（共 {count} 个文件）")
         else:
-            self.log_signal.emit(f"📦 归档目录为空，跳过复制")
+            self.log_signal.emit("📦 归档目录为空，跳过复制")
 
     def _do_fallback_archive(self) -> bool:
         """执行兜底归档（max_iterations 耗尽时）
@@ -571,7 +570,7 @@ class AutoLoopWorker(QThread):
                     worker.wait(1000)
                     QCoreApplication.processEvents()
                 if self._is_cancelled and worker.isRunning():
-                    logger.info(f"[AutoLoop] 用户取消，中断 worker")
+                    logger.info("[AutoLoop] 用户取消，中断 worker")
                     worker.cancel()
                     worker.requestInterruption()
                     worker.wait(3000)

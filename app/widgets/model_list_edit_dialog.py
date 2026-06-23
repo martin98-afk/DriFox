@@ -4,17 +4,18 @@
 Enter 新增，Delete 删除，双击编辑，拖拽排序
 """
 from PyQt5.QtCore import Qt
-from app.utils.utils import get_font_family_css
-from app.utils.design_tokens import scale_font_size
 from PyQt5.QtWidgets import (
     QDialog,
-    QVBoxLayout,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QLabel,
+    QVBoxLayout,
 )
+
+from app.utils.design_tokens import scale_font_size
+from app.utils.utils import get_font_family_css
 
 
 class ModelListEditDialog(QDialog):

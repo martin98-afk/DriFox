@@ -14,7 +14,8 @@ ChatSession & SessionManager - 会话管理模块
 """
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
+
 from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages

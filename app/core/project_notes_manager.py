@@ -11,8 +11,8 @@
 
 from pathlib import Path
 from typing import Dict, Optional
-from loguru import logger
 
+from loguru import logger
 
 # 默认模板（与原 SQLite get_or_create 一致）
 INITIAL_TEMPLATE = """# 项目开发规范

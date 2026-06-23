@@ -6,10 +6,6 @@ AutoLoop Prompt 组合器 — 集中管理所有 prompt 模板
 """
 import re
 import time
-from typing import Optional
-
-from loguru import logger
-
 
 # ========== 阶段约束常量 ==========
 
@@ -386,10 +382,10 @@ class AutoLoopPromptComposer:
             "- 验证成功 → 前进到下一步",
             "",
             "### 完成信号",
-            f"- **当前步骤完成** → 输出 `STEP_X/Y_COMPLETE`（X=当前步骤序号, Y=总步骤数，数字可任意调整）",
+            "- **当前步骤完成** → 输出 `STEP_X/Y_COMPLETE`（X=当前步骤序号, Y=总步骤数，数字可任意调整）",
             f"- **全部步骤完成** → 输出 `{self._engine.config.completion_signal}`（独占一行）",
             f"  ⚠️ **重要**：`{self._engine.config.completion_signal}` 必须**连续 {self._engine.config.completion_threshold} 次**都输出，",
-            f"    循环才会真正结束。只输出一次不会结束，系统会提示「还需确认次数」。",
+            "    循环才会真正结束。只输出一次不会结束，系统会提示「还需确认次数」。",
             "",
             "### 当前步骤详情",
         ]
@@ -433,13 +429,13 @@ class AutoLoopPromptComposer:
             "",
             "1. **清理垃圾文件**：删除临时文件、缓存等不需要的内容",
             "2. **归档笔记**：",
-            f"   - 将 `SHARED_TASK_NOTES.md` 复制到 `.autoloop/archive/latest/SHARED_TASK_NOTES.md`",
-            f"   - 使用 `write` 工具创建该文件",
+            "   - 将 `SHARED_TASK_NOTES.md` 复制到 `.autoloop/archive/latest/SHARED_TASK_NOTES.md`",
+            "   - 使用 `write` 工具创建该文件",
             "3. **归档运行日志**：",
-            f"   - 将 `.autoloop/logs/` 下的所有 `round_*.md` 文件复制到 `.autoloop/archive/latest/logs/`",
-            f"   - 创建 `.autoloop/archive/latest/logs/` 目录（如果不存在）",
+            "   - 将 `.autoloop/logs/` 下的所有 `round_*.md` 文件复制到 `.autoloop/archive/latest/logs/`",
+            "   - 创建 `.autoloop/archive/latest/logs/` 目录（如果不存在）",
             "4. **创建归档索引**：",
-            f"   - 写入 `.autoloop/archive/latest/META.md`，包含任务概述和时间",
+            "   - 写入 `.autoloop/archive/latest/META.md`，包含任务概述和时间",
             "",
             "### 当前 SHARED_TASK_NOTES.md 内容参考",
             "```",

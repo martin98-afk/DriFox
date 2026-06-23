@@ -6,7 +6,7 @@ UI 对话引擎 — 处理桌面 LLM 对话的核心逻辑
 保留 ChatEngine 别名在 __init__.py 中提供向后兼容。
 """
 import os
-from typing import Dict, List, Optional, Callable, Any
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -15,11 +15,11 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
-from app.core.message_content import content_to_text
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
+from app.core.message_content import content_to_text
 from app.core.token_estimator import count_messages_tokens
 from app.tools import get_builtin_tools_schema
 

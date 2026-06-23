@@ -1,6 +1,6 @@
 # app/core/conversation/executor.py
 import threading
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -253,7 +253,7 @@ class ConversationExecutor:
         # 等待 worker 线程结束（最多等 3 秒）
         if worker.isRunning():
             if not worker.wait(3000):
-                logger.warning(f"[ConversationExecutor] Worker did not finish within 3s, requesting interruption")
+                logger.warning("[ConversationExecutor] Worker did not finish within 3s, requesting interruption")
                 worker.quit()
                 worker.requestInterruption()
                 if not worker.wait(1000):
@@ -262,7 +262,7 @@ class ConversationExecutor:
                     # 会导致 Python 解释器状态损坏 → 段错误闪退。
                     # 改用 requestInterruption() 请求线程退出（线程内检查 isInterruptionRequested()），
                     # 即使线程未及时退出，仅产生资源泄漏，远优于进程崩溃。
-                    logger.warning(f"[ConversationExecutor] Worker still running after interruption request, proceeding with cleanup")
+                    logger.warning("[ConversationExecutor] Worker still running after interruption request, proceeding with cleanup")
 
         # worker 已停止，状态已稳定，安全获取中断消息
         try:

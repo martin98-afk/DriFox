@@ -1,23 +1,24 @@
 # -*- coding: utf-8 -*-
-from typing import List
 from pathlib import Path
+from typing import List
 
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QWidget,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QWidget,
 )
 from qfluentwidgets import (
     CardWidget,
-    qconfig,
-    ExpandSettingCard,
     ConfigItem,
     ConfigValidator,
+    ExpandSettingCard,
     StrongBodyLabel,
+    qconfig,
 )
+
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
@@ -75,6 +76,7 @@ class SkillItem(CardWidget):
 
     def _setup_ui(self, name: str, description: str, is_enabled: bool):
         from qfluentwidgets import SwitchButton
+
         from app.utils.design_tokens import SwitchStyles
 
         layout = QHBoxLayout(self)
@@ -130,7 +132,6 @@ class SkillListSettingCard(ExpandSettingCard):
 
     def _discover_skills(self):
         from pathlib import Path
-        import yaml
 
         from app.utils.utils import get_app_data_dir
 

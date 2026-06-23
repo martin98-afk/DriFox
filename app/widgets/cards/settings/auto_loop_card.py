@@ -8,23 +8,45 @@ AutoLoop 卡片组件 — 配置卡 + 运行卡
 import time
 
 from PyQt5.QtCore import (
-    Qt, pyqtSignal, QTimer, QVariantAnimation,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    pyqtSignal,
 )
 from PyQt5.QtGui import (
-    QPainter, QPen, QBrush, QLinearGradient, QColor,
+    QBrush,
+    QColor,
+    QLinearGradient,
+    QPainter,
+    QPen,
 )
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QTextEdit, QFrame, QProgressBar, QScrollArea, )
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QScrollArea,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
-    PrimaryPushButton, PushButton, BodyLabel, StrongBodyLabel, LineEdit,
-    SpinBox, FluentIcon, ToolButton, TransparentToolButton, )
+    BodyLabel,
+    FluentIcon,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    SpinBox,
+    StrongBodyLabel,
+    ToolButton,
+    TransparentToolButton,
+)
 from qfluentwidgets.components.widgets.card_widget import CardSeparator
 from qfluentwidgets.components.widgets.flyout import IconWidget
 
 from app.core.engines.auto_loop import AutoLoopConfig
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
-from app.utils.design_tokens import font_size_css, scale_font_size, Colors
 
 FONT_CSS = get_font_family_css()
 
@@ -340,7 +362,7 @@ class AutoLoopConfigCard(QFrame):
                 border-radius: 6px;
             """)
         # 刷新信息标签
-        for label in [self._iter_label, self._time_label, self._token_label, 
+        for label in [self._iter_label, self._time_label, self._token_label,
                       self._status_label, self._phase_label]:
             if hasattr(self, label.property('objectName')) or hasattr(label, 'setStyleSheet'):
                 label.setStyleSheet(f"font-size: {scale_font_size(13)}px; {FONT_CSS}")
@@ -689,7 +711,7 @@ class AutoLoopRunningCard(QFrame):
             "completed": "✅ 已完成",
         }.get(phase, "未知")
         self._phase_label.setText(phase_text)
-        
+
         # 根据阶段调整颜色
         Colors.refresh()
         color_map = {
@@ -700,7 +722,7 @@ class AutoLoopRunningCard(QFrame):
         }
         color = color_map.get(phase, Colors.SEND_BTN_START)
         self._phase_label.setStyleSheet(f"color: {color}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
-        
+
         # 阶段变更时更新状态文本
         if phase == "planning":
             self._status_label.setText("▶ 拆解任务中...")
@@ -710,7 +732,7 @@ class AutoLoopRunningCard(QFrame):
             self._status_label.setText("📦 归档清理中...")
         elif phase == "completed":
             self._status_label.setText("✅ 全部完成")
-        
+
         self.update()
 
     # ========== 更新方法 ==========
@@ -752,7 +774,7 @@ class AutoLoopRunningCard(QFrame):
     def update_tokens(self, total_tokens: int):
         """更新 token 显示（使用紧凑的数字格式 K/M）"""
         self._current_tokens = total_tokens
-        
+
         # 数字格式化：使用 K/M 缩写
         def format_token(n: int) -> str:
             if n >= 1000000:
@@ -760,7 +782,7 @@ class AutoLoopRunningCard(QFrame):
             elif n >= 1000:
                 return f"{n / 1000:.1f}K"
             return str(n)
-        
+
         # Token 显示：当前使用 / 设定总数 + 百分比
         if self._max_tokens > 0:
             self._token_label.setText(f"{format_token(total_tokens)} / {format_token(self._max_tokens)}")
@@ -770,7 +792,7 @@ class AutoLoopRunningCard(QFrame):
         else:
             self._token_label.setText(format_token(total_tokens))
             self._token_percent_label.setText("")
-        
+
         self._token_label.repaint()
 
     def set_max_tokens(self, max_tokens: int):
@@ -1172,13 +1194,13 @@ class AutoLoopFullPage(QFrame):
         # 从布局中移除 placeholder（保留引用）
         self._step_layout.removeWidget(self._step_placeholder)
         self._step_placeholder.setParent(None)
-        
+
         # 删除其他所有 widget
         while self._step_layout.count():
             item = self._step_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        
+
         # 重新添加 placeholder
         self._step_layout.addWidget(self._step_placeholder)
         self._step_layout.addStretch()

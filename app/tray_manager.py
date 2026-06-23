@@ -5,15 +5,16 @@
 """
 import platform
 import uuid
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QApplication
+
 from loguru import logger
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
 
 class TrayManager(QObject):
     """全局唯一托盘图标管理器，管理所有聊天窗口的托盘行为"""
-    
+
     # 信号：当窗口数量变为0时发出
     allWindowsClosed = pyqtSignal()
 
@@ -64,14 +65,14 @@ class TrayManager(QObject):
         tray_menu.addAction(quit_action)
 
         self._tray_icon.setContextMenu(tray_menu)
-        
+
         # 监听托盘图标点击（Windows: 单击恢复窗口）
         if platform.system() == "Windows":
             self._tray_icon.activated.connect(self._on_tray_activated)
-        
+
         # 监听托盘消息点击（点击通知时显示对应窗口）
         self._tray_icon.messageClicked.connect(self._on_message_clicked)
-        
+
         self._tray_icon.show()
 
         # ========== 多窗口选中管理 ==========
@@ -338,7 +339,7 @@ class TrayManager(QObject):
             except RuntimeError:
                 # 窗口已被 C++ 销毁，清理引用
                 self._windows = [x for x in self._windows if x is not w]
-        
+
         if not has_visible and self._windows:
             # 没有可见窗口，显示第一个
             w = self._windows[0]
@@ -403,18 +404,18 @@ class TrayManager(QObject):
     def _show_or_create_window(self) -> None:
         """显示所有窗口或创建新窗口"""
         logger.info(f"[_show_or_create] windows count: {len(self._windows)}")
-        
+
         if not self._windows:
             logger.warning("[_show_or_create] 没有已注册的窗口")
             return
-        
+
         # 找到所有有效的窗口（包括隐藏的）
         valid_windows = [w for w in self._windows if self._is_window_valid(w)]
-        
+
         if not valid_windows:
             logger.warning("[_show_or_create] 没有有效窗口")
             return
-        
+
         # 显示第一个有效窗口
         w = valid_windows[0]
         try:
@@ -432,7 +433,7 @@ class TrayManager(QObject):
         # 先注销所有窗口，防止 closeEvent 再次调用 unregister
         all_windows = list(self._windows)
         self._windows.clear()
-        
+
         for w in all_windows:
             try:
                 if hasattr(w, "_is_closing"):
@@ -440,5 +441,5 @@ class TrayManager(QObject):
                 w.close()
             except Exception:
                 pass
-        
+
         QApplication.instance().quit()

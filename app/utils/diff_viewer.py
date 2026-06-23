@@ -12,19 +12,20 @@ Git Diff 差异对比模块 - Cursor/VS Code 风格差异审查工具
   7. 上下文智能折叠（连续未修改行自动收起）
 """
 
-import orjson as json
 import difflib
+import os
 import re
 import subprocess
-import os
 import sys
-
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
+import orjson as json
 from loguru import logger
+from PyQt5.QtCore import Qt, QTimer, QUrl
+from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 from PyQt5.QtWidgets import QDialog, QHBoxLayout
-from PyQt5.QtCore import Qt, QUrl, QTimer
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+
 from app.core.webengine_profile import create_transient_web_profile
 
 try:
@@ -924,9 +925,9 @@ requestAnimationFrame(function(){{
                 u.append(f'<div class="du-row hh" data-type="hunk-header">'
                          f'<span class="du-num"></span><span class="du-num"></span>'
                          f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>')
-                s.append(f'<div class="ds-pair hh" data-type="hunk-header">'
-                         f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                         f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
+                s.append('<div class="ds-pair hh" data-type="hunk-header">'
+                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
+                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
                 i += 1
 
             elif ln.startswith("-") and not ln.startswith("---"):
@@ -1013,9 +1014,9 @@ requestAnimationFrame(function(){{
                 u.append(f'<div class="du-row ctx" data-type="context">'
                          f'<span class="du-num"></span><span class="du-num"></span>'
                          f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>')
-                s.append(f'<div class="ds-pair ctx" data-type="context">'
-                         f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                         f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
+                s.append('<div class="ds-pair ctx" data-type="context">'
+                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
+                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
                 i += 1
 
         return {"u": "\n".join(u), "s": "\n".join(s)}

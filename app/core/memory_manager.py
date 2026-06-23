@@ -7,18 +7,18 @@
 """
 
 import os
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
+
 from loguru import logger
 
+from app.core import project_notes_manager
 from app.core.store import (
-    SessionStore,
+    KeyDocumentsRepository,
     MemoryRepository,
     ProjectNotesRepository,
-    KeyDocumentsRepository,
+    SessionStore,
 )
-from app.core import project_notes_manager
 
 # ========== 兼容旧接口（已废弃，保持向后兼容）==========
 # 旧版 5 大类记忆已废弃，但 topic_summary.py 还在用
@@ -46,13 +46,13 @@ class MemoryManagerCore:
     def __init__(self):
         self._session_store: Optional[SessionStore] = None
         self._db_manager = None
-        
+
         # 三个仓储
         self._entry_memories_repo: Optional[MemoryRepository] = None
         # SQLite 仓储：用于 (1) 无 workdir 项目的笔记存储，(2) 一次性从历史数据迁出
         self._sqlite_project_notes_repo: Optional[ProjectNotesRepository] = None
         self._key_documents_repo: Optional[KeyDocumentsRepository] = None
-        
+
         # 初始化存储
         self._init_storage()
 
@@ -63,12 +63,12 @@ class MemoryManagerCore:
             if self._session_store.is_initialized:
                 self._db_manager = self._session_store._db
                 logger.info("[MemoryManager] SQLite 存储已启用")
-                
+
                 # 初始化三个仓储
                 self._entry_memories_repo = MemoryRepository(self._db_manager)
                 self._sqlite_project_notes_repo = ProjectNotesRepository(self._db_manager)
                 self._key_documents_repo = KeyDocumentsRepository(self._db_manager)
-                
+
                 return
             else:
                 logger.warning("[MemoryManager] SQLite 初始化失败")

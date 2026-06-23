@@ -9,9 +9,9 @@ class ContainerType(Enum):
 
 
 from app.widgets.cards.card_container import (
+    BottomCardContainer,
     CardContainer,
     TopCardContainer,
-    BottomCardContainer,
 )
 from app.widgets.cards.card_manager import CardManager
 

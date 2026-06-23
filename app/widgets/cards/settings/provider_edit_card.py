@@ -4,34 +4,32 @@
 """
 import threading
 
-from loguru import logger
 import requests
-from PyQt5.QtCore import pyqtSignal, Qt
+from loguru import logger
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     InfoBarPosition,
-)
-from qfluentwidgets import (
     LineEdit,
     PrimaryPushButton,
 )
 
 from app.constants import (
+    FREE_PROVIDERS,
     PROVIDER_ICONS,
     PROVIDER_MODELS,
-    FREE_PROVIDERS,
 )
-from app.utils.utils import get_icon, get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
-from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 from app.widgets.model_list_edit_dialog import ModelListEditDialog
+from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
 
 def _is_text_chat_model(model_id: str) -> bool:

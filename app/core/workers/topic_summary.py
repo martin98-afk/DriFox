@@ -3,14 +3,13 @@
 话题摘要任务 - 异步生成话题摘要
 """
 
-import orjson as json
 import re
-
 from typing import Callable
 
+import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QRunnable, pyqtSlot
 from openai import OpenAI
+from PyQt5.QtCore import QRunnable, pyqtSlot
 
 from app.core.workers.error_handler import create_api_call_with_retry
 
@@ -101,7 +100,7 @@ class TopicSummaryTask(QRunnable):
             if not self.messages:
                 self.callback({"topic_summary": ""})
                 return
-            
+
             summary_text = self._build_conversation_context()
 
             # 安全转义 previous_summary 用于 JSON 示例
@@ -176,7 +175,7 @@ class TopicSummaryTask(QRunnable):
                     texts = [item.get("text", "") for item in last_content if item.get("type") == "text"]
                     last_content = "\n".join(texts)
                 self.callback({"topic_summary": str(last_content)[:15]})
-            
+
         except Exception as e:
             logger.exception(f"[TopicSummary] 生成摘要失败: {e}")
             self.callback(None, error=str(e))

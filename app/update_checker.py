@@ -1,18 +1,18 @@
+import glob
 import os
 import platform
 import plistlib
 import subprocess
 import tempfile
 import time
-import glob
 import weakref
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QWidget, QApplication, QProgressDialog, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QHBoxLayout, QProgressDialog, QWidget
 from qfluentwidgets import (
     InfoBar,
-    InfoBarPosition,
     InfoBarIcon,
+    InfoBarPosition,
     PrimaryPushButton,
 )
 
@@ -121,7 +121,7 @@ class UpdateChecker(QWidget):
         info_bar = InfoBar(
             icon=InfoBarIcon.INFORMATION,
             title=f"发现新版本 {latest_version}",
-            content=f"",
+            content="",
             orient=Qt.Vertical,
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
@@ -130,8 +130,8 @@ class UpdateChecker(QWidget):
         )
 
         # 创建按钮容器（水平布局）
-        from PyQt5.QtGui import QDesktopServices
         from PyQt5.QtCore import QUrl
+        from PyQt5.QtGui import QDesktopServices
         from qfluentwidgets import PushButton  # 普通按钮用于次要操作
 
         button_container = QWidget()

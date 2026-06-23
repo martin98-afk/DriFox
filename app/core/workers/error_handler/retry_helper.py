@@ -11,18 +11,18 @@ API 调用重试辅助工具
 - 支持更精细的错误分类
 """
 
-import time
 import random
+import time
 from functools import wraps
-from typing import Callable, Any, Optional
+from typing import Any, Callable, Optional
 
 from loguru import logger
 
 # 尝试导入新的错误分类器
 try:
     from app.core.workers.error_handler.error_classifier import (
-        ErrorClassifier,
         ClassifiedError,
+        ErrorClassifier,
         FailoverReason,
         get_error_classifier,
     )
@@ -60,11 +60,11 @@ def is_retriable_error(e: Exception) -> bool:
 
     # 回退到基础检查
     from openai import (
-        RateLimitError,
-        APIError,
         APIConnectionError,
+        APIError,
         APITimeoutError,
         InternalServerError,
+        RateLimitError,
     )
 
     is_rate_limit = isinstance(e, RateLimitError)
@@ -108,11 +108,11 @@ def get_error_type_name(e: Exception) -> str:
 
     # 回退到基础检查
     from openai import (
-        RateLimitError,
-        APIError,
         APIConnectionError,
+        APIError,
         APITimeoutError,
         InternalServerError,
+        RateLimitError,
     )
 
     if isinstance(e, RateLimitError):
@@ -199,15 +199,15 @@ def retry_on_api_error(
                             if classified:
                                 if classified.should_compress:
                                     logger.info(
-                                        f"[API] 上下文溢出，需要压缩后重试"
+                                        "[API] 上下文溢出，需要压缩后重试"
                                     )
                                 elif classified.should_rotate_credential:
                                     logger.warning(
-                                        f"[API] 认证失败，需要轮换凭据"
+                                        "[API] 认证失败，需要轮换凭据"
                                     )
                                 elif classified.should_fallback:
                                     logger.warning(
-                                        f"[API] 模型不可用，需要切换模型"
+                                        "[API] 模型不可用，需要切换模型"
                                     )
                         raise
 
@@ -284,7 +284,7 @@ def create_api_call_with_retry(
                     if classified.should_compress:
                         compression_needed = True
                         logger.info(
-                            f"[API] 上下文溢出标记，尝试重试"
+                            "[API] 上下文溢出标记，尝试重试"
                         )
                     elif classified.reason == FailoverReason.billing:
                         # 计费问题不重试

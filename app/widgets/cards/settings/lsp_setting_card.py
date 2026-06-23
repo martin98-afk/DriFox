@@ -8,31 +8,28 @@ from __future__ import annotations
 
 from typing import Dict
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess
+from loguru import logger
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QWidget,
 )
-from loguru import logger
 from qfluentwidgets import (
     CardWidget,
     Dialog,
     ExpandSettingCard,
-    StrongBodyLabel,
-    PushButton,
     InfoBar,
     InfoBarPosition,
+    PushButton,
+    StrongBodyLabel,
     SwitchButton,
 )
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, scale_font_size, font_size_css, SwitchStyles
-from app.utils.design_tokens import apply_font_size_to_widget
+from app.utils.design_tokens import Colors, SwitchStyles, apply_font_size_to_widget, scale_font_size
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.elided_label import _ElidedLabel
-
 
 # ── LSP 单行 ──────────────────────────────────────────────────────
 
@@ -291,8 +288,8 @@ class LspListSettingCard(ExpandSettingCard):
 
         # 将 installHint 中的 pip 替换为当前环境的包管理器
         # 优先 uv（项目标准），其次 python -m pip，最后原样
-        import sys
         import shutil
+        import sys
         _cmd = install_hint
         if _cmd.startswith("pip "):
             pkg = _cmd[4:]  # "install pyright"
@@ -321,8 +318,8 @@ class LspListSettingCard(ExpandSettingCard):
         if not w.exec_():
             return
 
-        import subprocess
         import os
+        import subprocess
 
         try:
             if sys.platform == "win32":
@@ -363,7 +360,7 @@ class LspListSettingCard(ExpandSettingCard):
 
             InfoBar.success(
                 title=f"正在安装 {server_name}",
-                content=f"已在终端中打开安装进程。完成后请点击「刷新」按钮。",
+                content="已在终端中打开安装进程。完成后请点击「刷新」按钮。",
                 orient=Qt.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,

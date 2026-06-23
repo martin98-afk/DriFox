@@ -1,32 +1,33 @@
 # -*- coding: utf-8 -*-
 import platform
 import uuid
+
 import psutil
-from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, QPoint, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QMouseEvent
+from loguru import logger
+from PyQt5.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QMouseEvent, QPainter
 from PyQt5.QtWidgets import (
-    QWidget,
-    QStackedWidget,
+    QApplication,
     QDialog,
-    QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QApplication,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from loguru import logger
 from qfluentwidgets import (
-    isDarkTheme,
     FluentIcon as FIF,
-    TransparentToolButton,
+)
+from qfluentwidgets import (
     IconWidget,
+    TransparentToolButton,
+    isDarkTheme,
 )
 
 from app.tray_manager import TrayManager
 from app.utils.config import Settings
-from app.utils.design_tokens import get_font_family_css
-from app.utils.design_tokens import scale_font_size
+from app.utils.design_tokens import Colors, font_size_css, get_font_family_css, scale_font_size
 from app.utils.utils import get_icon
-from app.utils.design_tokens import font_size_css, Colors
 
 
 class ToolWindowTitleBar(QWidget):
@@ -739,7 +740,7 @@ class ToolPopupDialog(QDialog):
 
         # macOS 不支持这种方式，透明穿透在 macOS 上会导致窗口系统问题
         if platform.system() != "Windows":
-            logger.debug(f"[ToolPopupDialog] 穿透模式仅支持 Windows，macOS 跳过")
+            logger.debug("[ToolPopupDialog] 穿透模式仅支持 Windows，macOS 跳过")
             return
 
         import ctypes

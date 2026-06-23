@@ -13,11 +13,14 @@
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QSizePolicy,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QWidget,
 )
 
-from app.utils.utils import get_font_family_css
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css
 
 
 class UndoDeleteCard(QWidget):

@@ -7,12 +7,12 @@
 - 完全从文件读取，不硬编码主题数据
 - 参考技能加载模式设计（多层搜索 + 合并）
 """
-import os
-import weakref
-import yaml
 import logging
+import weakref
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, Optional
+
+import yaml
 
 logger = logging.getLogger(__name__)
 

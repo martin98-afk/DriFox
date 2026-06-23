@@ -8,19 +8,19 @@ MCP Server 配置卡片
 """
 
 import json
-from typing import Dict, List, Tuple
+from typing import Dict
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from loguru import logger
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
-    QPlainTextEdit,
-    QStackedWidget, QSizePolicy,
 )
-from loguru import logger
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
@@ -36,9 +36,16 @@ from qfluentwidgets import (
 )
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, CardStyles, Sizes, ButtonStyles, SwitchStyles, scale_font_size, font_size_css
-from app.utils.design_tokens import apply_font_size_to_widget
-from app.utils.utils import get_icon, get_font_family_css
+from app.utils.design_tokens import (
+    ButtonStyles,
+    CardStyles,
+    Colors,
+    Sizes,
+    SwitchStyles,
+    apply_font_size_to_widget,
+    scale_font_size,
+)
+from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
 
@@ -625,7 +632,7 @@ class MCPListSettingCard(ExpandSettingCard):
         self._status_timer.setInterval(3000)
         self._status_timer.timeout.connect(self._refresh_status_dots)
         self._status_timer.timeout.connect(self._update_mcp_token_count)
-        
+
         self._setup_ui()
         self._refresh()
         # 初始刷新一次状态指示灯
@@ -749,7 +756,7 @@ class MCPListSettingCard(ExpandSettingCard):
             else:
                 logger.warning(f"[MCP] '{name}' 热连接失败")
                 InfoBar.error(
-                    title=f"MCP 连接失败",
+                    title="MCP 连接失败",
                     content=f"'{name}' 连接失败，请检查配置是否正确",
                     parent=self.window(),
                     duration=5000,

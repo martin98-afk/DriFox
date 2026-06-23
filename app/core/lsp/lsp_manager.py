@@ -17,13 +17,12 @@ import os
 import subprocess
 import sys
 import threading
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 from .lsp_client import LspClient
-from .lsp_config import LspServerConfig, load_lsp_configs
+from .lsp_config import LspServerConfig
 
 
 class LspManager:
@@ -476,8 +475,8 @@ class LspManager:
 
             file.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.
         """
-        import re
         import asyncio.subprocess
+        import re
         subprocess_kwargs = {}
         if sys.platform == "win32":
             subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW

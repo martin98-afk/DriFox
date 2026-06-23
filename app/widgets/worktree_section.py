@@ -11,16 +11,22 @@ import os
 import subprocess
 import sys
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame, QSizePolicy, QDialog,
-)
 from loguru import logger
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtWidgets import (
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css
 from app.utils.git_worktree import GitWorktreeDetector
+from app.utils.utils import get_font_family_css
 
 # Windows 下隐藏 cmd 窗口
 _CREATION_FLAGS = 0
@@ -59,7 +65,7 @@ class _WorktreeRow(QWidget):
         # 左侧竖线（加粗到 3px，配合更大圆点）
         bar = QFrame(self)
         bar.setFixedWidth(3)
-        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.15);")
+        bar.setStyleSheet("background-color: rgba(255,255,255,0.15);")
         layout.addWidget(bar)
 
         # 圆点（加大到 8x8，配合加粗的线）
@@ -273,7 +279,7 @@ class _AddWorktreeRow(QWidget):
         # 竖线（加粗到 3px，配合圆点尺寸）
         bar = QFrame(self)
         bar.setFixedWidth(3)
-        bar.setStyleSheet(f"background-color: rgba(255,255,255,0.15);")
+        bar.setStyleSheet("background-color: rgba(255,255,255,0.15);")
         layout.addWidget(bar)
 
         add_label = QLabel("＋ 新建 worktree", self)

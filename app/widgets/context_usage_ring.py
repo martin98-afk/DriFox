@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-from PyQt5.QtCore import Qt, QTimer, QPoint, QRectF
-import math
-from PyQt5.QtGui import QColor, QPainter, QPen, QFontMetrics, QPainterPath, QLinearGradient
-from PyQt5.QtWidgets import QWidget, QApplication, QToolTip
 
-from app.utils.design_tokens import _get_global_font, scale_font_size, Colors
+from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
+from PyQt5.QtGui import QColor, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
+from PyQt5.QtWidgets import QApplication, QToolTip, QWidget
+
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 
 
 class ContextUsageRing(QWidget):

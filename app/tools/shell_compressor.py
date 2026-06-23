@@ -21,7 +21,7 @@ Shell 输出压缩 - 减少 LLM token 消耗
 """
 
 import re
-from typing import Optional, Tuple
+from typing import Optional
 
 # =============================================================================
 # 基础工具
@@ -92,12 +92,12 @@ def classify(command: str) -> str:
     - compress: 应用 pattern 压缩
     """
     cmd = command.strip().lower()
-    
+
     # protected 检查
     for pat in _PROTECTED_PATTERNS:
         if re.search(pat, command, re.IGNORECASE):
             return "protected"
-    
+
     # passthrough：容器列表、tree 等需要保持格式的命令
     passthrough = [
         r'^docker\s+ps',
@@ -112,7 +112,7 @@ def classify(command: str) -> str:
     for pat in passthrough:
         if re.search(pat, command, re.IGNORECASE):
             return "passthrough"
-    
+
     return "compress"
 
 
@@ -132,124 +132,124 @@ def compress_output(command: str, output: str) -> Optional[str]:
         压缩后的字符串，如果无法压缩则返回 None
     """
     policy = classify(command)
-    
+
     if policy == "protected":
         return None
-    
+
     # 先清理 ANSI
     cleaned = _strip_ansi(output)
     if len(cleaned) < len(output):
         output = cleaned
-    
+
     if policy == "passthrough":
         # passthrough: 去除空行、截断超长输出
         lines = [l.rstrip() for l in output.split('\n') if l.strip()]
         if len(lines) > 200:
             lines = _compact_lines(lines, 100)
         return '\n'.join(lines)
-    
+
     # compress: 尝试各 pattern
     # 按使用频率排序
     if (cmd_starts_with(command, "git ") or cmd_starts_with(command, "git.exe")):
         result = _compress_git(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "npm ") or cmd_starts_with(command, "yarn "):
         result = _compress_npm(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "pnpm "):
         result = _compress_pnpm(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "cargo "):
         result = _compress_cargo(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "pytest") or cmd_starts_with(command, "python -m pytest"):
         result = _compress_pytest(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "ruff "):
         result = _compress_ruff(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "mypy") or cmd_starts_with(command, "python -m mypy"):
         result = _compress_mypy(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "pip "):
         result = _compress_pip(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "docker ") or cmd_starts_with(command, "docker-compose "):
         result = _compress_docker(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "kubectl "):
         result = _compress_kubectl(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "go "):
         result = _compress_go(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "node "):
         result = _compress_node(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "npx "):
         result = _compress_npx(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "tsc") or "typescript" in command.lower():
         result = _compress_typescript(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "eslint") or cmd_starts_with(command, "biome "):
         result = _compress_eslint(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "curl "):
         result = _compress_curl(command, output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "grep ") or cmd_starts_with(command, "rg "):
         result = _compress_grep(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "find "):
         result = _compress_find(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     if cmd_starts_with(command, "ls ") or command.strip() == "ls":
         result = _compress_ls(output)
         if result:
             return _shorter_only(result, output) or result
-    
+
     # 回退：通用压缩（去除空行，截断超长输出）
     result = _compress_generic(output)
     if result:
         return _shorter_only(result, output) or result
-    
+
     return None
 
 
@@ -265,55 +265,55 @@ def cmd_starts_with(command: str, prefix: str) -> bool:
 def _compress_git(command: str, output: str) -> Optional[str]:
     """Git 各子命令的压缩"""
     cmd_lower = command.strip().lower()
-    
+
     # git status
     if re.search(r'git\s+status', cmd_lower):
         return _compress_git_status(output)
-    
+
     # git log
     if re.search(r'git\s+log', cmd_lower):
         return _compress_git_log(command, output)
-    
+
     # git diff (不压缩 git diff 的实际代码内容，只压缩统计行)
     if re.search(r'git\s+diff', cmd_lower):
         return _compress_git_diff(output)
-    
+
     # git add
     if re.search(r'git\s+add', cmd_lower):
         return _compress_git_add(output)
-    
+
     # git commit
     if re.search(r'git\s+commit', cmd_lower):
         return _compress_git_commit(output)
-    
+
     # git push
     if re.search(r'git\s+push', cmd_lower):
         return _compress_git_push(output)
-    
+
     # git pull
     if re.search(r'git\s+pull', cmd_lower):
         return _compress_git_pull(output)
-    
+
     # git branch
     if re.search(r'git\s+branch', cmd_lower):
         return _compress_git_branch(output)
-    
+
     # git stash
     if re.search(r'git\s+stash', cmd_lower):
         return _compress_git_stash(command, output)
-    
+
     # git clone
     if re.search(r'git\s+clone', cmd_lower):
         return _compress_git_clone(output)
-    
+
     # git fetch
     if re.search(r'git\s+fetch', cmd_lower):
         return _compress_git_fetch(output)
-    
+
     # git merge
     if re.search(r'git\s+merge', cmd_lower):
         return _compress_git_merge(output)
-    
+
     return None
 
 
@@ -326,21 +326,21 @@ def _compress_git_status(output: str) -> str:
     untracked = []
     section = ""
     ahead = 0
-    
+
     for line in lines:
         t = line.strip()
-        
+
         # 分支
         m = re.match(r'On branch (.+)', t)
         if m:
             branch = m.group(1)
             continue
-        
+
         m = re.match(r'Your branch is ahead .+ by (\d+) commit', t)
         if m:
             ahead = int(m.group(1))
             continue
-        
+
         # 分段
         if 'Changes to be committed' in t:
             section = "staged"
@@ -351,7 +351,7 @@ def _compress_git_status(output: str) -> str:
         if 'Untracked files' in t:
             section = "untracked"
             continue
-        
+
         # 文件
         if t.startswith('new file:'):
             f = t[9:].strip()
@@ -373,14 +373,14 @@ def _compress_git_status(output: str) -> str:
                 staged.append(f"->{f}")
         elif section == "untracked" and t and not t.startswith('(') and not t.startswith('Untracked'):
             untracked.append(t)
-    
+
     # 构造输出
     parts = []
     if ahead > 0:
         parts.append(f"{branch} ↑{ahead}")
     else:
         parts.append(branch)
-    
+
     if staged:
         parts.append(f"staged: {' '.join(staged)}")
     if unstaged:
@@ -389,7 +389,7 @@ def _compress_git_status(output: str) -> str:
         parts.append(f"untracked: {' '.join(untracked)}")
     if "nothing to commit" in output:
         parts.append("clean")
-    
+
     return '\n'.join(parts)
 
 
@@ -402,7 +402,7 @@ def _compress_git_log(command: str, output: str) -> str:
             return output.strip()
         # 截断到前 8 行，加摘要
         return '\n'.join(lines[:8]) + f"\n... ({len(lines) - 8} more commits)"
-    
+
     # 标准 log：保留前 3 条完整信息，剩余截断
     commits = re.split(r'\n(?=commit\s)', output)
     if len(commits) <= 3:
@@ -411,13 +411,13 @@ def _compress_git_log(command: str, output: str) -> str:
             if 'diff --git' in output:
                 return output  # 完整保留
         return output.strip()
-    
+
     # 截断
     kept = commits[:3]
     if 'diff --git' in output:
         # 保留最后一个完整 diff，其余截断
         kept = commits[:1]
-    
+
     return '\n'.join(kept) + f"\n... ({len(commits) - len(kept)} more commits)"
 
 
@@ -426,26 +426,26 @@ def _compress_git_diff(output: str) -> str:
     # --stat 只保留汇总
     if re.match(r'\s*\d+\s+file', output) and 'diff --git' not in output:
         return output.strip()
-    
+
     # 有实际 diff 内容，保留 hunks + 统计
     stat_match = re.search(r'(\d+\s+files?\s+changed.*)', output)
     stats = stat_match.group(1) if stat_match else ""
-    
+
     # 提取关键文件变更
     files = re.findall(r'(diff --git.*?)(?=\n(?:diff --git|---|\+\+\+|\Z))', output, re.DOTALL)
     if not files:
         return output.strip()
-    
+
     # 保留前 3 个文件的完整 diff
     compressed = []
     for f in files[:3]:
         compressed.append(f.strip())
-    
+
     if stats:
         compressed.append(stats)
     if len(files) > 3:
         compressed.append(f"... ({len(files) - 3} more files)")
-    
+
     return '\n'.join(compressed)
 
 
@@ -459,7 +459,7 @@ def _compress_git_add(output: str) -> str:
 def _compress_git_commit(output: str) -> str:
     """git commit 压缩"""
     parts = []
-    
+
     # hook 输出
     hook_lines = []
     for line in output.split('\n'):
@@ -467,13 +467,13 @@ def _compress_git_commit(output: str) -> str:
             hook_lines.append(line.strip())
         elif line.strip().startswith('['):
             break
-    
+
     if hook_lines:
         if len(hook_lines) > 5:
             parts.append(f"{len(hook_lines)} hooks passed")
         else:
             parts.extend(hook_lines)
-    
+
     # commit hash + message
     m = re.search(r'\[([^\s]+)\s+([a-f0-9]+)\]\s*(.+)', output)
     if m:
@@ -481,42 +481,42 @@ def _compress_git_commit(output: str) -> str:
         hash_ = m.group(2)[:7]
         msg = m.group(3).strip()
         parts.append(f"{branch} {hash_} {msg}")
-    
+
     # 变更统计
     m = re.search(r'(\d+)\s+files?\s+changed.*', output)
     if m:
         parts.append(output[output.rfind(m.group(0)):].strip())
-    
+
     return '\n'.join(parts) if parts else output.strip()
 
 
 def _compress_git_push(output: str) -> str:
     """git push 压缩"""
     parts = []
-    
+
     # 远程信息
     if 'To ' in output:
         m = re.search(r'To\s+(\S+)', output)
         if m:
             parts.append(f"-> {m.group(1)}")
-    
+
     # ref 更新
     m = re.search(r'([a-f0-9]+)\.\.([a-f0-9]+)\s+(\S+)\s*->\s*(\S+)', output)
     if m:
         parts.append(f"{m.group(3)}: {m.group(2)[:7]}..{m.group(4)[:7]}")
-    
+
     # PR/MR URL
     if 'pull/' in output or 'merge_requests' in output:
         m = re.search(r'(https://\S+(?:pull/\S+|merge_requests/\S+))', output)
         if m:
             parts.append(m.group(1))
-    
+
     # pipeline URL
     if 'pipeline' in output.lower():
         m = re.search(r'(https://\S+pipelines/\S+)', output)
         if m:
             parts.append(m.group(1))
-    
+
     return '\n'.join(parts) if parts else output.strip()
 
 
@@ -548,15 +548,15 @@ def _compress_git_stash(command: str, output: str) -> str:
         if len(lines) <= 5:
             return '\n'.join(lines)
         return '\n'.join(lines[:3]) + f"\n... ({len(lines) - 3} more)"
-    
+
     if 'stash pop' in command or 'stash drop' in command or 'stash apply' in command:
         if output.strip():
             return output.strip()
         return "ok"
-    
+
     if 'stash show' in command:
         return output.strip()
-    
+
     # git stash (push)
     if output.strip():
         return output.strip()
@@ -605,32 +605,32 @@ def _compress_git_merge(output: str) -> str:
 def _compress_npm(command: str, output: str) -> str:
     """npm 压缩"""
     cmd = command.lower()
-    
+
     if 'npm install' in cmd or 'npm i' in cmd:
         return _compress_npm_install(output)
-    
+
     if 'npm test' in cmd:
         return _compress_npm_test(output)
-    
+
     if 'npm run' in cmd:
         return _compress_npm_run(output, command)
-    
+
     if 'npm list' in cmd:
         return _compress_npm_list(output)
-    
+
     if 'npm outdated' in cmd:
         return _compress_npm_outdated(output)
-    
+
     if 'npm audit' in cmd:
         return _compress_npm_audit(output)
-    
+
     return output.strip()
 
 
 def _compress_npm_install(output: str) -> str:
     """npm install 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
-    
+
     added = 0
     for line in lines:
         m = re.search(r'added\s+(\d+)\s+packages?', line)
@@ -664,7 +664,7 @@ def _compress_npm_run(cmd: str, output: str) -> str:
     if not m:
         return output.strip()
     script = m.group(1)
-    
+
     # build/dev/lint 等常见脚本
     if script in ('build', 'dev', 'start', 'preview'):
         for line in output.split('\n'):
@@ -673,7 +673,7 @@ def _compress_npm_run(cmd: str, output: str) -> str:
             if 'error' in line.lower() and 'warning' not in line.lower():
                 return line.strip()
         return output.strip()
-    
+
     return output.strip()
 
 
@@ -718,16 +718,16 @@ def _compress_pnpm(command: str, output: str) -> str:
 def _compress_cargo(command: str, output: str) -> str:
     """cargo 压缩"""
     cmd = command.lower()
-    
+
     if 'cargo build' in cmd or 'cargo check' in cmd or 'cargo clippy' in cmd:
         return _compress_cargo_build(output)
-    
+
     if 'cargo test' in cmd or 'cargo bench' in cmd:
         return _compress_cargo_test(output)
-    
+
     if 'cargo run' in cmd:
         return _compress_cargo_run(output)
-    
+
     return output.strip()
 
 
@@ -735,7 +735,7 @@ def _compress_cargo_build(output: str) -> str:
     """cargo build/check/clippy 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
     parts = []
-    
+
     for line in lines:
         if line.startswith('Compiling ') or line.startswith('   Compiling '):
             # 提取 crate 名
@@ -749,7 +749,7 @@ def _compress_cargo_build(output: str) -> str:
             parts.append(line)
         elif 'warning[' in line and len(parts) < 3:
             parts.append(line)
-    
+
     if parts:
         return '\n'.join(parts)
     return output.strip()
@@ -789,7 +789,7 @@ def _compress_cargo_run(output: str) -> str:
 def _compress_pytest(output: str) -> str:
     """pytest 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
-    
+
     for line in lines:
         # 通过摘要
         m = re.search(r'(\d+)\s+passed', line)
@@ -797,7 +797,7 @@ def _compress_pytest(output: str) -> str:
             failed_m = re.search(r'(\d+)\s+failed', line)
             skipped_m = re.search(r'(\d+)\s+skipped', line)
             time_m = re.search(r'in\s+([\d.]+)s', line)
-            
+
             parts = [f"{m.group(1)} passed"]
             if failed_m:
                 parts.append(f"{failed_m.group(1)} failed")
@@ -806,17 +806,17 @@ def _compress_pytest(output: str) -> str:
             if time_m:
                 parts.append(f"({time_m.group(1)}s)")
             return ', '.join(parts)
-    
+
     # 失败详情
     for line in lines:
         if 'FAILED' in line or 'ERROR' in line:
             return line
-    
+
     # 收集错误
     errors = [l for l in lines if 'error' in l.lower() and ('Error' in l or 'error:' in l)]
     if errors:
         return '\n'.join(errors[:5])
-    
+
     return output.strip()
 
 
@@ -829,7 +829,7 @@ def _compress_ruff(output: str) -> str:
     lines = [l.strip() for l in output.split('\n') if l.strip()]
     errors = []
     summary = None
-    
+
     for line in lines:
         # 错误列表
         if re.search(r'\.(py|rs|ts|js):\d+', line):
@@ -838,7 +838,7 @@ def _compress_ruff(output: str) -> str:
         m = re.search(r'Found\s+(\d+)\s+(error|warning)', line, re.IGNORECASE)
         if m:
             summary = f"{m.group(1)} {m.group(2)}s"
-    
+
     if errors:
         result = errors[:10]
         if summary:
@@ -846,7 +846,7 @@ def _compress_ruff(output: str) -> str:
         if len(errors) > 10:
             result.append(f"... ({len(errors) - 10} more)")
         return '\n'.join(result)
-    
+
     return output.strip()
 
 
@@ -855,7 +855,7 @@ def _compress_mypy(output: str) -> str:
     lines = [l.strip() for l in output.split('\n') if l.strip()]
     errors = []
     summary = None
-    
+
     for line in lines:
         if re.search(r'\.py:\d+', line):
             errors.append(line)
@@ -865,26 +865,26 @@ def _compress_mypy(output: str) -> str:
         m = re.search(r'Success:', line)
         if m:
             return "Success"
-    
+
     if errors:
         result = errors[:8]
         if summary:
             result.append(summary)
         return '\n'.join(result)
-    
+
     return output.strip()
 
 
 def _compress_eslint(command: str, output: str) -> str:
     """ESLint/biome 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
-    
+
     # 有错误列表
     errors = []
     for line in lines:
         if re.search(r'\.(ts|js|tsx|jsx):\d+', line):
             errors.append(line)
-    
+
     if errors:
         result = errors[:10]
         # 统计
@@ -895,7 +895,7 @@ def _compress_eslint(command: str, output: str) -> str:
         if total > 10:
             result.append(f"... ({total - 10} more)")
         return '\n'.join(result)
-    
+
     return output.strip()
 
 
@@ -906,7 +906,7 @@ def _compress_eslint(command: str, output: str) -> str:
 def _compress_pip(command: str, output: str) -> str:
     """pip 压缩"""
     cmd = command.lower()
-    
+
     if 'pip install' in cmd or 'pip3 install' in cmd:
         lines = [l.strip() for l in output.split('\n') if l.strip()]
         for line in lines:
@@ -916,11 +916,11 @@ def _compress_pip(command: str, output: str) -> str:
             if m:
                 return f"downloaded {m.group(1)} packages"
         return output.strip()
-    
+
     if 'pip list' in cmd:
         lines = [l.strip() for l in output.split('\n') if l.strip()]
         return '\n'.join(lines[:15])
-    
+
     return output.strip()
 
 
@@ -931,16 +931,16 @@ def _compress_pip(command: str, output: str) -> str:
 def _compress_docker(command: str, output: str) -> str:
     """docker 压缩"""
     cmd = command.lower()
-    
+
     if 'docker build' in cmd:
         return _compress_docker_build(output)
-    
+
     if 'docker images' in cmd:
         lines = [l.strip() for l in output.split('\n') if l.strip()]
         if len(lines) > 10:
             return '\n'.join(lines[:5]) + f"\n... ({len(lines) - 5} more)"
         return output.strip()
-    
+
     return output.strip()
 
 
@@ -948,7 +948,7 @@ def _compress_docker_build(output: str) -> str:
     """docker build 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
     parts = []
-    
+
     for line in lines:
         # Step 信息
         m = re.match(r'Step \d+/(\d+)\s*:\s*(.+)', line)
@@ -962,7 +962,7 @@ def _compress_docker_build(output: str) -> str:
         # 失败
         if 'error' in line.lower() and 'Step' in line:
             parts.append(line[:120])
-    
+
     return '\n'.join(parts) if parts else output.strip()
 
 
@@ -973,26 +973,26 @@ def _compress_docker_build(output: str) -> str:
 def _compress_kubectl(command: str, output: str) -> str:
     """kubectl 压缩"""
     cmd = command.lower()
-    
+
     if 'kubectl get' in cmd and 'pod' in cmd:
         return _compress_kubectl_pods(output)
-    
+
     if 'kubectl logs' in cmd:
         lines = [l.strip() for l in output.split('\n') if l.strip()]
         if len(lines) > 50:
             return '\n'.join(lines[:30]) + f"\n... ({len(lines) - 30} more lines)"
         return output.strip()
-    
+
     return output.strip()
 
 
 def _compress_kubectl_pods(output: str) -> str:
     """kubectl get pods 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip() and not l.startswith('NAME')]
-    
+
     if not lines:
         return output.strip()
-    
+
     pods = []
     for line in lines:
         if not line:
@@ -1002,19 +1002,19 @@ def _compress_kubectl_pods(output: str) -> str:
             name = parts[0]
             status = parts[2] if len(parts) > 2 else "?"
             pods.append(f"{name} {status}")
-    
+
     # 统计
     running = sum(1 for p in pods if 'Running' in p)
     ready = sum(1 for p in pods if '1/1' in p or '2/2' in p)
     crash = sum(1 for p in pods if 'CrashLoop' in p or 'Error' in p or 'Evicted' in p)
-    
+
     result = [f"{len(pods)} pods: {running} Running, {ready} Ready"]
     if crash:
         result.append(f"{crash} not ready")
     result.extend(pods[:5])
     if len(pods) > 5:
         result.append(f"... ({len(pods) - 5} more)")
-    
+
     return '\n'.join(result)
 
 
@@ -1025,20 +1025,20 @@ def _compress_kubectl_pods(output: str) -> str:
 def _compress_go(command: str, output: str) -> str:
     """go 压缩"""
     cmd = command.lower()
-    
+
     if 'go test' in cmd:
         lines = [l.strip() for l in output.split('\n') if l.strip()]
         for line in lines:
             if 'ok' in line or 'FAIL' in line:
                 return line
         return output.strip()
-    
+
     if 'go build' in cmd:
         lines = [l.strip() for l in output.split('\n') if l.strip()]
         if not lines:
             return "ok"
         return lines[0] if len(lines) <= 3 else '\n'.join(lines[:3])
-    
+
     return output.strip()
 
 
@@ -1058,14 +1058,14 @@ def _compress_node(command: str, output: str) -> str:
 def _compress_npx(command: str, output: str) -> str:
     """npx 压缩"""
     cmd = command.lower()
-    
+
     # vite / next 等
     if 'vite' in cmd:
         return _compress_vite(output)
-    
+
     if 'next' in cmd:
         return _compress_next(output)
-    
+
     return output.strip()
 
 
@@ -1100,20 +1100,20 @@ def _compress_typescript(output: str) -> str:
     lines = [l.strip() for l in output.split('\n') if l.strip()]
     errors = []
     summary = None
-    
+
     for line in lines:
         if re.search(r'\.(ts|tsx):\d+', line):
             errors.append(line)
         m = re.search(r'Found\s+(\d+)\s+errors?', line, re.IGNORECASE)
         if m:
             summary = f"{m.group(1)} errors"
-    
+
     if errors:
         result = errors[:8]
         if summary:
             result.append(summary)
         return '\n'.join(result)
-    
+
     return output.strip()
 
 
@@ -1124,14 +1124,14 @@ def _compress_typescript(output: str) -> str:
 def _compress_curl(command: str, output: str) -> str:
     """curl 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
-    
+
     # JSON 响应
     if output.strip().startswith('{') or output.strip().startswith('['):
         m = re.search(r'"(\w+)"\s*:\s*[^{[]+', output)
         if m and len(output) > 500:
             return f"[JSON] {output[:200]}... ({len(output)} bytes)"
         return output.strip()[:500]
-    
+
     # HTTP 状态
     status_m = re.search(r'HTTP/[.\d]+\s+(\d+)', output)
     if status_m:
@@ -1139,7 +1139,7 @@ def _compress_curl(command: str, output: str) -> str:
         size_m = re.search(r'Content-Length:\s*(\d+)', output)
         size = f" {size_m.group(1)}B" if size_m else ""
         return f"{status}{size}"
-    
+
     return output.strip()[:500]
 
 
@@ -1150,16 +1150,16 @@ def _compress_curl(command: str, output: str) -> str:
 def _compress_grep(output: str) -> str:
     """grep/rg 压缩"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
-    
+
     # 统计匹配
     for line in lines:
         m = re.search(r'(\d+)\s+matches?', line, re.IGNORECASE)
         if m:
             return f"{m.group(1)} matches"
-    
+
     if len(lines) > 20:
         return '\n'.join(lines[:10]) + f"\n... ({len(lines) - 10} more)"
-    
+
     return '\n'.join(lines)
 
 
@@ -1178,7 +1178,7 @@ def _compress_find(output: str) -> str:
 def _compress_ls(output: str) -> str:
     """ls 压缩（仅文件名列表）"""
     lines = [l.strip() for l in output.split('\n') if l.strip()]
-    
+
     # 去掉详情列（权限、大小、日期等）
     compressed = []
     for line in lines:
@@ -1188,7 +1188,7 @@ def _compress_ls(output: str) -> str:
         parts = line.split()
         if parts:
             compressed.append(parts[-1])
-    
+
     if len(compressed) > 30:
         return '\n'.join(compressed[:20]) + f"\n... ({len(compressed) - 20} more)"
     return '\n'.join(compressed)
@@ -1201,13 +1201,13 @@ def _compress_ls(output: str) -> str:
 def _compress_generic(output: str) -> Optional[str]:
     """通用压缩：去除空行、截断超长输出"""
     lines = [l.rstrip() for l in output.split('\n') if l.strip()]
-    
+
     if len(lines) <= 3:
         return output.strip()
-    
+
     if len(lines) > 100:
         return '\n'.join(_compact_lines(lines, 50))
-    
+
     return '\n'.join(lines)
 
 
@@ -1230,28 +1230,28 @@ def compress(command: str, output: str, include_stats: bool = True) -> str:
     # 如果输出太短，不压缩
     if len(output.strip()) < 50:
         return output.strip()
-    
+
     # 计算原始 token 数
     orig_tokens = _count_tokens(output)
-    
+
     # 执行压缩
     result = compress_output(command, output)
     if result is None:
         # 无法压缩：清理 ANSI 后返回
         return _strip_ansi(output).strip()
-    
+
     # 只有压缩后更短才使用压缩结果
     compressed = _shorter_only(result, output)
     if compressed is None:
         return output.strip()
-    
+
     # 添加 token 节省统计
     if include_stats and _count_tokens(compressed) < orig_tokens:
         new_tokens = _count_tokens(compressed)
         saved = orig_tokens - new_tokens
         pct = int((saved / orig_tokens) * 100) if orig_tokens > 0 else 0
         compressed = f"{compressed}\n[saved {saved} tok, {pct}%]"
-    
+
     return compressed
 
 
@@ -1278,11 +1278,11 @@ def track(command: str, output: str, exit_code: int = 0, elapsed: float = 0) -> 
         'python -m http.server' in command.lower() or
         'docker compose up' in command.lower()
     )
-    
+
     if not should_track:
         # 输出短或非 track 类型命令，走正常压缩
         return compress(command, output, include_stats=False)
-    
+
     # Track mode：只返回元数据
     status = "ok" if exit_code == 0 else f"fail({exit_code})"
     if elapsed > 0:

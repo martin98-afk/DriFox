@@ -8,18 +8,16 @@ Gateway 消息处理器
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable
 
 from loguru import logger
 
 from app.gateway.base import (
-    BasePlatformAdapter,
     MessageEvent,
     Platform,
     SendResult,
 )
-from app.gateway.session_manager import GatewaySession, GatewaySessionManager
-
+from app.gateway.session_manager import GatewaySessionManager
 
 
 class MessageHandler:
