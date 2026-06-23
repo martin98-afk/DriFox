@@ -1392,9 +1392,20 @@ class CommandCard(QWidget):
                     t = t.strip()
                     if t in type_map:
                         type_set.add(type_map[t])
-            elif token.startswith('#') and token[1:] in type_map:
+            elif token.startswith('#'):
                 # #skill, #agent, #prompt, #cmd 简写
-                type_set.add(type_map[token[1:]])
+                # 支持 #agent|search、#agent&search 等无空格分隔的写法：
+                # 按 | 和 & 拆分，第一部分识别为类型过滤器，其余为搜索关键字
+                rest = token[1:]
+                parts = [p.strip() for p in rest.replace('&', '|').split('|') if p.strip()]
+                if parts and parts[0] in type_map:
+                    type_set.add(type_map[parts[0]])
+                    # 剩余部分是搜索关键字（如 #agent|search → "search"）
+                    for part in parts[1:]:
+                        clean_tokens.append(part)
+                else:
+                    # 不是有效的类型过滤器（如 #|search、##agent 等）→ 作为普通搜索关键字
+                    clean_tokens.append(token)
             else:
                 clean_tokens.append(token)
 
