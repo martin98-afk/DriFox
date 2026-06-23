@@ -55,21 +55,7 @@ from loguru import logger
 FRAME_SIZE = 16  # 每帧像素尺寸
 SCALE = 3  # 渲染倍数 → 48×48 显示
 DISPLAY_SIZE = FRAME_SIZE * SCALE  # 48
-def _resolve_spritesheet() -> Path:
-    """通过插件系统获取 fox_pet.png 路径"""
-    try:
-        from app.core.plugin_manager import PluginManager
-        plugin_path = PluginManager._SYSTEM_PLUGIN_DIR
-        logger.debug(f"[PixelPet] 系统插件目录: {plugin_path}")
-        if plugin_path is not None:
-            p = Path(plugin_path) / "system" / "pets" / "fox_pet.png"
-            if p.exists():
-                return p
-    except Exception:
-        logger.exception("[PixelPet] 获取 spritesheet 路径失败，使用默认路径")
-
-
-SPRITESHEET = _resolve_spritesheet()
+SPRITESHEET = None  # 懒加载，启动后由插件系统解析路径
 
 # 状态 → 行索引（扩展为 10 行）
 STATE_ROWS = {
@@ -252,8 +238,12 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _load_spritesheet(self) -> None:
+        """通过插件系统懒加载 spritesheet"""
+        global SPRITESHEET
+        if SPRITESHEET is None:
+            SPRITESHEET = self._resolve_spritesheet()
         try:
-            if SPRITESHEET.exists():
+            if SPRITESHEET and SPRITESHEET.exists():
                 sp = QPixmap(str(SPRITESHEET))
                 if sp.isNull():
                     logger.warning(f"[PixelPet] spritesheet 无效: {SPRITESHEET}")
@@ -267,6 +257,21 @@ class PixelPetWidget(QWidget):
         except Exception as e:
             logger.exception(f"[PixelPet] 加载 spritesheet 失败: {e}")
             self._spritesheet = None
+
+    @staticmethod
+    def _resolve_spritesheet():
+        """通过 PluginManager 解析 spritesheet 路径"""
+        try:
+            from app.core.plugin_manager import PluginManager
+            pm = PluginManager.get_instance()
+            plugin = pm.get_plugin("system")
+            if plugin is not None:
+                p = plugin.path / "pets" / "fox_pet.png"
+                if p.exists():
+                    return p
+        except Exception:
+            logger.debug("[PixelPet] 插件系统未就绪，使用默认路径")
+        return Path(__file__).parent / "pet_sprites.png"
 
     # ═══════════════════════════════════════════════════════════
     # 帧间隔管理
@@ -461,11 +466,11 @@ class PixelPetWidget(QWidget):
         """入场欢迎：从下方弹入"""
         if self.parent() and self._current_state == "idle":
             pw, ph = self.parent().width(), self.parent().height()
-            target_x = pw - self.width() - 12
+            target_x = pw - self.width() - 8
             # 计算目标 Y：站在发送按钮上
             btn_top = self._get_send_button_top()
             if btn_top is not None:
-                target_y = btn_top - 41
+                target_y = btn_top - 42
             else:
                 target_y = ph - self.height() - 100
             self.move(target_x, ph)  # 从底部开始
@@ -844,17 +849,16 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _get_send_button_top(self):
-        """返回发送按钮上边缘在父窗口中的 Y 坐标"""
-        if not self.parent():
+        """通过父窗口的 input_area.send_btn 获取发送按钮上边缘 Y 坐标"""
+        parent = self.parent()
+        if not parent:
             return None
         try:
-            for child in self.parent().children():
-                cls_name = type(child).__name__
-                if "InputArea" in cls_name or "Input" in cls_name or "bottom" in cls_name.lower():
-                    if hasattr(child, 'send_btn'):
-                        sb = child.send_btn
-                        local_pos = sb.mapTo(self.parent(), QPoint(0, 0))
-                        return local_pos.y()
+            input_area = getattr(parent, 'input_area', None)
+            if input_area is not None and hasattr(input_area, 'send_btn'):
+                sb = input_area.send_btn
+                if sb.isVisible():
+                    return sb.mapTo(parent, QPoint(0, 0)).y()
         except Exception:
             pass
         return None
@@ -864,7 +868,7 @@ class PixelPetWidget(QWidget):
         if self._dragging:
             return
 
-        margin = 12
+        margin = 8
         target_x = parent_width - self.width() - margin
 
         # 找到发送按钮，让桌宠脚底站在它上边缘
