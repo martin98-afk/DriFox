@@ -116,7 +116,7 @@ include = ["app*"]
 # uv 多平台依赖解析配置
 # 声明项目需要支持的目标平台，确保 uv lock 生成的锁文件兼容所有平台
 [tool.uv]
-required-environments = [
+environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
