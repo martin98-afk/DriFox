@@ -40,10 +40,12 @@ jobs:
         run: uv run ruff check app/ main.py build.py
 
       - name: Syntax check
-        run: uv run python -c "import ast; ast.parse(open('main.py').read()); print('check: syntax OK')"
+        run: |
+          uv run python -c "import ast; ast.parse(open('main.py').read()); print('check: syntax OK')"
 
       - name: Core import check
-        run: uv run python -c "from app.core import core; print('check: imports OK')"
+        run: |
+          uv run python -c "from app.core import core; print('check: imports OK')"
 
   # ════════════════════════════════════════════════
   # Job 1: Windows (PyInstaller + Inno Setup)
@@ -242,20 +244,20 @@ jobs:
         shell: bash
         run: |
           python -c "
-import re, sys
-with open('CHANGELOG.md') as f:
-    content = f.read()
-# Extract the first version entry (from ## to next ## or EOF)
-match = re.search(r'## .*?(?=\n## |\Z)', content, re.DOTALL)
-if match:
-    body = match.group().strip()
-    with open('release_body.txt', 'w') as f:
-        f.write(body)
-    print('Release body extracted from CHANGELOG.md')
-else:
-    print('WARNING: no version entry found in CHANGELOG.md, using empty body')
-    open('release_body.txt', 'w').close()
-"
+          import re, sys
+          with open('CHANGELOG.md') as f:
+              content = f.read()
+          # Extract the first version entry (from ## to next ## or EOF)
+          match = re.search(r'## .*?(?=\n## |\Z)', content, re.DOTALL)
+          if match:
+              body = match.group().strip()
+              with open('release_body.txt', 'w') as f:
+                  f.write(body)
+              print('Release body extracted from CHANGELOG.md')
+          else:
+              print('WARNING: no version entry found in CHANGELOG.md, using empty body')
+              open('release_body.txt', 'w').close()
+          "
 
       - name: Create / Update Release
         uses: softprops/action-gh-release@v2
