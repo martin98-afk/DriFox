@@ -181,21 +181,26 @@ jobs:
       # ── DMG ──
       - name: Build DMG
         run: uv run python create_dmg.py
+        env:
+          DMG_VERSION: ${{ steps.version.outputs.tag }}
 
       - name: Verify DMG output
         shell: bash
         run: |
-          if [ ! -f "dist/Drifox.dmg" ]; then
-            echo "❌ DMG 未生成: dist/Drifox.dmg"
+          tag="${{ steps.version.outputs.tag }}"
+          dmg="dist/Drifox-${tag}.dmg"
+          if [ ! -f "$dmg" ]; then
+            echo "❌ DMG 未生成: $dmg"
             exit 1
           fi
-          echo "✅ DMG: $(du -h dist/Drifox.dmg | cut -f1)"
+          echo "✅ DMG: $(du -h "$dmg" | cut -f1)"
 
       # ── 校验和 ──
       - name: Generate SHA256
         shell: bash
         run: |
-          sha256sum dist/Drifox.dmg | tee dist/SHA256SUMS
+          tag="${{ steps.version.outputs.tag }}"
+          sha256sum "dist/Drifox-${tag}.dmg" | tee dist/SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (macOS)
@@ -203,18 +208,107 @@ jobs:
         with:
           name: Drifox-macOS-${{ steps.version.outputs.tag }}
           path: |
-            dist/Drifox.dmg
+            dist/Drifox-*.dmg
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
   # ════════════════════════════════════════════════
-  # Job 3: 发布 GitHub Release（仅 push tag 时触发）
+  # Job 3: Linux (PyInstaller + tar.gz)
+  # ════════════════════════════════════════════════
+  build-linux:
+    name: Linux (PyInstaller + tar.gz)
+    needs: [check]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.5.x
+          python-version: "3.14"
+          enable-cache: true
+          cache-suffix: "uv-linux"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 \
+            libxkbcommon-x11-0 libegl1-mesa libegl1
+
+      - name: Sync dependencies
+        run: uv sync --group linux-build
+
+      # ── 解析版本号 ──
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          v="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$v" >> "$GITHUB_OUTPUT"
+          echo "💡 Version: $v"
+
+      # ── PyInstaller ──
+      - name: PyInstaller build
+        run: uv run python build.py
+
+      - name: Verify PyInstaller output
+        shell: bash
+        run: |
+          if [ ! -f "dist/Drifox/Drifox" ]; then
+            echo "❌ PyInstaller 没有产出 dist/Drifox/Drifox"
+            exit 1
+          fi
+          echo "✅ PyInstaller 打包成功"
+
+      # ── 打包 tar.gz ──
+      - name: Package as tar.gz
+        shell: bash
+        run: |
+          cd dist
+          tag="${{ steps.version.outputs.tag }}"
+          tar czf "Drifox-Linux-${tag}.tar.gz" Drifox/
+          echo "✅ tar.gz: $(du -h Drifox-Linux-${tag}.tar.gz | cut -f1)"
+
+      - name: Verify tar.gz output
+        shell: bash
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if [ ! -f "dist/Drifox-Linux-${tag}.tar.gz" ]; then
+            echo "❌ tar.gz 未生成: dist/Drifox-Linux-${tag}.tar.gz"
+            exit 1
+          fi
+
+      # ── 校验和 ──
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          cd dist
+          sha256sum "Drifox-Linux-${tag}.tar.gz" | tee SHA256SUMS
+
+      # ── 上传产物 ──
+      - name: Upload artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Drifox-Linux-${{ steps.version.outputs.tag }}
+          path: |
+            dist/Drifox-Linux-*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  # ════════════════════════════════════════════════
+  # Job 4: 发布 GitHub Release（仅 push tag 时触发）
   # ════════════════════════════════════════════════
   release:
     name: Publish GitHub Release
     if: github.event_name == 'push'
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -231,8 +325,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "*.exe" -o -name "*.dmg" -o -name "SHA256SUMS" \) \
+          # 收集各平台安装包
+          find artifacts -type f \
+            \( -name "*.exe" -o -name "*.dmg" -o -name "*.tar.gz" \) \
             -exec cp {} release-assets/ \;
+          # 合并所有平台 SHA256SUMS（避免平台间相互覆盖）
+          find artifacts -type f -name "SHA256SUMS" -exec cat {} \; \
+            > release-assets/SHA256SUMS
           ls -la release-assets/
 
       - name: Extract changelog for release body
@@ -271,5 +370,6 @@ jobs:
           generate_release_notes: false
           files: |
             release-assets/Drifox-Setup-*.exe
-            release-assets/Drifox.dmg
+            release-assets/Drifox-*.dmg
+            release-assets/Drifox-Linux-*.tar.gz
             release-assets/SHA256SUMS

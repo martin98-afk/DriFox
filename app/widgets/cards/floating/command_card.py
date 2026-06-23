@@ -463,6 +463,7 @@ class CommandCard(QWidget):
         self._divider = None  # 缓存分隔线 QFrame，避免积累
         self._visible = False
         self._current_query = ""
+        self._current_text_query = ""  # 去除类别过滤器后的纯文本 query，用于 widget 高亮
         self._last_query = ""  # 上次过滤的 query，用于增量剪枝
         self._current_selected_type: str = ""  # 当前选中项的 display_type（用于 detail 模式）
 
@@ -1455,6 +1456,9 @@ class CommandCard(QWidget):
         self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
 
         self._last_query = query
+        # 存储去除类别过滤器后的纯文本 query，供 _render 传给 widget 用于高亮
+        # 避免 #agent 等类别标签干扰 & 和 | 的解析
+        self._current_text_query = text_query
 
         self._render(incremental=incremental)
 
@@ -1507,11 +1511,11 @@ class CommandCard(QWidget):
             if key in old_by_key_copy and key not in seen_keys:
                 w = old_by_key_copy.pop(key)  # 消耗掉这个 key
                 seen_keys.add(key)
-                w.reuse(item, self._current_query)
+                w.reuse(item, self._current_text_query)
                 new_widgets.append(w)
             else:
                 # 创建新 widget
-                w = CommandItemWidget(item, self._current_query, self._scroll_content)
+                w = CommandItemWidget(item, self._current_text_query, self._scroll_content)
                 w.clicked.connect(self._on_item_clicked)
                 new_widgets.append(w)
 

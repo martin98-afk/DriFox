@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 创建 Drifox DMG 安装包
+可通过环境变量 DMG_VERSION 指定版本号（如 v0.2.10），输出为 Drifox-$tag.dmg
 """
 import os
 import dmgbuild
 
 def build_dmg():
     app_path = "dist/Drifox.app"
-    dmg_path = "dist/Drifox.dmg"
-    
+
+    # 版本号（可选，默认无后缀）
+    version = os.environ.get("DMG_VERSION", "").strip()
+    suffix = f"-{version}" if version else ""
+    dmg_path = f"dist/Drifox{suffix}.dmg"
+
     # 删除旧的 dmg
     if os.path.exists(dmg_path):
         os.remove(dmg_path)
-    
+
     # DMG 配置
     settings = {
         "format": "ULFO",
@@ -26,7 +31,7 @@ def build_dmg():
         "volume_name": "Drifox",
         "volume_icon_file": None,
     }
-    
+
     print(f"正在创建 DMG: {dmg_path}")
     dmgbuild.build_dmg(
         dmg_path,

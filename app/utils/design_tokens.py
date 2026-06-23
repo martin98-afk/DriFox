@@ -9,6 +9,7 @@
 from PyQt5.QtCore import QSize
 
 from app.utils.theme_manager import theme_manager
+from app.utils.utils import get_font_family_css
 
 
 def _get_global_font() -> str:

@@ -42,7 +42,7 @@ def main():
     from loguru import logger
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QApplication
-
+    from app.utils import icons_rc
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
     # 这些设置必须在任何 Qt 模块导入之前或 QApplication 创建之前完成
