@@ -24,8 +24,8 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 
 - **CI uv 版本与依赖**: 升级 uv 到最新版本以支持 cp314 wheel；移除已废弃的 `libegl1-mesa` 依赖
-- **CI uv 配置**: 指定 uv 版本为 0.5.x，并为所有平台添加 Python 3.14 安装步骤
-- **release.yml**: 修复 YAML 语法错误，并使用 `setup-uv` 的 `python-version` 参数解决 Python 3.14 找不到的问题
+- **CI uv 配置**: 使用 `setup-uv` 的 `python-version` 参数自动安装 Python 3.14，避免 uv 0.5.x wheel 解析 bug
+- **release.yml**: 修复 YAML 语法错误，确保 CI 工作流配置正确
 - **CI import check**: 避免 PyQt5 lazy load 触发的 Linux SIGSEGV
 - **pyproject.toml 依赖组**: 修正 `all` 依赖组为 PEP 735 标准 `include-group` 语法
 - **ruff 配置**: 缩窄规则到 E/F 并加入 ignore 列表，适配当前代码库
@@ -43,6 +43,7 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - **`/release` 工作流**: 增加版本号升级阶段（阶段 B），统一修改 3 个版本号文件
+- **gateway 组临时缩减**: `pyproject.toml` 中 gateway 组暂时只保留 `dingtalk-stream`，其余依赖（python-telegram-bot、discord.py、slack-sdk、lark-oapi、aiohttp）注释掉，便于 CI 调试（pywin32 实际来自 mcp 而非 gateway）
 - **版本号升级**: v0.2.9 → v0.2.10
   - `pyproject.toml` 第 3 行（不带 v）
   - `app/utils/config.py` 第 242 行（带 v）
