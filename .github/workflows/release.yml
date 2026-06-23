@@ -26,7 +26,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: 0.5.x
+          version: latest
           python-version: "3.14"
           enable-cache: true
           cache-suffix: "uv-check"
@@ -59,7 +59,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: 0.5.x
+          version: latest
           python-version: "3.14"
           enable-cache: true
           cache-suffix: "uv-win"
@@ -146,7 +146,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: 0.5.x
+          version: latest
           python-version: "3.14"
           enable-cache: true
           cache-suffix: "uv-mac"
@@ -226,7 +226,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          version: 0.5.x
+          version: latest
           python-version: "3.14"
           enable-cache: true
           cache-suffix: "uv-linux"
@@ -238,7 +238,7 @@ jobs:
             libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 \
-            libxkbcommon-x11-0 libegl1-mesa libegl1
+            libxkbcommon-x11-0 libegl1
 
       - name: Sync dependencies
         run: uv sync --group linux-build
