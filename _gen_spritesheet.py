@@ -1,394 +1,551 @@
 # -*- coding: utf-8 -*-
-"""重新生成像素狐狸 Spritesheet — 全面优化所有状态动画"""
-# pip install Pillow
+"""重新生成像素狐狸 Spritesheet — 增强版 v2：10状态×12帧，更丰富的动画"""
 
 from PIL import Image
 
-# ═══════════════════════════════════════════════════
-# 颜色
-# ═══════════════════════════════════════════════════
-ORANGE = (240, 136, 62)
+# ════════════════════════════════════════════════════════════════
+# 调色板
+# ════════════════════════════════════════════════════════════════
+ORANGE       = (240, 136, 62)
+ORANGE_MID   = (220, 120, 50)
+ORANGE_DARK  = (180, 95, 35)
 ORANGE_LIGHT = (255, 179, 71)
-WHITE = (255, 224, 178)
-DARK = (26, 26, 46)
-PINK = (255, 138, 128)
-BLUE = (102, 198, 255)
-YELLOW = (255, 235, 59)        # 烟花主色
-YELLOW_BRIGHT = (255, 255, 150)  # 烟花高光
-AMBER = (255, 193, 7)           # 烟花暗色
+CREAM        = (255, 224, 178)
+WHITE_FACE   = (255, 240, 210)
+DARK         = (26, 26, 46)
+DARK_SOFT    = (60, 55, 70)
+PINK         = (255, 138, 128)
+PINK_SOFT    = (255, 180, 170)
+BLUE         = (102, 198, 255)
+BLUE_DARK    = (60, 160, 220)
+YELLOW       = (255, 235, 59)
+YELLOW_BRIGHT= (255, 255, 180)
+AMBER        = (255, 193, 7)
+RED          = (255, 80, 70)
+GREEN        = (150, 255, 140)
+PURPLE       = (200, 150, 255)
+WHITE_PURE   = (255, 255, 255)
+TEAR_BLUE    = (130, 210, 255)
+GLASSES_TINT = (180, 220, 255, 80)
+
+# ── 尾巴形状 ──
+TAIL_NORMAL   = [(15,8),(12,9),(13,9),(14,9),(15,9),(12,10),(13,10),(14,10),(15,10),(12,11),(13,11),(14,11),(15,11),(12,12),(13,12),(14,12)]
+TAIL_WAG_UP   = [(15,7),(12,8),(13,8),(14,8),(15,8),(12,9),(13,9),(14,9),(15,9),(12,10),(13,10),(14,10),(15,10),(12,11),(13,11),(14,11)]
+TAIL_WAG_DOWN = [(15,9),(12,10),(13,10),(14,10),(15,10),(12,11),(13,11),(14,11),(15,11),(12,12),(13,12),(14,12),(15,12),(12,13),(13,13),(14,13)]
+TAIL_HAPPY    = [(15,6),(12,7),(13,7),(14,7),(15,7),(12,8),(13,8),(14,8),(15,8),(12,9),(13,9),(14,9),(15,9),(12,10),(13,10),(14,10)]
+TAIL_WAG_FAST = [(15,6),(12,7),(13,7),(14,7),(15,7),(12,8),(13,8),(14,8),(15,8),(12,9),(13,9),(14,9),(15,9),(12,11),(13,11),(14,11),(15,11)]
 
 FRAME = 16
-COLS = 8
-ROWS = 7
-W = FRAME * COLS   # 128
-H = FRAME * ROWS   # 112
+COLS = 12
+ROWS = 10  # idle, thinking, streaming, question, success, error, sleeping, writing, thinking_hard, excited
+W = FRAME * COLS  # 192
+H = FRAME * ROWS  # 160
 
 img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
+# ════════════════════════════════════════════════════════════════
+# 绘制辅助 + 细胞裁剪
+# ════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════
-# 辅助绘制函数
-# ═══════════════════════════════════════════════════
-
-def draw_sparkle(canvas, ox, oy, cx, cy):
-    """在 (ox+cx, oy+cy) 绘制一颗黄色四角星烟花粒子"""
-    def sp(x, y, color):
-        if 0 <= x < 16 and 0 <= y < 16:
-            canvas.putpixel((ox + x, oy + y), color)
-
-    # 十字星形：中心亮 + 四方向
-    sp(cx, cy, YELLOW_BRIGHT)
-    sp(cx - 1, cy, YELLOW)
-    sp(cx + 1, cy, YELLOW)
-    sp(cx, cy - 1, YELLOW)
-    sp(cx, cy + 1, YELLOW)
-    # 对角暗色
-    sp(cx - 1, cy - 1, AMBER)
-    sp(cx + 1, cy - 1, AMBER)
-    sp(cx - 1, cy + 1, AMBER)
-    sp(cx + 1, cy + 1, AMBER)
+# 当前帧的裁剪矩形（由 draw_fox 设置）
+_current_cell_rect = None  # (left, top, right, bottom)
 
 
-def draw_question_mark(canvas, ox, oy):
-    """在左上角绘制一个小问号（3×3 像素）"""
-    def qp(x, y, color):
-        if 0 <= x < 16 and 0 <= y < 16:
-            canvas.putpixel((ox + x, oy + y), color)
-
-    qp(0, 0, YELLOW)
-    qp(1, 0, YELLOW)
-    qp(2, 1, YELLOW)
-    qp(1, 2, YELLOW)
-    qp(2, 2, YELLOW)
+def _set_cell_rect(l, t, r, b):
+    """设置当前帧裁剪区域"""
+    global _current_cell_rect
+    _current_cell_rect = (l, t, r, b)
 
 
-def draw_fox(canvas, ox, oy, **overrides):
+def p_px(canvas, ox, oy, x, y, color):
+    """在画布 (ox+x, oy+y) 画一个像素（已裁剪到当前细胞边界）"""
+    px, py = ox + x, oy + y
+    # 先检查全局边界
+    if not (0 <= px < W and 0 <= py < H):
+        return
+    # 再检查细胞边界裁剪
+    if _current_cell_rect is not None:
+        l, t, r, b = _current_cell_rect
+        if not (l <= px <= r and t <= py <= b):
+            return
+    if isinstance(color, tuple) and len(color) == 4:
+        existing = canvas.getpixel((px, py))
+        if existing[3] > 0:
+            a = color[3] / 255
+            blended = tuple(int(existing[i] * (1-a) + color[i] * a) for i in range(3)) + (255,)
+            canvas.putpixel((px, py), blended)
+        else:
+            canvas.putpixel((px, py), color)
+    else:
+        canvas.putpixel((px, py), color)
+
+def px_list(canvas, ox, oy, coords, color):
+    for x, y in coords:
+        p_px(canvas, ox, oy, x, y, color)
+
+def draw_sparkle(canvas, ox, oy, cx, cy, color=YELLOW):
+    pts = [(cx,cy),(cx-1,cy),(cx+1,cy),(cx,cy-1),(cx,cy+1),
+           (cx-1,cy-1),(cx+1,cy-1),(cx-1,cy+1),(cx+1,cy+1)]
+    for x,y in pts:
+        p_px(canvas, ox, oy, x, y, color)
+
+def draw_mini_star(canvas, ox, oy, cx, cy):
+    for x,y in [(cx,cy),(cx-1,cy-1),(cx+1,cy-1)]:
+        p_px(canvas, ox, oy, x, y, YELLOW_BRIGHT)
+
+def draw_heart(canvas, ox, oy, cx, cy):
+    pts = [(cx,cy),(cx+1,cy),(cx-1,cy+1),(cx,cy+1),(cx+1,cy+1),(cx+2,cy+1),(cx,cy+2),(cx+1,cy+2)]
+    for x,y in pts:
+        p_px(canvas, ox, oy, x, y, PINK)
+
+def draw_music_note(canvas, ox, oy, cx, cy):
+    """小音符"""
+    for x,y in [(cx,cy),(cx+1,cy),(cx,cy+1),(cx,cy+2),(cx+1,cy+2),(cx+2,cy+1)]:
+        p_px(canvas, ox, oy, x, y, PURPLE)
+
+def draw_question_mark(canvas, ox, oy, frame=0):
+    """右侧弹跳问号，frame 控制位置（已在细胞边界内）"""
+    bounce_offsets = [0, -1, -1, 0, 0, -1, -1, 0, -1, 0, -1, 0]
+    dy = bounce_offsets[frame] if frame < len(bounce_offsets) else 0
+    qx, qy = 11, 1 + dy
+    q_pts = [(qx+1,qy),(qx+2,qy),(qx+3,qy+1),(qx+2,qy+2),(qx+2,qy+3),(qx+2,qy+4)]
+    for x,y in q_pts:
+        p_px(canvas, ox, oy, x, y, WHITE_PURE)
+    p_px(canvas, ox, oy, qx+2, qy+5, WHITE_PURE)
+
+def draw_zzz(canvas, ox, oy, seq=0):
+    zzz_positions = [None, (12,2,1), (12,1,1), (11,0,2), (11,-1,2), (10,-2,3), (10,-2,3), None,
+                     (11,1,2), (10,0,3), (9,-1,3), None]
+    entry = zzz_positions[seq] if seq < len(zzz_positions) else None
+    if entry is None: return
+    dx, dy, size = entry
+    def zz(x, y, c): p_px(canvas, ox, oy, dx+x, dy+y, c)
+    if size == 1:
+        for x,y in [(0,0),(1,0),(2,0),(2,1),(0,2),(1,2),(2,2)]: zz(x,y,BLUE)
+    elif size == 2:
+        for x,y in [(0,0),(1,0),(2,0),(3,0),(3,1),(2,2),(0,3),(1,3),(2,3)]: zz(x,y,BLUE)
+    elif size == 3:
+        for x,y in [(0,0),(1,0),(2,0),(3,0),(4,0),(4,1),(3,2),(2,3),(0,4),(1,4),(2,4),(3,4),(4,4)]: zz(x,y,BLUE_DARK)
+
+def draw_thinking_dots(canvas, ox, oy, frame=0):
+    dot_patterns = [
+        [], [(6,0),(8,0)], [(6,0),(8,0),(10,0)], [(8,0)], [],
+        [(6,0),(8,0),(10,0),(12,0)], [(6,0),(8,0)], [(8,0),(10,0)],
+        [(6,0),(10,0)], [(6,0),(8,0),(10,0)], [(8,0)], [(6,0),(8,0),(10,0),(12,0)],
+    ]
+    pattern = dot_patterns[frame] if frame < len(dot_patterns) else []
+    for x, y in pattern:
+        p_px(canvas, ox, oy, x, y, WHITE_PURE)
+
+def draw_sweat(canvas, ox, oy, frame=0):
+    """思考过度流汗"""
+    sweat_pos = [None, (3,2), (2,2), (3,3), None, (2,1), (3,2), (2,3), None, (3,2), (2,2), None]
+    pos = sweat_pos[frame] if frame < len(sweat_pos) else None
+    if pos:
+        p_px(canvas, ox, oy, pos[0], pos[1], TEAR_BLUE)
+
+def draw_pen(canvas, ox, oy, frame=0):
+    """写作时笔尖在右侧点动"""
+    pen_y_offsets = [0, -1, 0, 1, 0, -1, 0, 1, 0, -1, 0, 0]
+    dy = pen_y_offsets[frame] if frame < len(pen_y_offsets) else 0
+    # 笔尖（右侧）
+    for x,y in [(13,4+dy),(13,5+dy),(13,6+dy),(12,6+dy)]:
+        p_px(canvas, ox, oy, x, y, DARK)
+    # 笔身
+    for x,y in [(13,7+dy),(13,8+dy)]:
+        p_px(canvas, ox, oy, x, y, BLUE)
+
+# ════════════════════════════════════════════════════════════════
+# 核心狐狸绘制
+# ════════════════════════════════════════════════════════════════
+
+def draw_fox(canvas, ox, oy, cell_oy=None, **overrides):
     """
-    绘制一只 16×16 像素狐狸，ox/oy 是左上角偏移。
-    关键：头(3-12行)和身体(9-14行)有重叠区域(9-12行)，确保不分家。
+    增强版狐狸绘制 — 紧凑 16×16，带细胞裁剪
+    cell_oy: 所在行的顶部 Y（不含 dy 偏移），用于裁剪
     """
-    def p(x, y, color):
-        if 0 <= x < 16 and 0 <= y < 16:
-            canvas.putpixel((ox + x, oy + y), color)
+    # 设置细胞裁剪边界
+    if cell_oy is not None:
+        _set_cell_rect(ox, cell_oy, ox + FRAME - 1, cell_oy + FRAME - 1)
+    else:
+        _set_cell_rect(ox, oy, ox + FRAME - 1, oy + FRAME - 1)
+
+    def p(x, y, color): p_px(canvas, ox, oy, x, y, color)
 
     # ── 尾巴 ──
-    tail = [
-        (13, 11), (14, 10), (15, 10),
-        (13, 12), (14, 11), (15, 11),
-        (13, 13), (14, 12),
-    ]
-    for x, y in tail:
-        p(x, y, ORANGE)
-    p(15, 9, WHITE)  # 尾巴尖
+    tail = overrides.get("tail", TAIL_NORMAL)
+    px_list(canvas, ox, oy, tail, ORANGE)
+    tail_tip = overrides.get("tail_tip", [(15,8)])
+    px_list(canvas, ox, oy, tail_tip, CREAM)
 
     # ── 腿 ──
+    leg_color = overrides.get("leg_color", ORANGE_DARK)
     for x in [5, 6, 9, 10]:
-        p(x, 13, ORANGE)
-    for x in [5, 6, 9, 10]:
-        p(x, 14, ORANGE)
+        p(x, 12, leg_color); p(x, 13, leg_color)
 
-    # ── 身体 (9-13行，包含和头的重叠 9行) ──
-    body = []
-    for y in range(9, 13):
-        for x in range(4, 12):
-            body.append((x, y))
-    # 去掉腿的位置
-    body = [(x, y) for x, y in body if y not in (13, 14) or x not in (5, 6, 9, 10)]
+    # ── 身体 ──
+    for y in range(8, 12):
+        for x in range(4, 12): p(x, y, ORANGE)
+    for x in range(4, 12): p(x, 11, ORANGE_MID)
 
-    for x, y in body:
-        p(x, y, ORANGE)
-
-    # 白肚皮 (10-11行)
-    for y in range(10, 12):
-        for x in range(6, 10):
-            p(x, y, WHITE)
+    # ── 白肚皮 ──
+    for y in range(9, 11):
+        for x in range(6, 10): p(x, y, CREAM)
 
     # ── 耳朵 ──
-    # 左耳
-    ear_l = [(4, 1), (5, 1), (4, 2), (5, 2), (6, 2)]
-    for x, y in ear_l:
-        p(x, y, ORANGE)
-    p(5, 1, ORANGE_LIGHT)
-    p(5, 2, ORANGE_LIGHT)
+    ear_l = overrides.get("ear_l", [(4,2),(5,2),(4,3),(5,3)])
+    px_list(canvas, ox, oy, ear_l, ORANGE)
+    p(5, 3, ORANGE_LIGHT)
+    ear_r = overrides.get("ear_r", [(10,2),(11,2),(10,3),(11,3)])
+    px_list(canvas, ox, oy, ear_r, ORANGE)
+    p(10, 3, ORANGE_LIGHT)
+    p(4, 3, PINK_SOFT); p(11, 3, PINK_SOFT)
 
-    # 右耳 — 支持耳动覆盖
-    ear_r = overrides.get("ear_r", [(10, 1), (11, 1), (10, 2), (11, 2), (9, 2)])
-    for x, y in ear_r:
-        p(x, y, ORANGE)
-    p(10, 1, ORANGE_LIGHT)
-    p(10, 2, ORANGE_LIGHT)
-
-    # 左耳 — 支持耳动覆盖
-    if overrides.get("ear_l_alt"):
-        for x, y in overrides["ear_l_alt"]:
-            p(x, y, ORANGE)
-        # 高光
-        p(5, 1, ORANGE_LIGHT)
-
-    # ── 头 (3-8行) ──
-    for y in range(3, 9):
-        for x in range(3, 13):
-            p(x, y, ORANGE)
-    # 白色面部 (5-7行)
+    # ── 头 ──
+    for y in range(4, 8):
+        for x in range(4, 12): p(x, y, ORANGE)
     for y in range(5, 8):
-        for x in range(5, 11):
-            p(x, y, WHITE)
+        for x in range(6, 10): p(x, y, CREAM)
+
+    # ── 眼镜（writing 专用） ──
+    glasses = overrides.get("glasses")
+    if glasses:
+        # 眼镜框
+        for x in range(5, 8):
+            p(x, 4, DARK_SOFT); p(x, 6, DARK_SOFT)
+        for x in range(9, 12):
+            p(x, 4, DARK_SOFT); p(x, 6, DARK_SOFT)
+        p(8, 5, DARK_SOFT)  # 镜桥
+        # 镜片反光
+        p(6, 5, GLASSES_TINT); p(10, 5, GLASSES_TINT)
 
     # ── 眼睛 ──
-    eyes_white = overrides.get("eyes_white", None)
-    pupils = overrides.get("pupils", None)
-    highlights = overrides.get("highlights", None)
+    eyes_white = overrides.get("eyes_white", [(6,5),(7,5),(9,5),(10,5)])
+    px_list(canvas, ox, oy, eyes_white, WHITE_PURE)
+    pupils = overrides.get("pupils", [(7,5),(9,5)])
+    px_list(canvas, ox, oy, pupils, DARK)
+    highlights = overrides.get("highlights", [(6,5),(10,5)])
+    px_list(canvas, ox, oy, highlights, WHITE_PURE)
 
-    if eyes_white is None:
-        p(5, 4, WHITE); p(6, 4, WHITE)   # 左眼白
-        p(9, 4, WHITE); p(10, 4, WHITE)  # 右眼白
-    else:
-        for x, y in eyes_white:
-            p(x, y, WHITE)
-
-    if pupils is None:
-        p(6, 4, DARK)   # 左瞳孔
-        p(9, 4, DARK)   # 右瞳孔
-    else:
-        for x, y in pupils:
-            p(x, y, DARK)
-
-    if highlights is None:
-        p(5, 4, (255, 255, 255, 180))
-        p(9, 4, (255, 255, 255, 180))
-    else:
-        for x, y in highlights:
-            p(x, y, (255, 255, 255, 180))
+    # ── 星星眼（success/excited 专用） ──
+    star_eyes = overrides.get("star_eyes")
+    if star_eyes:
+        for sx, sy in star_eyes:
+            draw_mini_star(canvas, ox, oy, sx, sy)
 
     # ── 鼻子 ──
-    nose = overrides.get("nose", [(7, 6), (8, 6)])
-    for x, y in nose:
-        p(x, y, DARK)
+    nose = overrides.get("nose", [(7,6),(8,6)]); px_list(canvas, ox, oy, nose, DARK)
 
     # ── 嘴 ──
-    mouth = overrides.get("mouth", [(7, 7), (8, 7)])
-    for x, y in mouth:
-        p(x, y, DARK)
+    mouth = overrides.get("mouth", [(7,7),(8,7)]); px_list(canvas, ox, oy, mouth, DARK)
+    smile = overrides.get("smile")
+    if smile: px_list(canvas, ox, oy, smile, DARK)
 
     # ── 腮红 ──
-    p(4, 6, PINK); p(11, 6, PINK)
+    p(5, 6, PINK_SOFT); p(10, 6, PINK_SOFT)
 
-    # ── 泪滴（error 用） ──
+    # ── 泪滴 ──
     if overrides.get("tear"):
-        p(11, 5, BLUE)
-        p(11, 6, BLUE)
+        p(11, 4, TEAR_BLUE); p(11, 5, TEAR_BLUE); p(10, 6, TEAR_BLUE)
 
-    # ── 额外粒子（烟花等） ──
-    particles = overrides.get("particles", [])
-    for cx, cy in particles:
-        draw_sparkle(canvas, ox, oy, cx, cy)
+    # ── 特效粒子 ──
+    for cx, cy in overrides.get("sparkles", []): draw_sparkle(canvas, ox, oy, cx, cy, YELLOW)
+    for cx, cy in overrides.get("hearts", []): draw_heart(canvas, ox, oy, cx, cy)
+    for cx, cy in overrides.get("mini_stars", []): draw_mini_star(canvas, ox, oy, cx, cy)
+    for cx, cy in overrides.get("music_notes", []): draw_music_note(canvas, ox, oy, cx, cy)
 
     # ── 问号 ──
-    if overrides.get("question_mark"):
-        draw_question_mark(canvas, ox, oy)
+    q_frame = overrides.get("q_frame")
+    if q_frame is not None: draw_question_mark(canvas, ox, oy, q_frame)
+
+    # ── Zzz ──
+    z_seq = overrides.get("zzz_seq")
+    if z_seq is not None: draw_zzz(canvas, ox, oy, z_seq)
+
+    # ── 思考点 ──
+    dot_frame = overrides.get("dot_frame")
+    if dot_frame is not None: draw_thinking_dots(canvas, ox, oy, dot_frame)
+
+    # ── 流汗 ──
+    if overrides.get("sweat"): draw_sweat(canvas, ox, oy, overrides.get("sweat_frame", 0))
+
+    # ── 笔 ──
+    if overrides.get("pen"): draw_pen(canvas, ox, oy, overrides.get("pen_frame", 0))
 
 
-# ═══════════════════════════════════════════════════
-# Row 0: idle — 呼吸起伏 + 眨眼（8帧）
-# ═══════════════════════════════════════════════════
-y0 = 0 * FRAME
-# 微妙呼吸：身体微微上下 + 偶尔眨眼
-idle_dys = [0, -1, -1, 0, 0, 1, 0, 0]
-idle_overrides = [
-    {},                                                          # 0: 正
-    {},                                                          # 1: 吸气
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(5, 4), (6, 4)],
-     "highlights": []},                                          # 2: 闭眼（吸气顶）
-    {},                                                          # 3: 呼气
-    {},                                                          # 4: 正
-    {},                                                          # 5: 微呼
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(5, 4), (6, 4)],
-     "highlights": []},                                          # 6: 闭眼
-    {},                                                          # 7: 正
-]
-for f in range(8):
-    dy = idle_dys[f]
-    draw_fox(img, f * FRAME, y0 + dy, **idle_overrides[f])
-
-
-# ═══════════════════════════════════════════════════
-# Row 1: thinking — 歪头思考 + 眼球转 + 思考点（8帧）
-# ═══════════════════════════════════════════════════
-y1 = 1 * FRAME
-thinks = [
-    # 帧0: 正 + 眼球偏左上
-    {"pupils": [(6, 3), (9, 3)], "highlights": [(5, 3), (9, 3)]},
-    # 帧1: 头微歪右 + 眼球右上
-    {"pupils": [(7, 3), (10, 3)], "highlights": [(6, 3), (10, 3)]},
-    # 帧2: 正 + 眨眼
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(5, 4), (6, 4)],
-     "highlights": []},
-    # 帧3: 头微歪左 + 眼球左
-    {"pupils": [(5, 4), (8, 4)], "highlights": [(4, 4), (8, 4)]},
-    # 帧4: 正 + 眼球偏上
-    {"pupils": [(6, 3), (9, 3)], "highlights": [(5, 3), (9, 3)]},
-    # 帧5: 眨眼 + 右耳微动
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(5, 4), (6, 4)],
-     "highlights": [],
-     "ear_r": [(10, 0), (11, 0), (10, 1), (11, 1), (9, 1)]},  # 耳朵上移1px
-    # 帧6: 眼球右
-    {"pupils": [(7, 4), (10, 4)], "highlights": [(6, 4), (10, 4)]},
-    # 帧7: 正
+# ════════════════════════════════════════════════════════════════
+# Row 0: idle — 呼吸起伏 + 眨眼 + 耳动 + 摇尾（12帧）
+# ════════════════════════════════════════════════════════════════
+idle_dys = [0, -1, -1, 0, 0, 1, 0, 0, -1, 0, 1, 0]
+idle_frames = [
+    # 0  正常
+    {},
+    # 1  右耳动 + 尾上摆
+    {"ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)], "tail": TAIL_WAG_UP},
+    # 2  闭眼 + 尾下摆
+    {"eyes_white": [], "pupils": [], "highlights": [], "tail": TAIL_WAG_DOWN},
+    # 3  左耳动 + 尾上摆
+    {"ear_l": [(4,1),(5,1),(4,2),(5,2)], "tail": TAIL_WAG_UP, "tail_tip": [(15,7)]},
+    # 4  正常
+    {},
+    # 5  右耳动
+    {"ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)], "tail": TAIL_WAG_UP},
+    # 6  闭眼 + 微笑
+    {"eyes_white": [], "pupils": [], "highlights": [], "mouth": [(7,7),(8,7)], "smile": [(6,8),(9,8)]},
+    # 7  张嘴哈欠 + 尾下摆
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)], "tail": TAIL_WAG_DOWN, "tail_tip": [(15,9)]},
+    # 8  正常（补充帧）
+    {},
+    # 9  半闭眼（补充帧）
+    {"eyes_white": [(6,5),(7,5),(9,5)], "pupils": [(7,5)], "highlights": [(6,5)]},
+    # 10 伸懒腰（身体抬起）
+    {"tail": TAIL_WAG_UP, "tail_tip": [(15,7)]},
+    # 11 恢复正常
     {},
 ]
-for f in range(8):
-    draw_fox(img, f * FRAME, y1, **thinks[f])
+for f in range(12):
+    dy = idle_dys[f]
+    kwargs = dict(idle_frames[f])
+    draw_fox(img, f * FRAME, 0 * FRAME + dy, cell_oy=0 * FRAME, **kwargs)
 
-
-# ═══════════════════════════════════════════════════
-# Row 2: streaming — 说话嘴动 + 身体微弹 + 眨眼眯眼（8帧）
-# ═══════════════════════════════════════════════════
-y2 = 2 * FRAME
-stream_dys = [0, -1, 0, 1, 0, -1, 0, 0]  # 说话时身体微弹
-streams = [
-    # 帧0: 小口
-    {"mouth": [(7, 7), (8, 7)]},
-    # 帧1: 大张嘴 + 身体上弹 + 眯眼
-    {"mouth": [(6, 7), (7, 7), (8, 7), (9, 7)],
-     "eyes_white": [(5, 4), (6, 4), (9, 4), (10, 4)],
-     "pupils": [(5, 4), (9, 4)],
-     "highlights": [(5, 4), (9, 4)]},
-    # 帧2: 偏右小口
-    {"mouth": [(7, 7), (8, 7), (9, 7)]},
-    # 帧3: 大嘴 + 身体下落 + 眨眼
-    {"mouth": [(6, 7), (7, 7), (8, 7), (9, 7)],
-     "eyes_white": [(5, 4), (6, 4), (9, 4), (10, 4)],
-     "pupils": [(5, 4), (9, 4)],
-     "highlights": []},
-    # 帧4: 偏左小口
-    {"mouth": [(6, 7), (7, 7), (8, 7)]},
-    # 帧5: 闭嘴 + 身体上弹 + 眯眼
-    {"mouth": [(7, 7), (8, 7)],
-     "eyes_white": [(5, 4), (6, 4), (9, 4), (10, 4)],
-     "pupils": [(5, 4), (9, 4)],
-     "highlights": [(5, 4), (9, 4)]},
-    # 帧6: 大嘴
-    {"mouth": [(6, 7), (7, 7), (8, 7), (9, 7)]},
-    # 帧7: 正常小口
-    {"mouth": [(7, 7), (8, 7)]},
+# ════════════════════════════════════════════════════════════════
+# Row 1: thinking — 眼球转 + 思考点 + 耳动（12帧）
+# ════════════════════════════════════════════════════════════════
+thinking_frames = [
+    {"pupils": [(7,4)], "highlights": [(6,5)]},                               # 0 正常
+    {"pupils": [(10,4)], "highlights": [(10,5)], "dot_frame": 1},             # 1 看右
+    {"eyes_white": [], "pupils": [], "highlights": [], "dot_frame": 2},       # 2 闭眼思考
+    {"pupils": [(6,5)], "highlights": [(6,5)], "dot_frame": 3},              # 3 看左
+    {"pupils": [(7,4)], "highlights": [(6,5)]},                               # 4 正常
+    {"eyes_white": [], "pupils": [], "highlights": [],                        # 5 歪头思考
+     "ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)], "dot_frame": 5},
+    {"pupils": [(10,5)], "highlights": [(10,5)], "dot_frame": 6},             # 6 看右上
+    {"eyes_white": [], "pupils": [], "highlights": [],                        # 7 闭眼+耳动
+     "ear_l": [(4,1),(5,1),(4,2),(5,2)], "dot_frame": 7},
+    {"pupils": [(7,4)], "highlights": [(6,5)], "dot_frame": 8},              # 8 正常+远点
+    {"pupils": [(6,4)], "highlights": [(6,5)], "dot_frame": 9},              # 9 看左上
+    {"eyes_white": [], "pupils": [], "highlights": [], "dot_frame": 10},      # 10 闭眼+两点
+    {"pupils": [(7,4)], "highlights": [(6,5)], "dot_frame": 11},             # 11 回来
 ]
-for f in range(8):
+for f in range(12):
+    draw_fox(img, f * FRAME, 1 * FRAME, cell_oy=1 * FRAME, **thinking_frames[f])
+
+# ════════════════════════════════════════════════════════════════
+# Row 2: streaming — 说话嘴动 + 身体起伏 + 眨眼（12帧）
+# ════════════════════════════════════════════════════════════════
+stream_dys = [0, -1, 0, 1, 0, -1, 0, 0, -1, 0, 1, 0]
+stream_frames = [
+    {"mouth": [(7,7),(8,7)], "tail": TAIL_WAG_UP},                            # 0 小嘴
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)],                                      # 1 张嘴大
+     "eyes_white": [(6,5),(7,5),(9,5),(10,5)], "pupils": [(6,5),(9,5)],
+     "highlights": [(6,5),(9,5)], "tail": TAIL_WAG_DOWN},
+    {"mouth": [(7,7),(8,7),(9,7)], "tail": TAIL_WAG_UP},                     # 2 中嘴
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)],                                      # 3 张嘴+闭右眼
+     "eyes_white": [(6,5),(7,5),(9,5),(10,5)], "pupils": [(6,5),(9,5)],
+     "highlights": [], "tail": TAIL_WAG_DOWN},
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)],                                      # 4 大张嘴
+     "tail": TAIL_WAG_UP, "tail_tip": [(15,7)]},
+    {"mouth": [(7,7),(8,7)],                                                  # 5 小嘴+睁大眼
+     "eyes_white": [(6,5),(7,5),(9,5),(10,5)], "pupils": [(6,5),(9,5)],
+     "highlights": [(6,5),(9,5)], "tail": TAIL_WAG_DOWN},
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)], "tail": TAIL_WAG_UP},               # 6 中张嘴
+    {"mouth": [(7,7),(8,7)], "smile": [(6,8),(9,8)]},                        # 7 小嘴+微笑
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)],                                      # 8 补充：大张嘴眨眼
+     "eyes_white": [(6,5),(7,5),(9,5),(10,5)], "pupils": [(6,5),(9,5)],
+     "highlights": [(6,5),(9,5)]},
+    {"mouth": [(7,7),(8,7)], "tail": TAIL_WAG_UP},                           # 9 补充
+    {"mouth": [(6,7),(7,7),(8,7),(9,7)],                                      # 10 补充：大张嘴
+     "tail": TAIL_WAG_DOWN},
+    {"mouth": [(7,7),(8,7)], "smile": [(6,8),(9,8)]},                        # 11 微笑结尾
+]
+for f in range(12):
     dy = stream_dys[f]
-    draw_fox(img, f * FRAME, y2 + dy, **streams[f])
+    draw_fox(img, f * FRAME, 2 * FRAME + dy, cell_oy=2 * FRAME, **stream_frames[f])
 
-
-# ═══════════════════════════════════════════════════
-# Row 3: question — 歪头疑惑 + 问号 + 黄色烟花（8帧）
-# ═══════════════════════════════════════════════════
-y3 = 3 * FRAME
-questions = [
-    # 帧0: 歪左 + 大小眼 + 问号 + 火花
-    {"eyes_white": [(5, 4), (6, 5)], "pupils": [(6, 5)], "highlights": [(5, 5)],
-     "question_mark": True,
-     "particles": [(14, 1), (1, 4)]},
-    # 帧1: 正 + 问号 + 火花闪烁
-    {"question_mark": True,
-     "particles": [(13, 0), (2, 3)]},
-    # 帧2: 歪右 + 大小眼 + 问号 + 火花
-    {"eyes_white": [(9, 4), (10, 5)], "pupils": [(9, 5)], "highlights": [(9, 5)],
-     "question_mark": True,
-     "particles": [(15, 2), (0, 1)]},
-    # 帧3: 正 + 张嘴疑惑 + 问号
-    {"mouth": [(6, 7), (7, 7), (8, 7)],
-     "question_mark": True,
-     "particles": [(14, 1)]},
-    # 帧4: 歪左 + 大小眼 + 问号 + 火花爆发
-    {"eyes_white": [(5, 4), (6, 5)], "pupils": [(6, 5)], "highlights": [(5, 5)],
-     "question_mark": True,
-     "particles": [(13, 1), (1, 3), (15, 0)]},
-    # 帧5: 正 + 大张嘴 + 问号
-    {"mouth": [(6, 7), (7, 7), (8, 7), (9, 7)],
-     "question_mark": True,
-     "particles": [(14, 0), (0, 2)]},
-    # 帧6: 歪右 + 大小眼 + 问号 + 火花
-    {"eyes_white": [(9, 4), (10, 5)], "pupils": [(9, 5)], "highlights": [(9, 5)],
-     "question_mark": True,
-     "particles": [(13, 2), (1, 1)]},
-    # 帧7: 正 + 问号
-    {"question_mark": True,
-     "particles": [(14, 1), (0, 3)]},
+# ════════════════════════════════════════════════════════════════
+# Row 3: question — 疑惑歪头 + 右侧弹跳问号（12帧）
+# ════════════════════════════════════════════════════════════════
+question_frames = [
+    {"q_frame": 0, "pupils": [(7,4)], "highlights": [(6,5)]},                  # 0
+    {"q_frame": 1, "mouth": [(6,7),(7,7),(8,7),(9,7)]},                       # 1 好奇张嘴
+    {"q_frame": 2, "eyes_white": [], "pupils": [], "highlights": []},          # 2 闭眼疑惑
+    {"q_frame": 3, "pupils": [(6,5)], "highlights": [(6,5)]},                 # 3 左看
+    {"q_frame": 4, "pupils": [(7,4)], "highlights": [(6,5)]},                  # 4 归位
+    {"q_frame": 5, "pupils": [(10,4)], "highlights": [(10,5)]},                # 5 右看
+    {"q_frame": 6, "ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)],              # 6 歪头
+     "pupils": [(10,4)], "highlights": [(10,5)]},
+    {"q_frame": 7, "mouth": [(6,7),(7,7),(8,7),(9,7)],                        # 7 张嘴
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"q_frame": 8, "pupils": [(6,5)], "highlights": [(6,5)]},                 # 8 补充
+    {"q_frame": 9, "eyes_white": [], "pupils": [], "highlights": []},          # 9 补充
+    {"q_frame": 10, "pupils": [(10,4)], "highlights": [(10,5)]},               # 10 补充
+    {"q_frame": 11, "pupils": [(7,4)], "highlights": [(6,5)]},                 # 11 结束
 ]
-for f in range(8):
-    draw_fox(img, f * FRAME, y3, **questions[f])
+for f in range(12):
+    draw_fox(img, f * FRAME, 3 * FRAME, cell_oy=3 * FRAME, **question_frames[f])
 
-
-# ═══════════════════════════════════════════════════
-# Row 4: success — 开心跳跃（降高）+ 黄色烟花（8帧）
-# ═══════════════════════════════════════════════════
-y4 = 4 * FRAME
-# 跳跃高度大幅降低：最高 -4px（原 -8px）
-success_dys = [0, -1, -2, -4, -2, -1, 0, 0]
-success_overrides = [
-    # 帧0: 预备 — 笑眼 + 小火花
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(6, 4)], "highlights": [(5, 4)],
-     "particles": [(14, 2)]},
-    # 帧1: 起跳 — 眯眼 + 火花
-    {"eyes_white": [(5, 4)], "pupils": [(5, 4)], "highlights": [(5, 4)],
-     "particles": [(13, 1), (1, 3)]},
-    # 帧2: 升空 — 闭眼开心 + 烟花爆发
-    {"eyes_white": [], "pupils": [], "highlights": [],
-     "particles": [(14, 0), (1, 1), (0, 4)]},
-    # 帧3: 最高点 — 眯眼 + 大烟花
-    {"eyes_white": [(5, 4)], "pupils": [(5, 4)], "highlights": [(5, 4)],
-     "particles": [(13, 0), (15, 2), (2, 0), (0, 3)]},
-    # 帧4: 下落 — 笑眼 + 火花散去
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(6, 4)], "highlights": [(5, 4)],
-     "particles": [(14, 1), (1, 2)]},
-    # 帧5: 着地 — 笑眼
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(6, 4)], "highlights": [(5, 4)],
-     "particles": [(13, 2)]},
-    # 帧6: 缓冲 — 笑眼
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(6, 4)], "highlights": [(5, 4)]},
-    # 帧7: 恢复 — 笑眼
-    {"eyes_white": [(5, 4), (6, 4)], "pupils": [(6, 4)], "highlights": [(5, 4)]},
+# ════════════════════════════════════════════════════════════════
+# Row 4: success — 笑眼 + 星星眼 + 烟花散开 + 小心心（12帧）
+# ════════════════════════════════════════════════════════════════
+success_frames = [
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 0
+     "smile": [(6,8),(9,8)], "sparkles": [(8,1)], "mini_stars": [(4,2)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                            # 1 星星眼
+     "smile": [(6,8),(9,8)], "sparkles": [(7,0),(9,0)], "hearts": [(3,3)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                            # 2
+     "smile": [(6,8),(9,8)], "sparkles": [(6,0),(10,0),(7,1),(9,1)],
+     "mini_stars": [(4,1),(12,1)]},
+    {"eyes_white": [], "pupils": [], "highlights": [],                         # 3 闭眼开心
+     "smile": [(6,8),(9,8)], "sparkles": [(5,0),(11,0),(6,2),(10,2),
+               (4,1),(12,1),(7,1),(9,1)], "hearts": [(3,2),(13,2)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                            # 4
+     "smile": [(6,8),(9,8)], "sparkles": [(4,2),(12,2),(5,3),(11,3),(7,1),(9,1)],
+     "mini_stars": [(3,3),(13,3)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 5
+     "smile": [(6,8),(9,8)], "sparkles": [(3,2),(13,2),(6,3),(10,3)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 6 尾巴翘起
+     "smile": [(6,8),(9,8)], "tail": TAIL_HAPPY, "sparkles": [(4,3),(12,3)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 7
+     "smile": [(6,8),(9,8)], "tail": TAIL_HAPPY},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                            # 8 补充
+     "smile": [(6,8),(9,8)], "sparkles": [(5,2),(11,2)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 9 补充
+     "smile": [(6,8),(9,8)], "tail": TAIL_HAPPY, "hearts": [(4,3)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 10
+     "smile": [(6,8),(9,8)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],   # 11 结束微笑
+     "smile": [(6,8),(9,8)], "tail": TAIL_HAPPY},
 ]
-for f in range(8):
-    dy = success_dys[f]
-    draw_fox(img, f * FRAME, y4 + dy, **success_overrides[f])
+for f in range(12):
+    draw_fox(img, f * FRAME, 4 * FRAME, cell_oy=4 * FRAME, **success_frames[f])
 
-
-# ═══════════════════════════════════════════════════
-# Row 5: error — 惊吓发抖 + 泪滴（8帧）
-# ═══════════════════════════════════════════════════
-y5 = 5 * FRAME
-# 水平抖动维持，增加幅度让效果更明显
-error_shifts = [1, -2, 2, -1, 2, -2, 1, -1]
-for f in range(8):
-    dx = error_shifts[f]
-    # 双眼瞪大 3×1 + 瞳孔居中
-    overrides = {
-        "eyes_white": [(4, 3), (5, 3), (6, 3), (9, 3), (10, 3), (11, 3)],
-        "pupils": [(5, 3), (10, 3)],
-        "highlights": [(4, 3), (9, 3)],
-    }
-    if f in (2, 4, 6):
-        overrides["tear"] = True  # 泪滴 — 间隔出现更有节奏
-    draw_fox(img, f * FRAME + dx, y5, **overrides)
-
-
-# ═══════════════════════════════════════════════════
-# Row 6: sleeping — 闭眼睡眠 + ZZZ 飘动（8帧）
-# ═══════════════════════════════════════════════════
-y6 = 6 * FRAME
-sleep_dys = [0, 1, 0, 1, 0, 1, 0, 1]  # 呼吸浮动
-sleep_eyes = {
-    "eyes_white": [(5, 4), (6, 4)],
-    "pupils": [(5, 4), (6, 4)],   # 瞳孔撑满 = 闭眼
-    "highlights": [],
+# ════════════════════════════════════════════════════════════════
+# Row 5: error — 惊吓发抖 + 泪滴 + 大眼（12帧）
+# ════════════════════════════════════════════════════════════════
+error_shifts = [1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1]
+error_eyes_base = {
+    "eyes_white": [(4,4),(5,4),(6,4),(9,4),(10,4),(11,4)],
+    "pupils": [(6,4),(9,4)],
+    "highlights": [(5,4),(10,4)],
 }
-for f in range(8):
-    dy = sleep_dys[f]
-    draw_fox(img, f * FRAME, y6 + dy, **sleep_eyes)
+for f in range(12):
+    dx = error_shifts[f]
+    kwargs = dict(error_eyes_base)
+    kwargs["tear"] = f in (1, 2, 4, 5, 6, 8, 9)
+    if f in (2, 4, 8, 10):
+        kwargs["mouth"] = [(6,7),(7,7),(8,7),(9,7)]  # 张嘴惊吓
+    draw_fox(img, f * FRAME + dx, 5 * FRAME, cell_oy=5 * FRAME, **kwargs)
 
+# ════════════════════════════════════════════════════════════════
+# Row 6: sleeping — 闭眼 + 呼吸 + Zzz 浮动（12帧）
+# ════════════════════════════════════════════════════════════════
+sleep_eyes = {"eyes_white": [(6,5),(7,5)], "pupils": [(6,5),(7,5)], "highlights": []}
+zzz_seq_per_frame = [None, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, None]
+for f in range(12):
+    kwargs = dict(sleep_eyes)
+    zz = zzz_seq_per_frame[f]
+    if zz is not None: kwargs["zzz_seq"] = zz
+    draw_fox(img, f * FRAME, 6 * FRAME, cell_oy=6 * FRAME, **kwargs)
 
-# ═══════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
+# Row 7: writing — 写作状态 + 眼镜 + 笔尖点动（12帧）
+# ════════════════════════════════════════════════════════════════
+writing_frames = [
+    {"glasses": True, "pen": True, "pen_frame": 0,                             # 0 写作中
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 1,                             # 1 笔动
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 2,                             # 2 笔动
+     "eyes_white": [], "pupils": [], "highlights": []},
+    {"glasses": True, "pen": True, "pen_frame": 3,                             # 3 笔动
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 4,                             # 4 抬头
+     "pupils": [(6,5)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 5,                             # 5 继续写
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 6,                             # 6 笔动
+     "eyes_white": [], "pupils": [], "highlights": []},
+    {"glasses": True, "pen": True, "pen_frame": 7,                             # 7 笔动
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 8,                             # 8 思考停顿
+     "pupils": [(10,4)], "highlights": [(10,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 9,                             # 9 继续写
+     "pupils": [(7,4)], "highlights": [(6,5)]},
+    {"glasses": True, "pen": True, "pen_frame": 10,                            # 10 笔动
+     "eyes_white": [], "pupils": [], "highlights": []},
+    {"glasses": True, "pen": True, "pen_frame": 11,                            # 11 停下看看
+     "pupils": [(7,4)], "highlights": [(6,5)], "smile": [(6,8),(9,8)]},
+]
+for f in range(12):
+    draw_fox(img, f * FRAME, 7 * FRAME, cell_oy=7 * FRAME, **writing_frames[f])
+
+# ════════════════════════════════════════════════════════════════
+# Row 8: thinking_hard — 深度思考 + 流汗 + 问号旋转（12帧）
+# ════════════════════════════════════════════════════════════════
+thinking_hard_frames = [
+    {"pupils": [(6,4)], "highlights": [(6,5)], "sweat": True, "sweat_frame": 0}, # 0
+    {"pupils": [(10,4)], "highlights": [(10,5)], "sweat": True, "sweat_frame": 1}, # 1
+    {"eyes_white": [], "pupils": [], "highlights": [], "sweat": True, "sweat_frame": 2}, # 2
+    {"pupils": [(6,5)], "highlights": [(6,5)], "sweat": True, "sweat_frame": 3}, # 3
+    {"pupils": [(7,4)], "highlights": [(6,5)], "sweat": True, "sweat_frame": 4}, # 4 休息
+    {"eyes_white": [], "pupils": [], "highlights": [],                               # 5 闭眼用力
+     "ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)], "sweat": True, "sweat_frame": 5},
+    {"pupils": [(10,5)], "highlights": [(10,5)], "sweat": True, "sweat_frame": 6}, # 6
+    {"eyes_white": [], "pupils": [], "highlights": [],                               # 7 闭眼+耳动
+     "ear_l": [(4,1),(5,1),(4,2),(5,2)], "sweat": True, "sweat_frame": 7},
+    {"pupils": [(7,4)], "highlights": [(6,5)], "sweat": True, "sweat_frame": 8}, # 8
+    {"pupils": [(10,4)], "highlights": [(10,5)], "sweat": True, "sweat_frame": 9}, # 9
+    {"eyes_white": [], "pupils": [], "highlights": [], "sweat": True, "sweat_frame": 10}, # 10
+    {"pupils": [(7,4)], "highlights": [(6,5)], "sweat": True, "sweat_frame": 11}, # 11
+]
+for f in range(12):
+    draw_fox(img, f * FRAME, 8 * FRAME, cell_oy=8 * FRAME, **thinking_hard_frames[f])
+
+# ════════════════════════════════════════════════════════════════
+# Row 9: excited — 跳跃 + 星星眼 + 音符 + 快速摆尾（12帧）
+# ════════════════════════════════════════════════════════════════
+excited_dys = [0, -2, -2, -1, 0, -2, -2, -1, 0, -2, -2, 0]
+excited_frames = [
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 0
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 1 跳起
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(4,3),(12,3)], "music_notes": [(2,1)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 2 最高
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(3,2),(13,2),(5,1),(11,1)], "hearts": [(4,4)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],      # 3 下落
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(4,2),(12,2)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 4 落地
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 5 跳起
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(5,3),(11,3)], "music_notes": [(3,2)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 6 最高
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(2,2),(14,2),(4,1),(12,1)], "hearts": [(6,3)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],      # 7 下落
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 8 落地
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(3,3),(13,3)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 9 跳起
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "music_notes": [(2,2),(14,2)]},
+    {"star_eyes": [(6,5),(9,5)], "highlights": [],                               # 10 最高
+     "smile": [(6,8),(9,8)], "tail": TAIL_WAG_FAST,
+     "sparkles": [(3,1),(13,1),(5,2),(11,2)], "hearts": [(4,3),(12,3)]},
+    {"eyes_white": [(6,5),(7,5)], "pupils": [(7,5)], "highlights": [(6,5)],      # 11 收尾
+     "smile": [(6,8),(9,8)], "tail": TAIL_HAPPY},
+]
+for f in range(12):
+    dy = excited_dys[f]
+    draw_fox(img, f * FRAME, 9 * FRAME + dy, cell_oy=9 * FRAME, **excited_frames[f])
+
+# ════════════════════════════════════════════════════════════════
 # 保存
-# ═══════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 out_path = "D:/work/DriFoxx/app/widgets/pet_sprites.png"
 img.save(out_path)
 print(f"Done: {out_path}  ({W}×{H})")
