@@ -303,6 +303,9 @@ class Settings(QConfig):
         OptionsValidator(["fallout"]),  # 运行时动态补充
     )
 
+    # ========== 像素桌宠 ==========
+    pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+
     # ========== 会话项目管理 ==========
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")
 

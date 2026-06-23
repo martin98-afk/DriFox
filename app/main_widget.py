@@ -86,6 +86,7 @@ from app.widgets.bottom_input_area import (
     InputGlowUnderlay,
     SendableTextEdit,
 )
+from app.widgets.pixel_pet import PixelPetWidget
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
@@ -232,6 +233,8 @@ class OpenAIChatToolWindow(ToolWindow):
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
+    # 桌宠用：AI 状态变化信号（idle / thinking / streaming / question / error）
+    ai_state_changed = pyqtSignal(str)
     # 套餐用量查询结果桥接信号（后台线程 → 主线程）
     _coding_plan_result_ready = pyqtSignal(object)
 
@@ -357,6 +360,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._handle_tool_start_ui_sync, type=Qt.QueuedConnection
         )
         self._is_streaming = False
+        self._ai_state = "idle"  # 桌宠用：当前 AI 状态
         self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
         self._stop_elapsed = None  # 手动停止时暂存的耗时
@@ -1422,6 +1426,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 字体样式
         self.setStyleSheet("")
+
+        # ===== 像素小狐桌宠 =====
+        self.pixel_pet: PixelPetWidget | None = None
+        from app.utils.config import Settings
+        if Settings.get_instance().pet_enabled.value:
+            self._init_pixel_pet()
 
         session_bar_layout = QHBoxLayout()
 
@@ -4185,6 +4195,33 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._todo_floating_widget.setVisible(True)
 
+    # ══════════════════════════════════════════════════════════════
+    # 像素小狐桌宠 — 集中 AI 状态管理
+    # ══════════════════════════════════════════════════════════════
+
+    def _set_ai_state(self, state: str) -> None:
+        """设置 AI 状态并通知桌宠（仅变化时发射信号）"""
+        if state != self._ai_state:
+            self._ai_state = state
+            self.ai_state_changed.emit(state)
+
+    def _init_pixel_pet(self) -> None:
+        """初始化像素小狐桌宠"""
+        try:
+            self.pixel_pet = PixelPetWidget(self)
+            self.pixel_pet.show()
+            self.pixel_pet.raise_()
+            # 连接 AI 状态信号 → 桌宠自主管理动画
+            self.ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
+            # 初始定位到右下角
+            self.pixel_pet.resize_handle(self.width(), self.height())
+            logger.info("[PixelPet] 桌宠已初始化")
+        except Exception as e:
+            logger.warning(f"[PixelPet] 初始化失败: {e}")
+            self.pixel_pet = None
+
+    # ══════════════════════════════════════════════════════════════
+
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
         try:
@@ -4547,6 +4584,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
+        # 桌宠跟随窗口大小修正位置
+        if self.pixel_pet:
+            self.pixel_pet.resize_handle(self.width(), self.height())
 
     def _set_cards_resize_preview_mode(self, enabled: bool):
         if enabled == self._resize_preview_active:
@@ -9266,6 +9306,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._is_streaming = True
         self._response_start_time = time.time()
+        self._set_ai_state("streaming")  # 桌宠：开始回复
         if self._current_assistant_card:
             self._current_assistant_card.start_elapsed_tracking()
         self._accumulated_content = ""
@@ -9300,6 +9341,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """新轮次思考开始，为当前助手卡片创建新的独立思考块"""
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("thinking")  # 桌宠：开始思考
         card = self._current_assistant_card
         if card and getattr(card, "_content_data", None) is not None:
             card.start_streaming_anim()
@@ -10065,6 +10107,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._is_streaming = False
         self._toggle_send_stop(False)
+        self._set_ai_state("idle")  # 桌宠：任务完成
 
         # 写入模型名称/服务商到卡片和 session 消息
         if self._current_assistant_card:
@@ -10424,6 +10467,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.update_content(error)
 
         self._is_streaming = False
+        self._set_ai_state("error")  # 桌宠：发生错误
 
         self._toggle_send_stop(False)
 
@@ -10538,6 +10582,7 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("question")  # 桌宠：等待用户回答
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
@@ -10579,6 +10624,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_question_answered(self, answer: str):
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("streaming")  # 桌宠：已回答，准备继续生成
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
@@ -10588,6 +10634,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
+        if self.pixel_pet:
+            self.pixel_pet.set_state("streaming")  # 回答后继续回复
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
@@ -10620,6 +10668,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("idle")  # 桌宠：取消提问，恢复空闲
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
@@ -10629,6 +10678,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")  # 取消则回 idle
 
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -11694,6 +11745,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.cancel_streaming()
 
         self._is_streaming = False
+        self._set_ai_state("idle")  # 桌宠：用户手动停止
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:
