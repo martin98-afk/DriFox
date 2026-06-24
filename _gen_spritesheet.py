@@ -38,7 +38,7 @@ TAIL_WAG_FAST = [(15,6),(12,7),(13,7),(14,7),(15,7),(12,8),(13,8),(14,8),(15,8),
 
 FRAME = 16
 COLS = 12
-ROWS = 10  # idle, thinking, streaming, question, success, error, sleeping, writing, thinking_hard, excited
+ROWS = 12  # idle, thinking, streaming, question, success, error, sleeping, writing, thinking_hard, excited, dragging, warning
 W = FRAME * COLS  # 192
 H = FRAME * ROWS  # 160
 
@@ -484,15 +484,76 @@ for f in range(12):
     draw_fox(img, f * FRAME + dx, 5 * FRAME, cell_oy=5 * FRAME, **kwargs)
 
 # ════════════════════════════════════════════════════════════════
-# Row 6: sleeping — 闭眼 + 呼吸 + Zzz 浮动（12帧）
+# Row 6: sleeping — 蜷睡（12帧：身体蜷成团、头埋低、腿消失、Zzz 从身侧）
 # ════════════════════════════════════════════════════════════════
-sleep_eyes = {"eyes_white": [(6,5),(7,5)], "pupils": [(6,5),(7,5)], "highlights": []}
-zzz_seq_per_frame = [None, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, None]
+# 蜷睡关键：身体高度从 16px 压缩到 ~10px、腿完全消失、Zzz 起点改到身体左侧
+sleep_dys = [0, -1, 0, 1, 0, 0, -1, 0, 1, 0, -1, 0]  # 呼吸起伏
+
+def draw_fox_curled(canvas, ox, oy, frame, cell_oy):
+    """绘制蜷睡姿态：身体蜷成圆团，腿消失，尾巴卷到身前"""
+    _set_cell_rect(ox, cell_oy, ox + FRAME - 1, cell_oy + FRAME - 1)
+
+    dy = sleep_dys[frame]
+    # 主体圆团（占据 y=8~12 区域，5px 高，去除腿部 y=12-13）
+    for y in range(8 + dy, 12 + dy):
+        for x in range(4, 12):
+            p_px(canvas, ox, oy, x, y, ORANGE)
+    # 肚皮白色
+    for y in range(9 + dy, 11 + dy):
+        for x in range(6, 10):
+            p_px(canvas, ox, oy, x, y, CREAM)
+    # 头（埋低，y=7~9，比站立时低 2px）
+    for y in range(7 + dy, 10 + dy):
+        for x in range(5, 11):
+            p_px(canvas, ox, oy, x, y, ORANGE)
+    # 脸白色（头埋低时脸部半遮）
+    for y in range(8 + dy, 10 + dy):
+        for x in range(6, 10):
+            p_px(canvas, ox, oy, x, y, CREAM)
+    # 耳朵（贴在头顶，dy 偏移）
+    for x, y in [(5, 6 + dy), (6, 6 + dy), (9, 6 + dy), (10, 6 + dy)]:
+        p_px(canvas, ox, oy, x, y, ORANGE)
+    # 眼睛（闭合：水平线）
+    for x, y in [(6, 8 + dy), (7, 8 + dy), (9, 8 + dy), (10, 8 + dy)]:
+        p_px(canvas, ox, oy, x, y, DARK)
+    # 鼻子（小点）
+    p_px(canvas, ox, oy, 8, 9 + dy, DARK)
+    # 尾巴（卷到身前，覆盖在身体左侧）
+    tail_curled = [(2, 9 + dy), (3, 9 + dy), (3, 10 + dy), (2, 10 + dy),
+                   (1, 10 + dy), (1, 11 + dy), (2, 11 + dy), (3, 11 + dy)]
+    for x, y in tail_curled:
+        p_px(canvas, ox, oy, x, y, ORANGE)
+    # 尾巴尖（白色）
+    p_px(canvas, ox, oy, 1, 10 + dy, CREAM)
+
+
 for f in range(12):
-    kwargs = dict(sleep_eyes)
+    # 蜷睡帧循环：呼吸（dy 起伏）+ Zzz 从身侧（x=12-14）冒出
+    draw_fox_curled(img, f * FRAME, 6 * FRAME, f, cell_oy=6 * FRAME)
+    # Zzz 冒泡（5-11 帧，从身体左侧 x=12+ 冒出）
+    zzz_seq_per_frame = [None, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, None]
     zz = zzz_seq_per_frame[f]
-    if zz is not None: kwargs["zzz_seq"] = zz
-    draw_fox(img, f * FRAME, 6 * FRAME, cell_oy=6 * FRAME, **kwargs)
+    if zz is not None:
+        # Zzz 位置（从身侧冒出，dx/dy 相对单元格左上角）
+        # 每帧的 (dx, dy, size) - dx 在身侧（x>10），dy 在头顶方向（y<8）
+        zzz_positions = [(13, 6, 1), (13, 5, 1), (12, 4, 2), (12, 3, 2),
+                         (11, 2, 3), (11, 1, 3), None,
+                         (12, 5, 2), (11, 4, 3), None, None, None]
+        entry = zzz_positions[zz] if zz < len(zzz_positions) else None
+        if entry is not None:
+            dx, dy_zzz, size = entry
+            def draw_zzz_at(zx, zy, c):
+                p_px(canvas=img, ox=f * FRAME, oy=6 * FRAME, x=dx + zx, y=dy_zzz + zy, color=c)
+            if size == 1:
+                for zx, zy in [(0, 0), (1, 0), (2, 0), (2, 1), (0, 2), (1, 2), (2, 2)]:
+                    draw_zzz_at(zx, zy, BLUE)
+            elif size == 2:
+                for zx, zy in [(0, 0), (1, 0), (2, 0), (3, 0), (3, 1), (2, 2), (0, 3), (1, 3), (2, 3)]:
+                    draw_zzz_at(zx, zy, BLUE)
+            elif size == 3:
+                for zx, zy in [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (4, 1),
+                               (3, 2), (2, 3), (0, 4), (1, 4), (2, 4), (3, 4), (4, 4)]:
+                    draw_zzz_at(zx, zy, BLUE_DARK)
 
 # ════════════════════════════════════════════════════════════════
 # Row 7: writing — 写作状态 + 眼镜 + 笔尖点动（12帧）
@@ -589,6 +650,146 @@ excited_frames = [
 for f in range(12):
     dy = excited_dys[f]
     draw_fox(img, f * FRAME, 9 * FRAME + dy, cell_oy=9 * FRAME, **excited_frames[f])
+
+# ════════════════════════════════════════════════════════════════
+# Row 10: dragging — 挣扎（12帧：身体扭动 + 嘴张 + 眼睁大 + 四肢乱动）
+# ════════════════════════════════════════════════════════════════
+drag_dys = [-1, 1, 1, -1, -1, 1, 0, 0, 1, -1, 1, -1]  # 左右扭动
+
+drag_frames = [
+    # 0 起始：眼睁大、嘴微张、身体左倾
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 1 向右扭：dy=+1
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(7,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 2 继续右扭 + 嘴微张
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(7,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 3 喊叫：嘴大张
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)], "tail": TAIL_WAG_FAST},
+    # 4 向左扭：dy=-1
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(9,4)], "highlights": [(5,4),(10,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 5 继续左扭
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(9,4)], "highlights": [(5,4),(10,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 6 四肢乱动：前腿前伸
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)], "leg_color": ORANGE_MID},
+    # 7 后腿后蹬
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(7,4),(9,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)], "leg_color": ORANGE_DARK},
+    # 8 抖动循环：dy=+1 嘴张
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(7,7),(8,7)]},
+    # 9 抖动循环：dy=-1 嘴合
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(7,4),(9,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 10 抖动循环：dy=+1
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 11 抖动循环：dy=-1
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(7,4),(9,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(7,7),(8,7)]},
+]
+for f in range(12):
+    dy = drag_dys[f]
+    kwargs = dict(drag_frames[f])
+    draw_fox(img, f * FRAME, 10 * FRAME + dy, cell_oy=10 * FRAME, **kwargs)
+
+# ════════════════════════════════════════════════════════════════
+# Row 11: warning — 警示（12帧：身体紧张、眼睁大、头顶 "!" 号闪烁）
+# ════════════════════════════════════════════════════════════════
+
+def draw_warning_sign(canvas, ox, oy, frame=0):
+    """在头顶右侧绘制闪烁的 '!' 警示符号"""
+    warn_patterns = [
+        None, None, (10, 0), (10, 0), (10, 1), (10, 0),
+        None, None, (10, 0), (10, 0), (10, 1), None,
+    ]
+    pos = warn_patterns[frame] if frame < len(warn_patterns) else None
+    if pos is None:
+        return
+    wx, wy = pos
+    # 感叹号主体
+    for xy in [(wx, wy), (wx, wy+1), (wx, wy+2), (wx, wy+3)]:
+        p_px(canvas, ox, oy, xy[0], xy[1], YELLOW_BRIGHT)
+    # 感叹号下面的点
+    p_px(canvas, ox, oy, wx, wy + 4, YELLOW_BRIGHT)
+
+warning_frames = [
+    # 0 警觉：眼睛睁大、耳朵竖立、身体直立、嘴微张
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)],
+     "ear_l": [(4,1),(5,1),(4,2),(5,2)], "ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)]},
+    # 1 紧张：张嘴、身体前倾
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 2 警示：头顶 "!" 闪烁
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 3 保持警觉
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(9,4)], "highlights": [(5,4),(10,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 4 快速左看
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(9,4)], "highlights": [(5,4),(10,4)],
+     "mouth": [(7,7),(8,7)]},
+    # 5 回正
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 6 眨眼一瞬
+    {"eyes_white": [], "pupils": [], "highlights": [],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 7 睁大眼 + "!" 闪烁
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)]},
+    # 8 快速右看
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(7,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(7,7),(8,7)]},
+    # 9 嘴微张、紧张
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)],
+     "ear_l": [(4,1),(5,1),(4,2),(5,2)]},
+    # 10 剧烈反应："!" + 嘴大张
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(6,7),(7,7),(8,7),(9,7)],
+     "ear_r": [(10,1),(11,1),(10,2),(11,2),(9,2)]},
+    # 11 稍微放松但仍警觉
+    {"eyes_white": [(5,4),(6,4),(7,4),(9,4),(10,4),(11,4)],
+     "pupils": [(6,4),(10,4)], "highlights": [(5,4),(11,4)],
+     "mouth": [(7,7),(8,7)]},
+]
+for f in range(12):
+    kwargs = dict(warning_frames[f])
+    # 非 None 的帧才画 "!" 警示符号
+    warn_patterns = [None, None, 0, 0, 1, 0, None, 0, 0, 0, 1, None]
+    if warn_patterns[f] is not None:
+        draw_warning_sign(img, f * FRAME, 0 * FRAME, frame=f)
+    draw_fox(img, f * FRAME, 11 * FRAME, cell_oy=11 * FRAME, **kwargs)
 
 # ════════════════════════════════════════════════════════════════
 # 保存
