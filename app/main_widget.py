@@ -4214,6 +4214,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """初始化像素小狐桌宠"""
         try:
             self.pixel_pet = PixelPetWidget(self)
+            from app.utils.theme_manager import theme_manager
+            theme_manager.register_refresh_target(self.pixel_pet)
             self.pixel_pet.show()
             self.pixel_pet.raise_()
             # 连接 AI 状态信号 → 桌宠自主管理动画
@@ -4247,6 +4249,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.pixel_pet.raise_()
         else:
             if self.pixel_pet is not None:
+                from app.utils.theme_manager import theme_manager
+                theme_manager.unregister_refresh_target(self.pixel_pet)
                 self.pixel_pet.hide()
 
     # ══════════════════════════════════════════════════════════════
