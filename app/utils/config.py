@@ -239,7 +239,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.2.10"
+    current_version = "v0.2.11"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -302,6 +302,10 @@ class Settings(QConfig):
         "fallout",
         OptionsValidator(["fallout"]),  # 运行时动态补充
     )
+
+    # ========== 像素桌宠 ==========
+    pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+    pet_size = OptionsConfigItem("UI", "PetSize", "medium", OptionsValidator(["small", "medium", "large"]))
 
     # ========== 会话项目管理 ==========
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")

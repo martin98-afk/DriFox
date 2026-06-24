@@ -152,6 +152,37 @@ class ThemeManager:
         resource_path = theme_dir / filename
         return resource_path if resource_path.exists() else None
 
+    def get_theme_pet(self, theme_id: str) -> dict:
+        """获取主题的 pet 配置。
+
+        主题 YAML 可选声明 `pet:` 段：
+            pet:
+              image: ./pet.png    # 相对主题目录的路径
+
+        Returns:
+            dict: {"image": Path, "source": "theme"} 表示该主题声明了有效 pet
+                  {} 表示该主题未声明 / 声明无效，调用方应 fallback 到内嵌默认
+        """
+        theme = self._themes.get(theme_id) or {}
+        pet_cfg = theme.get("pet") or {}
+        image_rel = pet_cfg.get("image")
+        if not image_rel:
+            return {}
+
+        theme_dir = self.get_theme_dir(theme_id)
+        if not theme_dir:
+            return {}
+
+        image_path = theme_dir / image_rel
+        if image_path.exists():
+            return {"image": image_path, "source": "theme"}
+
+        logger.warning(
+            f"[ThemeManager] 主题 {theme_id} 声明的 pet 不存在: {image_path}，"
+            f"fallback 到内嵌默认"
+        )
+        return {}
+
     def is_user_theme(self, theme_id: str) -> bool:
         """判断是否为用户自定义主题（非内置）"""
         theme = self._themes.get(theme_id)

@@ -45,3 +45,4 @@ app.config
 .playwright-mcp/ 
 "nul"  
 /.mypy_cache/
+/memory/

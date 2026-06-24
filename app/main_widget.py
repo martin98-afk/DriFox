@@ -86,6 +86,7 @@ from app.widgets.bottom_input_area import (
     InputGlowUnderlay,
     SendableTextEdit,
 )
+from app.widgets.pixel_pet import PixelPetWidget
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
@@ -232,6 +233,8 @@ class OpenAIChatToolWindow(ToolWindow):
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
+    # 桌宠用：AI 状态变化信号（idle / thinking / streaming / question / error）
+    ai_state_changed = pyqtSignal(str)
     # 套餐用量查询结果桥接信号（后台线程 → 主线程）
     _coding_plan_result_ready = pyqtSignal(object)
 
@@ -357,6 +360,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._handle_tool_start_ui_sync, type=Qt.QueuedConnection
         )
         self._is_streaming = False
+        self._ai_state = "idle"  # 桌宠用：当前 AI 状态
         self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
         self._stop_elapsed = None  # 手动停止时暂存的耗时
@@ -1423,6 +1427,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 字体样式
         self.setStyleSheet("")
 
+        # ===== 像素小狐桌宠 =====
+        self.pixel_pet: PixelPetWidget | None = None
+        from app.utils.config import Settings
+        if Settings.get_instance().pet_enabled.value:
+            self._init_pixel_pet()
+
+        # 桌宠显示开关的实时响应
+        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
+
         session_bar_layout = QHBoxLayout()
 
         # ===== 项目+分支组合控件（一体感布局） =====
@@ -2084,6 +2097,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.enteringHistoryMode.connect(self._on_entering_history_mode)
         self.input_area.historyAttachmentsRestored.connect(self._on_history_attachments_restored)
         self.input_area.historyModeExited.connect(self._on_history_mode_exited)
+        # ★ 用户输入时通知桌宠好奇看向输入框
+        self.input_area.textChanged.connect(self._on_pet_typing)
         card_layout.addWidget(self.input_area)
 
         # 加载输入历史
@@ -4185,6 +4200,61 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._todo_floating_widget.setVisible(True)
 
+    # ══════════════════════════════════════════════════════════════
+    # 像素小狐桌宠 — 集中 AI 状态管理
+    # ══════════════════════════════════════════════════════════════
+
+    def _set_ai_state(self, state: str) -> None:
+        """设置 AI 状态并通知桌宠（仅变化时发射信号）"""
+        if state != self._ai_state:
+            self._ai_state = state
+            self.ai_state_changed.emit(state)
+
+    def _init_pixel_pet(self) -> None:
+        """初始化像素小狐桌宠"""
+        try:
+            self.pixel_pet = PixelPetWidget(self)
+            from app.utils.theme_manager import theme_manager
+            theme_manager.register_refresh_target(self.pixel_pet)
+            self.pixel_pet.show()
+            self.pixel_pet.raise_()
+            # 连接 AI 状态信号 → 桌宠自主管理动画
+            self.ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
+            # 初始定位到右下角
+            self.pixel_pet.resize_handle(self.width(), self.height())
+            logger.info("[PixelPet] 桌宠已初始化")
+        except Exception as e:
+            logger.warning(f"[PixelPet] 初始化失败: {e}")
+            self.pixel_pet = None
+
+    def _on_pet_typing(self) -> None:
+        """★ 用户输入文字时让桌宠好奇看向输入框"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not hasattr(self, "pixel_pet") or self.pixel_pet is None:
+            return
+        # 只在有实际内容输入时触发（避免清空/加载历史时的误触发）
+        text = self.input_area.toPlainText().strip() if hasattr(self, "input_area") else ""
+        if text:
+            self.pixel_pet.on_user_typing()
+
+    def _on_pet_enabled_changed(self, enabled: bool) -> None:
+        """桌宠显示开关实时响应"""
+        from app.utils.config import Settings
+        if enabled:
+            if self.pixel_pet is None:
+                self._init_pixel_pet()
+            else:
+                self.pixel_pet.show()
+                self.pixel_pet.raise_()
+        else:
+            if self.pixel_pet is not None:
+                from app.utils.theme_manager import theme_manager
+                theme_manager.unregister_refresh_target(self.pixel_pet)
+                self.pixel_pet.hide()
+
+    # ══════════════════════════════════════════════════════════════
+
     def _apply_bg_from_theme(self):
         """从当前主题配置加载背景图片"""
         try:
@@ -4547,6 +4617,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
+        # 桌宠跟随窗口大小修正位置
+        if self.pixel_pet:
+            self.pixel_pet.resize_handle(self.width(), self.height())
 
     def _set_cards_resize_preview_mode(self, enabled: bool):
         if enabled == self._resize_preview_active:
@@ -5216,6 +5289,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_agent_list(self):
         """加载智能体列表到按钮组（仅显示 primary agents）"""
+        # 防重复调用：showEvent 和 session 创建都可能触发，避免无意义重复
+        if getattr(self, "_loading_agent_list", False):
+            return
+
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             return
@@ -5234,48 +5311,53 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
             return
 
-        self._suppress_agent_intro = True
-        agents = self.backend.get_primary_agents()
-        buttons = self._agent_btn_group.buttons()
-        default_agent = getattr(self, "_current_agent", "build")
+        # 以上为防护性提前返回，以下为实际主逻辑
+        self._loading_agent_list = True
+        try:
+            self._suppress_agent_intro = True
+            agents = self.backend.get_primary_agents()
+            buttons = self._agent_btn_group.buttons()
+            default_agent = getattr(self, "_current_agent", "build")
 
-        # 更新按钮文本和提示
-        for i, agent in enumerate(agents):
-            if i < len(buttons):
-                btn = buttons[i]
-                btn.setText(agent.name)
-                btn.setToolTip(agent.description)
+            # 更新按钮文本和提示
+            for i, agent in enumerate(agents):
+                if i < len(buttons):
+                    btn = buttons[i]
+                    btn.setText(agent.name)
+                    btn.setToolTip(agent.description)
 
-        # 根据当前智能体选中对应按钮
-        found = False
-        for i, agent in enumerate(agents):
-            if i < len(buttons) and agent.name == default_agent:
-                buttons[i].setChecked(True)
-                self._update_agent_button_style(default_agent)
-                found = True
-                logger.info(
-                    f"[_load_agent_list] Found match for {default_agent}, btn_id={i}"
+            # 根据当前智能体选中对应按钮
+            found = False
+            for i, agent in enumerate(agents):
+                if i < len(buttons) and agent.name == default_agent:
+                    buttons[i].setChecked(True)
+                    self._update_agent_button_style(default_agent)
+                    found = True
+                    logger.info(
+                        f"[_load_agent_list] Found match for {default_agent}, btn_id={i}"
+                    )
+                    break
+
+            if not found:
+                # 如果没找到匹配的，默认选中第一个
+                logger.warning(
+                    f"[_load_agent_list] {default_agent} not found, using agents[0]={agents[0].name if agents else 'None'}"
                 )
-                break
+                if buttons:
+                    buttons[0].setChecked(True)
+                    self._current_agent = agents[0].name if agents else "build"
+                    self._update_agent_button_style(self._current_agent)
 
-        if not found:
-            # 如果没找到匹配的，默认选中第一个
-            logger.warning(
-                f"[_load_agent_list] {default_agent} not found, using agents[0]={agents[0].name if agents else 'None'}"
-            )
-            if buttons:
-                buttons[0].setChecked(True)
-                self._current_agent = agents[0].name if agents else "build"
-                self._update_agent_button_style(self._current_agent)
+            # 同步 ChatEngine 的 agent
+            if self.backend.chat_engine:
+                self.backend.set_current_agent(self._current_agent)
+                logger.info(
+                    f"[_load_agent_list] Synced ChatEngine._current_agent = {self._current_agent}"
+                )
 
-        # 同步 ChatEngine 的 agent
-        if self.backend.chat_engine:
-            self.backend.set_current_agent(self._current_agent)
-            logger.info(
-                f"[_load_agent_list] Synced ChatEngine._current_agent = {self._current_agent}"
-            )
-
-        self._suppress_agent_intro = False
+            self._suppress_agent_intro = False
+        finally:
+            self._loading_agent_list = False
 
     def _update_agent_button_style(self, active_agent: str):
         """更新智能体按钮样式"""
@@ -6725,6 +6807,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._virtual_scroll_timer.start()
 
     def _archive_history_session(self, index: int):
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
         history_list = self.history_manager.get_history_list(self._current_project)
         if index < 0 or index >= len(history_list):
             return
@@ -6889,6 +6974,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_archived_session_deleted(self, file_path: str):
         """彻底删除归档会话"""
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
         from qfluentwidgets import MessageBox
 
         # 确认对话框
@@ -9266,6 +9354,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._is_streaming = True
         self._response_start_time = time.time()
+        self._set_ai_state("streaming")  # 桌宠：开始回复
         if self._current_assistant_card:
             self._current_assistant_card.start_elapsed_tracking()
         self._accumulated_content = ""
@@ -9280,6 +9369,13 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_content_received(self, content_piece: str):
         if getattr(self, "_is_destroyed", False):
             return
+        # ★ 推理结束后首个内容到达时，确保桌宠从 thinking 切回 streaming
+        # 背景：stream_started 在 worker 启动时即触发（早于任何内容），
+        # 随后 thinking_started（推理内容到达）覆盖为 thinking，
+        # 但内容到达时没有信号通知桌宠切回 streaming。
+        if self._ai_state == "thinking":
+            self._set_ai_state("streaming")
+
         if self._current_assistant_card:
             self._update_assistant_message(self._current_assistant_card, content_piece)
 
@@ -9300,6 +9396,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """新轮次思考开始，为当前助手卡片创建新的独立思考块"""
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("thinking")  # 桌宠：开始思考
         card = self._current_assistant_card
         if card and getattr(card, "_content_data", None) is not None:
             card.start_streaming_anim()
@@ -10065,6 +10162,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._is_streaming = False
         self._toggle_send_stop(False)
+        self._set_ai_state("idle")  # 桌宠：任务完成
 
         # 写入模型名称/服务商到卡片和 session 消息
         if self._current_assistant_card:
@@ -10424,6 +10522,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.update_content(error)
 
         self._is_streaming = False
+        self._set_ai_state("error")  # 桌宠：发生错误
 
         self._toggle_send_stop(False)
 
@@ -10456,7 +10555,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_retry_status(
         self, error_type: str, attempt: int, max_retries: int, wait_time: float
     ):
-        """API 重试状态通知 - 更新卡片边框和状态栏"""
+        """API 重试状态通知 - 更新卡片边框和状态栏，同时通知桌宠报错"""
         if getattr(self, "_is_destroyed", False):
             return
         # 🛡️ 不在流式状态时忽略重试信号（说明已停止或不在对话中）
@@ -10471,13 +10570,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_assistant_card.update_retry_status(
                     error_type, attempt, max_retries, wait_time
                 )
+        # 通知桌宠：重试 = 出错了（等待恢复）
+        self._set_ai_state("error")
 
     def _on_retry_resolved(self):
-        """API 重试成功 - 恢复卡片彩虹边框"""
+        """API 重试成功 - 恢复卡片彩虹边框，通知桌宠继续回复"""
         if getattr(self, "_is_destroyed", False):
             return
         if self._current_assistant_card:
             self._current_assistant_card.stop_retry_anim()
+        # 通知桌宠：重试成功，回到 streaming
+        self._set_ai_state("streaming")
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
@@ -10538,6 +10641,7 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("question")  # 桌宠：等待用户回答
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
@@ -10579,6 +10683,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_question_answered(self, answer: str):
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("streaming")  # 桌宠：已回答，准备继续生成
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
@@ -10588,6 +10693,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
+        if self.pixel_pet:
+            self.pixel_pet.set_state("streaming")  # 回答后继续回复
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
@@ -10620,6 +10727,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
         if getattr(self, "_is_destroyed", False):
             return
+        self._set_ai_state("idle")  # 桌宠：取消提问，恢复空闲
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
         if hasattr(self, "_bottom_input_container"):
@@ -10629,6 +10737,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")  # 取消则回 idle
 
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -11121,6 +11231,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
         if not self.history_manager:
             return
 
@@ -11694,6 +11807,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.cancel_streaming()
 
         self._is_streaming = False
+        self._set_ai_state("idle")  # 桌宠：用户手动停止
 
         self._toggle_send_stop(False)
         if self._current_assistant_card:

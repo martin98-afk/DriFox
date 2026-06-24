@@ -336,6 +336,27 @@ class LLMSettingsCard(SystemCardFrame):
         self._setup_font_card()
         content_layout.addWidget(self.llmFontCard)
 
+        # 桌宠显示开关
+        self.petCard = SwitchSettingCard(
+            FluentIcon.HEART,
+            "桌宠显示",
+            "在主窗口上显示像素小狐桌宠",
+            configItem=self.cfg.pet_enabled,
+            parent=self,
+        )
+        content_layout.addWidget(self.petCard)
+
+        # 桌宠大小
+        self.petSizeCard = OptionsSettingCard(
+            self.cfg.pet_size,
+            FluentIcon.ZOOM,
+            "桌宠大小",
+            "调整像素桌宠的显示尺寸",
+            texts=["小 (32px)", "中 (48px)", "大 (64px)"],
+            parent=self,
+        )
+        content_layout.addWidget(self.petSizeCard)
+
         # ---- 版本更新分隔标签 ----
         self._sep_update_label = self._make_sep_label("版本更新")
         self._section_anchors["update"] = self._sep_update_label
@@ -373,6 +394,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.ui_theme_style.valueChanged.connect(self._on_config_changed)
         self.cfg.llm_api_enabled.valueChanged.connect(self._on_llm_api_enabled_changed)
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
+        self.cfg.pet_size.valueChanged.connect(self._on_settings_changed)
 
     def _on_tab_changed(self, tab_id: str):
         """Tab 切换时滚动到对应区域"""

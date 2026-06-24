@@ -6648,8 +6648,6 @@ def create_welcome_card(
 
     welcome_md = f"""### 👋 {greeting}
 
----
-
 {history_section}
 """
 
