@@ -2097,6 +2097,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.enteringHistoryMode.connect(self._on_entering_history_mode)
         self.input_area.historyAttachmentsRestored.connect(self._on_history_attachments_restored)
         self.input_area.historyModeExited.connect(self._on_history_mode_exited)
+        # ★ 用户输入时通知桌宠好奇看向输入框
+        self.input_area.textChanged.connect(self._on_pet_typing)
         card_layout.addWidget(self.input_area)
 
         # 加载输入历史
@@ -4222,6 +4224,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[PixelPet] 初始化失败: {e}")
             self.pixel_pet = None
+
+    def _on_pet_typing(self) -> None:
+        """★ 用户输入文字时让桌宠好奇看向输入框"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not hasattr(self, "pixel_pet") or self.pixel_pet is None:
+            return
+        # 只在有实际内容输入时触发（避免清空/加载历史时的误触发）
+        text = self.input_area.toPlainText().strip() if hasattr(self, "input_area") else ""
+        if text:
+            self.pixel_pet.on_user_typing()
 
     def _on_pet_enabled_changed(self, enabled: bool) -> None:
         """桌宠显示开关实时响应"""

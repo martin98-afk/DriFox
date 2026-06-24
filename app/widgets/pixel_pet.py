@@ -8,11 +8,15 @@
   streaming     - 回复中（说话 + 摇尾）
   question      - 等待用户回答（歪头 + 问号弹跳）
   success       - 任务完成（星星眼 + 烟花 + 爱心）
-  error         - 出错了（发抖 + 泪滴）
+  error         - 😭 出错了（大哭 + 双侧泪痕 + 抖动 + 红色边框）
   sleeping      - 长时间无活动（闭眼 + Zzz）
   writing       - 正在写作/编码（眼镜 + 笔尖点动）
   thinking_hard - 深度思考（流汗 + 快速转眼）
   excited       - 连续成功兴奋（跳跃 + 音符 + 星星眼）
+  confused      - 疑惑不解（问号表情）
+  surprised     - 惊讶一瞥
+  dizzy         - 眩晕冒金星
+  crying        - 持续大哭（与 error 同帧，更持久的哭泣）
 
 子状态（无需独立 spritesheet 行）：
   napping       - 深夜沉睡（sleeping 帧 + 更慢间隔）
@@ -30,6 +34,7 @@
   pet.set_state("idle")           # 恢复正常
 """
 
+import math
 import random
 from pathlib import Path
 
@@ -37,13 +42,14 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QElapsedTimer,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
     QTimer,
     Qt,
     pyqtSignal,
 )
-from PyQt5.QtGui import QMouseEvent, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
 from loguru import logger
 
@@ -55,9 +61,14 @@ from loguru import logger
 FRAME_SIZE = 16  # 每帧像素尺寸
 SCALE = 3  # 渲染倍数 → 48×48 显示
 DISPLAY_SIZE = FRAME_SIZE * SCALE  # 48
+BADGE_HEIGHT = 18  # ★ 顶部情绪徽章预留高度（像素）
 SPRITESHEET = None  # 懒加载，启动后由插件系统解析路径
 
-# 状态 → 行索引（扩展为 10 行）
+# 状态 → 行索引（扩展为 12 行）
+# Row 0: 基础待机      Row 1: 眨眼环顾     Row 2: 专注/严肃
+# Row 3: 享受/闭眼     Row 4: 眩晕冒金星   Row 5: 流汗惊恐
+# Row 6: 疑惑问号      Row 7: 专注写作     Row 8: 尴尬小紧张
+# Row 9: 兴奋魔法特效
 STATE_ROWS = {
     "idle": 0,
     "thinking": 1,
@@ -69,6 +80,16 @@ STATE_ROWS = {
     "writing": 7,
     "thinking_hard": 8,
     "excited": 9,
+    "confused": 6,       # ★ 疑惑（Row 6 问号），与 sleeping 共用行
+    "surprised": 8,      # ★ 惊讶（Row 8 尴尬小紧张），与 thinking_hard 共用行
+    "dizzy": 4,          # ★ 眩晕（Row 4 冒金星），与 success 共用行
+    "crying": 5,         # ★ 大哭（Row 5 流汗惊恐），与 error 共用行
+}
+
+# 睡眠子状态映射（深夜用 napping 表现更深度的睡眠）
+SLEEP_SUB_MAP = {
+    "napping": "sleeping",
+    "deep_sleep": "sleeping",
 }
 
 # 每状态帧数（从 8→12）
@@ -86,6 +107,10 @@ FRAME_INTERVALS = {
     "writing": 200,             # 写作：专注节奏
     "thinking_hard": 150,       # 深度思考：稍快但不鬼畜
     "excited": 110,             # 兴奋：活泼但不过度
+    "confused": (250, 350),     # ★ 疑惑：缓慢困惑，问号浮现
+    "surprised": 90,            # ★ 惊讶：快速闪现
+    "dizzy": 130,               # ★ 眩晕：冒金星节奏
+    "crying": 150,              # ★ 哭泣：比正常 error 稍慢
     # 子状态
     "napping": 500,
 }
@@ -108,6 +133,25 @@ ATTENTION_TIMEOUT_MS = 300_000     # 5 分钟无交互 → 主动吸引注意
 # 惯性滑动参数
 INERTIA_DECAY = 0.92
 INERTIA_MIN_VELOCITY = 0.5
+
+# ★ 情绪 emoji 映射（画在桌宠上方，直观显示心情）
+STATE_EMOJI = {
+    "idle": "😊",
+    "thinking": "🤔",
+    "streaming": "💬",
+    "question": "❓",
+    "success": "🎉",
+    "error": "😭",
+    "sleeping": "💤",
+    "writing": "✏️",
+    "thinking_hard": "🤔",
+    "excited": "✨",
+    "confused": "🤷",
+    "surprised": "😲",
+    "dizzy": "😵",
+    "crying": "😭",
+    "napping": "💤",
+}
 
 
 class PixelPetWidget(QWidget):
@@ -144,6 +188,16 @@ class PixelPetWidget(QWidget):
         self._thinking_start_time = None
         self._success_streak = 0
         self._error_streak = 0
+
+        # ── 错误状态持久化（重试时保持报错） ──
+        self._error_persist = False
+
+        # ── 抖动动画（error 状态下更显眼） ──
+        self._shake_intensity = 3
+        self._shake_frame = 0
+        self._shake_original_pos = None
+        self._shake_timer = QTimer(self)
+        self._shake_timer.timeout.connect(self._apply_shake)
 
         # ── 性能 ──
         self._frame_timer_elapsed = QElapsedTimer()
@@ -205,6 +259,17 @@ class PixelPetWidget(QWidget):
         self._interaction_timer = QElapsedTimer()
         self._interaction_timer.start()
 
+        # ★ 情绪徽章动画
+        self._badge_alpha = 0.0       # 0~1.0 淡入淡出
+        self._badge_bounce_frame = 0  # 徽章弹跳帧
+        self._badge_font = None       # 懒加载
+
+        # ★ 状态过渡粒子
+        self._particles = []          # [(x, y, alpha, life), ...]
+        self._particle_timer = QTimer(self)
+        self._particle_timer.timeout.connect(self._update_particles)
+        self._particle_timer.setInterval(50)
+
         # 初始状态
         self._check_night_mode()
         if parent:
@@ -223,12 +288,15 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _update_display_size(self) -> None:
-        """根据当前缩放更新显示尺寸"""
+        """根据当前缩放更新显示尺寸（含顶部徽章空间）"""
         from app.utils.config import Settings
         size_map = {"small": 2, "medium": 3, "large": 4}
         cfg_size = Settings.get_instance().pet_size.value
         self._current_scale = size_map.get(cfg_size, 3)
-        self.setFixedSize(FRAME_SIZE * self._current_scale, FRAME_SIZE * self._current_scale)
+        self.setFixedSize(
+            FRAME_SIZE * self._current_scale,
+            FRAME_SIZE * self._current_scale + BADGE_HEIGHT
+        )
 
     def _get_display_scale(self) -> int:
         return self._current_scale
@@ -315,6 +383,11 @@ class PixelPetWidget(QWidget):
         elif ai_state == "error":
             self._error_streak += 1
             self._success_streak = 0
+            # ★ 重试中：如果已经是 error 状态，开启持久化模式
+            if self._current_state == "error":
+                self._error_persist = True
+                # 重试期间加速抖动，更显慌张
+                self._shake_intensity = min(6, 3 + self._error_streak)
             self.set_state("error")
         elif ai_state == "thinking":
             self._success_streak = 0
@@ -344,6 +417,17 @@ class PixelPetWidget(QWidget):
         old_state = self._current_state
         self._current_state = state
 
+        # ★ 错误持续：离开错误状态时清除持久化标志
+        if state != "error":
+            self._error_persist = False
+
+        # ★ 错误状态：启动抖动
+        if state == "error":
+            self._start_shake()
+        elif old_state == "error":
+            # 离开错误状态：停止抖动
+            self._stop_shake()
+
         # 帧索引重置
         if state == "idle":
             self._frame_index = random.randint(0, FRAMES_PER_STATE - 1)
@@ -363,6 +447,10 @@ class PixelPetWidget(QWidget):
             self._sleep_timer.stop()
         else:
             self._reset_sleep_timer()
+
+        # ★ 快乐状态触发粒子效果
+        if state in ("success", "excited", "surprised"):
+            self._spawn_particles(8)
 
         # 过渡动画（非紧急切换）
         if old_state not in ("error",) and state not in ("error",):
@@ -421,7 +509,16 @@ class PixelPetWidget(QWidget):
     def _on_recover(self) -> None:
         """恢复计时器回调：重置宠物状态和 AI 状态跟踪，防止状态卡死"""
         self._last_ai_state = "idle"
-        if self._current_state in ("success", "error"):
+        if self._current_state in ("success",):
+            self.set_state("idle")
+        elif self._current_state == "error":
+            # ★ 错误持久化模式：重试中不自动恢复
+            if self._error_persist:
+                logger.debug("[PixelPet] 错误持久化中，跳过自动恢复")
+                # 重新启动恢复检查，下次再试
+                self._recover_timer.start(RECOVER_MS)
+                return
+            # 非持久化模式：正常恢复
             self.set_state("idle")
 
     # ═══════════════════════════════════════════════════════════
@@ -495,6 +592,9 @@ class PixelPetWidget(QWidget):
 
     def _advance_frame(self) -> None:
         """推进到下一帧，含空闲行为逻辑"""
+        # ★ 驱动情绪徽章弹跳
+        self._badge_bounce_frame += 1
+
         if self._current_state == "idle" and not self._idle_behavior_active:
             # 空闲时偶尔停留增加自然感（权重停留）
             if random.random() < 0.10:
@@ -523,14 +623,27 @@ class PixelPetWidget(QWidget):
             return
 
         behaviors = [
-            ("blink", 40),       # 40% 眨眨眼（高频率）
-            ("look_around", 20), # 20% 四处张望
-            ("yawn", 12),        # 12% 打哈欠
-            ("stretch", 8),      # 8% 伸懒腰
-            ("groom", 8),        # 8% 理毛
-            ("tail_play", 7),    # 7% 玩尾巴
-            ("head_tilt", 5),    # 5% 歪头看用户
+            ("blink", 25),           # 25% 眨眨眼
+            ("look_around", 12),     # 12% 四处张望
+            ("yawn", 10),            # 10% 打哈欠
+            ("stretch", 7),          # 7% 伸懒腰
+            ("groom", 6),            # 6% 理毛
+            ("tail_play", 5),        # 5% 玩尾巴
+            ("head_tilt", 5),        # 5% 歪头看用户
+            ("surprise_glance", 5),  # ★ 5% 惊讶一瞥
+            ("confused", 4),         # ★ 4% 困惑歪头
+            ("sneak_peak", 3),       # ★ 3% 偷瞄用户
+            ("wiggle_ears", 5),      # ★ 5% 耳朵抖动
+            ("dizzy_moment", 3),     # ★ 3% 突然晕眩
         ]
+
+        # ★ 深夜模式：添加犯困专属行为
+        if self._is_night_time():
+            behaviors.extend([
+                ("yawn", 20),          # 打哈欠概率翻倍
+                ("rub_eyes", 10),      # ★ 10% 揉眼睛
+                ("nod_off", 5),        # ★ 5% 打瞌睡
+            ])
 
         r = random.randint(1, 100)
         cumulative = 0
@@ -551,18 +664,36 @@ class PixelPetWidget(QWidget):
 
         # 不同行为持续不同的帧数
         duration_map = {
-            "blink": 3,          # 快速眨眼
-            "look_around": 8,    # 左右看
-            "yawn": 6,           # 哈欠
-            "stretch": 8,        # 伸懒腰
-            "groom": 10,         # 理毛
-            "tail_play": 8,      # 玩尾巴
-            "head_tilt": 6,      # 歪头
+            "blink": 3,               # 快速眨眼
+            "look_around": 8,         # 左右看
+            "yawn": 6,                # 哈欠
+            "stretch": 8,             # 伸懒腰
+            "groom": 10,              # 理毛
+            "tail_play": 8,           # 玩尾巴
+            "head_tilt": 6,           # 歪头
+            "surprise_glance": 4,     # ★ 惊讶一瞥（短促）
+            "confused": 6,            # ★ 困惑
+            "sneak_peak": 4,          # ★ 偷瞄
+            "wiggle_ears": 5,         # ★ 耳朵抖动
+            "dizzy_moment": 5,        # ★ 突然晕眩
+            "rub_eyes": 8,            # ★ 揉眼睛（深夜）
+            "nod_off": 6,             # ★ 打瞌睡（深夜）
         }
         behavior_frames = duration_map.get(chosen, 6)
 
-        # 播放行为动画（重写帧索引循环）
-        self._play_behavior_frames(chosen, behavior_frames)
+        # 需要临时切换 spritesheet 行的行为
+        state_override_map = {
+            "surprise_glance": "surprised",
+            "confused": "confused",
+            "dizzy_moment": "dizzy",
+        }
+
+        override_state = state_override_map.get(chosen)
+        if override_state:
+            self._play_behavior_with_state(override_state, behavior_frames)
+        else:
+            # 播放行为动画（重写帧索引循环）
+            self._play_behavior_frames(chosen, behavior_frames)
         logger.debug(f"[PixelPet] 空闲行为: {chosen}")
 
     def _play_behavior_frames(self, behavior: str, total_frames: int) -> None:
@@ -592,22 +723,39 @@ class PixelPetWidget(QWidget):
 
         QTimer.singleShot(50, behavior_step)
 
-    # ═══════════════════════════════════════════════════════════
-    # 注意力系统
-    # ═══════════════════════════════════════════════════════════
+    def _play_behavior_with_state(self, state_name: str, total_frames: int) -> None:
+        """★ 播放需要临时切换状态的空闲行为（如惊讶、困惑、眩晕）"""
+        if state_name not in STATE_ROWS:
+            self._idle_behavior_active = False
+            return
 
-    def _reset_attention_timer(self) -> None:
-        self._attention_timer.stop()
-        self._attention_timer.start(ATTENTION_TIMEOUT_MS)
-        self._attention_shown = False
+        old_state = self._current_state
+        # 保存当前帧索引以便恢复
+        old_frame = self._frame_index
+        # 切换到目标状态
+        self._current_state = state_name
+        self._frame_index = 0
+        self._start_frame_timer(state_name)
+        self.update()
+        self.state_changed.emit(state_name)
 
-    def _seek_attention(self) -> None:
-        """长时间无交互，主动吸引注意"""
-        if self._current_state in ("idle", "sleeping") and not self._attention_shown:
-            self._attention_shown = True
-            # 小跳一下吸引注意
-            self._play_bounce()
-            logger.debug("[PixelPet] 主动吸引注意")
+        def state_step(count):
+            if count >= total_frames:
+                # 恢复为 idle
+                self._current_state = old_state
+                self._frame_index = old_frame
+                self._start_frame_timer("idle")
+                self._idle_behavior_active = False
+                self._idle_behavior_type = None
+                self.update()
+                self.state_changed.emit(old_state)
+                self._reset_idle_behavior_timer()
+                return
+            self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
+            self.update()
+            QTimer.singleShot(150, lambda: state_step(count + 1))
+
+        QTimer.singleShot(80, lambda: state_step(1))
 
     # ═══════════════════════════════════════════════════════════
     # 绘制
@@ -619,14 +767,99 @@ class PixelPetWidget(QWidget):
         painter.setRenderHint(QPainter.LosslessImageRendering, True)
         painter.setRenderHint(QPainter.Antialiasing, False)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
 
+        # ★ 情绪 emoji 徽章（画在顶部预留区域）
+        self._draw_emotion_badge(painter)
+
+        # ★ 绘制 sprite（下移 BADGE_HEIGHT，避开徽章区域）
         if self._spritesheet and not self._spritesheet.isNull():
             src = self._current_frame_rect()
-            painter.drawPixmap(self.rect(), self._spritesheet, src)
+            sprite_rect = QRect(0, BADGE_HEIGHT, self.width(), self.height() - BADGE_HEIGHT)
+            painter.drawPixmap(sprite_rect, self._spritesheet, src)
         else:
             painter.fillRect(self.rect(), Qt.transparent)
 
+        # ★ 错误状态：脉冲红色边框
+        if self._current_state == "error":
+            alpha = 80 + int(40 * math.sin(self._shake_frame * 0.4))
+            pen = QPen(QColor(255, 60, 60, alpha), 2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            # 边框区域也要下移，包住 sprite 区域
+            error_rect = QRect(0, BADGE_HEIGHT, self.width(), self.height() - BADGE_HEIGHT)
+            painter.drawRect(error_rect.adjusted(0, 0, -1, -1))
+
+        # ★ 持久化错误：更强烈的双边框
+        if self._current_state == "error" and self._error_persist:
+            outer_alpha = 60 + int(40 * math.sin(self._shake_frame * 0.3 + 1.0))
+            pen2 = QPen(QColor(255, 30, 30, outer_alpha), 1)
+            painter.setPen(pen2)
+            outer_rect = QRect(-2, BADGE_HEIGHT - 2, self.width() + 4, self.height() - BADGE_HEIGHT + 4)
+            painter.drawRect(outer_rect)
+
+        # ★ 粒子效果（相对 sprite 区域定位）
+        for px, py, pa, plife in self._particles:
+            if plife <= 0:
+                continue
+            c = QColor(255, 235, 59, int(pa * 255))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(c)
+            size = 2 + int(plife * 2)
+            painter.drawEllipse(QPointF(px, py), size, size)
+
         painter.end()
+
+    def _draw_emotion_badge(self, painter: QPainter) -> None:
+        """★ 在桌宠头顶预留区域绘制情绪 emoji"""
+        # 获取基础 emoji
+        emoji = STATE_EMOJI.get(self._current_state)
+        if not emoji:
+            return
+
+        # ★ 重试递进：error 状态下根据重试次数升级 emoji
+        if self._current_state == "error":
+            if self._error_streak <= 2:
+                emoji = "😭"
+            elif self._error_streak <= 4:
+                emoji = "😱"
+            else:
+                emoji = "💀"
+
+        # 空闲/睡眠等平常状态不显示
+        quiet_states = {"idle", "sleeping", "napping", "writing", "thinking"}
+        if self._current_state in quiet_states:
+            target_alpha = 0.0
+        else:
+            target_alpha = 0.85
+
+        # 平滑过渡 alpha
+        diff = target_alpha - self._badge_alpha
+        self._badge_alpha += diff * 0.15
+        if abs(diff) < 0.01:
+            self._badge_alpha = target_alpha
+
+        if self._badge_alpha < 0.05:
+            return
+
+        # 懒加载字体
+        if self._badge_font is None:
+            self._badge_font = QFont("Segoe UI Emoji", 10)
+            self._badge_font.setStyleStrategy(QFont.NoFontMerging)
+
+        # 徽章弹跳偏移（基于帧计数器平滑）
+        bounce = math.sin(self._badge_bounce_frame * 0.08) * 1.5
+
+        painter.save()
+        painter.setOpacity(self._badge_alpha)
+        painter.setFont(self._badge_font)
+
+        # 绘制在顶部 BADGE_HEIGHT 区域（居中显示）
+        bw = self.width()
+        rect = QRect(0, int(bounce * 0.5), bw, BADGE_HEIGHT)
+        painter.drawText(rect, Qt.AlignHCenter | Qt.AlignVCenter, emoji)
+
+        painter.restore()
 
     # ═══════════════════════════════════════════════════════════
     # 动效
@@ -682,11 +915,147 @@ class PixelPetWidget(QWidget):
         self._animations.append(anim)
         # 短暂闪烁爱心效果（改变状态到 success 帧再回来）
         if self._current_state == "idle":
-            old = self._current_state
             self._frame_index = 4  # success 的爱心帧
             self.update()
             QTimer.singleShot(400, lambda: self.update())
         logger.debug("[PixelPet] 蹭蹭~")
+
+    # ═══════════════════════════════════════════════════════════
+    # ★ 抖动动画 — 错误状态时让桌宠更显眼
+    # ═══════════════════════════════════════════════════════════
+
+    def _start_shake(self, intensity: int | None = None) -> None:
+        """启动位置抖动效果（error 状态下视觉增强）"""
+        if intensity is not None:
+            self._shake_intensity = intensity
+        self._shake_frame = 0
+        self._shake_original_pos = QPoint(self.x(), self.y())
+        self._shake_timer.start(40)  # 25fps 抖动
+
+    def _stop_shake(self) -> None:
+        """停止抖动，恢复原始位置"""
+        self._shake_timer.stop()
+        if self._shake_original_pos is not None:
+            # 限幅防止越界
+            new_x = max(0, min(self._shake_original_pos.x(),
+                               (self.parent().width() if self.parent() else 9999) - self.width()))
+            new_y = max(0, min(self._shake_original_pos.y(),
+                               (self.parent().height() if self.parent() else 9999) - self.height()))
+            self.move(new_x, new_y)
+            self._shake_original_pos = None
+        self._shake_frame = 0
+
+    def _apply_shake(self) -> None:
+        """执行单帧抖动偏移"""
+        if self._current_state != "error":
+            self._stop_shake()
+            return
+        self._shake_frame += 1
+        if self._shake_original_pos is None:
+            self._shake_original_pos = QPoint(self.x(), self.y())
+        intensity = self._shake_intensity
+        # 随机偏移，模拟颤抖
+        offset_x = random.randint(-intensity, intensity)
+        offset_y = random.randint(-intensity, intensity)
+        if self.parent():
+            new_x = max(0, min(
+                self._shake_original_pos.x() + offset_x,
+                self.parent().width() - self.width()
+            ))
+            new_y = max(0, min(
+                self._shake_original_pos.y() + offset_y,
+                self.parent().height() - self.height()
+            ))
+            self.move(new_x, new_y)
+        else:
+            self.move(self._shake_original_pos.x() + offset_x,
+                      self._shake_original_pos.y() + offset_y)
+
+    # ═══════════════════════════════════════════════════════════
+    # ★ 粒子效果 — 状态过渡时的视觉效果
+    # ═══════════════════════════════════════════════════════════
+
+    def _spawn_particles(self, count: int = 6) -> None:
+        """★ 在当前桌宠位置生成星星粒子"""
+        cx, cy = self.width() // 2, self.height() // 2
+        for _ in range(count):
+            px = cx + random.randint(-12, 12)
+            py = cy + random.randint(-12, 12)
+            self._particles.append([px, py, 0.6 + random.random() * 0.4, 1.0])
+        if not self._particle_timer.isActive():
+            self._particle_timer.start()
+        self.update()
+
+    def _update_particles(self) -> None:
+        """★ 更新粒子状态（衰减 + 清除）"""
+        if not self._particles:
+            self._particle_timer.stop()
+            return
+        alive = []
+        for p in self._particles:
+            p[3] -= 0.08  # life 衰减
+            p[2] -= 0.04  # alpha 衰减
+            p[1] -= 0.5   # 轻微上飘
+            if p[3] > 0 and p[2] > 0:
+                alive.append(p)
+        self._particles = alive
+        self.update()
+        if not alive:
+            self._particle_timer.stop()
+
+    # ═══════════════════════════════════════════════════════════
+    # ★ 注意力吸引系统（v2 — 多阶段、更可爱）
+    # ═══════════════════════════════════════════════════════════
+
+    def _reset_attention_timer(self) -> None:
+        self._attention_timer.stop()
+        self._attention_timer.start(ATTENTION_TIMEOUT_MS)
+        self._attention_shown = False
+
+    def _seek_attention(self) -> None:
+        """长时间无交互，主动吸引注意 — 多阶段可爱吸引"""
+        if self._current_state not in ("idle", "sleeping") or self._attention_shown:
+            return
+        self._attention_shown = True
+
+        # 随机选择一种吸引注意的方式
+        style = random.choice(["bounce", "emoji_wave", "double_bounce", "spin_look"])
+        logger.debug(f"[PixelPet] 主动吸引注意 (style={style})")
+
+        if style == "bounce":
+            self._play_bounce()
+        elif style == "emoji_wave":
+            self._play_bounce_small()
+            # 切换为 surprised 表情一瞬
+            QTimer.singleShot(100, lambda: self._flash_state("surprised", 3))
+        elif style == "double_bounce":
+            self._play_bounce()
+            QTimer.singleShot(400, self._play_bounce_small)
+        elif style == "spin_look":
+            self._play_bounce()
+            # 快速左右张望
+            for d in [6, 9, 3, 9]:
+                QTimer.singleShot(d * 50, self.update)
+
+    def _flash_state(self, state_name: str, frames: int = 3) -> None:
+        """★ 快速闪烁切换到指定状态再回来（用于表情反馈）"""
+        if state_name not in STATE_ROWS:
+            return
+        old_state = self._current_state
+        self._frame_index = 0
+
+        def flash_step(count):
+            if count >= frames or self._current_state != old_state:
+                return
+            # 交替显示目标状态和原始状态
+            if count % 2 == 0:
+                self._current_state = state_name
+            else:
+                self._current_state = old_state
+            self.update()
+            QTimer.singleShot(100, lambda: flash_step(count + 1))
+
+        flash_step(0)
 
     def _reset_interaction_timer(self) -> None:
         self._interaction_timer.restart()
@@ -704,6 +1073,8 @@ class PixelPetWidget(QWidget):
             self._drag_velocity = QPoint(0, 0)
             self._inertia_timer.stop()
             self.setCursor(Qt.ClosedHandCursor)
+            # ★ 拖拽开始 → 无奈表情
+            self.on_drag_started()
 
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
@@ -747,6 +1118,18 @@ class PixelPetWidget(QWidget):
                 if dx < 4 and dy < 4:
                     self._handle_click()
             self._reset_interaction_timer()
+
+    def enterEvent(self, event: object) -> None:
+        """★ 鼠标悬停进入 — 桌宠抬头看鼠标"""
+        super().enterEvent(event)
+        if self._current_state == "idle" and not self._dragging:
+            self._flash_state("surprised", 2)
+
+    def leaveEvent(self, event: object) -> None:
+        """★ 鼠标离开 — 恢复 idle"""
+        super().leaveEvent(event)
+        if self._current_state == "idle":
+            self.update()
 
     def _apply_inertia(self) -> None:
         """惯性滑动衰减"""
@@ -867,8 +1250,8 @@ class PixelPetWidget(QWidget):
         # 找到发送按钮，让桌宠脚底站在它上边缘
         btn_top = self._get_send_button_top()
         if btn_top is not None:
-            # 像素狐狸脚底在 widget 内的偏移量（16×16 中脚在 y=13，缩放后 13*3=39，+2px 空隙）
-            feet_offset = 41
+            # 像素狐狸脚底在 widget 内的偏移量（16×16 中脚在 y=13，缩放后 13*3=39，+2px 空隙 + 徽章高度）
+            feet_offset = 41 + BADGE_HEIGHT
             target_y = btn_top - feet_offset
         else:
             # fallback: 右下角，输入区域上方
@@ -897,7 +1280,6 @@ class PixelPetWidget(QWidget):
 
     def on_pet_size_changed(self) -> None:
         """配置中 pet_size 变化时调用"""
-        old_scale = self._current_scale
         self._update_display_size()
         # 重新定位
         if self.parent():
@@ -919,6 +1301,22 @@ class PixelPetWidget(QWidget):
             logger.debug(f"[PixelPet] 配置信号连接失败: {e}")
 
     # ═══════════════════════════════════════════════════════════
+    # ★ 外部事件响应
+    # ═══════════════════════════════════════════════════════════
+
+    def on_user_typing(self) -> None:
+        """★ 💬 用户正在输入时调用 — 桌宠显示写作动画（陪用户一起打字）"""
+        if self._current_state not in ("idle", "thinking"):
+            return
+        # 短暂播放 writing 动画（眼镜+笔尖点动），像在陪用户一起写
+        self._play_behavior_with_state("writing", 6)
+
+    def on_drag_started(self) -> None:
+        """★ 🖱️ 用户开始拖拽时调用 — 显示被拽的无奈表情"""
+        if self._current_state == "idle":
+            self._flash_state("crying", 2)
+
+    # ═══════════════════════════════════════════════════════════
     # 生命周期
     # ═══════════════════════════════════════════════════════════
 
@@ -935,4 +1333,8 @@ class PixelPetWidget(QWidget):
         self._attention_timer.stop()
         self._inertia_timer.stop()
         self._click_timer.stop()
+        self._shake_timer.stop()
+        self._particle_timer.stop()
+        self._particles.clear()
+        self._stop_shake()
         logger.debug("[PixelPet] v2 已清理")

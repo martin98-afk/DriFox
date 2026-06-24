@@ -245,9 +245,50 @@ def draw_fox(canvas, ox, oy, cell_oy=None, **overrides):
     # ── 腮红 ──
     p(5, 6, PINK_SOFT); p(10, 6, PINK_SOFT)
 
-    # ── 泪滴 ──
+    # ── 泪滴（原来的单侧泪滴，保留兼容）
     if overrides.get("tear"):
         p(11, 4, TEAR_BLUE); p(11, 5, TEAR_BLUE); p(10, 6, TEAR_BLUE)
+
+    # ── 流泪 😭（双侧泪痕 + 流动动画）
+    cry_frame = overrides.get("cry_frame")
+    if cry_frame is not None:
+        # 右眼泪痕（从右眼角 x=11,y=4 流下）
+        r_len = 2 + (cry_frame % 5)  # 长度 2~6
+        for i in range(r_len):
+            if i == 0:
+                p(11, 4, TEAR_BLUE)
+            elif i == 1:
+                p(11, 5, TEAR_BLUE)
+            elif i == 2:
+                p(10, 6, TEAR_BLUE)
+            elif i == 3:
+                p(11, 7, TEAR_BLUE)
+            elif i == 4:
+                p(10, 8, TEAR_BLUE)
+            elif i == 5:
+                p(10, 9, TEAR_BLUE)
+        # 左眼泪痕（从左眼角 x=4,y=4 流下）
+        l_len = 2 + ((cry_frame + 2) % 5)  # 长度 2~6，错开右眼节奏
+        for i in range(l_len):
+            if i == 0:
+                p(4, 4, TEAR_BLUE)
+            elif i == 1:
+                p(4, 5, TEAR_BLUE)
+            elif i == 2:
+                p(5, 6, TEAR_BLUE)
+            elif i == 3:
+                p(4, 7, TEAR_BLUE)
+            elif i == 4:
+                p(5, 8, TEAR_BLUE)
+            elif i == 5:
+                p(5, 9, TEAR_BLUE)
+        # 泪滴飞溅（底部溅开的小点）
+        if cry_frame % 2 == 0:
+            p(9, 10, TEAR_BLUE)   # 右侧溅射
+            p(10, 11, TEAR_BLUE)
+        if cry_frame % 3 == 0:
+            p(6, 10, TEAR_BLUE)   # 左侧溅射
+            p(5, 11, TEAR_BLUE)
 
     # ── 特效粒子 ──
     for cx, cy in overrides.get("sparkles", []): draw_sparkle(canvas, ox, oy, cx, cy, YELLOW)
@@ -421,7 +462,7 @@ for f in range(12):
     draw_fox(img, f * FRAME, 4 * FRAME, cell_oy=4 * FRAME, **success_frames[f])
 
 # ════════════════════════════════════════════════════════════════
-# Row 5: error — 惊吓发抖 + 泪滴 + 大眼（12帧）
+# Row 5: error — 😭 大哭 + 双侧泪痕流动 + 抖动（12帧）
 # ════════════════════════════════════════════════════════════════
 error_shifts = [1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1]
 error_eyes_base = {
@@ -432,9 +473,14 @@ error_eyes_base = {
 for f in range(12):
     dx = error_shifts[f]
     kwargs = dict(error_eyes_base)
-    kwargs["tear"] = f in (1, 2, 4, 5, 6, 8, 9)
-    if f in (2, 4, 8, 10):
-        kwargs["mouth"] = [(6,7),(7,7),(8,7),(9,7)]  # 张嘴惊吓
+    # 所有帧都带上泪痕，每帧长度不同产生流动感
+    kwargs["cry_frame"] = f
+    # 张嘴大哭 vs 瘪嘴哭交替
+    if f in (0, 2, 4, 6, 8, 10):
+        kwargs["mouth"] = [(6,7),(7,7),(8,7),(9,7)]  # 张嘴大哭
+    else:
+        kwargs["mouth"] = [(7,7),(8,7)]               # 瘪嘴抽泣
+        kwargs["smile"] = [(6,8),(9,8)]                # 嘴角下拉 = 哭脸
     draw_fox(img, f * FRAME + dx, 5 * FRAME, cell_oy=5 * FRAME, **kwargs)
 
 # ════════════════════════════════════════════════════════════════
