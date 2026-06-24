@@ -222,7 +222,7 @@ class PixelPetWidget(QWidget):
         # 强力 Z-order
         self._raise_timer = QTimer(self)
         self._raise_timer.timeout.connect(self._force_raise)
-        self._raise_timer.start(100)  # 降低频率减负
+        self._raise_timer.start(5000)  # 5秒一次足够维持 Z-order
         if parent:
             parent.installEventFilter(self)
 
@@ -468,8 +468,14 @@ class PixelPetWidget(QWidget):
             self._play_bounce_small()
         elif state == "sleeping":
             self._sleep_timer.stop()
+            # ★ 睡眠时暂停 raise_timer，降低帧率
+            self._raise_timer.stop()
+            self._frame_timer.setInterval(500)
         else:
             self._reset_sleep_timer()
+            # ★ 非睡眠状态确保 raise_timer 恢复（如果没有被 hide 的话）
+            if not self._raise_timer.isActive() and self.isVisible():
+                self._raise_timer.start(5000)
 
         # ★ 快乐状态触发粒子效果
         if state in ("success", "excited", "surprised"):
@@ -575,8 +581,11 @@ class PixelPetWidget(QWidget):
     def wake_up(self) -> None:
         if self._current_state in ("sleeping",):
             self.set_state("idle")
+            # ★ 唤醒后恢复 raise_timer 和正常帧率
+            self._raise_timer.start(5000)
         elif self._current_state in ("napping",):
             self.set_state("greeting")  # 映射到 idle
+            self._raise_timer.start(5000)
 
     # ═══════════════════════════════════════════════════════════
     # 入场动画
@@ -614,9 +623,15 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _advance_frame(self) -> None:
-        """推进到下一帧，含空闲行为逻辑"""
+        """推进到下一帧，含空闲行为逻辑 + 粒子更新"""
         # ★ 驱动情绪徽章弹跳
         self._badge_bounce_frame += 1
+
+        # ★ 粒子更新合并到主帧循环
+        if self._particles:
+            self._update_particles()
+            if self._particle_timer.isActive():
+                self._particle_timer.stop()  # 确保独立 timer 不运行
 
         if self._current_state == "idle" and not self._idle_behavior_active:
             # 空闲时偶尔停留增加自然感（权重停留）
@@ -785,7 +800,6 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def paintEvent(self, event: object) -> None:
-        self.raise_()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.LosslessImageRendering, True)
         painter.setRenderHint(QPainter.Antialiasing, False)
@@ -1008,12 +1022,12 @@ class PixelPetWidget(QWidget):
             px = cx + random.randint(-12, 12)
             py = cy + random.randint(-12, 12)
             self._particles.append([px, py, 0.6 + random.random() * 0.4, 1.0])
-        if not self._particle_timer.isActive():
-            self._particle_timer.start()
+        # 粒子更新已合并到主帧循环 _advance_frame，不再启动独立 timer
         self.update()
 
     def _update_particles(self) -> None:
-        """★ 更新粒子状态（衰减 + 清除）"""
+        """★ 更新粒子状态（衰减 + 清除）
+        已合并到主帧循环 _advance_frame，此方法保留供 cleanup 调用"""
         if not self._particles:
             self._particle_timer.stop()
             return
@@ -1162,7 +1176,7 @@ class PixelPetWidget(QWidget):
             self.update()
 
     def _apply_inertia(self) -> None:
-        """惯性滑动衰减"""
+        """惯性滑动衰减 — 根据速度动态调整间隔，速度低时降频"""
         if not hasattr(self, "_inertia_velocity"):
             self._inertia_timer.stop()
             return
@@ -1170,10 +1184,15 @@ class PixelPetWidget(QWidget):
         vy = int(self._inertia_velocity.y() * INERTIA_DECAY)
         self._inertia_velocity = QPoint(vx, vy)
 
-        if abs(vx) < INERTIA_MIN_VELOCITY and abs(vy) < INERTIA_MIN_VELOCITY:
+        speed = math.sqrt(vx * vx + vy * vy)
+        if speed < INERTIA_MIN_VELOCITY:
             self._inertia_timer.stop()
             self.setCursor(Qt.PointingHandCursor)
             return
+
+        # ★ 智能降频：速度越低，间隔越长（保底 16ms = ~60fps）
+        adaptive_interval = max(16, min(60, int(60 - speed * 0.5)))
+        self._inertia_timer.setInterval(adaptive_interval)
 
         if self.parent():
             pw = self.parent().width()
@@ -1245,7 +1264,6 @@ class PixelPetWidget(QWidget):
             self._last_parent_size = (pw, ph)
 
     def eventFilter(self, obj: object, event: object) -> bool:
-        self.raise_()
         return super().eventFilter(obj, event)
 
     # ═══════════════════════════════════════════════════════════
@@ -1353,6 +1371,14 @@ class PixelPetWidget(QWidget):
     def showEvent(self, event: object) -> None:
         super().showEvent(event)
         self.raise_()
+        # ★ 显示时恢复 raise_timer（除非在睡觉）
+        if self._current_state != "sleeping" and not self._raise_timer.isActive():
+            self._raise_timer.start(5000)
+
+    def hideEvent(self, event: object) -> None:
+        """★ 隐藏时停止不必要的定时器"""
+        super().hideEvent(event)
+        self._raise_timer.stop()
 
     def cleanup(self) -> None:
         self._frame_timer.stop()

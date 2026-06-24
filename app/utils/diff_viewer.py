@@ -205,6 +205,8 @@ THEME_CSS = r"""
         line-height:1.5; height:100vh; overflow:hidden; font-size:12px;
         user-select:none;
     }
+    /* 代码区域可选中，UI 元素保持不可选中 */
+    .du-code, .ds-code, .file-hdr .fh-path, .sb-search input { user-select:text; -webkit-user-select:text; }
 
     /* ---- Layout ---- */
     .app { display:flex; height:100vh; }
@@ -278,15 +280,22 @@ THEME_CSS = r"""
         overflow:hidden;
     }
     .view-tgl button {
-        padding:3px 10px; font-size:11px; background:transparent;
-        color:var(--text2); border:none; cursor:pointer; transition:all 0.1s;
+        padding:4px 12px; font-size:11px; font-family:var(--sans);
+        background:transparent; color:var(--text2); border:none;
+        cursor:pointer; transition:all 0.15s ease; position:relative;
     }
     .view-tgl button:first-child { border-right:1px solid var(--border); }
-    .view-tgl button.active { background:var(--accent-bg); color:var(--accent); }
-    .view-tgl button:hover:not(.active) { background:rgba(255,255,255,0.03); }
+    .view-tgl button.active {
+        background:var(--accent-bg); color:var(--accent); font-weight:500;
+    }
+    .view-tgl button:hover:not(.active) {
+        background:rgba(255,255,255,0.04); color:var(--text);
+    }
 
     /* ---- Diff scroll area ---- */
     .diff-scroll { flex:1; overflow:auto; }
+
+    /* 横向滚动通过 JS 同步各行的滚动位置，实现容器级一致的滚动体验 */
 
     /* ---- File block ---- */
     .file-block { border-bottom:1px solid var(--border); }
@@ -308,11 +317,18 @@ THEME_CSS = r"""
     .file-hdr .fh-add { color:var(--green); font-family:var(--mono); font-size:11px; }
     .file-hdr .fh-del { color:var(--red); font-family:var(--mono); font-size:11px; }
     .file-hdr .fh-open {
-        padding:2px 7px; font-size:10px; background:transparent;
-        border:1px solid var(--border); border-radius:3px;
+        padding:3px 10px; font-size:10px; font-family:var(--sans);
+        background:var(--bg2); border:1px solid var(--border); border-radius:4px;
         color:var(--text2); cursor:pointer; flex-shrink:0;
+        transition:all 0.15s ease;
     }
-    .file-hdr .fh-open:hover { border-color:var(--accent); color:var(--accent); }
+    .file-hdr .fh-open:hover {
+        background:rgba(88,166,255,0.1);
+        border-color:var(--accent); color:var(--accent);
+    }
+    .file-hdr .fh-open:active {
+        background:rgba(88,166,255,0.2);
+    }
 
     /* ================================================================ */
     /*  UNIFIED VIEW — 删除块 → 新增块，不逐行配对                       */
@@ -335,7 +351,7 @@ THEME_CSS = r"""
     }
     .du-code {
         flex:1; padding:0 10px; white-space:pre;
-        line-height:var(--lh); overflow-x:auto;
+        line-height:var(--lh); overflow-x:auto; overflow-y:hidden;
     }
 
     /* Unified: hunk header */
@@ -395,7 +411,7 @@ THEME_CSS = r"""
     }
     .ds-code {
         flex:1; padding:0 8px; white-space:pre;
-        line-height:var(--lh); overflow-x:auto;
+        line-height:var(--lh); overflow-x:auto; overflow-y:hidden;
     }
 
     /* Split: hunk header */
@@ -434,14 +450,21 @@ THEME_CSS = r"""
     /* ---- Fold button ---- */
     .fold-btn {
         display:flex; align-items:center; justify-content:center;
-        padding:3px 12px;
+        padding:4px 14px;
         background:var(--accent-bg);
-        border-top:1px dashed rgba(56,139,253,0.2);
-        border-bottom:1px dashed rgba(56,139,253,0.2);
+        border-top:1px solid rgba(56,139,253,0.15);
+        border-bottom:1px solid rgba(56,139,253,0.15);
         color:var(--accent); cursor:pointer;
-        font-size:10px; gap:5px; user-select:none;
+        font-size:10px; font-family:var(--sans); gap:6px;
+        user-select:none; transition:all 0.15s ease;
     }
-    .fold-btn:hover { background:rgba(56,139,253,0.2); }
+    .fold-btn:hover {
+        background:rgba(56,139,253,0.22);
+        color:#79c0ff;
+    }
+    .fold-btn:active {
+        background:rgba(56,139,253,0.30);
+    }
 
     /* ---- Empty state ---- */
     .empty-state {
@@ -455,6 +478,10 @@ THEME_CSS = r"""
     ::-webkit-scrollbar-track { background:transparent; }
     ::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:3px; }
     ::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.22); }
+    /* 代码区域滚动条极细，减少视觉杂乱 */
+    .du-code::-webkit-scrollbar, .ds-code::-webkit-scrollbar { height:3px; }
+    .du-code::-webkit-scrollbar-thumb, .ds-code::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.10); }
+    .du-code::-webkit-scrollbar-thumb:hover, .ds-code::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.20); }
 
     /* ---- Initial loading pulse ---- */
     .diff-scroll:empty::after {
@@ -536,7 +563,7 @@ class DiffHtmlGenerator:
     <div class="sb-stats">
         <span class="add">+{total_adds}</span> <span class="del">-{total_dels}</span>
         <span style="flex:1"></span>
-        <button class="fh-open" onclick="toggleFold()">全部展开</button>
+        <button class="fh-open" id="toggle-fold-btn" onclick="toggleFold()">全部展开</button>
     </div>
     <div class="tree-list">{tree_html}</div>
 </div>
@@ -739,11 +766,13 @@ function applyFold(c){{
 
 function toggleFold(){{
     window._ae=!window._ae;
+    var tb=document.getElementById('toggle-fold-btn');
     document.querySelectorAll('.fold-btn').forEach(function(btn){{
         var h=btn._h;if(!h||!h.length)return;
         if(window._ae){{h.forEach(function(r){{r.style.display='';}});btn.style.display='none';}}
         else{{h.forEach(function(r){{r.style.display='none';}});btn.style.display='';}}
     }});
+    if(tb)tb.textContent=window._ae?'全部收缩':'全部展开';
 }}
 
 function openFile(p){{
@@ -809,6 +838,41 @@ requestAnimationFrame(function(){{
     document.querySelectorAll('.file-block').forEach(function(b){{applyFold(b);applyView(b);}});
     var f=document.querySelector('.tree-item');if(f)f.classList.add('active');
 }});
+
+// ---- Horizontal scroll sync ----
+(function(){{
+    function syncCodeCells(container, rowSelector, cellSelector){{
+        container.querySelectorAll(rowSelector).forEach(function(row){{
+            var cells=row.querySelectorAll(cellSelector);
+            if(cells.length<2)return;
+            var _busy=false;
+            cells.forEach(function(cell){{
+                cell.addEventListener('scroll',function(){{
+                    if(_busy)return;_busy=true;
+                    var l=this.scrollLeft;
+                    cells.forEach(function(o){{if(o!==this)o.scrollLeft=l;}},this);
+                    _busy=false;
+                }});
+            }});
+        }});
+    }}
+    // Unified: 每个 .du-row 内的所有 .du-code 同步（同一行只有一个，无操作）
+    // Split: 每个 .ds-pair 内左右两个 .ds-code 同步
+    document.querySelectorAll('.file-block').forEach(function(block){{
+        syncCodeCells(block,'.ds-pair','.ds-code');
+    }});
+    // 懒加载新文件时自动绑定
+    var _origLoad=loadFile;
+    window.loadFile=function(id,idx){{
+        _origLoad(id,idx);
+        requestAnimationFrame(function(){{
+            var block=document.getElementById(id);
+            if(block){{
+                syncCodeCells(block,'.ds-pair','.ds-code');
+            }}
+        }});
+    }};
+}})();
 </script>
 </body></html>"""
 
