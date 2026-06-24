@@ -1045,13 +1045,13 @@ class PixelPetWidget(QWidget):
         self._frame_index = 0
 
         def flash_step(count):
-            if count >= frames or self._current_state != old_state:
+            if count >= frames:
+                # 完成后务必恢复原始状态
+                self._current_state = old_state
+                self.update()
                 return
             # 交替显示目标状态和原始状态
-            if count % 2 == 0:
-                self._current_state = state_name
-            else:
-                self._current_state = old_state
+            self._current_state = state_name if count % 2 == 0 else old_state
             self.update()
             QTimer.singleShot(100, lambda: flash_step(count + 1))
 
