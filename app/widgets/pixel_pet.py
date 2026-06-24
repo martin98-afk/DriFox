@@ -62,7 +62,6 @@ FRAME_SIZE = 16  # 每帧像素尺寸
 SCALE = 3  # 渲染倍数 → 48×48 显示
 DISPLAY_SIZE = FRAME_SIZE * SCALE  # 48
 BADGE_HEIGHT = 18  # ★ 顶部情绪徽章预留高度（像素）
-SPRITESHEET = None  # 懒加载，启动后由插件系统解析路径
 
 # 状态 → 行索引（扩展为 12 行）
 # Row 0: 基础待机      Row 1: 眨眼环顾     Row 2: 专注/严肃
@@ -306,40 +305,58 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _load_spritesheet(self) -> None:
-        """通过插件系统懒加载 spritesheet"""
-        global SPRITESHEET
-        if SPRITESHEET is None:
-            SPRITESHEET = self._resolve_spritesheet()
+        """加载 spritesheet：优先文件系统 → fallback Qt 内嵌资源"""
+        info = self._resolve_spritesheet()
+        source, path = info["source"], info["path"]
+
         try:
-            if SPRITESHEET and SPRITESHEET.exists():
-                sp = QPixmap(str(SPRITESHEET))
-                if sp.isNull():
-                    logger.warning(f"[PixelPet] spritesheet 无效: {SPRITESHEET}")
-                    self._spritesheet = None
-                else:
-                    self._spritesheet = sp
-                    logger.debug(f"[PixelPet] spritesheet 加载成功 ({sp.width()}×{sp.height()})")
+            if source == "theme":
+                sp = QPixmap(str(path))
             else:
-                logger.warning(f"[PixelPet] spritesheet 不存在: {SPRITESHEET}")
+                sp = QPixmap(path)  # Qt 资源路径如 ":/icons/pet.png"
+
+            if sp.isNull():
+                logger.warning(f"[PixelPet] spritesheet 无效: {path}")
                 self._spritesheet = None
+            else:
+                self._spritesheet = sp
+                logger.debug(
+                    f"[PixelPet] spritesheet 加载成功 ({sp.width()}×{sp.height()}) "
+                    f"source={source}"
+                )
         except Exception as e:
             logger.exception(f"[PixelPet] 加载 spritesheet 失败: {e}")
             self._spritesheet = None
 
     @staticmethod
-    def _resolve_spritesheet():
-        """通过 PluginManager 解析 spritesheet 路径"""
+    def _resolve_spritesheet() -> dict:
+        """解析桌宠 spritesheet 来源。
+
+        Returns:
+            dict: {"source": "theme", "path": Path} 或
+                  {"source": "builtin", "path": ":/icons/pet.png"}
+        """
         try:
-            from app.core.plugin_manager import PluginManager
-            pm = PluginManager.get_instance()
-            plugin = pm.get_plugin("system")
-            if plugin is not None:
-                p = plugin.path / "pets" / "fox_pet.png"
-                if p.exists():
-                    return p
+            from app.utils.theme_manager import theme_manager
+            pet_cfg = theme_manager.get_theme_pet(
+                theme_manager.get_current_theme_id()
+            )
+            if pet_cfg and pet_cfg.get("image"):
+                return {"source": "theme", "path": pet_cfg["image"]}
         except Exception:
-            logger.debug("[PixelPet] 插件系统未就绪，使用默认路径")
-        return Path(__file__).parent / "pet_sprites.png"
+            logger.debug("[PixelPet] 主题系统未就绪，使用内嵌默认桌宠")
+
+        return {"source": "builtin", "path": ":/icons/pet.png"}
+
+    def refresh_pet(self) -> None:
+        """响应主题热重载：重新加载 spritesheet。
+
+        由 theme_manager.dispatch_refresh() 通过 refresh_theme() 调用。
+        """
+        logger.debug("[PixelPet] refresh_pet: 重新加载 spritesheet")
+        self._spritesheet = None
+        self._load_spritesheet()
+        self.update()
 
     # ═══════════════════════════════════════════════════════════
     # 帧间隔管理
