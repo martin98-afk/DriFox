@@ -6798,6 +6798,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._virtual_scroll_timer.start()
 
     def _archive_history_session(self, index: int):
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
         history_list = self.history_manager.get_history_list(self._current_project)
         if index < 0 or index >= len(history_list):
             return
@@ -6962,6 +6965,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_archived_session_deleted(self, file_path: str):
         """彻底删除归档会话"""
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
         from qfluentwidgets import MessageBox
 
         # 确认对话框
@@ -11209,6 +11215,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
         if not self.history_manager:
             return
 

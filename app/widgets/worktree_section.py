@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.git_worktree import GitWorktreeDetector
 from app.utils.utils import get_font_family_css
+from app.widgets.pixel_pet import PixelPetWidget  # ★ 用于重要操作时触发警示动画
 
 # Windows 下隐藏 cmd 窗口
 _CREATION_FLAGS = 0
@@ -201,6 +202,10 @@ class _WorktreeRow(QWidget):
 
     def _do_delete(self):
         """执行删除 worktree + 自动删除分支"""
+        ## 触发警示动画
+        pet = self.window().findChild(PixelPetWidget)
+        if pet:
+            pet.set_state("warning")
         cwd = self._find_git_root()
         # 1. 删除 worktree 目录
         try:
@@ -416,6 +421,10 @@ class WorktreeSectionWidget(QWidget):
             self._populate_rows()
 
     def _on_create(self, branch_name: str, base_branch: str):
+        ## 触发警示动画
+        pet = self.window().findChild(PixelPetWidget)
+        if pet:
+            pet.set_state("warning")
         repo_root = self._repo_info.root
         worktree_dir = os.path.join(
             os.path.dirname(repo_root),
