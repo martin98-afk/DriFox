@@ -484,68 +484,71 @@ for f in range(12):
     draw_fox(img, f * FRAME + dx, 5 * FRAME, cell_oy=5 * FRAME, **kwargs)
 
 # ════════════════════════════════════════════════════════════════
-# Row 6: sleeping — 侧躺（12帧：身体自然侧卧、头枕地、腿消失、Zzz 轻浮）
+# Row 6: sleeping — 蜷睡（12帧：身体蜷成球、头埋低、腿消失、Zzz 从身侧）
 # ════════════════════════════════════════════════════════════════
+# 蜷睡关键：身体从 16px 压缩到 ~10px 高的圆球、腿完全消失、Zzz 从身侧冒出
 sleep_dys = [0, -1, 0, 1, 0, 0, -1, 0, 1, 0, -1, 0]  # 呼吸起伏
 
-def draw_fox_sleeping(canvas, ox, oy, frame, cell_oy):
-    """绘制侧躺睡姿：身体自然侧卧、头枕在前腿位置、腿消失、尾巴卷曲"""
+def draw_fox_curled(canvas, ox, oy, frame, cell_oy):
+    """绘制蜷睡姿态：身体蜷成圆球，腿消失，尾巴卷到身前"""
     _set_cell_rect(ox, cell_oy, ox + FRAME - 1, cell_oy + FRAME - 1)
 
     dy = sleep_dys[frame]
-    # ── 身体（侧躺椭圆，y=6~12，7px 高）
-    for y in range(6 + dy, 12 + dy):
-        for x in range(6, 13):
+    # ── 主体圆球（y=6~14，波浪形边缘模拟圆形）──
+    # 圆球主体：宽 x=4~11，高 y=7~13，带渐消边缘形成球形
+    for y in range(7 + dy, 14 + dy):
+        for x in range(4, 12):
             p_px(canvas, ox, oy, x, y, ORANGE)
-    # 肚皮白色
-    for y in range(7 + dy, 10 + dy):
+    # 球的上半圆修饰（y=6，两侧收缩形成弧形）
+    for x in range(5, 11):
+        p_px(canvas, ox, oy, x, 6 + dy, ORANGE)
+    # 球的底部修饰（y=14，收缩）
+    for x in range(5, 11):
+        p_px(canvas, ox, oy, x, 14 + dy, ORANGE_MID)
+    # ── 肚皮（球心浅色区域）──
+    for y in range(8 + dy, 12 + dy):
         for x in range(6, 10):
             p_px(canvas, ox, oy, x, y, CREAM)
-
-    # ── 头（枕在左臂位置，y=5~8）
-    for y in range(5 + dy, 9 + dy):
-        for x in range(4, 8):
+    # ── 头（在球的上端露出）──
+    for y in range(6 + dy, 9 + dy):
+        for x in range(5, 11):
             p_px(canvas, ox, oy, x, y, ORANGE)
-    # 脸白色（朝向左侧）
-    for y in range(5 + dy, 8 + dy):
-        for x in range(5, 8):
+    # 脸（头埋低，脸朝前方，脸部在球的上部）
+    for y in range(7 + dy, 9 + dy):
+        for x in range(6, 10):
             p_px(canvas, ox, oy, x, y, CREAM)
-
-    # ── 耳朵（自然垂在头侧）
-    ear_l = [(3, 4 + dy), (4, 4 + dy), (3, 5 + dy), (4, 5 + dy)]
-    for x, y in ear_l:
+    # ── 耳朵（贴在头顶两侧，dy 偏移）──
+    for x, y in [(5, 5 + dy), (6, 5 + dy), (9, 5 + dy), (10, 5 + dy)]:
         p_px(canvas, ox, oy, x, y, ORANGE)
-    p_px(canvas, ox, oy, 3, 5 + dy, PINK_SOFT)
-    ear_r = [(5, 4 + dy), (6, 4 + dy), (5, 5 + dy), (6, 5 + dy)]
-    for x, y in ear_r:
-        p_px(canvas, ox, oy, x, y, ORANGE)
-
-    # ── 眼睛（闭合：弧形线）
-    for x, y in [(5, 6 + dy), (6, 6 + dy)]:
+    for x, y in [(5, 6 + dy), (10, 6 + dy)]:
+        p_px(canvas, ox, oy, x, y, PINK_SOFT)
+    # ── 眼睛（闭合：水平短线）──
+    for x, y in [(6, 8 + dy), (7, 8 + dy), (9, 8 + dy), (10, 8 + dy)]:
         p_px(canvas, ox, oy, x, y, DARK)
-    # 鼻子
-    p_px(canvas, ox, oy, 7, 7 + dy, DARK)
-
-    # ── 尾巴（从身后甩到右侧）
-    tail_side = [(12, 8 + dy), (13, 8 + dy), (13, 9 + dy), (14, 9 + dy),
-                 (14, 10 + dy), (13, 10 + dy), (12, 10 + dy)]
-    for x, y in tail_side:
+    # ── 鼻子（小点）──
+    p_px(canvas, ox, oy, 8, 9 + dy, DARK)
+    # ── 尾巴（卷到身前，覆盖在圆球左侧）──
+    for x, y in [(2, 8 + dy), (3, 8 + dy), (2, 9 + dy), (3, 9 + dy),
+                 (1, 9 + dy), (1, 10 + dy), (2, 10 + dy), (3, 10 + dy),
+                 (1, 11 + dy), (2, 11 + dy), (3, 11 + dy), (2, 12 + dy)]:
         p_px(canvas, ox, oy, x, y, ORANGE)
-    # 尾巴尖白色
-    p_px(canvas, ox, oy, 14, 10 + dy, CREAM)
-
-    # ── 腿（完全看不见——被身体遮住）
+    # 尾巴尖（白色）
+    for x, y in [(1, 9 + dy), (1, 10 + dy)]:
+        p_px(canvas, ox, oy, x, y, CREAM)
 
 
 for f in range(12):
-    draw_fox_sleeping(img, f * FRAME, 6 * FRAME, f, cell_oy=6 * FRAME)
-    # Zzz 从身体右侧上方冒出
+    # 蜷睡帧循环：呼吸（dy 起伏）+ Zzz 从身侧（x=12-14）冒出
+    draw_fox_curled(img, f * FRAME, 6 * FRAME, f, cell_oy=6 * FRAME)
+    # Zzz 冒泡（5-11 帧，从身体左侧 x=12+ 冒出）
     zzz_seq_per_frame = [None, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, None]
     zz = zzz_seq_per_frame[f]
     if zz is not None:
-        zzz_positions = [(14, 4, 1), (14, 3, 1), (13, 2, 2), (13, 1, 2),
-                         (12, 0, 3), (12, -1, 3), None,
-                         (13, 2, 2), (12, 1, 3), None, None, None]
+        # Zzz 位置（从身侧冒出，dx/dy 相对单元格左上角）
+        # 每帧的 (dx, dy, size) - dx 在身侧（x>10），dy 在头顶方向（y<8）
+        zzz_positions = [(13, 6, 1), (13, 5, 1), (12, 4, 2), (12, 3, 2),
+                         (11, 2, 3), (11, 1, 3), None,
+                         (12, 5, 2), (11, 4, 3), None, None, None]
         entry = zzz_positions[zz] if zz < len(zzz_positions) else None
         if entry is not None:
             dx, dy_zzz, size = entry
