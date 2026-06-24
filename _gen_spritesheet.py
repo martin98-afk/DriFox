@@ -484,57 +484,97 @@ for f in range(12):
     draw_fox(img, f * FRAME + dx, 5 * FRAME, cell_oy=5 * FRAME, **kwargs)
 
 # ════════════════════════════════════════════════════════════════
-# Row 6: sleeping — 蜷睡（12帧：身体蜷成球、头埋低、腿消失、Zzz 从身侧）
+# Row 6: sleeping — 趴睡（保留 idle 的头部/脸部/尾巴轮廓，闭眼+腮红+嘴角，无腿）
 # ════════════════════════════════════════════════════════════════
-# 蜷睡关键：身体从 16px 压缩到 ~10px 高的圆球、腿完全消失、Zzz 从身侧冒出
-sleep_dys = [0, -1, 0, 1, 0, 0, -1, 0, 1, 0, -1, 0]  # 呼吸起伏
+# 趴睡关键：保留 idle Frame 6 的整体轮廓（耳朵 y=2~3、头 y=4~7、嘴 y=8~10、
+# 尾巴 x=11~15 y=8~12），仅替换眼睛（睁→闭）、加嘴角弧线/腮红、去掉腿（y=11~13 DD→OO）。
+sleep_dys = [0, -1, -1, 0, 1, 1, 0,   # 第一个呼吸周期（基准-吸起-吸满-回落-呼气-呼尽-基准）
+             0, -1, -1, 0, 1, 1]      # 第二个呼吸周期（同样节奏，3 周期循环）
+
+# 尾巴尖端 y 坐标（独立于身体 dy，按呼吸节奏切换）
+tail_tip_y = [10, 9, 9, 10, 11, 11, 10,
+              9, 9, 10, 11, 11, 10]
+
+# 偶数帧添加腮红（6 帧有，6 帧无）
+BLUSH_FRAMES = {0, 2, 4, 6, 8, 10}
 
 def draw_fox_curled(canvas, ox, oy, frame, cell_oy):
-    """绘制蜷睡姿态：身体蜷成圆球，腿消失，尾巴卷到身前"""
+    """绘制趴睡姿态：保留 idle 的头/脸/尾巴轮廓，闭眼+腮红+嘴角+无腿。
+
+    与 idle Frame 6 (dy=0) 的差异：
+    - 眼睛 y=6：睁眼 → 闭眼短横线（左右各 2px 黑）
+    - 嘴角弧线 y=7：两侧嘴角上扬，软萌感
+    - 腮红：偶数帧在脸两侧 y=7 加粉色小点
+    - 腿消失：y=11~13 的 DD/MM → y=11~12 的 OO（趴下看不到腿）
+    - 呼吸：dy 在 -1, 0, +1 间切换，尾巴尖独立抖动
+    """
     _set_cell_rect(ox, cell_oy, ox + FRAME - 1, cell_oy + FRAME - 1)
 
     dy = sleep_dys[frame]
-    # ── 主体圆球（y=6~14，波浪形边缘模拟圆形）──
-    # 圆球主体：宽 x=4~11，高 y=7~13，带渐消边缘形成球形
-    for y in range(7 + dy, 14 + dy):
+    tip_y = tail_tip_y[frame]
+
+    # ── 耳朵（与 idle 一致：左耳 x=4~5, 右耳 x=10~11, y=2~3） ──
+    for x, y in [(4, 2 + dy), (5, 2 + dy), (10, 2 + dy), (11, 2 + dy)]:
+        p_px(canvas, ox, oy, x, y, ORANGE)
+    # 内耳淡橙色（idle 风格：左耳 x=5, 右耳 x=10, y=3）
+    p_px(canvas, ox, oy, 5, 3 + dy, ORANGE_LIGHT)
+    p_px(canvas, ox, oy, 10, 3 + dy, ORANGE_LIGHT)
+    # 内耳粉尖（idle 风格：左耳 x=4, 右耳 x=11, y=3）
+    for x, y in [(4, 3 + dy), (11, 3 + dy)]:
+        p_px(canvas, ox, oy, x, y, PINK_SOFT)
+
+    # ── 头部（与 idle 一致：y=4~7 全宽橙色矩形，中部 cream 脸） ──
+    for y in range(4 + dy, 8 + dy):
         for x in range(4, 12):
             p_px(canvas, ox, oy, x, y, ORANGE)
-    # 球的上半圆修饰（y=6，两侧收缩形成弧形）
-    for x in range(5, 11):
-        p_px(canvas, ox, oy, x, 6 + dy, ORANGE)
-    # 球的底部修饰（y=14，收缩）
-    for x in range(5, 11):
-        p_px(canvas, ox, oy, x, 14 + dy, ORANGE_MID)
-    # ── 肚皮（球心浅色区域）──
-    for y in range(8 + dy, 12 + dy):
+    for y in range(5 + dy, 8 + dy):
         for x in range(6, 10):
             p_px(canvas, ox, oy, x, y, CREAM)
-    # ── 头（在球的上端露出）──
-    for y in range(6 + dy, 9 + dy):
-        for x in range(5, 11):
-            p_px(canvas, ox, oy, x, y, ORANGE)
-    # 脸（头埋低，脸朝前方，脸部在球的上部）
-    for y in range(7 + dy, 9 + dy):
-        for x in range(6, 10):
-            p_px(canvas, ox, oy, x, y, CREAM)
-    # ── 耳朵（贴在头顶两侧，dy 偏移）──
-    for x, y in [(5, 5 + dy), (6, 5 + dy), (9, 5 + dy), (10, 5 + dy)]:
-        p_px(canvas, ox, oy, x, y, ORANGE)
-    for x, y in [(5, 6 + dy), (10, 6 + dy)]:
-        p_px(canvas, ox, oy, x, y, PINK_SOFT)
-    # ── 眼睛（闭合：水平短线）──
-    for x, y in [(6, 8 + dy), (7, 8 + dy), (9, 8 + dy), (10, 8 + dy)]:
+
+    # ── 闭眼（y=6，左右各 2px 黑短横线） ──
+    for x, y in [(6, 6 + dy), (7, 6 + dy), (9, 6 + dy), (10, 6 + dy)]:
         p_px(canvas, ox, oy, x, y, DARK)
-    # ── 鼻子（小点）──
-    p_px(canvas, ox, oy, 8, 9 + dy, DARK)
-    # ── 尾巴（卷到身前，覆盖在圆球左侧）──
-    for x, y in [(2, 8 + dy), (3, 8 + dy), (2, 9 + dy), (3, 9 + dy),
-                 (1, 9 + dy), (1, 10 + dy), (2, 10 + dy), (3, 10 + dy),
-                 (1, 11 + dy), (2, 11 + dy), (3, 11 + dy), (2, 12 + dy)]:
+
+    # ── 嘴角弧线（y=7，两侧嘴角上扬） ──
+    for x, y in [(6, 7 + dy), (10, 7 + dy)]:
+        p_px(canvas, ox, oy, x, y, DARK)
+
+    # ── 鼻子（y=7 中间） ──
+    p_px(canvas, ox, oy, 8, 7 + dy, DARK)
+
+    # ── 腮红（偶数帧在脸两侧 y=7 加粉色小点） ──
+    if frame in BLUSH_FRAMES:
+        for x, y in [(5, 7 + dy), (10, 7 + dy)]:
+            p_px(canvas, ox, oy, x, y, PINK_SOFT)
+
+    # ── 嘴/下巴（y=8~10，与 idle 类似：橙色外框 + cream 中部） ──
+    for y in range(8 + dy, 11 + dy):
+        for x in range(4, 12):
+            p_px(canvas, ox, oy, x, y, ORANGE)
+    for y in range(8 + dy, 11 + dy):
+        for x in range(6, 10):
+            p_px(canvas, ox, oy, x, y, CREAM)
+
+    # ── 身体底（y=11，全宽 ORANGE，取代 idle 的 MMMMMMMM 阴影行） ──
+    for x in range(4, 12):
+        p_px(canvas, ox, oy, x, 11 + dy, ORANGE)
+
+    # ── 尾巴（与 idle TAIL_NORMAL 一致：右下角延伸，4 px 宽，加粗版） ──
+    # 主体（橙色，y 随身体 dy 浮动）— 4 px 宽 × 5 行（含尖）
+    for x, y in [(12, 8 + dy), (13, 8 + dy), (14, 8 + dy), (15, 8 + dy),
+                 (12, 9 + dy), (13, 9 + dy), (14, 9 + dy), (15, 9 + dy),
+                 (12, 10 + dy), (13, 10 + dy), (14, 10 + dy), (15, 10 + dy),
+                 (12, 11 + dy), (13, 11 + dy), (14, 11 + dy), (15, 11 + dy),
+                 (13, 12 + dy), (14, 12 + dy)]:
         p_px(canvas, ox, oy, x, y, ORANGE)
-    # 尾巴尖（白色）
-    for x, y in [(1, 9 + dy), (1, 10 + dy)]:
-        p_px(canvas, ox, oy, x, y, CREAM)
+
+    # 尾巴尖（白色，2 px 宽，y 独立于身体 dy，按 tail_tip_y 切换）
+    p_px(canvas, ox, oy, 14, tip_y, CREAM)
+    p_px(canvas, ox, oy, 15, tip_y, CREAM)
+
+    # ── 身体收尾（y=12 阴影，取代 idle 的 DD 腿） ──
+    for x in range(5, 9):
+        p_px(canvas, ox, oy, x, 12 + dy, ORANGE_MID)
 
 
 for f in range(12):
