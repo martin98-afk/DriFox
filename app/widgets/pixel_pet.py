@@ -1096,8 +1096,8 @@ class PixelPetWidget(QWidget):
             self._drag_velocity = QPoint(0, 0)
             self._inertia_timer.stop()
             self.setCursor(Qt.ClosedHandCursor)
-            # ★ 拖拽开始 → 无奈表情
-            self.on_drag_started()
+            # ★ 拖拽开始 → 挣扎动画 + >< emoji
+            self.set_state("dragging")
 
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
@@ -1133,6 +1133,10 @@ class PixelPetWidget(QWidget):
                 self._inertia_timer.start(16)  # ~60fps
             else:
                 self.setCursor(Qt.PointingHandCursor)
+
+            # ★ 新增：松手后从 dragging 恢复 idle
+            if was_dragging and self._current_state == "dragging":
+                self.set_state("idle")
 
             # 点击检测（仅在拖拽距离很小时视为点击）
             if was_dragging and self._drag_offset:
