@@ -15,6 +15,7 @@ ICON_NAME_TO_FILE = {
     "MiniMax": "MiniMax.svg",
     "Ollama": "Ollama.svg",
     "opencode": "opencode.svg",
+    "pet": "pet.png",
     "plan-agent": "plan-agent.svg",
     "qwen": "qwen.svg",
     "siliconflow": "siliconflow.png",
