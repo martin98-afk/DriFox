@@ -104,7 +104,7 @@ FRAME_INTERVALS = {
     "question": (220, 300),     # 提问：带疑惑感，不能太快
     "success": 120,             # 成功：轻快喜悦
     "error": 100,               # 错误：颤抖但可看清
-    "sleeping": 400,            # 睡眠：缓慢
+    "sleeping": 300,            # 睡眠：缓慢
     "writing": 200,             # 写作：专注节奏
     "thinking_hard": 150,       # 深度思考：稍快但不鬼畜
     "excited": 110,             # 兴奋：活泼但不过度
@@ -115,7 +115,7 @@ FRAME_INTERVALS = {
     "dizzy": 130,               # ★ 眩晕：冒金星节奏
     "crying": 150,              # ★ 哭泣：比正常 error 稍慢
     # 子状态
-    "napping": 500,
+    "napping": 300,
 }
 
 # 空闲超过此时间自动进入睡眠 (ms)
@@ -193,6 +193,10 @@ class PixelPetWidget(QWidget):
         self._thinking_start_time = None
         self._success_streak = 0
         self._error_streak = 0
+
+        # ★ 状态机增强
+        self._state_before_drag = None       # 拖拽前保存的状态
+        self._thinking_hard_checker = None   # 思考深度检测计时器引用
 
         # ── 错误状态持久化（重试时保持报错） ──
         self._error_persist = False
@@ -440,6 +444,14 @@ class PixelPetWidget(QWidget):
         old_state = self._current_state
         self._current_state = state
 
+        # ★ AI 高优先级状态：停止恢复计时器，防止后续竞态覆盖
+        if state in ("thinking", "streaming", "question", "error"):
+            self._recover_timer.stop()
+
+        # ★ 离开 thinking/thinking_hard 时销毁思考深度检测计时器
+        if old_state in ("thinking", "thinking_hard") and state not in ("thinking", "thinking_hard"):
+            self._stop_thinking_hard_timer()
+
         # ★ 错误持续：离开错误状态时清除持久化标志
         if state != "error":
             self._error_persist = False
@@ -508,10 +520,21 @@ class PixelPetWidget(QWidget):
 
     def _check_thinking_hard(self) -> None:
         """启动延迟检测：5秒后如果还在 thinking，升级为 thinking_hard"""
+        # ★ 先销毁旧计时器，避免泄漏
+        self._stop_thinking_hard_timer()
         self._thinking_hard_checker = QTimer(self)
         self._thinking_hard_checker.setSingleShot(True)
         self._thinking_hard_checker.timeout.connect(self._do_upgrade_thinking)
         self._thinking_hard_checker.start(5000)
+
+    def _stop_thinking_hard_timer(self) -> None:
+        """销毁 thinking_hard 检测计时器（离开 thinking 时调用）"""
+        if self._thinking_hard_checker is not None:
+            try:
+                self._thinking_hard_checker.stop()
+            except Exception:
+                pass
+            self._thinking_hard_checker = None
 
     def _do_upgrade_thinking(self) -> None:
         """5秒后检查是否需要升级为 thinking_hard"""
@@ -537,17 +560,21 @@ class PixelPetWidget(QWidget):
 
     def _on_recover(self) -> None:
         """恢复计时器回调：重置宠物状态和 AI 状态跟踪，防止状态卡死"""
+        # ★ 安全检测：只有当前还是 success/error 才恢复
+        # 如果状态已经被 AI 信号切换为 thinking/streaming 等，跳过恢复
+        if self._current_state not in ("success", "error"):
+            logger.debug(f"[PixelPet] 恢复跳过：当前状态 {self._current_state} 无需恢复")
+            return
+
         self._last_ai_state = "idle"
-        if self._current_state in ("success",):
+        if self._current_state == "success":
             self.set_state("idle")
         elif self._current_state == "error":
             # ★ 错误持久化模式：重试中不自动恢复
             if self._error_persist:
                 logger.debug("[PixelPet] 错误持久化中，跳过自动恢复")
-                # 重新启动恢复检查，下次再试
                 self._recover_timer.start(RECOVER_MS)
                 return
-            # 非持久化模式：正常恢复
             self.set_state("idle")
 
     # ═══════════════════════════════════════════════════════════
@@ -1113,6 +1140,8 @@ class PixelPetWidget(QWidget):
             self._drag_velocity = QPoint(0, 0)
             self._inertia_timer.stop()
             self.setCursor(Qt.ClosedHandCursor)
+            # ★ 保存拖拽前的状态（用于松手后恢复）
+            self._state_before_drag = self._current_state
             # ★ 拖拽开始 → 挣扎动画 + >< emoji
             self.set_state("dragging")
 
@@ -1151,9 +1180,11 @@ class PixelPetWidget(QWidget):
             else:
                 self.setCursor(Qt.PointingHandCursor)
 
-            # ★ 新增：松手后从 dragging 恢复 idle
+            # ★ 松手后恢复拖拽前的状态（而非强制 idle）
             if was_dragging and self._current_state == "dragging":
-                self.set_state("idle")
+                prev_state = self._state_before_drag or "idle"
+                self._state_before_drag = None
+                self.set_state(prev_state)
 
             # 点击检测（仅在拖拽距离很小时视为点击）
             if was_dragging and self._drag_offset:
@@ -1393,4 +1424,6 @@ class PixelPetWidget(QWidget):
         self._particle_timer.stop()
         self._particles.clear()
         self._stop_shake()
+        self._stop_thinking_hard_timer()
+        self._state_before_drag = None
         logger.debug("[PixelPet] v2 已清理")

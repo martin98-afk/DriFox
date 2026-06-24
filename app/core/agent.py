@@ -528,12 +528,17 @@ class AgentManager:
             try:
                 agent = self._parse_markdown_agent(md_file)
                 if agent:
+                    # 同名智能体去重：先加载的（系统插件优先）保留，后续的跳过
+                    target_dict = self._hidden_agents if agent.is_hidden() else self._agents
+                    if agent.name in target_dict:
+                        logger.debug(
+                            f"[AgentManager] Skip duplicate agent: {agent.name} "
+                            f"(already loaded, source={md_file})"
+                        )
+                        continue
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
-                    if agent.is_hidden():
-                        self._hidden_agents[agent.name] = agent
-                    else:
-                        self._agents[agent.name] = agent
+                    target_dict[agent.name] = agent
                     logger.info(
                         f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})"
                     )
@@ -544,12 +549,16 @@ class AgentManager:
             try:
                 agent = self._parse_yaml_agent(yaml_file)
                 if agent:
+                    target_dict = self._hidden_agents if agent.is_hidden() else self._agents
+                    if agent.name in target_dict:
+                        logger.debug(
+                            f"[AgentManager] Skip duplicate agent: {agent.name} "
+                            f"(already loaded, source={yaml_file})"
+                        )
+                        continue
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
-                    if agent.is_hidden():
-                        self._hidden_agents[agent.name] = agent
-                    else:
-                        self._agents[agent.name] = agent
+                    target_dict[agent.name] = agent
                     logger.info(f"[AgentManager] Loaded agent (yaml): {agent.name}")
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {yaml_file}: {e}")

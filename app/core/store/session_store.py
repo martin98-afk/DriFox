@@ -201,7 +201,9 @@ class SessionStore:
             if not success or not result:
                 return
             current = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
-            if current == 'incremental':
+            # SQLite PRAGMA auto_vacuum 返回整数: 0=NONE, 1=FULL, 2=INCREMENTAL
+            # Python sqlite3 driver 可能返回 int 2 而非字符串 'incremental'
+            if str(current).lower() == 'incremental' or current == 2:
                 # 检查 freelist 是否还有很多 (> 50MB 提示用户首次 VACUUM)
                 success2, result2 = self._db.execute_sql('PRAGMA freelist_count')
                 if success2 and result2:

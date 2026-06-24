@@ -369,7 +369,7 @@ class MCPClientManager:
             if not name:
                 continue
             if not server_cfg.get("enabled", True):
-                logger.info(f"[MCP] 跳过已禁用的服务器: {name}")
+                logger.debug(f"[MCP] 跳过已禁用的服务器: {name}")
                 continue
             enabled_servers.append(server_cfg)
 

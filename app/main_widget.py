@@ -5289,6 +5289,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_agent_list(self):
         """加载智能体列表到按钮组（仅显示 primary agents）"""
+        # 防重复调用：showEvent 和 session 创建都可能触发，避免无意义重复
+        if getattr(self, "_loading_agent_list", False):
+            return
+
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             return
@@ -5307,48 +5311,53 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
             return
 
-        self._suppress_agent_intro = True
-        agents = self.backend.get_primary_agents()
-        buttons = self._agent_btn_group.buttons()
-        default_agent = getattr(self, "_current_agent", "build")
+        # 以上为防护性提前返回，以下为实际主逻辑
+        self._loading_agent_list = True
+        try:
+            self._suppress_agent_intro = True
+            agents = self.backend.get_primary_agents()
+            buttons = self._agent_btn_group.buttons()
+            default_agent = getattr(self, "_current_agent", "build")
 
-        # 更新按钮文本和提示
-        for i, agent in enumerate(agents):
-            if i < len(buttons):
-                btn = buttons[i]
-                btn.setText(agent.name)
-                btn.setToolTip(agent.description)
+            # 更新按钮文本和提示
+            for i, agent in enumerate(agents):
+                if i < len(buttons):
+                    btn = buttons[i]
+                    btn.setText(agent.name)
+                    btn.setToolTip(agent.description)
 
-        # 根据当前智能体选中对应按钮
-        found = False
-        for i, agent in enumerate(agents):
-            if i < len(buttons) and agent.name == default_agent:
-                buttons[i].setChecked(True)
-                self._update_agent_button_style(default_agent)
-                found = True
-                logger.info(
-                    f"[_load_agent_list] Found match for {default_agent}, btn_id={i}"
+            # 根据当前智能体选中对应按钮
+            found = False
+            for i, agent in enumerate(agents):
+                if i < len(buttons) and agent.name == default_agent:
+                    buttons[i].setChecked(True)
+                    self._update_agent_button_style(default_agent)
+                    found = True
+                    logger.info(
+                        f"[_load_agent_list] Found match for {default_agent}, btn_id={i}"
+                    )
+                    break
+
+            if not found:
+                # 如果没找到匹配的，默认选中第一个
+                logger.warning(
+                    f"[_load_agent_list] {default_agent} not found, using agents[0]={agents[0].name if agents else 'None'}"
                 )
-                break
+                if buttons:
+                    buttons[0].setChecked(True)
+                    self._current_agent = agents[0].name if agents else "build"
+                    self._update_agent_button_style(self._current_agent)
 
-        if not found:
-            # 如果没找到匹配的，默认选中第一个
-            logger.warning(
-                f"[_load_agent_list] {default_agent} not found, using agents[0]={agents[0].name if agents else 'None'}"
-            )
-            if buttons:
-                buttons[0].setChecked(True)
-                self._current_agent = agents[0].name if agents else "build"
-                self._update_agent_button_style(self._current_agent)
+            # 同步 ChatEngine 的 agent
+            if self.backend.chat_engine:
+                self.backend.set_current_agent(self._current_agent)
+                logger.info(
+                    f"[_load_agent_list] Synced ChatEngine._current_agent = {self._current_agent}"
+                )
 
-        # 同步 ChatEngine 的 agent
-        if self.backend.chat_engine:
-            self.backend.set_current_agent(self._current_agent)
-            logger.info(
-                f"[_load_agent_list] Synced ChatEngine._current_agent = {self._current_agent}"
-            )
-
-        self._suppress_agent_intro = False
+            self._suppress_agent_intro = False
+        finally:
+            self._loading_agent_list = False
 
     def _update_agent_button_style(self, active_agent: str):
         """更新智能体按钮样式"""
@@ -9360,6 +9369,13 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_content_received(self, content_piece: str):
         if getattr(self, "_is_destroyed", False):
             return
+        # ★ 推理结束后首个内容到达时，确保桌宠从 thinking 切回 streaming
+        # 背景：stream_started 在 worker 启动时即触发（早于任何内容），
+        # 随后 thinking_started（推理内容到达）覆盖为 thinking，
+        # 但内容到达时没有信号通知桌宠切回 streaming。
+        if self._ai_state == "thinking":
+            self._set_ai_state("streaming")
+
         if self._current_assistant_card:
             self._update_assistant_message(self._current_assistant_card, content_piece)
 

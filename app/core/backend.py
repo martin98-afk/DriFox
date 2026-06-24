@@ -443,9 +443,14 @@ class ChatBackend(QObject):
                     from app.core.lsp.lsp_manager import LspManager
                     lsp_mgr = LspManager.get_instance()
                     lsp_configs = pm.get_lsp_configs()
-                    workdir = os.getcwd()
-                    if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
-                        workdir = str(self._tool_executor._workdir)
+                    # 使用项目根目录作为 LSP workspace root，而非 os.getcwd()
+                    # 避免 pyright 扫描整个上级目录（如 d:\work 下所有项目）
+                    # backend.py 位于 app/core/backend.py，项目根在其上 3 层
+                    workdir = os.path.dirname(
+                        os.path.dirname(
+                            os.path.dirname(os.path.abspath(__file__))
+                        )
+                    )
                     lsp_mgr.initialize(workdir, lsp_configs)
                     logger.info(f"[ChatBackend] LspManager 初始化完成，"
                                f"已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
