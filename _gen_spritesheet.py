@@ -593,6 +593,6 @@ for f in range(12):
 # ════════════════════════════════════════════════════════════════
 # 保存
 # ════════════════════════════════════════════════════════════════
-out_path = Path(__file__).parent / "plugins" / "system" / "pets" / "fox_pet.png"
+out_path = Path(__file__).parent / "icons" / "pet.png"
 img.save(out_path)
 print(f"Done: {out_path}  ({W}×{H})")
