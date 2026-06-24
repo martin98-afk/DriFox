@@ -178,27 +178,13 @@ jobs:
           fi
           echo "✅ PyInstaller 打包成功"
 
-      # ── Ad-hoc 代码签名 ──
-      # PyInstaller 默认不会真正签名，导致 Gatekeeper 拦截。
-      # 用 ad-hoc 签名（--sign -）能确保 .app 内部所有 binary 都有合法签名标识，
-      # 减少 Gatekeeper 弹窗（仍需用户在"隐私与安全性"中点"仍要打开"一次）。
-      - name: Ad-hoc codesign
-        shell: bash
-        run: |
-          echo "🔏 正在对 dist/Drifox.app 进行 ad-hoc 签名..."
-          # 先签名内部组件，再签名 .app 本身（--deep 自动处理嵌套）
-          find dist/Drifox.app/Contents/MacOS -type f -perm +111 2>/dev/null \
-            | xargs -I {} codesign --force --sign - {} 2>/dev/null || true
-          codesign --force --deep --sign - dist/Drifox.app
-          # 验证签名（不用 --strict，因为 ad-hoc 不支持 hardened runtime）
-          if codesign --verify --deep dist/Drifox.app; then
-            echo "✅ ad-hoc 签名成功"
-          else
-            echo "⚠️ 签名验证返回非零（ad-hoc 签名通常仍可运行），继续..."
-          fi
-          # 显示签名信息
-          echo "--- Signature Info ---"
-          codesign --display --verbose=2 dist/Drifox.app 2>&1 | head -20
+      # ── 代码签名说明 ──
+      # 不做 ad-hoc 签名。原因：
+      #   1. ad-hoc 签名本身不提供开发者身份认证，无法消除 Gatekeeper 弹窗
+      #   2. codesign --deep 已被 Apple 弃用，可能导致内部签名不一致
+      #   3. 本地打包也从不做签名，工作正常
+      #   4. 下载的 .app 因 quarantine 属性 + 问题签名会触发更严格的检查，
+      #      反而不如不签名（未签名 app 只需在"隐私与安全性"中点"仍要打开"一次）
 
       # ── DMG ──
       - name: Build DMG
