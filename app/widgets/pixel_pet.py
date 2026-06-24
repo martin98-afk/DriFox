@@ -792,10 +792,8 @@ class PixelPetWidget(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
 
-        # ★ 强制清屏为全透明（CompositionMode_Source 直接替换像素而非叠加）
-        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        # ★ 清屏（用全透明填充，防止拖拽时残留像素）
         painter.fillRect(self.rect(), Qt.transparent)
-        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
         # ★ 情绪 emoji 徽章（画在顶部预留区域）
         self._draw_emotion_badge(painter)
@@ -1122,8 +1120,6 @@ class PixelPetWidget(QWidget):
                     )
                 self._last_pos = QPoint(new_x, new_y)
                 self.move(new_x, new_y)
-                # ★ 拖拽时强制重绘，避免帧切换不及时造成残留
-                self.update()
                 self._reset_interaction_timer()
 
     def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
