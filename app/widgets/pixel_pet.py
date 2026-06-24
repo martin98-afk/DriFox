@@ -792,6 +792,9 @@ class PixelPetWidget(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
 
+        # ★ 清屏修残留像素（Qt 透明 widget 不自动清屏）
+        painter.eraseRect(self.rect())
+
         # ★ 情绪 emoji 徽章（画在顶部预留区域）
         self._draw_emotion_badge(painter)
 
