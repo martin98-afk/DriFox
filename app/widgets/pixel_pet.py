@@ -149,7 +149,7 @@ STATE_EMOJI = {
     "writing": "✏️",
     "thinking_hard": "🤔",
     "excited": "✨",
-    "dragging": "><",      # ★ 挣扎：被抓住的害羞表情
+    "dragging": "😖",      # ★ 挣扎：被抓住的窘迫表情
     "warning": "⚠️",       # ★ 警示：重要操作前的提醒
     "confused": "🤷",
     "surprised": "😲",
