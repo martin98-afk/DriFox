@@ -79,6 +79,8 @@ STATE_ROWS = {
     "writing": 7,
     "thinking_hard": 8,
     "excited": 9,
+    "dragging": 10,      # ★ 挣扎（Row 10 扭动 + 嘴张）
+    "warning": 11,       # ★ 警示（Row 11 紧张 + 头顶"!"号）
     "confused": 6,       # ★ 疑惑（Row 6 问号），与 sleeping 共用行
     "surprised": 8,      # ★ 惊讶（Row 8 尴尬小紧张），与 thinking_hard 共用行
     "dizzy": 4,          # ★ 眩晕（Row 4 冒金星），与 success 共用行
@@ -106,6 +108,8 @@ FRAME_INTERVALS = {
     "writing": 200,             # 写作：专注节奏
     "thinking_hard": 150,       # 深度思考：稍快但不鬼畜
     "excited": 110,             # 兴奋：活泼但不过度
+    "dragging": 80,             # ★ 挣扎：快速帧（比 error 还快，传达慌张）
+    "warning": 150,             # ★ 警示：适中节奏，传达警觉感
     "confused": (250, 350),     # ★ 疑惑：缓慢困惑，问号浮现
     "surprised": 90,            # ★ 惊讶：快速闪现
     "dizzy": 130,               # ★ 眩晕：冒金星节奏
@@ -145,6 +149,8 @@ STATE_EMOJI = {
     "writing": "✏️",
     "thinking_hard": "🤔",
     "excited": "✨",
+    "dragging": "><",      # ★ 挣扎：被抓住的害羞表情
+    "warning": "⚠️",       # ★ 警示：重要操作前的提醒
     "confused": "🤷",
     "surprised": "😲",
     "dizzy": "😵",
