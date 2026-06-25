@@ -590,7 +590,15 @@ class ToolExecutor:
                     # 将 hook 输出注入到消息上下文（供 LLM 后续分析）
                     # 🛡️ 跨线程保护：使用 Qt.callLater 确保在主线程执行
                     if result.output and self._backend:
-                        hook_output_msg = f"<hook event=\"PreToolUse\">\n[BLOCKED] Tool '{tool_name}' was blocked by hook.\nHook output:\n{result.output}\n</hook>"
+                        hook_output_msg = (
+                            f"---\n"
+                            f"🔌 **Hook 内部通知** · 事件: `PreToolUse`\n"
+                            f"\n"
+                            f"[BLOCKED] Tool '{tool_name}' was blocked by hook.\n"
+                            f"Hook output:\n"
+                            f"{result.output}\n"
+                            f"---"
+                        )
                         from PyQt5.QtCore import QMetaObject, Qt
                         QMetaObject.invokeMethod(
                             self._backend, "message_received",

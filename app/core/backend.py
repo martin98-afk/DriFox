@@ -29,7 +29,22 @@ _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
 
 def _strip_hook_wrapper(content: str) -> str:
-    """从 <hook event=\"...\">\\n...\\n</hook> 格式中提取纯文本内容"""
+    """从 hook 消息格式中提取纯文本内容（兼容新旧格式）
+
+    旧格式: <hook event=\"...\">\\n...\\n</hook>
+    新格式: ---\\n🔌 **Hook 内部通知** · 事件: `...`\\n\\n...\\n---
+    """
+    # 新格式
+    if content.startswith('---') and '🔌 **Hook 内部通知**' in content:
+        match = re.search(
+            r'---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---',
+            content, re.DOTALL
+        )
+        if match:
+            return match.group(1).strip()
+        return content
+
+    # 旧格式
     match = re.search(r'<hook[^>]*>(.*?)</hook>', content, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -257,7 +272,14 @@ class ChatBackend(QObject):
             if not success:
                 return
 
-            hook_output = f"<hook event=\"{event_name}\">\n{output}\n</hook>"
+            # 新格式：Markdown 分隔线 + emoji + 中文标注，让 LLM 清晰识别为系统内部通知
+            hook_output = (
+                f"---\n"
+                f"🔌 **Hook 内部通知** · 事件: `{event_name}`\n"
+                f"\n"
+                f"{output}\n"
+                f"---"
+            )
 
             # PROMPT 类型始终加入消息列表；其他类型只加入特定事件
             # PostToolUse 添加以支持工具执行后 hook 消息显示
@@ -270,17 +292,26 @@ class ChatBackend(QObject):
                     if event_name == "PreUserMessage":
                         session.messages = [
                             msg for msg in session.messages
-                            if not (msg.get("role") == "assistant" and "<hook " in (msg.get("content") or "") and 'event="PreUserMessage"' in (msg.get("content") or ""))
+                            if not (msg.get("role") == "assistant" and msg.get("_hook_event") == "PreUserMessage")
                         ]
 
-                    # 添加新消息
-                    session.add_assistant_message(hook_output)
+                    # 存入原始输出（不含格式包装），供 UI 显示
+                    # _hook_event 是内部标记用于清理；get_context_messages() 中 consolidate 时会自动剥离
+                    import datetime as _dt
+                    msg = {
+                        "role": "assistant",
+                        "content": output,
+                        "_hook_event": event_name,
+                        "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    session.messages.append(msg)
+                    session._update_timestamp()
 
                 # 推入线程安全队列，供 worker 在下一轮 LLM 调用前消费
-                text_content = _strip_hook_wrapper(hook_output)
+                # 注入带格式包装的消息，让 LLM 能识别这是 Hook 内部通知而非用户输入
                 self._hook_message_queue.put({
                     "role": "assistant",
-                    "content": text_content,
+                    "content": hook_output,
                 })
 
                 # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
@@ -1594,6 +1625,7 @@ class ChatBackend(QObject):
         if trigger_hook and self._hook_manager:
             context = {
                 "project_root": os.getcwd(),
+                "state": "startup",
             }
             self._hook_manager.trigger_event(
                 "SessionStart",
@@ -1602,6 +1634,20 @@ class ChatBackend(QObject):
             )
 
         return session
+
+    def trigger_session_event(self, state: str, extra_context: dict = None):
+        """触发 SessionStart hook，带会话状态
+
+        Args:
+            state: 会话状态，可选 startup/resume/clear/compact
+            extra_context: 额外上下文信息
+        """
+        if not self._hook_manager:
+            return
+        ctx = {"project_root": os.getcwd(), "state": state}
+        if extra_context:
+            ctx.update(extra_context)
+        self._hook_manager.trigger_event("SessionStart", context=ctx, current_message="")
 
     def get_current_session(self) -> Optional[ChatSession]:
         """获取当前会话"""

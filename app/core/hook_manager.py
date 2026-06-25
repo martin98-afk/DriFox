@@ -105,6 +105,11 @@ class Hook:
     # Prompt 类型专用字段
     prompt: Optional[str] = None
 
+    # Windows 专用命令（Claude Code 插件兼容）
+    commandWindows: Optional[str] = None
+    # 状态信息（执行时显示的状态消息）
+    statusMessage: Optional[str] = None
+
     # config_file: 所属的 hooks.json 配置文件路径（用于 UI 保存）
     config_file: Optional[str] = None
 
@@ -114,6 +119,8 @@ class Hook:
         hook_type = d.get("type", "command")
         # 根据类型规范化 command 值：优先取专用字段，再 fallback 到 command
         command = d.get("command", "")
+        commandWindows = d.get("commandWindows") or d.get("command_windows", "")
+        statusMessage = d.get("statusMessage") or d.get("status_message", "")
         if hook_type == "python":
             command = d.get("function") or command
         elif hook_type == "http":
@@ -125,6 +132,8 @@ class Hook:
             id=hook_id,
             type=hook_type,
             command=command,
+            commandWindows=commandWindows,
+            statusMessage=statusMessage,
             cwd=d.get("cwd"),
             add_output_to_context=d.get("add_output_to_context", True),
             skill_root=d.get("skill_root", ""),
@@ -160,6 +169,8 @@ class Hook:
             "function": self.function,
             "function_args": self.function_args,
             "config_file": self.config_file,
+            "commandWindows": self.commandWindows,
+            "statusMessage": self.statusMessage,
         }
         if self.prompt is not None:
             result["prompt"] = self.prompt
@@ -187,6 +198,15 @@ class HookMatchRule:
         if not self.matcher:
             return True
 
+        event_name = context.get("event_name", "")
+
+        # SessionStart 会话状态匹配
+        # matcher 格式如 "startup|resume|clear|compact"，匹配 context["state"]
+        if event_name == "SessionStart":
+            session_state = context.get("state", "startup")
+            states = [s.strip() for s in self.matcher.split("|")]
+            return session_state in states
+
         # 工具名匹配（支持别名）
         if self.matcher.startswith("tool:"):
             pattern = self.matcher[5:]
@@ -205,7 +225,6 @@ class HookMatchRule:
 
         # 对于工具相关事件，也尝试匹配工具名（大小写不敏感）
         # 这样 "Write|Edit" 这样的 matcher 可以直接匹配工具名
-        event_name = context.get("event_name", "")
         if event_name in ("PreToolUse", "PostToolUse"):
             tool_name = context.get("tool_name", "")
             if tool_name:
@@ -423,9 +442,14 @@ class HookWorker(QRunnable):
     def _execute_command(self) -> tuple:
         """执行命令（委托给公共静态方法），传递 context 作为 stdin"""
         import json as _json
+        import os
+        # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
+        effective_cmd = self.hook.command
+        if os.name == 'nt' and self.hook.commandWindows:
+            effective_cmd = self.hook.commandWindows
         stdin_data = _json.dumps(self.context) if self.context else None
         output, success, _ = HookWorker._run_command_sync(
-            self.hook.command, self.cwd, self.hook.timeout,
+            effective_cmd, self.cwd, self.hook.timeout,
             stdin_data=stdin_data
         )
         return output, success
@@ -1021,7 +1045,12 @@ class HookManager:
         cwd = self._resolve_command_cwd(hook, context)
 
         # 变量替换
-        command = self._interpolate_variables(hook.command, context)
+        # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
+        if os.name == 'nt' and hook.commandWindows:
+            effective_command = hook.commandWindows
+        else:
+            effective_command = hook.command
+        command = self._interpolate_variables(effective_command, context)
         url = self._interpolate_variables(hook.url or "", context)
 
         if trigger_async and hook.type == HookType.COMMAND.value:
@@ -1462,7 +1491,8 @@ class HookManager:
                 # 处理其他字段
                 for key in ["type", "cwd", "add_output_to_context", "skill_root",
                             "timeout", "retry", "conditions", "headers",
-                            "allowedEnvVars", "function_args"]:
+                            "allowedEnvVars", "function_args",
+                            "commandWindows", "statusMessage"]:
                     if key in new_data:
                         hook_entry[key] = new_data[key]
 
@@ -1524,6 +1554,10 @@ class HookManager:
             hook.function_args = new_data["function_args"]
         if "add_output_to_context" in new_data:
             hook.add_output_to_context = new_data["add_output_to_context"]
+        if "commandWindows" in new_data:
+            hook.commandWindows = new_data["commandWindows"]
+        if "statusMessage" in new_data:
+            hook.statusMessage = new_data["statusMessage"]
 
         # 事件变更：从当前事件移动到新事件
         new_event = new_data.get("event", event_name)
