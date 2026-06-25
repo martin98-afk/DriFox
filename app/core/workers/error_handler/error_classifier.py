@@ -67,6 +67,11 @@ class FailoverReason(enum.Enum):
     # 请求格式
     format_error = "format_error"           # 400 格式错误 → 终止或剥离重试
 
+    # 模型死循环（Qwen/DashScope 等服务端检测到连续重复工具调用，拒绝继续）
+    # 见 https://help.aliyun.com/zh/model-studio/error-code
+    # 这类错误不可重试（服务端会持续拒绝），必须用户调整输入或工具调用策略
+    tool_loop = "tool_loop"                 # 工具循环 → 终止，让用户介入
+
     # 捕获-all
     unknown = "unknown"                     # 不可分类 → 带退避重试
 
@@ -297,6 +302,21 @@ IMAGE_TOO_LARGE_PATTERNS = [
     "image too large",
     "image_too_large",
     "image size exceeds",
+]
+
+# 模型死循环模式（Qwen/DashScope 等服务端检测到连续重复工具调用）
+# 错误码：InternalError.Algo.InvalidParameter
+# 错误消息：Repetitive tool calls detected in the conversation history. The same
+# tool call with identical name and arguments has been repeated across multiple
+# consecutive rounds. Please modify your request or adjust the tool call arguments
+# to avoid infinite loops.
+# 注意：这种错误**不可自动重试**——服务端会持续拒绝同样的消息序列
+REPETITIVE_TOOL_CALL_PATTERNS = [
+    "repetitive tool calls detected",
+    "repetitive tool calls",
+    "identical name and arguments has been repeated",
+    "tool call with identical name",
+    "internalerror.algo.invalidparameter",
 ]
 
 
@@ -616,6 +636,16 @@ class ErrorClassifier:
         """根据 HTTP 状态码分类"""
 
         if status_code == 400:
+            # ⚠️ 优先识别 Qwen/DashScope 的"工具循环"错误
+            # 服务端检测到连续重复的工具调用会主动拒绝，且**不接受同样的请求重试**
+            # 必须在 format_error 之前拦截，避免被归类为通用格式错误后误让用户重试
+            if any(p in error_msg for p in REPETITIVE_TOOL_CALL_PATTERNS):
+                return result_fn(
+                    FailoverReason.tool_loop,
+                    retryable=False,
+                    should_compress=False,
+                )
+
             # 格式错误或参数错误
             # 检查是否是上下文溢出（某些 provider 用 400 表示）
             if any(p in error_msg for p in CONTEXT_OVERFLOW_PATTERNS):
