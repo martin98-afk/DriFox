@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import (
     ExpandSettingCard,
     FluentIcon,
@@ -175,7 +175,9 @@ class HookEditCard(QWidget):
         main_layout.addLayout(row)
 
         # ── 命令 ──
-        self.commandEdit = QLineEdit()
+        self.commandEdit = QPlainTextEdit()
+        self.commandEdit.setMaximumHeight(100)
+        self.commandEdit.setMinimumHeight(48)
         self.commandEdit.setPlaceholderText('如: echo "Hello" 或 python script.py')
         self._cmd_row, self._cmd_label = _make_row("命令:", self.commandEdit)
         main_layout.addLayout(self._cmd_row)
@@ -208,21 +210,21 @@ class HookEditCard(QWidget):
         d = self._hook_data
         hook_type = d.get("type", "command")
         self.typeCombo.setCurrentText(hook_type)
-        self.eventCombo.setCurrentText(d.get("event", "PreToolUse"))
+        self.eventCombo.setCurrentText(d.get("_event", "PreToolUse"))
         # 根据类型选择正确的字段加载
         if hook_type == "python":
-            self.commandEdit.setText(d.get("function", "") or d.get("command", "") or "")
+            self.commandEdit.setPlainText(d.get("function", "") or d.get("command", "") or "")
         elif hook_type == "http":
-            self.commandEdit.setText(d.get("url", "") or d.get("command", "") or "")
+            self.commandEdit.setPlainText(d.get("url", "") or d.get("command", "") or "")
         elif hook_type == "prompt":
-            self.commandEdit.setText(d.get("prompt", "") or d.get("command", "") or "")
+            self.commandEdit.setPlainText(d.get("prompt", "") or d.get("command", "") or "")
         else:
-            self.commandEdit.setText(d.get("command", "") or "")
+            self.commandEdit.setPlainText(d.get("command", "") or "")
         self.matcherEdit.setText(d.get("matcher", ""))
 
     def get_values(self) -> dict:
         hook_type = self.typeCombo.currentText()
-        value = self.commandEdit.text().strip()
+        value = self.commandEdit.toPlainText().strip()
         result = {
             "event": self.eventCombo.currentText(),
             "type": hook_type,

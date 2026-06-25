@@ -235,6 +235,10 @@ class ChatBackend(QObject):
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 
+        # 线程安全队列：hook 消息通过此队列传递给 worker（避免 Qt 信号跨线程延迟）
+        # 必须在 on_hook_finished 回调之前初始化，因为回调中会引用此队列
+        self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
+
         # Hook 完成后，把输出添加到上下文
         def on_hook_finished(event_name: str, output: str, success: bool):
             # 检查 UI 是否仍然有效，防止窗口关闭后 hook 回调访问已销毁的 UI
@@ -337,9 +341,6 @@ class ChatBackend(QObject):
         )
         logger.info("[ChatBackend] ChatEngine 创建完成")
 
-        # 线程安全队列：hook 消息通过此队列传递给 worker（避免 Qt 信号跨线程延迟）
-        self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
-
         # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
         self._hook_messages_updated.connect(self._on_hook_messages_changed)
 
@@ -429,8 +430,9 @@ class ChatBackend(QObject):
         通过 _hook_messages_updated 信号连接（跨线程安全），
         确保在 hook 后台线程执行完毕后，UI 能及时显示 hook 输出。
 
-        额外功能：将 hook 消息注入到当前活跃 worker 的消息缓存中，
-        使得 LLM 在后续 API 调用中能感知 hook 的输出。
+        Hook 消息注入 worker API 缓存的职责已由队列路径
+        （_inject_pending_hook_messages，在 worker 线程中运行）承担，
+        避免跨线程直接访问 worker 内部状态带来的竞态风险。
         """
         if not getattr(self, '_ui_valid', True):
             return
@@ -439,45 +441,9 @@ class ChatBackend(QObject):
         if not session:
             return
 
-        # 1. 通知 UI 刷新消息列表
+        # 通知 UI 刷新消息列表
         if self._chat_engine:
             self._chat_engine._emit("messages_updated", list(session.messages))
-
-        # 2. 将 hook 消息注入到活跃 worker 的 API 缓存中
-        #    确保 LLM 能在同一轮后续交互中感知 hook 输出
-        try:
-            executor = getattr(self._chat_engine, '_conversation_executor', None) if self._chat_engine else None
-            if executor:
-                worker = executor.get_current_worker()
-                if worker and hasattr(worker, '_api_messages_cache') and hasattr(worker, '_current_session_messages'):
-                    # 找到 session 中最新的一条 hook 消息
-                    hook_msg = None
-                    for msg in reversed(session.messages):
-                        if msg.get("role") == "assistant" and "<hook " in (msg.get("content") or ""):
-                            content = msg.get("content", "")
-                            # 避免重复注入：比较剥离包装后的文本，与 worker 缓存内容对齐
-                            stripped = _strip_hook_wrapper(content)
-                            already_injected = any(
-                                m.get("content") == stripped
-                                for m in worker._current_session_messages
-                                if m.get("role") == "assistant"
-                            )
-                            if not already_injected:
-                                hook_msg = msg
-                            break
-                    if hook_msg:
-                        # 提取纯文本内容（去掉 <hook> XML 包装），供 LLM 读取
-                        raw_content = hook_msg.get("content", "")
-                        text_content = _strip_hook_wrapper(raw_content)
-                        llm_msg = dict(hook_msg)  # 拷贝，不修改 session 原消息
-                        llm_msg["content"] = text_content
-                        # 注入到 worker 的 API 消息缓存（供 LLM 后续轮次读取）
-                        worker._append_to_api_cache([llm_msg])
-                        # 注入到 worker 的 session 消息缓存（供 messages_updated 回调使用）
-                        worker._current_session_messages.append(llm_msg)
-                        logger.debug(f"[HookManager] Hook message injected into worker caches: {text_content[:80]}")
-        except Exception as e:
-            logger.debug(f"[HookManager] Failed to inject hook msg into worker: {e}")
 
     def set_subagent_model_resolver(self, resolver: Callable[[str], Optional[Dict]]):
         """设置子智能体默认模型解析回调
