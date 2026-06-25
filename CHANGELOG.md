@@ -1,6 +1,32 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Qwen/DashScope 流式工具调用永远卡在"接收参数中"**
+  - 根因：`ChatWorker._process_response` 用 `tc.id` 作为流式 tool_calls 聚合 key，但 Qwen/DashScope
+    OpenAI 兼容协议在 chunk 2+ 会把 `tc.id` 清空为空字符串（OpenAI 官方 SDK 用 `tc.index` 作为聚合 key）。
+    旧逻辑会为每个 `id=""` 的 chunk 创建孤立 buffer（`""`、`"index_N"` 等），无法清理，导致
+    `tool_args_pending` 永远 True、主循环 `while tool_calls_found and tool_args_pending: continue`
+    死循环，工具永远不执行
+  - 修复：新增 `_tool_calls_index_to_id: Dict[int, str]` 映射，在 `tc.id` 缺失时通过 `tc.index`
+    找回真实 id；只有 chunk 含 `name` 时才允许创建新 buffer（避免孤立）；`arguments=None`
+    跳过避免 TypeError；流结束后清理 `index_to_id` 映射
+  - 影响：所有 Qwen 系（qwen3-max、qwen-plus、qwen-turbo、qwen2.5/3、SiliconFlow 上的 qwen 等）
+    通过 DashScope 兼容模式调用的工具调用都能正常执行
+  - 文件：`app/core/workers/chat_worker.py`、`app/core/workers/chat_worker_state.py`
+
+### ✅ 测试 (Tests)
+
+- 新增 `tests/test_chat_worker_qwen_streaming.py`（5 个测试用例）
+  - 核心回归：qwen 流式 tool_calls `id` 消失场景
+  - 多 tool_call 并行场景
+  - OpenAI 兼容模式（每个 chunk 都有 id）正常
+  - `arguments` 全 `None` 不崩溃
+  - 孤立 chunk（无 name 无 buffer）正确跳过
+
 ## [v0.2.11] - 2026-06-24
 
 自上一版本以来的变更 | 提交数：34 · 文件变更：26 · +4313/-350 | 贡献者：dingma, drifox-bot

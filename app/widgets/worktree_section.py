@@ -242,6 +242,10 @@ class _WorktreeRow(QWidget):
             logger.error(f"[Worktree] delete branch failed: {e}")
 
         self.deleted.emit(self._wt_path)
+        # 操作完成，恢复正常状态
+        pet = self.window().findChild(PixelPetWidget)
+        if pet:
+            pet.set_state("idle")
 
     def _find_git_root(self) -> str:
         if os.path.isdir(self._wt_path):
@@ -464,6 +468,11 @@ class WorktreeSectionWidget(QWidget):
             self._show_error_dialog("超时", "创建 worktree 超时")
         except Exception as e:
             self._show_error_dialog("错误", f"创建失败：{e}")
+        finally:
+            # 操作完成（不论成功或失败），恢复正常状态
+            pet = self.window().findChild(PixelPetWidget)
+            if pet:
+                pet.set_state("idle")
 
     def _show_error_dialog(self, title: str, message: str):
         dlg = QDialog(self)

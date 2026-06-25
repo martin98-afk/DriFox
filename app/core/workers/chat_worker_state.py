@@ -30,6 +30,9 @@ class ToolCallState:
     calls_buffer: Dict[str, Any] = field(default_factory=dict)  # tool_call_id -> buffer
     waiting_params: Dict[str, dict] = field(default_factory=dict)  # tool_call_id -> {buffer, attempt_count}
     previewed_ids: Set[str] = field(default_factory=set)  # 已预览的 tool_call_id
+    # 流式 tool_calls 处理期间，Qwen/DashScope 等 OpenAI 兼容协议在 chunk 2+ 会把
+    # tc.id 清空为 ""。这里维护 tc.index → 真实 tc.id 的临时映射，供后续 chunk 查找。
+    index_to_id: Dict[int, str] = field(default_factory=dict)
     execution_cancelled: bool = False
 
 
@@ -183,8 +186,8 @@ class ChatWorkerState:
         """
         重置单轮对话结束后的中间状态。
         在每次 API 调用前和工具执行完成后调用，释放内存。
-        
-        注意：必须同时清除 response_chunks，否则流式文本 chunk 
+
+        注意：必须同时清除 response_chunks，否则流式文本 chunk
         会跨迭代累积，导致 _response_chunks deque 的内存泄漏。
         """
         # 工具调用状态
@@ -192,6 +195,7 @@ class ChatWorkerState:
         self.tool_call.calls_buffer = {}
         self.tool_call.waiting_params = {}
         self.tool_call.previewed_ids = set()
+        self.tool_call.index_to_id = {}
 
         # 响应内容（但保留 full_response）
         self.response.content_blocks = []

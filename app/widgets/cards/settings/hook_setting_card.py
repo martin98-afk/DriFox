@@ -68,9 +68,9 @@ class HookItem(QWidget):
 
         # 类型标签
         hook_type = self._hook_data.get("type", "command")
-        type_colors = {"command": "#4CAF50", "http": "#FF9800", "python": "#2196F3"}
+        type_colors = {"command": "#4CAF50", "http": "#FF9800", "python": "#2196F3", "prompt": "#9C27B0"}
         type_color = type_colors.get(hook_type, "#888")
-        type_labels = {"command": "CMD", "http": "HTTP", "python": "PY"}
+        type_labels = {"command": "CMD", "http": "HTTP", "python": "PY", "prompt": "PROMPT"}
         self.typeLabel = QLabel(type_labels.get(hook_type, hook_type.upper()), self)
         self.typeLabel.setStyleSheet(
             f"background-color: {type_color}; color: white; "
@@ -120,12 +120,14 @@ class HookItem(QWidget):
         self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.hook_id, checked))
 
     def _get_effective_command(self) -> str:
-        """根据 type 取正确字段"""
+        """根据 type 取正确字段用于预览"""
         t = self._hook_data.get("type", "command")
         if t == "python":
             raw = self._hook_data.get("function", "") or self._hook_data.get("command", "") or ""
         elif t == "http":
             raw = self._hook_data.get("url", "") or self._hook_data.get("command", "") or ""
+        elif t == "prompt":
+            raw = self._hook_data.get("prompt", "") or self._hook_data.get("command", "") or ""
         else:
             raw = self._hook_data.get("command", "") or ""
         return raw
@@ -167,7 +169,7 @@ class HookEditCard(QWidget):
 
         # ── 类型 ──
         self.typeCombo = NoWheelComboBox()
-        self.typeCombo.addItems(["command", "http", "python"])
+        self.typeCombo.addItems(["command", "http", "python", "prompt"])
         self.typeCombo.currentTextChanged.connect(self._on_type_changed)
         row, _ = _make_row("类型:", self.typeCombo)
         main_layout.addLayout(row)
@@ -195,6 +197,9 @@ class HookEditCard(QWidget):
         elif hook_type == "python":
             self._cmd_label.setText("脚本:")
             self.commandEdit.setPlaceholderText("如: my_module.hook_handler")
+        elif hook_type == "prompt":
+            self._cmd_label.setText("提示:")
+            self.commandEdit.setPlaceholderText("如: Before ending, check for uncommitted changes...")
         else:
             self._cmd_label.setText("命令:")
             self.commandEdit.setPlaceholderText('如: echo "Hello" 或 python script.py')
@@ -209,6 +214,8 @@ class HookEditCard(QWidget):
             self.commandEdit.setText(d.get("function", "") or d.get("command", "") or "")
         elif hook_type == "http":
             self.commandEdit.setText(d.get("url", "") or d.get("command", "") or "")
+        elif hook_type == "prompt":
+            self.commandEdit.setText(d.get("prompt", "") or d.get("command", "") or "")
         else:
             self.commandEdit.setText(d.get("command", "") or "")
         self.matcherEdit.setText(d.get("matcher", ""))
@@ -226,11 +233,14 @@ class HookEditCard(QWidget):
         # 清理旧专用字段，避免类型切换时残留
         result.pop("function", None)
         result.pop("url", None)
+        result.pop("prompt", None)
         # 根据类型存入正确字段
         if hook_type == "python":
             result["function"] = value
         elif hook_type == "http":
             result["url"] = value
+        elif hook_type == "prompt":
+            result["prompt"] = value
         return result
 
     def _on_save(self):
@@ -423,6 +433,8 @@ class HookListSettingCard(ExpandSettingCard):
             hook_entry["function"] = command
         elif hook_type == "http":
             hook_entry["url"] = command
+        elif hook_type == "prompt":
+            hook_entry["prompt"] = command
 
         # 加载/创建配置文件
         config_file = self._hooks_config_file

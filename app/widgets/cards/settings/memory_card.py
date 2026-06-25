@@ -468,7 +468,7 @@ class SingleInputDialog(MaskDialogBase):
             return
         self.confirmed.emit(text)
         self.urlConfirmed.emit(text)  # 兼容旧用法
-        self.close()
+        self.accept()
 
     def showEvent(self, e):
         super().showEvent(e)

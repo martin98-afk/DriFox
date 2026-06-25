@@ -474,7 +474,7 @@ class PixelPetWidget(QWidget):
         self._start_frame_timer(state)
 
         # 特殊状态处理
-        if state in ("success", "error"):
+        if state in ("success", "error", "warning"):
             self._recover_timer.start(RECOVER_MS)
         elif state == "question":
             self._play_bounce_small()
@@ -560,9 +560,9 @@ class PixelPetWidget(QWidget):
 
     def _on_recover(self) -> None:
         """恢复计时器回调：重置宠物状态和 AI 状态跟踪，防止状态卡死"""
-        # ★ 安全检测：只有当前还是 success/error 才恢复
+        # ★ 安全检测：只有当前还是 success/error/warning 才恢复
         # 如果状态已经被 AI 信号切换为 thinking/streaming 等，跳过恢复
-        if self._current_state not in ("success", "error"):
+        if self._current_state not in ("success", "error", "warning"):
             logger.debug(f"[PixelPet] 恢复跳过：当前状态 {self._current_state} 无需恢复")
             return
 
@@ -575,6 +575,8 @@ class PixelPetWidget(QWidget):
                 logger.debug("[PixelPet] 错误持久化中，跳过自动恢复")
                 self._recover_timer.start(RECOVER_MS)
                 return
+            self.set_state("idle")
+        elif self._current_state == "warning":
             self.set_state("idle")
 
     # ═══════════════════════════════════════════════════════════

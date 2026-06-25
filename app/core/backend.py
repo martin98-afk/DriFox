@@ -231,6 +231,11 @@ class ChatBackend(QObject):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
 
+            # 检测 prompt 类型 hook（_execute_hook 中加了 __prompt__: 前缀）
+            is_prompt_hook = event_name.startswith("__prompt__:")
+            if is_prompt_hook:
+                event_name = event_name[len("__prompt__:"):]
+
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}，output={output[:100]}...")
 
             # 只有成功执行的 hook 才添加到消息列表
@@ -239,8 +244,8 @@ class ChatBackend(QObject):
 
             hook_output = f"<hook event=\"{event_name}\">\n{output}\n</hook>"
 
-            # SessionStart / UserPromptSubmit / PreUserMessage / PostUserMessage 添加到消息列表
-            add_to_messages = event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage")
+            # PROMPT 类型始终加入消息列表；其他类型只加入特定事件
+            add_to_messages = is_prompt_hook or event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage")
 
             if add_to_messages:
                 session = self.get_current_session()

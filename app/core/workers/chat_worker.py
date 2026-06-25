@@ -316,6 +316,7 @@ class OpenAIChatWorker(QThread):
         self._previewed_tool_call_ids = s.tool_call.previewed_ids
         self._current_tool_calls = s.tool_call.current_calls
         self._tool_calls_buffer = s.tool_call.calls_buffer
+        self._tool_calls_index_to_id = s.tool_call.index_to_id
         self._reasoning_content = s.response.reasoning_content
         self._http_client = s.http.client
         self._reasoning_chunks = s.response.reasoning_chunks
@@ -347,6 +348,7 @@ class OpenAIChatWorker(QThread):
         s.permission.permission_approved = self._permission_approved
         s.tool_call.current_calls = self._current_tool_calls
         s.tool_call.calls_buffer = self._tool_calls_buffer
+        s.tool_call.index_to_id = self._tool_calls_index_to_id
         s.response.reasoning_content = self._reasoning_content
         s.http.client = self._http_client
         s.tool_call.execution_cancelled = self._tool_execution_cancelled
@@ -1806,6 +1808,8 @@ class OpenAIChatWorker(QThread):
         self._response_content_blocks = []
         self._current_tool_calls = {}  # 改成字典，key 是 tool_call_id
         self._tool_calls_buffer = {}
+        # Qwen/DashScope 流式 tool_calls：chunk 2+ 会清空 tc.id，用 index→id 映射回真实 id
+        self._tool_calls_index_to_id = {}
         tool_calls_found = False
         tool_args_pending = True
         reasoning_started_this_call = False  # 本轮 API 调用是否已发射 thinking_started
@@ -1865,11 +1869,37 @@ class OpenAIChatWorker(QThread):
                     _content_batch_time = time.time()
 
                 for tc in tool_calls:
-                    tc_id = tc.id
-                    if tc_id is None:
-                        if self._tool_calls_buffer:
-                            tc_id = list(self._tool_calls_buffer.keys())[-1]
-                        else:
+                    # ⚠️ 兼容 Qwen/DashScope 等 OpenAI 兼容协议的流式 tool_calls：
+                    # 第一个 chunk 含 id（"call_xxx"）+ name + 空 arguments；
+                    # 后续 chunk 仅含 index + arguments（id 清空为 ""，name 清空为 ""）。
+                    # 用首 chunk 的真实 tc.id 作为内部统一 key（保证与 _current_tool_calls /
+                    # _waiting_tool_params / tool_result.tool_call_id 下游一致），
+                    # 借助 _tool_calls_index_to_id 映射在 id 缺失时找回真实 id。
+                    tc_index = getattr(tc, "index", None)
+                    raw_id = tc.id
+                    tc_id = None
+
+                    # 1. 优先用 raw_id 匹配现有 buffer
+                    if raw_id and raw_id in self._tool_calls_buffer:
+                        tc_id = raw_id
+                    # 2. 否则用 index 映射回真实 id（处理 qwen 等 id 缺失场景）
+                    elif tc_index is not None and tc_index in self._tool_calls_index_to_id:
+                        tc_id = self._tool_calls_index_to_id[tc_index]
+
+                    # ⚠️ 关键修复（2026-06-25 qwen 工具永远卡在"接收参数中"）：
+                    # 修复前代码 `elif self._tool_calls_buffer: tc_id = next(reversed(...))`
+                    # 会把第二个 tool_call 的内容错合并到第一个 buffer，导致：
+                    # 1) 多 tool_call 并行时 name 互相覆盖
+                    # 2) Qwen 末尾 `id=""` 的孤立 chunk 被合并进已有 buffer
+                    # 新逻辑：找不到匹配 buffer 时，必须含 name 才创建新条目，避免孤立 buffer
+                    # 累积导致 tool_args_pending 永远 True、主循环死锁。
+                    if not tc_id:
+                        # 必须含 name 才允许创建新 buffer（孤立 delta chunk 跳过）
+                        if not (tc.function and tc.function.name):
+                            continue
+                        # 用真实 id 作为 key（缺 id 时退化用 index）
+                        tc_id = raw_id if raw_id else (f"index_{tc_index}" if tc_index is not None else None)
+                        if not tc_id:
                             continue
 
                     if tc_id not in self._tool_calls_buffer:
@@ -1884,6 +1914,9 @@ class OpenAIChatWorker(QThread):
                                 "tool_call_id": tc_id,
                             }
                         )
+                        # 记录 index → id 映射（供后续 chunk 查找）
+                        if tc_index is not None:
+                            self._tool_calls_index_to_id[tc_index] = tc_id
 
                     buffer = self._tool_calls_buffer[tc_id]
                     tool_name = ""
@@ -1920,7 +1953,9 @@ class OpenAIChatWorker(QThread):
                                     tc_id, tool_name, preview_args, "preview"
                                 )
                     if tc.function and tc.function.arguments:
-                        buffer["function"]["arguments"] += tc.function.arguments
+                        # ⚠️ Qwen 末尾 chunk 的 arguments=null，跳过避免 TypeError
+                        if tc.function.arguments is not None:
+                            buffer["function"]["arguments"] += tc.function.arguments
 
                     # 【优化】不在此处逐 chunk 执行 json.loads()。
                     # 对于 write/edit 等超长 content 参数，arguments 可能分 50-200 个 chunks 到达。
@@ -2211,6 +2246,9 @@ class OpenAIChatWorker(QThread):
             for tc in self._current_tool_calls.values():
                 if not tc["function"]["arguments"] and tc.get("id") in all_pending_ids:
                     tc["function"]["arguments"] = "{}"
+
+        # 流式结束后清理 index→id 临时映射（仅流处理期间需要）
+        self._tool_calls_index_to_id = {}
 
         # 🛡️ 清除当前响应引用（已完成，不需要被 cancel 关闭）
         if self._current_response is not None:
