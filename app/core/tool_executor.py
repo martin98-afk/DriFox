@@ -395,15 +395,15 @@ class ToolExecutor:
             logger.warning(f"[ToolExecutor] 自动 LSP 快速诊断失败: {e}")
             return result
 
+        # 诊断文本存入独立字段，不混入 result.content
+        # to_api_message 会将 lsp_diagnostic 拼接到 API 请求的 tool content 末尾，
+        # 但 normalize_message 不保留此字段，因此 session 历史消息不含诊断文本，
+        # 避免累积诊断文本触发上下文压缩（soft_limit 超限 → prompt_tokens 骤减）
         if not diag_result:
             # diag_result 为 None 表示 CLI 返回空或不可用（工具未安装/超时/真无问题）
-            result.content = (
-                f"{result.content}\n\n[LSP 自动诊断] 未发现问题"
-            )
+            result.lsp_diagnostic = "[LSP 自动诊断] 未发现问题"
         else:
-            result.content = (
-                f"{result.content}\n\n{diag_result}"
-            )
+            result.lsp_diagnostic = diag_result
 
         logger.debug(
             f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}"

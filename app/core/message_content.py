@@ -636,6 +636,14 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
 
     支持 multimodal 内容（含 image_url 块的列表）。
     """
+    # 在 normalize 之前提取 lsp_diagnostic（normalize_message 不保留此字段，
+    # 使得 session 历史消息不含诊断文本，但 API 请求可以拼接到 content 末尾）
+    _lsp_diagnostic = (
+        message.get("lsp_diagnostic")
+        if isinstance(message, dict)
+        else None
+    )
+
     normalized_message = normalize_message(message)
     if not normalized_message:
         return {}
@@ -703,6 +711,9 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
                         # tool 结果中的图片转为文本描述
                         tool_text_parts.append("[Image: base64 data]")
             tool_content = "\n".join(tool_text_parts)
+        # 拼接 LSP 自动诊断到 content 末尾（仅 API 侧可见，不持久化到 session）
+        if _lsp_diagnostic:
+            tool_content = f"{tool_content}\n\n{_lsp_diagnostic}"
         return {
             "role": "tool",
             "tool_call_id": str(normalized_message.get("tool_call_id", "")),

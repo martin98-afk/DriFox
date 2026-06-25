@@ -9,7 +9,7 @@
   question      - 等待用户回答（歪头 + 问号弹跳）
   success       - 任务完成（星星眼 + 烟花 + 爱心）
   error         - 😭 出错了（大哭 + 双侧泪痕 + 抖动 + 红色边框）
-  sleeping      - 长时间无活动（闭眼 + Zzz）
+  sleeping      - 长时间无活动（闭眼 + Zzz），有概率自动醒来
   writing       - 正在写作/编码（眼镜 + 笔尖点动）
   thinking_hard - 深度思考（流汗 + 快速转眼）
   excited       - 连续成功兴奋（跳跃 + 音符 + 星星眼）
@@ -17,6 +17,9 @@
   surprised     - 惊讶一瞥
   dizzy         - 眩晕冒金星
   crying        - 持续大哭（与 error 同帧，更持久的哭泣）
+  playing       - ★ 玩耍（追球跳跃 + 星星眼 + 火花，空闲随机触发）
+  music         - ★ 戴耳机听音乐（头顶耳机 + 音符飘出 + 律动，空闲随机触发）
+  wakeup        - ★ 睡醒过渡（闭眼→哈欠→伸懒腰→清醒，睡眠醒来时播放）
 
 子状态（无需独立 spritesheet 行）：
   napping       - 深夜沉睡（sleeping 帧 + 更慢间隔）
@@ -27,6 +30,7 @@
   · 拖拽 → 惯性滑动
   · 快速连击 → 蹭蹭动画（眯眼 + 爱心）
   · 长时间不理 → 主动吸引注意
+  · 单击睡眠中的桌宠 → 播放 wakeup 动画后苏醒
 
 使用：
   pet = PixelPetWidget(parent)
@@ -63,11 +67,12 @@ SCALE = 3  # 渲染倍数 → 48×48 显示
 DISPLAY_SIZE = FRAME_SIZE * SCALE  # 48
 BADGE_HEIGHT = 18  # ★ 顶部情绪徽章预留高度（像素）
 
-# 状态 → 行索引（扩展为 12 行）
+# 状态 → 行索引（扩展为 15 行）
 # Row 0: 基础待机      Row 1: 眨眼环顾     Row 2: 专注/严肃
 # Row 3: 享受/闭眼     Row 4: 眩晕冒金星   Row 5: 流汗惊恐
 # Row 6: 疑惑问号      Row 7: 专注写作     Row 8: 尴尬小紧张
-# Row 9: 兴奋魔法特效
+# Row 9: 兴奋魔法特效  Row 10: 挣扎扭动    Row 11: 警示紧张
+# Row 12: 玩耍追球     Row 13: 戴耳机听音乐 Row 14: 睡醒过渡
 STATE_ROWS = {
     "idle": 0,
     "thinking": 1,
@@ -85,6 +90,9 @@ STATE_ROWS = {
     "surprised": 8,      # ★ 惊讶（Row 8 尴尬小紧张），与 thinking_hard 共用行
     "dizzy": 4,          # ★ 眩晕（Row 4 冒金星），与 success 共用行
     "crying": 5,         # ★ 大哭（Row 5 流汗惊恐），与 error 共用行
+    "playing": 12,       # ★ 玩耍（Row 12 追球跳跃 + 星星眼）
+    "music": 13,         # ★ 戴耳机听音乐（Row 13 耳机 + 音符 + 律动）
+    "wakeup": 14,        # ★ 睡醒过渡（Row 14 闭眼→哈欠→伸懒腰→清醒）
 }
 
 # 睡眠子状态映射（深夜用 napping 表现更深度的睡眠）
@@ -106,7 +114,7 @@ FRAME_INTERVALS = {
     "error": 100,               # 错误：颤抖但可看清
     "sleeping": 200,            # 睡眠：缓慢
     "writing": 200,             # 写作：专注节奏
-    "thinking_hard": 150,       # 深度思考：稍快但不鬼畜
+    "thinking_hard": 250,       # 深度思考：稍快但不鬼畜
     "excited": 110,             # 兴奋：活泼但不过度
     "dragging": 80,             # ★ 挣扎：快速帧（比 error 还快，传达慌张）
     "warning": 150,             # ★ 警示：适中节奏，传达警觉感
@@ -114,12 +122,16 @@ FRAME_INTERVALS = {
     "surprised": 90,            # ★ 惊讶：快速闪现
     "dizzy": 130,               # ★ 眩晕：冒金星节奏
     "crying": 150,              # ★ 哭泣：比正常 error 稍慢
+    "playing": 130,             # ★ 玩耍：活泼跳跃，比 excited 稍慢一点更耐看
+    "music": 220,               # ★ 听音乐：舒缓律动节奏
+    "wakeup": 180,              # ★ 睡醒：渐进苏醒，不急不缓
     # 子状态
     "napping": 200,
 }
 
-# 空闲超过此时间自动进入睡眠 (ms)
-SLEEP_TIMEOUT_MS = 60_000  # 1 分钟
+# 空闲超过此时间自动进入睡眠 (ms) — 随机化，不再固定间隔
+SLEEP_TIMEOUT_MIN_MS = 45_000   # 最早 45s
+SLEEP_TIMEOUT_MAX_MS = 120_000  # 最晚 2 分钟
 
 # 成功/错误状态持续后恢复 idle (ms)
 RECOVER_MS = 2500
@@ -128,10 +140,19 @@ RECOVER_MS = 2500
 NIGHT_START_HOUR = 23
 NIGHT_END_HOUR = 6
 
-# 空闲行为配置
-IDLE_BEHAVIOR_INTERVAL_MS = 10_000  # 每隔 10s 检查一次随机行为
-IDLE_BEHAVIOR_DURATION_MS = 2000   # 行为持续约 2s
+# 空闲行为配置 — 随机化，间隔加长
+IDLE_BEHAVIOR_MIN_MS = 20_000   # 最早 20s
+IDLE_BEHAVIOR_MAX_MS = 50_000   # 最晚 50s
 ATTENTION_TIMEOUT_MS = 300_000     # 5 分钟无交互 → 主动吸引注意
+
+# ★ 睡眠醒来配置 — 睡着后不会一直睡死，有概率自动醒来
+SLEEP_WAKE_CHECK_MIN_MS = 30_000   # 最早 30s 后开始检查是否醒来
+SLEEP_WAKE_CHECK_MAX_MS = 90_000   # 最晚 90s 检查一次
+SLEEP_WAKE_PROBABILITY = 0.45      # 每次检查有 45% 概率醒来
+# 空闲行为持续时长（ms，随机范围）— 多轮循环，沉浸感更强
+PLAYING_DURATION_MS = (15_000, 30_000)   # 玩耍持续 15~30 秒
+MUSIC_DURATION_MS = (20_000, 40_000)     # 听音乐持续 20~40 秒
+WAKEUP_DURATION_FRAMES = 12        # 睡醒过渡完整一轮（按帧数精确控制，只播一次）
 
 # 惯性滑动参数
 INERTIA_DECAY = 0.92
@@ -155,6 +176,9 @@ STATE_EMOJI = {
     "surprised": "😲",
     "dizzy": "😵",
     "crying": "😭",
+    "playing": "🎾",       # ★ 玩耍：小球
+    "music": "🎵",         # ★ 听音乐：耳机
+    "wakeup": "🌤️",       # ★ 睡醒：清晨阳光
     "napping": "💤",
 }
 
@@ -196,7 +220,9 @@ class PixelPetWidget(QWidget):
 
         # ★ 状态机增强
         self._state_before_drag = None       # 拖拽前保存的状态
+        self._drag_pending_state = None      # ★ 延迟切换状态（从睡眠拖拽时首次移动才切 dragging）
         self._thinking_hard_checker = None   # 思考深度检测计时器引用
+        self._wakeup_frame_count = 0         # ★ 睡醒过渡帧计数（走完一轮自动回 idle，不循环）
 
         # ── 错误状态持久化（重试时保持报错） ──
         self._error_persist = False
@@ -239,6 +265,11 @@ class PixelPetWidget(QWidget):
         self._sleep_timer = QTimer(self)
         self._sleep_timer.setSingleShot(True)
         self._sleep_timer.timeout.connect(self._enter_sleep)
+
+        # ★ 睡眠醒来计时器 — 睡着后定时检查是否自动醒来
+        self._sleep_wake_timer = QTimer(self)
+        self._sleep_wake_timer.setSingleShot(True)
+        self._sleep_wake_timer.timeout.connect(self._check_sleep_wake)
 
         self._idle_behavior_timer = QTimer(self)
         self._idle_behavior_timer.setSingleShot(True)
@@ -444,6 +475,11 @@ class PixelPetWidget(QWidget):
         old_state = self._current_state
         self._current_state = state
 
+        # ★ 离开空闲行为状态(playing/music)时清理标志，防止 state_step 闭包残留
+        if old_state in ("playing", "music") and state not in ("playing", "music"):
+            self._idle_behavior_active = False
+            self._idle_behavior_type = None
+
         # ★ AI 高优先级状态：停止恢复计时器，防止后续竞态覆盖
         if state in ("thinking", "streaming", "question", "error"):
             self._recover_timer.stop()
@@ -451,6 +487,10 @@ class PixelPetWidget(QWidget):
         # ★ 离开 thinking/thinking_hard 时销毁思考深度检测计时器
         if old_state in ("thinking", "thinking_hard") and state not in ("thinking", "thinking_hard"):
             self._stop_thinking_hard_timer()
+
+        # ★ 离开 sleeping/napping 时停止睡眠醒来计时器（避免唤醒到已醒状态）
+        if old_state in ("sleeping", "napping") and state not in ("sleeping", "napping", "wakeup"):
+            self._sleep_wake_timer.stop()
 
         # ★ 错误持续：离开错误状态时清除持久化标志
         if state != "error":
@@ -483,6 +523,8 @@ class PixelPetWidget(QWidget):
             # ★ 睡眠时暂停 raise_timer，降低帧率
             self._raise_timer.stop()
             self._frame_timer.setInterval(500)
+            # ★ 启动睡眠醒来检查 — 睡着后不会一直睡死
+            self._start_sleep_wake_timer()
         else:
             self._reset_sleep_timer()
             # ★ 非睡眠状态确保 raise_timer 恢复（如果没有被 hide 的话）
@@ -587,7 +629,7 @@ class PixelPetWidget(QWidget):
         if self._current_state in ("success", "error", "sleeping"):
             return
         self._sleep_timer.stop()
-        self._sleep_timer.start(SLEEP_TIMEOUT_MS)
+        self._sleep_timer.start(random.randint(SLEEP_TIMEOUT_MIN_MS, SLEEP_TIMEOUT_MAX_MS))
 
     def _enter_sleep(self) -> None:
         if self._current_state == "idle":
@@ -608,13 +650,51 @@ class PixelPetWidget(QWidget):
         return h >= NIGHT_START_HOUR or h < NIGHT_END_HOUR
 
     def wake_up(self) -> None:
-        if self._current_state in ("sleeping",):
-            self.set_state("idle")
-            # ★ 唤醒后恢复 raise_timer 和正常帧率
+        """唤醒桌宠 — 单击睡眠中的桌宠时调用，播放 wakeup 过渡动画后苏醒"""
+        if self._current_state in ("sleeping", "napping"):
+            # ★ 停止睡眠醒来计时器（已被手动唤醒）
+            self._sleep_wake_timer.stop()
+            # 播放睡醒过渡动画，结束后自动回到 idle
+            self._play_wakeup_to_idle()
+        elif self._current_state in ("greeting",):
             self._raise_timer.start(5000)
-        elif self._current_state in ("napping",):
-            self.set_state("greeting")  # 映射到 idle
+
+    def _start_sleep_wake_timer(self) -> None:
+        """★ 启动睡眠醒来检查计时器（随机 30~90s 后检查）"""
+        self._sleep_wake_timer.stop()
+        delay = random.randint(SLEEP_WAKE_CHECK_MIN_MS, SLEEP_WAKE_CHECK_MAX_MS)
+        self._sleep_wake_timer.start(delay)
+        logger.debug(f"[PixelPet] 睡眠醒来检查已排程: {delay}ms 后")
+
+    def _check_sleep_wake(self) -> None:
+        """★ 睡眠中定时检查是否自动醒来 — 有概率播放 wakeup 动画后回到 idle"""
+        if self._current_state not in ("sleeping", "napping"):
+            return
+        # 按概率决定是否醒来
+        if random.random() < SLEEP_WAKE_PROBABILITY:
+            logger.debug("[PixelPet] 睡眠中自动醒来~")
+            self._play_wakeup_to_idle()
+        else:
+            # 没醒，重新排程下一次检查
+            self._start_sleep_wake_timer()
+
+    def _play_wakeup_to_idle(self) -> None:
+        """★ 播放睡醒过渡动画（wakeup），完成后回到 idle 状态
+
+        通过帧计数器精确控制：走完 WAKEUP_DURATION_FRAMES 帧后由
+        _advance_frame 自动切回 idle，不依赖时间估算，避免动画循环
+        重复播放"醒"的动作。
+        """
+        # 切换到 wakeup 状态播放苏醒动画
+        self._current_state = "wakeup"
+        self._frame_index = 0
+        self._wakeup_frame_count = 0  # ★ 帧计数归零，由 _advance_frame 计数推进
+        self._start_frame_timer("wakeup")
+        # 唤醒时恢复 raise_timer 和正常帧率
+        if not self._raise_timer.isActive() and self.isVisible():
             self._raise_timer.start(5000)
+        self.update()
+        self.state_changed.emit("wakeup")
 
     # ═══════════════════════════════════════════════════════════
     # 入场动画
@@ -666,6 +746,18 @@ class PixelPetWidget(QWidget):
             # 空闲时偶尔停留增加自然感（权重停留）
             if random.random() < 0.10:
                 return  # 10% 概率停留一帧
+
+        # ★ wakeup（睡醒过渡）：精确播放一轮后回到 idle，避免循环重复"醒"动作
+        if self._current_state == "wakeup":
+            self._wakeup_frame_count += 1
+            if self._wakeup_frame_count >= WAKEUP_DURATION_FRAMES:
+                self._wakeup_frame_count = 0
+                self.set_state("idle")
+                return
+            self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
+            self.update()
+            return
+
         self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
         self.update()
 
@@ -681,36 +773,18 @@ class PixelPetWidget(QWidget):
 
     def _reset_idle_behavior_timer(self) -> None:
         self._idle_behavior_timer.stop()
-        self._idle_behavior_timer.start(IDLE_BEHAVIOR_INTERVAL_MS)
+        self._idle_behavior_timer.start(random.randint(IDLE_BEHAVIOR_MIN_MS, IDLE_BEHAVIOR_MAX_MS))
 
     def _try_idle_behavior(self) -> None:
-        """尝试触发随机空闲行为"""
+        """尝试触发随机空闲行为 — 只保留玩耍和听音乐（有独立动画的行为）"""
         if self._current_state != "idle" or self._idle_behavior_active:
             self._reset_idle_behavior_timer()
             return
 
         behaviors = [
-            ("blink", 25),           # 25% 眨眨眼
-            ("look_around", 12),     # 12% 四处张望
-            ("yawn", 10),            # 10% 打哈欠
-            ("stretch", 7),          # 7% 伸懒腰
-            ("groom", 6),            # 6% 理毛
-            ("tail_play", 5),        # 5% 玩尾巴
-            ("head_tilt", 5),        # 5% 歪头看用户
-            ("surprise_glance", 5),  # ★ 5% 惊讶一瞥
-            ("confused", 4),         # ★ 4% 困惑歪头
-            ("sneak_peak", 3),       # ★ 3% 偷瞄用户
-            ("wiggle_ears", 5),      # ★ 5% 耳朵抖动
-            ("dizzy_moment", 3),     # ★ 3% 突然晕眩
+            ("playing", 50),          # 玩耍（追球跳跃 + 星星眼）
+            ("music", 50),            # 戴耳机听音乐（沉浸律动）
         ]
-
-        # ★ 深夜模式：添加犯困专属行为
-        if self._is_night_time():
-            behaviors.extend([
-                ("yawn", 20),          # 打哈欠概率翻倍
-                ("rub_eyes", 10),      # ★ 10% 揉眼睛
-                ("nod_off", 5),        # ★ 5% 打瞌睡
-            ])
 
         r = random.randint(1, 100)
         cumulative = 0
@@ -729,69 +803,31 @@ class PixelPetWidget(QWidget):
         self._idle_behavior_type = chosen
         self._idle_behavior_frame = 0
 
-        # 不同行为持续不同的帧数
+        # 行为持续时长（ms，随机范围）
         duration_map = {
-            "blink": 3,               # 快速眨眼
-            "look_around": 8,         # 左右看
-            "yawn": 6,                # 哈欠
-            "stretch": 8,             # 伸懒腰
-            "groom": 10,              # 理毛
-            "tail_play": 8,           # 玩尾巴
-            "head_tilt": 6,           # 歪头
-            "surprise_glance": 4,     # ★ 惊讶一瞥（短促）
-            "confused": 6,            # ★ 困惑
-            "sneak_peak": 4,          # ★ 偷瞄
-            "wiggle_ears": 5,         # ★ 耳朵抖动
-            "dizzy_moment": 5,        # ★ 突然晕眩
-            "rub_eyes": 8,            # ★ 揉眼睛（深夜）
-            "nod_off": 6,             # ★ 打瞌睡（深夜）
+            "playing": PLAYING_DURATION_MS,
+            "music": MUSIC_DURATION_MS,
         }
-        behavior_frames = duration_map.get(chosen, 6)
+        dur_range = duration_map.get(chosen, (3000, 6000))
+        duration_ms = random.randint(dur_range[0], dur_range[1])
 
-        # 需要临时切换 spritesheet 行的行为
+        # 切换到对应状态的 spritesheet 行
         state_override_map = {
-            "surprise_glance": "surprised",
-            "confused": "confused",
-            "dizzy_moment": "dizzy",
+            "playing": "playing",
+            "music": "music",
         }
 
         override_state = state_override_map.get(chosen)
         if override_state:
-            self._play_behavior_with_state(override_state, behavior_frames)
-        else:
-            # 播放行为动画（重写帧索引循环）
-            self._play_behavior_frames(chosen, behavior_frames)
-        logger.debug(f"[PixelPet] 空闲行为: {chosen}")
+            self._play_behavior_with_state(override_state, duration_ms)
+        logger.debug(f"[PixelPet] 空闲行为: {chosen} ({duration_ms}ms)")
 
-    def _play_behavior_frames(self, behavior: str, total_frames: int) -> None:
-        """播放指定空闲行为的帧序列"""
-        # 对于空闲行为，我们利用现有的 sprite 帧做重新排序
-        # 而不是真的画新帧
-        # 但不改变 _frame_index，因为 idle 的 12 帧已经包含了各种动作
-        # 我们通过_advance_frame来控制步伐
-        # 行为结束后恢复
-        self._idle_behavior_frame = 0
+    def _play_behavior_with_state(self, state_name: str, duration_ms: int) -> None:
+        """★ 播放需要临时切换状态的空闲行为（玩耍、听音乐、写作等）
 
-        def behavior_step():
-            if self._current_state != "idle":
-                self._idle_behavior_active = False
-                self._reset_idle_behavior_timer()
-                return
-            self._idle_behavior_frame += 1
-            self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
-            self.update()
-            if self._idle_behavior_frame >= total_frames:
-                self._idle_behavior_active = False
-                self._idle_behavior_type = None
-                self._reset_idle_behavior_timer()
-                return
-            # 行为期间用更快的帧间隔
-            QTimer.singleShot(100, behavior_step)
-
-        QTimer.singleShot(50, behavior_step)
-
-    def _play_behavior_with_state(self, state_name: str, total_frames: int) -> None:
-        """★ 播放需要临时切换状态的空闲行为（如惊讶、困惑、眩晕）"""
+        基于时间控制持续时间，帧动画自然循环（mod 12），到时间后恢复 idle。
+        停止主帧定时器，由 state_step 按状态对应间隔独立推进帧，避免双重推进。
+        """
         if state_name not in STATE_ROWS:
             self._idle_behavior_active = False
             return
@@ -802,12 +838,23 @@ class PixelPetWidget(QWidget):
         # 切换到目标状态
         self._current_state = state_name
         self._frame_index = 0
-        self._start_frame_timer(state_name)
+        # ★ 停止主帧定时器，改由 state_step 独立按状态间隔推进，避免双重推进
+        self._frame_timer.stop()
         self.update()
         self.state_changed.emit(state_name)
 
-        def state_step(count):
-            if count >= total_frames:
+        # ★ 使用状态对应的帧间隔（playing=130 / music=220 / writing=200 ...）
+        step_interval = self._get_interval(state_name)
+        elapsed = QElapsedTimer()
+        elapsed.start()
+
+        def state_step():
+            # ★ 状态被外部(AI信号等)改变时中止行为，避免闭包覆写新状态
+            if self._current_state != state_name:
+                self._idle_behavior_active = False
+                self._idle_behavior_type = None
+                return
+            if elapsed.elapsed() >= duration_ms:
                 # 恢复为 idle
                 self._current_state = old_state
                 self._frame_index = old_frame
@@ -820,9 +867,9 @@ class PixelPetWidget(QWidget):
                 return
             self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
             self.update()
-            QTimer.singleShot(150, lambda: state_step(count + 1))
+            QTimer.singleShot(step_interval, state_step)
 
-        QTimer.singleShot(80, lambda: state_step(1))
+        QTimer.singleShot(step_interval, state_step)
 
     # ═══════════════════════════════════════════════════════════
     # 绘制
@@ -1114,6 +1161,9 @@ class PixelPetWidget(QWidget):
         self._frame_index = 0
 
         def flash_step(count):
+            # ★ 状态被外部(AI信号等)改变时中止闪烁，避免闭包覆写新状态
+            if self._current_state != state_name and self._current_state != old_state:
+                return
             if count >= frames:
                 # 完成后务必恢复原始状态
                 self._current_state = old_state
@@ -1143,14 +1193,26 @@ class PixelPetWidget(QWidget):
             self._inertia_timer.stop()
             self.setCursor(Qt.ClosedHandCursor)
             # ★ 保存拖拽前的状态（用于松手后恢复）
-            self._state_before_drag = self._current_state
-            # ★ 拖拽开始 → 挣扎动画 + >< emoji
-            self.set_state("dragging")
+            prev = self._current_state
+            if prev in ("sleeping", "napping"):
+                # ★ 从睡眠被拖拽：松手后回 idle（不播 wakeup），延迟切 dragging
+                #   让轻点仍能触发 wake_up()，只有真正拖动时才进挣扎
+                self._state_before_drag = "idle"
+                self._sleep_wake_timer.stop()
+                self._drag_pending_state = "dragging"
+            else:
+                self._state_before_drag = prev
+                self._drag_pending_state = None
+                self.set_state("dragging")
 
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
             return
         if self._dragging:
+            # ★ 从睡眠开始的拖拽：首次移动时才切换到 dragging 状态
+            if self._drag_pending_state:
+                self.set_state(self._drag_pending_state)
+                self._drag_pending_state = None
             new_pos = self.mapToParent(event.pos()) - self._drag_offset
             if self.parent():
                 pw = self.parent().width()
@@ -1181,6 +1243,9 @@ class PixelPetWidget(QWidget):
                 self._inertia_timer.start(16)  # ~60fps
             else:
                 self.setCursor(Qt.PointingHandCursor)
+
+            # ★ 清理延迟切换标记（轻点时未触发拖动，标记还在）
+            self._drag_pending_state = None
 
             # ★ 松手后恢复拖拽前的状态（而非强制 idle）
             if was_dragging and self._current_state == "dragging":
@@ -1390,7 +1455,7 @@ class PixelPetWidget(QWidget):
         if self._current_state not in ("idle", "thinking"):
             return
         # 短暂播放 writing 动画（眼镜+笔尖点动），像在陪用户一起写
-        self._play_behavior_with_state("writing", 6)
+        self._play_behavior_with_state("writing", 1200)
 
     def on_drag_started(self) -> None:
         """★ 🖱️ 用户开始拖拽时调用 — 显示被拽的无奈表情"""
@@ -1416,6 +1481,7 @@ class PixelPetWidget(QWidget):
     def cleanup(self) -> None:
         self._frame_timer.stop()
         self._sleep_timer.stop()
+        self._sleep_wake_timer.stop()
         self._recover_timer.stop()
         self._raise_timer.stop()
         self._idle_behavior_timer.stop()
@@ -1428,4 +1494,5 @@ class PixelPetWidget(QWidget):
         self._stop_shake()
         self._stop_thinking_hard_timer()
         self._state_before_drag = None
+        self._drag_pending_state = None
         logger.debug("[PixelPet] v2 已清理")

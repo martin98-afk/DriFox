@@ -1139,6 +1139,10 @@ class FileMentionCard(QWidget):
         self._visible = has_items
         self.setVisible(has_items)
         self.updateGeometry()
+        # 安全网：延迟一帧触发容器 _schedule_expand，防止极端时序下
+        # setFixedHeight 的 Resize 事件被容器动画钳制而未触发重新展开
+        if has_items:
+            QTimer.singleShot(0, self._deferred_container_expand)
 
     def _async_scan_and_refresh(self):
         """异步扫描完成后立即渲染（跳过防抖）

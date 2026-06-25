@@ -3168,10 +3168,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         card = self._file_mention_card
-        # 先让 CardManager 展开容器
-        self._card_manager.show_card("file_mention", self._window_id)
-        # 显示文件列表（show_card 内部处理缓存：就绪则即时，否则异步扫）
+        # ⚠️ 先加载卡片内容并设置正确高度，再让 CardManager 展开容器
+        # 若顺序反转（先 CardManager 后 show_card），_do_expand 会在卡片
+        # fixedHeight 尚未设置时读取 QScrollArea 默认 sizeHint（≈72px=2 item），
+        # 导致容器动画到错误高度且因动画钳制 maximumHeight 不触发 Resize 修正。
         card.show_card(workdir, query)
+        self._card_manager.show_card("file_mention", self._window_id)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
 
