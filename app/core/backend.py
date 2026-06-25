@@ -5,6 +5,7 @@ ChatBackend - 统一后端接口
 """
 import asyncio
 import os
+import queue
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -271,6 +272,13 @@ class ChatBackend(QObject):
                     # 添加新消息
                     session.add_assistant_message(hook_output)
 
+                # 推入线程安全队列，供 worker 在下一轮 LLM 调用前消费
+                text_content = _strip_hook_wrapper(hook_output)
+                self._hook_message_queue.put({
+                    "role": "assistant",
+                    "content": text_content,
+                })
+
                 # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
                 self._hook_messages_updated.emit()
 
@@ -328,6 +336,9 @@ class ChatBackend(QObject):
             backend=self,  # 暂时设为 None，后面通过 setter 设置
         )
         logger.info("[ChatBackend] ChatEngine 创建完成")
+
+        # 线程安全队列：hook 消息通过此队列传递给 worker（避免 Qt 信号跨线程延迟）
+        self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
 
         # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
         self._hook_messages_updated.connect(self._on_hook_messages_changed)
@@ -444,9 +455,10 @@ class ChatBackend(QObject):
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant" and "<hook " in (msg.get("content") or ""):
                             content = msg.get("content", "")
-                            # 避免重复注入：检查是否已在当前 worker 的 session 缓存中
+                            # 避免重复注入：比较剥离包装后的文本，与 worker 缓存内容对齐
+                            stripped = _strip_hook_wrapper(content)
                             already_injected = any(
-                                m.get("content") == content
+                                m.get("content") == stripped
                                 for m in worker._current_session_messages
                                 if m.get("role") == "assistant"
                             )

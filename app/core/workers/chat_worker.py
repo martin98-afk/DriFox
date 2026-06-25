@@ -6,6 +6,7 @@ Chat Worker - OpenAI 对话执行器
 import concurrent.futures
 import gc
 import os
+import queue
 import re
 import threading
 import time
@@ -398,6 +399,34 @@ class OpenAIChatWorker(QThread):
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
                 self._api_messages_cache.append(api_msg)
+
+    def _inject_pending_hook_messages(self) -> None:
+        """
+        消费 backend 线程安全队列中的待处理 hook 消息并注入到 API 缓存。
+
+        在每次 _make_api_call 前调用，确保 LLM 在同轮次后续交互中能感知 hook 输出。
+        与 Qt 信号路径（_on_hook_messages_changed）互补——队列提供即时投递，
+        信号提供最终一致性（含去重检查，不会重复注入）。
+        """
+        try:
+            backend = getattr(self.tool_executor, '_backend', None)
+            if not backend:
+                return
+            q = getattr(backend, '_hook_message_queue', None)
+            if q is None:
+                return
+            msgs = []
+            while True:
+                try:
+                    msgs.append(q.get_nowait())
+                except queue.Empty:
+                    break
+            if msgs:
+                self._append_to_api_cache(msgs)
+                self._current_session_messages.extend(msgs)
+                logger.debug(f"[HookManager] Injected {len(msgs)} pending hook msgs from queue")
+        except Exception as e:
+            logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
 
     @property
     def event_bus(self) -> WorkerEventBus:
@@ -970,6 +999,9 @@ class OpenAIChatWorker(QThread):
                         current_session_messages,
                     )
                     return
+
+                # 消费待处理的 hook 消息（从线程安全队列，避免 Qt 信号跨线程延迟）
+                self._inject_pending_hook_messages()
 
                 # 使用 API 消息缓存（首次会重建，后续复用）
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
