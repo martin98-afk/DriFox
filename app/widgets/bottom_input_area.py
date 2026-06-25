@@ -79,8 +79,8 @@ PLACEHOLDER_TIPS = [
     "记忆管理让 AI 记住你的偏好",
 
     # ════ 消息卡片页脚 ════
-    "页脚：📄N差异 | 🔍审查 | Token | 耗时 | 模型",
-    "点击 📄N 查看文件修改对比",
+    "页脚：差异 | 审查 | Token | 耗时 | 模型",
+    "点击消息页脚差异对比统计查看文件修改对比",
     "点击 🔍 用 code-reviewer 审查修改",
     "点击 Token 查看上下文详情与预算",
     "点击模型名快速切换对应服务商和模型",
@@ -220,8 +220,7 @@ class SendableTextEdit(TextEdit):
         self._setting_history_text: bool = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
-        # placeholder 定时轮播 tips
-        self._placeholder_tip_index = 0
+        # placeholder 定时随机切换 tips
         self._placeholder_tip_timer = QTimer(self)
         self._placeholder_tip_timer.setInterval(_PLACEHOLDER_ROTATE_INTERVAL_MS)
         self._placeholder_tip_timer.timeout.connect(self._rotate_placeholder_tip)
@@ -256,10 +255,9 @@ class SendableTextEdit(TextEdit):
         """初始化完成后重置标志，允许高度调整"""
 
     def _rotate_placeholder_tip(self):
-        """轮播 placeholder tips"""
+        """随机切换 placeholder tips"""
         if not self.toPlainText():
-            self._placeholder_tip_index = (self._placeholder_tip_index + 1) % len(PLACEHOLDER_TIPS)
-            self.setPlaceholderText(PLACEHOLDER_TIPS[self._placeholder_tip_index])
+            self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
 
     def set_command_card(self, card):
         """注入命令卡片引用（由 main_widget 创建并注册）"""
