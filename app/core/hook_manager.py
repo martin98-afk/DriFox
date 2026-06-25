@@ -264,15 +264,26 @@ class HookWorkerSignals(QObject):
 class HookOverrideManager:
     """
     Hook 覆写层管理器
-    用于覆盖 plugin/skill hooks 的 enabled 状态（不影响源文件）
+    用于覆盖 plugin/skill hooks 的配置字段（不影响源文件）
     存储位置: ~/.drifox/plugins/user-custom/hooks_overrides.json
-    格式: {"hook_id": {"enabled": bool}}
+    
+    格式:
+    {
+      "hook_id": {
+        "enabled": false,           # 开关覆写（旧格式兼容）
+        "command": "new command",   # 字段级覆写
+        "matcher": "startup|clear",
+        "commandWindows": "win cmd"
+      }
+    }
+    
+    编辑 plugin/skill hook 时只写此文件，不碰源文件。
     """
 
     OVERRIDES_FILE = "hooks_overrides.json"
 
     def __init__(self):
-        self._overrides: Dict[str, Dict[str, bool]] = {}
+        self._overrides: Dict[str, Dict[str, Any]] = {}
         self._storage_path: Optional[str] = None
         self._init_storage_path()
         self._load()
@@ -309,20 +320,57 @@ class HookOverrideManager:
 
     def get_effective_enabled(self, hook_id: str, default: bool) -> bool:
         """获取 hook 的有效 enabled 状态（覆写优先）"""
-        if hook_id in self._overrides:
-            return self._overrides[hook_id].get("enabled", default)
+        if hook_id in self._overrides and "enabled" in self._overrides[hook_id]:
+            return self._overrides[hook_id]["enabled"]
         return default
 
     def set_hook_enabled(self, hook_id: str, enabled: bool):
         """设置 hook 的覆写 enabled 状态"""
-        self._overrides[hook_id] = {"enabled": enabled}
+        if hook_id not in self._overrides:
+            self._overrides[hook_id] = {}
+        self._overrides[hook_id]["enabled"] = enabled
         self._save()
 
-    def remove_override(self, hook_id: str):
-        """移除 hook 的覆写（恢复默认值）"""
-        if hook_id in self._overrides:
+    def get_effective_value(self, hook_id: str, field: str, default: Any = None) -> Any:
+        """获取 hook 指定字段的覆写值（覆写优先）"""
+        if hook_id in self._overrides and field in self._overrides[hook_id]:
+            return self._overrides[hook_id][field]
+        return default
+
+    def set_hook_overrides(self, hook_id: str, overrides: dict):
+        """批量设置 hook 的字段覆写
+        
+        Args:
+            hook_id: hook 唯一标识
+            overrides: 要覆写的字段字典，如 {"command": "new", "matcher": "startup|clear"}
+        """
+        if hook_id not in self._overrides:
+            self._overrides[hook_id] = {}
+        self._overrides[hook_id].update(overrides)
+        self._save()
+
+    def remove_hook_overrides(self, hook_id: str, fields: list = None):
+        """移除 hook 的指定字段覆写（不传 fields 则移除全部）
+        
+        Args:
+            hook_id: hook 唯一标识
+            fields: 要移除的字段列表，None=移除全部
+        """
+        if hook_id not in self._overrides:
+            return
+        if fields:
+            for f in fields:
+                self._overrides[hook_id].pop(f, None)
+            # 如果只剩空 dict 或只残留空值，清理整个条目
+            if not self._overrides[hook_id]:
+                del self._overrides[hook_id]
+        else:
             del self._overrides[hook_id]
-            self._save()
+        self._save()
+
+    def get_all_overrides(self, hook_id: str) -> dict:
+        """获取 hook 的所有覆写字段"""
+        return dict(self._overrides.get(hook_id, {}))
 
 
 class HookWorker(QRunnable):
@@ -628,15 +676,16 @@ class HookManager:
         return "user-custom" in (hook.config_file or "") or not hook.config_file
 
     def _get_effective_hook_dict(self, hook: Hook) -> dict:
-        """获取覆写后的 hook dict（覆写层的 enabled 优先）"""
+        """获取覆写后的 hook dict（覆写层所有字段优先于源文件）"""
         d = hook.to_dict()
         # user-custom 的 hook 不走覆写层（直接改源文件）
         if not self._is_user_custom_hook(hook):
-            # plugin/skill hooks 走覆写层
-            effective_enabled = self._override_manager.get_effective_enabled(
-                hook.id, hook.enabled
-            )
-            d["enabled"] = effective_enabled
+            # plugin/skill hooks 走覆写层：所有已覆写的字段覆盖源文件值
+            overrides = self._override_manager.get_all_overrides(hook.id)
+            for key, val in overrides.items():
+                if key == "matcher":
+                    continue  # matcher 属于 Rule 层，不在 Hook dict 中
+                d[key] = val
         return d
 
     def set_on_finished_callback(self, callback: Callable[[str, str, bool], None]):
@@ -730,6 +779,14 @@ class HookManager:
         # 持久化生成的 hook id 到源文件（确保下次启动 id 不变）
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
+
+        # 为新注册的 hook 应用覆写层（确保 hot reload 后覆写生效）
+        if count > 0:
+            for event_name, rules in self._hooks.items():
+                for rule in rules:
+                    self._apply_matcher_override(rule)
+                    for hook in rule.hooks:
+                        self._apply_overrides_to_hook(hook)
 
         return count
 
@@ -1018,25 +1075,59 @@ class HookManager:
             if not rule.matches(context):
                 continue
 
+            # 应用 matcher 覆写（plugin/skill 的 matcher 编辑存于覆写层）
+            self._apply_matcher_override(rule)
+
             for hook in rule.hooks:
                 # 检查启用状态（走覆写层：plugin/skill 看 override，user-custom 看源文件）
-                hook_enabled = (
-                    hook.enabled if self._is_user_custom_hook(hook)
-                    else self._override_manager.get_effective_enabled(hook.id, hook.enabled)
-                )
-                if not hook_enabled:
-                    continue
+                if not self._is_user_custom_hook(hook):
+                    effective_enabled = self._override_manager.get_effective_enabled(
+                        hook.id, hook.enabled
+                    )
+                    if not effective_enabled:
+                        continue
+                else:
+                    if not hook.enabled:
+                        continue
 
                 # 检查执行条件
                 if not self._check_conditions(hook, context):
                     logger.debug(f"[HookManager] Hook conditions not met: {event_name}")
                     continue
 
+                # 执行前应用字段覆写（plugin/skill 才有覆写）
+                self._apply_overrides_to_hook(hook)
+
                 # 执行 hook
                 result = self._execute_hook(hook, context, trigger_async)
                 results.append(result)
 
         return results
+
+    def _apply_overrides_to_hook(self, hook: Hook):
+        """将覆写层的字段值应用到 Hook 对象（执行前调用）"""
+        if self._is_user_custom_hook(hook):
+            return
+        overrides = self._override_manager.get_all_overrides(hook.id)
+        if not overrides:
+            return
+        # 排除 enabled（已单独处理）和 matcher（属于 Rule 层，不在 Hook 上）
+        for key, val in overrides.items():
+            if key in ("enabled", "matcher"):
+                continue
+            if hasattr(hook, key):
+                setattr(hook, key, val)
+
+    def _apply_matcher_override(self, rule: HookMatchRule):
+        """将覆写层的 matcher 值应用到 Rule 对象"""
+        if not rule.hooks:
+            return
+        hook = rule.hooks[0]
+        if self._is_user_custom_hook(hook):
+            return
+        matcher_override = self._override_manager.get_effective_value(hook.id, "matcher")
+        if matcher_override is not None:
+            rule.matcher = matcher_override or None
 
     def _execute_hook(self, hook: Hook, context: Dict[str, Any],
                      trigger_async: bool = True) -> HookExecutionResult:
@@ -1597,8 +1688,12 @@ class HookManager:
             if "matcher" in new_data:
                 self._hooks[event_name][rule_idx].matcher = new_data["matcher"] or None
 
-        # 保存到源文件
-        self._save_hook_to_file_by_id(hook, new_data)
+        # 持久化：user-custom → 写源文件；plugin/skill → 写覆写层
+        if self._is_user_custom_hook(hook):
+            self._save_hook_to_file_by_id(hook, new_data)
+        else:
+            # plugin/skill hooks 只写覆写层，不碰源文件
+            self._override_manager.set_hook_overrides(hook.id, new_data)
 
         logger.info(f"[HookManager] Edited hook {hook_id}")
         return True
@@ -1661,10 +1756,10 @@ class HookManager:
             del self._hooks[event_name]
 
         # 从覆写层清除记录
-        self._override_manager.remove_override(hook_id)
+        self._override_manager.remove_hook_overrides(hook_id)
 
-        # 从源文件删除
-        if config_file and os.path.exists(config_file):
+        # 从源文件删除（仅 user-custom hook 操作源文件，plugin/skill 只清覆写层）
+        if self._is_user_custom_hook(hook) and config_file and os.path.exists(config_file):
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)

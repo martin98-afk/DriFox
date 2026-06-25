@@ -525,6 +525,9 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["elapsed"] = float(message["elapsed"])
         if isinstance(message.get("token_usage"), dict):
             normalized["token_usage"] = dict(message["token_usage"])
+        # 保留 _hook_event 标记，确保能通过 save/load 持久化
+        if "_hook_event" in message:
+            normalized["_hook_event"] = message["_hook_event"]
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -563,6 +566,9 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
 
     if message.get("model_name"):
         normalized["model_name"] = str(message.get("model_name"))
+    # 保留 _hook_event 标记，确保能通过 save/load 持久化
+    if "_hook_event" in message:
+        normalized["_hook_event"] = message["_hook_event"]
     return normalized
 
 
