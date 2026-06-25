@@ -17,7 +17,7 @@
   surprised     - 惊讶一瞥
   dizzy         - 眩晕冒金星
   crying        - 持续大哭（与 error 同帧，更持久的哭泣）
-  playing       - ★ 玩耍（追球跳跃 + 星星眼 + 火花，空闲随机触发）
+  reading       - ★ 看书（胸前打开的书 + 翻页动画 + 偶尔抬头思考，空闲随机触发）
   music         - ★ 戴耳机听音乐（头顶耳机 + 音符飘出 + 律动，空闲随机触发）
   wakeup        - ★ 睡醒过渡（闭眼→哈欠→伸懒腰→清醒，睡眠醒来时播放）
 
@@ -72,7 +72,7 @@ BADGE_HEIGHT = 18  # ★ 顶部情绪徽章预留高度（像素）
 # Row 3: 享受/闭眼     Row 4: 眩晕冒金星   Row 5: 流汗惊恐
 # Row 6: 疑惑问号      Row 7: 专注写作     Row 8: 尴尬小紧张
 # Row 9: 兴奋魔法特效  Row 10: 挣扎扭动    Row 11: 警示紧张
-# Row 12: 玩耍追球     Row 13: 戴耳机听音乐 Row 14: 睡醒过渡
+# Row 12: 看书阅读     Row 13: 戴耳机听音乐 Row 14: 睡醒过渡
 STATE_ROWS = {
     "idle": 0,
     "thinking": 1,
@@ -84,13 +84,13 @@ STATE_ROWS = {
     "writing": 7,
     "thinking_hard": 8,
     "excited": 9,
+    "reading": 12,      # ★ 看书（Row 12 胸前书+翻页）
     "dragging": 10,      # ★ 挣扎（Row 10 扭动 + 嘴张）
     "warning": 11,       # ★ 警示（Row 11 紧张 + 头顶"!"号）
     "confused": 6,       # ★ 疑惑（Row 6 问号），与 sleeping 共用行
     "surprised": 8,      # ★ 惊讶（Row 8 尴尬小紧张），与 thinking_hard 共用行
     "dizzy": 4,          # ★ 眩晕（Row 4 冒金星），与 success 共用行
     "crying": 5,         # ★ 大哭（Row 5 流汗惊恐），与 error 共用行
-    "playing": 12,       # ★ 玩耍（Row 12 追球跳跃 + 星星眼）
     "music": 13,         # ★ 戴耳机听音乐（Row 13 耳机 + 音符 + 律动）
     "wakeup": 14,        # ★ 睡醒过渡（Row 14 闭眼→哈欠→伸懒腰→清醒）
 }
@@ -116,13 +116,13 @@ FRAME_INTERVALS = {
     "writing": 200,             # 写作：专注节奏
     "thinking_hard": 250,       # 深度思考：稍快但不鬼畜
     "excited": 110,             # 兴奋：活泼但不过度
+    "reading": 250,            # ★ 看书：缓慢有节奏，沉浸阅读
     "dragging": 80,             # ★ 挣扎：快速帧（比 error 还快，传达慌张）
     "warning": 150,             # ★ 警示：适中节奏，传达警觉感
     "confused": (250, 350),     # ★ 疑惑：缓慢困惑，问号浮现
     "surprised": 90,            # ★ 惊讶：快速闪现
     "dizzy": 130,               # ★ 眩晕：冒金星节奏
     "crying": 150,              # ★ 哭泣：比正常 error 稍慢
-    "playing": 130,             # ★ 玩耍：活泼跳跃，比 excited 稍慢一点更耐看
     "music": 220,               # ★ 听音乐：舒缓律动节奏
     "wakeup": 180,              # ★ 睡醒：渐进苏醒，不急不缓
     # 子状态
@@ -150,7 +150,7 @@ SLEEP_WAKE_CHECK_MIN_MS = 30_000   # 最早 30s 后开始检查是否醒来
 SLEEP_WAKE_CHECK_MAX_MS = 90_000   # 最晚 90s 检查一次
 SLEEP_WAKE_PROBABILITY = 0.45      # 每次检查有 45% 概率醒来
 # 空闲行为持续时长（ms，随机范围）— 多轮循环，沉浸感更强
-PLAYING_DURATION_MS = (15_000, 30_000)   # 玩耍持续 15~30 秒
+READING_DURATION_MS = (15_000, 30_000)    # 看书持续 15~30 秒
 MUSIC_DURATION_MS = (20_000, 40_000)     # 听音乐持续 20~40 秒
 WAKEUP_DURATION_FRAMES = 12        # 睡醒过渡完整一轮（按帧数精确控制，只播一次）
 
@@ -176,7 +176,7 @@ STATE_EMOJI = {
     "surprised": "😲",
     "dizzy": "😵",
     "crying": "😭",
-    "playing": "🎾",       # ★ 玩耍：小球
+    "reading": "📖",       # ★ 看书：开卷有益
     "music": "🎵",         # ★ 听音乐：耳机
     "wakeup": "🌤️",       # ★ 睡醒：清晨阳光
     "napping": "💤",
@@ -475,8 +475,8 @@ class PixelPetWidget(QWidget):
         old_state = self._current_state
         self._current_state = state
 
-        # ★ 离开空闲行为状态(playing/music)时清理标志，防止 state_step 闭包残留
-        if old_state in ("playing", "music") and state not in ("playing", "music"):
+        # ★ 离开空闲行为状态(reading/music)时清理标志，防止 state_step 闭包残留
+        if old_state in ("reading", "music") and state not in ("reading", "music"):
             self._idle_behavior_active = False
             self._idle_behavior_type = None
 
@@ -776,13 +776,13 @@ class PixelPetWidget(QWidget):
         self._idle_behavior_timer.start(random.randint(IDLE_BEHAVIOR_MIN_MS, IDLE_BEHAVIOR_MAX_MS))
 
     def _try_idle_behavior(self) -> None:
-        """尝试触发随机空闲行为 — 只保留玩耍和听音乐（有独立动画的行为）"""
+        """尝试触发随机空闲行为 — 只保留看书和听音乐（有独立动画的行为）"""
         if self._current_state != "idle" or self._idle_behavior_active:
             self._reset_idle_behavior_timer()
             return
 
         behaviors = [
-            ("playing", 50),          # 玩耍（追球跳跃 + 星星眼）
+            ("reading", 50),          # 看书（胸前打开的书 + 翻页动画）
             ("music", 50),            # 戴耳机听音乐（沉浸律动）
         ]
 
@@ -805,7 +805,7 @@ class PixelPetWidget(QWidget):
 
         # 行为持续时长（ms，随机范围）
         duration_map = {
-            "playing": PLAYING_DURATION_MS,
+            "reading": READING_DURATION_MS,
             "music": MUSIC_DURATION_MS,
         }
         dur_range = duration_map.get(chosen, (3000, 6000))
@@ -813,7 +813,7 @@ class PixelPetWidget(QWidget):
 
         # 切换到对应状态的 spritesheet 行
         state_override_map = {
-            "playing": "playing",
+            "reading": "reading",
             "music": "music",
         }
 
@@ -843,7 +843,7 @@ class PixelPetWidget(QWidget):
         self.update()
         self.state_changed.emit(state_name)
 
-        # ★ 使用状态对应的帧间隔（playing=130 / music=220 / writing=200 ...）
+        # ★ 使用状态对应的帧间隔（reading=250 / music=220 / writing=200 ...）
         step_interval = self._get_interval(state_name)
         elapsed = QElapsedTimer()
         elapsed.start()

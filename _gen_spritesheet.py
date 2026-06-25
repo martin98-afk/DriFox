@@ -39,7 +39,7 @@ TAIL_WAG_FAST = [(15,6),(12,7),(13,7),(14,7),(15,7),(12,8),(13,8),(14,8),(15,8),
 FRAME = 16
 COLS = 12
 # 15 行：idle, thinking, streaming, question, success, error, sleeping, writing,
-#        thinking_hard, excited, dragging, warning, playing, music, wakeup
+#        thinking_hard, excited, dragging, warning, reading, music, wakeup
 ROWS = 15
 W = FRAME * COLS  # 192
 H = FRAME * ROWS  # 240
@@ -910,17 +910,64 @@ def draw_headphones(canvas, ox, oy, dy=0, bob=0):
     p_px(canvas, ox, oy, 12, 4 + bob_dy, HEADPHONE_CUP_HI)
     p_px(canvas, ox, oy, 11, 5 + bob_dy, HEADPHONE_PAD)
 
-def draw_play_ball(canvas, ox, oy, frame=0):
-    """玩耍时的小球 — 在狐狸左侧弹跳，frame 控制高度。"""
-    # 球的弹跳轨迹：高低高低
-    ball_y = [11, 8, 5, 8, 11, 9, 6, 9, 11, 8, 5, 8]
-    by = ball_y[frame] if frame < len(ball_y) else 11
-    bx = 1  # 球在左侧 x=1~2
-    # 球体（2×2 橙色）
-    for x, y in [(bx, by), (bx + 1, by), (bx, by + 1), (bx + 1, by + 1)]:
-        p_px(canvas, ox, oy, x, y, ORANGE_LIGHT)
-    # 高光
-    p_px(canvas, ox, oy, bx, by, YELLOW_BRIGHT)
+# 书本配色 — 藏青色封面 + 米白书页，“安静阅读”主题与狐狸橙色形成对比
+BOOK_COVER  = (40, 70, 130)
+BOOK_SPINE  = (25, 50, 95)
+BOOK_PAGES  = (245, 240, 215)
+BOOK_TEXT   = (120, 110, 90)
+
+def draw_book(canvas, ox, oy, dy=0, page_anim=0):
+    """在狐狸胸前绘制一本打开的书 + 翻页动画
+
+    采用与听音乐同源的“静态道具 + 简单重复特效”公式：
+    - 封面位于 x=4~11, y=10+dy~12+dy，覆盖狐狸下攀与部分脚
+    - 上方露出一行米白书页 (y=9+dy)，表现“翻开”的立体感
+    - 翻页效果：书页上方 y=8+dy 处掠过米白像素，以帧索引驱动
+    """
+    by = 10 + dy
+    bx = 4
+    bw = 8
+
+    # 上方书页露出（米白）
+    for x in range(bx, bx + bw):
+        p_px(canvas, ox, oy, x, by, BOOK_PAGES)
+
+    # 封面（藏青，2 行）
+    for x in range(bx, bx + bw):
+        p_px(canvas, ox, oy, x, by + 1, BOOK_COVER)
+        p_px(canvas, ox, oy, x, by + 2, BOOK_COVER)
+
+    # 中央书脊 (2 列深色)
+    spine_l = bx + 3
+    spine_r = bx + 4
+    for y_off in range(3):
+        p_px(canvas, ox, oy, spine_l, by + y_off, BOOK_SPINE)
+        p_px(canvas, ox, oy, spine_r, by + y_off, BOOK_SPINE)
+
+    # 书页顶部“文字点”（左右各一）
+    p_px(canvas, ox, oy, bx + 1, by, BOOK_TEXT)
+    p_px(canvas, ox, oy, bx + 6, by, BOOK_TEXT)
+
+    # 翻页动画：在书页上方 y=by-1 处掠过米白像素
+    # 12 帧周期：3 帧静止 → 4 帧翻页滑过 → 4 帧静止 → 1 帧取样
+    page_patterns = [
+        None,                                                   # 0 静止
+        None,                                                   # 1
+        [(bx + 1, by - 1)],                                    # 2 页起拍
+        [(bx + 2, by - 1), (bx + 3, by - 1)],                   # 3 上升中
+        [(bx + 3, by - 1), (bx + 4, by - 1)],                   # 4 越过中线
+        [(bx + 5, by - 1), (bx + 6, by - 1)],                   # 5 右回落
+        None,                                                   # 6 静止
+        None,                                                   # 7
+        None,                                                   # 8
+        [(bx + 4, by - 1), (bx + 5, by - 1)],                   # 9 反向翻页
+        [(bx + 3, by - 1), (bx + 4, by - 1)],                   # 10
+        None,                                                   # 11 静止
+    ]
+    pts = page_patterns[page_anim] if page_anim < len(page_patterns) else None
+    if pts:
+        for x, y in pts:
+            p_px(canvas, ox, oy, x, y, BOOK_PAGES)
 
 def draw_music_notes_float(canvas, ox, oy, frame=0):
     """音乐模式下从头顶飘出的音符 — 两个音符交替升起。"""
@@ -959,60 +1006,57 @@ def draw_sound_wave(canvas, ox, oy, frame=0):
 
 
 # ════════════════════════════════════════════════════════════════
-# Row 12: playing — 玩耍（追尾巴 + 跳跃 + 星星眼 + 球弹跳 + 火花，12帧）
+# Row 12: reading — 看书（胸前打开的书 + 翻页动画 + 偶尔抬头思考，12帧）
 # ════════════════════════════════════════════════════════════════
-# 设计：身体上下跳跃律动 + 尾巴快速甩动 + 星星眼/开心眯眼交替 + 左侧小球弹跳 + 火花特效
-playing_dys = [0, -2, -2, -1, 0, -2, -2, -1, 0, -2, -2, 0]
-playing_frames = [
-    # 0 起跳：星星眼 + 球在低位
-    {"star_eyes": [(6, 5), (9, 5)], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST},
-    # 1 最高点：眯眼笑 + 球弹起
+# 设计套路与 music 同源：一个静态道具（书）× 一个简单重复特效（翻页）＋躺平呼吸。
+# 身体只做轻微上下起伏（dy 在 0 / -1 间摇曳），眼睛大多低头看书，偶尔抬头/闭眼。
+reading_dys = [0, -1, -1, 0, 0, -1, -1, 0, 0, -1, -1, 0]   # 缓慢呼吸
+
+reading_frames = [
+    # 0 静默看书：瞳孔下看 y=6，微笑
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 1 翻页时闭眼一瞬
     {"eyes_white": [], "pupils": [], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST,
-     "sparkles": [(4, 2), (12, 2)]},
-    # 2 空中：星星眼 + 球到顶
-    {"star_eyes": [(6, 5), (9, 5)], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST,
-     "sparkles": [(3, 1), (13, 1), (5, 0), (11, 0)]},
-    # 3 下落：睁眼 + 球回落
-    {"eyes_white": [(6, 5), (7, 5), (9, 5), (10, 5)], "pupils": [(6, 5), (9, 5)],
-     "highlights": [(7, 5), (10, 5)], "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST},
-    # 4 落地：张嘴笑 + 球低位
-    {"mouth": [(6, 7), (7, 7), (8, 7), (9, 7)], "tail": TAIL_WAG_FAST,
-     "sparkles": [(4, 3), (12, 3)]},
-    # 5 再跳：星星眼 + 球弹起
-    {"star_eyes": [(6, 5), (9, 5)], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST,
-     "hearts": [(3, 3)]},
-    # 6 最高：眯眼 + 球到顶 + 火花
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 2 继续看书，尾下摇
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_DOWN},
+    # 3 抬头思考一瞬：瞳孔 y=4 看上
+    {"pupils": [(7, 4), (9, 4)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 4 低头看书
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 5 微眯眼享受书中内容，爱心
+    {"eyes_white": [(6, 5), (7, 5), (9, 5), (10, 5)], "pupils": [(7, 5), (9, 5)],
+     "highlights": [], "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_DOWN,
+     "hearts": [(2, 2)]},
+    # 6 静默看书
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 7 闭眼微笑（被打动）
     {"eyes_white": [], "pupils": [], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST,
-     "sparkles": [(2, 2), (14, 2), (4, 1), (12, 1)]},
-    # 7 下落：睁眼追球
-    {"eyes_white": [(6, 5), (7, 5), (9, 5), (10, 5)], "pupils": [(5, 5), (9, 5)],
-     "highlights": [(6, 5), (10, 5)], "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST},
-    # 8 落地：张嘴 + 球低位
-    {"mouth": [(6, 7), (7, 7), (8, 7), (9, 7)], "tail": TAIL_WAG_FAST,
-     "sparkles": [(3, 3), (13, 3)]},
-    # 9 起跳：星星眼 + 球弹起
-    {"star_eyes": [(6, 5), (9, 5)], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST,
-     "hearts": [(12, 3)]},
-    # 10 最高：眯眼 + 球到顶 + 双心
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP, "hearts": [(3, 2)]},
+    # 8 低头看书
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_DOWN},
+    # 9 翻页动画峰值：闭眼，尾上摇
     {"eyes_white": [], "pupils": [], "highlights": [],
-     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_FAST,
-     "sparkles": [(3, 1), (13, 1), (5, 2), (11, 2)], "hearts": [(4, 3), (12, 3)]},
-    # 11 收尾：睁眼 + 球低位
-    {"eyes_white": [(6, 5), (7, 5), (9, 5), (10, 5)], "pupils": [(6, 5), (9, 5)],
-     "highlights": [(7, 5), (10, 5)], "smile": [(6, 8), (9, 8)], "tail": TAIL_HAPPY},
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 10 低头看书
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
+    # 11 收尾：睁眼，睁开眼看书
+    {"pupils": [(7, 6), (9, 6)], "highlights": [(6, 5), (10, 5)],
+     "smile": [(6, 8), (9, 8)], "tail": TAIL_WAG_UP},
 ]
 for f in range(12):
-    dy = playing_dys[f]
-    kwargs = dict(playing_frames[f])
+    dy = reading_dys[f]
+    kwargs = dict(reading_frames[f])
     draw_fox(img, f * FRAME, 12 * FRAME + dy, cell_oy=12 * FRAME, **kwargs)
-    # 左侧小球弹跳（独立于身体 dy）
-    draw_play_ball(img, f * FRAME, 12 * FRAME, frame=f)
+    # 书本 (跟随身体浮动)
+    draw_book(img, f * FRAME, 12 * FRAME, dy=dy, page_anim=f)
 
 # ════════════════════════════════════════════════════════════════
 # Row 13: music — 戴耳机听音乐（头顶耳机 + 音符飘出 + 身体律动，12帧）
