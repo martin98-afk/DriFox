@@ -495,6 +495,8 @@ class HookWorker(QRunnable):
         effective_cmd = self.hook.command
         if os.name == 'nt' and self.hook.commandWindows:
             effective_cmd = self.hook.commandWindows
+        # 变量插值（含 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量）
+        effective_cmd = HookManager._interpolate_variables(effective_cmd, self.context)
         stdin_data = _json.dumps(self.context) if self.context else None
         output, success, _ = HookWorker._run_command_sync(
             effective_cmd, self.cwd, self.hook.timeout,
@@ -1135,6 +1137,9 @@ class HookManager:
         # cwd: 智能解析（显式设置 > 从命令脚本路径推导 > 默认项目根目录）
         cwd = self._resolve_command_cwd(hook, context)
 
+        # 注入 skill_root 到 context，供异步 worker 也能解析 ${CLAUDE_PLUGIN_ROOT}
+        context["skill_root"] = hook.skill_root
+
         # 变量替换
         # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
         if os.name == 'nt' and hook.commandWindows:
@@ -1351,13 +1356,23 @@ class HookManager:
         self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
         return None
 
-    def _interpolate_variables(self, text: str, context: Dict[str, Any]) -> str:
+    @staticmethod
+    def _interpolate_variables(text: str, context: Dict[str, Any]) -> str:
         """变量替换"""
         if not text:
             return text
 
+        # ── Claude Code 插件路径变量（用 skill_root 推导，优先于环境变量） ──
+        skill_root = context.get("skill_root", "")
+        plugin_root = ""
+        if skill_root:
+            plugin_root = str(Path(skill_root).parent) if Path(skill_root).name == "hooks" else skill_root
+            # ${CLAUDE_PLUGIN_ROOT} 是环境变量风格，单独替换
+            text = text.replace("${CLAUDE_PLUGIN_ROOT}", plugin_root)
+
         variables = {
-            "{skill_root}": context.get("skill_root", ""),
+            "{skill_root}": skill_root,
+            "{plugin_root}": plugin_root,
             "{project_root}": context.get("project_root", ""),
             "{message}": context.get("message", ""),
             "{file}": context.get("file", ""),
@@ -1369,7 +1384,7 @@ class HookManager:
             if value:
                 text = text.replace(var, str(value))
 
-        # 环境变量替换
+        # 环境变量替换（CLAUDE_PLUGIN_ROOT 已在上面处理，不会走这里）
         text = re.sub(r'\$\{(\w+)\}', lambda m: os.environ.get(m.group(1), ""), text)
         text = re.sub(r'\$(\w+)', lambda m: os.environ.get(m.group(1), ""), text)
 

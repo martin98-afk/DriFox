@@ -1611,7 +1611,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
         self._hook_edit_card.setMinimumHeight(200)
-        self._hook_edit_card.set_height_mode('content')  # 按内容自适应高度
+        self._hook_edit_card.set_height_mode('proportional')  # 按窗口比例自适应高度
         self._hook_edit_popup = HookEditCard(parent=self)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
@@ -3830,6 +3830,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
+        self._hook_edit_card.set_header_sticky("")  # 新增时无来源标签
         self._card_manager.show_card("hook_edit", self._window_id)
 
     def _show_hook_edit_card(self, hook_id: str, hook_data: dict):
@@ -3854,6 +3855,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
+        # 来源信息显示到卡片标题栏
+        self._hook_edit_card.set_header_sticky(self._hook_edit_popup.get_source_display())
         self._card_manager.show_card("hook_edit", self._window_id)
 
     def _on_hook_edit_saved(self, values: dict):

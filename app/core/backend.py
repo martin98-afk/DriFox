@@ -312,6 +312,7 @@ class ChatBackend(QObject):
                 self._hook_message_queue.put({
                     "role": "assistant",
                     "content": hook_output,
+                    "_hook_event": event_name,  # 保留标记，供渲染层识别为 hook 消息
                 })
 
                 # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
