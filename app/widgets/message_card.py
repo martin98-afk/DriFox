@@ -3447,13 +3447,13 @@ class CodeWebViewer(QWebEngineView):
         if self._streaming:
             content_len = len(self._markdown_text)
             if content_len > 100000:
-                interval = 1500
+                interval = 500
             elif content_len > 50000:
-                interval = 800
+                interval = 300
             elif content_len > 10000:
-                interval = 400
-            else:
                 interval = 200
+            else:
+                interval = 100
         else:
             interval = 40
 
@@ -5874,7 +5874,16 @@ class MessageCard(SimpleCardWidget):
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
             if self._streaming:
                 self.viewer._append_text_incremental(text)
-            self.viewer._schedule_render(immediate=False)
+            # 流式模式下大块文本 (>3字符) 且没有正在运行的定时器时即时触发全量渲染，
+            # 避免用户长时间只看到增量纯文本而等待格式化渲染。
+            # 若定时器已在运行中则沿用其计划渲染时间（防止高频重复渲染）。
+            if self._streaming and len(text) > 3:
+                if not self.viewer._render_timer.isActive():
+                    self.viewer._schedule_render(immediate=True)
+                else:
+                    self.viewer._schedule_render(immediate=False)
+            else:
+                self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
             return
 
