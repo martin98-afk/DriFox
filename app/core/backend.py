@@ -27,6 +27,14 @@ from app.utils.history_manager import HistoryManager
 _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
 
+def _strip_hook_wrapper(content: str) -> str:
+    """从 <hook event=\"...\">\\n...\\n</hook> 格式中提取纯文本内容"""
+    match = re.search(r'<hook[^>]*>(.*?)</hook>', content, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return content
+
+
 def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
     """
     从 Markdown 内容中提取本地图片文件路径。
@@ -73,6 +81,8 @@ class ChatBackend(QObject):
 
     # 消息相关
     message_received = pyqtSignal(dict)  # 新消息
+    # 内部信号：hook 回调添加消息后触发 UI 刷新（跨线程安全）
+    _hook_messages_updated = pyqtSignal()
     stream_started = pyqtSignal()
     stream_chunk = pyqtSignal(str)  # 流式内容片段
     stream_finished = pyqtSignal(dict)  # 完成时的消息
@@ -245,7 +255,8 @@ class ChatBackend(QObject):
             hook_output = f"<hook event=\"{event_name}\">\n{output}\n</hook>"
 
             # PROMPT 类型始终加入消息列表；其他类型只加入特定事件
-            add_to_messages = is_prompt_hook or event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage")
+            # PostToolUse 添加以支持工具执行后 hook 消息显示
+            add_to_messages = is_prompt_hook or event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage", "PostToolUse")
 
             if add_to_messages:
                 session = self.get_current_session()
@@ -260,12 +271,9 @@ class ChatBackend(QObject):
                     # 添加新消息
                     session.add_assistant_message(hook_output)
 
-                # 发送消息给前端显示（仅在 UI 有效时发送，防止窗口关闭后 emit 导致 segfault）
-                if getattr(self, '_ui_valid', True):
-                    self.message_received.emit({
-                        "role": "assistant",
-                        "content": hook_output
-                    })
+                # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
+                self._hook_messages_updated.emit()
+
                 logger.info(f"[HookManager] Hook added to messages: {event_name}")
         self._hook_manager.set_on_finished_callback(on_hook_finished)
 
@@ -320,6 +328,9 @@ class ChatBackend(QObject):
             backend=self,  # 暂时设为 None，后面通过 setter 设置
         )
         logger.info("[ChatBackend] ChatEngine 创建完成")
+
+        # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
+        self._hook_messages_updated.connect(self._on_hook_messages_changed)
 
         # 创建 GatewayEngine（全局单例，多个窗口共享）
         from app.core.engines.gateway import GatewayEngine
@@ -400,6 +411,61 @@ class ChatBackend(QObject):
         if self._chat_engine:
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
+
+    def _on_hook_messages_changed(self):
+        """槽：hook 消息已添加到 session，通知 UI 刷新消息列表
+
+        通过 _hook_messages_updated 信号连接（跨线程安全），
+        确保在 hook 后台线程执行完毕后，UI 能及时显示 hook 输出。
+
+        额外功能：将 hook 消息注入到当前活跃 worker 的消息缓存中，
+        使得 LLM 在后续 API 调用中能感知 hook 的输出。
+        """
+        if not getattr(self, '_ui_valid', True):
+            return
+
+        session = self.get_current_session()
+        if not session:
+            return
+
+        # 1. 通知 UI 刷新消息列表
+        if self._chat_engine:
+            self._chat_engine._emit("messages_updated", list(session.messages))
+
+        # 2. 将 hook 消息注入到活跃 worker 的 API 缓存中
+        #    确保 LLM 能在同一轮后续交互中感知 hook 输出
+        try:
+            executor = getattr(self._chat_engine, '_conversation_executor', None) if self._chat_engine else None
+            if executor:
+                worker = executor.get_current_worker()
+                if worker and hasattr(worker, '_api_messages_cache') and hasattr(worker, '_current_session_messages'):
+                    # 找到 session 中最新的一条 hook 消息
+                    hook_msg = None
+                    for msg in reversed(session.messages):
+                        if msg.get("role") == "assistant" and "<hook " in (msg.get("content") or ""):
+                            content = msg.get("content", "")
+                            # 避免重复注入：检查是否已在当前 worker 的 session 缓存中
+                            already_injected = any(
+                                m.get("content") == content
+                                for m in worker._current_session_messages
+                                if m.get("role") == "assistant"
+                            )
+                            if not already_injected:
+                                hook_msg = msg
+                            break
+                    if hook_msg:
+                        # 提取纯文本内容（去掉 <hook> XML 包装），供 LLM 读取
+                        raw_content = hook_msg.get("content", "")
+                        text_content = _strip_hook_wrapper(raw_content)
+                        llm_msg = dict(hook_msg)  # 拷贝，不修改 session 原消息
+                        llm_msg["content"] = text_content
+                        # 注入到 worker 的 API 消息缓存（供 LLM 后续轮次读取）
+                        worker._append_to_api_cache([llm_msg])
+                        # 注入到 worker 的 session 消息缓存（供 messages_updated 回调使用）
+                        worker._current_session_messages.append(llm_msg)
+                        logger.debug(f"[HookManager] Hook message injected into worker caches: {text_content[:80]}")
+        except Exception as e:
+            logger.debug(f"[HookManager] Failed to inject hook msg into worker: {e}")
 
     def set_subagent_model_resolver(self, resolver: Callable[[str], Optional[Dict]]):
         """设置子智能体默认模型解析回调

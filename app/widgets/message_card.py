@@ -2029,7 +2029,10 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
-        if self._markdown_text:
+        # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
+        # 仅检查 _markdown_text 会遗漏这些内容，导致卡片永久空白。
+        # 当 _lazy_markdown_cb 存在时也触发渲染，_perform_update 会消费它。
+        if self._markdown_text or self._lazy_markdown_cb:
             self._schedule_render(immediate=True)
 
     def _load_skeleton(self):
@@ -3519,6 +3522,11 @@ class CodeWebViewer(QWebEngineView):
                 fresh_md = self._lazy_markdown_cb()
                 self._lazy_markdown_cb = None  # 清除回调，避免后续 set_content 重复转换
                 self._markdown_text = fresh_md
+            elif self._markdown_text:
+                # 🐛 修复：_markdown_text 已通过 set_content（来自 ensure_rendered）
+                # 预填充了内容，但 _lazy_markdown_cb 从未被 append_text 设置过。
+                # 不应跳过渲染，否则内容永远不显示。
+                pass
             else:
                 # [PERF-opt] 无新内容：流式模式下跳过全量渲染
                 # 工具块/思考块的状态切换已通过增量 JS（_inject_tool_streaming_html /
@@ -3567,9 +3575,15 @@ class CodeWebViewer(QWebEngineView):
         self._schedule_render(immediate=True)
 
     def _cleanup_render_cache(self):
-        """清理渲染缓存，降低内存占用（流式完成后调用）"""
+        """清理渲染缓存，降低内存占用（流式完成后调用）
+
+        🐛 修复：JS 未就绪时不清除 _lazy_markdown_cb，防止流式完成早于
+        _on_js_ready 时丢失内容引用，导致卡片永久空白。
+        """
         self._last_rendered_html = None
-        self._lazy_markdown_cb = None
+        # 只有在 JS 已就绪的情况下才清除懒回调——因为 _on_js_ready 还需要它
+        if self._is_js_ready:
+            self._lazy_markdown_cb = None
 
     @staticmethod
     def clear_global_cache():

@@ -139,11 +139,26 @@ def draw_thinking_dots(canvas, ox, oy, frame=0):
         p_px(canvas, ox, oy, x, y, WHITE_PURE)
 
 def draw_sweat(canvas, ox, oy, frame=0):
-    """思考过度流汗"""
-    sweat_pos = [None, (3,2), (2,2), (3,3), None, (2,1), (3,2), (2,3), None, (3,2), (2,2), None]
-    pos = sweat_pos[frame] if frame < len(sweat_pos) else None
-    if pos:
-        p_px(canvas, ox, oy, pos[0], pos[1], TEAR_BLUE)
+    """思考过度流汗 — 双侧散落效果"""
+    # 左右两侧汗水散落，每帧不同组合产生飞溅动画
+    # 左侧 x=2~4, y=1~4   右侧 x=11~13, y=1~4
+    sweat_patterns = [
+        [(3, 2), (12, 2)],                          # 0: 左右各一
+        [(2, 2), (13, 2)],                          # 1
+        [(3, 1), (12, 3)],                          # 2
+        [(2, 3), (4, 2), (11, 2), (13, 3)],         # 3: 各二
+        [(3, 2), (12, 1)],                          # 4
+        [(2, 1), (4, 3), (11, 3), (13, 1)],         # 5: 各二散落
+        [(3, 3), (12, 2)],                          # 6
+        [(2, 2), (4, 1), (11, 2), (13, 3)],         # 7: 各二
+        [(3, 2), (12, 3), (13, 2)],                 # 8: 右二左一
+        [(2, 3), (3, 1), (11, 2)],                  # 9: 左二右一
+        [(3, 2), (4, 2), (12, 2), (13, 2)],         # 10: 各二排开
+        [(2, 2), (3, 3), (11, 3), (12, 1), (13, 3)], # 11: 最多散落
+    ]
+    drops = sweat_patterns[frame] if frame < len(sweat_patterns) else []
+    for x, y in drops:
+        p_px(canvas, ox, oy, x, y, TEAR_BLUE)
 
 def draw_pen(canvas, ox, oy, frame=0):
     """写作时笔尖在右侧点动"""
@@ -580,15 +595,14 @@ def draw_fox_curled(canvas, ox, oy, frame, cell_oy):
 for f in range(12):
     # 蜷睡帧循环：呼吸（dy 起伏）+ Zzz 从身侧（x=12-14）冒出
     draw_fox_curled(img, f * FRAME, 6 * FRAME, f, cell_oy=6 * FRAME)
-    # Zzz 冒泡（5-11 帧，从身体左侧 x=12+ 冒出）
+    # Zzz 冒泡 — 从嘴部 (x=8,y=6) 冒出，逐渐变大飘向右上角
     zzz_seq_per_frame = [None, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, None]
     zz = zzz_seq_per_frame[f]
     if zz is not None:
-        # Zzz 位置（从身侧冒出，dx/dy 相对单元格左上角）
-        # 每帧的 (dx, dy, size) - dx 在身侧（x>10），dy 在头顶方向（y<8）
-        zzz_positions = [(13, 6, 1), (13, 5, 1), (12, 4, 2), (12, 3, 2),
-                         (11, 2, 3), (11, 1, 3), None,
-                         (12, 5, 2), (11, 4, 3), None, None, None]
+        # Zzz 位置：(dx, dy, size) — 从嘴巴附近飘向右上角，逐渐变大
+        zzz_positions = [(8, 6, 1), (9, 5, 1), (10, 4, 2), (11, 3, 2),
+                         (12, 2, 3), (13, 1, 3), None, None,
+                         None, None, None, None]
         entry = zzz_positions[zz] if zz < len(zzz_positions) else None
         if entry is not None:
             dx, dy_zzz, size = entry

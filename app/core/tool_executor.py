@@ -334,10 +334,13 @@ class ToolExecutor:
                         current_message_text = content_to_text(msg.get('content', ''))
                         break
 
+        # PostToolUse hook 同步执行，确保 hook 输出在 worker 构建消息序列前
+        # 完成并注入到 session，使得 LLM 能感知 hook 的验证/处理结果
         self._backend.hook_manager.trigger_event(
             "PostToolUse",
             context=context,
             current_message=current_message_text,
+            trigger_async=False,
         )
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========

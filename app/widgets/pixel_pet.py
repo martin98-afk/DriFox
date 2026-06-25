@@ -104,7 +104,7 @@ FRAME_INTERVALS = {
     "question": (220, 300),     # 提问：带疑惑感，不能太快
     "success": 120,             # 成功：轻快喜悦
     "error": 100,               # 错误：颤抖但可看清
-    "sleeping": 300,            # 睡眠：缓慢
+    "sleeping": 200,            # 睡眠：缓慢
     "writing": 200,             # 写作：专注节奏
     "thinking_hard": 150,       # 深度思考：稍快但不鬼畜
     "excited": 110,             # 兴奋：活泼但不过度
@@ -115,7 +115,7 @@ FRAME_INTERVALS = {
     "dizzy": 130,               # ★ 眩晕：冒金星节奏
     "crying": 150,              # ★ 哭泣：比正常 error 稍慢
     # 子状态
-    "napping": 300,
+    "napping": 200,
 }
 
 # 空闲超过此时间自动进入睡眠 (ms)
