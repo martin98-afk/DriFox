@@ -6,6 +6,7 @@ Chat Worker - OpenAI 对话执行器
 import concurrent.futures
 import gc
 import os
+import queue
 import re
 import threading
 import time
@@ -64,6 +65,12 @@ class OpenAIChatWorker(QThread):
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
+
+    # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
+    # Qwen/DashScope 服务端会拒绝"连续多轮相同 (name, args) 的工具调用"，返回 400。
+    # 同样的消息序列重试仍会被拒，必须客户端主动中断。
+    # 阈值设为 3：与 AutoLoopWorker 的"连续失败 3 次"语义对齐；给模型 1-2 轮自我修正机会。
+    _TOOL_LOOP_THRESHOLD = 3
 
     def __init__(
             self,
@@ -316,6 +323,7 @@ class OpenAIChatWorker(QThread):
         self._previewed_tool_call_ids = s.tool_call.previewed_ids
         self._current_tool_calls = s.tool_call.current_calls
         self._tool_calls_buffer = s.tool_call.calls_buffer
+        self._tool_calls_index_to_id = s.tool_call.index_to_id
         self._reasoning_content = s.response.reasoning_content
         self._http_client = s.http.client
         self._reasoning_chunks = s.response.reasoning_chunks
@@ -347,6 +355,7 @@ class OpenAIChatWorker(QThread):
         s.permission.permission_approved = self._permission_approved
         s.tool_call.current_calls = self._current_tool_calls
         s.tool_call.calls_buffer = self._tool_calls_buffer
+        s.tool_call.index_to_id = self._tool_calls_index_to_id
         s.response.reasoning_content = self._reasoning_content
         s.http.client = self._http_client
         s.tool_call.execution_cancelled = self._tool_execution_cancelled
@@ -390,6 +399,34 @@ class OpenAIChatWorker(QThread):
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
                 self._api_messages_cache.append(api_msg)
+
+    def _inject_pending_hook_messages(self) -> None:
+        """
+        消费 backend 线程安全队列中的待处理 hook 消息并注入到 API 缓存。
+
+        在每次 _make_api_call 前调用，确保 LLM 在同轮次后续交互中能感知 hook 输出。
+        与 Qt 信号路径（_on_hook_messages_changed）互补——队列提供即时投递，
+        信号提供最终一致性（含去重检查，不会重复注入）。
+        """
+        try:
+            backend = getattr(self.tool_executor, '_backend', None)
+            if not backend:
+                return
+            q = getattr(backend, '_hook_message_queue', None)
+            if q is None:
+                return
+            msgs = []
+            while True:
+                try:
+                    msgs.append(q.get_nowait())
+                except queue.Empty:
+                    break
+            if msgs:
+                self._append_to_api_cache(msgs)
+                self._current_session_messages.extend(msgs)
+                logger.debug(f"[HookManager] Injected {len(msgs)} pending hook msgs from queue")
+        except Exception as e:
+            logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
 
     @property
     def event_bus(self) -> WorkerEventBus:
@@ -518,6 +555,146 @@ class OpenAIChatWorker(QThread):
         # 使用 ChatWorkerState 清理
         self._state.reset_pending_response_state()
         self._sync_state_from_state()
+
+    @staticmethod
+    def _detect_repetitive_tool_loop(messages: List[Dict]) -> Optional[Dict]:
+        """
+        检测消息列表中最近 N 轮的 assistant tool_calls 是否完全一致（即陷入循环）。
+
+        Qwen/DashScope 服务端会拒绝"连续多轮相同 (name, arguments) 的工具调用"。
+        同样的请求序列重试仍会被拒，所以必须在客户端主动检测并终止。
+
+        判断标准（与 qwen 服务端语义对齐）：
+        - 比较**内容**：`tool_name` + `arguments`（注意：不是 tool_call_id，id 每轮新生成）
+        - 比较**轮次**：连续 N 轮 assistant 消息中，如果 tool_calls 签名（按 name+args 排序后
+          拼接的 sha256）完全相同 → 触发循环
+        - 中间插入任何**不同的** tool_call → 重置计数（不要求与上一轮完全相同才算重复）
+
+        Args:
+            messages: 即将发给 API 的完整消息列表（已 consolidate）
+
+        Returns:
+            None 表示未检测到循环；
+            Dict 表示检测到循环，含 {"rounds": int, "signature": str,
+                                       "tool_calls": List[Dict]} 用于构造友好提示。
+        """
+        threshold = OpenAIChatWorker._TOOL_LOOP_THRESHOLD
+
+        # 从后往前扫，收集最近的 assistant 消息（含 tool_calls 的）
+        recent_assistants: List[Dict] = []
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                # 普通文本消息不算轮次，跳过（继续往前找）
+                continue
+            recent_assistants.append(msg)
+            if len(recent_assistants) >= threshold:
+                break
+
+        if len(recent_assistants) < threshold:
+            return None
+
+        # 计算每个 assistant 消息的签名：sorted([(name, normalized_args)]) 的 sha256
+        signatures = []
+        for msg in recent_assistants:
+            sig = OpenAIChatWorker._compute_tool_call_signature(msg.get("tool_calls") or [])
+            signatures.append(sig)
+
+        # 检查最近 threshold 轮是否完全一致
+        if len(set(signatures)) == 1:
+            tool_calls = recent_assistants[0].get("tool_calls") or []
+            return {
+                "rounds": threshold,
+                "signature": signatures[0],
+                "tool_calls": tool_calls,
+            }
+
+        return None
+
+    @staticmethod
+    def _compute_tool_call_signature(tool_calls: List[Dict]) -> str:
+        """
+        计算一轮 tool_calls 的稳定签名。
+
+        排序后再 hash，避免 list 顺序差异导致误判。
+        arguments 是字符串，标准化空白后再用：
+        - 去除 JSON token（`{}` `,` `:` `"`）周围的装饰性空格
+        - 但保留字符串 value 内部的空格（如 "hello world"）
+        """
+        import hashlib
+        import re
+
+        def _normalize_json_whitespace(s: str) -> str:
+            # 去掉所有空白（包含换行）后重新插入：
+            # 1. JSON token 周围不留空格
+            # 2. 字符串 value 内部保留原始字符（只把连续空白压成单空格）
+            # 简化版：把所有空白压成单空格，再去掉 `,` `:` `{` `}` `[` `]` 前后的空格
+            # 用状态机判断是否在字符串内部太复杂，这里采用保守策略：
+            # 先尝试用 json 解析，解析成功则重 dump 规范化；失败则退到"压缩连续空白"。
+            try:
+                import json
+                obj = json.loads(s)
+                return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                # 退化：去掉所有空白（包括换行/制表）
+                return re.sub(r"\s+", "", s)
+
+        parts = []
+        for tc in tool_calls:
+            func = tc.get("function") or {}
+            name = (func.get("name") or "").strip()
+            args = (func.get("arguments") or "").strip()
+            args = _normalize_json_whitespace(args)
+            parts.append(f"{name}|{args}")
+        parts.sort()
+        canonical = "\n".join(parts)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_tool_loop_error_message(loop_info: Dict) -> str:
+        """
+        把"工具循环"检测结果翻译成中文友好错误提示。
+
+        Args:
+            loop_info: `_detect_repetitive_tool_loop` 的返回值
+        """
+        rounds = loop_info.get("rounds", 3)
+        tool_calls = loop_info.get("tool_calls") or []
+
+        # 列出陷入循环的工具名（去重）
+        names = []
+        for tc in tool_calls:
+            func = tc.get("function") or {}
+            name = (func.get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+
+        names_str = "、".join(names) if names else "（未知工具）"
+        example = tool_calls[0] if tool_calls else {}
+        example_func = example.get("function") or {}
+        example_args = (example_func.get("arguments") or "").strip()
+        if len(example_args) > 120:
+            example_args = example_args[:117] + "..."
+
+        return (
+            f"[工具调用循环] 检测到模型在最近 {rounds} 轮里反复调用相同的工具 "
+            f"（{names_str}），参数也完全相同——模型可能已经陷入死循环。\n\n"
+            f"重复的工具调用示例：\n"
+            f"  工具：{example_func.get('name', '?')}\n"
+            f"  参数：{example_args or '（无参数）'}\n\n"
+            f"为什么会这样：\n"
+            f"  • 工具返回的结果可能不够具体，模型无法据此推进下一步\n"
+            f"  • 工具实现未考虑幂等（如 grep 总返回相同内容）\n"
+            f"  • 用户的输入本身就是重复型任务\n\n"
+            f"如果重试同样的请求，Qwen/DashScope 服务端也会再次拒绝 "
+            f"（HTTP 400 Repetitive tool calls detected），所以已主动终止。\n\n"
+            f"建议：\n"
+            f"  1. 修改输入，明确告诉模型何时该停止调用工具\n"
+            f"  2. 检查工具实现，确保每次返回结果有变化或包含终止信号\n"
+            f"  3. 如需继续，可考虑开启新会话后重新发起任务"
+        )
 
     def _get_reasoning_content(self) -> str:
         """获取当前的 reasoning_content（从累积的 chunks 合成）"""
@@ -800,6 +977,31 @@ class OpenAIChatWorker(QThread):
                     msg_count=len(current_messages),
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                     session_count=len(current_session_messages))
+
+                # ⚠️ 客户端主动循环检测：避免触发 Qwen/DashScope 的 Repetitive tool calls 错误
+                # Qwen 服务端会拒绝"连续多轮相同 (name, args) 的工具调用"，返回 400。
+                # 同样的请求序列重试仍会被拒，必须在客户端主动中断。
+                # 策略：检查 current_messages 中最近 _TOOL_LOOP_THRESHOLD 轮 assistant 消息的
+                # tool_call 签名是否完全一致；连续达到阈值就主动终止并提示用户。
+                loop_detected = OpenAIChatWorker._detect_repetitive_tool_loop(current_messages)
+                if loop_detected:
+                    logger.warning(
+                        f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，"
+                        f"主动终止以避免 Qwen/DashScope 服务端拒绝。"
+                    )
+                    self._emit_with_callback(
+                        "error_occurred", self.error_occurred,
+                        self._build_tool_loop_error_message(loop_detected),
+                    )
+                    # 保存当前消息状态后退出，避免 UI 看到半截结果
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages,
+                        current_session_messages,
+                    )
+                    return
+
+                # 消费待处理的 hook 消息（从线程安全队列，避免 Qt 信号跨线程延迟）
+                self._inject_pending_hook_messages()
 
                 # 使用 API 消息缓存（首次会重建，后续复用）
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
@@ -1806,6 +2008,8 @@ class OpenAIChatWorker(QThread):
         self._response_content_blocks = []
         self._current_tool_calls = {}  # 改成字典，key 是 tool_call_id
         self._tool_calls_buffer = {}
+        # Qwen/DashScope 流式 tool_calls：chunk 2+ 会清空 tc.id，用 index→id 映射回真实 id
+        self._tool_calls_index_to_id = {}
         tool_calls_found = False
         tool_args_pending = True
         reasoning_started_this_call = False  # 本轮 API 调用是否已发射 thinking_started
@@ -1865,11 +2069,37 @@ class OpenAIChatWorker(QThread):
                     _content_batch_time = time.time()
 
                 for tc in tool_calls:
-                    tc_id = tc.id
-                    if tc_id is None:
-                        if self._tool_calls_buffer:
-                            tc_id = list(self._tool_calls_buffer.keys())[-1]
-                        else:
+                    # ⚠️ 兼容 Qwen/DashScope 等 OpenAI 兼容协议的流式 tool_calls：
+                    # 第一个 chunk 含 id（"call_xxx"）+ name + 空 arguments；
+                    # 后续 chunk 仅含 index + arguments（id 清空为 ""，name 清空为 ""）。
+                    # 用首 chunk 的真实 tc.id 作为内部统一 key（保证与 _current_tool_calls /
+                    # _waiting_tool_params / tool_result.tool_call_id 下游一致），
+                    # 借助 _tool_calls_index_to_id 映射在 id 缺失时找回真实 id。
+                    tc_index = getattr(tc, "index", None)
+                    raw_id = tc.id
+                    tc_id = None
+
+                    # 1. 优先用 raw_id 匹配现有 buffer
+                    if raw_id and raw_id in self._tool_calls_buffer:
+                        tc_id = raw_id
+                    # 2. 否则用 index 映射回真实 id（处理 qwen 等 id 缺失场景）
+                    elif tc_index is not None and tc_index in self._tool_calls_index_to_id:
+                        tc_id = self._tool_calls_index_to_id[tc_index]
+
+                    # ⚠️ 关键修复（2026-06-25 qwen 工具永远卡在"接收参数中"）：
+                    # 修复前代码 `elif self._tool_calls_buffer: tc_id = next(reversed(...))`
+                    # 会把第二个 tool_call 的内容错合并到第一个 buffer，导致：
+                    # 1) 多 tool_call 并行时 name 互相覆盖
+                    # 2) Qwen 末尾 `id=""` 的孤立 chunk 被合并进已有 buffer
+                    # 新逻辑：找不到匹配 buffer 时，必须含 name 才创建新条目，避免孤立 buffer
+                    # 累积导致 tool_args_pending 永远 True、主循环死锁。
+                    if not tc_id:
+                        # 必须含 name 才允许创建新 buffer（孤立 delta chunk 跳过）
+                        if not (tc.function and tc.function.name):
+                            continue
+                        # 用真实 id 作为 key（缺 id 时退化用 index）
+                        tc_id = raw_id if raw_id else (f"index_{tc_index}" if tc_index is not None else None)
+                        if not tc_id:
                             continue
 
                     if tc_id not in self._tool_calls_buffer:
@@ -1884,6 +2114,9 @@ class OpenAIChatWorker(QThread):
                                 "tool_call_id": tc_id,
                             }
                         )
+                        # 记录 index → id 映射（供后续 chunk 查找）
+                        if tc_index is not None:
+                            self._tool_calls_index_to_id[tc_index] = tc_id
 
                     buffer = self._tool_calls_buffer[tc_id]
                     tool_name = ""
@@ -1920,7 +2153,9 @@ class OpenAIChatWorker(QThread):
                                     tc_id, tool_name, preview_args, "preview"
                                 )
                     if tc.function and tc.function.arguments:
-                        buffer["function"]["arguments"] += tc.function.arguments
+                        # ⚠️ Qwen 末尾 chunk 的 arguments=null，跳过避免 TypeError
+                        if tc.function.arguments is not None:
+                            buffer["function"]["arguments"] += tc.function.arguments
 
                     # 【优化】不在此处逐 chunk 执行 json.loads()。
                     # 对于 write/edit 等超长 content 参数，arguments 可能分 50-200 个 chunks 到达。
@@ -2211,6 +2446,9 @@ class OpenAIChatWorker(QThread):
             for tc in self._current_tool_calls.values():
                 if not tc["function"]["arguments"] and tc.get("id") in all_pending_ids:
                     tc["function"]["arguments"] = "{}"
+
+        # 流式结束后清理 index→id 临时映射（仅流处理期间需要）
+        self._tool_calls_index_to_id = {}
 
         # 🛡️ 清除当前响应引用（已完成，不需要被 cancel 关闭）
         if self._current_response is not None:
@@ -2758,6 +2996,29 @@ class OpenAIChatWorker(QThread):
             return
 
         if isinstance(error, BadRequestError):
+            # ⚠️ Qwen/DashScope 服务端拒绝"重复工具调用"错误
+            # 错误码：InternalError.Algo.InvalidParameter
+            # 错误消息：Repetitive tool calls detected in the conversation history...
+            # 服务端会拒绝"连续多轮相同 (name, arguments) 的工具调用"，
+            # 同样的请求序列重试仍会被拒，必须用户介入（修改输入/工具策略）。
+            if any(p in error_msg for p in (
+                    "repetitive tool calls detected",
+                    "repetitive tool calls",
+                    "identical name and arguments has been repeated",
+                    "tool call with identical name",
+                    "internalerror.algo.invalidparameter",
+            )):
+                self._emit_with_callback(
+                    "error_occurred", self.error_occurred,
+                    f"[工具调用循环] 模型在最近几轮反复用相同参数调用同一工具，"
+                    f"Qwen/DashScope 服务端主动拒绝了请求（HTTP 400 InternalError.Algo.InvalidParameter）。\n\n"
+                    f"原始错误：{error_msg[:300]}\n\n"
+                    f"建议：\n"
+                    f"  1. 修改输入，明确告诉模型何时该停止调用工具\n"
+                    f"  2. 检查工具实现，确保每次返回结果有变化或包含终止信号\n"
+                    f"  3. 重新发起任务（如开启新会话）"
+                )
+                return
             # 检测参数过大相关错误（不同 provider 的不同错误信息）
             if any(kw in error_msg.lower() for kw in
                    ["too large", "too long", "exceeds", "maximum length",

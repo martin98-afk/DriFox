@@ -6812,6 +6812,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self.pixel_pet.set_state("warning")
         history_list = self.history_manager.get_history_list(self._current_project)
         if index < 0 or index >= len(history_list):
+            # 参数无效，恢复状态
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
             return
 
         session_record = history_list[index]
@@ -6819,6 +6822,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 通过 session_id 找到全量列表中的真实 index
         full_index = self.history_manager.find_index_by_session_id(session_id)
         if full_index is None:
+            # 会话不存在，恢复状态
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
             return
 
         archived_current = (
@@ -6884,6 +6890,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     refresh_history_card_if_visible(
                         self._history_card, self._refresh_history_toggle_panel
                     )
+
+        # 操作完成，恢复正常状态
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")
 
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:
@@ -6987,6 +6997,9 @@ class OpenAIChatToolWindow(ToolWindow):
         msg_box.cancelButton.setText("取消")
 
         if msg_box.exec() != MessageBox.Accepted:
+            # 取消操作，恢复正常状态
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
             return
 
         try:
@@ -7014,6 +7027,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 parent=self,
             )
+        finally:
+            # 操作完成（不论成功或失败），恢复正常状态
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
 
     def _on_archived_session_renamed(self, file_path: str, new_title: str):
         """重命名归档会话"""
@@ -11235,6 +11252,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.pixel_pet:
             self.pixel_pet.set_state("warning")
         if not self.history_manager:
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
             return
 
         # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
@@ -11304,6 +11323,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._project_selector_card_content.set_projects_data(
                 projects, self._current_project, meta_map, root_dir_map
             )
+
+        # 操作完成，恢复正常状态
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")
 
     def _on_memory_tab_changed(self, tab_id: str):
         """处理记忆管理标签切换"""

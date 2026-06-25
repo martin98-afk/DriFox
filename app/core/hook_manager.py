@@ -33,6 +33,7 @@ class HookType(Enum):
     COMMAND = "command"
     HTTP = "http"
     PYTHON = "python"
+    PROMPT = "prompt"
 
 
 class HookDecision(Enum):
@@ -68,10 +69,11 @@ class Hook:
     
     支持字段:
     - id: 唯一标识符
-    - type: hook 类型 (command/http/python)
+    - type: hook 类型 (command/http/python/prompt)
     - command: 执行命令 (command 类型)
     - url: HTTP 请求地址 (http 类型)
     - function: Python 函数路径 (python 类型)
+    - prompt: 提示文本 (prompt 类型，直接插入到消息中)
     - cwd: 工作目录
     - add_output_to_context: 是否添加到上下文
     - skill_root: 所属技能根目录
@@ -100,6 +102,9 @@ class Hook:
     function: Optional[str] = None
     function_args: Optional[Dict[str, Any]] = None
 
+    # Prompt 类型专用字段
+    prompt: Optional[str] = None
+
     # config_file: 所属的 hooks.json 配置文件路径（用于 UI 保存）
     config_file: Optional[str] = None
 
@@ -113,6 +118,8 @@ class Hook:
             command = d.get("function") or command
         elif hook_type == "http":
             command = d.get("url") or command
+        elif hook_type == "prompt":
+            command = d.get("prompt") or command
         hook_id = d.get("id", "") or uuid4().hex
         return cls(
             id=hook_id,
@@ -131,11 +138,12 @@ class Hook:
             function=d.get("function"),
             function_args=d.get("function_args"),
             config_file=d.get("config_file"),
+            prompt=d.get("prompt"),
         )
 
     def to_dict(self) -> dict:
         """转换为字典（用于序列化）"""
-        return {
+        result = {
             "id": self.id,
             "type": self.type,
             "command": self.command,
@@ -151,8 +159,11 @@ class Hook:
             "allowedEnvVars": self.allowed_env_vars,
             "function": self.function,
             "function_args": self.function_args,
-            "config_file": self.config_file,  # 添加 config_file 字段
+            "config_file": self.config_file,
         }
+        if self.prompt is not None:
+            result["prompt"] = self.prompt
+        return result
 
 
 @dataclass
@@ -187,9 +198,24 @@ class HookMatchRule:
         # 正则匹配用户消息
         message = context.get("message", "")
         try:
-            return bool(re.match(self.matcher, message))
+            if re.match(self.matcher, message):
+                return True
         except re.error:
-            return False
+            pass
+
+        # 对于工具相关事件，也尝试匹配工具名（大小写不敏感）
+        # 这样 "Write|Edit" 这样的 matcher 可以直接匹配工具名
+        event_name = context.get("event_name", "")
+        if event_name in ("PreToolUse", "PostToolUse"):
+            tool_name = context.get("tool_name", "")
+            if tool_name:
+                try:
+                    if re.match(self.matcher, tool_name, re.IGNORECASE):
+                        return True
+                except re.error:
+                    pass
+
+        return False
 
     @classmethod
     def from_dict(cls, d: dict, skill_root: str = "", config_file: str = "") -> 'HookMatchRule':
@@ -378,6 +404,8 @@ class HookWorker(QRunnable):
                 output, success = self._execute_http()
             elif self.hook.type == HookType.PYTHON.value:
                 output, success = self._execute_python()
+            elif self.hook.type == HookType.PROMPT.value:
+                output, success = self._execute_prompt()
             else:
                 output = f"Unknown hook type: {self.hook.type}"
                 success = False
@@ -386,6 +414,11 @@ class HookWorker(QRunnable):
         except Exception as e:
             logger.error(f"[HookWorker] Execution failed: {e}")
             self.signals.finished.emit(self.event_name, f"Error: {str(e)}", False)
+
+    def _execute_prompt(self) -> tuple:
+        """执行 prompt 类型：直接返回 prompt 文本"""
+        prompt_text = self.hook.prompt or self.hook.command or ""
+        return prompt_text, True
 
     def _execute_command(self) -> tuple:
         """执行命令（委托给公共静态方法），传递 context 作为 stdin"""
@@ -1032,6 +1065,10 @@ class HookManager:
                         output = response.read().decode('utf-8')
                         success = True
 
+                elif hook.type == HookType.PROMPT.value:
+                    output = hook.prompt or hook.command or ""
+                    success = True
+
                 elif hook.type == HookType.PYTHON.value:
                     if not hook.function:
                         output = "No function specified"
@@ -1104,7 +1141,11 @@ class HookManager:
 
                 # 触发完成回调
                 if hook.add_output_to_context and self._on_finished_callback:
-                    self._on_finished_callback(context.get("event_name", ""), output, success)
+                    callback_event = context.get("event_name", "")
+                    # PROMPT 类型 hook 用前缀标记，backend 据此总是加入消息列表
+                    if hook.type == HookType.PROMPT.value:
+                        callback_event = f"__prompt__:{callback_event}"
+                    self._on_finished_callback(callback_event, output, success)
 
                 logger.info(f"[HookManager] Hook executed: {context.get('event_name')}")
 
@@ -1113,7 +1154,10 @@ class HookManager:
             except Exception as e:
                 logger.error(f"[HookManager] Hook failed: {context.get('event_name')} - {e}")
                 if hook.add_output_to_context and self._on_finished_callback:
-                    self._on_finished_callback(context.get("event_name", ""), f"Error: {str(e)}", False)
+                    callback_event = context.get("event_name", "")
+                    if hook.type == HookType.PROMPT.value:
+                        callback_event = f"__prompt__:{callback_event}"
+                    self._on_finished_callback(callback_event, f"Error: {str(e)}", False)
                 return HookExecutionResult(success=False, output=str(e))
 
     def _resolve_command_cwd(self, hook: Hook, context: Dict[str, Any]) -> Optional[str]:
@@ -1321,8 +1365,13 @@ class HookManager:
                 hooks_list = rule.get("hooks", [])
                 for hook_idx, h in enumerate(hooks_list):
                     hook_id = h.get("id", "") or ""
-                    hook_cmd = h.get("command", "") or h.get("url", "") or h.get("function", "")
-                    target_cmd = hook.command or hook.url or hook.function or ""
+                    hook_cmd = (
+                        h.get("command", "") or h.get("url", "") or
+                        h.get("function", "") or h.get("prompt", "")
+                    )
+                    target_cmd = (
+                        hook.command or hook.url or hook.function or hook.prompt or ""
+                    )
                     if hook_id == hook.id or hook_cmd == target_cmd:
                         return (event_name, rule_idx, hook_idx)
         return None

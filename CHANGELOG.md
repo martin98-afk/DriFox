@@ -1,6 +1,55 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Qwen/DashScope 流式工具调用永远卡在"接收参数中"**
+  - 根因：`ChatWorker._process_response` 用 `tc.id` 作为流式 tool_calls 聚合 key，但 Qwen/DashScope
+    OpenAI 兼容协议在 chunk 2+ 会把 `tc.id` 清空为空字符串（OpenAI 官方 SDK 用 `tc.index` 作为聚合 key）。
+    旧逻辑会为每个 `id=""` 的 chunk 创建孤立 buffer（`""`、`"index_N"` 等），无法清理，导致
+    `tool_args_pending` 永远 True、主循环 `while tool_calls_found and tool_args_pending: continue`
+    死循环，工具永远不执行
+  - 修复：新增 `_tool_calls_index_to_id: Dict[int, str]` 映射，在 `tc.id` 缺失时通过 `tc.index`
+    找回真实 id；只有 chunk 含 `name` 时才允许创建新 buffer（避免孤立）；`arguments=None`
+    跳过避免 TypeError；流结束后清理 `index_to_id` 映射
+  - 影响：所有 Qwen 系（qwen3-max、qwen-plus、qwen-turbo、qwen2.5/3、SiliconFlow 上的 qwen 等）
+    通过 DashScope 兼容模式调用的工具调用都能正常执行
+  - 文件：`app/core/workers/chat_worker.py`、`app/core/workers/chat_worker_state.py`
+
+- **Qwen/DashScope `Repetitive tool calls detected` 错误（HTTP 400）**
+  - 根因：Qwen 服务端会拒绝"连续多轮相同 (name, arguments) 的工具调用"，错误码
+    `InternalError.Algo.InvalidParameter`。同样的请求序列重试仍会被拒，必须客户端主动中断
+  - 修复（三层防护）：
+    1. **客户端主动循环检测**：`ChatWorker._detect_repetitive_tool_loop` 在每次 API 调用
+       前扫描最近 3 轮 assistant 消息的 tool_calls 签名（按 `name + arguments` 计算，忽略
+       `tool_call_id` 和 JSON 空白差异），连续 3 轮完全一致就主动终止并发友好错误提示
+    2. **`ErrorClassifier` 新增 `tool_loop` 分类**：识别服务端 400 + Repetitive tool calls
+       模式（`REPETITIVE_TOOL_CALL_PATTERNS`），标 `retryable=False`，避免后续自动重试
+    3. **`_handle_error` 中文友好提示**：万一客户端没拦住，给出根因分析和解决建议
+  - 判断标准（与 qwen 服务端语义对齐）：
+    - 比较**内容**：`tool_name + arguments`（不是 tool_call_id，id 每轮新生成）
+    - 比较**轮次**：连续 N 轮 assistant 消息签名完全相同 → 循环
+    - 中间插入不同 tool_call → 重置计数（只有连续才算）
+  - 文件：`app/core/workers/chat_worker.py`、`app/core/workers/error_handler/error_classifier.py`
+
+### ✅ 测试 (Tests)
+
+- 新增 `tests/test_chat_worker_qwen_streaming.py`（5 个测试用例）
+  - 核心回归：qwen 流式 tool_calls `id` 消失场景
+  - 多 tool_call 并行场景
+  - OpenAI 兼容模式（每个 chunk 都有 id）正常
+  - `arguments` 全 `None` 不崩溃
+  - 孤立 chunk（无 name 无 buffer）正确跳过
+- 新增 `tests/test_chat_worker_tool_loop.py`（13 个测试用例）
+  - 签名稳定性 / `tool_call_id` 不影响签名 / 空白规范化
+  - 3 轮完全相同 → 检测到循环
+  - args 不同 / 中间插入不同调用 / 不到阈值 → 不算循环
+  - 并行 tool_calls 全相同 → 循环 / 不一致 → 不算循环
+  - 错误消息包含工具名 + 参数 + 建议
+  - 纯文本 assistant 消息不影响判断
+
 ## [v0.2.11] - 2026-06-24
 
 自上一版本以来的变更 | 提交数：34 · 文件变更：26 · +4313/-350 | 贡献者：dingma, drifox-bot
