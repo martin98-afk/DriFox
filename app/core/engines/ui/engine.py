@@ -354,13 +354,20 @@ class UIEngine(BaseEngine):
                     if r.success and r.output:
                         _inject_hook_to_session(inject_to_session, event_name, r.output)
 
+        # 获取 session_id（用于 hook context；必须先于 hook 触发块赋值，
+        # 否则 L365/L378 会在 Python 编译期被识别为"先读后写"的局部变量，触发 UnboundLocalError）
+        _session_id = session.session_id if session else ""
+
         # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager
         hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
 
         if hook_mgr:
             # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
             _trigger_and_inject(hook_mgr, "UserPromptSubmit",
-                                {"message": user_text}, inject_to_session=session)
+                {
+                    "message": user_text,
+                    "session_id": _session_id,
+                }, inject_to_session=session)
             # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文
             memory_ctx = {}
             worktree_ctx = {}
@@ -370,17 +377,27 @@ class UIEngine(BaseEngine):
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
-            _trigger_and_inject(hook_mgr, "PreUserMessage", {
+            pre_user_ctx = {
                 "message": user_text,
+                "session_id": _session_id,
                 **memory_ctx,
                 **worktree_ctx,
-            }, inject_to_session=session)
+            }
+            _trigger_and_inject(hook_mgr, "PreUserMessage",
+                                pre_user_ctx, inject_to_session=session)
 
         session.add_user_message(content=content_to_store)
 
         if hook_mgr:
+            post_user_ctx = {
+                "message": user_text,
+                "session_id": _session_id,
+            }
+            # 补充多模态内容（如有图片）
+            if _user_content is not None and _user_content != user_text:
+                post_user_ctx["user_content"] = _user_content
             _trigger_and_inject(hook_mgr, "PostUserMessage",
-                                {"message": user_text}, inject_to_session=session)
+                                post_user_ctx, inject_to_session=session)
 
             # 通知 UI 刷新（预对话 hook 已注入 session.messages）
             if self._backend:
@@ -549,11 +566,14 @@ class UIEngine(BaseEngine):
 
         session = self._session_manager.get_current_session()
         last_user_msg = ""
-        if session and hasattr(session, 'messages'):
-            for msg in reversed(session.messages):
-                if msg.get('role') == 'user':
-                    last_user_msg = content_to_text(msg.get('content', ''))
-                    break
+        session_id = ""
+        if session:
+            session_id = session.session_id or ""
+            if hasattr(session, 'messages'):
+                for msg in reversed(session.messages):
+                    if msg.get('role') == 'user':
+                        last_user_msg = content_to_text(msg.get('content', ''))
+                        break
 
         # 多窗口隔离：使用当前窗口的工作目录
         project_root = (
@@ -563,11 +583,15 @@ class UIEngine(BaseEngine):
         )
         context = {
             "project_root": project_root,
+            "session_id": session_id,  # Claude Code 兼容字段
         }
         if is_error:
             context["error"] = response_or_error
         else:
+            # DriFoxx 自有格式（向后兼容）
             context["response"] = response_or_error
+            # Claude Code 兼容格式
+            context["assistant_response"] = response_or_error
 
         hook_mgr.trigger_event(
             "PostAssistantMessage",

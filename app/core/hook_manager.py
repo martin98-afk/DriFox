@@ -393,8 +393,15 @@ class HookWorker(QRunnable):
         处理 echo 快捷方式、Windows 编码回退、路径分隔符转换。
         stdin_data: 可选的 stdin 输入（传递给脚本的 JSON 上下文）
         """
-        # echo 快捷方式（不需要 stdin）
-        if command.startswith("echo "):
+        # echo 快捷方式 — 仅对纯单行 echo 有效，无任何命令分隔符
+        # 排除换行/&&/||/;/&/| 等，避免截胡多命令（如 echo "msg"\nexit 2）
+        if (command.startswith("echo ")
+            and "\n" not in command
+            and "&&" not in command
+            and "||" not in command
+            and ";" not in command
+            and " & " not in command
+            and " |" not in command):
             output = command[5:].strip()
             if output.startswith('"') and output.endswith('"'):
                 output = output[1:-1]
@@ -405,6 +412,10 @@ class HookWorker(QRunnable):
         # 修复路径分隔符问题：Unix / 转 Windows \
         if os.name == 'nt':
             command = command.replace('/', '\\')
+            # Windows cmd.exe 对 `subprocess.run(..., shell=True)` 传入的多行命令里 `\n`
+            # 处理不可靠（实际只跑第一行）。统一转换为 `&` 分隔符确保 exit 2 等能真正执行。
+            if "\n" in command:
+                command = command.replace("\n", " & ")
 
         # 构造 subprocess 参数
         subprocess_kwargs = {
@@ -425,27 +436,29 @@ class HookWorker(QRunnable):
 
         if os.name == 'nt':
             import locale
-            preferred = locale.getpreferredencoding(False) or ''
-            if preferred.upper() not in ('UTF-8', 'UTF8'):
-                try:
-                    result = subprocess.run(
-                        command, encoding='utf-8', **subprocess_kwargs
-                    )
-                except Exception:
-                    result = subprocess.run(
-                        command, encoding=preferred or 'gbk', **subprocess_kwargs
-                    )
-                exit_code = result.returncode
-                if exit_code != 0:
-                    # exit code 2: Claude Code BLOCK 约定，用 stdout 作为 output
-                    if exit_code == 2:
-                        return result.stdout or "", False, exit_code
-                    return result.stderr or f"Command failed with exit code {exit_code}", False, exit_code
-                return result.stdout or "", True, exit_code
+            # Windows: cmd.exe 的 echo 输出编码跟随系统代码页（中文 Windows 通常 GBK/gb2312），
+            # 用 UTF-8 解码会变乱码。优先用系统首选编码，与 cmd.exe 输出一致。
+            preferred = locale.getpreferredencoding(False) or 'gbk'
+            if preferred.upper() in ('UTF-8', 'UTF8'):
+                enc = 'utf-8'
             else:
+                enc = preferred
+            try:
+                result = subprocess.run(
+                    command, encoding=enc, **subprocess_kwargs
+                )
+            except (UnicodeDecodeError, LookupError):
+                # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(
                     command, encoding='utf-8', **subprocess_kwargs
                 )
+            exit_code = result.returncode
+            if exit_code != 0:
+                # exit code 2: Claude Code BLOCK 约定，用 stdout 作为 output
+                if exit_code == 2:
+                    return result.stdout or "", False, exit_code
+                return result.stderr or f"Command failed with exit code {exit_code}", False, exit_code
+            return result.stdout or "", True, exit_code
         else:
             result = subprocess.run(
                 command, encoding='utf-8', **subprocess_kwargs
@@ -1248,6 +1261,7 @@ class HookManager:
                 # 方式1: 检测 exit code 2（Claude Code 兼容：跳过工具执行）
                 if _exit2_skip:
                     decision = HookDecision.BLOCK
+                    success = True  # exit 2 是有效钩子响应，非执行失败
                     logger.info(f"[HookManager] Hook exit code 2 → BLOCK: {context.get('event_name')}")
 
                 # 方式2: 解析 JSON 中的 decision 字段

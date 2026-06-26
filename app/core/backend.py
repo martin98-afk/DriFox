@@ -1769,6 +1769,7 @@ class ChatBackend(QObject):
         # Trigger SessionStart hook — 同步执行，直接注入 session.messages
         if trigger_hook and self._hook_manager:
             context = self._build_session_context("startup")
+            context["session_id"] = session.session_id  # Claude Code 兼容字段
             results = self._hook_manager.trigger_event(
                 "SessionStart",
                 context=context,
@@ -1791,14 +1792,16 @@ class ChatBackend(QObject):
         """
         if not self._hook_manager:
             return
+        session = self.get_current_session()
         ctx = self._build_session_context(state)
+        if session:
+            ctx["session_id"] = session.session_id  # Claude Code 兼容字段
         if extra_context:
             ctx.update(extra_context)
         results = self._hook_manager.trigger_event(
             "SessionStart", context=ctx, current_message="",
             trigger_async=False,  # 同步执行，收集输出直接注入
         )
-        session = self.get_current_session()
         if session:
             for r in results:
                 if r.success and r.output:

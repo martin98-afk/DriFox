@@ -490,7 +490,19 @@ class OpenAIChatWorker(QThread):
                 import os as _os
                 workdir = _os.getcwd()
 
-            ctx = {"project_root": workdir}
+            # 获取 session_id
+            _session_id = ""
+            try:
+                _session = backend.get_current_session() if hasattr(backend, 'get_current_session') else None
+                if _session:
+                    _session_id = _session.session_id or ""
+            except Exception:
+                pass
+
+            ctx = {
+                "project_root": workdir,
+                "session_id": _session_id,  # Claude Code 兼容字段
+            }
             if extra_context:
                 ctx.update(extra_context)
 
@@ -1189,7 +1201,7 @@ class OpenAIChatWorker(QThread):
                         "PostAssistantMessage",
                         current_messages,
                         current_session_messages,
-                        extra_context={"assistant_response": self.full_response[:500]},
+                        extra_context={"assistant_response": self.full_response},
                     )
 
                     # ====== Stop hook：正常完成退出循环前触发 ======
@@ -1296,11 +1308,17 @@ class OpenAIChatWorker(QThread):
                 self._current_session_messages = list(current_session_messages)
 
                 # ====== PostAssistantMessage hook：assistant 响应后触发 ======
-                # 从 response_sequence 提取 assistant 文本作为上下文
+                # 从 response_sequence 提取完整 assistant 文本作为上下文
                 _asst_text = ""
                 for _m in response_sequence:
                     if _m.get("role") == "assistant" and _m.get("content"):
-                        _asst_text = str(_m["content"])[:500]
+                        _c = _m["content"]
+                        if isinstance(_c, list):
+                            # content blocks: 提取所有 text 块
+                            texts = [b.get("text", "") for b in _c if isinstance(b, dict) and b.get("type") == "text"]
+                            _asst_text = "\n".join(texts)
+                        else:
+                            _asst_text = str(_c)
                         break
                 self._trigger_worker_hook(
                     "PostAssistantMessage",
