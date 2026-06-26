@@ -326,7 +326,7 @@ class UIEngine(BaseEngine):
         content_to_store = _user_content or user_text
         # user_text 始终是纯文本版本，用于 hook 触发和 UI 显示
 
-        # 公共辅助方法：触发 hook
+        # 公共辅助方法：同步触发 hook 并收集输出
         # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
         _window_workdir = (
             self._backend.tool_executor.get_workdir()
@@ -334,24 +334,34 @@ class UIEngine(BaseEngine):
             else os.getcwd()
         )
 
-        def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
+        def _trigger_and_inject(hook_mgr, event_name, extra_context=None, msg_text=None,
+                                inject_to_session=None):
+            """同步触发 hook，收集输出并注入 session.messages（只追加不删除）"""
             if extra_context is None:
                 extra_context = {}
             ctx = {"project_root": _window_workdir}
             ctx.update(extra_context)
-            hook_mgr.trigger_event(
+            results = hook_mgr.trigger_event(
                 event_name,
                 context=ctx,
                 current_message=msg_text or user_text,
+                trigger_async=False,  # 关键：同步执行，确保输出在返回值中
             )
+            # 收集成功执行的 hook 输出，注入 session
+            if inject_to_session:
+                from app.core.backend import _inject_hook_to_session
+                for r in results:
+                    if r.success and r.output:
+                        _inject_hook_to_session(inject_to_session, event_name, r.output)
 
-        # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager，不通过全局单例
+        # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager
         hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
 
         if hook_mgr:
             # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
-            _do_trigger(hook_mgr, "UserPromptSubmit", {"message": user_text})
-            # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文（通过 backend 预取，不硬编码）
+            _trigger_and_inject(hook_mgr, "UserPromptSubmit",
+                                {"message": user_text}, inject_to_session=session)
+            # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文
             memory_ctx = {}
             worktree_ctx = {}
             try:
@@ -360,25 +370,21 @@ class UIEngine(BaseEngine):
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
-            _do_trigger(hook_mgr, "PreUserMessage", {
+            _trigger_and_inject(hook_mgr, "PreUserMessage", {
                 "message": user_text,
                 **memory_ctx,
                 **worktree_ctx,
-            })
-        session.add_user_message(content=content_to_store)
-        if hook_mgr:
-            _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})
+            }, inject_to_session=session)
 
-        # PreAssistantMessage
+        session.add_user_message(content=content_to_store)
+
         if hook_mgr:
-            last_user_msg = ""
-            session_for_hook = self._session_manager.get_current_session()
-            if session_for_hook and hasattr(session_for_hook, 'messages'):
-                for msg in reversed(session_for_hook.messages):
-                    if msg.get('role') == 'user':
-                        last_user_msg = content_to_text(msg.get('content', ''))
-                        break
-            _do_trigger(hook_mgr, "PreAssistantMessage", msg_text=last_user_msg)
+            _trigger_and_inject(hook_mgr, "PostUserMessage",
+                                {"message": user_text}, inject_to_session=session)
+
+            # 通知 UI 刷新（预对话 hook 已注入 session.messages）
+            if self._backend:
+                self._backend._hook_messages_updated.emit()
 
         messages = self._adapter.build_messages(
             self._session_manager.get_current_session(),

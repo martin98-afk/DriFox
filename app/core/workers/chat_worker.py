@@ -404,21 +404,16 @@ class OpenAIChatWorker(QThread):
                 self._api_messages_cache.append(api_msg)
 
     def _inject_pending_hook_messages(self, session_messages_target: List = None) -> None:
-        """
-        消费 backend 线程安全队列中的待处理 hook 消息并注入到 API 缓存。
+        """消费 backend 队列中的 PostToolUse 等 hook 消息并注入到 API 缓存。
 
-        在每次 _make_api_call 前调用，确保 LLM 在同轮次后续交互中能感知 hook 输出。
-        与 Qt 信号路径（_on_hook_messages_changed）互补——队列提供即时投递，
-        信号提供最终一致性（含去重检查，不会重复注入）。
-
-        注意：
-        - on_hook_finished 回调已把格式化版本同时写入 session.messages 和队列。
-        - context_builder 从 session.messages 读取后，可能已包含同 _hook_event 的消息。
-        - 因此需要在此处做 _hook_event 去重，避免队列消息重复注入。
+        在每次 _make_api_call 前调用，确保 LLM 能感知 hook 输出。
+        队列中只有 tool_executor 触发的事件（PostToolUse/prompt），预对话事件
+        已由 engine.py 直接注入 session.messages，不经过队列。
+        不做去重——每条 PostToolUse 对应一次独立的工具调用，都应保留。
 
         Args:
-            session_messages_target: 可选，若传入则将 hook 消息也追加到此列表，
-                确保 worker 结束时能随 current_session_messages 一起持久化到 session。
+            session_messages_target: 若传入则同时追加到此列表，
+                确保 worker 结束时随 current_session_messages 一起持久化。
         """
         try:
             backend = getattr(self.tool_executor, '_backend', None)
@@ -428,15 +423,6 @@ class OpenAIChatWorker(QThread):
             if q is None:
                 return
 
-            # 收集 session_messages_target 中已有的 _hook_event 集合，用于去重
-            target_events = set()
-            target = session_messages_target or self._current_session_messages
-            if target:
-                for m in target:
-                    evt = m.get('_hook_event')
-                    if evt:
-                        target_events.add(evt)
-
             msgs = []
             while True:
                 try:
@@ -445,22 +431,86 @@ class OpenAIChatWorker(QThread):
                     break
 
             if msgs:
-                # 去重：过滤掉 _hook_event 已存在于目标列表的消息
-                deduped = [
-                    m for m in msgs
-                    if m.get('_hook_event') not in target_events
-                ]
-                if not deduped:
-                    logger.debug(f"[HookManager] All {len(msgs)} pending hook msgs already exist, skipped")
-                    return
-
-                self._append_to_api_cache(deduped)
-                self._current_session_messages.extend(deduped)
+                self._append_to_api_cache(msgs)
+                self._current_session_messages.extend(msgs)
                 if session_messages_target is not None:
-                    session_messages_target.extend(deduped)
-                logger.debug(f"[HookManager] Injected {len(deduped)}/{len(msgs)} pending hook msgs from queue")
+                    session_messages_target.extend(msgs)
+                logger.debug(f"[HookManager] Injected {len(msgs)} hook msgs from queue")
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
+
+    def _trigger_worker_hook(
+        self,
+        event_name: str,
+        current_messages: List[Dict],
+        current_session_messages: List[Dict],
+        extra_context: Dict = None,
+    ) -> None:
+        """在 worker 线程中同步触发 hook 并将输出追加到消息流（只追加不删除）"""
+        from app.core.backend import _make_hook_message
+        try:
+            backend = getattr(self.tool_executor, '_backend', None)
+            if not backend or not backend.hook_manager:
+                return
+
+            workdir = None
+            if backend.tool_executor:
+                workdir = backend.tool_executor.get_workdir()
+            if not workdir:
+                import os as _os
+                workdir = _os.getcwd()
+
+            ctx = {"project_root": workdir}
+            if extra_context:
+                ctx.update(extra_context)
+
+            # 获取当前用户消息作为 current_message
+            current_message_text = ""
+            for msg in reversed(current_session_messages):
+                if msg.get('role') == 'user':
+                    from app.core.message_content import content_to_text
+                    current_message_text = content_to_text(msg.get('content', ''))
+                    break
+
+            results = backend.hook_manager.trigger_event(
+                event_name,
+                context=ctx,
+                current_message=current_message_text,
+                trigger_async=False,
+            )
+
+            for r in results:
+                if r.success and r.output:
+                    msg = _make_hook_message(event_name, r.output)
+                    current_messages.append(msg)
+                    current_session_messages.append(msg)
+                    self._current_session_messages.append(msg)
+                    # 追加到 API 缓存
+                    self._append_to_api_cache([msg])
+
+                    logger.debug(f"[HookManager] Worker hook injected: {event_name}")
+
+        except Exception as e:
+            logger.debug(f"[HookManager] Worker hook trigger failed: {event_name} - {e}")
+
+    def _cancel_with_stop_hook(self, current_messages: List[Dict],
+                                current_session_messages: List[Dict]) -> None:
+        """取消时保存 partial 响应并触发 Stop hook 后发射 finished 信号
+
+        统一处理 3 处取消路径的重复逻辑：
+        保存 partial → 触发 Stop hook → 发射 finished_with_messages
+        """
+        partial_sequence = self._build_response_message_sequence()
+        if partial_sequence:
+            current_messages.extend(partial_sequence)
+            current_session_messages.extend(partial_sequence)
+            self._current_session_messages = list(current_session_messages)
+            self.full_response = ''.join(self._response_chunks)
+            # ====== Stop hook：取消退出前触发 ======
+            self._trigger_worker_hook("Stop", current_messages, current_session_messages)
+            # 虽然信号可能已被断开，但事件总线仍可能接收
+            self._emit_with_callback("finished_with_messages", self.finished_with_messages,
+                                     current_session_messages)
 
     @property
     def event_bus(self) -> WorkerEventBus:
@@ -1061,50 +1111,29 @@ class OpenAIChatWorker(QThread):
                     self._api_messages_built = False
                     continue
 
-                # 消费待处理的 hook 消息（从线程安全队列，避免 Qt 信号跨线程延迟）
-                # ⚠️ 必须传入 current_session_messages 作为 session_messages_target，
-                # 否则 hook 消息只追加到 self._current_session_messages 而不影响局部变量，
-                # 后续 self._current_session_messages = list(current_session_messages) 会覆盖掉 hook 消息，
-                # 导致 finished_with_messages 发射的消息列表不包含 hook 内容，进而丢失持久化。
+                # 消费队列中的 PostToolUse 等 hook 消息（来自 tool_executor）
                 self._inject_pending_hook_messages(session_messages_target=current_session_messages)
+
+                # ====== PreAssistantMessage hook：每次 API 调用前触发 ======
+                self._trigger_worker_hook(
+                    "PreAssistantMessage",
+                    current_messages,
+                    current_session_messages,
+                )
 
                 # 使用 API 消息缓存（首次会重建，后续复用）
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
                 if self._is_cancelled:
-                    # 🛡️ 取消前保存已收到的 partial 响应，避免消息丢失
-                    partial_sequence = self._build_response_message_sequence()
-                    if partial_sequence:
-                        current_messages.extend(partial_sequence)
-                        current_session_messages.extend(partial_sequence)
-                        self._current_session_messages = list(current_session_messages)
-                        self.full_response = ''.join(self._response_chunks)
-                        # 虽然信号可能已被断开，但事件总线仍可能接收
-                        self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                                 current_session_messages)
+                    self._cancel_with_stop_hook(current_messages, current_session_messages)
                     return
                 if tool_calls_found and tool_args_pending:
                     # 🛡️ continue 之前检查取消状态，否则 while 循环直接退出绕过保存
                     if self._is_cancelled:
-                        partial_sequence = self._build_response_message_sequence()
-                        if partial_sequence:
-                            current_messages.extend(partial_sequence)
-                            current_session_messages.extend(partial_sequence)
-                            self._current_session_messages = list(current_session_messages)
-                            self.full_response = ''.join(self._response_chunks)
-                            self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                                     current_session_messages)
+                        self._cancel_with_stop_hook(current_messages, current_session_messages)
                         return
                     continue
                 if self._is_cancelled:
-                    # 🛡️ 同上，保存 partial 响应
-                    partial_sequence = self._build_response_message_sequence()
-                    if partial_sequence:
-                        current_messages.extend(partial_sequence)
-                        current_session_messages.extend(partial_sequence)
-                        self._current_session_messages = list(current_session_messages)
-                        self.full_response = ''.join(self._response_chunks)
-                        self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                                 current_session_messages)
+                    self._cancel_with_stop_hook(current_messages, current_session_messages)
                     return
 
                 # [MEM] API 返回后
@@ -1124,6 +1153,22 @@ class OpenAIChatWorker(QThread):
                     self._append_to_api_cache(response_sequence)
                     # 性能优化：在发送前才合成完整响应字符串
                     self.full_response = ''.join(self._response_chunks)
+
+                    # ====== PostAssistantMessage hook：assistant 响应后触发 ======
+                    self._trigger_worker_hook(
+                        "PostAssistantMessage",
+                        current_messages,
+                        current_session_messages,
+                        extra_context={"assistant_response": self.full_response[:500]},
+                    )
+
+                    # ====== Stop hook：正常完成退出循环前触发 ======
+                    self._trigger_worker_hook(
+                        "Stop",
+                        current_messages,
+                        current_session_messages,
+                    )
+
                     self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                              current_session_messages)
                     # 🔧 修复：先保存 full_response，再清理状态（_clear_pending_response_state
@@ -1215,6 +1260,20 @@ class OpenAIChatWorker(QThread):
                 current_session_messages.extend(response_sequence)
                 self._current_session_messages = list(current_session_messages)
 
+                # ====== PostAssistantMessage hook：assistant 响应后触发 ======
+                # 从 response_sequence 提取 assistant 文本作为上下文
+                _asst_text = ""
+                for _m in response_sequence:
+                    if _m.get("role") == "assistant" and _m.get("content"):
+                        _asst_text = str(_m["content"])[:500]
+                        break
+                self._trigger_worker_hook(
+                    "PostAssistantMessage",
+                    current_messages,
+                    current_session_messages,
+                    extra_context={"assistant_response": _asst_text},
+                )
+
                 # ========== 视觉模型注入：截图/read图片 → base64 图片 ==========
                 vision_injected = self._try_inject_vision_content(
                     tool_results, current_messages,
@@ -1293,6 +1352,13 @@ class OpenAIChatWorker(QThread):
             logger.exception("请求失败!")
             # 🔧 异常时保存已生成的部分消息到会话
             try:
+                # ====== Stop hook：异常退出前触发 ======
+                self._trigger_worker_hook(
+                    "Stop",
+                    current_messages if 'current_messages' in locals() else self.messages,
+                    current_session_messages if 'current_session_messages' in locals() else list(self.session_messages),
+                )
+
                 partial_sequence = self._build_response_message_sequence()
                 if partial_sequence:
                     current_session_messages.extend(partial_sequence)

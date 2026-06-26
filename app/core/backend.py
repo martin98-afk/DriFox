@@ -51,6 +51,37 @@ def _strip_hook_wrapper(content: str) -> str:
     return content
 
 
+def _format_hook_output(event_name: str, output: str) -> str:
+    """格式化 hook 输出为 Markdown 分隔线包装的内部通知格式"""
+    return (
+        f"---\n"
+        f"🔌 **Hook 内部通知** · 事件: `{event_name}`\n"
+        f"\n"
+        f"{output}\n"
+        f"---"
+    )
+
+
+def _make_hook_message(event_name: str, output: str) -> Dict[str, Any]:
+    """构建一条 hook 消息 dict（带 _hook_event 标记和 timestamp）"""
+    import datetime as _dt
+    return {
+        "role": "assistant",
+        "content": _format_hook_output(event_name, output),
+        "_hook_event": event_name,
+        "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _inject_hook_to_session(session, event_name: str, output: str):
+    """将 hook 输出追加到 session.messages（只追加不删除，保证历史稳定）"""
+    if not session:
+        return
+    msg = _make_hook_message(event_name, output)
+    session.messages.append(msg)
+    session._update_timestamp()
+
+
 def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
     """
     从 Markdown 内容中提取本地图片文件路径。
@@ -250,90 +281,43 @@ class ChatBackend(QObject):
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 
-        # 线程安全队列：hook 消息通过此队列传递给 worker（避免 Qt 信号跨线程延迟）
-        # 必须在 on_hook_finished 回调之前初始化，因为回调中会引用此队列
+        # 线程安全队列：仅用于 chat_worker 内部 hook（PreToolUse/PostToolUse）的输出传递
+        # 预对话 hook（SessionStart/PreUserMessage/PostUserMessage 等）由 engine.py 直接注入
+        # chat_worker 内部 hook（PreAssistant/PostAssistant/Stop）由 worker 直接注入
         self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
 
-        # Hook 完成后，把输出添加到上下文
+        # Hook 完成回调 — 仅处理需要通过队列传递给 worker 的事件
+        # 预对话事件（SessionStart, PreUserMessage, PostUserMessage 等）不经过此回调，
+        # 由 engine.py 收集 trigger_event 返回值后直接注入 session.messages
         def on_hook_finished(event_name: str, output: str, success: bool):
-            # 检查 UI 是否仍然有效，防止窗口关闭后 hook 回调访问已销毁的 UI
             if not getattr(self, '_ui_valid', True):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
 
-            # 检测 prompt 类型 hook（_execute_hook 中加了 __prompt__: 前缀）
             is_prompt_hook = event_name.startswith("__prompt__:")
             if is_prompt_hook:
                 event_name = event_name[len("__prompt__:"):]
 
-            logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}，output={output}...")
+            logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
 
-            # 只有成功执行的 hook 才添加到消息列表
             if not success:
                 return
 
-            # 新格式：Markdown 分隔线 + emoji + 中文标注，让 LLM 清晰识别为系统内部通知
-            hook_output = (
-                f"---\n"
-                f"🔌 **Hook 内部通知** · 事件: `{event_name}`\n"
-                f"\n"
-                f"{output}\n"
-                f"---"
-            )
+            # 只有需要通过队列传递给 worker 的事件才入队
+            # PostToolUse: 在 tool_executor 中触发，需通过队列传给 worker
+            # prompt hooks: 可能从任意位置触发，也通过队列
+            should_queue = is_prompt_hook or event_name in ("PostToolUse",)
 
-            # PROMPT 类型始终加入消息列表；其他类型只加入特定事件
-            # PostToolUse 添加以支持工具执行后 hook 消息显示
-            add_to_messages = is_prompt_hook or event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage", "PostToolUse")
-
-            if add_to_messages:
-                session = self.get_current_session()
-                if session:
-                    # 兼容清理：删除不包含 "🔌 Hook 内部通知" 标记的旧格式 raw hook 消息
-                    # 旧版本（2026-06-26 之前）的 on_hook_finished 会把 raw 输出直接写入
-                    # session.messages，context_builder 会把它送入 LLM，与队列注入的格式化
-                    # 版本重复。此清理为一次性迁移，当第一个 hook 事件触发时执行。
-                    if any(
-                        msg.get("_hook_event") and "🔌 Hook 内部通知" not in str(msg.get("content", ""))
-                        for msg in session.messages
-                    ):
-                        session.messages = [
-                            msg for msg in session.messages
-                            if not msg.get("_hook_event") or "🔌 Hook 内部通知" in str(msg.get("content", ""))
-                        ]
-
-                    # 通用去重：删除 session.messages 中同类型的所有旧 hook 消息
-                    # 这包括旧格式的 raw 版本和格式化版本，确保每个事件类型最多一条
-                    session.messages = [
-                        msg for msg in session.messages
-                        if not (msg.get("_hook_event") == event_name)
-                    ]
-
-                    # 存入格式化版本（带 Markdown 分隔线 + Hook 通知标记），
-                    # 让 LLM 清晰识别为系统内部通知而非用户输入或正常对话
-                    import datetime as _dt
-                    msg = {
-                        "role": "assistant",
-                        "content": hook_output,
-                        "_hook_event": event_name,
-                        "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                    session.messages.append(msg)
-                    session._update_timestamp()
-
-                # 推入线程安全队列，供 worker 在下一轮 LLM 调用前消费
-                # 用于异步 hook 完成后，worker 能及时感知（与上面 session.messages 同步写入）
-                # 注意：_inject_pending_hook_messages 中会有 _hook_event 去重检查，
-                # 避免队列消息重复注入（当 context_builder 已从 session.messages 读取时）。
+            if should_queue:
+                hook_output = _format_hook_output(event_name, output)
                 self._hook_message_queue.put({
                     "role": "assistant",
                     "content": hook_output,
-                    "_hook_event": event_name,  # 保留标记，供渲染层/去重使用
+                    "_hook_event": event_name,
                 })
-
-                # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
                 self._hook_messages_updated.emit()
+                logger.debug(f"[HookManager] Hook queued for worker: {event_name}")
 
-                logger.info(f"[HookManager] Hook added to messages: {event_name}")
         self._hook_manager.set_on_finished_callback(on_hook_finished)
 
         # 4. 创建初始会话（不触发 SessionStart hook，避免重复初始化）
@@ -1386,15 +1370,12 @@ class ChatBackend(QObject):
         )
 
     def stop_streaming(self):
-        """停止流式输出（同步方式，可能阻塞 UI 线程）"""
-        # 触发 Stop hook（同步执行，确保 hook 在流停止前完成）
-        if self._hook_manager:
-            self._hook_manager.trigger_event(
-                "Stop",
-                context={"project_root": os.getcwd()},
-                current_message="",
-                trigger_async=False,  # 同步：确保 ralph-loop 等 hook 在 stop 前完成
-            )
+        """停止流式输出（同步方式，可能阻塞 UI 线程）
+
+        Stop hook 已移至 chat_worker 退出循环前触发，此处不再重复触发。
+        执行流程：cancel_worker() → finalize_stop()（阻塞等待 worker 线程结束，
+        worker return 前会同步触发 Stop hook）。
+        """
         if self._chat_engine:
             return self._chat_engine.stop()
 
@@ -1776,14 +1757,19 @@ class ChatBackend(QObject):
         session = self._session_manager.create_new_session()
         self.session_created.emit(session.session_id)
 
-        # Trigger SessionStart hook — 通过 context 传入所有数据
+        # Trigger SessionStart hook — 同步执行，直接注入 session.messages
         if trigger_hook and self._hook_manager:
             context = self._build_session_context("startup")
-            self._hook_manager.trigger_event(
+            results = self._hook_manager.trigger_event(
                 "SessionStart",
                 context=context,
-                current_message=""
+                current_message="",
+                trigger_async=False,  # 同步执行，收集输出直接注入
             )
+            for r in results:
+                if r.success and r.output:
+                    _inject_hook_to_session(session, "SessionStart", r.output)
+            self._hook_messages_updated.emit()
 
         return session
 
@@ -1799,7 +1785,16 @@ class ChatBackend(QObject):
         ctx = self._build_session_context(state)
         if extra_context:
             ctx.update(extra_context)
-        self._hook_manager.trigger_event("SessionStart", context=ctx, current_message="")
+        results = self._hook_manager.trigger_event(
+            "SessionStart", context=ctx, current_message="",
+            trigger_async=False,  # 同步执行，收集输出直接注入
+        )
+        session = self.get_current_session()
+        if session:
+            for r in results:
+                if r.success and r.output:
+                    _inject_hook_to_session(session, "SessionStart", r.output)
+            self._hook_messages_updated.emit()
 
     def get_current_session(self) -> Optional[ChatSession]:
         """获取当前会话"""
