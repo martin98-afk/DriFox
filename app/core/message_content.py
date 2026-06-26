@@ -365,7 +365,9 @@ def content_to_markdown(content: Any) -> str:
                             serialized = json.dumps(v).decode('utf-8')
                         except (AttributeError, TypeError):
                             serialized = str(v)
-                        if len(serialized) > 300:
+                        # question 工具的 questions 字段是核心展示数据，不截断
+                        is_question_args = block.get("name") == "question" and k == "questions"
+                        if len(serialized) > 300 and not is_question_args:
                             # 过长的 list/dict 只保留前100字符作为预览 + 省略标记
                             preview = serialized[:100].replace('\\', '\\\\\\').replace('"', '\\"').replace('\n', '\\n')
                             preview = _sanitize_result(preview)
@@ -378,7 +380,11 @@ def content_to_markdown(content: Any) -> str:
 
             # 处理 result：清理可能影响渲染的标签
             result_raw = str(block.get("result", ""))
-            result_escaped = _sanitize_result(result_raw)[:300]
+            # question 工具的回答可能包含多个问题，不截断
+            if block.get("name") == "question":
+                result_escaped = _sanitize_result(result_raw)
+            else:
+                result_escaped = _sanitize_result(result_raw)[:300]
 
             success = bool(block.get("success", True))
             tool_call_id = block.get("tool_call_id", "")

@@ -802,6 +802,211 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
     <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
 
 
+def _normalize_question_item(q) -> dict:
+    """将 question 条目规范化为 dict 格式
+
+    兼容 LLM 传参的各种格式：
+    - dict: {"question": "...", "options": [...], "multiple": ...}
+    - str:  "问题文本"
+    - 其他: 转为字符串
+    """
+    if isinstance(q, dict):
+        return q
+    elif isinstance(q, str):
+        return {"question": q, "options": [], "multiple": False}
+    else:
+        return {"question": str(q), "options": [], "multiple": False}
+
+
+def _normalize_option_item(opt) -> dict:
+    """将选项条目规范化为 dict 格式
+
+    兼容 LLM 传参的各种格式：
+    - dict: {"label": "...", "description": "..."}
+    - str:  "选项文本"
+    - 其他: 转为字符串
+    """
+    if isinstance(opt, dict):
+        label = opt.get("label", "")
+        if not label:
+            for key in ("name", "text", "value", "title"):
+                label = opt.get(key, "")
+                if label:
+                    break
+        if not label:
+            for v in opt.values():
+                if isinstance(v, str) and v:
+                    label = v
+                    break
+            if not label:
+                label = str(opt)
+        return {"label": label, "description": opt.get("description", "")}
+    elif isinstance(opt, str):
+        return {"label": opt, "description": ""}
+    else:
+        return {"label": str(opt), "description": ""}
+
+
+def _parse_questions_field(questions_raw) -> list:
+    """解析 questions 字段，兼容 list / str / None
+
+    当 message_content 序列化截断后，questions 可能变成一个 JSON 字符串
+    而非 list，此处统一还原为规范化 list[dict]。
+    """
+    if not questions_raw:
+        return []
+
+    if isinstance(questions_raw, list):
+        return [_normalize_question_item(q) for q in questions_raw]
+
+    if isinstance(questions_raw, str):
+        # 尝试 JSON 解析（完整或截断的 JSON 字符串）
+        try:
+            parsed = json.loads(questions_raw)
+            if isinstance(parsed, list):
+                return [_normalize_question_item(q) for q in parsed]
+            elif isinstance(parsed, dict):
+                return [_normalize_question_item(parsed)]
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # JSON 解析失败（可能被截断），作为单个问题展示原始文本
+        return [{"question": questions_raw, "options": [], "multiple": False}]
+
+    return [{"question": str(questions_raw), "options": [], "multiple": False}]
+
+
+# 预编译：匹配 "问题「xxx」的回答：" 格式
+_QRESULT_SECTION_RE = re.compile(r'问题「(.+?)」的回答：\n?(.*)', re.DOTALL)
+# 预编译：匹配 【label】 格式的选中项
+_QRESULT_SELECTED_RE = re.compile(r'【(.+?)】')
+
+
+def _parse_question_result(result: str) -> dict:
+    """解析 question 工具的回答字符串，提取每个问题的选中选项和自定义回答
+
+    回答格式（来自 question_floating_widget._build_and_emit_answer）:
+        问题「问题文本」的回答：
+        【选项1】；【选项2】；自定义文本
+        ---
+        问题「问题2」的回答：
+        【选项A】
+
+    返回: {question_text: {"selected": [label, ...], "custom": str or None}}
+    """
+    if not result:
+        return {}
+
+    text = _unescape_newlines(result)
+    answers = {}
+
+    for section in re.split(r'\n---\n', text):
+        m = _QRESULT_SECTION_RE.match(section.strip())
+        if not m:
+            continue
+        q_text = m.group(1).strip()
+        answer_text = m.group(2).strip()
+
+        # 提取 【label】 格式的选中选项
+        selected = _QRESULT_SELECTED_RE.findall(answer_text)
+
+        # 自定义文本 = 移除 【label】 和分隔符后的剩余文本
+        custom_text = _QRESULT_SELECTED_RE.sub('', answer_text)
+        # 移除中英文分号分隔符
+        custom_text = custom_text.replace('；', '').replace(';', '').strip()
+        # 过滤掉仅含省略号或空白的假自定义文本
+        if custom_text and custom_text != '...':
+            custom = custom_text
+        else:
+            custom = None
+
+        answers[q_text] = {"selected": selected, "custom": custom}
+
+    return answers
+
+
+def _render_question_block(tool_args: dict, result: str = None) -> str:
+    """将 question 工具渲染为 bash 风格的终端块
+
+    渲染规则：
+    - 终端头: ❓ question: 第一个问题文本（预览）
+    - 终端体: 逐个展示问题 → 选项列表 → 用户回答
+    - 选项标记: 选中 ● / 未选中 ○（多选时用 ◉ / ○）
+    - 自定义回答: 单独以 ✎ 自定义: xxx 显示
+
+    兼容多种参数格式（list / str / 旧格式单 question 字段）。
+    """
+    _gf = _get_global_font()
+
+    # 获取问题列表（兼容新旧格式 + 字符串类型）
+    questions_raw = tool_args.get("questions", [])
+    if not questions_raw and "question" in tool_args:
+        questions_raw = [{
+            "question": str(tool_args.get("question", "")),
+            "options": tool_args.get("options", []),
+            "multiple": tool_args.get("multiple", False),
+        }]
+    normalized = _parse_questions_field(questions_raw)
+    if not normalized:
+        return ""
+
+    # 解析用户回答
+    answer_map = _parse_question_result(result) if result else {}
+
+    # 构建终端体文本
+    lines = []
+    for q in normalized:
+        q_text = q.get("question", "")
+        options = q.get("options", [])
+        multiple = q.get("multiple", False)
+        suffix = " (多选)" if multiple else ""
+        answer_info = answer_map.get(q_text, {})
+        selected_labels = answer_info.get("selected", [])
+        custom_text = answer_info.get("custom")
+
+        # 问题文本行
+        lines.append(f"❓ {q_text}{suffix}")
+
+        # 选项列表
+        if options:
+            lines.append("")
+            unselected_marker = "○"
+            selected_marker = "◉" if multiple else "●"
+            for opt in options:
+                opt = _normalize_option_item(opt)
+                label = opt.get("label", "")
+                desc = opt.get("description", "")
+                is_selected = label in selected_labels
+                marker = selected_marker if is_selected else unselected_marker
+                if desc:
+                    lines.append(f"  {marker} {label}  —  {desc}")
+                else:
+                    lines.append(f"  {marker} {label}")
+            lines.append("")
+
+        # 用户回答：只有自定义输入才单独显示（选中的选项已用实心标记）
+        if custom_text:
+            lines.append(f"  ✎ 自定义: {custom_text}")
+        if not selected_labels and not custom_text and not options:
+            # 无选项且无回答时，显示原始 result
+            if result:
+                lines.append(f"  ✎ 回答: {_unescape_newlines(result)}")
+        lines.append("")
+
+    body_text = "\n".join(lines).rstrip()
+
+    # 终端头预览（第一个问题文本）
+    first_q = normalized[0].get("question", "")
+    q_preview = first_q[:80] + ("…" if len(first_q) > 80 else "")
+
+    return f"""
+    <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+        <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+            <span style="color:#FFA500;">❓</span> <span style="color:#c9d1d9;">question: {escape(q_preview)}</span>
+        </div>
+        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(body_text)}</pre>
+    </div>"""
+
+
 def render_tool_block(
     tool_name: str,
     tool_args: dict,
@@ -909,7 +1114,16 @@ def render_tool_block(
         </span>'''
 
     # 生成参数预览（折叠时显示）
-    args_preview = _format_args_preview(tool_args)
+    # question 特殊处理：预览显示第一个问题文本
+    if tool_name == "question":
+        questions_raw = tool_args.get("questions", [])
+        if not questions_raw and "question" in tool_args:
+            questions_raw = [{"question": str(tool_args["question"])}]
+        normalized = _parse_questions_field(questions_raw)
+        q_text = normalized[0].get("question", "") if normalized else ""
+        args_preview = q_text[:120] + ("…" if len(q_text) > 120 else "") if q_text else "(无问题)"
+    else:
+        args_preview = _format_args_preview(tool_args)
 
     # ── inline diff 预览区 ──
     diff_html = ""
@@ -1001,6 +1215,13 @@ def render_tool_block(
         <div class="tool-expanded-content">
             {echarts_html}
             {diff_html}
+        </div>"""
+    elif tool_name == "question" and success is not False:
+        collapsed = True
+        question_html = _render_question_block(tool_args, result)
+        expanded_content = f"""
+        <div class="tool-expanded-content">
+            {question_html}
         </div>"""
     else:
         # 无特殊渲染时：显示参数表格
