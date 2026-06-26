@@ -40,7 +40,7 @@ FRAME = 16
 COLS = 12
 # 15 行：idle, thinking, streaming, question, success, error, sleeping, writing,
 #        thinking_hard, excited, dragging, warning, reading, music, wakeup
-ROWS = 15
+ROWS = 16
 W = FRAME * COLS  # 192
 H = FRAME * ROWS  # 240
 
@@ -1220,6 +1220,110 @@ for f in range(12):
         # 伸懒腰帧加一个上方小星星表示精神恢复
         if f == 10:
             draw_sparkle(img, ox, 14 * FRAME, 8, 0, YELLOW_BRIGHT)
+
+# ════════════════════════════════════════════════════════════════
+# Row 15: sleep — 入睡过渡（站立→犯困→哈欠→趴下→入睡，12帧）
+# ════════════════════════════════════════════════════════════════
+# 设计：与 wakeup（Row 14）对称，wakeup 是 curled→standing，sleep 是 standing→curled。
+# 0-1: 站立犯困（眼皮渐重）
+# 2-3: ★ 打哈欠（张嘴 + 闭眼 + 耳朵竖起 + 身体微仰）
+# 4-5: 闭眼放松（头微微低下）
+# 6-7: 趴下过渡（手动绘制，从站立过渡到蜷缩，视觉上腿消失身体填满）
+# 8-11: 蜷缩入睡（与 wakeup 0-2 帧对称的趴睡姿态）
+# 重要：不使用额外的 crouch offset，站立和蜷缩在 16x16 格内占据相同垂直空间
+#       （站立=头y2-7身y8-11腿y12-13, 蜷缩=头y2-7身y8-11底y12）
+
+sleep_dys = [0, 0, -1, -1, 0, 0, 0, 0, -1, -1, 0, 0]
+
+for f in range(12):
+    ox = f * FRAME
+    cell_oy = 15 * FRAME
+    dy = sleep_dys[f]
+
+    if f <= 5:
+        # 0-5：站立犯困阶段（用 draw_fox）
+        if f == 0:
+            # 正常站立，眼神略显疲惫（半闭）
+            kwargs = {"eyes_white": [(6, 5), (7, 5)], "pupils": [(7, 5)],
+                      "highlights": [(6, 5)], "mouth": [(7, 7), (8, 7)]}
+        elif f == 1:
+            # 眼睛半闭（只剩细缝），嘴微张
+            kwargs = {"eyes_white": [(6, 5)], "pupils": [(7, 5)],
+                      "highlights": [], "mouth": [(7, 7), (8, 7)]}
+        elif f in (2, 3):
+            # ★ 打哈欠！嘴巴张大（4px宽），眼睛紧闭，耳朵竖起，尾巴翘起
+            kwargs = {"eyes_white": [], "pupils": [], "highlights": [],
+                      "mouth": [(6, 7), (7, 7), (8, 7), (9, 7)],
+                      "ear_l": [(4, 1), (5, 1), (4, 2), (5, 2)],
+                      "ear_r": [(10, 1), (11, 1), (10, 2), (11, 2), (9, 2)],
+                      "tail": TAIL_WAG_UP}
+        elif f == 4:
+            # 哈欠打完，闭眼，嘴合拢，头微微低下
+            kwargs = {"eyes_white": [], "pupils": [], "highlights": [],
+                      "mouth": [(7, 7), (8, 7)]}
+        else:  # f == 5
+            # 闭眼放松，头低下，尾巴下垂
+            kwargs = {"eyes_white": [], "pupils": [], "highlights": [],
+                      "mouth": [(7, 7), (8, 7)], "tail": TAIL_WAG_DOWN}
+        draw_fox(img, ox, 15 * FRAME + dy, cell_oy=cell_oy, **kwargs)
+
+    else:
+        # 6-11：趴下过渡→蜷缩入睡（手动绘制，与 wakeup 0-4 帧对称）
+        _set_cell_rect(ox, cell_oy, ox + FRAME - 1, cell_oy + FRAME - 1)
+        oy = 15 * FRAME
+
+        # 耳朵（与 sleeping 一致的趴卧耳朵位置）
+        for x, y in [(4, 2 + dy), (5, 2 + dy), (10, 2 + dy), (11, 2 + dy)]:
+            p_px(img, ox, oy, x, y, ORANGE)
+        p_px(img, ox, oy, 5, 3 + dy, ORANGE_LIGHT)
+        p_px(img, ox, oy, 10, 3 + dy, ORANGE_LIGHT)
+        for x, y in [(4, 3 + dy), (11, 3 + dy)]:
+            p_px(img, ox, oy, x, y, PINK_SOFT)
+
+        # 头部
+        for y in range(4 + dy, 8 + dy):
+            for x in range(4, 12):
+                p_px(img, ox, oy, x, y, ORANGE)
+        for y in range(5 + dy, 8 + dy):
+            for x in range(6, 10):
+                p_px(img, ox, oy, x, y, CREAM)
+
+        # 闭眼横线
+        for x, y in [(6, 6 + dy), (7, 6 + dy), (9, 6 + dy), (10, 6 + dy)]:
+            p_px(img, ox, oy, x, y, DARK)
+
+        # 嘴角弧线 + 鼻子
+        for x, y in [(6, 7 + dy), (10, 7 + dy)]:
+            p_px(img, ox, oy, x, y, DARK)
+        p_px(img, ox, oy, 8, 7 + dy, DARK)
+
+        # 腮红（偶数帧）
+        if f in (6, 8, 10):
+            p_px(img, ox, oy, 5, 7 + dy, PINK_SOFT)
+            p_px(img, ox, oy, 10, 7 + dy, PINK_SOFT)
+
+        # 下半身（趴卧姿态 — 不画腿，只画身体）
+        for y in range(8 + dy, 11 + dy):
+            for x in range(4, 12):
+                p_px(img, ox, oy, x, y, ORANGE)
+        for y in range(8 + dy, 11 + dy):
+            for x in range(6, 10):
+                p_px(img, ox, oy, x, y, CREAM)
+        for x in range(4, 12):
+            p_px(img, ox, oy, x, 11 + dy, ORANGE)
+
+        # 尾巴
+        for x, y in [(12, 8 + dy), (13, 8 + dy), (14, 8 + dy), (15, 8 + dy),
+                     (12, 9 + dy), (13, 9 + dy), (14, 9 + dy), (15, 9 + dy),
+                     (12, 10 + dy), (13, 10 + dy), (14, 10 + dy), (15, 10 + dy),
+                     (12, 11 + dy), (13, 11 + dy), (14, 11 + dy), (15, 11 + dy)]:
+            p_px(img, ox, oy, x, y, ORANGE)
+        p_px(img, ox, oy, 14, 10 + dy, CREAM)
+        p_px(img, ox, oy, 15, 10 + dy, CREAM)
+
+        # 身体收尾（取代腿的位置，平滑过渡）
+        for x in range(5, 9):
+            p_px(img, ox, oy, x, 12 + dy, ORANGE_MID)
 
 # ════════════════════════════════════════════════════════════════
 # 保存

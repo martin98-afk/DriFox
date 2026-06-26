@@ -11773,6 +11773,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception:
                     pass
 
+        # ★ 清理像素小狐桌宠（停止所有定时器）
+        if getattr(self, "pixel_pet", None) is not None:
+            try:
+                self.pixel_pet.cleanup()
+            except Exception:
+                pass
+
         # 🔧 内存泄漏修复：停止窗口级 ThreadPool
         if hasattr(self, "_gen_thread_pool") and self._gen_thread_pool:
             try:

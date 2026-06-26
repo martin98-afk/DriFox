@@ -21,8 +21,6 @@ ICON_NAME_TO_FILE = {
     "siliconflow": "siliconflow.png",
     "slack": "slack.svg",
     "Telegram": "Telegram.svg",
-    "_preview_full": "_preview_full.png",
-    "_preview_playing": "_preview_playing.png",
     "主题风格": "主题风格.svg",
     "云通信": "云通信.svg",
     "企业微信": "企业微信.svg",

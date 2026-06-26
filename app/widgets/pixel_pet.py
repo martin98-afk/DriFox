@@ -42,6 +42,7 @@ import math
 import random
 from pathlib import Path
 
+from PyQt5 import sip
 from PyQt5.QtCore import (
     QEasingCurve,
     QElapsedTimer,
@@ -93,6 +94,7 @@ STATE_ROWS = {
     "crying": 5,         # ★ 大哭（Row 5 流汗惊恐），与 error 共用行
     "music": 13,         # ★ 戴耳机听音乐（Row 13 耳机 + 音符 + 律动）
     "wakeup": 14,        # ★ 睡醒过渡（Row 14 闭眼→哈欠→伸懒腰→清醒）
+    "sleep": 15,         # ★ 入睡过渡（Row 15 站立→哈欠→眯眼→趴下→入睡）
 }
 
 # 睡眠子状态映射（深夜用 napping 表现更深度的睡眠）
@@ -125,6 +127,7 @@ FRAME_INTERVALS = {
     "crying": 150,              # ★ 哭泣：比正常 error 稍慢
     "music": 220,               # ★ 听音乐：舒缓律动节奏
     "wakeup": 180,              # ★ 睡醒：渐进苏醒，不急不缓
+    "sleep": 180,               # ★ 入睡：缓慢犯困，渐入梦乡
     # 子状态
     "napping": 200,
 }
@@ -153,6 +156,7 @@ SLEEP_WAKE_PROBABILITY = 0.45      # 每次检查有 45% 概率醒来
 READING_DURATION_MS = (15_000, 30_000)    # 看书持续 15~30 秒
 MUSIC_DURATION_MS = (20_000, 40_000)     # 听音乐持续 20~40 秒
 WAKEUP_DURATION_FRAMES = 12        # 睡醒过渡完整一轮（按帧数精确控制，只播一次）
+SLEEP_DURATION_FRAMES = 12         # 入睡过渡完整一轮（按帧数精确控制，只播一次）
 
 # 惯性滑动参数
 INERTIA_DECAY = 0.92
@@ -179,6 +183,7 @@ STATE_EMOJI = {
     "reading": "📖",       # ★ 看书：开卷有益
     "music": "🎵",         # ★ 听音乐：耳机
     "wakeup": "🌤️",       # ★ 睡醒：清晨阳光
+    "sleep": "😴",          # ★ 入睡：犯困睡觉
     "napping": "💤",
 }
 
@@ -223,6 +228,7 @@ class PixelPetWidget(QWidget):
         self._drag_pending_state = None      # ★ 延迟切换状态（从睡眠拖拽时首次移动才切 dragging）
         self._thinking_hard_checker = None   # 思考深度检测计时器引用
         self._wakeup_frame_count = 0         # ★ 睡醒过渡帧计数（走完一轮自动回 idle，不循环）
+        self._sleep_frame_count = 0          # ★ 入睡过渡帧计数（走完一轮自动切 sleeping，不循环）
 
         # ── 错误状态持久化（重试时保持报错） ──
         self._error_persist = False
@@ -492,6 +498,10 @@ class PixelPetWidget(QWidget):
         if old_state in ("sleeping", "napping") and state not in ("sleeping", "napping", "wakeup"):
             self._sleep_wake_timer.stop()
 
+        # ★ 离开 sleep（入睡过渡）时停止帧计数
+        if old_state == "sleep" and state not in ("sleep", "sleeping", "napping"):
+            self._sleep_frame_count = 0
+
         # ★ 错误持续：离开错误状态时清除持久化标志
         if state != "error":
             self._error_persist = False
@@ -633,10 +643,8 @@ class PixelPetWidget(QWidget):
 
     def _enter_sleep(self) -> None:
         if self._current_state == "idle":
-            if self._is_night_time():
-                self.set_state("napping")  # 映射到 sleeping
-            else:
-                self.set_state("sleeping")
+            # ★ 先播放入睡过渡动画，结束后自动切到 sleeping
+            self._play_idle_to_sleep()
 
     def _check_night_mode(self) -> None:
         """检查当前是否为深夜，自动进入 napping"""
@@ -696,6 +704,21 @@ class PixelPetWidget(QWidget):
         self.update()
         self.state_changed.emit("wakeup")
 
+    def _play_idle_to_sleep(self) -> None:
+        """★ 播放入睡过渡动画（sleep），完成后切换到 sleeping 状态
+
+        与 _play_wakeup_to_idle 对称，是入睡的必经过渡步骤。
+        通过帧计数器精确控制：走完 SLEEP_DURATION_FRAMES 帧后由
+        _advance_frame 自动切到 sleeping，不循环播放。
+        """
+        # 切换到 sleep 状态播放入睡动画
+        self._current_state = "sleep"
+        self._frame_index = 0
+        self._sleep_frame_count = 0  # ★ 帧计数归零，由 _advance_frame 计数推进
+        self._start_frame_timer("sleep")
+        self.update()
+        self.state_changed.emit("sleep")
+
     # ═══════════════════════════════════════════════════════════
     # 入场动画
     # ═══════════════════════════════════════════════════════════
@@ -753,6 +776,21 @@ class PixelPetWidget(QWidget):
             if self._wakeup_frame_count >= WAKEUP_DURATION_FRAMES:
                 self._wakeup_frame_count = 0
                 self.set_state("idle")
+                return
+            self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
+            self.update()
+            return
+
+        # ★ sleep（入睡过渡）：精确播放一轮后切换到 sleeping，避免循环重复"睡"动作
+        if self._current_state == "sleep":
+            self._sleep_frame_count += 1
+            if self._sleep_frame_count >= SLEEP_DURATION_FRAMES:
+                self._sleep_frame_count = 0
+                # 入睡后根据深夜时段决定 napping 还是 sleeping
+                if self._is_night_time():
+                    self.set_state("napping")
+                else:
+                    self.set_state("sleeping")
                 return
             self._frame_index = (self._frame_index + 1) % FRAMES_PER_STATE
             self.update()
@@ -849,6 +887,9 @@ class PixelPetWidget(QWidget):
         elapsed.start()
 
         def state_step():
+            # ★ widget 已被销毁时跳过（如窗口关闭后触发的残留 singleShot）
+            if sip.isdeleted(self):
+                return
             # ★ 状态被外部(AI信号等)改变时中止行为，避免闭包覆写新状态
             if self._current_state != state_name:
                 self._idle_behavior_active = False
@@ -1495,4 +1536,5 @@ class PixelPetWidget(QWidget):
         self._stop_thinking_hard_timer()
         self._state_before_drag = None
         self._drag_pending_state = None
+        self._sleep_frame_count = 0
         logger.debug("[PixelPet] v2 已清理")

@@ -954,6 +954,9 @@ class CommandCard(QWidget):
                     color: {Colors.TEXT_PRIMARY}; background: transparent;
                     padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
                 }}
+                QLabel:hover {{
+                    background: {Colors.HOVER_BG};
+                }}
             """)
             # 用 lambda 捕获值
             item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
@@ -976,53 +979,57 @@ class CommandCard(QWidget):
     # ---- 自动检测 --model 触发值选择 / 实时搜索 ----
 
     def _auto_switch_to_value_selection(self, text: str, cursor_pos: int = -1):
-        """检测 --model 前缀输入，自动进入/刷新值选择模式
+        """检测文本中完整的 value 参数名（含 =），自动进入/刷新值选择模式
 
         行为：
-        - 用户在 detail 命令范围内输入 `--m`/`--mo`/`--mod`/.../`--model=` 时自动弹出模型列表
+        - 只匹配完整的参数名 + =（如 --language=），不匹配前缀
+        - 文本中有多个完整参数时取最后一个（最近输入的）
+        - 不论参数当前是否可见（active 的参数会被隐藏但文本仍在）
         - 已在值选择模式时，根据光标前内容实时过滤
         - cursor_pos=-1 时按"到下一个空格/末尾"取搜索关键字
         """
         import re
 
-        # 1. 找 --model 前缀位置（--m, --mo, --model, --model= 都匹配）
-        #    使用 lookahead 限制最长匹配到 = 之前/或 整个 token
-        match = re.search(r'--model[a-z-]*', text)
-        if not match:
-            return
-
-        token_start = match.start()
-        token_end = match.end()  # 包含 = 时指向 = 之后
-
-        # 2. 限定在 detail 命令范围内（避免误识别）
-        #    detail 模式的输入形如 "/agent --model=xxx"
-        cmd_prefix_len = len(self._detail_cmd_name) + 2  # "/<cmd_name> "
-        if token_start < cmd_prefix_len:
-            return
-
-        # 3. 找到对应的参数 widget（必须在 _param_widgets 中且仍可见）
-        target_widget = None
+        # 1. 收集所有带 value_options 的 value 参数（不论显隐，靠文本来匹配）
+        candidate_params = []
         for w in self._param_widgets:
-            if w.param_name == "--model=" and w.param_type == "value":
-                if w.isVisible():
-                    target_widget = w
-                break
-        if target_widget is None:
-            return  # 参数已激活（被显隐为不可见），不做自动触发
+            if w.param_type != "value":
+                continue
+            # --model= 使用动态数据源；其他参数需有静态 value_options
+            if w.param_name == "--model=":
+                candidate_params.append(w)
+            elif w._param.value_options:
+                candidate_params.append(w)
 
-        # 4. 提取搜索 query：match 之后到光标/下一个空格的内容
-        query = self._extract_model_query(text, token_end, cursor_pos)
+        if not candidate_params:
+            return
 
-        # 5. 已在值选择模式：仅刷新过滤
-        if self._value_selection_mode and self._value_selection_param == "--model=":
+        # 2. 查找文本中完整的参数名（含 =），取最后一个匹配
+        best_match = None  # (match_end, widget, query)
+
+        for w in candidate_params:
+            param_clean = w.param_name.rstrip("=")
+            m = re.search(re.escape(param_clean) + r'=', text)
+            if m and (best_match is None or m.end() > best_match[0]):
+                token_end = m.end()
+                query = self._extract_value_query(text, token_end, cursor_pos)
+                best_match = (m.end(), w, query)
+
+        if best_match is None:
+            return
+
+        _, target_widget, query = best_match
+
+        # 3. 已在值选择模式且是同一个参数：仅刷新过滤
+        if self._value_selection_mode and self._value_selection_param == target_widget.param_name:
             self._refresh_value_list(query)
             return
 
-        # 6. 否则切到值选择模式
+        # 4. 切到值选择模式
         self._switch_to_value_selection(target_widget, query=query)
 
-    def _extract_model_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
-        """提取 --model= 之后到光标前/下一个空格前的子串作为搜索关键字"""
+    def _extract_value_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
+        """提取 value 参数 = 之后到光标前/下一个空格前的子串作为搜索关键字"""
         if cursor_pos < 0 or cursor_pos > len(text):
             cursor_pos = len(text)
         # 右边界 = min(光标, 下一个空格)
@@ -1075,6 +1082,9 @@ class CommandCard(QWidget):
                 QLabel {{
                     color: {Colors.TEXT_PRIMARY}; background: transparent;
                     padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
+                }}
+                QLabel:hover {{
+                    background: {Colors.HOVER_BG};
                 }}
             """)
             item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
@@ -1245,16 +1255,25 @@ class CommandCard(QWidget):
                 self._value_widgets[old_idx].setStyleSheet(f"""
                     QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;
                              padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+                    QLabel:hover {{
+                        background: {Colors.HOVER_BG};
+                    }}
                 """)
             if 0 <= new_idx < len(self._value_widgets):
                 self._value_widgets[new_idx].setStyleSheet(f"""
                     QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
                              padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+                    QLabel:hover {{
+                        background: {Colors.HOVER_BG};
+                    }}
                 """)
         elif 0 <= new_idx < len(self._value_widgets):
             self._value_widgets[new_idx].setStyleSheet(f"""
                 QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
                          padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
+                QLabel:hover {{
+                    background: {Colors.HOVER_BG};
+                }}
             """)
 
         # 滚动到可见
