@@ -100,6 +100,17 @@ feat|fix|docs|chore|refactor|test: scope - summary
 ---
 
 ### 已修复（2026-06-26）
+- **hook 消息双重注入（严重 bug）**:
+  - 根因：`on_hook_finished` 回调把 hook 输出同时写入**两个路径**：
+    - `session.messages.append(raw_msg)` — raw 版本直接持久化到会话（无格式包装）
+    - `_hook_message_queue.put(formatted_msg)` — 格式化版本推入队列供 worker 注入
+  - 结果：context_builder 从 session.messages 读取 raw 版本送入 LLM，worker 再从队列读取格式化版本送入 LLM → **每轮翻倍累积**
+  - 修复 1（`backend.py`）：移除 raw 版本写入，改为只写入格式化版本（带 `---🔌 Hook 内部通知---` 包装）+ 通用 `_hook_event` 去重 + 旧 raw 消息迁移清理
+  - 修复 2（`chat_worker.py`）：`_inject_pending_hook_messages` 增加 `_hook_event` 去重检查，当 session 已包含同类型 hook 消息时跳过队列注入
+  - 修复 3：PostUserMessage 从 command 类型改为 Python 类型（`current_datetime.py`），同步执行确保在 worker 启动前完成
+  - 影响文件：`app/core/backend.py`、`app/core/workers/chat_worker.py`、`plugins/system/hooks/hooks.json`、`plugins/system/hooks/current_datetime.py`（新建）
+  - 测试：全部 42 个测试通过 ✅
+
 - **chat_worker 工具调用循环导致会话永久卡死**:
   - 根因：循环检测触发后 `finished_with_messages` 发射的消息列表**仍包含重复的工具调用轮次**，持久化后下次发消息再次触发检测 → 会话死锁
   - 修复 V1 → V2 迭代（V1 有两个 bug）:

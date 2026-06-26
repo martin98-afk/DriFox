@@ -4,9 +4,8 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "date +\"%Y-%m-%d %H:%M:%S\"",
-            "commandWindows": "powershell -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss'\"",
+            "type": "python",
+            "function": ".current_datetime:hook",
             "add_output_to_context": true,
             "statusMessage": "正在注入当前系统时间...",
             "id": "e3886659a58a428094a185a054e87791"

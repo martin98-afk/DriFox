@@ -411,6 +411,11 @@ class OpenAIChatWorker(QThread):
         与 Qt 信号路径（_on_hook_messages_changed）互补——队列提供即时投递，
         信号提供最终一致性（含去重检查，不会重复注入）。
 
+        注意：
+        - on_hook_finished 回调已把格式化版本同时写入 session.messages 和队列。
+        - context_builder 从 session.messages 读取后，可能已包含同 _hook_event 的消息。
+        - 因此需要在此处做 _hook_event 去重，避免队列消息重复注入。
+
         Args:
             session_messages_target: 可选，若传入则将 hook 消息也追加到此列表，
                 确保 worker 结束时能随 current_session_messages 一起持久化到 session。
@@ -422,18 +427,38 @@ class OpenAIChatWorker(QThread):
             q = getattr(backend, '_hook_message_queue', None)
             if q is None:
                 return
+
+            # 收集 session_messages_target 中已有的 _hook_event 集合，用于去重
+            target_events = set()
+            target = session_messages_target or self._current_session_messages
+            if target:
+                for m in target:
+                    evt = m.get('_hook_event')
+                    if evt:
+                        target_events.add(evt)
+
             msgs = []
             while True:
                 try:
                     msgs.append(q.get_nowait())
                 except queue.Empty:
                     break
+
             if msgs:
-                self._append_to_api_cache(msgs)
-                self._current_session_messages.extend(msgs)
+                # 去重：过滤掉 _hook_event 已存在于目标列表的消息
+                deduped = [
+                    m for m in msgs
+                    if m.get('_hook_event') not in target_events
+                ]
+                if not deduped:
+                    logger.debug(f"[HookManager] All {len(msgs)} pending hook msgs already exist, skipped")
+                    return
+
+                self._append_to_api_cache(deduped)
+                self._current_session_messages.extend(deduped)
                 if session_messages_target is not None:
-                    session_messages_target.extend(msgs)
-                logger.debug(f"[HookManager] Injected {len(msgs)} pending hook msgs from queue")
+                    session_messages_target.extend(deduped)
+                logger.debug(f"[HookManager] Injected {len(deduped)}/{len(msgs)} pending hook msgs from queue")
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
 
@@ -1825,7 +1850,7 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
-
+        print(sanitized)
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]

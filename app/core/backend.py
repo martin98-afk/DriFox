@@ -288,19 +288,32 @@ class ChatBackend(QObject):
             if add_to_messages:
                 session = self.get_current_session()
                 if session:
-                    # 对于 PreUserMessage，先删除之前的同类 hook 消息，只保留最新一个
-                    if event_name == "PreUserMessage":
+                    # 兼容清理：删除不包含 "🔌 Hook 内部通知" 标记的旧格式 raw hook 消息
+                    # 旧版本（2026-06-26 之前）的 on_hook_finished 会把 raw 输出直接写入
+                    # session.messages，context_builder 会把它送入 LLM，与队列注入的格式化
+                    # 版本重复。此清理为一次性迁移，当第一个 hook 事件触发时执行。
+                    if any(
+                        msg.get("_hook_event") and "🔌 Hook 内部通知" not in str(msg.get("content", ""))
+                        for msg in session.messages
+                    ):
                         session.messages = [
                             msg for msg in session.messages
-                            if not (msg.get("role") == "assistant" and msg.get("_hook_event") == "PreUserMessage")
+                            if not msg.get("_hook_event") or "🔌 Hook 内部通知" in str(msg.get("content", ""))
                         ]
 
-                    # 存入原始输出（不含格式包装），供 UI 显示
-                    # _hook_event 是内部标记用于清理；get_context_messages() 中 consolidate 时会自动剥离
+                    # 通用去重：删除 session.messages 中同类型的所有旧 hook 消息
+                    # 这包括旧格式的 raw 版本和格式化版本，确保每个事件类型最多一条
+                    session.messages = [
+                        msg for msg in session.messages
+                        if not (msg.get("_hook_event") == event_name)
+                    ]
+
+                    # 存入格式化版本（带 Markdown 分隔线 + Hook 通知标记），
+                    # 让 LLM 清晰识别为系统内部通知而非用户输入或正常对话
                     import datetime as _dt
                     msg = {
                         "role": "assistant",
-                        "content": output,
+                        "content": hook_output,
                         "_hook_event": event_name,
                         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
@@ -308,11 +321,13 @@ class ChatBackend(QObject):
                     session._update_timestamp()
 
                 # 推入线程安全队列，供 worker 在下一轮 LLM 调用前消费
-                # 注入带格式包装的消息，让 LLM 能识别这是 Hook 内部通知而非用户输入
+                # 用于异步 hook 完成后，worker 能及时感知（与上面 session.messages 同步写入）
+                # 注意：_inject_pending_hook_messages 中会有 _hook_event 去重检查，
+                # 避免队列消息重复注入（当 context_builder 已从 session.messages 读取时）。
                 self._hook_message_queue.put({
                     "role": "assistant",
                     "content": hook_output,
-                    "_hook_event": event_name,  # 保留标记，供渲染层识别为 hook 消息
+                    "_hook_event": event_name,  # 保留标记，供渲染层/去重使用
                 })
 
                 # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
