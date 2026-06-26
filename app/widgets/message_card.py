@@ -2736,6 +2736,16 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
+                /* 元信息行（文件头/hunk头/截断）：行号列与符号列隐形，避免空列割裂视觉 */
+                .tool-diff-inline .diff-meta .line-num {{
+                    background: transparent;
+                    border-right-color: transparent;
+                    min-width: 0;
+                    padding: 0;
+                }}
+                .tool-diff-inline .diff-meta .line-sign {{
+                    width: 0;
+                }}
                 .tool-diff-inline .word-add {{
                     background: rgba(63, 185, 80, 0.28);
                     border-radius: 3px;

@@ -330,7 +330,7 @@ def _render_diff_preview(diff_text: str) -> str:
         line = lines[i]
         if line is None:
             rows.append(
-                f'<div class="diff-line diff-truncated">'
+                f'<div class="diff-line diff-truncated diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>'
@@ -353,14 +353,14 @@ def _render_diff_preview(diff_text: str) -> str:
                 else:
                     display = new_path or old_path
                 rows.append(
-                    f'<div class="diff-line diff-file-header">'
+                    f'<div class="diff-line diff-file-header diff-meta">'
                     f'<span class="line-num">&nbsp;</span>'
                     f'<span class="line-sign"></span>'
                     f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(display)}</span></div>'
                 )
             else:
                 rows.append(
-                    f'<div class="diff-line diff-file-header">'
+                    f'<div class="diff-line diff-file-header diff-meta">'
                     f'<span class="line-num">&nbsp;</span>'
                     f'<span class="line-sign"></span>'
                     f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(line[4:]))}</span></div>'
@@ -370,7 +370,7 @@ def _render_diff_preview(diff_text: str) -> str:
         elif _pending_old_header:
             # 单独的 --- 行（没有 +++ 跟随），先渲染 header 再处理当前行
             rows.append(
-                f'<div class="diff-line diff-file-header">'
+                f'<div class="diff-line diff-file-header diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(_pending_old_header[4:]))}</span></div>'
@@ -384,7 +384,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 old_ln = int(m.group(1))
                 new_ln = int(m.group(2))
             rows.append(
-                f'<div class="diff-line diff-hunk">'
+                f'<div class="diff-line diff-hunk diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">{escape(line)}</span></div>'
@@ -401,19 +401,18 @@ def _render_diff_preview(diff_text: str) -> str:
                 add_lines.append(lines[i][1:])  # 去掉前缀 +
                 i += 1
 
-            # 配对 word diff：旧行放一起，新行放一起
+            # 配对 word diff：- 行紧跟 + 行交替输出（GitHub unified diff 风格）
+            # 便于上下对照词级差异，行号连续
             pair_count = min(len(del_lines), len(add_lines))
-            old_rows = []
-            new_rows = []
             for k in range(pair_count):
                 old_html, new_html = _word_diff_html(del_lines[k], add_lines[k])
-                old_rows.append(
+                rows.append(
                     f'<div class="diff-line diff-del">'
                     f'<span class="line-num">{old_ln}</span>'
                     f'<span class="line-sign">-</span>'
                     f'<span class="line-code">{old_html}</span></div>'
                 )
-                new_rows.append(
+                rows.append(
                     f'<div class="diff-line diff-add">'
                     f'<span class="line-num">{new_ln}</span>'
                     f'<span class="line-sign">+</span>'
@@ -421,9 +420,6 @@ def _render_diff_preview(diff_text: str) -> str:
                 )
                 old_ln += 1
                 new_ln += 1
-
-            rows.extend(old_rows)
-            rows.extend(new_rows)
 
             # 未配对的删除行
             for k in range(pair_count, len(del_lines)):
