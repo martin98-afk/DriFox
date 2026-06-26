@@ -245,48 +245,6 @@ class TaskTools:
         except Exception as e:
             return ToolResult(False, error=f"List skills error: {str(e)}")
 
-    def scan_repo(self, path: str = None, max_depth: int = 2) -> ToolResult:
-        import os as _os
-
-        try:
-            target_path = self._resolve_path(path) if path else self.workdir
-            if not target_path.exists():
-                return ToolResult(False, error=f"Path not found: {target_path}")
-
-            try:
-                scan_display = str(target_path.relative_to(self.workdir))
-            except ValueError:
-                scan_display = str(target_path)
-            lines = [f"Repository scan: {scan_display}"]
-            root_depth = len(target_path.parts)
-
-            for root, dirs, files in _os.walk(target_path):
-                rel_depth = len(Path(root).parts) - root_depth
-                if rel_depth > max_depth:
-                    dirs[:] = []
-                    continue
-
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if d not in {'.mypy_cache', '.git', 'node_modules', '__pycache__', 'venv', '.venv',
-                                 'dist', 'build', '.idea', '.vscode'}
-                ]
-                rel_root = Path(root).relative_to(target_path)
-                display_root = "." if str(rel_root) == "." else str(rel_root)
-                lines.append(f"\n[{display_root}]")
-
-                sample_dirs = sorted(dirs)[:8]
-                sample_files = sorted(files)[:12]
-                if sample_dirs:
-                    lines.append("dirs: " + ", ".join(sample_dirs))
-                if sample_files:
-                    lines.append("files: " + ", ".join(sample_files))
-
-            return ToolResult(True, content="\n".join(lines[:200]))
-        except Exception as e:
-            return ToolResult(False, error=f"scan_repo error: {str(e)}")
-
     def stage_files(self, files: List[str]) -> ToolResult:
         try:
             staged = []

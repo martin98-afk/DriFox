@@ -3887,8 +3887,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 if "commandWindows" in values:
                     add_kwargs["commandWindows"] = values["commandWindows"]
-                if "statusMessage" in values:
-                    add_kwargs["statusMessage"] = values["statusMessage"]
                 self._settings_popup.hookListCard._add_hook(**add_kwargs)
         # 广播给所有其他窗口刷新 hook 列表
         for win in OpenAIChatToolWindow._instances:

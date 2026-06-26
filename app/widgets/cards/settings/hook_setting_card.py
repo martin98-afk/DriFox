@@ -51,12 +51,28 @@ HOOK_EVENT_ORDER = [
 PLUGIN_PATH_VARS = ["${CLAUDE_PLUGIN_ROOT}"]
 
 
-class _FlowLayout(QLayout):
-    """简易流式布局：子控件按宽度自动换行排列"""
+class _CompactTextEdit(QPlainTextEdit):
+    """QPlainTextEdit with small initial height via sizeHint override.
 
-    def __init__(self, parent=None, spacing=6):
+    QPlainTextEdit 默认 sizeHint() 高度很大（基于 8 行文本），
+    即使 setMinimumHeight(36) 也不会缩小实际占用空间。
+    此子类让 sizeHint 高度 = minimumHeight，
+    初始很小、无最大高度限制、可随内容自动增长。
+    """
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        h = max(self.minimumHeight(), 28)
+        return QSize(s.width(), h)
+
+
+class _FlowLayout(QLayout):
+    """简易流式布局：子控件按宽度自动换行排列，支持左/右对齐"""
+
+    def __init__(self, parent=None, spacing=6, alignment=Qt.AlignLeft):
         super().__init__(parent)
         self._spacing = spacing
+        self._alignment = alignment
         self._items = []
 
     def addItem(self, item):
@@ -101,22 +117,49 @@ class _FlowLayout(QLayout):
         x = rect.x()
         y = rect.y()
         line_height = 0
+        line_widths = []  # 每行总宽度（含 spacing）
+        cur_line_items = []  # 当前行尚未布局的 items
+
+        # 第一遍：分行 + 计算每行总宽度
+        items_to_layout = []
         for item in self._items:
             wid = item.widget()
             if wid is None or not wid.isVisible():
                 continue
             hint = item.sizeHint()
-            next_x = x + hint.width() + self._spacing
-            if next_x - self._spacing > rect.right() and line_height > 0:
+            items_to_layout.append((item, hint))
+
+        # 按行分组
+        rows = []
+        cur_row = []
+        cur_row_width = 0
+        for item, hint in items_to_layout:
+            projected = cur_row_width + hint.width() + (self._spacing if cur_row else 0)
+            if projected - self._spacing > rect.width() and cur_row:
+                rows.append(cur_row)
+                cur_row = [(item, hint)]
+                cur_row_width = hint.width()
+            else:
+                cur_row.append((item, hint))
+                cur_row_width = projected
+        if cur_row:
+            rows.append(cur_row)
+
+        # 第二遍：按行布局
+        for row in rows:
+            row_total = sum(h.width() for _, h in row) + self._spacing * max(0, len(row) - 1)
+            if self._alignment == Qt.AlignRight:
+                x = rect.right() - row_total + 1
+            else:
                 x = rect.x()
-                y = y + line_height + self._spacing
-                next_x = x + hint.width() + self._spacing
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y()
+            for item, hint in row:
+                if not test_only:
+                    item.setGeometry(QRect(QPoint(x, y), hint))
+                x += hint.width() + self._spacing
+            y += max(h.height() for _, h in row) + self._spacing
+        if rows:
+            y -= self._spacing
+        return y - rect.y()
 
 
 class HookItem(QWidget):
@@ -239,7 +282,6 @@ class HookEditCard(QWidget):
 
     增强:
     - commandWindows 字段（编辑已有 command 插件时显示）
-    - statusMessage 字段
     - 智能 Matcher 选择：
       - SessionStart → startup/resume/clear/compact 勾选框
       - PreToolUse/PostToolUse → 工具名列表勾选框
@@ -298,12 +340,12 @@ class HookEditCard(QWidget):
         main_layout.addLayout(row)
 
         # ── 命令 ──
-        self.commandEdit = QPlainTextEdit()
-        self.commandEdit.setMinimumHeight(36)
+        self.commandEdit = _CompactTextEdit()
+        self.commandEdit.setMinimumHeight(28)
         self.commandEdit.setPlaceholderText('如: echo "Hello" 或 python script.py')
         self.commandEdit.textChanged.connect(self._update_path_var_hint)
         self._cmd_row, self._cmd_label = _make_row("命令:", self.commandEdit)
-        main_layout.addLayout(self._cmd_row, 1)
+        main_layout.addLayout(self._cmd_row)
 
         # ── 插件路径变量解析提示 ──
         self._path_var_hint = QLabel("")
@@ -316,21 +358,15 @@ class HookEditCard(QWidget):
         main_layout.addWidget(self._path_var_hint)
 
         # ── Windows 命令（仅编辑已有 commandWindows 的 hook 时显示） ──
-        self.commandWindowsEdit = QPlainTextEdit()
-        self.commandWindowsEdit.setMinimumHeight(36)
+        self.commandWindowsEdit = _CompactTextEdit()
+        self.commandWindowsEdit.setMinimumHeight(28)
         self.commandWindowsEdit.setPlaceholderText("Windows 专用命令（可选）")
         # 用 QFrame 承载整行以便整体 setVisible（layout 本身没有 setVisible）
         self._cmdwin_row = QFrame()
         _cmdwin_inner, self._cmdwin_label = _make_row("Win 命令:", self.commandWindowsEdit)
         self._cmdwin_row.setLayout(_cmdwin_inner)
         self._cmdwin_row.setVisible(False)
-        main_layout.addWidget(self._cmdwin_row, 1)
-
-        # ── 状态消息 ──
-        self.statusMessageEdit = QLineEdit()
-        self.statusMessageEdit.setPlaceholderText("如: Loading ponytail mode...（可选）")
-        row, _ = _make_row("状态消息:", self.statusMessageEdit)
-        main_layout.addLayout(row)
+        main_layout.addWidget(self._cmdwin_row)
 
         # ── 执行结果插入消息列表 ──
         self.addOutputCtxSwitch = SwitchButton()
@@ -364,10 +400,10 @@ class HookEditCard(QWidget):
         row, _ = _make_row("Matcher:", self.matcherEdit)
         matcher_section.addLayout(row)
 
-        # toggle 按钮容器（FlowLayout 宽度自适应换行）
+        # toggle 按钮容器（FlowLayout 宽度自适应换行，右对齐）
         self._matcher_checks_frame = QFrame()
         self._matcher_checks_frame.setVisible(False)
-        self._matcher_checks_layout = _FlowLayout(self._matcher_checks_frame, spacing=6)
+        self._matcher_checks_layout = _FlowLayout(self._matcher_checks_frame, spacing=6, alignment=Qt.AlignRight)
         self._matcher_checks_layout.setContentsMargins(70, 0, 0, 4)  # 缩进对齐文本输入框
         matcher_section.addWidget(self._matcher_checks_frame)
 
@@ -553,9 +589,6 @@ class HookEditCard(QWidget):
         if self._cmdwin_row:
             self._cmdwin_row.setVisible(is_command and has_cmdwin)
 
-        # 状态消息仅对 command 类型有效
-        self.statusMessageEdit.setVisible(is_command)
-
         # 输出到消息切换：prompt 类型固定为 True（隐藏开关），其他类型可配置
         self._add_output_row.setVisible(not is_prompt)
 
@@ -579,9 +612,6 @@ class HookEditCard(QWidget):
             self.commandWindowsEdit.setPlainText(d["commandWindows"])
             if self._cmdwin_row:
                 self._cmdwin_row.setVisible(True)
-
-        # statusMessage
-        self.statusMessageEdit.setText(d.get("statusMessage", "") or d.get("status_message", "") or "")
 
         # matcher
         matcher = d.get("matcher", "")
@@ -632,11 +662,6 @@ class HookEditCard(QWidget):
         cmdwin = self.commandWindowsEdit.toPlainText().strip()
         if cmdwin:
             result["commandWindows"] = cmdwin
-
-        # statusMessage
-        status_msg = self.statusMessageEdit.text().strip()
-        if status_msg:
-            result["statusMessage"] = status_msg
 
         # 清理旧专用字段，避免类型切换时残留
         result.pop("function", None)

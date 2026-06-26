@@ -662,48 +662,71 @@ class OpenAIChatWorker(QThread):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _build_tool_loop_error_message(loop_info: Dict) -> str:
+    def _truncate_repetitive_tool_calls(messages: List[Dict], threshold: int) -> List[Dict]:
         """
-        把"工具循环"检测结果翻译成中文友好错误提示。
+        从消息列表中移除**所有**连续重复的工具调用轮次，只保留第 1 轮。
+
+        循环检测触发后调用，清理消息历史中的重复工具调用，
+        避免下次发消息时再次触发循环检测或被服务端拒绝。
+
+        策略：
+        1. 从末尾往前找所有含 tool_calls 的 assistant 消息，计算签名
+        2. 找出从末尾开始的**完整连续相同签名区间**（可能超过 threshold 轮）
+        3. 保留第 1 轮（assistant + tool 结果）作为正常调用记录
+        4. 移除第 2~N 轮的重复 assistant + tool 消息
+        5. **保留重复区间之后的所有消息**（如用户刚发的新消息）
+        6. 在清理点插入一条 assistant 终止提示（让模型下次换方法）
 
         Args:
-            loop_info: `_detect_repetitive_tool_loop` 的返回值
+            messages: 会话消息列表（含重复工具调用轮次）
+            threshold: 循环检测阈值（即至少重复了多少轮）
+
+        Returns:
+            清理后的消息列表（不再包含重复轮次，但保留后续消息）
         """
-        rounds = loop_info.get("rounds", 3)
-        tool_calls = loop_info.get("tool_calls") or []
+        # 1. 从后往前收集所有含 tool_calls 的 assistant 消息（index, signature）
+        assistants: List[tuple] = []  # [(index, signature), ...] 从后往前
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                sig = OpenAIChatWorker._compute_tool_call_signature(msg.get("tool_calls") or [])
+                assistants.append((i, sig))
 
-        # 列出陷入循环的工具名（去重）
-        names = []
-        for tc in tool_calls:
-            func = tc.get("function") or {}
-            name = (func.get("name") or "").strip()
-            if name and name not in names:
-                names.append(name)
+        if len(assistants) < threshold:
+            return messages  # 不足阈值，不需要清理
 
-        names_str = "、".join(names) if names else "（未知工具）"
-        example = tool_calls[0] if tool_calls else {}
-        example_func = example.get("function") or {}
-        example_args = (example_func.get("arguments") or "").strip()
-        if len(example_args) > 120:
-            example_args = example_args[:117] + "..."
+        # 2. 找出从末尾开始的完整连续相同签名区间
+        last_sig = assistants[0][1]
+        run_length = 0
+        for _idx, sig in assistants:
+            if sig == last_sig:
+                run_length += 1
+            else:
+                break
 
-        return (
-            f"[工具调用循环] 检测到模型在最近 {rounds} 轮里反复调用相同的工具 "
-            f"（{names_str}），参数也完全相同——模型可能已经陷入死循环。\n\n"
-            f"重复的工具调用示例：\n"
-            f"  工具：{example_func.get('name', '?')}\n"
-            f"  参数：{example_args or '（无参数）'}\n\n"
-            f"为什么会这样：\n"
-            f"  • 工具返回的结果可能不够具体，模型无法据此推进下一步\n"
-            f"  • 工具实现未考虑幂等（如 grep 总返回相同内容）\n"
-            f"  • 用户的输入本身就是重复型任务\n\n"
-            f"如果重试同样的请求，Qwen/DashScope 服务端也会再次拒绝 "
-            f"（HTTP 400 Repetitive tool calls detected），所以已主动终止。\n\n"
-            f"建议：\n"
-            f"  1. 修改输入，明确告诉模型何时该停止调用工具\n"
-            f"  2. 检查工具实现，确保每次返回结果有变化或包含终止信号\n"
-            f"  3. 如需继续，可考虑开启新会话后重新发起任务"
-        )
+        if run_length < threshold:
+            return messages  # 连续相同轮次不足阈值
+
+        # 3. assistants[run_length - 1] 是第 1 个重复轮次（最靠前的那个）
+        first_round_assistant_idx = assistants[run_length - 1][0]
+
+        # 4. 找到第 1 轮的 tool 结果结束位置（即需要保留的前缀边界）
+        prefix_end = first_round_assistant_idx + 1
+        while prefix_end < len(messages) and messages[prefix_end].get("role") == "tool":
+            prefix_end += 1
+
+        # 5. 找到最后一个重复轮次的 tool 结果结束位置（即后续消息的起始点）
+        last_round_assistant_idx = assistants[0][0]
+        tail_start = last_round_assistant_idx + 1
+        while tail_start < len(messages) and messages[tail_start].get("role") == "tool":
+            tail_start += 1
+
+        # 6. 组装：[前缀含第1轮] + [后续消息（如用户的新消息）]
+        # 不插入任何提示消息，让模型自然地从清理后的历史继续
+        sanitized = list(messages[:prefix_end])
+        sanitized.extend(messages[tail_start:])
+
+        return sanitized
 
     def _get_reasoning_content(self) -> str:
         """获取当前的 reasoning_content（从累积的 chunks 合成）"""
@@ -996,20 +1019,22 @@ class OpenAIChatWorker(QThread):
                 # tool_call 签名是否完全一致；连续达到阈值就主动终止并提示用户。
                 loop_detected = OpenAIChatWorker._detect_repetitive_tool_loop(current_messages)
                 if loop_detected:
+                    # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
                     logger.warning(
                         f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，"
-                        f"主动终止以避免 Qwen/DashScope 服务端拒绝。"
+                        f"静默清理重复轮次后继续。"
                     )
-                    self._emit_with_callback(
-                        "error_occurred", self.error_occurred,
-                        self._build_tool_loop_error_message(loop_detected),
+                    current_session_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
+                        current_session_messages, self._TOOL_LOOP_THRESHOLD
                     )
-                    # 保存当前消息状态后退出，避免 UI 看到半截结果
-                    self._emit_with_callback(
-                        "finished_with_messages", self.finished_with_messages,
-                        current_session_messages,
+                    current_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
+                        current_messages, self._TOOL_LOOP_THRESHOLD
                     )
-                    return
+                    self._current_session_messages = list(current_session_messages)
+                    # 作废 API 缓存，下一轮 _make_api_call 会从清理后的 current_messages 重建
+                    self._api_messages_cache = None
+                    self._api_messages_built = False
+                    continue
 
                 # 消费待处理的 hook 消息（从线程安全队列，避免 Qt 信号跨线程延迟）
                 # ⚠️ 必须传入 current_session_messages 作为 session_messages_target，
