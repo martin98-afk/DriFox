@@ -377,8 +377,10 @@ class UIEngine(BaseEngine):
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
-            # 🆕 读取 main_widget 存下的 pending_command，传递给 PreUserMessage hook
+            # 🆕 读取 main_widget 存下的 pending_command/pending_skill，
+            # 传递给 PreUserMessage hook 进行注入
             pending_cmd = session.metadata.pop("_pending_command", None) if session else None
+            pending_skill = session.metadata.pop("_pending_skill", None) if session else None
 
             pre_user_ctx = {
                 "message": user_text,
@@ -388,6 +390,8 @@ class UIEngine(BaseEngine):
             }
             if pending_cmd:
                 pre_user_ctx["pending_command"] = pending_cmd
+            if pending_skill:
+                pre_user_ctx["pending_skill"] = pending_skill
             _trigger_and_inject(hook_mgr, "PreUserMessage",
                                 pre_user_ctx, inject_to_session=session)
 

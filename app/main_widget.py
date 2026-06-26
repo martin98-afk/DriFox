@@ -9292,7 +9292,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 命令提示词已通过 hook 注入，不再替换 user_text
         # ---- 内置命令拦截结束 ----
 
-        # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
+        # ---- 技能名称替换：/skillname → hook 注入技能内容 ----
         if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
 
@@ -9311,10 +9311,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     elif remainder == "--disable":
                         self._execute_skill_toggle(skill_name, enable=False)
                         return
-                    if remainder:
-                        user_text = f"加载这个智能体技能：@{skill_name}\n{remainder}"
-                    else:
-                        user_text = f"加载这个智能体技能：@{skill_name}"
+                    # 🆕 直接调用 load_skill 读取技能内容，通过 PreUserMessage hook 注入
+                    from app.utils.utils import load_skill as load_skill_func
+                    success, content, workspace = load_skill_func(skill_name)
+                    if success:
+                        session = self.session_manager.get_current_session()
+                        if session:
+                            session.metadata["_pending_skill"] = {
+                                "name": skill_name,
+                                "content": content,
+                                "workspace": workspace,
+                                "remainder": remainder or "",
+                            }
+                    # 用户消息保持原始输入不变（含 /xxx 前缀）
+                    # 技能内容已通过 hook 注入，不再替换 user_text
         # ---- 技能替换结束 ----
 
         # ---- 检查模型配置（用于后续判断图片支持）----
