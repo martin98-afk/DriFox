@@ -5,8 +5,10 @@ PreUserMessage Hook 函数 — 将条目记忆、关键文档、worktree 上下�
 所有数据由 backend 预取后通过 context 传入，本函数不做任何文件 I/O，
 仅负责格式化输出。
 
-注意：PreUserMessage hook 有内置去重机制（backend 中的 on_hook_finished
-每次触发前会删除同类型的旧 hook 消息），因此上下文永远只保留最新一份。
+注意：PreUserMessage hook 会在每轮用户消息前执行，每次注入最新状态的
+记忆和上下文到 session.messages 中。旧轮次的 hook 消息会在 round 截断时
+被自动清理（由 get_user_round_ranges 控制 round 边界），因此虽然 session
+中可能有多个 PreUserMessage 条目，但只有最近几轮才会保留在上下文中。
 
 动态内容（worktree/分支信息/路径建议）从 SessionStart 移至此，
 确保分支切换等中途操作后 LLM 能感知最新状态。
