@@ -357,7 +357,7 @@ class ChatBackend(QObject):
                     "content": hook_output,
                     "_hook_event": event_name,
                 })
-                logger.debug(f"[HookManager] PreToolUse queued to pre-tool queue")
+                logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
             elif is_prompt_hook or event_name == "PostToolUse":
                 hook_output = _format_hook_output(event_name, output)
                 self._hook_message_queue.put({
