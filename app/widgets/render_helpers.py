@@ -592,7 +592,7 @@ _INLINE_TOOLS = frozenset({
 
 
 def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
-    """将工具调用转为自然语言描述（用于内联卡片的右侧预览）"""
+    """将工具调用转为自然语言描述（用于内联卡片和折叠头的预览）"""
     # todoread / read_project_note 等即使无参数也应有描述
     if tool_name in ("todoread", "read_project_note"):
         label = {"todoread": "查看待办事项", "read_project_note": "查看项目笔记"}[tool_name]
@@ -605,6 +605,18 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         elif limit is not None:
             label += f" (前 {limit} 行)"
         return label
+
+    # ── 无参数也有描述的工具 ──
+    if tool_name == "list_skills":
+        return "列出可用技能"
+    if tool_name == "mcp_list_servers":
+        return "列出 MCP 服务器"
+    if tool_name == "screenshot":
+        region = tool_args.get("region")
+        if region and isinstance(region, (list, tuple)) and len(region) == 4:
+            return f"截取屏幕 ({region[2]}×{region[3]})"
+        return "截取屏幕"
+
     if not tool_args:
         return ""
     desc = ""
@@ -666,6 +678,96 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         desc = f'诊断 {path}' if path else "代码诊断"
         if language:
             desc += f" ({language})"
+    # ── 折叠工具的自然预览 ──
+    elif tool_name in ("write", "edit", "multi_edit"):
+        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        fname = os.path.basename(path) if path else "文件"
+        if tool_name == "write":
+            desc = f'写入 "{fname}"'
+        elif tool_name == "edit":
+            desc = f'编辑 "{fname}"'
+        else:
+            edits = tool_args.get("edits", [])
+            count = len(edits) if isinstance(edits, list) else 0
+            desc = f'批量编辑 "{fname}"' + (f" ({count}处)" if count else "")
+    elif tool_name == "todowrite":
+        todos = tool_args.get("todos", [])
+        count = len(todos) if isinstance(todos, list) else 0
+        desc = "更新待办事项" + (f" ({count}项)" if count else "")
+    elif tool_name == "skill":
+        name = tool_args.get("name", "")
+        desc = f'加载技能 "{name}"' if name else "加载技能"
+    elif tool_name == "lsp":
+        operation = tool_args.get("operation", "")
+        path = tool_args.get("path", "")
+        op_labels = {
+            "diagnostics": "诊断", "documentSymbols": "符号列表",
+            "goToDefinition": "跳转定义", "findReferences": "查找引用",
+            "hover": "悬浮文档", "listServers": "服务器列表",
+        }
+        op_label = op_labels.get(operation, operation or "LSP")
+        fname = os.path.basename(path) if path else ""
+        desc = f"LSP {op_label}"
+        if fname:
+            desc += f' "{fname}"'
+    elif tool_name == "subagent_para":
+        tasks = tool_args.get("tasks", [])
+        count = len(tasks) if isinstance(tasks, list) else 0
+        if count:
+            agents = set()
+            for t in tasks:
+                if isinstance(t, dict):
+                    agents.add(t.get("agent", "?"))
+            agent_names = ", ".join(sorted(agents)) if agents else ""
+            desc = f"分发 {count} 个子任务" + (f" → {agent_names}" if agent_names else "")
+        else:
+            desc = "分发子智能体任务"
+    elif tool_name == "subagent_status":
+        task_ids = tool_args.get("task_ids", [])
+        if isinstance(task_ids, list) and task_ids:
+            desc = f"查询子智能体状态 ({', '.join(str(t)[:12] for t in task_ids[:3])})"
+        else:
+            desc = "查询子智能体状态"
+    elif tool_name == "subagent_dag":
+        nodes = tool_args.get("nodes", [])
+        count = len(nodes) if isinstance(nodes, list) else 0
+        desc = "DAG 工作流" + (f" ({count}节点)" if count else "")
+    elif tool_name == "websearch":
+        query = tool_args.get("query", "")
+        desc = f'搜索 "{query}"' if query else "网络搜索"
+    elif tool_name == "webfetch":
+        url = tool_args.get("url", "")
+        desc = f"获取网页 {url}" if url else "获取网页"
+    elif tool_name == "mouse":
+        action = tool_args.get("action", "")
+        x = tool_args.get("x", "")
+        y = tool_args.get("y", "")
+        action_labels = {
+            "move": "移动", "click": "点击", "double_click": "双击",
+            "right_click": "右键", "scroll": "滚动", "drag": "拖拽",
+            "position": "查询位置",
+        }
+        action_label = action_labels.get(action, action or "操作")
+        if action == "position":
+            desc = "查询鼠标位置"
+        elif x != "" and y != "":
+            desc = f"鼠标{action_label} ({x}, {y})"
+        else:
+            desc = f"鼠标{action_label}"
+    elif tool_name == "keyboard":
+        action = tool_args.get("action", "")
+        if action == "type":
+            text = tool_args.get("text", "")
+            preview = text[:30] + ("…" if len(text) > 30 else "")
+            desc = f'键盘输入 "{preview}"' if preview else "键盘输入"
+        elif action == "press":
+            key = tool_args.get("key", "")
+            desc = f"按键 {key}" if key else "按键"
+        elif action == "hotkey":
+            keys = tool_args.get("keys", "")
+            desc = f"热键 {keys}" if keys else "热键"
+        else:
+            desc = "键盘操作"
     return desc
 
 
@@ -1123,7 +1225,9 @@ def render_tool_block(
         q_text = normalized[0].get("question", "") if normalized else ""
         args_preview = q_text[:120] + ("…" if len(q_text) > 120 else "") if q_text else "(无问题)"
     else:
-        args_preview = _format_args_preview(tool_args)
+        # 优先使用自然语言预览，无匹配时 fallback 到 key=value 格式
+        natural = _format_natural_preview(tool_name, tool_args)
+        args_preview = natural if natural else _format_args_preview(tool_args)
 
     # ── inline diff 预览区 ──
     diff_html = ""
