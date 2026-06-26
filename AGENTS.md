@@ -99,6 +99,16 @@ feat|fix|docs|chore|refactor|test: scope - summary
 
 ---
 
+### 已修复（2026-06-26）
+- **chat_worker 工具调用循环导致会话永久卡死**:
+  - 根因：循环检测触发后 `finished_with_messages` 发射的消息列表**仍包含重复的工具调用轮次**，持久化后下次发消息再次触发检测 → 会话死锁
+  - 修复 V1 → V2 迭代（V1 有两个 bug）:
+    - V1 bug1：截断 `messages[:second_round_index]` 丢弃了用户的新消息 → 用户消息丢失 → 永远无法推进
+    - V1 bug2：只取最后 threshold 轮截断，超过阈值的重复轮次（如5轮）没清理干净 → 下次又触发
+    - V2 修复：重写 `_truncate_repetitive_tool_calls()`，找出从末尾开始的完整连续相同签名区间，保留第1轮 + 终止提示 + **后续所有消息**（含用户新消息）
+  - 测试：`tests/test_chat_worker_tool_loop.py` 共 21 个测试全部通过 ✅
+  - 已卡死会话恢复方法：重启 DriFox → 发一条消息（触发截断清理，会报错但消息已清理）→ 再发一条即可正常对话；或使用 `/compact` 命令压缩上下文绕过
+
 ### 已修复（2026-06-18）
 - **tool_control_card 信号链 / 统计数字不更新**:
   - `_on_active_toggles_changed` 完整实现（含 `rebuild` + `update()` + `togglesChanged.emit()`）

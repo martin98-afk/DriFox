@@ -190,7 +190,7 @@ class HookItem(QWidget):
         self.sourceLabel.setStyleSheet(
             f"background-color: {source_color}; color: white; "
             f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
-            f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
+            f"padding: 1px 2px; border-radius: 4px; font-weight: bold;"
         )
         self.sourceLabel.setFixedHeight(18)
 
@@ -203,7 +203,7 @@ class HookItem(QWidget):
         self.typeLabel.setStyleSheet(
             f"background-color: {type_color}; color: white; "
             f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
-            f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
+            f"padding: 1px 2px; border-radius: 4px; font-weight: bold;"
         )
         self.typeLabel.setFixedHeight(18)
 
@@ -223,7 +223,7 @@ class HookItem(QWidget):
             self._winLabel.setStyleSheet(
                 f"background-color: #FF8C00; color: white; "
                 f"{get_font_family_css()} font-size: {scale_font_size(9)}px; "
-                f"padding: 1px 4px; border-radius: 3px; font-weight: bold;"
+                f"padding: 1px 2px; border-radius: 3px; font-weight: bold;"
             )
             self._winLabel.setFixedHeight(16)
 
@@ -244,16 +244,16 @@ class HookItem(QWidget):
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
 
         self.setFixedHeight(40)
-        self.hBoxLayout.setContentsMargins(8, 0, 16, 0)  # ponytail: 左 padding 从 48 缩到 8
+        self.hBoxLayout.setContentsMargins(8, 0, 4, 0)  # ponytail: 左 padding 从 48 缩到 8
         self.hBoxLayout.addWidget(self.sourceLabel, 0)
-        self.hBoxLayout.addSpacing(6)
+        self.hBoxLayout.addSpacing(3)
         self.hBoxLayout.addWidget(self.typeLabel, 0)
-        self.hBoxLayout.addSpacing(8)
+        self.hBoxLayout.addSpacing(3)
         self.hBoxLayout.addWidget(self.commandLabel, 1)
         if self._winLabel:
-            self.hBoxLayout.addSpacing(4)
+            self.hBoxLayout.addSpacing(2)
             self.hBoxLayout.addWidget(self._winLabel, 0)
-        self.hBoxLayout.addSpacing(12)
+        self.hBoxLayout.addSpacing(6)
         self.hBoxLayout.addWidget(self.switch, 0)
         self.hBoxLayout.addWidget(self.editBtn, 0)
         self.hBoxLayout.addWidget(self.delBtn, 0)
@@ -376,7 +376,7 @@ class HookEditCard(QWidget):
         self._add_output_row = QFrame()
         _add_output_inner = QHBoxLayout()
         _add_output_inner.setSpacing(8)
-        _add_output_label = BodyLabel("输出到消息:")
+        _add_output_label = BodyLabel("消息注入:")
         _add_output_label.setFixedWidth(70)
         _add_output_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         _add_output_inner.addWidget(_add_output_label)
