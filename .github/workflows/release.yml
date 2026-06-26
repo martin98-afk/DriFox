@@ -349,15 +349,17 @@ jobs:
           import re, sys
           with open('CHANGELOG.md') as f:
               content = f.read()
-          # Extract the first version entry (from ## to next ## or EOF)
-          match = re.search(r'## .*?(?=\n## |\Z)', content, re.DOTALL)
+          tag = '${{ github.ref_name }}'
+          # Extract the version entry matching current tag (## [vX.Y.Z] ...)
+          tag_escaped = re.escape(tag)
+          match = re.search(rf'## \[{tag_escaped}\].*?(?=\n## |\Z)', content, re.DOTALL)
           if match:
               body = match.group().strip()
               with open('release_body.txt', 'w') as f:
                   f.write(body)
-              print('Release body extracted from CHANGELOG.md')
+              print(f'Release body extracted from CHANGELOG.md (tag: {tag})')
           else:
-              print('WARNING: no version entry found in CHANGELOG.md, using empty body')
+              print(f'WARNING: no version entry found in CHANGELOG.md for tag {tag}, using empty body')
               open('release_body.txt', 'w').close()
           "
 
