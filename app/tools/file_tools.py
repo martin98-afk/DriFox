@@ -30,6 +30,24 @@ _GREP_EXCLUDE_DIRS = frozenset({
     'venv', '.venv', 'dist', 'build', '.idea', '.vscode'
 })
 
+# scan_repo 专用排除集合：grep 集合的超集，覆盖更多构建产物与缓存目录
+# 使用 fnmatch 风格通配符：'*' 匹配任意字符序列（涵盖 .venv/.venv_old/.venv.bak 这类变体）
+_SCAN_EXCLUDE_DIRS = frozenset({
+    # 来自 grep 集合（保证 scan 至少和 grep 一样严格）
+    '.drifox', '.mypy_cache*', '.git*', 'node_modules*', '__pycache__',
+    'venv*', '.venv*', 'dist*', 'build*', '.idea*', '.vscode*',
+    # Python 测试/打包
+    '.pytest_cache*', '.tox*', 'site-packages*', '.eggs*',
+    '.ipynb_checkpoints*', 'htmlcov*', '.ruff_cache*',
+    # JS/前端构建产物
+    '.next*', '.nuxt*', '.svelte-kit*', '.cache*', '.parcel-cache*',
+    '.turbo*', '.nyc_output*', 'coverage*', '.vercel*',
+    # C/C++/Rust
+    'target*', 'cmake-build-debug*', 'cmake-build-release*',
+    # Java/Kotlin
+    '.gradle*', 'out*',
+})
+
 
 @lru_cache(maxsize=128)
 def _compile_grep_pattern(pattern: str) -> re.Pattern:
@@ -499,6 +517,69 @@ class FileTools:
             return ToolResult(True, content="\n".join(results))
         except Exception as e:
             return ToolResult(False, error=f"Glob error: {str(e)}")
+
+    def scan_repo(
+        self,
+        path: str = None,
+        max_depth: int = 2,
+        include: str = None,
+        exclude: List[str] = None,
+    ) -> ToolResult:
+        """扫描仓库目录并返回结构化摘要。
+
+        Args:
+            path: 扫描起始路径（默认 workdir）
+            max_depth: 最大扫描深度
+            include: 仅显示匹配的文件名（fnmatch 模式，如 "*.py"）
+            exclude: 额外排除的目录（fnmatch 模式列表，如 [".venv*", "tmp-*"]），
+                     默认集合见 _SCAN_EXCLUDE_DIRS
+        """
+        try:
+            target_path = self._resolve_path(path) if path else self.workdir
+            if not target_path.exists():
+                return ToolResult(False, error=f"Path not found: {target_path}")
+
+            try:
+                scan_display = str(target_path.relative_to(self.workdir))
+            except ValueError:
+                scan_display = str(target_path)
+
+            extra_excludes = list(exclude) if exclude else []
+            # 默认集合 + 用户传入统一走 fnmatch，确保通配符在两边都生效
+            all_patterns = (*_SCAN_EXCLUDE_DIRS, *extra_excludes)
+
+            def _is_excluded(d: str) -> bool:
+                return any(fnmatch.fnmatch(d, pat) for pat in all_patterns)
+
+            lines = [f"Repository scan: {scan_display}"]
+            root_depth = len(target_path.parts)
+
+            for root, dirs, files in os.walk(target_path):
+                rel_depth = len(Path(root).parts) - root_depth
+                if rel_depth > max_depth:
+                    dirs[:] = []
+                    continue
+
+                dirs[:] = [d for d in dirs if not _is_excluded(d)]
+
+                visible_files = files
+                if include:
+                    visible_files = [f for f in files if fnmatch.fnmatch(f, include)]
+
+                rel_root = Path(root).relative_to(target_path)
+                display_root = "." if str(rel_root) == "." else str(rel_root)
+                lines.append(f"\n[{display_root}]")
+
+                sample_dirs = sorted(dirs)[:8]
+                sample_files = sorted(visible_files)[:12]
+                if sample_dirs:
+                    lines.append("dirs: " + ", ".join(sample_dirs))
+                if sample_files:
+                    lines.append("files: " + ", ".join(sample_files))
+
+            return ToolResult(True, content="\n".join(lines[:200]))
+        except Exception as e:
+            return ToolResult(False, error=f"scan_repo error: {str(e)}")
 
     def diff_files(
         self, file1: str, file2: str = None, use_git: bool = False

@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-工具名别名映射器 — 纯内部机制
+工具名别名映射器 — 双向映射
 
-将其他大模型平台（Claude Code, Cursor 等）使用的工具名
-翻译为 DriFoxx 原生工具名，使跨平台插件能正确工作。
+功能：
+1. to_native(): 将 Claude Code/Cursor 等外部平台工具名 → DriFoxx 原生名（小写）
+2. to_claude_style(): 将任意已知工具名 → Claude Code 风格（PascalCase）
+   用于 hook context，使第三方 Claude Code 插件能正确匹配工具名。
 
 LLM 永远看到 DriFoxx 原生名，此映射器只在系统内部使用。
 """
@@ -13,11 +15,13 @@ from typing import Dict, List, Optional
 
 class ToolNameMapper:
     """
-    工具名别名注册表（纯内部使用）
+    工具名双向映射器
 
     用法：
-        ToolNameMapper.to_native("Read")  → "read"
-        ToolNameMapper.to_native("read")  → "read"  (passthrough)
+        ToolNameMapper.to_native("Read")       → "read"
+        ToolNameMapper.to_native("read")       → "read"  (passthrough)
+        ToolNameMapper.to_claude_style("edit") → "Edit"
+        ToolNameMapper.to_claude_style("read") → "Read"
     """
 
     # DriFoxx 原生名 → 其他平台常见名称列表
@@ -86,6 +90,43 @@ class ToolNameMapper:
             return cls._reverse_map[name_lower]
 
         return name  # 未知名，原样返回
+
+    @classmethod
+    def to_claude_style(cls, name: str) -> str:
+        """将任意已知工具名转换为 Claude Code 风格（PascalCase）
+
+        用于 hook context 中的 tool_name 字段，使第三方 Claude Code 插件
+        （如 security-guidance、hookify 等）能通过 'Edit|Write|MultiEdit'
+        等大小写敏感匹配来正确识别工具。
+
+        Args:
+            name: 工具名（如 "edit", "Write", "multi_edit", "Read"）
+
+        Returns:
+            Claude Code 风格的工具名（如 "Edit", "Write", "MultiEdit", "Read"）
+            如果是 MCP 工具（mcp__ 前缀）或未知名，原样返回。
+        """
+        if not name:
+            return name
+
+        # MCP 工具或未知工具：原样返回
+        if name.startswith("mcp__"):
+            return name
+
+        # 先归一化到 DriFoxx 原生名
+        native = cls.to_native(name)
+
+        # 快速路径：原生名本身就是 Claude Code 风格（如 "mcp__xxx"）
+        if native.startswith("mcp__"):
+            return native
+
+        # 查找 ALIAS_MAP 中该原生名的第一个别名（通常是 Claude Code 风格）
+        aliases = cls.ALIAS_MAP.get(native, [])
+        if aliases:
+            return aliases[0]  # 第一个别名：如 "edit" → "Edit", "read" → "Read"
+
+        # 回退：简单首字母大写
+        return native.capitalize()
 
     @classmethod
     def is_known(cls, name: str) -> bool:

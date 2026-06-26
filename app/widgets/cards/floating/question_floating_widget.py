@@ -9,12 +9,13 @@ from functools import partial
 
 from loguru import logger
 from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtGui import QColor, QKeySequence, QPalette
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -247,7 +248,7 @@ class _CustomInputCard(QWidget):
     activated = pyqtSignal()  # 用户主动点击选中时触发
     heightNeedsUpdate = pyqtSignal()  # 高度需要更新时触发
 
-    MAX_INPUT_HEIGHT = 180  # 输入框最大高度（与主输入框一致）
+    MAX_INPUT_HEIGHT = 220  # 输入框最大高度
     MIN_INPUT_HEIGHT = 32   # 输入框初始单行高度（一行文字 + 内边距）
 
     def __init__(self, multiple: bool = False, parent=None):
@@ -546,10 +547,10 @@ class QuestionFloatingWidget(QWidget):
 
         main_layout.addWidget(self._header_widget)
 
-        # ── 问题标题（超出 160px 高度时滚动） ──
+        # ── 问题标题（按内容动态高度，上限自适应） ──
         self._question_scroll = QScrollArea()
         self._question_scroll.setWidgetResizable(True)
-        self._question_scroll.setMaximumHeight(160)
+        self._question_scroll.setMaximumHeight(280)
         self._question_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._question_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._question_scroll.viewport().setAutoFillBackground(False)
@@ -596,7 +597,7 @@ class QuestionFloatingWidget(QWidget):
         self._hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         main_layout.addWidget(self._hint_label)
 
-        # ── 选项区（直接布局，无滚动） ──
+        # ── 选项区（直接布局，随内容自然展开） ──
         self._options_container = QWidget()
         self._options_container.setStyleSheet("background: transparent;")
         self._options_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -652,14 +653,15 @@ class QuestionFloatingWidget(QWidget):
             QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
         """)
 
+        footer.addWidget(self._back_btn)
         footer.addWidget(self._ignore_btn)
         footer.addStretch()
         footer.addWidget(self._preview_btn)
-        footer.addWidget(self._back_btn)
         footer.addWidget(self._next_btn)
 
         main_layout.addWidget(self._footer_widget)
         self._apply_card_style()
+        self._setup_shortcuts()
 
     def _apply_card_style(self):
         Colors.refresh()
@@ -674,10 +676,57 @@ class QuestionFloatingWidget(QWidget):
         self._hint_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
 
     def eventFilter(self, obj, event):
+        # 窗口 resize → 动态更新各区域最大高度
+        if event.type() == QEvent.Resize and obj is self.window() and obj is not None:
+            self._update_dynamic_heights()
+            return False
         if obj is self._header_widget and event.type() == QEvent.MouseButtonPress:
             self._toggle_collapse()
             return True
         return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        """键盘快捷键：Enter/数字键选选项（不在文本输入框时生效）"""
+        key = event.key()
+        mods = event.modifiers()
+        # Ctrl+Enter → 下一步（已在 QShortcut 中捕获，此处兜底）
+        if mods & Qt.ControlModifier and key in (Qt.Key_Return, Qt.Key_Enter):
+            self._on_next()
+            return
+        # 纯 Enter → 下一步（焦点不在 QTextEdit 时才到达此处）
+        if not mods and key in (Qt.Key_Return, Qt.Key_Enter):
+            self._on_next()
+            return
+        # 数字键 1-9 → 选择对应序号选项
+        if not mods and Qt.Key_1 <= key <= Qt.Key_9:
+            self._select_option_by_digit(key - Qt.Key_0)
+            return
+        super().keyPressEvent(event)
+
+    def _select_option_by_digit(self, digit: int):
+        """按数字键选择对应序号的可见选项（1 → 第一个选项）"""
+        idx = digit - 1
+        if idx < 0 or idx >= len(self._option_widgets):
+            return
+        w = self._option_widgets[idx]
+        if not w.isVisible():
+            return
+        if isinstance(w, _OptionCheckCard):
+            w.toggle()
+        else:
+            self._on_radio_selected(w)
+
+    def _update_dynamic_heights(self):
+        """根据窗口高度动态调整问题标题区与选项区的最大高度
+
+        短内容自然展开（≤ sizeHint），长内容在窗口比例的合理阈值内滚动，
+        避免硬编码值在小窗口溢出 / 大窗口浪费。
+        """
+        win = self.window()
+        win_h = win.height() if win is not None else 800
+        # 问题标题：窗口 30%，夹紧 [120, 320]
+        q_max = max(120, min(int(win_h * 0.30), 320))
+        self._question_scroll.setMaximumHeight(q_max)
 
     def _toggle_collapse(self):
         """折叠/展开提问卡片，仅保留顶栏"""
@@ -691,6 +740,21 @@ class QuestionFloatingWidget(QWidget):
         self._collapse_btn.setToolTip("展开问题" if self._collapsed else "折叠问题")
         QTimer.singleShot(0, self.heightChanged.emit)
 
+    def _setup_shortcuts(self):
+        """设置键盘快捷键"""
+        # Esc → 忽略（WidgetWithChildrenShortcut 确保在子控件聚焦时也生效）
+        sc_esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        sc_esc.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_esc.activated.connect(self._on_ignore)
+
+        # Ctrl+Enter / Ctrl+Return → 下一步/提交（文本输入框中也可用）
+        sc_ctrl_ret = QShortcut(QKeySequence("Ctrl+Return"), self)
+        sc_ctrl_ret.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_ctrl_ret.activated.connect(self._on_next)
+        sc_ctrl_ent = QShortcut(QKeySequence("Ctrl+Enter"), self)
+        sc_ctrl_ent.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_ctrl_ent.activated.connect(self._on_next)
+
     # ────────────── 公开接口 ──────────────
 
     def show_question(self, questions: list, show_custom_input: bool = True, preview_payload=None):
@@ -702,6 +766,12 @@ class QuestionFloatingWidget(QWidget):
         # 新问题进来时自动展开
         if self._collapsed:
             self._toggle_collapse()
+        # 安装窗口 resize 监听（只一次）
+        win = self.window()
+        if win is not None and win is not self and not getattr(self, '_win_filtered', False):
+            win.installEventFilter(self)
+            self._win_filtered = True
+        self._update_dynamic_heights()
         self._render_current()
         # 强制几何重新计算，确保 _options_container 的 sizeHint 反映最新内容
         # 避免 CardContainer._do_expand 读到过期的 sizeHint 而跳过展开
@@ -780,14 +850,20 @@ class QuestionFloatingWidget(QWidget):
         if not isinstance(options, list):
             options = []
 
-        self._page_label.setText(f"{self._current_index + 1}/{total} 个问题")
-        self._page_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
+        self._page_label.setText(f" {self._current_index + 1} / {total} ")
+        self._page_label.setStyleSheet(f"""
+            color:{Colors.REALTIME_ACCENT};
+            background:{Colors.REALTIME_TAG_BG};
+            border:1px solid {Colors.REALTIME_ACCENT};
+            border-radius:10px;
+            padding:1px 8px;
+        """)
 
         self._question_label.setText(question_text)
 
         self._hint_label.setText(
-            "选择所有适用的选项" if multiple and options else
-            "选择一个答案" if options else ""
+            "☑ 选择所有适用的选项（可多选）" if multiple and options else
+            "👆 选择一个答案" if options else ""
         )
 
         # ── 复用 option widgets（不销毁重建） ──
@@ -836,6 +912,8 @@ class QuestionFloatingWidget(QWidget):
             QTimer.singleShot(20, self._on_options_height_changed)
 
         self._update_footer(total)
+        # 自动聚焦到下一步按钮，键盘操作立即可用
+        self._next_btn.setFocus()
 
     def _update_footer(self, total: int):
         is_first = self._current_index == 0

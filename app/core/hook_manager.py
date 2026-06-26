@@ -105,6 +105,11 @@ class Hook:
     # Prompt 类型专用字段
     prompt: Optional[str] = None
 
+    # Windows 专用命令（Claude Code 插件兼容）
+    commandWindows: Optional[str] = None
+    # 状态信息（执行时显示的状态消息）
+    statusMessage: Optional[str] = None
+
     # config_file: 所属的 hooks.json 配置文件路径（用于 UI 保存）
     config_file: Optional[str] = None
 
@@ -114,6 +119,8 @@ class Hook:
         hook_type = d.get("type", "command")
         # 根据类型规范化 command 值：优先取专用字段，再 fallback 到 command
         command = d.get("command", "")
+        commandWindows = d.get("commandWindows") or d.get("command_windows", "")
+        statusMessage = d.get("statusMessage") or d.get("status_message", "")
         if hook_type == "python":
             command = d.get("function") or command
         elif hook_type == "http":
@@ -125,6 +132,8 @@ class Hook:
             id=hook_id,
             type=hook_type,
             command=command,
+            commandWindows=commandWindows,
+            statusMessage=statusMessage,
             cwd=d.get("cwd"),
             add_output_to_context=d.get("add_output_to_context", True),
             skill_root=d.get("skill_root", ""),
@@ -160,6 +169,8 @@ class Hook:
             "function": self.function,
             "function_args": self.function_args,
             "config_file": self.config_file,
+            "commandWindows": self.commandWindows,
+            "statusMessage": self.statusMessage,
         }
         if self.prompt is not None:
             result["prompt"] = self.prompt
@@ -187,6 +198,15 @@ class HookMatchRule:
         if not self.matcher:
             return True
 
+        event_name = context.get("event_name", "")
+
+        # SessionStart 会话状态匹配
+        # matcher 格式如 "startup|resume|clear|compact"，匹配 context["state"]
+        if event_name == "SessionStart":
+            session_state = context.get("state", "startup")
+            states = [s.strip() for s in self.matcher.split("|")]
+            return session_state in states
+
         # 工具名匹配（支持别名）
         if self.matcher.startswith("tool:"):
             pattern = self.matcher[5:]
@@ -205,7 +225,6 @@ class HookMatchRule:
 
         # 对于工具相关事件，也尝试匹配工具名（大小写不敏感）
         # 这样 "Write|Edit" 这样的 matcher 可以直接匹配工具名
-        event_name = context.get("event_name", "")
         if event_name in ("PreToolUse", "PostToolUse"):
             tool_name = context.get("tool_name", "")
             if tool_name:
@@ -245,15 +264,26 @@ class HookWorkerSignals(QObject):
 class HookOverrideManager:
     """
     Hook 覆写层管理器
-    用于覆盖 plugin/skill hooks 的 enabled 状态（不影响源文件）
+    用于覆盖 plugin/skill hooks 的配置字段（不影响源文件）
     存储位置: ~/.drifox/plugins/user-custom/hooks_overrides.json
-    格式: {"hook_id": {"enabled": bool}}
+    
+    格式:
+    {
+      "hook_id": {
+        "enabled": false,           # 开关覆写（旧格式兼容）
+        "command": "new command",   # 字段级覆写
+        "matcher": "startup|clear",
+        "commandWindows": "win cmd"
+      }
+    }
+    
+    编辑 plugin/skill hook 时只写此文件，不碰源文件。
     """
 
     OVERRIDES_FILE = "hooks_overrides.json"
 
     def __init__(self):
-        self._overrides: Dict[str, Dict[str, bool]] = {}
+        self._overrides: Dict[str, Dict[str, Any]] = {}
         self._storage_path: Optional[str] = None
         self._init_storage_path()
         self._load()
@@ -290,20 +320,57 @@ class HookOverrideManager:
 
     def get_effective_enabled(self, hook_id: str, default: bool) -> bool:
         """获取 hook 的有效 enabled 状态（覆写优先）"""
-        if hook_id in self._overrides:
-            return self._overrides[hook_id].get("enabled", default)
+        if hook_id in self._overrides and "enabled" in self._overrides[hook_id]:
+            return self._overrides[hook_id]["enabled"]
         return default
 
     def set_hook_enabled(self, hook_id: str, enabled: bool):
         """设置 hook 的覆写 enabled 状态"""
-        self._overrides[hook_id] = {"enabled": enabled}
+        if hook_id not in self._overrides:
+            self._overrides[hook_id] = {}
+        self._overrides[hook_id]["enabled"] = enabled
         self._save()
 
-    def remove_override(self, hook_id: str):
-        """移除 hook 的覆写（恢复默认值）"""
-        if hook_id in self._overrides:
+    def get_effective_value(self, hook_id: str, field: str, default: Any = None) -> Any:
+        """获取 hook 指定字段的覆写值（覆写优先）"""
+        if hook_id in self._overrides and field in self._overrides[hook_id]:
+            return self._overrides[hook_id][field]
+        return default
+
+    def set_hook_overrides(self, hook_id: str, overrides: dict):
+        """批量设置 hook 的字段覆写
+        
+        Args:
+            hook_id: hook 唯一标识
+            overrides: 要覆写的字段字典，如 {"command": "new", "matcher": "startup|clear"}
+        """
+        if hook_id not in self._overrides:
+            self._overrides[hook_id] = {}
+        self._overrides[hook_id].update(overrides)
+        self._save()
+
+    def remove_hook_overrides(self, hook_id: str, fields: list = None):
+        """移除 hook 的指定字段覆写（不传 fields 则移除全部）
+        
+        Args:
+            hook_id: hook 唯一标识
+            fields: 要移除的字段列表，None=移除全部
+        """
+        if hook_id not in self._overrides:
+            return
+        if fields:
+            for f in fields:
+                self._overrides[hook_id].pop(f, None)
+            # 如果只剩空 dict 或只残留空值，清理整个条目
+            if not self._overrides[hook_id]:
+                del self._overrides[hook_id]
+        else:
             del self._overrides[hook_id]
-            self._save()
+        self._save()
+
+    def get_all_overrides(self, hook_id: str) -> dict:
+        """获取 hook 的所有覆写字段"""
+        return dict(self._overrides.get(hook_id, {}))
 
 
 class HookWorker(QRunnable):
@@ -326,8 +393,15 @@ class HookWorker(QRunnable):
         处理 echo 快捷方式、Windows 编码回退、路径分隔符转换。
         stdin_data: 可选的 stdin 输入（传递给脚本的 JSON 上下文）
         """
-        # echo 快捷方式（不需要 stdin）
-        if command.startswith("echo "):
+        # echo 快捷方式 — 仅对纯单行 echo 有效，无任何命令分隔符
+        # 排除换行/&&/||/;/&/| 等，避免截胡多命令（如 echo "msg"\nexit 2）
+        if (command.startswith("echo ")
+            and "\n" not in command
+            and "&&" not in command
+            and "||" not in command
+            and ";" not in command
+            and " & " not in command
+            and " |" not in command):
             output = command[5:].strip()
             if output.startswith('"') and output.endswith('"'):
                 output = output[1:-1]
@@ -338,6 +412,10 @@ class HookWorker(QRunnable):
         # 修复路径分隔符问题：Unix / 转 Windows \
         if os.name == 'nt':
             command = command.replace('/', '\\')
+            # Windows cmd.exe 对 `subprocess.run(..., shell=True)` 传入的多行命令里 `\n`
+            # 处理不可靠（实际只跑第一行）。统一转换为 `&` 分隔符确保 exit 2 等能真正执行。
+            if "\n" in command:
+                command = command.replace("\n", " & ")
 
         # 构造 subprocess 参数
         subprocess_kwargs = {
@@ -358,27 +436,29 @@ class HookWorker(QRunnable):
 
         if os.name == 'nt':
             import locale
-            preferred = locale.getpreferredencoding(False) or ''
-            if preferred.upper() not in ('UTF-8', 'UTF8'):
-                try:
-                    result = subprocess.run(
-                        command, encoding='utf-8', **subprocess_kwargs
-                    )
-                except Exception:
-                    result = subprocess.run(
-                        command, encoding=preferred or 'gbk', **subprocess_kwargs
-                    )
-                exit_code = result.returncode
-                if exit_code != 0:
-                    # exit code 2: Claude Code BLOCK 约定，用 stdout 作为 output
-                    if exit_code == 2:
-                        return result.stdout or "", False, exit_code
-                    return result.stderr or f"Command failed with exit code {exit_code}", False, exit_code
-                return result.stdout or "", True, exit_code
+            # Windows: cmd.exe 的 echo 输出编码跟随系统代码页（中文 Windows 通常 GBK/gb2312），
+            # 用 UTF-8 解码会变乱码。优先用系统首选编码，与 cmd.exe 输出一致。
+            preferred = locale.getpreferredencoding(False) or 'gbk'
+            if preferred.upper() in ('UTF-8', 'UTF8'):
+                enc = 'utf-8'
             else:
+                enc = preferred
+            try:
+                result = subprocess.run(
+                    command, encoding=enc, **subprocess_kwargs
+                )
+            except (UnicodeDecodeError, LookupError):
+                # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(
                     command, encoding='utf-8', **subprocess_kwargs
                 )
+            exit_code = result.returncode
+            if exit_code != 0:
+                # exit code 2: Claude Code BLOCK 约定，用 stdout 作为 output
+                if exit_code == 2:
+                    return result.stdout or "", False, exit_code
+                return result.stderr or f"Command failed with exit code {exit_code}", False, exit_code
+            return result.stdout or "", True, exit_code
         else:
             result = subprocess.run(
                 command, encoding='utf-8', **subprocess_kwargs
@@ -423,9 +503,16 @@ class HookWorker(QRunnable):
     def _execute_command(self) -> tuple:
         """执行命令（委托给公共静态方法），传递 context 作为 stdin"""
         import json as _json
+        import os
+        # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
+        effective_cmd = self.hook.command
+        if os.name == 'nt' and self.hook.commandWindows:
+            effective_cmd = self.hook.commandWindows
+        # 变量插值（含 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量）
+        effective_cmd = HookManager._interpolate_variables(effective_cmd, self.context)
         stdin_data = _json.dumps(self.context) if self.context else None
         output, success, _ = HookWorker._run_command_sync(
-            self.hook.command, self.cwd, self.hook.timeout,
+            effective_cmd, self.cwd, self.hook.timeout,
             stdin_data=stdin_data
         )
         return output, success
@@ -604,15 +691,16 @@ class HookManager:
         return "user-custom" in (hook.config_file or "") or not hook.config_file
 
     def _get_effective_hook_dict(self, hook: Hook) -> dict:
-        """获取覆写后的 hook dict（覆写层的 enabled 优先）"""
+        """获取覆写后的 hook dict（覆写层所有字段优先于源文件）"""
         d = hook.to_dict()
         # user-custom 的 hook 不走覆写层（直接改源文件）
         if not self._is_user_custom_hook(hook):
-            # plugin/skill hooks 走覆写层
-            effective_enabled = self._override_manager.get_effective_enabled(
-                hook.id, hook.enabled
-            )
-            d["enabled"] = effective_enabled
+            # plugin/skill hooks 走覆写层：所有已覆写的字段覆盖源文件值
+            overrides = self._override_manager.get_all_overrides(hook.id)
+            for key, val in overrides.items():
+                if key == "matcher":
+                    continue  # matcher 属于 Rule 层，不在 Hook dict 中
+                d[key] = val
         return d
 
     def set_on_finished_callback(self, callback: Callable[[str, str, bool], None]):
@@ -706,6 +794,14 @@ class HookManager:
         # 持久化生成的 hook id 到源文件（确保下次启动 id 不变）
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
+
+        # 为新注册的 hook 应用覆写层（确保 hot reload 后覆写生效）
+        if count > 0:
+            for event_name, rules in self._hooks.items():
+                for rule in rules:
+                    self._apply_matcher_override(rule)
+                    for hook in rule.hooks:
+                        self._apply_overrides_to_hook(hook)
 
         return count
 
@@ -994,19 +1090,28 @@ class HookManager:
             if not rule.matches(context):
                 continue
 
+            # 应用 matcher 覆写（plugin/skill 的 matcher 编辑存于覆写层）
+            self._apply_matcher_override(rule)
+
             for hook in rule.hooks:
                 # 检查启用状态（走覆写层：plugin/skill 看 override，user-custom 看源文件）
-                hook_enabled = (
-                    hook.enabled if self._is_user_custom_hook(hook)
-                    else self._override_manager.get_effective_enabled(hook.id, hook.enabled)
-                )
-                if not hook_enabled:
-                    continue
+                if not self._is_user_custom_hook(hook):
+                    effective_enabled = self._override_manager.get_effective_enabled(
+                        hook.id, hook.enabled
+                    )
+                    if not effective_enabled:
+                        continue
+                else:
+                    if not hook.enabled:
+                        continue
 
                 # 检查执行条件
                 if not self._check_conditions(hook, context):
                     logger.debug(f"[HookManager] Hook conditions not met: {event_name}")
                     continue
+
+                # 执行前应用字段覆写（plugin/skill 才有覆写）
+                self._apply_overrides_to_hook(hook)
 
                 # 执行 hook
                 result = self._execute_hook(hook, context, trigger_async)
@@ -1014,14 +1119,47 @@ class HookManager:
 
         return results
 
+    def _apply_overrides_to_hook(self, hook: Hook):
+        """将覆写层的字段值应用到 Hook 对象（执行前调用）"""
+        if self._is_user_custom_hook(hook):
+            return
+        overrides = self._override_manager.get_all_overrides(hook.id)
+        if not overrides:
+            return
+        # 排除 enabled（已单独处理）和 matcher（属于 Rule 层，不在 Hook 上）
+        for key, val in overrides.items():
+            if key in ("enabled", "matcher"):
+                continue
+            if hasattr(hook, key):
+                setattr(hook, key, val)
+
+    def _apply_matcher_override(self, rule: HookMatchRule):
+        """将覆写层的 matcher 值应用到 Rule 对象"""
+        if not rule.hooks:
+            return
+        hook = rule.hooks[0]
+        if self._is_user_custom_hook(hook):
+            return
+        matcher_override = self._override_manager.get_effective_value(hook.id, "matcher")
+        if matcher_override is not None:
+            rule.matcher = matcher_override or None
+
     def _execute_hook(self, hook: Hook, context: Dict[str, Any],
                      trigger_async: bool = True) -> HookExecutionResult:
         """执行单个 Hook"""
         # cwd: 智能解析（显式设置 > 从命令脚本路径推导 > 默认项目根目录）
         cwd = self._resolve_command_cwd(hook, context)
 
+        # 注入 skill_root 到 context，供异步 worker 也能解析 ${CLAUDE_PLUGIN_ROOT}
+        context["skill_root"] = hook.skill_root
+
         # 变量替换
-        command = self._interpolate_variables(hook.command, context)
+        # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
+        if os.name == 'nt' and hook.commandWindows:
+            effective_command = hook.commandWindows
+        else:
+            effective_command = hook.command
+        command = self._interpolate_variables(effective_command, context)
         url = self._interpolate_variables(hook.url or "", context)
 
         if trigger_async and hook.type == HookType.COMMAND.value:
@@ -1123,6 +1261,7 @@ class HookManager:
                 # 方式1: 检测 exit code 2（Claude Code 兼容：跳过工具执行）
                 if _exit2_skip:
                     decision = HookDecision.BLOCK
+                    success = True  # exit 2 是有效钩子响应，非执行失败
                     logger.info(f"[HookManager] Hook exit code 2 → BLOCK: {context.get('event_name')}")
 
                 # 方式2: 解析 JSON 中的 decision 字段
@@ -1231,13 +1370,23 @@ class HookManager:
         self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
         return None
 
-    def _interpolate_variables(self, text: str, context: Dict[str, Any]) -> str:
+    @staticmethod
+    def _interpolate_variables(text: str, context: Dict[str, Any]) -> str:
         """变量替换"""
         if not text:
             return text
 
+        # ── Claude Code 插件路径变量（用 skill_root 推导，优先于环境变量） ──
+        skill_root = context.get("skill_root", "")
+        plugin_root = ""
+        if skill_root:
+            plugin_root = str(Path(skill_root).parent) if Path(skill_root).name == "hooks" else skill_root
+            # ${CLAUDE_PLUGIN_ROOT} 是环境变量风格，单独替换
+            text = text.replace("${CLAUDE_PLUGIN_ROOT}", plugin_root)
+
         variables = {
-            "{skill_root}": context.get("skill_root", ""),
+            "{skill_root}": skill_root,
+            "{plugin_root}": plugin_root,
             "{project_root}": context.get("project_root", ""),
             "{message}": context.get("message", ""),
             "{file}": context.get("file", ""),
@@ -1249,7 +1398,7 @@ class HookManager:
             if value:
                 text = text.replace(var, str(value))
 
-        # 环境变量替换
+        # 环境变量替换（CLAUDE_PLUGIN_ROOT 已在上面处理，不会走这里）
         text = re.sub(r'\$\{(\w+)\}', lambda m: os.environ.get(m.group(1), ""), text)
         text = re.sub(r'\$(\w+)', lambda m: os.environ.get(m.group(1), ""), text)
 
@@ -1462,7 +1611,8 @@ class HookManager:
                 # 处理其他字段
                 for key in ["type", "cwd", "add_output_to_context", "skill_root",
                             "timeout", "retry", "conditions", "headers",
-                            "allowedEnvVars", "function_args"]:
+                            "allowedEnvVars", "function_args",
+                            "commandWindows", "statusMessage"]:
                     if key in new_data:
                         hook_entry[key] = new_data[key]
 
@@ -1524,6 +1674,10 @@ class HookManager:
             hook.function_args = new_data["function_args"]
         if "add_output_to_context" in new_data:
             hook.add_output_to_context = new_data["add_output_to_context"]
+        if "commandWindows" in new_data:
+            hook.commandWindows = new_data["commandWindows"]
+        if "statusMessage" in new_data:
+            hook.statusMessage = new_data["statusMessage"]
 
         # 事件变更：从当前事件移动到新事件
         new_event = new_data.get("event", event_name)
@@ -1563,8 +1717,12 @@ class HookManager:
             if "matcher" in new_data:
                 self._hooks[event_name][rule_idx].matcher = new_data["matcher"] or None
 
-        # 保存到源文件
-        self._save_hook_to_file_by_id(hook, new_data)
+        # 持久化：user-custom → 写源文件；plugin/skill → 写覆写层
+        if self._is_user_custom_hook(hook):
+            self._save_hook_to_file_by_id(hook, new_data)
+        else:
+            # plugin/skill hooks 只写覆写层，不碰源文件
+            self._override_manager.set_hook_overrides(hook.id, new_data)
 
         logger.info(f"[HookManager] Edited hook {hook_id}")
         return True
@@ -1627,10 +1785,10 @@ class HookManager:
             del self._hooks[event_name]
 
         # 从覆写层清除记录
-        self._override_manager.remove_override(hook_id)
+        self._override_manager.remove_hook_overrides(hook_id)
 
-        # 从源文件删除
-        if config_file and os.path.exists(config_file):
+        # 从源文件删除（仅 user-custom hook 操作源文件，plugin/skill 只清覆写层）
+        if self._is_user_custom_hook(hook) and config_file and os.path.exists(config_file):
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)

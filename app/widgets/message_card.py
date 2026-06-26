@@ -82,7 +82,7 @@ from app.core import (
     ensure_content_blocks,
 )
 from app.core.message_content import make_tool_result_block
-from app.core.webengine_profile import create_transient_web_profile
+from app.core.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Colors,
     _get_global_font,
@@ -1458,53 +1458,60 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
     return "".join(parts)
 
 
+def _tag_to_event_name(tag: str) -> str:
+    """Claude Code 风格的 kebab-case-hook 标签 → PascalCase 事件名
+
+    例:
+        user-prompt-submit-hook  → UserPromptSubmit
+        pre-user-message-hook    → PreUserMessage
+        pre-tool-use-hook        → PreToolUse
+        session-start-hook       → SessionStart
+    """
+    name = tag
+    if name.endswith("-hook"):
+        name = name[: -len("-hook")]
+    parts = name.split("-")
+    return "".join(p[:1].upper() + p[1:] for p in parts if p)
+
+
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
-    """注入 Hook 块 HTML，类似 think 块"""
+    """注入 Hook 块 HTML，类似 think 块
+
+    支持两种格式（从最优先到兼容）：
+    1. Claude Code 格式: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+    2. 旧格式（向后兼容）: <hook event="EventName">...</hook>
+    """
     if not md_text:
         return md_text
 
+    from app.widgets.render_helpers import render_hook_block
+
+    # 合并两种格式的标签正则，按出现顺序处理
+    # 1. Claude Code: <xxx-hook>...</xxx-hook>
+    # 2. 旧: <hook event="Xxx">...</hook>
+    pattern = re.compile(
+        r'<([a-z0-9-]+-hook)>(.*?)</\1>'
+        r'|<hook\s+event="([^"]+)">(.*?)</hook>',
+        re.DOTALL,
+    )
+
     parts = []
-    i = 0
-    while i < len(md_text):
-        start_idx = md_text.find("<hook ", i)
-        if start_idx == -1:
-            parts.append(md_text[i:])
-            break
-        parts.append(md_text[i:start_idx])
+    last_end = 0
+    for m in pattern.finditer(md_text):
+        parts.append(md_text[last_end:m.start()])
 
-        # 找到 event 属性
-        event_start = md_text.find('event="', start_idx)
-        if event_start == -1 or event_start > start_idx + 10:
-            # 没有 event 属性，跳过这个位置，继续往后找
-            i = start_idx + 6
-            continue
+        if m.group(1):  # Claude Code 格式
+            tag = m.group(1)
+            event_name = _tag_to_event_name(tag)
+            hook_content = m.group(2).strip()
+        else:  # 旧 <hook event="..."> 格式
+            event_name = m.group(3)
+            hook_content = m.group(4).strip()
 
-        event_end = md_text.find('"', event_start + len('event="'))
-        if event_end == -1:
-            parts.append(md_text[start_idx:])
-            break
+        parts.append(render_hook_block(event_name, hook_content, collapsed=not completed))
+        last_end = m.end()
 
-        event_name = md_text[event_start + len('event="'):event_end]
-
-        # 找到闭合标签
-        end_idx = md_text.find("</hook>", start_idx + len("<hook "))
-        if end_idx != -1:
-            content = md_text[start_idx + len('<hook '): end_idx]
-            # 解析内容（event_name 后面的内容）
-            content_start = content.find('>')
-            if content_start != -1:
-                hook_content = content[content_start + 1:].strip()
-            else:
-                hook_content = content.strip()
-
-            # 使用 render_hook_block 渲染
-            from app.widgets.render_helpers import render_hook_block
-            parts.append(render_hook_block(event_name, hook_content, collapsed=not completed))
-            i = end_idx + len("</hook>")
-        else:
-            # 未闭合的 hook，跳过
-            parts.append(md_text[start_idx:])
-            break
+    parts.append(md_text[last_end:])
     return "".join(parts)
 
 
@@ -1816,7 +1823,9 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        self._profile = create_transient_web_profile(self)
+        # 共享全局 profile：所有消息卡片复用同一 Chromium 进程池，
+        # 避免每个卡片独立匿名 profile 触发独立进程组初始化（加载慢的根因）。
+        self._profile = get_shared_web_profile()
         self._page = ConsoleMonitorPage(self._profile, self)
         self.setPage(self._page)
 
@@ -2734,6 +2743,16 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
+                /* 元信息行（文件头/hunk头/截断）：行号列与符号列隐形，避免空列割裂视觉 */
+                .tool-diff-inline .diff-meta .line-num {{
+                    background: transparent;
+                    border-right-color: transparent;
+                    min-width: 0;
+                    padding: 0;
+                }}
+                .tool-diff-inline .diff-meta .line-sign {{
+                    width: 0;
+                }}
                 .tool-diff-inline .word-add {{
                     background: rgba(63, 185, 80, 0.28);
                     border-radius: 3px;
@@ -3447,13 +3466,13 @@ class CodeWebViewer(QWebEngineView):
         if self._streaming:
             content_len = len(self._markdown_text)
             if content_len > 100000:
-                interval = 1500
+                interval = 500
             elif content_len > 50000:
-                interval = 800
+                interval = 300
             elif content_len > 10000:
-                interval = 400
-            else:
                 interval = 200
+            else:
+                interval = 100
         else:
             interval = 40
 
@@ -4134,13 +4153,10 @@ class CodeWebViewer(QWebEngineView):
         except (RuntimeError, AttributeError):
             pass
 
-        # 清理一次性 profile
-        try:
-            if hasattr(self, '_profile'):
-                self._profile.deleteLater()
-                del self._profile
-        except (RuntimeError, AttributeError):
-            pass
+        # 共享 profile 为全局单例，不可销毁；仅解除引用。
+        # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。
+        if hasattr(self, '_profile'):
+            self._profile = None
 
         # 清理代码块缓存
         if hasattr(self, '_code_block_cache'):
@@ -5874,6 +5890,11 @@ class MessageCard(SimpleCardWidget):
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
             if self._streaming:
                 self.viewer._append_text_incremental(text)
+            # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
+            # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
+            # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
+            # 文字即时性已由 _append_text_incremental 保证；流式结束由
+            # finish_streaming() 触发 immediate 收尾渲染。
             self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
             return

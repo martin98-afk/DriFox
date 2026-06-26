@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject
 
 from app.core.lsp.lsp_manager import LspManager
 from app.core.lsp.lsp_tools import LspToolsIntegration
@@ -39,12 +39,10 @@ class BuiltinTools(QObject):
     """
     Builtin tools registry - automatically aggregates methods from tool modules.
 
-    This is a deep module: it handles dynamic dispatch to registered tools,
-    manages session state, and emits file change events without requiring
-    manual method forwarding for every tool method.
+    This is a deep module: it handles dynamic dispatch to registered tools
+    and manages session state, without requiring manual method forwarding
+    for every tool method.
     """
-
-    fileModified = pyqtSignal(str)
 
     def __init__(self, homepage=None, workdir: str = None):
         super().__init__(homepage)
@@ -145,25 +143,6 @@ class BuiltinTools(QObject):
         for tool in self._tools.values():
             if hasattr(tool, name):
                 method = getattr(tool, name)
-
-                # Wrap the method to handle fileModified emission after write operations
-                if name in ["write_file", "edit_file", "multi_edit"]:
-
-                    def wrapped_method(*args, **kwargs):
-                        result = method(*args, **kwargs)
-                        if isinstance(result, ToolResult) and result.success:
-                            # Get path from first argument
-                            path = args[0] if args else kwargs.get("path")
-                            if path:
-                                resolved_path = self._file_tools._resolve_path(path)
-                                logger.info(
-                                    f"[BuiltinTools] {name} success, emitting fileModified: {resolved_path}"
-                                )
-                                self.fileModified.emit(str(resolved_path))
-                        return result
-
-                    return wrapped_method
-
                 return method
 
         # If not found, raise AttributeError (Python default)

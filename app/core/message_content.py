@@ -365,7 +365,9 @@ def content_to_markdown(content: Any) -> str:
                             serialized = json.dumps(v).decode('utf-8')
                         except (AttributeError, TypeError):
                             serialized = str(v)
-                        if len(serialized) > 300:
+                        # question 工具的 questions 字段是核心展示数据，不截断
+                        is_question_args = block.get("name") == "question" and k == "questions"
+                        if len(serialized) > 300 and not is_question_args:
                             # 过长的 list/dict 只保留前100字符作为预览 + 省略标记
                             preview = serialized[:100].replace('\\', '\\\\\\').replace('"', '\\"').replace('\n', '\\n')
                             preview = _sanitize_result(preview)
@@ -378,7 +380,11 @@ def content_to_markdown(content: Any) -> str:
 
             # 处理 result：清理可能影响渲染的标签
             result_raw = str(block.get("result", ""))
-            result_escaped = _sanitize_result(result_raw)[:300]
+            # question 工具的回答可能包含多个问题，不截断
+            if block.get("name") == "question":
+                result_escaped = _sanitize_result(result_raw)
+            else:
+                result_escaped = _sanitize_result(result_raw)[:300]
 
             success = bool(block.get("success", True))
             tool_call_id = block.get("tool_call_id", "")
@@ -525,6 +531,9 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["elapsed"] = float(message["elapsed"])
         if isinstance(message.get("token_usage"), dict):
             normalized["token_usage"] = dict(message["token_usage"])
+        # 保留 _hook_event 标记，确保能通过 save/load 持久化
+        if "_hook_event" in message:
+            normalized["_hook_event"] = message["_hook_event"]
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -563,6 +572,9 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
 
     if message.get("model_name"):
         normalized["model_name"] = str(message.get("model_name"))
+    # 保留 _hook_event 标记，确保能通过 save/load 持久化
+    if "_hook_event" in message:
+        normalized["_hook_event"] = message["_hook_event"]
     return normalized
 
 
@@ -581,16 +593,51 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int]]:
+    """
+    计算每个 user round 的起止索引。
+
+    Round 范围向前扩展：包含 user 消息之前的所有 hook 消息
+    （PreUserMessage、PreToolUse 等除 SessionStart 外的 hook），
+    删除 round 时这些 hook 会被一起删除，避免重复堆叠。
+
+    SessionStart 视为会话级上下文，不纳入任何 round 范围，
+    删除首个 round 时不会连带删除。
+
+    关键设计：先计算每个 round 的 start（向前回溯 hook），
+    再用下一个 round 的 start 作为本 round 的 end，
+    避免 hook 消息同时属于两个 round。
+    """
     canonical_messages = consolidate_messages(messages or [])
     user_indices = [
         idx for idx, msg in enumerate(canonical_messages) if msg.get("role") == "user"
     ]
-    ranges: List[tuple[int, int]] = []
+
+    # 第一遍：计算每个 round 的 start
+    round_starts: List[int] = []
     for pos, start_idx in enumerate(user_indices):
-        end_idx = (
-            user_indices[pos + 1] if pos + 1 < len(user_indices) else len(canonical_messages)
-        )
-        ranges.append((start_idx, end_idx))
+        # 向前回溯起点：上一个 user 之后，或会话开头
+        prev_boundary = user_indices[pos - 1] + 1 if pos > 0 else 0
+        round_start = start_idx
+        for j in range(start_idx - 1, prev_boundary - 1, -1):
+            msg = canonical_messages[j]
+            if msg.get("role") == "user":
+                break  # 遇到上一个 user，停止
+            hook_event = msg.get("_hook_event")
+            if hook_event and hook_event != "SessionStart":
+                round_start = j  # 扩展起点到本 hook
+            elif hook_event == "SessionStart":
+                # SessionStart 是会话级，跳过不扩展
+                continue
+            else:
+                # 非 hook 消息，停止向前回溯
+                break
+        round_starts.append(round_start)
+
+    # 第二遍：end = 下一个 round 的 start（最后一个 round 则是消息总数）
+    ranges: List[tuple[int, int]] = []
+    for i, start in enumerate(round_starts):
+        end = round_starts[i + 1] if i + 1 < len(round_starts) else len(canonical_messages)
+        ranges.append((start, end))
     return ranges
 
 
@@ -604,6 +651,11 @@ def group_messages_for_display(
     for msg in canonical_messages:
         role = msg.get("role")
         if role == "system":
+            continue
+        # 跳过 hook 内部通知消息（如 SessionStart、PostToolUse 等），
+        # 不显示为消息卡片。判定依据是 _hook_event 字段，
+        # 与内容格式（<system-reminder><event-name-hook>...</event-name-hook></system-reminder>）无关。
+        if msg.get("_hook_event"):
             continue
         if role == "user":
             if current_batch:
@@ -630,6 +682,14 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
 
     支持 multimodal 内容（含 image_url 块的列表）。
     """
+    # 在 normalize 之前提取 lsp_diagnostic（normalize_message 不保留此字段，
+    # 使得 session 历史消息不含诊断文本，但 API 请求可以拼接到 content 末尾）
+    _lsp_diagnostic = (
+        message.get("lsp_diagnostic")
+        if isinstance(message, dict)
+        else None
+    )
+
     normalized_message = normalize_message(message)
     if not normalized_message:
         return {}
@@ -697,6 +757,9 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
                         # tool 结果中的图片转为文本描述
                         tool_text_parts.append("[Image: base64 data]")
             tool_content = "\n".join(tool_text_parts)
+        # 拼接 LSP 自动诊断到 content 末尾（仅 API 侧可见，不持久化到 session）
+        if _lsp_diagnostic:
+            tool_content = f"{tool_content}\n\n{_lsp_diagnostic}"
         return {
             "role": "tool",
             "tool_call_id": str(normalized_message.get("tool_call_id", "")),

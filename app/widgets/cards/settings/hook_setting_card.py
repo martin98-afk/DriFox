@@ -5,10 +5,21 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QLayout,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
+    BodyLabel,
     ExpandSettingCard,
     FluentIcon,
     PushButton,
@@ -16,7 +27,8 @@ from qfluentwidgets import (
     ToolButton,
 )
 
-from app.utils.design_tokens import ButtonStyles, Sizes, SwitchStyles, scale_font_size
+from app.tools.tool_name_mapper import ToolNameMapper
+from app.utils.design_tokens import ButtonStyles, Colors, Sizes, SwitchStyles, scale_font_size
 from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
@@ -32,6 +44,122 @@ HOOK_EVENT_ORDER = [
     "PreToolUse", "PostToolUse",
     "Stop",
 ]
+
+
+# ── Claude Code 插件路径变量 ──
+# ${CLAUDE_PLUGIN_ROOT} 指向插件根目录，编辑卡片中识别并提示解析
+PLUGIN_PATH_VARS = ["${CLAUDE_PLUGIN_ROOT}"]
+
+
+class _CompactTextEdit(QPlainTextEdit):
+    """QPlainTextEdit with small initial height via sizeHint override.
+
+    QPlainTextEdit 默认 sizeHint() 高度很大（基于 8 行文本），
+    即使 setMinimumHeight(36) 也不会缩小实际占用空间。
+    此子类让 sizeHint 高度 = minimumHeight，
+    初始很小、无最大高度限制、可随内容自动增长。
+    """
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        h = max(self.minimumHeight(), 28)
+        return QSize(s.width(), h)
+
+
+class _FlowLayout(QLayout):
+    """简易流式布局：子控件按宽度自动换行排列，支持左/右对齐"""
+
+    def __init__(self, parent=None, spacing=6, alignment=Qt.AlignLeft):
+        super().__init__(parent)
+        self._spacing = spacing
+        self._alignment = alignment
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Vertical
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size + QSize(2 * self._spacing, 2 * self._spacing)
+
+    def _do_layout(self, rect, test_only):
+        x = rect.x()
+        y = rect.y()
+        line_height = 0
+        line_widths = []  # 每行总宽度（含 spacing）
+        cur_line_items = []  # 当前行尚未布局的 items
+
+        # 第一遍：分行 + 计算每行总宽度
+        items_to_layout = []
+        for item in self._items:
+            wid = item.widget()
+            if wid is None or not wid.isVisible():
+                continue
+            hint = item.sizeHint()
+            items_to_layout.append((item, hint))
+
+        # 按行分组
+        rows = []
+        cur_row = []
+        cur_row_width = 0
+        for item, hint in items_to_layout:
+            projected = cur_row_width + hint.width() + (self._spacing if cur_row else 0)
+            if projected - self._spacing > rect.width() and cur_row:
+                rows.append(cur_row)
+                cur_row = [(item, hint)]
+                cur_row_width = hint.width()
+            else:
+                cur_row.append((item, hint))
+                cur_row_width = projected
+        if cur_row:
+            rows.append(cur_row)
+
+        # 第二遍：按行布局
+        for row in rows:
+            row_total = sum(h.width() for _, h in row) + self._spacing * max(0, len(row) - 1)
+            if self._alignment == Qt.AlignRight:
+                x = rect.right() - row_total + 1
+            else:
+                x = rect.x()
+            for item, hint in row:
+                if not test_only:
+                    item.setGeometry(QRect(QPoint(x, y), hint))
+                x += hint.width() + self._spacing
+            y += max(h.height() for _, h in row) + self._spacing
+        if rows:
+            y -= self._spacing
+        return y - rect.y()
 
 
 class HookItem(QWidget):
@@ -62,7 +190,7 @@ class HookItem(QWidget):
         self.sourceLabel.setStyleSheet(
             f"background-color: {source_color}; color: white; "
             f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
-            f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
+            f"padding: 1px 2px; border-radius: 4px; font-weight: bold;"
         )
         self.sourceLabel.setFixedHeight(18)
 
@@ -75,7 +203,7 @@ class HookItem(QWidget):
         self.typeLabel.setStyleSheet(
             f"background-color: {type_color}; color: white; "
             f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
-            f"padding: 1px 6px; border-radius: 4px; font-weight: bold;"
+            f"padding: 1px 2px; border-radius: 4px; font-weight: bold;"
         )
         self.typeLabel.setFixedHeight(18)
 
@@ -87,6 +215,17 @@ class HookItem(QWidget):
             f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
         )
         self.commandLabel.setMinimumWidth(40)
+
+        # Windows 标签（仅在 commandWindows 存在时显示）
+        self._winLabel = None
+        if self._hook_data.get("commandWindows"):
+            self._winLabel = QLabel("Win", self)
+            self._winLabel.setStyleSheet(
+                f"background-color: #FF8C00; color: white; "
+                f"{get_font_family_css()} font-size: {scale_font_size(9)}px; "
+                f"padding: 1px 2px; border-radius: 3px; font-weight: bold;"
+            )
+            self._winLabel.setFixedHeight(16)
 
         # 开关
         self.switch = SwitchButton(self)
@@ -105,13 +244,16 @@ class HookItem(QWidget):
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
 
         self.setFixedHeight(40)
-        self.hBoxLayout.setContentsMargins(8, 0, 16, 0)  # ponytail: 左 padding 从 48 缩到 8
+        self.hBoxLayout.setContentsMargins(8, 0, 4, 0)  # ponytail: 左 padding 从 48 缩到 8
         self.hBoxLayout.addWidget(self.sourceLabel, 0)
-        self.hBoxLayout.addSpacing(6)
+        self.hBoxLayout.addSpacing(3)
         self.hBoxLayout.addWidget(self.typeLabel, 0)
-        self.hBoxLayout.addSpacing(8)
+        self.hBoxLayout.addSpacing(3)
         self.hBoxLayout.addWidget(self.commandLabel, 1)
-        self.hBoxLayout.addSpacing(12)
+        if self._winLabel:
+            self.hBoxLayout.addSpacing(2)
+            self.hBoxLayout.addWidget(self._winLabel, 0)
+        self.hBoxLayout.addSpacing(6)
         self.hBoxLayout.addWidget(self.switch, 0)
         self.hBoxLayout.addWidget(self.editBtn, 0)
         self.hBoxLayout.addWidget(self.delBtn, 0)
@@ -137,22 +279,44 @@ class HookEditCard(QWidget):
     """
     Hook 编辑卡片（卡片形态）
     类似 MCPEditCard，放在 BaseSettingsCard 中使用
+
+    增强:
+    - commandWindows 字段（编辑已有 command 插件时显示）
+    - 智能 Matcher 选择：
+      - SessionStart → startup/resume/clear/compact 勾选框
+      - PreToolUse/PostToolUse → 工具名列表勾选框
+      - 其他事件 → 仅文本输入框
+    - 勾选框与文本输入框双向同步
+    - 来源自动填充（从已加载插件解析）
     """
+
+    # SessionStart 会话状态选项
+    SESSION_STATES = ["startup", "resume", "clear", "compact"]
 
     saved = pyqtSignal(dict)
     closed = pyqtSignal()
 
-    def __init__(self, hook_data: dict = None, parent=None):
+    def __init__(self, hook_data: dict = None, parent=None, hook_manager=None):
         super().__init__(parent=parent)
         self._hook_data = hook_data or {}
         self._is_new = hook_data is None
+        self._hook_manager = hook_manager
+        self._matcher_checkboxes = []  # [(QPushButton, value), ...]
+        self._syncing_matcher = False  # 防递归同步标志
+        self._source_display = ""  # 来源显示名称（供外部卡片标题栏展示）
         self._setup_ui()
         if not self._is_new:
             self._load_data()
+        # 初始化后同步 matcher 状态
+        self._sync_matcher_text_from_checks()
 
     def get_original_data(self) -> dict:
         """返回原始 hook 数据（编辑时使用），新增时返回空 dict"""
         return dict(self._hook_data) if not self._is_new else {}
+
+    def get_source_display(self) -> str:
+        """返回来源显示名称（供外部卡片标题栏展示），无来源时返回空字符串"""
+        return self._source_display
 
     def _setup_ui(self):
         self.setStyleSheet(EDIT_CARD_STYLE)
@@ -164,6 +328,7 @@ class HookEditCard(QWidget):
         # ── 事件 ──
         self.eventCombo = NoWheelComboBox()
         self.eventCombo.addItems(HOOK_EVENT_ORDER)
+        self.eventCombo.currentTextChanged.connect(self._on_event_changed)
         row, _ = _make_row("事件:", self.eventCombo)
         main_layout.addLayout(row)
 
@@ -175,24 +340,237 @@ class HookEditCard(QWidget):
         main_layout.addLayout(row)
 
         # ── 命令 ──
-        self.commandEdit = QPlainTextEdit()
-        self.commandEdit.setMaximumHeight(100)
-        self.commandEdit.setMinimumHeight(48)
+        self.commandEdit = _CompactTextEdit()
+        self.commandEdit.setMinimumHeight(28)
         self.commandEdit.setPlaceholderText('如: echo "Hello" 或 python script.py')
+        self.commandEdit.textChanged.connect(self._update_path_var_hint)
         self._cmd_row, self._cmd_label = _make_row("命令:", self.commandEdit)
         main_layout.addLayout(self._cmd_row)
 
-        # ── Matcher（可选） ──
+        # ── 插件路径变量解析提示 ──
+        self._path_var_hint = QLabel("")
+        self._path_var_hint.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} "
+            f"font-size: {scale_font_size(10)}px; padding: 0 4px 0 74px;"
+        )
+        self._path_var_hint.setWordWrap(True)
+        self._path_var_hint.setVisible(False)
+        main_layout.addWidget(self._path_var_hint)
+
+        # ── Windows 命令（仅编辑已有 commandWindows 的 hook 时显示） ──
+        self.commandWindowsEdit = _CompactTextEdit()
+        self.commandWindowsEdit.setMinimumHeight(28)
+        self.commandWindowsEdit.setPlaceholderText("Windows 专用命令（可选）")
+        # 用 QFrame 承载整行以便整体 setVisible（layout 本身没有 setVisible）
+        self._cmdwin_row = QFrame()
+        _cmdwin_inner, self._cmdwin_label = _make_row("Win 命令:", self.commandWindowsEdit)
+        self._cmdwin_row.setLayout(_cmdwin_inner)
+        self._cmdwin_row.setVisible(False)
+        main_layout.addWidget(self._cmdwin_row)
+
+        # ── 执行结果插入消息列表 ──
+        self.addOutputCtxSwitch = SwitchButton()
+        SwitchStyles.configure(self.addOutputCtxSwitch)
+        self.addOutputCtxSwitch.setChecked(True)
+        # 用 QFrame 承载整行以便整体 setVisible
+        self._add_output_row = QFrame()
+        _add_output_inner = QHBoxLayout()
+        _add_output_inner.setSpacing(8)
+        _add_output_label = BodyLabel("消息注入:")
+        _add_output_label.setFixedWidth(70)
+        _add_output_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        _add_output_inner.addWidget(_add_output_label)
+        _add_output_inner.addWidget(self.addOutputCtxSwitch, 0)
+        _add_output_hint = QLabel("执行结果将插入对话消息列表")
+        _add_output_hint.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
+        _add_output_inner.addWidget(_add_output_hint, 1)
+        self._add_output_row.setLayout(_add_output_inner)
+        main_layout.addWidget(self._add_output_row)
+
+        # ── Matcher 智能选择区 ──
+        matcher_section = QVBoxLayout()
+        matcher_section.setSpacing(4)
+
+        # 文本输入框（放在 toggle 区上方）
         self.matcherEdit = QLineEdit()
-        self.matcherEdit.setPlaceholderText("如: tool:bash 或 .*帮助.*")
+        self.matcherEdit.setPlaceholderText("如: startup|clear 或 Edit|Write|MultiEdit 或 .*帮助.*")
+        self.matcherEdit.textChanged.connect(self._on_matcher_text_changed)
         row, _ = _make_row("Matcher:", self.matcherEdit)
-        main_layout.addLayout(row)
+        matcher_section.addLayout(row)
+
+        # toggle 按钮容器（FlowLayout 宽度自适应换行，右对齐）
+        self._matcher_checks_frame = QFrame()
+        self._matcher_checks_frame.setVisible(False)
+        self._matcher_checks_layout = _FlowLayout(self._matcher_checks_frame, spacing=6, alignment=Qt.AlignRight)
+        self._matcher_checks_layout.setContentsMargins(70, 0, 0, 4)  # 缩进对齐文本输入框
+        matcher_section.addWidget(self._matcher_checks_frame)
+
+        main_layout.addLayout(matcher_section)
 
         # 初始类型
         self._on_type_changed(self.typeCombo.currentText())
 
+        # 初始事件勾选框（新卡片时 eventCombo 有默认值但信号未触发）
+        self._rebuild_matcher_checks(self.eventCombo.currentText())
+
+    def _on_event_changed(self, event_name: str):
+        """事件切换时重建 matcher 勾选框"""
+        self._rebuild_matcher_checks(event_name)
+        self._sync_matcher_text_from_checks()
+
+    def _rebuild_matcher_checks(self, event_name: str):
+        """根据事件类型重建 matcher 勾选框"""
+        # 清除旧勾选框
+        for cb, _ in self._matcher_checkboxes:
+            self._matcher_checks_layout.removeWidget(cb)
+            cb.deleteLater()
+        self._matcher_checkboxes.clear()
+
+        # 根据事件类型获取选项列表
+        options = []
+        if event_name == "SessionStart":
+            options = list(self.SESSION_STATES)
+        elif event_name in ("PreToolUse", "PostToolUse"):
+            options = sorted(ToolNameMapper.ALIAS_MAP.keys())
+
+        if not options:
+            self._matcher_checks_frame.setVisible(False)
+            return
+
+        self._matcher_checks_frame.setVisible(True)
+
+        # 主题感知的 toggle pill 样式（选中用淡主题色，非打勾框）
+        Colors.refresh()
+        _accent = Colors.TEXT_ACCENT
+        # 将 hex 主题色转为低透明度 rgba 作为选中背景（淡主题色效果）
+        _accent_rgba = _accent
+        if _accent.startswith('#') and len(_accent) == 7:
+            _r, _g, _b = int(_accent[1:3], 16), int(_accent[3:5], 16), int(_accent[5:7], 16)
+            _accent_rgba = f"rgba({_r}, {_g}, {_b}, 0.15)"
+        _toggle_style = (
+            f"QPushButton {{"
+            f"  background: transparent;"
+            f"  border: 1px solid {Colors.BORDER};"
+            f"  border-radius: 11px;"
+            f"  padding: 2px 10px;"
+            f"  color: {Colors.TEXT_SECONDARY};"
+            f"  {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+            f"  text-align: center;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  border-color: {Colors.TEXT_ACCENT};"
+            f"  color: {Colors.TEXT_PRIMARY};"
+            f"}}"
+            f"QPushButton:checked {{"
+            f"  background: {_accent_rgba};"
+            f"  border-color: {Colors.TEXT_ACCENT};"
+            f"  color: {Colors.TEXT_ACCENT};"
+            f"}}"
+        )
+
+        def _make_toggle(opt: str):
+            cb = QPushButton(opt)
+            cb.setCheckable(True)
+            cb.setFixedHeight(22)
+            cb.setStyleSheet(_toggle_style)
+            cb.toggled.connect(self._on_matcher_check_toggled)
+            return cb
+
+        # FlowLayout 自动按宽度换行，无需手动分行
+        for opt in options:
+            cb = _make_toggle(opt)
+            self._matcher_checks_layout.addWidget(cb)
+            self._matcher_checkboxes.append((cb, opt))
+
+    def _on_matcher_check_toggled(self):
+        """勾选框变化 -> 更新文本输入框"""
+        if self._syncing_matcher:
+            return
+        self._sync_matcher_text_from_checks()
+
+    def _on_matcher_text_changed(self, text: str):
+        """文本输入框变化 -> 更新勾选框"""
+        if self._syncing_matcher:
+            return
+        self._sync_matcher_checks_from_text(text)
+
+    def _sync_matcher_text_from_checks(self):
+        """勾选框状态 -> pipe 分隔文本"""
+        self._syncing_matcher = True
+        try:
+            selected = [opt for cb, opt in self._matcher_checkboxes if cb.isChecked()]
+            text = "|".join(selected)
+            self.matcherEdit.setText(text)
+        finally:
+            self._syncing_matcher = False
+
+    @staticmethod
+    def _normalize_matcher_part(part: str) -> str:
+        """归一化 matcher 片段：去 tool: 前缀、大小写不敏感、ToolNameMapper 别名"""
+        p = part.strip()
+        if not p:
+            return ""
+        # 去除 tool: 前缀
+        if p.startswith("tool:"):
+            p = p[5:]
+        # 通过 ToolNameMapper 归一化（处理别名）
+        native = ToolNameMapper.to_native(p)
+        if native != p:
+            return native
+        # 兜底：小写化
+        return p.lower()
+
+    def _sync_matcher_checks_from_text(self, text: str):
+        """pipe 分隔文本 -> 勾选框状态（大小写/别名/前缀不敏感）"""
+        self._syncing_matcher = True
+        try:
+            if not text:
+                for cb, _ in self._matcher_checkboxes:
+                    cb.setChecked(False)
+                return
+            # 归一化所有目标值
+            parts = set()
+            for p in text.split("|"):
+                normalized = self._normalize_matcher_part(p)
+                if normalized:
+                    parts.add(normalized)
+            for cb, opt in self._matcher_checkboxes:
+                cb.setChecked(opt.lower() in parts)
+        finally:
+            self._syncing_matcher = False
+
+    def _update_path_var_hint(self):
+        """检测命令中的 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量，显示解析提示"""
+        text = self.commandEdit.toPlainText()
+        if not text:
+            self._path_var_hint.setVisible(False)
+            return
+
+        # 检测所有已知插件路径变量
+        found = [v for v in PLUGIN_PATH_VARS if v in text]
+        if not found:
+            self._path_var_hint.setVisible(False)
+            return
+
+        # 从 hook_data 获取 skill_root 推导插件根路径
+        skill_root = self._hook_data.get("skill_root", "")
+        if skill_root:
+            from pathlib import Path as _P
+            plugin_root = str(_P(skill_root).parent) if _P(skill_root).name == "hooks" else skill_root
+        else:
+            plugin_root = "（执行时自动解析为插件根目录）"
+
+        vars_text = " / ".join(found)
+        self._path_var_hint.setText(f"💡 {vars_text} → {plugin_root}（执行时自动替换）")
+        self._path_var_hint.setVisible(True)
+
     def _on_type_changed(self, hook_type: str):
-        """根据类型切换标签文本"""
+        """根据类型切换标签文本和可见字段"""
+        is_command = hook_type == "command"
+        is_prompt = hook_type == "prompt"
+
         if hook_type == "http":
             self._cmd_label.setText("URL:")
             self.commandEdit.setPlaceholderText("如: https://example.com/hook")
@@ -205,6 +583,14 @@ class HookEditCard(QWidget):
         else:
             self._cmd_label.setText("命令:")
             self.commandEdit.setPlaceholderText('如: echo "Hello" 或 python script.py')
+
+        # commandWindows 仅对 command 类型且在编辑已有 commandWindows 的 hook 时显示
+        has_cmdwin = bool(self._hook_data.get("commandWindows", ""))
+        if self._cmdwin_row:
+            self._cmdwin_row.setVisible(is_command and has_cmdwin)
+
+        # 输出到消息切换：prompt 类型固定为 True（隐藏开关），其他类型可配置
+        self._add_output_row.setVisible(not is_prompt)
 
     def _load_data(self):
         d = self._hook_data
@@ -220,18 +606,63 @@ class HookEditCard(QWidget):
             self.commandEdit.setPlainText(d.get("prompt", "") or d.get("command", "") or "")
         else:
             self.commandEdit.setPlainText(d.get("command", "") or "")
-        self.matcherEdit.setText(d.get("matcher", ""))
+
+        # commandWindows（仅当存在时显示）
+        if d.get("commandWindows", ""):
+            self.commandWindowsEdit.setPlainText(d["commandWindows"])
+            if self._cmdwin_row:
+                self._cmdwin_row.setVisible(True)
+
+        # matcher
+        matcher = d.get("matcher", "")
+        self.matcherEdit.setText(matcher)
+
+        # 重建勾选框并同步
+        event = d.get("_event", self.eventCombo.currentText())
+        self._rebuild_matcher_checks(event)
+        self._sync_matcher_checks_from_text(matcher)
+
+        # 来源标注（保存供外部卡片标题栏展示）
+        source_type = d.get("_source_type", "")
+        display_name = d.get("_display_name", "")
+        self._source_display = display_name if (source_type and display_name and source_type != "user") else ""
+
+        # add_output_to_context
+        add_output = d.get("add_output_to_context", True)
+        if isinstance(add_output, bool):
+            self.addOutputCtxSwitch.setChecked(add_output)
+        # prompt 类型固定输出到消息，开关隐藏
+        if hook_type == "prompt":
+            self.addOutputCtxSwitch.setChecked(True)
+
+        # 重新同步 UI 可见性（确保 _cmdwin_row 等与当前数据一致）
+        self._on_type_changed(hook_type)
+
+        # 更新插件路径变量解析提示
+        self._update_path_var_hint()
 
     def get_values(self) -> dict:
         hook_type = self.typeCombo.currentText()
         value = self.commandEdit.toPlainText().strip()
+        matcher = self.matcherEdit.text().strip()
+
+        # prompt 类型始终输出到消息
+        add_output = True if hook_type == "prompt" else self.addOutputCtxSwitch.isChecked()
+
         result = {
             "event": self.eventCombo.currentText(),
             "type": hook_type,
             "command": value,
-            "matcher": self.matcherEdit.text().strip(),
-            "enabled": True
+            "matcher": matcher,
+            "enabled": True,
+            "add_output_to_context": add_output,
         }
+
+        # commandWindows
+        cmdwin = self.commandWindowsEdit.toPlainText().strip()
+        if cmdwin:
+            result["commandWindows"] = cmdwin
+
         # 清理旧专用字段，避免类型切换时残留
         result.pop("function", None)
         result.pop("url", None)
@@ -420,7 +851,8 @@ class HookListSettingCard(ExpandSettingCard):
             self._refresh(reload=True)
             self.hooksChanged.emit()
 
-    def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command", enabled: bool = True):
+    def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command",
+                  enabled: bool = True, commandWindows: str = "", statusMessage: str = ""):
         """添加新 hook（写入 user-custom hooks 文件）"""
         # 构建 hook 条目
         hook_id = uuid4().hex
@@ -431,6 +863,10 @@ class HookListSettingCard(ExpandSettingCard):
             "matcher": matcher or "",
             "enabled": enabled
         }
+        if commandWindows:
+            hook_entry["commandWindows"] = commandWindows
+        if statusMessage:
+            hook_entry["statusMessage"] = statusMessage
         if hook_type == "python":
             hook_entry["function"] = command
         elif hook_type == "http":

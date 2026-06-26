@@ -498,6 +498,8 @@ class CommandCard(QWidget):
                 border-bottom-right-radius: 0px;
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
             }}
         """)
 
@@ -976,53 +978,60 @@ class CommandCard(QWidget):
     # ---- 自动检测 --model 触发值选择 / 实时搜索 ----
 
     def _auto_switch_to_value_selection(self, text: str, cursor_pos: int = -1):
-        """检测 --model 前缀输入，自动进入/刷新值选择模式
+        """检测文本中完整的 value 参数名（含 =），自动进入/刷新值选择模式
 
         行为：
-        - 用户在 detail 命令范围内输入 `--m`/`--mo`/`--mod`/.../`--model=` 时自动弹出模型列表
+        - 只匹配完整的参数名 + =（如 --language=），不匹配前缀
+        - 文本中有多个完整参数时取最后一个（最近输入的）
+        - 不论参数当前是否可见（active 的参数会被隐藏但文本仍在）
         - 已在值选择模式时，根据光标前内容实时过滤
         - cursor_pos=-1 时按"到下一个空格/末尾"取搜索关键字
+
+        注意：绝不通过前缀匹配触发值选择——值列表会顶掉参数列表，
+        只有在参数全名 + 等号（--model=）时才应进入值选择模式。
         """
         import re
 
-        # 1. 找 --model 前缀位置（--m, --mo, --model, --model= 都匹配）
-        #    使用 lookahead 限制最长匹配到 = 之前/或 整个 token
-        match = re.search(r'--model[a-z-]*', text)
-        if not match:
-            return
-
-        token_start = match.start()
-        token_end = match.end()  # 包含 = 时指向 = 之后
-
-        # 2. 限定在 detail 命令范围内（避免误识别）
-        #    detail 模式的输入形如 "/agent --model=xxx"
-        cmd_prefix_len = len(self._detail_cmd_name) + 2  # "/<cmd_name> "
-        if token_start < cmd_prefix_len:
-            return
-
-        # 3. 找到对应的参数 widget（必须在 _param_widgets 中且仍可见）
-        target_widget = None
+        # 1. 收集所有带 value_options 的 value 参数（不论显隐，靠文本来匹配）
+        candidate_params = []
         for w in self._param_widgets:
-            if w.param_name == "--model=" and w.param_type == "value":
-                if w.isVisible():
-                    target_widget = w
-                break
-        if target_widget is None:
-            return  # 参数已激活（被显隐为不可见），不做自动触发
+            if w.param_type != "value":
+                continue
+            # --model= 使用动态数据源；其他参数需有静态 value_options
+            if w.param_name == "--model=":
+                candidate_params.append(w)
+            elif w._param.value_options:
+                candidate_params.append(w)
 
-        # 4. 提取搜索 query：match 之后到光标/下一个空格的内容
-        query = self._extract_model_query(text, token_end, cursor_pos)
+        if not candidate_params:
+            return
 
-        # 5. 已在值选择模式：仅刷新过滤
-        if self._value_selection_mode and self._value_selection_param == "--model=":
+        # 2. 查找文本中完整的参数名（含 =），取最后一个匹配
+        best_match = None  # (match_end, widget, query)
+
+        for w in candidate_params:
+            param_clean = w.param_name.rstrip("=")
+            m = re.search(re.escape(param_clean) + r'=', text)
+            if m and (best_match is None or m.end() > best_match[0]):
+                token_end = m.end()
+                query = self._extract_value_query(text, token_end, cursor_pos)
+                best_match = (m.end(), w, query)
+
+        if best_match is None:
+            return
+
+        _, target_widget, query = best_match
+
+        # 3. 已在值选择模式且是同一个参数：仅刷新过滤
+        if self._value_selection_mode and self._value_selection_param == target_widget.param_name:
             self._refresh_value_list(query)
             return
 
-        # 6. 否则切到值选择模式
+        # 4. 切到值选择模式
         self._switch_to_value_selection(target_widget, query=query)
 
-    def _extract_model_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
-        """提取 --model= 之后到光标前/下一个空格前的子串作为搜索关键字"""
+    def _extract_value_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
+        """提取 value 参数 = 之后到光标前/下一个空格前的子串作为搜索关键字"""
         if cursor_pos < 0 or cursor_pos > len(text):
             cursor_pos = len(text)
         # 右边界 = min(光标, 下一个空格)
@@ -1105,11 +1114,59 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(True)
         self._adjust_detail_height()
 
+    def _extract_param_filter(self, full_text: str) -> str:
+        """从输入文本提取用户当前正在输入的部分参数名
+
+        用于参数列表过滤：当用户在输入框中输入 `--q` 时，
+        参数列表只显示以 `--q` 开头的参数（如 --quick）。
+
+        规则：
+        - 如果不是 detail 模式或没有命令名 → 返回空
+        - 提取命令名后的文本，取最后一个 --xxx 部分
+        - 包含 = → 已进入值选择模式，不过滤
+        - 末尾空格 → 刚完成一个参数，不过滤
+        - -- 后至少有一个字符才过滤
+
+        Returns:
+            过滤前缀（如 "--q"），空字符串表示不应用过滤
+        """
+        if not full_text or not self._detail_cmd_name:
+            return ""
+
+        cmd_prefix = f"/{self._detail_cmd_name} "
+        idx = full_text.find(cmd_prefix)
+        if idx < 0:
+            return ""
+
+        after_cmd = full_text[idx + len(cmd_prefix):]
+
+        # 包含 = → 在输入值列表，不过滤参数列表
+        if "=" in after_cmd:
+            return ""
+
+        # 末尾空格 → 刚完成一个参数
+        if after_cmd.endswith(" "):
+            return ""
+
+        # 取最后一个 --xxx 单词
+        import re
+        tokens = re.findall(r'(?<!\S)(--[\w-]+)', after_cmd)
+        if not tokens:
+            return ""
+
+        last = tokens[-1]
+        # 至少 --x 三个字符
+        if len(last) < 3:
+            return ""
+
+        return last
+
     def update_active_params(self, active: set, full_text: str = "", cursor_pos: int = -1):
         """根据输入中已存在的参数名列表，显隐参数项
 
         支持互斥参数组：当互斥组中任一参数被激活后，同组其他参数自动隐藏，
         避免用户同时选中两个互斥参数（如 --quick 和 --thorough）。
+        支持输入前缀过滤：用户正在输入 --xxx 时，参数列表只显示匹配项。
 
         Args:
             active: 输入文本中已存在的参数名集合，如 {"--with-context", "--model="}
@@ -1145,6 +1202,9 @@ class CommandCard(QWidget):
                 # 参数已被删掉 → 退出值选择模式，回到参数列表
                 self._exit_value_selection()
 
+        # 提取输入前缀过滤（用户正在输入的 --xxx 部分）
+        param_filter = self._extract_param_filter(full_text)
+
         # ---- 第一遍：检测互斥组激活状态 ----
         mutex_active_groups: set = set()  # 已有激活参数的互斥组名
         for w in self._param_widgets:
@@ -1159,7 +1219,7 @@ class CommandCard(QWidget):
             if is_active:
                 mutex_active_groups.add(mg)
 
-        # ---- 第二遍：根据激活状态 + 互斥规则设置可见性 ----
+        # ---- 第二遍：根据激活状态 + 互斥规则 + 输入前缀过滤 设置可见性 ----
         any_visible = False
         for w in self._param_widgets:
             param_key = w.param_name
@@ -1177,6 +1237,12 @@ class CommandCard(QWidget):
             mg = getattr(w._param, 'mutex_group', '')
             if mg and mg in mutex_active_groups:
                 visible = False
+
+            # 输入前缀过滤：正在输入参数名部分时，只显示以此前缀开头的参数
+            # 只在参数可见且有不空前缀时才应用
+            if visible and param_filter:
+                if not param_clean.startswith(param_filter):
+                    visible = False
 
             w.setVisible(visible)
             if w.isVisible():
@@ -1205,6 +1271,7 @@ class CommandCard(QWidget):
         self._update_param_selection()
 
         # 自动检测 --model 前缀：进入/刷新值选择模式（实时搜索）
+        # 注意：此方法只匹配完整参数名 + =（如 --model=），不做前缀匹配
         if full_text and any_visible:
             self._auto_switch_to_value_selection(full_text, cursor_pos)
 
@@ -1292,7 +1359,7 @@ class CommandCard(QWidget):
 
     def _refresh_data(self):
         """刷新完整数据列表（命令 + 技能）
-        
+
         使用缓存避免每次敲击都读磁盘。
         只有在 _cache_dirty=True 时才重建缓存（如插件热重载后）。
         首次调用时必然重建。
@@ -1773,7 +1840,7 @@ class CommandCard(QWidget):
 
     def invalidate_cache(self):
         """使缓存失效，下次 show_card 时自动重建
-        
+
         由外部（如 main_widget）在插件热重载后调用。
         """
         self._cache_dirty = True

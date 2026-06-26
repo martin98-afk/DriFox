@@ -13,6 +13,7 @@ from loguru import logger
 
 from app.core.hook_manager import HookDecision
 from app.core.message_content import content_to_text
+from app.tools.tool_name_mapper import ToolNameMapper
 
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
@@ -300,14 +301,46 @@ class ToolExecutor:
         if not (self._backend and self._backend.hook_manager):
             return
 
+        # 获取 session_id
+        local_session_id = ""
+        if self._backend and self._backend.session_manager:
+            session = self._backend.get_current_session()
+            if session:
+                local_session_id = session.session_id or ""
+
+        # 创建标准化 tool_input 副本（兼容 Claude Code 字段命名）
+        _normalized_input = dict(args)
+        for _src, _dst in [
+            ("newString", "new_string"), ("oldString", "old_string"),
+            ("path", "file_path"), ("file", "file_path"),
+        ]:
+            if _src in _normalized_input and _dst not in _normalized_input:
+                _normalized_input[_dst] = _normalized_input[_src]
+            if _dst in _normalized_input and _src not in _normalized_input:
+                _normalized_input[_src] = _normalized_input[_dst]
+        for _edit in _normalized_input.get("edits", []):
+            if isinstance(_edit, dict):
+                if "newString" in _edit and "new_string" not in _edit:
+                    _edit["new_string"] = _edit["newString"]
+                if "oldString" in _edit and "old_string" not in _edit:
+                    _edit["old_string"] = _edit["oldString"]
+
         context = {
             "project_root": self._workdir or os.getcwd(),
-            "tool_name": tool_name,
+            # Claude Code 风格工具名（PascalCase），使第三方插件能通过
+            # 'Edit|Write|MultiEdit' 等大小写敏感匹配识别工具
+            "tool_name": ToolNameMapper.to_claude_style(tool_name),
+            # 保留 DriFoxx 原生小写名（向后兼容）
+            "tool_name_native": tool_name,
             "args": args,
+            # Claude Code 兼容字段（字段名已标准化）
+            "tool_input": _normalized_input,
+            "session_id": local_session_id,
         }
 
         # 注入工具结果信息（PostToolUse 最核心的增强）
         if result is not None:
+            _MAX_RESULT_LEN = 100000  # 足够钩子脚本分析，避免 10MB+ 巨量结果撑爆 JSON
             context["result_success"] = result.success
             # 确保 content 为字符串，防止 dict/list 等非字符串类型切片报错
             # 例如 subagent_para 返回的 content 是 dict
@@ -317,7 +350,19 @@ class ToolExecutor:
                     content = orjson.dumps(content).decode("utf-8", errors="replace")
                 else:
                     content = ""
-            context["result_content"] = (content or result.error or "")[:1000]
+            result_str = (content or result.error or "")
+            is_truncated = len(result_str) > _MAX_RESULT_LEN
+            # DriFoxx 自有格式（向后兼容）
+            context["result_content"] = result_str[:_MAX_RESULT_LEN]
+            context["result_truncated"] = is_truncated
+            # Claude Code 兼容格式：tool_result dict
+            context["tool_result"] = {
+                "success": result.success,
+                "content": result_str[:_MAX_RESULT_LEN],
+                "truncated": is_truncated,
+                "has_error": bool(result.error),
+                "error": result.error or "",
+            }
 
         # 注入文件路径
         file_path = args.get("path") or args.get("file")
@@ -395,15 +440,15 @@ class ToolExecutor:
             logger.warning(f"[ToolExecutor] 自动 LSP 快速诊断失败: {e}")
             return result
 
+        # 诊断文本存入独立字段，不混入 result.content
+        # to_api_message 会将 lsp_diagnostic 拼接到 API 请求的 tool content 末尾，
+        # 但 normalize_message 不保留此字段，因此 session 历史消息不含诊断文本，
+        # 避免累积诊断文本触发上下文压缩（soft_limit 超限 → prompt_tokens 骤减）
         if not diag_result:
             # diag_result 为 None 表示 CLI 返回空或不可用（工具未安装/超时/真无问题）
-            result.content = (
-                f"{result.content}\n\n[LSP 自动诊断] 未发现问题"
-            )
+            result.lsp_diagnostic = "[LSP 自动诊断] 未发现问题"
         else:
-            result.content = (
-                f"{result.content}\n\n{diag_result}"
-            )
+            result.lsp_diagnostic = diag_result
 
         logger.debug(
             f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}"
@@ -545,9 +590,35 @@ class ToolExecutor:
 
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         if self._backend and self._backend.hook_manager:
+            # 创建标准化 tool_input 副本（兼容 Claude Code 字段命名）
+            _normalized_input = dict(args)  # 浅拷贝，不污染原始 args
+            for _src, _dst in [
+                ("newString", "new_string"), ("oldString", "old_string"),
+                ("path", "file_path"), ("file", "file_path"),
+                ("content", "tool_input_content"),  # 额外别名（部分钩子用）
+            ]:
+                if _src in _normalized_input and _dst not in _normalized_input:
+                    _normalized_input[_dst] = _normalized_input[_src]
+                if _dst in _normalized_input and _src not in _normalized_input:
+                    _normalized_input[_src] = _normalized_input[_dst]  # 双向兼容
+            # MultiEdit edits 子项驼峰→蛇形
+            for _edit in _normalized_input.get("edits", []):
+                if isinstance(_edit, dict):
+                    if "newString" in _edit and "new_string" not in _edit:
+                        _edit["new_string"] = _edit["newString"]
+                    if "oldString" in _edit and "old_string" not in _edit:
+                        _edit["old_string"] = _edit["oldString"]
+
             context = {
                 "project_root": self._workdir or os.getcwd(),
-                "tool_name": tool_name,
+                # Claude Code 风格工具名（PascalCase），使第三方插件能通过
+                # 'Edit|Write|MultiEdit' 等大小写敏感匹配识别工具
+                "tool_name": ToolNameMapper.to_claude_style(tool_name),
+                # 保留 DriFoxx 原生小写名（向后兼容）
+                "tool_name_native": tool_name,
+                # Claude Code 兼容字段（字段名已标准化）
+                "tool_input": _normalized_input,
+                "session_id": local_session_id,
             }
             file_path = args.get("path") or args.get("file")
             if file_path:
@@ -562,7 +633,7 @@ class ToolExecutor:
                 context["command"] = args["command"]
             if "format" in args:
                 context["format"] = args["format"]
-            # 也保留完整的 args 供高级脚本使用
+            # 完整的 args（DriFoxx 自有格式，向后兼容）
             context["args"] = args
             current_message_text = ""
             if self._backend.session_manager:
@@ -587,18 +658,9 @@ class ToolExecutor:
                     # Hook 要求跳过工具执行，将 hook 输出作为工具结果回填
                     logger.info(f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}")
 
-                    # 将 hook 输出注入到消息上下文（供 LLM 后续分析）
-                    # 🛡️ 跨线程保护：使用 Qt.callLater 确保在主线程执行
-                    if result.output and self._backend:
-                        hook_output_msg = f"<hook event=\"PreToolUse\">\n[BLOCKED] Tool '{tool_name}' was blocked by hook.\nHook output:\n{result.output}\n</hook>"
-                        from PyQt5.QtCore import QMetaObject, Qt
-                        QMetaObject.invokeMethod(
-                            self._backend, "message_received",
-                            Qt.QueuedConnection,
-                            *({"role": "assistant", "content": hook_output_msg},)
-                        )
-
                     # 返回 hook 输出作为工具结果
+                    # ⚠️ hook 输出已由 on_hook_finished 回调排入 _pre_tool_message_queue，
+                    #    worker 的 _inject_pending_pretool_messages() 会将其注入到会话中。
                     return ToolResult(
                         True,
                         content=result.output or f"Tool '{tool_name}' was blocked by PreToolUse hook (exit code 2 / decision:block)."

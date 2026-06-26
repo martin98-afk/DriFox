@@ -8,7 +8,6 @@ permission:
   write: deny
   edit: deny
   multi_edit: deny
-  bash: deny
   question: deny
   todowrite: deny
   todoread: deny

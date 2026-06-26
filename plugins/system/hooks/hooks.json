@@ -1,3 +1,53 @@
 {
-  "hooks": {}
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".read_project_notes:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在读取项目上下文...",
+            "id": "99899bbb075f4df3ad373c9dc98b7133"
+          }
+        ]
+      }
+    ],
+    "PreUserMessage": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".current_datetime:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入当前系统时间...",
+            "id": "e3886659a58a428094a185a054e87791"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".format_memory_context:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在整理长期记忆...",
+            "id": "4926f722c2f54c058e16371e2b2d12df"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_command_prompt:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入命令提示词...",
+            "id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+          }
+        ]
+      }
+    ]
+  }
 }

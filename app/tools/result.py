@@ -4,7 +4,8 @@ from typing import Any, Optional
 class ToolResult:
     def __init__(self, success: bool, content: Any = None, error: Optional[str] = None,
                  diff: Optional[str] = None, anchors: Optional[str] = None,
-                 echarts: Optional[str] = None, image_data: Optional[dict] = None):
+                 echarts: Optional[str] = None, image_data: Optional[dict] = None,
+                 lsp_diagnostic: Optional[str] = None):
         self.success = success
         self.content = content
         self.error = error
@@ -12,6 +13,9 @@ class ToolResult:
         self.anchors = anchors  # 新锚点块，供 LLM 链式编辑
         self.echarts = echarts  # ECharts 图表 JSON，供 UI 渲染 DAG 图
         self.image_data = image_data  # 图片数据: {"mime": str, "data": str(base64)}
+        # LSP 自动诊断文本：仅在当前轮次 API 请求中拼接到 tool content，
+        # 不存入 session 历史消息，避免累积诊断文本触发上下文压缩
+        self.lsp_diagnostic = lsp_diagnostic
 
     def to_dict(self) -> dict:
         d = {"success": self.success}

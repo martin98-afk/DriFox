@@ -1611,7 +1611,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
         self._hook_edit_card.setMinimumHeight(200)
-        self._hook_edit_card.set_height_mode('content')  # 按内容自适应高度
+        self._hook_edit_card.set_height_mode('proportional')  # 按窗口比例自适应高度
         self._hook_edit_popup = HookEditCard(parent=self)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
@@ -2959,6 +2959,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if clear_after:
             on_finished_cb = lambda tid, result, _sid=session.session_id: \
                 self._on_compact_clear_finished(tid, result, _sid)
+        else:
+            # 普通 compact 完成后触发 SessionStart state="compact"
+            on_finished_cb = lambda tid, result, _sid=session.session_id: \
+                self._on_compact_finished(tid, result, _sid)
 
         sub_agent_mgr.execute_task(
             task_id=f"compact_{uuid.uuid4().hex[:8]}",
@@ -3017,10 +3021,39 @@ class OpenAIChatToolWindow(ToolWindow):
         # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
         self._session_card_cache.pop(target_session.session_id, None)
 
+        # 触发 SessionStart hook — state="clear"
+        try:
+            self.backend.trigger_session_event("clear")
+        except Exception:
+            pass
+
         # 仅在用户仍停留在原 session 时才同步更新 UI
         if self._current_session_id == session_id:
             self._clear_chat_area()
             self.node_preview.clear_nodes()
+
+    def _on_compact_finished(self, task_id: str, result: str, session_id: str):
+        """普通 compact 完成后触发 SessionStart state='compact'
+
+        Args:
+            task_id: 子智能体任务 ID
+            result: 子智能体返回的摘要内容
+            session_id: 触发压缩时锁定的会话 ID
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 校验执行结果：仅在无错误时触发
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
+        if executor is None:
+            return
+        execution_error = getattr(executor, "_execution_error", None)
+        if execution_error:
+            return
+        try:
+            self.backend.trigger_session_event("compact")
+        except Exception:
+            pass
             # 刷新上下文使用率指示器（清空后会回到 0%）
             self._refresh_context_usage_indicator()
 
@@ -3135,10 +3168,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         card = self._file_mention_card
-        # 先让 CardManager 展开容器
-        self._card_manager.show_card("file_mention", self._window_id)
-        # 显示文件列表（show_card 内部处理缓存：就绪则即时，否则异步扫）
+        # ⚠️ 先加载卡片内容并设置正确高度，再让 CardManager 展开容器
+        # 若顺序反转（先 CardManager 后 show_card），_do_expand 会在卡片
+        # fixedHeight 尚未设置时读取 QScrollArea 默认 sizeHint（≈72px=2 item），
+        # 导致容器动画到错误高度且因动画钳制 maximumHeight 不触发 Resize 修正。
         card.show_card(workdir, query)
+        self._card_manager.show_card("file_mention", self._window_id)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
 
@@ -3781,8 +3816,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._card_manager.hide_card("settings", self._window_id)
         self._hook_edit_card.set_title("➕ 添加 Hook")
+        # 获取 hook_manager
+        hm = None
+        if hasattr(self, "_settings_popup") and hasattr(self._settings_popup, "hookListCard"):
+            hm = self._settings_popup.hookListCard._hook_manager
         # 重新创建 HookEditCard
-        self._hook_edit_popup = HookEditCard(parent=self)
+        self._hook_edit_popup = HookEditCard(parent=self, hook_manager=hm)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
         while self._hook_edit_card.content_layout.count():
@@ -3793,6 +3832,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
+        self._hook_edit_card.set_header_sticky("")  # 新增时无来源标签
         self._card_manager.show_card("hook_edit", self._window_id)
 
     def _show_hook_edit_card(self, hook_id: str, hook_data: dict):
@@ -3801,8 +3841,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._card_manager.hide_card("settings", self._window_id)
         self._hook_edit_card.set_title("✏️ 编辑 Hook")
+        # 获取 hook_manager
+        hm = None
+        if hasattr(self, "_settings_popup") and hasattr(self._settings_popup, "hookListCard"):
+            hm = self._settings_popup.hookListCard._hook_manager
         # 创建携带原始数据的 HookEditCard
-        self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self)
+        self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self, hook_manager=hm)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
         while self._hook_edit_card.content_layout.count():
@@ -3813,6 +3857,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hook_edit_card.set_save_button_handler(
             lambda: self._hook_edit_popup._on_save()
         )
+        # 来源信息显示到卡片标题栏
+        self._hook_edit_card.set_header_sticky(self._hook_edit_popup.get_source_display())
         self._card_manager.show_card("hook_edit", self._window_id)
 
     def _on_hook_edit_saved(self, values: dict):
@@ -3832,13 +3878,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._settings_popup.hookListCard._refresh(reload=True)
             elif hm:
                 # 新增 hook
-                self._settings_popup.hookListCard._add_hook(
+                add_kwargs = dict(
                     event=values["event"],
                     command=values["command"],
                     matcher=values["matcher"],
                     hook_type=values["type"],
                     enabled=values["enabled"],
                 )
+                if "commandWindows" in values:
+                    add_kwargs["commandWindows"] = values["commandWindows"]
+                self._settings_popup.hookListCard._add_hook(**add_kwargs)
         # 广播给所有其他窗口刷新 hook 列表
         for win in OpenAIChatToolWindow._instances:
             if win._is_destroyed or win is self:
@@ -6464,9 +6513,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """批量懒渲染：每次处理 BATCH_SIZE 个卡片，减少 WebEngine 创建开销
 
         批量处理期间合并 heightChanged 信号，批次完成后统一触发布局更新和滚底。
-        BATCH_SIZE 默认 5，可通过 self._lazy_batch_size 调整。
+        BATCH_SIZE 默认 3，可通过 self._lazy_batch_size 调整。
         """
-        BATCH_SIZE = getattr(self, '_lazy_batch_size', 5)
+        BATCH_SIZE = getattr(self, '_lazy_batch_size', 3)
 
         if not self._pending_lazy_cards:
             self._loading_session = False
@@ -6503,9 +6552,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
-        # 继续处理下一批
+        # 继续处理下一批：60ms 间隔给 Chromium 进程喘息空间，避免批量
+        # 创建 QWebEngineView 时进程初始化压力集中导致卡顿
         if self._pending_lazy_cards:
-            QTimer.singleShot(0, self._process_next_lazy_batch)
+            QTimer.singleShot(60, self._process_next_lazy_batch)
         else:
             self._loading_session = False
             self._lazy_batch_timer_active = False
@@ -9228,11 +9278,21 @@ class OpenAIChatToolWindow(ToolWindow):
                                                          cmd_result.remainder)
                     if not selected_text:
                         selected_text = cmd_result.replacement  # 无匹配/无 sections → 完整 body
-                    user_text = (f"严格按照以下命令规范执行：{selected_text}\n\n"
-                                 f"$ARGUMENTS：{cmd_result.remainder or '无用户参数'}")
+                    # 🆕 改为 PreUserMessage hook 注入模式：
+                    # 不再直接替换 user_text，而是将命令信息存入 session.metadata，
+                    # 供 engine.py → PreUserMessage hook 读取并注入提示词。
+                    session = self.session_manager.get_current_session()
+                    if session:
+                        session.metadata["_pending_command"] = {
+                            "prompt_text": selected_text,
+                            "command_name": cmd_result.command_name,
+                            "remainder": cmd_result.remainder or "",
+                        }
+                    # 用户消息保持原始输入不变（含 /xxx 前缀）
+                    # 命令提示词已通过 hook 注入，不再替换 user_text
         # ---- 内置命令拦截结束 ----
 
-        # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----
+        # ---- 技能名称替换：/skillname → hook 注入技能内容 ----
         if cmd_result is None and user_text.startswith("/"):
             from app.utils.utils import get_skill_by_name
 
@@ -9251,10 +9311,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     elif remainder == "--disable":
                         self._execute_skill_toggle(skill_name, enable=False)
                         return
-                    if remainder:
-                        user_text = f"加载这个智能体技能：@{skill_name}\n{remainder}"
-                    else:
-                        user_text = f"加载这个智能体技能：@{skill_name}"
+                    # 🆕 直接调用 load_skill 读取技能内容，通过 PreUserMessage hook 注入
+                    from app.utils.utils import load_skill as load_skill_func
+                    success, content, workspace = load_skill_func(skill_name)
+                    if success:
+                        session = self.session_manager.get_current_session()
+                        if session:
+                            session.metadata["_pending_skill"] = {
+                                "name": skill_name,
+                                "content": content,
+                                "workspace": workspace,
+                                "remainder": remainder or "",
+                            }
+                    # 用户消息保持原始输入不变（含 /xxx 前缀）
+                    # 技能内容已通过 hook 注入，不再替换 user_text
         # ---- 技能替换结束 ----
 
         # ---- 检查模型配置（用于后续判断图片支持）----
@@ -10253,7 +10323,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
                     content = content_to_text(content)
                 # 如果最后一条消息是hook消息，不触发通知（例如新建会话时的SessionStart）
-                if content.strip().startswith("<hook "):
+                if last_msg.get("_hook_event"):
                     logger.debug("[Notify] Skip notification for hook message")
                 else:
                     preview = content[:50] + "..." if len(content) > 50 else content
@@ -11722,6 +11792,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     timer.stop()
                 except Exception:
                     pass
+
+        # ★ 清理像素小狐桌宠（停止所有定时器）
+        if getattr(self, "pixel_pet", None) is not None:
+            try:
+                self.pixel_pet.cleanup()
+            except Exception:
+                pass
 
         # 🔧 内存泄漏修复：停止窗口级 ThreadPool
         if hasattr(self, "_gen_thread_pool") and self._gen_thread_pool:

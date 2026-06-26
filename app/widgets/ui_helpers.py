@@ -1286,6 +1286,10 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
     """
     for msg in batch:
         if msg.get("role") == "assistant":
+            # 跳过 hook 消息（内部通知不显示到 UI，仅用于 LLM 上下文）
+            if msg.get("_hook_event"):
+                continue
+
             # 处理思考内容：将 reasoning_content 转换成 <think> 标签格式
             reasoning_content = msg.get("reasoning_content", "")
             content = msg.get("content", "")

@@ -245,23 +245,6 @@ def test_detect_loop_strict_on_parallel_tool_calls():
     print("  ✓ 并行 tool_calls 不一致 → 不算循环")
 
 
-def test_build_error_message_includes_tool_name_and_args():
-    """错误消息应包含工具名和示例参数"""
-    from app.core.workers.chat_worker import OpenAIChatWorker
-    msg = OpenAIChatWorker._build_tool_loop_error_message({
-        "rounds": 3,
-        "signature": "abc123",
-        "tool_calls": [
-            {"function": {"name": "bash", "arguments": '{"command":"ls /tmp"}'}}
-        ],
-    })
-    assert "[工具调用循环]" in msg
-    assert "bash" in msg
-    assert "ls /tmp" in msg
-    assert "建议" in msg
-    print("  ✓ 错误消息包含工具名 + 参数 + 建议")
-
-
 def test_detect_loop_ignores_text_only_assistants():
     """纯文本的 assistant 消息不算轮次（不算循环）"""
     messages = [
@@ -280,6 +263,230 @@ def test_detect_loop_ignores_text_only_assistants():
     print("  ✓ 中间插文本但 tool_calls 重复 → 循环")
 
 
+def _truncate(messages, threshold=3):
+    """Helper: 调用 `_truncate_repetitive_tool_calls`（static method）"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
+    return OpenAIChatWorker._truncate_repetitive_tool_calls(messages, threshold)
+
+
+def test_truncate_removes_repetitive_rounds_keeps_first():
+    """核心：3 轮重复 → 清理后只保留第 1 轮，且不再触发循环检测"""
+    messages = [
+        {"role": "user", "content": "读取文件"},
+        make_assistant_msg([("read", {"path": "main_widget.py", "limit": 15})], "call_a"),
+        make_tool_msg("call_a_0", "文件内容..."),
+        make_assistant_msg([("read", {"path": "main_widget.py", "limit": 15})], "call_b"),
+        make_tool_msg("call_b_0", "文件内容..."),
+        make_assistant_msg([("read", {"path": "main_widget.py", "limit": 15})], "call_c"),
+        make_tool_msg("call_c_0", "文件内容..."),
+    ]
+    # 清理前应检测到循环
+    assert _detect(messages) is not None, "清理前应检测到循环"
+
+    sanitized = _truncate(messages, threshold=3)
+
+    # 保留 user + 第1轮 assistant + tool 结果 = 3 条（不再插入终止提示）
+    assert len(sanitized) == 3, f"清理后应剩 3 条，实际 {len(sanitized)}: {sanitized}"
+    assert sanitized[0]["role"] == "user"
+    assert sanitized[1]["role"] == "assistant"
+    assert sanitized[1].get("tool_calls") is not None  # 第1轮 assistant 保留
+    assert sanitized[2]["role"] == "tool"
+
+    # 清理后不应再检测到循环
+    assert _detect(sanitized) is None, "清理后不应再检测到循环"
+    print("  ✓ 3 轮重复 → 清理后只保留第1轮，不再触发循环检测")
+
+
+def test_truncate_noop_below_threshold():
+    """不足阈值 → 不清理，原样返回"""
+    messages = [
+        {"role": "user", "content": "ls"},
+        make_assistant_msg([("bash", {"command": "ls"})]),
+        make_tool_msg("c0", ""),
+        make_assistant_msg([("bash", {"command": "ls"})]),
+        make_tool_msg("c1", ""),
+    ]
+    sanitized = _truncate(messages, threshold=3)
+    assert sanitized == messages, "不足阈值不应修改消息"
+    print("  ✓ 不足阈值 → 原样返回")
+
+
+def test_truncate_preserves_preceding_context():
+    """清理时应保留循环之前的所有上下文消息"""
+    messages = [
+        {"role": "user", "content": "帮我排查bug"},
+        make_assistant_msg([("grep", {"pattern": "foo"})], "call_g"),
+        make_tool_msg("call_g_0", "找到3处"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
+        make_tool_msg("call_a_0", "内容1"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_b"),
+        make_tool_msg("call_b_0", "内容2"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
+        make_tool_msg("call_c_0", "内容3"),
+    ]
+    sanitized = _truncate(messages, threshold=3)
+    # user + grep轮(assistant+tool) + read第1轮(assistant+tool) = 5条（不再插入终止提示）
+    assert len(sanitized) == 5, f"应保留前序上下文，实际 {len(sanitized)}: {sanitized}"
+    # 前序 grep 调用应保留
+    assert sanitized[1]["tool_calls"][0]["function"]["name"] == "grep"
+    # read 第1轮应保留
+    assert sanitized[3]["tool_calls"][0]["function"]["name"] == "read"
+    print("  ✓ 清理后保留前序上下文（grep + read第1轮）")
+
+
+def test_truncate_allows_session_continuation():
+    """端到端验证：清理后追加用户消息，模拟继续对话，不应触发循环检测"""
+    messages = [
+        {"role": "user", "content": "读取文件"},
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
+        make_tool_msg("call_a_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_b"),
+        make_tool_msg("call_b_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
+        make_tool_msg("call_c_0", "内容"),
+    ]
+    sanitized = _truncate(messages, threshold=3)
+
+    # 模拟用户继续发消息
+    continued = sanitized + [{"role": "user", "content": "换一种方法试试"}]
+    # 即使模型又调了一次同样的 read，也只算第2轮（历史1轮 + 新1轮 = 2轮），不到阈值3
+    continued_with_new_call = continued + [
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_d"),
+        make_tool_msg("call_d_0", "内容"),
+    ]
+    assert _detect(continued_with_new_call) is None, \
+        "清理后即使再调1次同样的工具也不应触发（只有2轮，不到阈值3）"
+    print("  ✓ 清理后会话可继续，即使再调1次也不触发循环检测")
+
+
+def test_truncate_preserves_user_new_message():
+    """
+    🔴 关键场景：用户在卡死的会话里发新消息，截断必须保留用户的新消息。
+
+    消息结构：[旧消息..., 3轮重复read, user(新消息)]
+    截断后应保留：[旧消息..., read第1轮, user(新消息)]
+    """
+    messages = [
+        {"role": "user", "content": "读取文件"},
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
+        make_tool_msg("call_a_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_b"),
+        make_tool_msg("call_b_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
+        make_tool_msg("call_c_0", "内容"),
+        {"role": "user", "content": "用别的方法试试"},  # 用户的新消息
+    ]
+    sanitized = _truncate(messages, threshold=3)
+
+    # 验证用户新消息被保留
+    user_msgs = [m for m in sanitized if m.get("role") == "user"]
+    assert len(user_msgs) == 2, f"应保留2条user消息（原始+新），实际 {len(user_msgs)}"
+    assert user_msgs[-1]["content"] == "用别的方法试试", "用户新消息应在最后"
+
+    # 最后一条应为用户新消息
+    assert sanitized[-1]["role"] == "user", "最后一条应为用户新消息"
+
+    # 清理后不应检测到循环
+    assert _detect(sanitized) is None, "清理后不应检测到循环"
+    print("  ✓ 截断保留用户新消息")
+
+
+def test_truncate_handles_more_than_threshold_rounds():
+    """
+    🔴 关键场景：超过阈值的重复轮次（如5轮），截断必须清理所有重复轮次。
+
+    5轮重复 read → 截断后只保留第1轮，移除第2~5轮。
+    如果只移除最后2轮，前3轮还在 → 下次又触发循环检测。
+    """
+    messages = [
+        {"role": "user", "content": "读取文件"},
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
+        make_tool_msg("call_a_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_b"),
+        make_tool_msg("call_b_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
+        make_tool_msg("call_c_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_d"),
+        make_tool_msg("call_d_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_e"),
+        make_tool_msg("call_e_0", "内容"),
+    ]
+    # 5轮重复，检测阈值3 → 应检测到循环
+    assert _detect(messages) is not None, "5轮重复应检测到循环"
+
+    sanitized = _truncate(messages, threshold=3)
+
+    # 应只保留 user + read第1轮(assistant+tool) = 3条（不再插入终止提示）
+    assert len(sanitized) == 3, f"5轮重复应清理为3条，实际 {len(sanitized)}: {sanitized}"
+    assert sanitized[1].get("tool_calls") is not None  # 第1轮保留
+
+    # 清理后不应检测到循环
+    assert _detect(sanitized) is None, "清理后不应检测到循环"
+    print("  ✓ 5轮重复 → 清理为3条（只保留第1轮），不再触发循环检测")
+
+
+def test_truncate_preserves_tail_with_new_message_after_5_rounds():
+    """5轮重复 + 用户新消息：截断后保留第1轮 + 终止提示 + 用户新消息"""
+    messages = [
+        {"role": "user", "content": "读取文件"},
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
+        make_tool_msg("call_a_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_b"),
+        make_tool_msg("call_b_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
+        make_tool_msg("call_c_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_d"),
+        make_tool_msg("call_d_0", "内容"),
+        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_e"),
+        make_tool_msg("call_e_0", "内容"),
+        {"role": "user", "content": "换方法"},  # 用户新消息
+    ]
+    sanitized = _truncate(messages, threshold=3)
+
+    # user + read第1轮(assistant+tool) + user(新) = 4条（不再插入终止提示）
+    assert len(sanitized) == 4, f"应保留4条，实际 {len(sanitized)}: {sanitized}"
+    assert sanitized[-1]["role"] == "user"
+    assert sanitized[-1]["content"] == "换方法"
+    assert _detect(sanitized) is None, "清理后不应检测到循环"
+    print("  ✓ 5轮重复 + 用户新消息 → 保留第1轮 + 用户新消息")
+
+
+def test_truncate_real_world_scenario():
+    """
+    端到端模拟用户报告的实际场景：
+    1. 会话已卡死（3轮重复 read main_widget.py）
+    2. 用户重启 DriFox，在卡死会话里发新消息
+    3. 循环检测触发 → 截断清理 → 保存干净消息
+    4. 用户再发消息 → 不再触发循环 → 正常对话
+    """
+    # Step 1: 卡死会话的消息（从磁盘加载）
+    stuck_messages = [
+        {"role": "user", "content": "排查 chat_worker 的工具调用循环错误"},
+        make_assistant_msg([("read", {"path": "D:/work/DriFox/app/main_widget.py", "limit": 15, "show_line_numbers": True})], "call_a"),
+        make_tool_msg("call_a_0", "文件内容..."),
+        make_assistant_msg([("read", {"path": "D:/work/DriFox/app/main_widget.py", "limit": 15, "show_line_numbers": True})], "call_b"),
+        make_tool_msg("call_b_0", "文件内容..."),
+        make_assistant_msg([("read", {"path": "D:/work/DriFox/app/main_widget.py", "limit": 15, "show_line_numbers": True})], "call_c"),
+        make_tool_msg("call_c_0", "文件内容..."),
+    ]
+
+    # Step 2: 用户发新消息
+    messages_with_new = stuck_messages + [{"role": "user", "content": "如何解决？"}]
+    assert _detect(messages_with_new) is not None, "应检测到循环"
+
+    # Step 3: 截断清理
+    sanitized = _truncate(messages_with_new, threshold=3)
+    assert _detect(sanitized) is None, "清理后不应检测到循环"
+    assert sanitized[-1]["content"] == "如何解决？", "用户新消息应保留"
+
+    # Step 4: 模拟模型正常回复（不再循环）
+    after_reply = sanitized + [
+        {"role": "assistant", "content": "这个问题可以通过修改截断逻辑来解决..."},
+    ]
+    assert _detect(after_reply) is None, "正常回复不应触发循环"
+    print("  ✓ 真实场景：卡死会话 → 发新消息 → 截断清理 → 继续对话，全流程通过")
+
+
 if __name__ == "__main__":
     test_compute_signature_is_stable_for_identical_calls()
     test_compute_signature_differs_for_different_args()
@@ -292,6 +499,13 @@ if __name__ == "__main__":
     test_detect_no_loop_with_only_two_rounds()
     test_detect_loop_with_multiple_parallel_tool_calls()
     test_detect_loop_strict_on_parallel_tool_calls()
-    test_build_error_message_includes_tool_name_and_args()
     test_detect_loop_ignores_text_only_assistants()
+    test_truncate_removes_repetitive_rounds_keeps_first()
+    test_truncate_noop_below_threshold()
+    test_truncate_preserves_preceding_context()
+    test_truncate_allows_session_continuation()
+    test_truncate_preserves_user_new_message()
+    test_truncate_handles_more_than_threshold_rounds()
+    test_truncate_preserves_tail_with_new_message_after_5_rounds()
+    test_truncate_real_world_scenario()
     print("\n🎉 All tool-loop detection tests passed!")

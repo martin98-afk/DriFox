@@ -28,12 +28,99 @@ from app.utils.history_manager import HistoryManager
 _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
 
+def _event_to_tag(event_name: str) -> str:
+    """将事件名转换为 Claude Code 兼容的 kebab-case 标签
+
+    例:
+        UserPromptSubmit → user-prompt-submit
+        PreUserMessage   → pre-user-message
+        PreToolUse       → pre-tool-use
+        PostToolUse      → post-tool-use
+        SessionStart     → session-start
+        Stop             → stop
+    """
+    # PascalCase / camelCase → kebab-case
+    # UserPromptSubmit → User-Prompt-Submit → user-prompt-submit
+    kebab = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', event_name)
+    kebab = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1-\2', kebab)
+    return kebab.lower()
+
+
 def _strip_hook_wrapper(content: str) -> str:
-    """从 <hook event=\"...\">\\n...\\n</hook> 格式中提取纯文本内容"""
+    """从 hook 消息格式中提取纯文本内容（兼容新旧格式）
+
+    Claude Code 格式: <{kebab-case-event}-hook>\\n...\\n</{kebab-case-event}-hook>
+    旧分隔线格式: ---\\n🔌 **Hook 内部通知** · 事件: `...`\\n\\n...\\n---
+    最早旧格式: <hook event=\"...\">\\n...\\n</hook>
+    """
+    if not content:
+        return content
+
+    # Claude Code 格式：<xxx-hook>...</xxx-hook>
+    # 用启发式：只要匹配 <xxx-hook>...</xxx-hook> 且标签以 -hook 结尾
+    m = re.search(
+        r'<([a-z0-9-]+-hook)>\s*(.*?)\s*</\1>',
+        content, re.DOTALL
+    )
+    if m:
+        return m.group(2).strip()
+
+    # 旧分隔线格式
+    if content.startswith('---') and '🔌 **Hook 内部通知**' in content:
+        match = re.search(
+            r'---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---',
+            content, re.DOTALL
+        )
+        if match:
+            return match.group(1).strip()
+        return content
+
+    # 最早旧格式
     match = re.search(r'<hook[^>]*>(.*?)</hook>', content, re.DOTALL)
     if match:
         return match.group(1).strip()
     return content
+
+
+def _format_hook_output(event_name: str, output: str) -> str:
+    """格式化 hook 输出为 Claude Code 兼容的双层 XML 标签格式
+
+    外层: <system-reminder>...</system-reminder>
+    内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+
+    与 Claude Code 实际格式对齐：
+    - <system-reminder> 是 Claude Code 通用系统注入容器
+    - <user-prompt-submit-hook> 等是 Claude Code 提示词中明说的 hook 反馈标签
+    LLM 收到时按 system prompt 约定识别为 hook 注入内容。
+    """
+    tag = _event_to_tag(event_name)
+    return (
+        f"<system-reminder>\n"
+        f"<{tag}-hook>\n"
+        f"{output}\n"
+        f"</{tag}-hook>\n"
+        f"</system-reminder>"
+    )
+
+
+def _make_hook_message(event_name: str, output: str) -> Dict[str, Any]:
+    """构建一条 hook 消息 dict（带 _hook_event 标记和 timestamp）"""
+    import datetime as _dt
+    return {
+        "role": "assistant",
+        "content": _format_hook_output(event_name, output),
+        "_hook_event": event_name,
+        "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _inject_hook_to_session(session, event_name: str, output: str):
+    """将 hook 输出追加到 session.messages（只追加不删除，保证历史稳定）"""
+    if not session:
+        return
+    msg = _make_hook_message(event_name, output)
+    session.messages.append(msg)
+    session._update_timestamp()
 
 
 def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
@@ -235,58 +322,52 @@ class ChatBackend(QObject):
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 
-        # 线程安全队列：hook 消息通过此队列传递给 worker（避免 Qt 信号跨线程延迟）
-        # 必须在 on_hook_finished 回调之前初始化，因为回调中会引用此队列
+        # 线程安全队列：用于 tool_executor 中触发的 hook 输出传递
+        # _hook_message_queue: PostToolUse（异步触发，在 loop 顶部消费）
+        # _pre_tool_message_queue: PreToolUse（同步触发，在 tool 执行后立即消费）
+        # 预对话 hook（SessionStart/PreUserMessage/PostUserMessage 等）由 engine.py 直接注入
+        # chat_worker 内部 hook（PreAssistant/PostAssistant/Stop）由 worker 直接注入
         self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
+        self._pre_tool_message_queue: "queue.Queue[Dict]" = queue.Queue()
 
-        # Hook 完成后，把输出添加到上下文
+        # Hook 完成回调 — 仅处理需要通过队列传递给 worker 的事件
+        # 预对话事件（SessionStart, PreUserMessage, PostUserMessage 等）不经过此回调，
+        # 由 engine.py 收集 trigger_event 返回值后直接注入 session.messages
         def on_hook_finished(event_name: str, output: str, success: bool):
-            # 检查 UI 是否仍然有效，防止窗口关闭后 hook 回调访问已销毁的 UI
             if not getattr(self, '_ui_valid', True):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
 
-            # 检测 prompt 类型 hook（_execute_hook 中加了 __prompt__: 前缀）
             is_prompt_hook = event_name.startswith("__prompt__:")
             if is_prompt_hook:
                 event_name = event_name[len("__prompt__:"):]
 
-            logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}，output={output[:100]}...")
+            logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
 
-            # 只有成功执行的 hook 才添加到消息列表
             if not success:
                 return
 
-            hook_output = f"<hook event=\"{event_name}\">\n{output}\n</hook>"
-
-            # PROMPT 类型始终加入消息列表；其他类型只加入特定事件
-            # PostToolUse 添加以支持工具执行后 hook 消息显示
-            add_to_messages = is_prompt_hook or event_name in ("SessionStart", "UserPromptSubmit", "PreUserMessage", "PostUserMessage", "PostToolUse")
-
-            if add_to_messages:
-                session = self.get_current_session()
-                if session:
-                    # 对于 PreUserMessage，先删除之前的同类 hook 消息，只保留最新一个
-                    if event_name == "PreUserMessage":
-                        session.messages = [
-                            msg for msg in session.messages
-                            if not (msg.get("role") == "assistant" and "<hook " in (msg.get("content") or "") and 'event="PreUserMessage"' in (msg.get("content") or ""))
-                        ]
-
-                    # 添加新消息
-                    session.add_assistant_message(hook_output)
-
-                # 推入线程安全队列，供 worker 在下一轮 LLM 调用前消费
-                text_content = _strip_hook_wrapper(hook_output)
+            # PreToolUse → 独立队列（worker 在 tool 执行后立即消费，插入 tool result 之前）
+            # PostToolUse → 主队列（在 loop 顶部消费，出现在 tool result 之后）
+            # prompt hooks → 主队列
+            if event_name == "PreToolUse":
+                hook_output = _format_hook_output(event_name, output)
+                self._pre_tool_message_queue.put({
+                    "role": "assistant",
+                    "content": hook_output,
+                    "_hook_event": event_name,
+                })
+                logger.debug(f"[HookManager] PreToolUse queued to pre-tool queue")
+            elif is_prompt_hook or event_name == "PostToolUse":
+                hook_output = _format_hook_output(event_name, output)
                 self._hook_message_queue.put({
                     "role": "assistant",
-                    "content": text_content,
+                    "content": hook_output,
+                    "_hook_event": event_name,
                 })
-
-                # 通知 UI 刷新消息列表（跨线程安全，通过 Qt 信号）
                 self._hook_messages_updated.emit()
+                logger.debug(f"[HookManager] Hook queued for worker: {event_name}")
 
-                logger.info(f"[HookManager] Hook added to messages: {event_name}")
         self._hook_manager.set_on_finished_callback(on_hook_finished)
 
         # 4. 创建初始会话（不触发 SessionStart hook，避免重复初始化）
@@ -1339,15 +1420,12 @@ class ChatBackend(QObject):
         )
 
     def stop_streaming(self):
-        """停止流式输出（同步方式，可能阻塞 UI 线程）"""
-        # 触发 Stop hook（同步执行，确保 hook 在流停止前完成）
-        if self._hook_manager:
-            self._hook_manager.trigger_event(
-                "Stop",
-                context={"project_root": os.getcwd()},
-                current_message="",
-                trigger_async=False,  # 同步：确保 ralph-loop 等 hook 在 stop 前完成
-            )
+        """停止流式输出（同步方式，可能阻塞 UI 线程）
+
+        Stop hook 已移至 chat_worker 退出循环前触发，此处不再重复触发。
+        执行流程：cancel_worker() → finalize_stop()（阻塞等待 worker 线程结束，
+        worker return 前会同步触发 Stop hook）。
+        """
         if self._chat_engine:
             return self._chat_engine.stop()
 
@@ -1534,11 +1612,14 @@ class ChatBackend(QObject):
             workdir = None
             if self._tool_executor:
                 workdir = self._tool_executor.get_workdir()
+            # include_project_context=False：项目笔记/路径建议/Worktree 信息
+            # 已由 SessionStart hook 注入，无需在每个用户消息中重复写入
             return self._memory_manager.format_memories_for_prompt(
                 project=self._current_project,
                 entry_limit=limit,
                 doc_limit=50,
                 workdir_override=workdir,
+                include_project_context=False,
             )
         return ""
 
@@ -1581,6 +1662,142 @@ class ChatBackend(QObject):
 
     # ========== 会话管理 ==========
 
+    def build_memory_context_dict(self) -> Dict[str, Any]:
+        """构建 PreUserMessage hook 记忆上下文 — 预取条目记忆 + 关键文档
+
+        Returns:
+            包含条目记忆和关键文档的 dict
+        """
+        from pathlib import Path
+
+        ctx: Dict[str, Any] = {}
+        if not self._memory_manager:
+            return ctx
+
+        # 条目记忆
+        try:
+            entries = self._memory_manager.get_entry_memories(limit=100)
+            if entries:
+                ctx["entry_memories"] = [e.get("content", "") for e in entries]
+        except Exception:
+            pass
+
+        # 关键文档（含路径显示）
+        try:
+            wd_path = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
+            if docs:
+                doc_items = []
+                for doc in docs:
+                    file_path = doc.get("file_path", "")
+                    file_name = doc.get("file_name", "")
+                    is_url = file_path and (file_path.startswith('http://') or file_path.startswith('https://'))
+                    is_wd = file_path == wd_path
+                    if not is_url and not is_wd and file_path and wd_path:
+                        try:
+                            display = str(Path(file_path).relative_to(Path(wd_path)))
+                        except ValueError:
+                            display = file_path
+                    elif is_url:
+                        display = file_path
+                    else:
+                        display = file_path
+                    doc_items.append({
+                        "file_name": file_name,
+                        "display": display,
+                        "is_url": is_url,
+                        "is_wd": is_wd,
+                    })
+                if doc_items:
+                    ctx["key_documents"] = doc_items
+        except Exception:
+            pass
+
+        return ctx
+
+    def _build_worktree_context_dict(self) -> Dict[str, Any]:
+        """构建 worktree + 路径使用建议上下文（PreUserMessage 每次触发时更新）
+
+        将原本在 SessionStart 中的动态内容（可能随分支切换变化）
+        移到 PreUserMessage，确保每次消息前都注入最新状态。
+
+        Returns:
+            包含 worktree 信息和路径建议的 dict
+        """
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+
+        ctx: Dict[str, Any] = {
+            "project_root": project_root,
+            "project_name": self._current_project or os.path.basename(project_root),
+        }
+
+        # Worktree / git 分支信息
+        try:
+            from app.utils.git_worktree import GitWorktreeDetector
+            repo_info = GitWorktreeDetector.get_repo_info(project_root)
+            if repo_info and repo_info.worktrees:
+                ctx["worktree"] = {
+                    "repo_name": os.path.basename(repo_info.root),
+                    "current_branch": repo_info.current_branch,
+                    "workdir": project_root,
+                    "is_worktree": project_root != repo_info.root,
+                    "other_branches": [
+                        wt.branch for wt in repo_info.worktrees if not wt.is_current
+                    ],
+                }
+        except Exception:
+            pass
+
+        return ctx
+
+    def _build_session_context(self, state: str) -> Dict[str, Any]:
+        """构建 SessionStart hook 上下文 — 预取所有项目数据，hook 只做格式化
+
+        Args:
+            state: 会话状态（startup/resume/clear/compact）
+
+        Returns:
+            包含所有项目上下文数据的 dict
+        """
+        # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+        ctx: Dict[str, Any] = {
+            "project_root": project_root,
+            "state": state,
+            "project_name": os.path.basename(project_root),
+        }
+
+        # 项目笔记（AGENTS.md 内容）
+        if self._memory_manager:
+            try:
+                note = self._memory_manager.get_project_note(
+                    self._current_project,
+                    workdir=project_root,
+                )
+                if note and note.get("content"):
+                    ctx["project_notes_content"] = note["content"]
+            except Exception:
+                pass
+
+        # Worktree / git 分支信息
+        try:
+            from app.utils.git_worktree import GitWorktreeDetector
+            repo_info = GitWorktreeDetector.get_repo_info(project_root)
+            if repo_info and repo_info.worktrees:
+                ctx["worktree"] = {
+                    "repo_name": os.path.basename(repo_info.root),
+                    "current_branch": repo_info.current_branch,
+                    "workdir": project_root,
+                    "is_worktree": project_root != repo_info.root,
+                    "other_branches": [
+                        wt.branch for wt in repo_info.worktrees if not wt.is_current
+                    ],
+                }
+        except Exception:
+            pass
+
+        return ctx
+
     def create_session(self, trigger_hook: bool = True) -> ChatSession:
         """创建新会话
         
@@ -1590,18 +1807,47 @@ class ChatBackend(QObject):
         session = self._session_manager.create_new_session()
         self.session_created.emit(session.session_id)
 
-        # Trigger SessionStart hook
+        # Trigger SessionStart hook — 同步执行，直接注入 session.messages
         if trigger_hook and self._hook_manager:
-            context = {
-                "project_root": os.getcwd(),
-            }
-            self._hook_manager.trigger_event(
+            context = self._build_session_context("startup")
+            context["session_id"] = session.session_id  # Claude Code 兼容字段
+            results = self._hook_manager.trigger_event(
                 "SessionStart",
                 context=context,
-                current_message=""
+                current_message="",
+                trigger_async=False,  # 同步执行，收集输出直接注入
             )
+            for r in results:
+                if r.success and r.output:
+                    _inject_hook_to_session(session, "SessionStart", r.output)
+            self._hook_messages_updated.emit()
 
         return session
+
+    def trigger_session_event(self, state: str, extra_context: dict = None):
+        """触发 SessionStart hook，带会话状态
+
+        Args:
+            state: 会话状态，可选 startup/resume/clear/compact
+            extra_context: 额外上下文信息
+        """
+        if not self._hook_manager:
+            return
+        session = self.get_current_session()
+        ctx = self._build_session_context(state)
+        if session:
+            ctx["session_id"] = session.session_id  # Claude Code 兼容字段
+        if extra_context:
+            ctx.update(extra_context)
+        results = self._hook_manager.trigger_event(
+            "SessionStart", context=ctx, current_message="",
+            trigger_async=False,  # 同步执行，收集输出直接注入
+        )
+        if session:
+            for r in results:
+                if r.success and r.output:
+                    _inject_hook_to_session(session, "SessionStart", r.output)
+            self._hook_messages_updated.emit()
 
     def get_current_session(self) -> Optional[ChatSession]:
         """获取当前会话"""

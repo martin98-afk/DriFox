@@ -326,38 +326,91 @@ class UIEngine(BaseEngine):
         content_to_store = _user_content or user_text
         # user_text 始终是纯文本版本，用于 hook 触发和 UI 显示
 
-        # 公共辅助方法：触发 hook
-        def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
+        # 公共辅助方法：同步触发 hook 并收集输出
+        # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
+        _window_workdir = (
+            self._backend.tool_executor.get_workdir()
+            if self._backend and self._backend.tool_executor
+            else os.getcwd()
+        )
+
+        def _trigger_and_inject(hook_mgr, event_name, extra_context=None, msg_text=None,
+                                inject_to_session=None):
+            """同步触发 hook，收集输出并注入 session.messages（只追加不删除）"""
             if extra_context is None:
                 extra_context = {}
-            ctx = {"project_root": os.getcwd()}
+            ctx = {"project_root": _window_workdir}
             ctx.update(extra_context)
-            hook_mgr.trigger_event(
+            results = hook_mgr.trigger_event(
                 event_name,
                 context=ctx,
                 current_message=msg_text or user_text,
+                trigger_async=False,  # 关键：同步执行，确保输出在返回值中
             )
+            # 收集成功执行的 hook 输出，注入 session
+            if inject_to_session:
+                from app.core.backend import _inject_hook_to_session
+                for r in results:
+                    if r.success and r.output:
+                        _inject_hook_to_session(inject_to_session, event_name, r.output)
 
-        hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
+        # 获取 session_id（用于 hook context；必须先于 hook 触发块赋值，
+        # 否则 L365/L378 会在 Python 编译期被识别为"先读后写"的局部变量，触发 UnboundLocalError）
+        _session_id = session.session_id if session else ""
+
+        # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager
+        hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
 
         if hook_mgr:
             # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
-            _do_trigger(hook_mgr, "UserPromptSubmit", {"message": user_text})
-            _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
-        session.add_user_message(content=content_to_store)
-        if hook_mgr:
-            _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})
+            _trigger_and_inject(hook_mgr, "UserPromptSubmit",
+                {
+                    "message": user_text,
+                    "session_id": _session_id,
+                }, inject_to_session=session)
+            # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文
+            memory_ctx = {}
+            worktree_ctx = {}
+            try:
+                if self._backend:
+                    memory_ctx = self._backend.build_memory_context_dict() or {}
+                    worktree_ctx = self._backend._build_worktree_context_dict() or {}
+            except Exception:
+                pass
+            # 🆕 读取 main_widget 存下的 pending_command/pending_skill，
+            # 传递给 PreUserMessage hook 进行注入
+            pending_cmd = session.metadata.pop("_pending_command", None) if session else None
+            pending_skill = session.metadata.pop("_pending_skill", None) if session else None
 
-        # PreAssistantMessage
+            pre_user_ctx = {
+                "message": user_text,
+                "session_id": _session_id,
+                **memory_ctx,
+                **worktree_ctx,
+            }
+            if pending_cmd:
+                pre_user_ctx["pending_command"] = pending_cmd
+            if pending_skill:
+                pre_user_ctx["pending_skill"] = pending_skill
+            _trigger_and_inject(hook_mgr, "PreUserMessage",
+                                pre_user_ctx, inject_to_session=session)
+
+        session.add_user_message(content=content_to_store)
+
         if hook_mgr:
-            last_user_msg = ""
-            session_for_hook = self._session_manager.get_current_session()
-            if session_for_hook and hasattr(session_for_hook, 'messages'):
-                for msg in reversed(session_for_hook.messages):
-                    if msg.get('role') == 'user':
-                        last_user_msg = content_to_text(msg.get('content', ''))
-                        break
-            _do_trigger(hook_mgr, "PreAssistantMessage", msg_text=last_user_msg)
+            post_user_ctx = {
+                "message": user_text,
+                "session_id": _session_id,
+            }
+            # 补充多模态内容（如有图片）
+            if _user_content is not None and _user_content != user_text:
+                post_user_ctx["user_content"] = _user_content
+            _trigger_and_inject(hook_mgr, "PostUserMessage",
+                                post_user_ctx, inject_to_session=session)
+
+            # 通知 UI 刷新（预对话 hook 已注入 session.messages）
+            if self._backend:
+                self._backend._hook_messages_updated.emit()
 
         messages = self._adapter.build_messages(
             self._session_manager.get_current_session(),
@@ -515,25 +568,39 @@ class UIEngine(BaseEngine):
 
     def _trigger_post_assistant_message(self, response_or_error: str, is_error: bool = False):
         """统一触发 PostAssistantMessage hook"""
-        hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
+        # 多窗口隔离：使用当前窗口 Backend 的 HookManager
+        hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
         if not hook_mgr:
             return
 
         session = self._session_manager.get_current_session()
         last_user_msg = ""
-        if session and hasattr(session, 'messages'):
-            for msg in reversed(session.messages):
-                if msg.get('role') == 'user':
-                    last_user_msg = content_to_text(msg.get('content', ''))
-                    break
+        session_id = ""
+        if session:
+            session_id = session.session_id or ""
+            if hasattr(session, 'messages'):
+                for msg in reversed(session.messages):
+                    if msg.get('role') == 'user':
+                        last_user_msg = content_to_text(msg.get('content', ''))
+                        break
 
+        # 多窗口隔离：使用当前窗口的工作目录
+        project_root = (
+            self._backend.tool_executor.get_workdir()
+            if self._backend and self._backend.tool_executor
+            else os.getcwd()
+        )
         context = {
-            "project_root": os.getcwd(),
+            "project_root": project_root,
+            "session_id": session_id,  # Claude Code 兼容字段
         }
         if is_error:
             context["error"] = response_or_error
         else:
+            # DriFoxx 自有格式（向后兼容）
             context["response"] = response_or_error
+            # Claude Code 兼容格式
+            context["assistant_response"] = response_or_error
 
         hook_mgr.trigger_event(
             "PostAssistantMessage",
