@@ -343,7 +343,18 @@ class UIEngine(BaseEngine):
         if hook_mgr:
             # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
             _do_trigger(hook_mgr, "UserPromptSubmit", {"message": user_text})
-            _do_trigger(hook_mgr, "PreUserMessage", {"message": user_text})
+            # PreUserMessage: 注入条目记忆 + 关键文档（通过 backend 预取，不硬编码）
+            memory_ctx = {}
+            try:
+                backend = getattr(self._conversation_core, 'context_builder', None)
+                if backend and getattr(backend, 'backend', None):
+                    memory_ctx = backend.backend.build_memory_context_dict() or {}
+            except Exception:
+                pass
+            _do_trigger(hook_mgr, "PreUserMessage", {
+                "message": user_text,
+                **memory_ctx,
+            })
         session.add_user_message(content=content_to_store)
         if hook_mgr:
             _do_trigger(hook_mgr, "PostUserMessage", {"message": user_text})

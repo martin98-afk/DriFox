@@ -252,6 +252,7 @@ class MemoryManagerCore:
         entry_limit: int = 100,
         doc_limit: int = 50,
         workdir_override: Optional[str] = None,
+        include_project_context: bool = True,
     ) -> str:
         """
         格式化记忆注入到 prompt
@@ -261,6 +262,8 @@ class MemoryManagerCore:
             entry_limit: 条目记忆最大数量
             doc_limit: 关键文档最大数量
             workdir_override: 工作目录覆盖（多窗口隔离：实例缓存优先于 DB）
+            include_project_context: 是否包含项目笔记/路径建议/Worktree 信息。
+                每轮消息中不包含，由 SessionStart hook 注入
         
         Returns:
             str: 格式化后的记忆字符串
@@ -279,14 +282,16 @@ class MemoryManagerCore:
         lines.append("")
 
         # 2. 项目笔记（从当前 workdir 读取，适配 worktree 多分支独立）
-        lines.append("### 项目笔记")
-        lines.append(f"[当前项目: {project}]")
-        note = self.get_project_note(project, workdir=workdir_override)
-        if note and note.get("content"):
-            lines.append(note.get("content", ""))
-        else:
-            lines.append("- 暂无项目笔记")
-        lines.append("")
+        # 注意：每轮消息中已不包含项目笔记，改由 SessionStart hook 注入
+        if include_project_context:
+            lines.append("### 项目笔记")
+            lines.append(f"[当前项目: {project}]")
+            note = self.get_project_note(project, workdir=workdir_override)
+            if note and note.get("content"):
+                lines.append(note.get("content", ""))
+            else:
+                lines.append("- 暂无项目笔记")
+            lines.append("")
 
         # 3. 关键文档
         lines.append("### 关键文档")
@@ -328,7 +333,8 @@ class MemoryManagerCore:
         lines.append("")
 
         # 3.5 路径使用建议（仅当关键文档中存在项目根目录标记时）
-        if has_root_doc and wd_path:
+        # 注意：每轮消息中已不包含，改由 SessionStart hook 注入
+        if include_project_context and has_root_doc and wd_path:
             lines.append("### 路径使用建议")
             lines.append(f"- 项目根目录: {wd_path}")
             lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
@@ -336,7 +342,8 @@ class MemoryManagerCore:
             lines.append("")
 
         # 4. Worktree 上下文（仅当工作目录在 git 仓库中且有 worktree 时）
-        if wd_path:
+        # 注意：每轮消息中已不包含，改由 SessionStart hook 注入
+        if include_project_context and wd_path:
             try:
                 from app.utils.git_worktree import GitWorktreeDetector
                 repo_info = GitWorktreeDetector.get_repo_info(wd_path)

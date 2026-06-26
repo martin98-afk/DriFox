@@ -12,12 +12,11 @@
 - 实际压缩逻辑委托给 HistoryCompactor，避免重复
 """
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import anyio
 
-from app.core.message_content import _extract_text_content, consolidate_messages
+from app.core.message_content import consolidate_messages
 from app.core.token_estimator import count_messages_tokens
 from app.utils.config import Settings
 
@@ -164,25 +163,10 @@ class ContextBudgetAllocator:
             user_msg["timestamp"] = latest_user_timestamp
         messages.append(user_msg)
 
-        # 在最后一个用户消息前插入动态上下文（时间 + 记忆）
-        # 不在 system prompt 中，避免动态内容破坏 API 缓存命中率
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        memory_context = self.backend.get_memory_context_string()
-
-        dynamic_parts = [f"## 当前系统时间\n{current_time}"]
-        if memory_context:
-            dynamic_parts.append(memory_context)
-
-        dynamic_context = "\n\n".join(dynamic_parts)
-        last_content = messages[-1]["content"]
-        if isinstance(last_content, list):
-            # multimodal content（含图片）：动态上下文作为 text block 插到最前面
-            messages[-1]["content"] = [
-                {"type": "text", "text": f"{dynamic_context}\n\n用户提问：{_extract_text_content(last_content)}"}
-            ] + [b for b in last_content if b.get("type") != "text"]
-        else:
-            messages[-1]["content"] = f"{dynamic_context}\n\n用户提问：{last_content}"
-
+        # 注意：长期记忆（条目记忆 + 关键文档）已由 PreUserMessage hook 注入，
+        #       项目笔记/路径建议/Worktree 由 SessionStart hook 注入，
+        #       当前系统时间由 PostUserMessage hook 注入。
+        # 此处不再需要任何硬编码的上下文注入。
         return messages
 
     def _allocate_history_budget(self, system_content: str, llm_config: Dict) -> int:
@@ -216,9 +200,11 @@ class ContextBudgetAllocator:
             # 正常情况：至少保留 MIN_HISTORY_BUDGET_RATIO
             history_budget = int(total_budget * MIN_HISTORY_BUDGET_RATIO)
 
-        # 预留动态上下文（build_messages 末尾注入的系统时间 + 记忆上下文）
-        # 这部分 token 不在系统提示中，需从历史预算中扣除
-        DYNAMIC_CONTEXT_RESERVE = 300  # 保守估算：时间戳(~15) + 8条记忆(~250)
+        # 预留动态上下文（已全部迁移至 hook 体系，无需再预留）
+        # - 系统时间 → PostUserMessage hook
+        # - 条目记忆 + 关键文档 → PreUserMessage hook（去重，只保留最新）
+        # - 项目笔记 + 路径建议 + Worktree → SessionStart hook
+        DYNAMIC_CONTEXT_RESERVE = 0
         history_budget = max(500, history_budget - DYNAMIC_CONTEXT_RESERVE)
 
         return history_budget

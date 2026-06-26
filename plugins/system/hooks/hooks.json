@@ -1,3 +1,45 @@
 {
-  "hooks": {}
+  "hooks": {
+    "PostUserMessage": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "date +\"%Y-%m-%d %H:%M:%S\"",
+            "commandWindows": "powershell -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss'\"",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入当前系统时间...",
+            "id": "e3886659a58a428094a185a054e87791"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".read_project_notes:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在读取项目上下文...",
+            "id": "99899bbb075f4df3ad373c9dc98b7133"
+          }
+        ]
+      }
+    ],
+    "PreUserMessage": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".format_memory_context:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在整理长期记忆...",
+            "id": "4926f722c2f54c058e16371e2b2d12df"
+          }
+        ]
+      }
+    ]
+  }
 }

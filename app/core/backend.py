@@ -1566,11 +1566,14 @@ class ChatBackend(QObject):
             workdir = None
             if self._tool_executor:
                 workdir = self._tool_executor.get_workdir()
+            # include_project_context=False：项目笔记/路径建议/Worktree 信息
+            # 已由 SessionStart hook 注入，无需在每个用户消息中重复写入
             return self._memory_manager.format_memories_for_prompt(
                 project=self._current_project,
                 entry_limit=limit,
                 doc_limit=50,
                 workdir_override=workdir,
+                include_project_context=False,
             )
         return ""
 
@@ -1613,6 +1616,106 @@ class ChatBackend(QObject):
 
     # ========== 会话管理 ==========
 
+    def build_memory_context_dict(self) -> Dict[str, Any]:
+        """构建 PreUserMessage hook 记忆上下文 — 预取条目记忆 + 关键文档
+
+        Returns:
+            包含条目记忆和关键文档的 dict
+        """
+        from pathlib import Path
+
+        ctx: Dict[str, Any] = {}
+        if not self._memory_manager:
+            return ctx
+
+        # 条目记忆
+        try:
+            entries = self._memory_manager.get_entry_memories(limit=100)
+            if entries:
+                ctx["entry_memories"] = [e.get("content", "") for e in entries]
+        except Exception:
+            pass
+
+        # 关键文档（含路径显示）
+        try:
+            wd_path = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
+            if docs:
+                doc_items = []
+                for doc in docs:
+                    file_path = doc.get("file_path", "")
+                    file_name = doc.get("file_name", "")
+                    is_url = file_path and (file_path.startswith('http://') or file_path.startswith('https://'))
+                    is_wd = file_path == wd_path
+                    if not is_url and not is_wd and file_path and wd_path:
+                        try:
+                            display = str(Path(file_path).relative_to(Path(wd_path)))
+                        except ValueError:
+                            display = file_path
+                    elif is_url:
+                        display = file_path
+                    else:
+                        display = file_path
+                    doc_items.append({
+                        "file_name": file_name,
+                        "display": display,
+                        "is_url": is_url,
+                        "is_wd": is_wd,
+                    })
+                if doc_items:
+                    ctx["key_documents"] = doc_items
+        except Exception:
+            pass
+
+        return ctx
+
+    def _build_session_context(self, state: str) -> Dict[str, Any]:
+        """构建 SessionStart hook 上下文 — 预取所有项目数据，hook 只做格式化
+
+        Args:
+            state: 会话状态（startup/resume/clear/compact）
+
+        Returns:
+            包含所有项目上下文数据的 dict
+        """
+        project_root = os.getcwd()
+        ctx: Dict[str, Any] = {
+            "project_root": project_root,
+            "state": state,
+            "project_name": os.path.basename(project_root),
+        }
+
+        # 项目笔记（AGENTS.md 内容）
+        if self._memory_manager:
+            try:
+                note = self._memory_manager.get_project_note(
+                    self._current_project,
+                    workdir=self._tool_executor.get_workdir() if self._tool_executor else project_root,
+                )
+                if note and note.get("content"):
+                    ctx["project_notes_content"] = note["content"]
+            except Exception:
+                pass
+
+        # Worktree / git 分支信息
+        try:
+            from app.utils.git_worktree import GitWorktreeDetector
+            repo_info = GitWorktreeDetector.get_repo_info(project_root)
+            if repo_info and repo_info.worktrees:
+                ctx["worktree"] = {
+                    "repo_name": os.path.basename(repo_info.root),
+                    "current_branch": repo_info.current_branch,
+                    "workdir": project_root,
+                    "is_worktree": project_root != repo_info.root,
+                    "other_branches": [
+                        wt.branch for wt in repo_info.worktrees if not wt.is_current
+                    ],
+                }
+        except Exception:
+            pass
+
+        return ctx
+
     def create_session(self, trigger_hook: bool = True) -> ChatSession:
         """创建新会话
         
@@ -1622,12 +1725,9 @@ class ChatBackend(QObject):
         session = self._session_manager.create_new_session()
         self.session_created.emit(session.session_id)
 
-        # Trigger SessionStart hook
+        # Trigger SessionStart hook — 通过 context 传入所有数据
         if trigger_hook and self._hook_manager:
-            context = {
-                "project_root": os.getcwd(),
-                "state": "startup",
-            }
+            context = self._build_session_context("startup")
             self._hook_manager.trigger_event(
                 "SessionStart",
                 context=context,
@@ -1645,7 +1745,7 @@ class ChatBackend(QObject):
         """
         if not self._hook_manager:
             return
-        ctx = {"project_root": os.getcwd(), "state": state}
+        ctx = self._build_session_context(state)
         if extra_context:
             ctx.update(extra_context)
         self._hook_manager.trigger_event("SessionStart", context=ctx, current_message="")
