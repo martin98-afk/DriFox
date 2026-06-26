@@ -377,12 +377,17 @@ class UIEngine(BaseEngine):
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
+            # 🆕 读取 main_widget 存下的 pending_command，传递给 PreUserMessage hook
+            pending_cmd = session.metadata.pop("_pending_command", None) if session else None
+
             pre_user_ctx = {
                 "message": user_text,
                 "session_id": _session_id,
                 **memory_ctx,
                 **worktree_ctx,
             }
+            if pending_cmd:
+                pre_user_ctx["pending_command"] = pending_cmd
             _trigger_and_inject(hook_mgr, "PreUserMessage",
                                 pre_user_ctx, inject_to_session=session)
 

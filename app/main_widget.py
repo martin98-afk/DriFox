@@ -9278,8 +9278,18 @@ class OpenAIChatToolWindow(ToolWindow):
                                                          cmd_result.remainder)
                     if not selected_text:
                         selected_text = cmd_result.replacement  # 无匹配/无 sections → 完整 body
-                    user_text = (f"严格按照以下命令规范执行：{selected_text}\n\n"
-                                 f"$ARGUMENTS：{cmd_result.remainder or '无用户参数'}")
+                    # 🆕 改为 PreUserMessage hook 注入模式：
+                    # 不再直接替换 user_text，而是将命令信息存入 session.metadata，
+                    # 供 engine.py → PreUserMessage hook 读取并注入提示词。
+                    session = self.session_manager.get_current_session()
+                    if session:
+                        session.metadata["_pending_command"] = {
+                            "prompt_text": selected_text,
+                            "command_name": cmd_result.command_name,
+                            "remainder": cmd_result.remainder or "",
+                        }
+                    # 用户消息保持原始输入不变（含 /xxx 前缀）
+                    # 命令提示词已通过 hook 注入，不再替换 user_text
         # ---- 内置命令拦截结束 ----
 
         # ---- 技能名称替换：/skillname → "加载这个智能体技能：@skillname" ----

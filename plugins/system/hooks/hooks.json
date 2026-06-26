@@ -36,6 +36,17 @@
             "id": "4926f722c2f54c058e16371e2b2d12df"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_command_prompt:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入命令提示词...",
+            "id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+          }
+        ]
       }
     ]
   }
