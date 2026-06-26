@@ -281,10 +281,13 @@ class ChatBackend(QObject):
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 
-        # 线程安全队列：仅用于 chat_worker 内部 hook（PreToolUse/PostToolUse）的输出传递
+        # 线程安全队列：用于 tool_executor 中触发的 hook 输出传递
+        # _hook_message_queue: PostToolUse（异步触发，在 loop 顶部消费）
+        # _pre_tool_message_queue: PreToolUse（同步触发，在 tool 执行后立即消费）
         # 预对话 hook（SessionStart/PreUserMessage/PostUserMessage 等）由 engine.py 直接注入
         # chat_worker 内部 hook（PreAssistant/PostAssistant/Stop）由 worker 直接注入
         self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
+        self._pre_tool_message_queue: "queue.Queue[Dict]" = queue.Queue()
 
         # Hook 完成回调 — 仅处理需要通过队列传递给 worker 的事件
         # 预对话事件（SessionStart, PreUserMessage, PostUserMessage 等）不经过此回调，
@@ -303,12 +306,18 @@ class ChatBackend(QObject):
             if not success:
                 return
 
-            # 只有需要通过队列传递给 worker 的事件才入队
-            # PostToolUse: 在 tool_executor 中触发，需通过队列传给 worker
-            # prompt hooks: 可能从任意位置触发，也通过队列
-            should_queue = is_prompt_hook or event_name in ("PostToolUse",)
-
-            if should_queue:
+            # PreToolUse → 独立队列（worker 在 tool 执行后立即消费，插入 tool result 之前）
+            # PostToolUse → 主队列（在 loop 顶部消费，出现在 tool result 之后）
+            # prompt hooks → 主队列
+            if event_name == "PreToolUse":
+                hook_output = _format_hook_output(event_name, output)
+                self._pre_tool_message_queue.put({
+                    "role": "assistant",
+                    "content": hook_output,
+                    "_hook_event": event_name,
+                })
+                logger.debug(f"[HookManager] PreToolUse queued to pre-tool queue")
+            elif is_prompt_hook or event_name == "PostToolUse":
                 hook_output = _format_hook_output(event_name, output)
                 self._hook_message_queue.put({
                     "role": "assistant",

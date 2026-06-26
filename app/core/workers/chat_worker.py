@@ -439,6 +439,36 @@ class OpenAIChatWorker(QThread):
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
 
+    def _inject_pending_pretool_messages(self, session_messages_target: List = None) -> None:
+        """消费 backend 的 PreToolUse 消息队列，在 tool result 之前注入。
+
+        与 _inject_pending_hook_messages 使用不同的队列，确保 PreToolUse
+        在 tool result 之前、PostToolUse 在 tool result 之后出现。
+        """
+        try:
+            backend = getattr(self.tool_executor, '_backend', None)
+            if not backend:
+                return
+            q = getattr(backend, '_pre_tool_message_queue', None)
+            if q is None:
+                return
+
+            msgs = []
+            while True:
+                try:
+                    msgs.append(q.get_nowait())
+                except queue.Empty:
+                    break
+
+            if msgs:
+                self._append_to_api_cache(msgs)
+                self._current_session_messages.extend(msgs)
+                if session_messages_target is not None:
+                    session_messages_target.extend(msgs)
+                logger.debug(f"[HookManager] Injected {len(msgs)} pretool msgs from queue")
+        except Exception as e:
+            logger.debug(f"[HookManager] Failed to inject pending pretool msgs: {e}")
+
     def _trigger_worker_hook(
         self,
         event_name: str,
@@ -1185,6 +1215,11 @@ class OpenAIChatWorker(QThread):
                     msg_count=len(current_messages))
 
                 tool_results = self._execute_all_tools()
+
+                # ★ 消费 PreToolUse 队列（独立于 PostToolUse 队列）
+                # PreToolUse 由 tool_executor 同步触发后入 pre_tool 队列，
+                # 此处消费确保出现在 tool result 之前，且不会误消费 PostToolUse。
+                self._inject_pending_pretool_messages(session_messages_target=current_session_messages)
 
                 if tool_results is None:
                     # 提前捕获 _question_pending，避免 cancel+cleanup 竞态导致丢失引用
