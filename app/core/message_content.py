@@ -617,6 +617,9 @@ def group_messages_for_display(
         role = msg.get("role")
         if role == "system":
             continue
+        # 跳过 hook 内部通知消息（如 SessionStart），不显示为消息卡片
+        if msg.get("_hook_event"):
+            continue
         if role == "user":
             if current_batch:
                 batches.append(current_batch)

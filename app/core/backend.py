@@ -266,7 +266,7 @@ class ChatBackend(QObject):
             if is_prompt_hook:
                 event_name = event_name[len("__prompt__:"):]
 
-            logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}，output={output[:100]}...")
+            logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}，output={output}...")
 
             # 只有成功执行的 hook 才添加到消息列表
             if not success:
@@ -1669,6 +1669,41 @@ class ChatBackend(QObject):
 
         return ctx
 
+    def _build_worktree_context_dict(self) -> Dict[str, Any]:
+        """构建 worktree + 路径使用建议上下文（PreUserMessage 每次触发时更新）
+
+        将原本在 SessionStart 中的动态内容（可能随分支切换变化）
+        移到 PreUserMessage，确保每次消息前都注入最新状态。
+
+        Returns:
+            包含 worktree 信息和路径建议的 dict
+        """
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+
+        ctx: Dict[str, Any] = {
+            "project_root": project_root,
+            "project_name": self._current_project or os.path.basename(project_root),
+        }
+
+        # Worktree / git 分支信息
+        try:
+            from app.utils.git_worktree import GitWorktreeDetector
+            repo_info = GitWorktreeDetector.get_repo_info(project_root)
+            if repo_info and repo_info.worktrees:
+                ctx["worktree"] = {
+                    "repo_name": os.path.basename(repo_info.root),
+                    "current_branch": repo_info.current_branch,
+                    "workdir": project_root,
+                    "is_worktree": project_root != repo_info.root,
+                    "other_branches": [
+                        wt.branch for wt in repo_info.worktrees if not wt.is_current
+                    ],
+                }
+        except Exception:
+            pass
+
+        return ctx
+
     def _build_session_context(self, state: str) -> Dict[str, Any]:
         """构建 SessionStart hook 上下文 — 预取所有项目数据，hook 只做格式化
 
@@ -1678,7 +1713,8 @@ class ChatBackend(QObject):
         Returns:
             包含所有项目上下文数据的 dict
         """
-        project_root = os.getcwd()
+        # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
         ctx: Dict[str, Any] = {
             "project_root": project_root,
             "state": state,
@@ -1690,7 +1726,7 @@ class ChatBackend(QObject):
             try:
                 note = self._memory_manager.get_project_note(
                     self._current_project,
-                    workdir=self._tool_executor.get_workdir() if self._tool_executor else project_root,
+                    workdir=project_root,
                 )
                 if note and note.get("content"):
                     ctx["project_notes_content"] = note["content"]

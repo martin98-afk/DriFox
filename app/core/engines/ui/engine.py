@@ -327,10 +327,17 @@ class UIEngine(BaseEngine):
         # user_text 始终是纯文本版本，用于 hook 触发和 UI 显示
 
         # 公共辅助方法：触发 hook
+        # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
+        _window_workdir = (
+            self._backend.tool_executor.get_workdir()
+            if self._backend and self._backend.tool_executor
+            else os.getcwd()
+        )
+
         def _do_trigger(hook_mgr, event_name, extra_context=None, msg_text=None):
             if extra_context is None:
                 extra_context = {}
-            ctx = {"project_root": os.getcwd()}
+            ctx = {"project_root": _window_workdir}
             ctx.update(extra_context)
             hook_mgr.trigger_event(
                 event_name,
@@ -338,22 +345,25 @@ class UIEngine(BaseEngine):
                 current_message=msg_text or user_text,
             )
 
-        hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
+        # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager，不通过全局单例
+        hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
 
         if hook_mgr:
             # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
             _do_trigger(hook_mgr, "UserPromptSubmit", {"message": user_text})
-            # PreUserMessage: 注入条目记忆 + 关键文档（通过 backend 预取，不硬编码）
+            # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文（通过 backend 预取，不硬编码）
             memory_ctx = {}
+            worktree_ctx = {}
             try:
-                backend = getattr(self._conversation_core, 'context_builder', None)
-                if backend and getattr(backend, 'backend', None):
-                    memory_ctx = backend.backend.build_memory_context_dict() or {}
+                if self._backend:
+                    memory_ctx = self._backend.build_memory_context_dict() or {}
+                    worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
             _do_trigger(hook_mgr, "PreUserMessage", {
                 "message": user_text,
                 **memory_ctx,
+                **worktree_ctx,
             })
         session.add_user_message(content=content_to_store)
         if hook_mgr:
@@ -526,7 +536,8 @@ class UIEngine(BaseEngine):
 
     def _trigger_post_assistant_message(self, response_or_error: str, is_error: bool = False):
         """统一触发 PostAssistantMessage hook"""
-        hook_mgr = getattr(self._agent_manager, '_hook_manager', None) if self._agent_manager else None
+        # 多窗口隔离：使用当前窗口 Backend 的 HookManager
+        hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
         if not hook_mgr:
             return
 
@@ -538,8 +549,14 @@ class UIEngine(BaseEngine):
                     last_user_msg = content_to_text(msg.get('content', ''))
                     break
 
+        # 多窗口隔离：使用当前窗口的工作目录
+        project_root = (
+            self._backend.tool_executor.get_workdir()
+            if self._backend and self._backend.tool_executor
+            else os.getcwd()
+        )
         context = {
-            "project_root": os.getcwd(),
+            "project_root": project_root,
         }
         if is_error:
             context["error"] = response_or_error
