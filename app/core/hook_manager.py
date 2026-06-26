@@ -318,6 +318,10 @@ class HookOverrideManager:
         except Exception as e:
             logger.error(f"[HookOverrideManager] Failed to save overrides: {e}")
 
+    def reload(self):
+        """从文件重新加载覆写配置（用于多窗口同步）"""
+        self._load()
+
     def get_effective_enabled(self, hook_id: str, default: bool) -> bool:
         """获取 hook 的有效 enabled 状态（覆写优先）"""
         if hook_id in self._overrides and "enabled" in self._overrides[hook_id]:

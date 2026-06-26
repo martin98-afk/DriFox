@@ -1598,6 +1598,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup.hookListCard.showEditHookCard.connect(
             self._show_hook_edit_card
         )
+        # Hook 开关/增删 → 广播到其他窗口同步
+        self._settings_popup.hookListCard.hooksChanged.connect(
+            self._on_hook_toggled
+        )
 
         # 连接 MCP 添加/编辑信号
         self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
@@ -4082,6 +4086,26 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("mcp_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
 
+    def _on_hook_toggled(self):
+        """Hook 开关/增删 → 广播到其他窗口同步（各窗口有独立 HookManager）"""
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed or win is self:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            hook_card = getattr(settings_popup, "hookListCard", None)
+            if hook_card is None:
+                continue
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                hm = hook_card._hook_manager
+                if hm:
+                    # 1. 重新加载覆写层（plugin/skill hooks 开关存在于此）
+                    hm._override_manager.reload()
+                    # 2. 重新加载全局 hooks 配置（user-custom hooks 开关存在于此）
+                    hm.reload_global_hooks(str(hook_card._hooks_config_file))
+                hook_card._refresh(reload=True)
+
     def _on_mcp_servers_toggled(self):
         """MCP 服务器开关变更 → 广播到其他窗口刷新列表"""
         for win in OpenAIChatToolWindow._instances:
@@ -5015,21 +5039,24 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[HotReload] 刷新技能列表失败: {e}")
 
-        # Hooks 变更：刷新设置面板中的 hook 列表
-        if (
-            result.get("hooks")
-            and hasattr(self, "_settings_popup")
-            and self._settings_popup
-        ):
-            try:
-                if hasattr(self._settings_popup, "hookListCard"):
-                    card = self._settings_popup.hookListCard
+        # Hooks 变更：广播刷新所有窗口的 hook 设置卡片
+        if result.get("hooks"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    if not hasattr(win, "_settings_popup") or not win._settings_popup:
+                        continue
+                    if not hasattr(win._settings_popup, "hookListCard"):
+                        continue
+                    card = win._settings_popup.hookListCard
                     if card._hook_manager:
                         card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
-                    logger.debug("[HotReload] hooks card refreshed")
-            except Exception as e:
-                logger.warning(f"[HotReload] 刷新 hooks 列表失败: {e}")
+                except (RuntimeError, AttributeError) as e:
+                    # 多窗口竞态：窗口已被销毁
+                    pass
+            logger.debug("[HotReload] hooks card refreshed (all windows)")
 
         # 主题变更：主动刷新设置面板中的主题下拉列表
         if (

@@ -970,6 +970,7 @@ class ChatBackend(QObject):
             # 2. 智能体 + hooks
             if comps.get("agents") and self._agent_manager:
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+                result["hooks"] = True  # agents 组件包含 hooks 重载
                 try:
                     from app.core.builtin_commands import reload_all_commands
                     reload_all_commands()
@@ -979,6 +980,7 @@ class ChatBackend(QObject):
 
             if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
                 self._agent_manager.reload_plugin_hooks(plugin_name)
+                result["hooks"] = True
 
             # 3. 命令
             if comps.get("commands") and not result["commands"]:
@@ -1237,6 +1239,7 @@ class ChatBackend(QObject):
                 # 智能体 + hooks（agents 组件同时处理 hooks）
                 if comps.get("agents") and self._agent_manager:
                     result["agents"] = self._agent_manager.reload_plugin_agents(name)
+                    result["hooks"] = True  # agents 组件包含 hooks 重载
                     # 智能体文件同时也是命令源（/agent_name）
                     try:
                         from app.core.builtin_commands import reload_all_commands
@@ -1248,6 +1251,7 @@ class ChatBackend(QObject):
                 # hooks-only（没有 agents 但有 hooks）
                 if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
                     self._agent_manager.reload_plugin_hooks(name)
+                    result["hooks"] = True
 
                 # 命令（非 agents 触发的独立命令目录）
                 if comps.get("commands") and not result["commands"]:

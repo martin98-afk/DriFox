@@ -845,10 +845,9 @@ class HookListSettingCard(ExpandSettingCard):
             self.hooksChanged.emit()
 
     def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
-        """切换 hook 启用状态"""
+        """切换 hook 启用状态（仅持久化 + 通知，不重建 UI）"""
         if self._hook_manager:
             self._hook_manager.toggle_hook_by_id(hook_id, enabled)
-            self._refresh(reload=True)
             self.hooksChanged.emit()
 
     def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command",
