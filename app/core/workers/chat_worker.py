@@ -158,6 +158,14 @@ class OpenAIChatWorker(QThread):
         self._mem_trace_enabled = os.environ.get('MEM_TRACE') == '1'
         self._mem_trace_snapshot = None
 
+        # ========== Stop hook 强制续命（Claude Code 兼容）==========
+        # 状态机：
+        #   False = 正常 turn 结束，Stop hook 可 block 强制续命
+        #   True  = 上一轮被 Stop hook 强制续命过，当前 turn 结束时的
+        #           Stop 触发后应立即放行（不再 block），避免无限循环
+        # 详见 docs/stop_hook_block.md 设计说明
+        self._stop_hook_active: bool = False
+
     def _get_persister(self) -> Optional["ToolResultPersister"]:
         """
         懒加载工具结果持久化器 (按 session_id 隔离)
@@ -475,13 +483,25 @@ class OpenAIChatWorker(QThread):
         current_messages: List[Dict],
         current_session_messages: List[Dict],
         extra_context: Dict = None,
-    ) -> None:
-        """在 worker 线程中同步触发 hook 并将输出追加到消息流（只追加不删除）"""
+    ) -> Optional[str]:
+        """在 worker 线程中同步触发 hook 并将输出追加到消息流（只追加不删除）
+
+        Args:
+            event_name: hook 事件名（PreAssistantMessage/PostAssistantMessage/Stop 等）
+            current_messages: 正在构建的 API 消息列表（in-place 追加）
+            current_session_messages: 会话消息列表（in-place 追加）
+            extra_context: 注入到 hook context 的额外字段
+
+        Returns:
+            block_reason: 如果 hook 决策为 BLOCK，返回提取出的 block 内容
+                （来自 hookify 风格 JSON 的 reason/stopReason 字段，或 raw output）；
+                否则返回 None。Stop hook 用此实现"强制续命"机制。
+        """
         from app.core.backend import _make_hook_message
         try:
             backend = getattr(self.tool_executor, '_backend', None)
             if not backend or not backend.hook_manager:
-                return
+                return None
 
             workdir = None
             if backend.tool_executor:
@@ -521,6 +541,8 @@ class OpenAIChatWorker(QThread):
                 trigger_async=False,
             )
 
+            # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
+            block_reason: Optional[str] = None
             for r in results:
                 if r.success and r.output:
                     msg = _make_hook_message(event_name, r.output)
@@ -532,8 +554,92 @@ class OpenAIChatWorker(QThread):
 
                     logger.debug(f"[HookManager] Worker hook injected: {event_name}")
 
+                # 检查 BLOCK 决策（Claude Code Stop hook 强制续命机制）
+                # HookDecision.BLOCK 来自 hook_manager.py，对应：
+                #   - command hook exit code 2
+                #   - JSON 输出 {"decision": "block", ...}
+                # 仅 Stop 事件实际消费该决策；其他事件也透传，由调用方决定
+                try:
+                    from app.core.hook_manager import HookDecision
+                    if r.decision == HookDecision.BLOCK:
+                        reason = self._extract_block_reason(r.output)
+                        if reason:
+                            block_reason = reason
+                            logger.info(
+                                f"[HookManager] Worker hook BLOCK: {event_name} "
+                                f"reason_len={len(reason)}"
+                            )
+                except ImportError:
+                    pass
+
+            return block_reason
+
         except Exception as e:
             logger.debug(f"[HookManager] Worker hook trigger failed: {event_name} - {e}")
+            return None
+
+    @staticmethod
+    def _extract_block_reason(output: str) -> Optional[str]:
+        """从 hook 输出中提取 block reason（用于 Stop hook 强制续命）
+
+        优先级（hookify 实际用法 → Claude Code 官方规范 → 兜底）：
+        1. JSON `reason` 字段（hookify 默认）
+        2. JSON `stopReason` 字段（Claude Code 官方）
+        3. JSON `additionalContext` 字段
+        4. raw output 兜底
+
+        Args:
+            output: hook 原始输出字符串
+
+        Returns:
+            提取出的 block reason，None 表示无可用内容
+        """
+        if not output or not output.strip():
+            return None
+
+        # 尝试解析 JSON
+        try:
+            data = orjson.loads(output)
+            if isinstance(data, dict):
+                # 优先级 1: hookify 风格
+                if data.get("reason"):
+                    return str(data["reason"])
+                # 优先级 2: Claude Code 官方
+                if data.get("stopReason"):
+                    return str(data["stopReason"])
+                # 优先级 3: additionalContext
+                if data.get("additionalContext"):
+                    return str(data["additionalContext"])
+        except (orjson.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        # 优先级 4: raw output 兜底
+        return output
+
+    def _build_stop_block_synthetic_user_message(
+        self,
+        block_reason: str,
+    ) -> Dict[str, Any]:
+        """构造 Stop hook block 强制续命用的合成 user message
+
+        标记 `_is_synthetic=True` 让 UI 渲染时能区分（灰色斜体、提示用户
+        这是 Stop hook 注入的），但喂给 LLM 时不带这个标记。
+
+        Args:
+            block_reason: hook 输出的 reason 字段，作为 user message content
+
+        Returns:
+            合成 user message dict
+        """
+        from datetime import datetime as _dt
+        return {
+            "role": "user",
+            "content": block_reason,
+            "_hook_event": "Stop",
+            "_is_synthetic": True,  # 标记为合成消息，UI 渲染时可特殊处理
+            "_block_continuation": True,  # 标记为 Stop block 触发的续命
+            "timestamp": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     def _cancel_with_stop_hook(self, current_messages: List[Dict],
                                 current_session_messages: List[Dict]) -> None:
@@ -541,15 +647,38 @@ class OpenAIChatWorker(QThread):
 
         统一处理 3 处取消路径的重复逻辑：
         保存 partial → 触发 Stop hook → 发射 finished_with_messages
+
+        注意：取消路径**不消费 Stop block 决策**。理由：
+        - 用户主动取消时不应被 hook 强制续命
+        - 但仍触发 Stop hook，让 hook 知道 assistant 被取消了
+        - 仍消费 block_reason 返回值（保证 _trigger_worker_hook 调用语义一致）
+        - 重置 _stop_hook_active 状态，避免影响下一轮对话
         """
         partial_sequence = self._build_response_message_sequence()
         if partial_sequence:
             current_messages.extend(partial_sequence)
             current_session_messages.extend(partial_sequence)
+            # 🛡️ 清理 orphaned tool_calls：取消时 partial assistant 消息含 tool_calls
+            # 但无对应 tool 结果，在持久化前清理，避免下次 API 调用触发 2013 错误
+            # 和重复的自动修复开销
+            current_messages, _ = self._fix_tool_result_order(current_messages)
+            current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
             self._current_session_messages = list(current_session_messages)
             self.full_response = ''.join(self._response_chunks)
             # ====== Stop hook：取消退出前触发 ======
-            self._trigger_worker_hook("Stop", current_messages, current_session_messages)
+            # 取消时传递 reason="cancelled"，让 hook 能感知取消场景
+            self._trigger_worker_hook(
+                "Stop",
+                current_messages,
+                current_session_messages,
+                extra_context={
+                    "stop_hook_active": self._stop_hook_active,
+                    "last_assistant_message": self.full_response,
+                    "reason": "cancelled",
+                },
+            )
+            # 取消路径：丢弃 block_reason，不强制续命
+            self._stop_hook_active = False
             # 虽然信号可能已被断开，但事件总线仍可能接收
             self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                      current_session_messages)
@@ -1103,6 +1232,12 @@ class OpenAIChatWorker(QThread):
             self._reasoning_content = ""
             # 开始新对话时，清理所有中间状态
             self._clear_pending_response_state()
+            # 🛡️ 防御性清理：移除可能来自上次取消/中断的 orphaned tool_calls
+            # （assistant 有 tool_calls 但无对应 tool result），避免 API 2013 错误和重复自动修复开销
+            current_messages, _ = self._fix_tool_result_order(current_messages)
+            current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
+            self._current_session_messages = list(current_session_messages)
+
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
             self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
@@ -1205,11 +1340,57 @@ class OpenAIChatWorker(QThread):
                     )
 
                     # ====== Stop hook：正常完成退出循环前触发 ======
-                    self._trigger_worker_hook(
+                    # Stop hook 可通过 decision=block 强制续命（Claude Code 兼容）：
+                    #   - 第一次 Stop 触发时 _stop_hook_active=False，hook 可 block
+                    #   - block 时把 hook 的 reason 注入为合成 user message，重跑一轮
+                    #   - 重跑出来的 Stop 触发时 _stop_hook_active=True，hook 不再 block
+                    #   - 第二轮结束后真正退出
+                    # 这限制了 Stop block 最多 1 次强制续命，避免无限循环。
+                    stop_extra_ctx = {
+                        "stop_hook_active": self._stop_hook_active,
+                        "last_assistant_message": self.full_response,
+                        "reason": "completed",
+                    }
+                    block_reason = self._trigger_worker_hook(
                         "Stop",
                         current_messages,
                         current_session_messages,
+                        extra_context=stop_extra_ctx,
                     )
+
+                    # 处理 block：第一次（_stop_hook_active=False）时真正强制续命
+                    if block_reason and not self._stop_hook_active:
+                        # 1. 构造合成 user message（来自 hook 的 reason 字段）
+                        synthetic_msg = self._build_stop_block_synthetic_user_message(
+                            block_reason
+                        )
+                        # 2. 追加到所有消息列表
+                        current_messages.append(synthetic_msg)
+                        current_session_messages.append(synthetic_msg)
+                        self._current_session_messages.append(synthetic_msg)
+                        # 3. 追加到 API 缓存（用 to_api_message 转换）
+                        api_synthetic = to_api_message(
+                            synthetic_msg, supports_vision=self._supports_vision
+                        )
+                        if self._api_messages_cache is not None:
+                            self._api_messages_cache.append(api_synthetic)
+                        # 4. 翻转 _stop_hook_active：下一轮 Stop 触发时 hook 端会看到 true
+                        self._stop_hook_active = True
+                        # 5. 发射 finished_with_messages 让 UI 看到合成消息（可选）
+                        self._emit_with_callback(
+                            "finished_with_messages", self.finished_with_messages,
+                            current_session_messages,
+                        )
+                        logger.info(
+                            f"[Stop hook] BLOCK detected, force continuation. "
+                            f"reason_len={len(block_reason)}"
+                        )
+                        # 6. 清理 pending state 后回到 while 顶部重跑 API
+                        self._clear_pending_response_state()
+                        continue  # 跳回 while 顶部，再来一轮
+
+                    # 真正结束：重置状态（无论本次是否 block）
+                    self._stop_hook_active = False
 
                     self._emit_with_callback("finished_with_messages", self.finished_with_messages,
                                              current_session_messages)
@@ -1406,11 +1587,22 @@ class OpenAIChatWorker(QThread):
             # 🔧 异常时保存已生成的部分消息到会话
             try:
                 # ====== Stop hook：异常退出前触发 ======
+                # 异常路径：消费 block_reason 但不强制续命（与 cancel 路径一致）
+                # 理由：API 已异常，继续调用大概率再次失败，无意义
+                _cur_msgs = current_messages if 'current_messages' in locals() else self.messages
+                _cur_session = current_session_messages if 'current_session_messages' in locals() else list(self.session_messages)
                 self._trigger_worker_hook(
                     "Stop",
-                    current_messages if 'current_messages' in locals() else self.messages,
-                    current_session_messages if 'current_session_messages' in locals() else list(self.session_messages),
+                    _cur_msgs,
+                    _cur_session,
+                    extra_context={
+                        "stop_hook_active": self._stop_hook_active,
+                        "last_assistant_message": self.full_response,
+                        "reason": "error",
+                    },
                 )
+                # 异常路径：重置状态，不强制续命
+                self._stop_hook_active = False
 
                 partial_sequence = self._build_response_message_sequence()
                 if partial_sequence:
@@ -1969,7 +2161,6 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
-        print(sanitized)
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]

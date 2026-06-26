@@ -593,16 +593,51 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int]]:
+    """
+    计算每个 user round 的起止索引。
+
+    Round 范围向前扩展：包含 user 消息之前的所有 hook 消息
+    （PreUserMessage、PreToolUse 等除 SessionStart 外的 hook），
+    删除 round 时这些 hook 会被一起删除，避免重复堆叠。
+
+    SessionStart 视为会话级上下文，不纳入任何 round 范围，
+    删除首个 round 时不会连带删除。
+
+    关键设计：先计算每个 round 的 start（向前回溯 hook），
+    再用下一个 round 的 start 作为本 round 的 end，
+    避免 hook 消息同时属于两个 round。
+    """
     canonical_messages = consolidate_messages(messages or [])
     user_indices = [
         idx for idx, msg in enumerate(canonical_messages) if msg.get("role") == "user"
     ]
-    ranges: List[tuple[int, int]] = []
+
+    # 第一遍：计算每个 round 的 start
+    round_starts: List[int] = []
     for pos, start_idx in enumerate(user_indices):
-        end_idx = (
-            user_indices[pos + 1] if pos + 1 < len(user_indices) else len(canonical_messages)
-        )
-        ranges.append((start_idx, end_idx))
+        # 向前回溯起点：上一个 user 之后，或会话开头
+        prev_boundary = user_indices[pos - 1] + 1 if pos > 0 else 0
+        round_start = start_idx
+        for j in range(start_idx - 1, prev_boundary - 1, -1):
+            msg = canonical_messages[j]
+            if msg.get("role") == "user":
+                break  # 遇到上一个 user，停止
+            hook_event = msg.get("_hook_event")
+            if hook_event and hook_event != "SessionStart":
+                round_start = j  # 扩展起点到本 hook
+            elif hook_event == "SessionStart":
+                # SessionStart 是会话级，跳过不扩展
+                continue
+            else:
+                # 非 hook 消息，停止向前回溯
+                break
+        round_starts.append(round_start)
+
+    # 第二遍：end = 下一个 round 的 start（最后一个 round 则是消息总数）
+    ranges: List[tuple[int, int]] = []
+    for i, start in enumerate(round_starts):
+        end = round_starts[i + 1] if i + 1 < len(round_starts) else len(canonical_messages)
+        ranges.append((start, end))
     return ranges
 
 
@@ -617,7 +652,9 @@ def group_messages_for_display(
         role = msg.get("role")
         if role == "system":
             continue
-        # 跳过 hook 内部通知消息（如 SessionStart），不显示为消息卡片
+        # 跳过 hook 内部通知消息（如 SessionStart、PostToolUse 等），
+        # 不显示为消息卡片。判定依据是 _hook_event 字段，
+        # 与内容格式（<system-reminder><event-name-hook>...</event-name-hook></system-reminder>）无关。
         if msg.get("_hook_event"):
             continue
         if role == "user":

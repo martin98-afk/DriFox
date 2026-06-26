@@ -1458,53 +1458,60 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
     return "".join(parts)
 
 
+def _tag_to_event_name(tag: str) -> str:
+    """Claude Code 风格的 kebab-case-hook 标签 → PascalCase 事件名
+
+    例:
+        user-prompt-submit-hook  → UserPromptSubmit
+        pre-user-message-hook    → PreUserMessage
+        pre-tool-use-hook        → PreToolUse
+        session-start-hook       → SessionStart
+    """
+    name = tag
+    if name.endswith("-hook"):
+        name = name[: -len("-hook")]
+    parts = name.split("-")
+    return "".join(p[:1].upper() + p[1:] for p in parts if p)
+
+
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
-    """注入 Hook 块 HTML，类似 think 块"""
+    """注入 Hook 块 HTML，类似 think 块
+
+    支持两种格式（从最优先到兼容）：
+    1. Claude Code 格式: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+    2. 旧格式（向后兼容）: <hook event="EventName">...</hook>
+    """
     if not md_text:
         return md_text
 
+    from app.widgets.render_helpers import render_hook_block
+
+    # 合并两种格式的标签正则，按出现顺序处理
+    # 1. Claude Code: <xxx-hook>...</xxx-hook>
+    # 2. 旧: <hook event="Xxx">...</hook>
+    pattern = re.compile(
+        r'<([a-z0-9-]+-hook)>(.*?)</\1>'
+        r'|<hook\s+event="([^"]+)">(.*?)</hook>',
+        re.DOTALL,
+    )
+
     parts = []
-    i = 0
-    while i < len(md_text):
-        start_idx = md_text.find("<hook ", i)
-        if start_idx == -1:
-            parts.append(md_text[i:])
-            break
-        parts.append(md_text[i:start_idx])
+    last_end = 0
+    for m in pattern.finditer(md_text):
+        parts.append(md_text[last_end:m.start()])
 
-        # 找到 event 属性
-        event_start = md_text.find('event="', start_idx)
-        if event_start == -1 or event_start > start_idx + 10:
-            # 没有 event 属性，跳过这个位置，继续往后找
-            i = start_idx + 6
-            continue
+        if m.group(1):  # Claude Code 格式
+            tag = m.group(1)
+            event_name = _tag_to_event_name(tag)
+            hook_content = m.group(2).strip()
+        else:  # 旧 <hook event="..."> 格式
+            event_name = m.group(3)
+            hook_content = m.group(4).strip()
 
-        event_end = md_text.find('"', event_start + len('event="'))
-        if event_end == -1:
-            parts.append(md_text[start_idx:])
-            break
+        parts.append(render_hook_block(event_name, hook_content, collapsed=not completed))
+        last_end = m.end()
 
-        event_name = md_text[event_start + len('event="'):event_end]
-
-        # 找到闭合标签
-        end_idx = md_text.find("</hook>", start_idx + len("<hook "))
-        if end_idx != -1:
-            content = md_text[start_idx + len('<hook '): end_idx]
-            # 解析内容（event_name 后面的内容）
-            content_start = content.find('>')
-            if content_start != -1:
-                hook_content = content[content_start + 1:].strip()
-            else:
-                hook_content = content.strip()
-
-            # 使用 render_hook_block 渲染
-            from app.widgets.render_helpers import render_hook_block
-            parts.append(render_hook_block(event_name, hook_content, collapsed=not completed))
-            i = end_idx + len("</hook>")
-        else:
-            # 未闭合的 hook，跳过
-            parts.append(md_text[start_idx:])
-            break
+    parts.append(md_text[last_end:])
     return "".join(parts)
 
 

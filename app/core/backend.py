@@ -28,13 +28,44 @@ from app.utils.history_manager import HistoryManager
 _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
 
+def _event_to_tag(event_name: str) -> str:
+    """将事件名转换为 Claude Code 兼容的 kebab-case 标签
+
+    例:
+        UserPromptSubmit → user-prompt-submit
+        PreUserMessage   → pre-user-message
+        PreToolUse       → pre-tool-use
+        PostToolUse      → post-tool-use
+        SessionStart     → session-start
+        Stop             → stop
+    """
+    # PascalCase / camelCase → kebab-case
+    # UserPromptSubmit → User-Prompt-Submit → user-prompt-submit
+    kebab = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', event_name)
+    kebab = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1-\2', kebab)
+    return kebab.lower()
+
+
 def _strip_hook_wrapper(content: str) -> str:
     """从 hook 消息格式中提取纯文本内容（兼容新旧格式）
 
-    旧格式: <hook event=\"...\">\\n...\\n</hook>
-    新格式: ---\\n🔌 **Hook 内部通知** · 事件: `...`\\n\\n...\\n---
+    Claude Code 格式: <{kebab-case-event}-hook>\\n...\\n</{kebab-case-event}-hook>
+    旧分隔线格式: ---\\n🔌 **Hook 内部通知** · 事件: `...`\\n\\n...\\n---
+    最早旧格式: <hook event=\"...\">\\n...\\n</hook>
     """
-    # 新格式
+    if not content:
+        return content
+
+    # Claude Code 格式：<xxx-hook>...</xxx-hook>
+    # 用启发式：只要匹配 <xxx-hook>...</xxx-hook> 且标签以 -hook 结尾
+    m = re.search(
+        r'<([a-z0-9-]+-hook)>\s*(.*?)\s*</\1>',
+        content, re.DOTALL
+    )
+    if m:
+        return m.group(2).strip()
+
+    # 旧分隔线格式
     if content.startswith('---') and '🔌 **Hook 内部通知**' in content:
         match = re.search(
             r'---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---',
@@ -44,7 +75,7 @@ def _strip_hook_wrapper(content: str) -> str:
             return match.group(1).strip()
         return content
 
-    # 旧格式
+    # 最早旧格式
     match = re.search(r'<hook[^>]*>(.*?)</hook>', content, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -52,13 +83,23 @@ def _strip_hook_wrapper(content: str) -> str:
 
 
 def _format_hook_output(event_name: str, output: str) -> str:
-    """格式化 hook 输出为 Markdown 分隔线包装的内部通知格式"""
+    """格式化 hook 输出为 Claude Code 兼容的双层 XML 标签格式
+
+    外层: <system-reminder>...</system-reminder>
+    内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+
+    与 Claude Code 实际格式对齐：
+    - <system-reminder> 是 Claude Code 通用系统注入容器
+    - <user-prompt-submit-hook> 等是 Claude Code 提示词中明说的 hook 反馈标签
+    LLM 收到时按 system prompt 约定识别为 hook 注入内容。
+    """
+    tag = _event_to_tag(event_name)
     return (
-        f"---\n"
-        f"🔌 **Hook 内部通知** · 事件: `{event_name}`\n"
-        f"\n"
+        f"<system-reminder>\n"
+        f"<{tag}-hook>\n"
         f"{output}\n"
-        f"---"
+        f"</{tag}-hook>\n"
+        f"</system-reminder>"
     )
 
 
