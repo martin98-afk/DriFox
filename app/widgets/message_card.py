@@ -82,7 +82,7 @@ from app.core import (
     ensure_content_blocks,
 )
 from app.core.message_content import make_tool_result_block
-from app.core.webengine_profile import create_transient_web_profile
+from app.core.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Colors,
     _get_global_font,
@@ -1816,7 +1816,9 @@ class CodeWebViewer(QWebEngineView):
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
-        self._profile = create_transient_web_profile(self)
+        # 共享全局 profile：所有消息卡片复用同一 Chromium 进程池，
+        # 避免每个卡片独立匿名 profile 触发独立进程组初始化（加载慢的根因）。
+        self._profile = get_shared_web_profile()
         self._page = ConsoleMonitorPage(self._profile, self)
         self.setPage(self._page)
 
@@ -4134,13 +4136,10 @@ class CodeWebViewer(QWebEngineView):
         except (RuntimeError, AttributeError):
             pass
 
-        # 清理一次性 profile
-        try:
-            if hasattr(self, '_profile'):
-                self._profile.deleteLater()
-                del self._profile
-        except (RuntimeError, AttributeError):
-            pass
+        # 共享 profile 为全局单例，不可销毁；仅解除引用。
+        # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。
+        if hasattr(self, '_profile'):
+            self._profile = None
 
         # 清理代码块缓存
         if hasattr(self, '_code_block_cache'):
@@ -5874,16 +5873,12 @@ class MessageCard(SimpleCardWidget):
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
             if self._streaming:
                 self.viewer._append_text_incremental(text)
-            # 流式模式下大块文本 (>3字符) 且没有正在运行的定时器时即时触发全量渲染，
-            # 避免用户长时间只看到增量纯文本而等待格式化渲染。
-            # 若定时器已在运行中则沿用其计划渲染时间（防止高频重复渲染）。
-            if self._streaming and len(text) > 3:
-                if not self.viewer._render_timer.isActive():
-                    self.viewer._schedule_render(immediate=True)
-                else:
-                    self.viewer._schedule_render(immediate=False)
-            else:
-                self.viewer._schedule_render(immediate=False)
+            # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
+            # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
+            # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
+            # 文字即时性已由 _append_text_incremental 保证；流式结束由
+            # finish_streaming() 触发 immediate 收尾渲染。
+            self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
             return
 

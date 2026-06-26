@@ -6513,9 +6513,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """批量懒渲染：每次处理 BATCH_SIZE 个卡片，减少 WebEngine 创建开销
 
         批量处理期间合并 heightChanged 信号，批次完成后统一触发布局更新和滚底。
-        BATCH_SIZE 默认 5，可通过 self._lazy_batch_size 调整。
+        BATCH_SIZE 默认 3，可通过 self._lazy_batch_size 调整。
         """
-        BATCH_SIZE = getattr(self, '_lazy_batch_size', 5)
+        BATCH_SIZE = getattr(self, '_lazy_batch_size', 3)
 
         if not self._pending_lazy_cards:
             self._loading_session = False
@@ -6552,9 +6552,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
-        # 继续处理下一批
+        # 继续处理下一批：60ms 间隔给 Chromium 进程喘息空间，避免批量
+        # 创建 QWebEngineView 时进程初始化压力集中导致卡顿
         if self._pending_lazy_cards:
-            QTimer.singleShot(0, self._process_next_lazy_batch)
+            QTimer.singleShot(60, self._process_next_lazy_batch)
         else:
             self._loading_session = False
             self._lazy_batch_timer_active = False
