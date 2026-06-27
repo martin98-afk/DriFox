@@ -210,12 +210,23 @@ jobs:
           fi
 
           # 关键 Qt5 framework（Core / Gui / Widgets / WebEngine）
+          # 打包后结构：Frameworks/QtCore -> PyQt5/Qt5/lib/QtCore.framework/Versions/5/QtCore
           for fw in QtCore QtGui QtWidgets QtWebEngineCore; do
-            fw_path="$FRAMEWORKS/$fw.framework/Versions/5/$fw"
-            if [ -f "$fw_path" ]; then
-              echo "  ✅ $fw"
+            target="$FRAMEWORKS/$fw"
+            if [ -f "$target" ]; then
+              echo "  ✅ $fw (文件存在)"
+            elif [ -L "$target" ]; then
+              # 符号链接，解析相对路径检查目标
+              link_target=$(readlink "$target")
+              real_target="$FRAMEWORKS/$link_target"
+              if [ -f "$real_target" ]; then
+                echo "  ✅ $fw (符号链接有效 -> $link_target)"
+              else
+                echo "  ❌ $fw 符号链接断链: $link_target"
+                exit 1
+              fi
             else
-              echo "  ❌ $fw 缺失 ($fw_path)"
+              echo "  ❌ $fw 缺失"
               exit 1
             fi
           done
