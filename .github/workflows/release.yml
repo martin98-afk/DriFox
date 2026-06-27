@@ -46,6 +46,10 @@ jobs:
           # 只导入 app.core 包，验证模块结构可加载；不触发 PyQt5 懒加载（Linux+Py3.14 下 PyQt5 会段错误）
           uv run python -c "import app.core; print('check: imports OK')"
 
+      - name: Check build.py cleanup list for QtPositioning
+        run: |
+          uv run python3 -c 'import sys; lines=open("build.py").readlines(); [sys.exit(print("ERROR: Line "+str(i)+": QtPositioning.framework in cleanup list")) for i,l in enumerate(lines,1) if "QtPositioning.framework" in l.strip() and not l.strip().startswith("#")]; print("OK: QtPositioning.framework not in cleanup list")'
+
   # ════════════════════════════════════════════════
   # Job 1: Windows (PyInstaller + Inno Setup)
   # ════════════════════════════════════════════════
@@ -172,11 +176,52 @@ jobs:
       - name: Verify PyInstaller output
         shell: bash
         run: |
-          if [ ! -d "dist/Drifox.app" ]; then
+          APP="dist/Drifox.app"
+          FRAMEWORKS="$APP/Contents/Frameworks"
+
+          if [ ! -d "$APP" ]; then
             echo "❌ PyInstaller 没有产出 dist/Drifox.app"
             exit 1
           fi
           echo "✅ PyInstaller 打包成功"
+
+          # ── 依赖完整性检查 ──
+          echo ""
+          echo "📦 依赖完整性检查..."
+
+          # QtPositioning —— QtWebEngineWidgets 必需
+          if [ -L "$FRAMEWORKS/QtPositioning" ] && [ -f "$(readlink -f "$FRAMEWORKS/QtPositioning" 2>/dev/null || echo "")" ]; then
+            echo "  ✅ QtPositioning (符号链接有效)"
+          elif [ -f "$FRAMEWORKS/QtPositioning" ]; then
+            echo "  ✅ QtPositioning (文件存在)"
+          else
+            echo "  ❌ QtPositioning 缺失或断链"
+            ls -la "$FRAMEWORKS/QtPositioning" 2>/dev/null || true
+            echo ""
+            echo "⚠️  请检查 build.py 的 to_remove_macos 列表是否误删了 QtPositioning.framework"
+            exit 1
+          fi
+
+          # QtPositioningQuick
+          if [ -f "$FRAMEWORKS/QtPositioningQuick" ]; then
+            echo "  ✅ QtPositioningQuick"
+          else
+            echo "  ⚠️  QtPositioningQuick 未找到（可选依赖）"
+          fi
+
+          # 关键 Qt5 framework（Core / Gui / Widgets / WebEngine）
+          for fw in QtCore QtGui QtWidgets QtWebEngineCore; do
+            fw_path="$FRAMEWORKS/$fw.framework/Versions/5/$fw"
+            if [ -f "$fw_path" ]; then
+              echo "  ✅ $fw"
+            else
+              echo "  ❌ $fw 缺失 ($fw_path)"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "✅ 依赖完整性检查通过"
 
       # ── 代码签名说明 ──
       # 不做 ad-hoc 签名。原因：
