@@ -30,6 +30,7 @@ class UIConversationAdapter(QObject):
     error_occurred = pyqtSignal(str)
     retry_status = pyqtSignal(str, int, int, float)
     retry_resolved = pyqtSignal()
+    context_updated = pyqtSignal(int, int)  # token_count, limit
 
     def __init__(self, core: ConversationCore, executor: ConversationExecutor):
         super().__init__()
@@ -90,6 +91,9 @@ class UIConversationAdapter(QObject):
     def on_stream_started(self):
         self.stream_started.emit()
 
+    def on_context_updated(self, token_count: int, limit: int):
+        self.context_updated.emit(token_count, limit)
+
     def get_callbacks(self) -> Dict[str, Callable]:
         return {
             "content_received": self.on_content_received,
@@ -106,4 +110,5 @@ class UIConversationAdapter(QObject):
             "retry_status": self.on_retry_status,
             "retry_resolved": self.on_retry_resolved,
             "stream_started": self.on_stream_started,
+            "context_updated": self.on_context_updated,
         }

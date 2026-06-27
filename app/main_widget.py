@@ -484,6 +484,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "retry_status": self._on_retry_status,
             "retry_resolved": self._on_retry_resolved,
             "permission_approval_requested": self._on_permission_approval_requested,
+            "context_updated": self._on_context_updated,
         }
         self.backend.set_all_callbacks(callbacks)
 
@@ -10706,6 +10707,14 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.stop_retry_anim()
         # 通知桌宠：重试成功，回到 streaming
         self._set_ai_state("streaming")
+
+    def _on_context_updated(self, token_count: int, limit: int):
+        """实时上下文占用更新回调"""
+        ring = getattr(self, "context_usage_ring", None)
+        if not ring or limit <= 0:
+            return
+        percent = min(100, int((token_count / limit) * 100))
+        ring.set_usage(percent, token_count, limit)
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""

@@ -95,6 +95,7 @@ class UIEngine(BaseEngine):
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
         self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))
         self._adapter.stream_started.connect(lambda: self._emit("stream_started"))
+        self._adapter.context_updated.connect(lambda tc, lim: self._emit("context_updated", tc, lim))
 
         # 调用父类构造
         super().__init__(self._conversation_core, self._conversation_executor)

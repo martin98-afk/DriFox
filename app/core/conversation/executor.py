@@ -297,6 +297,7 @@ class ConversationExecutor:
         safe_connect("permission_approval_requested", "permission_approval_requested")
         safe_connect("retry_status", "retry_status")
         safe_connect("retry_resolved", "retry_resolved")
+        safe_connect("context_updated", "context_updated")
 
     def stop(self) -> List[Dict]:
         """停止当前 Worker，返回中断的消息（同步方式，可能阻塞 UI 线程）

@@ -41,6 +41,7 @@ from app.core.message_content import append_text_block, consolidate_messages, me
 from app.core.model_capabilities import get_model_capabilities
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
+from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
 from app.core.workers.worker_event_bus import WorkerEvent, WorkerEventBus
@@ -64,6 +65,7 @@ class OpenAIChatWorker(QThread):
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
+    context_updated = pyqtSignal(int, int)  # token_count, limit，每轮 API 调用后实时更新
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
@@ -1297,6 +1299,19 @@ class OpenAIChatWorker(QThread):
                 if self._is_cancelled:
                     self._cancel_with_stop_hook(current_messages, current_session_messages)
                     return
+                # ====== 实时上下文占用更新（每轮 API 调用后）======
+                # 优先用 API 返回的精确 prompt_tokens，没有则估算
+                if self._last_usage and self._last_usage.get("prompt_tokens", 0) > 0:
+                    ctx_count = self._last_usage["prompt_tokens"]
+                else:
+                    try:
+                        model_name = str(self.llm_config.get("model", "") or "gpt-4")
+                        ctx_count = count_messages_tokens(current_messages, model=model_name)
+                    except (ValueError, TypeError, RuntimeError):
+                        ctx_count = 0
+                if ctx_count > 0 and budget > 0:
+                    self.context_updated.emit(ctx_count, budget)
+                # ==============================================
                 if tool_calls_found and tool_args_pending:
                     # 🛡️ continue 之前检查取消状态，否则 while 循环直接退出绕过保存
                     if self._is_cancelled:
