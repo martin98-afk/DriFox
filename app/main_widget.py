@@ -1646,8 +1646,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # MCP 编辑卡片
         self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
-        self._mcp_edit_card.setMinimumHeight(350)
-        self._mcp_edit_card.set_height_mode('content')  # 按内容自适应高度
+        self._mcp_edit_card.setMinimumHeight(200)
+        self._mcp_edit_card.set_height_mode('proportional')  # 按窗口比例自适应高度
         self._mcp_edit_popup = None
         self._mcp_edit_card.setVisible(False)
         self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
