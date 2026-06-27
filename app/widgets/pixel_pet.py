@@ -40,6 +40,7 @@
 
 import math
 import random
+import sys
 from pathlib import Path
 
 from PyQt5 import sip
@@ -999,10 +1000,20 @@ class PixelPetWidget(QWidget):
         if self._badge_alpha < 0.05:
             return
 
-        # 懒加载字体
+        # 懒加载字体 — 按平台选择系统 emoji 字体
+        # 修复:旧代码硬编码 "Segoe UI Emoji" 是 Windows 专属字体,
+        # 在 macOS / Linux 上不存在;同时 setStyleStrategy(NoFontMerging)
+        # 关闭了 Qt 的字体回退,导致 macOS 上桌宠头顶 emoji 渲染为空白。
         if self._badge_font is None:
-            self._badge_font = QFont("Segoe UI Emoji", 10)
-            self._badge_font.setStyleStrategy(QFont.NoFontMerging)
+            if sys.platform == "darwin":
+                emoji_family = "Apple Color Emoji"
+            elif sys.platform == "win32":
+                emoji_family = "Segoe UI Emoji"
+            else:
+                # Linux 桌面字体差异大,常见为 Noto Color Emoji
+                emoji_family = "Noto Color Emoji"
+            self._badge_font = QFont(emoji_family, 10)
+            # 不设 NoFontMerging,允许 Qt 在字符缺失时自动回退到其他字体
 
         # 徽章弹跳偏移（基于帧计数器平滑）
         bounce = math.sin(self._badge_bounce_frame * 0.08) * 1.5
