@@ -95,7 +95,6 @@ class CardContainer(QWidget):
         try:
             from app.tool_popup import ToolPopupDialog
             if ToolPopupDialog._any_window_dragging:
-                logger.debug(f"[DEBUG-QF] _schedule_expand(skip=dragging) source={source}")
                 return
         except ImportError:
             pass
@@ -112,11 +111,9 @@ class CardContainer(QWidget):
         if has_visible:
             # ⚡ 有可见卡片：立即展开，不等到 timer 触发
             # 否则父容器高度为 0 时，卡片虽然 setVisible(True) 但在屏幕上看不见
-            logger.debug(f"[DEBUG-QF] _schedule_expand → _do_expand(expand) source={source}")
             self._do_expand()
         else:
             # 无可见卡片：通过 timer 折叠（延迟一点没关系）
-            logger.debug(f"[DEBUG-QF] _schedule_expand → timer(collapse) source={source}")
             self._expand_timer.start()
 
     def _do_expand(self):
@@ -149,22 +146,12 @@ class CardContainer(QWidget):
             # 被计入容器高度。
             self._layout.activate()
 
-            # 🛠️ [Fix] 强制父级布局也立即重算，确保 self.height() 读取到的
-            # 高度反映容器新的 maxHeight 约束，而非父级缓存的旧分配值。
-            # 提问卡片偶尔不显示（resize 后恢复）的主要根因是父级 QVBoxLayout
-            # 未同步重算，导致动画早退出 <2px 检测或容器读不到正确高度。
-            p = self.parent()
-            parent_layout = p.layout() if hasattr(p, 'layout') else None
-            if parent_layout is not None:
-                parent_layout.invalidate()
-                parent_layout.activate()
-
             natural_h = max(
                 self._layout.sizeHint().height(),
                 self._layout.minimumSize().height(),
             )
             if natural_h <= 0:
-                # 兜底：layout 没算出高度，尝试强制子控件 adjustSize 后重测
+                # 兜底：layout 没算出高度，尝试强制子控件 adjustSize + 父级布局激活后重测
                 for w in self._cards.values():
                     if w.isVisible():
                         try:
@@ -172,9 +159,13 @@ class CardContainer(QWidget):
                         except RuntimeError:
                             pass
                 self._layout.activate()
-                if parent_layout is not None:
-                    parent_layout.invalidate()
-                    parent_layout.activate()
+                # 🛠️ 父级布局强制激活（仅在此重测路径中），让容器 height()
+                # 反映正确的分配；主展开路径不激活父级，以保留动画触发时机。
+                p = self.parent()
+                pl = p.layout() if hasattr(p, 'layout') else None
+                if pl is not None:
+                    pl.invalidate()
+                    pl.activate()
                 natural_h = max(
                     self._layout.sizeHint().height(),
                     self._layout.minimumSize().height(),
@@ -187,40 +178,23 @@ class CardContainer(QWidget):
                         # 重试 5 次仍为 0：不锁为 0，保留 EXPAND_MAX 让父级
                         # 在后续 layout pass 中通过 sizeHint 自行分配高度。
                         self._expand_retry_count = 0
-                        logger.debug(
-                            f"[DEBUG-QF] _do_expand bailout: retry exhausted, "
-                            f"leave max=_EXPAND_MAX"
-                        )
                         self.setMaximumHeight(self._EXPAND_MAX)
                         return
-                    logger.debug(
-                        f"[DEBUG-QF] _do_expand retry#{self._expand_retry_count}: "
-                        f"natural_h={natural_h}"
-                    )
                     QTimer.singleShot(0, self._do_expand)
                     return
 
             self._expand_retry_count = 0
+            # ⚡ 读 current_h 前不激活父级布局 — 父级此刻仍用过期高度（如 0），
+            # current_h ≈ 0 而 natural_h ≈ 200，差值巨大 → 触发平滑展开动画。
+            # 父级布局在动画中通过 maximumHeight 的 updateGeometry 级联刷新。
             current_h = self.height()
 
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
-                logger.debug(
-                    f"[DEBUG-QF] _do_expand skip-anim: natural_h={natural_h} "
-                    f"current_h={current_h} diff<2"
-                )
                 return
             if skip_anim:
-                logger.debug(
-                    f"[DEBUG-QF] _do_expand skip-anim(skip_anim=True): "
-                    f"snap {natural_h}"
-                )
                 self.setMaximumHeight(natural_h)
                 return
-            logger.debug(
-                f"[DEBUG-QF] _do_expand animate: {current_h}→{natural_h} "
-                f"(parent_layout_invalidated={parent_layout is not None})"
-            )
             self._animate_height(current_h, natural_h, on_finished=None)
         else:
             # ── 折叠：snap 或动画到 0，结束后锁定 maxHeight=0 ──
@@ -228,10 +202,6 @@ class CardContainer(QWidget):
             if self.maximumHeight() < self._EXPAND_MAX:
                 self.setMaximumHeight(self._EXPAND_MAX)
             current_h = self.height()
-            logger.debug(
-                f"[DEBUG-QF] _do_expand collapse: current_h={current_h} "
-                f"skip_anim={skip_anim}"
-            )
             if current_h <= 0:
                 self.setMaximumHeight(0)
                 return
