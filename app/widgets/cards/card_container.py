@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
 
+from loguru import logger
 from PyQt5.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QTimer
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
@@ -82,7 +83,7 @@ class CardContainer(QWidget):
             return
         self._schedule_expand()
 
-    def _schedule_expand(self):
+    def _schedule_expand(self, source: str = ""):
         """防抖调度：有可见卡片则展开，否则折叠
 
         注意：不在"已展开"时早 return。
@@ -94,6 +95,7 @@ class CardContainer(QWidget):
         try:
             from app.tool_popup import ToolPopupDialog
             if ToolPopupDialog._any_window_dragging:
+                logger.debug(f"[DEBUG-QF] _schedule_expand(skip=dragging) source={source}")
                 return
         except ImportError:
             pass
@@ -110,9 +112,11 @@ class CardContainer(QWidget):
         if has_visible:
             # ⚡ 有可见卡片：立即展开，不等到 timer 触发
             # 否则父容器高度为 0 时，卡片虽然 setVisible(True) 但在屏幕上看不见
+            logger.debug(f"[DEBUG-QF] _schedule_expand → _do_expand(expand) source={source}")
             self._do_expand()
         else:
             # 无可见卡片：通过 timer 折叠（延迟一点没关系）
+            logger.debug(f"[DEBUG-QF] _schedule_expand → timer(collapse) source={source}")
             self._expand_timer.start()
 
     def _do_expand(self):
@@ -144,31 +148,79 @@ class CardContainer(QWidget):
             # resize 窗口后恢复正常）。activate() 确保子 widget 的最新内容
             # 被计入容器高度。
             self._layout.activate()
+
+            # 🛠️ [Fix] 强制父级布局也立即重算，确保 self.height() 读取到的
+            # 高度反映容器新的 maxHeight 约束，而非父级缓存的旧分配值。
+            # 提问卡片偶尔不显示（resize 后恢复）的主要根因是父级 QVBoxLayout
+            # 未同步重算，导致动画早退出 <2px 检测或容器读不到正确高度。
+            p = self.parent()
+            parent_layout = p.layout() if hasattr(p, 'layout') else None
+            if parent_layout is not None:
+                parent_layout.invalidate()
+                parent_layout.activate()
+
             natural_h = max(
                 self._layout.sizeHint().height(),
                 self._layout.minimumSize().height(),
             )
             if natural_h <= 0:
-                # 兜底：layout 没算出高度（布局管道尚未完成测量），
-                # 延迟重试，让 Qt 在下一轮事件循环完成几何计算后再展开
-                self._expand_retry_count += 1
-                if self._expand_retry_count >= 5:
-                    # 重试 5 次仍为 0，强行 snap 到最小高度兜底
-                    # （防止 layout cache 持续过期的极端情况导致卡片不可见）
-                    self._expand_retry_count = 0
-                    self.setMaximumHeight(self._layout.minimumSize().height())
+                # 兜底：layout 没算出高度，尝试强制子控件 adjustSize 后重测
+                for w in self._cards.values():
+                    if w.isVisible():
+                        try:
+                            w.adjustSize()
+                        except RuntimeError:
+                            pass
+                self._layout.activate()
+                if parent_layout is not None:
+                    parent_layout.invalidate()
+                    parent_layout.activate()
+                natural_h = max(
+                    self._layout.sizeHint().height(),
+                    self._layout.minimumSize().height(),
+                )
+
+                if natural_h <= 0:
+                    # 仍然为 0：渐进重试，让 Qt 在下一轮事件循环完成测量
+                    self._expand_retry_count += 1
+                    if self._expand_retry_count >= 5:
+                        # 重试 5 次仍为 0：不锁为 0，保留 EXPAND_MAX 让父级
+                        # 在后续 layout pass 中通过 sizeHint 自行分配高度。
+                        self._expand_retry_count = 0
+                        logger.debug(
+                            f"[DEBUG-QF] _do_expand bailout: retry exhausted, "
+                            f"leave max=_EXPAND_MAX"
+                        )
+                        self.setMaximumHeight(self._EXPAND_MAX)
+                        return
+                    logger.debug(
+                        f"[DEBUG-QF] _do_expand retry#{self._expand_retry_count}: "
+                        f"natural_h={natural_h}"
+                    )
+                    QTimer.singleShot(0, self._do_expand)
                     return
-                QTimer.singleShot(0, self._do_expand)
-                return
+
             self._expand_retry_count = 0
             current_h = self.height()
+
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
+                logger.debug(
+                    f"[DEBUG-QF] _do_expand skip-anim: natural_h={natural_h} "
+                    f"current_h={current_h} diff<2"
+                )
                 return
             if skip_anim:
-                # 声明跳过动画：直接 snap，避免 resize / 拖拽期间高度延迟
+                logger.debug(
+                    f"[DEBUG-QF] _do_expand skip-anim(skip_anim=True): "
+                    f"snap {natural_h}"
+                )
                 self.setMaximumHeight(natural_h)
                 return
+            logger.debug(
+                f"[DEBUG-QF] _do_expand animate: {current_h}→{natural_h} "
+                f"(parent_layout_invalidated={parent_layout is not None})"
+            )
             self._animate_height(current_h, natural_h, on_finished=None)
         else:
             # ── 折叠：snap 或动画到 0，结束后锁定 maxHeight=0 ──
@@ -176,6 +228,10 @@ class CardContainer(QWidget):
             if self.maximumHeight() < self._EXPAND_MAX:
                 self.setMaximumHeight(self._EXPAND_MAX)
             current_h = self.height()
+            logger.debug(
+                f"[DEBUG-QF] _do_expand collapse: current_h={current_h} "
+                f"skip_anim={skip_anim}"
+            )
             if current_h <= 0:
                 self.setMaximumHeight(0)
                 return
