@@ -436,7 +436,10 @@ class AgentManager:
         if hooks_file.exists():
             self._hook_manager._clear_config_watcher(str(hooks_file))
         if hooks_dir.exists() and hooks_dir.is_dir():
-            self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+            # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
+            self._hook_manager.load_hooks_from_directory_flat(
+                hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
+            )
             return True
         return False
 
@@ -450,7 +453,10 @@ class AgentManager:
             # 清除配置去重缓存，允许用新 key 重新注册
             self._hook_manager._clear_config_watcher(str(hooks_file))
             self._hook_manager.unregister_skill_hooks(plugin.name)
-            self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+            # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
+            self._hook_manager.load_hooks_from_directory_flat(
+                hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
+            )
 
     def _unload_plugin_hooks(self):
         """注销所有插件级 hooks（reload 时调用）"""
@@ -511,8 +517,9 @@ class AgentManager:
                     if not hooks_dir.exists() or not hooks_dir.is_dir():
                         continue
                     # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
+                    # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
                     self._hook_manager.load_hooks_from_directory_flat(
-                        hooks_dir, skill_name=plugin.name
+                        hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
                     )
         except (ImportError, Exception):
             pass

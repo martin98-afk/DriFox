@@ -43,7 +43,8 @@ class ToolExecutor:
         self._homepage = homepage
         self._backend = backend  # ChatBackend 引用，用于访问 HookManager
         self._builtin_tools: Optional[BuiltinTools] = None
-        self._workdir = workdir
+        # P002: 初始就用默认路径兜底，避免 self._workdir 与 _builtin_tools.workdir 不一致
+        self._workdir = workdir or self._default_workdir()
         self._custom_tools: Dict[str, Callable] = {}
         self._session_id: Optional[str] = None
         self._call_id: Optional[str] = None
@@ -336,6 +337,9 @@ class ToolExecutor:
             # Claude Code 兼容字段（字段名已标准化）
             "tool_input": _normalized_input,
             "session_id": local_session_id,
+            # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+            "current_role": "primary",
+            "is_subagent_call": False,
         }
 
         # 注入工具结果信息（PostToolUse 最核心的增强）
@@ -487,24 +491,39 @@ class ToolExecutor:
             logger.info(f"[ToolExecutor] set_current_project({project})")
 
     def get_workdir(self) -> Optional[str]:
-        """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）"""
-        return self._workdir
+        """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）
+
+        兜底：当 self._workdir 未设置时返回默认工作目录（项目根 / exe 根），
+        避免上游调用方在 None 上崩溃（如 os.path.basename）。
+        """
+        return self._workdir or self._default_workdir()
 
     def set_workdir(self, workdir: Optional[str]):
         """设置工作目录（None 或 "" 表示恢复默认）"""
-        self._workdir = workdir
-        if self._builtin_tools:
-            if workdir:
+        if workdir:
+            self._workdir = workdir
+            if self._builtin_tools:
                 self._builtin_tools.set_workdir(workdir)
-            else:
-                # 恢复默认：用 resource_path
-                try:
-                    from app.utils.utils import resource_path
-                    default_wd = resource_path("")
-                except Exception:
-                    default_wd = str(Path(__file__).parent.parent.parent)
+        else:
+            # P002: 恢复默认时，self._workdir 与 _builtin_tools.workdir 保持一致
+            # 否则上游 get_workdir() 返回 None，触发 os.path.basename(None) 崩溃
+            default_wd = self._default_workdir()
+            self._workdir = default_wd
+            if self._builtin_tools:
                 self._builtin_tools.workdir = Path(default_wd)
-            logger.info(f"[ToolExecutor] Workdir updated: {workdir or 'default'}")
+        logger.info(f"[ToolExecutor] Workdir updated: {workdir or 'default'}")
+
+    def _default_workdir(self) -> str:
+        """获取默认工作目录（项目根 / exe 根，与 _initialize_builtin_tools 一致）
+
+        规范化：用 Path 解析后转为 str，避免 Windows 路径带尾随反斜杠
+        （如 'D:\\work\\DriFoxx\\' 导致 os.path.basename 返回空字符串）。
+        """
+        try:
+            from app.utils.utils import resource_path
+            return str(Path(resource_path("")).resolve())
+        except Exception:
+            return str(Path(__file__).resolve().parent.parent.parent)
 
     def set_key_documents_repo(self, repo, project: str = "默认项目"):
         """设置关键文档仓储和当前项目"""
@@ -617,6 +636,9 @@ class ToolExecutor:
                 # Claude Code 兼容字段（字段名已标准化）
                 "tool_input": _normalized_input,
                 "session_id": local_session_id,
+                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+                "current_role": "primary",
+                "is_subagent_call": False,
             }
             file_path = args.get("path") or args.get("file")
             if file_path:

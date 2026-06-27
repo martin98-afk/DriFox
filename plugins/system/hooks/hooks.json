@@ -24,11 +24,16 @@
           },
           {
             "type": "python",
-            "function": ".read_project_notes:hook",
+            "function": ".inject_subagent_info:hook",
             "add_output_to_context": true,
-            "statusMessage": "正在读取项目上下文...",
-            "id": "builtin_read_project_notes"
-          },
+            "statusMessage": "正在注入子智能体列表...",
+            "id": "builtin_inject_subagents"
+          }
+        ]
+      },
+      {
+        "matcher": "primary|subagent",
+        "hooks": [
           {
             "type": "python",
             "function": ".inject_skills_content:hook",
@@ -38,10 +43,10 @@
           },
           {
             "type": "python",
-            "function": ".inject_subagent_info:hook",
+            "function": ".read_project_notes:hook",
             "add_output_to_context": true,
-            "statusMessage": "正在注入子智能体列表...",
-            "id": "builtin_inject_subagents"
+            "statusMessage": "正在读取项目上下文...",
+            "id": "builtin_read_project_notes"
           }
         ]
       },

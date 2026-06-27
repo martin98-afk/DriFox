@@ -518,6 +518,9 @@ class OpenAIChatWorker(QThread):
             ctx = {
                 "project_root": workdir,
                 "session_id": _session_id,  # Claude Code 兼容字段
+                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+                "current_role": "primary",
+                "is_subagent_call": False,
             }
             if extra_context:
                 ctx.update(extra_context)

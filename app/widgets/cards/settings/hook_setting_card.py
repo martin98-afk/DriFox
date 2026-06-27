@@ -261,6 +261,12 @@ class HookItem(QWidget):
         self.delBtn.setStyleSheet(ButtonStyles.tool_button())
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
 
+        # 系统级 hook（来自 plugins/system/ 内置插件）禁止删除
+        is_system_plugin = self._hook_data.get("_is_system_plugin", False)
+        if is_system_plugin:
+            self.delBtn.setEnabled(False)
+            self.delBtn.setToolTip("系统级 Hook 不可删除")
+
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(8, 0, 4, 0)  # ponytail: 左 padding 从 48 缩到 8
         self.hBoxLayout.addWidget(self.sourceLabel, 0)
@@ -862,7 +868,12 @@ class HookListSettingCard(ExpandSettingCard):
     def _delete_hook_by_id(self, hook_id: str):
         """删除 hook"""
         if self._hook_manager:
-            self._hook_manager.delete_hook_by_id(hook_id)
+            success = self._hook_manager.delete_hook_by_id(hook_id)
+            if not success:
+                # 系统级 hook 或不存在时给出轻量提示
+                from PyQt5.QtWidgets import QToolTip
+                QToolTip.showText(QPoint(0, 0), "系统级 Hook 不可删除")
+                return
             self._refresh(reload=True)
             self.hooksChanged.emit()
 

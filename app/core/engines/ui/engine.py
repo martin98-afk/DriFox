@@ -340,7 +340,12 @@ class UIEngine(BaseEngine):
             """同步触发 hook，收集输出并注入 session.messages（只追加不删除）"""
             if extra_context is None:
                 extra_context = {}
-            ctx = {"project_root": _window_workdir}
+            ctx = {
+                "project_root": _window_workdir,
+                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+                "current_role": "primary",
+                "is_subagent_call": False,
+            }
             ctx.update(extra_context)
             results = hook_mgr.trigger_event(
                 event_name,
@@ -604,6 +609,9 @@ class UIEngine(BaseEngine):
         context = {
             "project_root": project_root,
             "session_id": session_id,  # Claude Code 兼容字段
+            # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+            "current_role": "primary",
+            "is_subagent_call": False,
         }
         if is_error:
             context["error"] = response_or_error

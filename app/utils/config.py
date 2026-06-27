@@ -91,6 +91,16 @@ class Settings(QConfig):
             except Exception:
                 logger.exception("无法加载配置文件")
                 cls._config_loaded = False
+            # 把 qfluentwidgets 全局 qconfig 指向本单例
+            # 原因：SwitchSettingCard / SwitchButton 等内置控件内部用 qconfig.set(item, value)
+            # 写入 item.value 后调 qconfig.save()；若 qconfig._cfg 仍是默认 QConfig 实例，
+            # save() 会写到错误的 config/config.json，导致 UI 改动不持久化。
+            # 替换后，qconfig.set / save / toDict 都走 Settings 单例，写入真正的 app.config。
+            try:
+                from qfluentwidgets import qconfig
+                qconfig._cfg = cls._instance
+            except Exception:
+                pass
         return cls._instance
 
     @classmethod
