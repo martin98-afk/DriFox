@@ -21,7 +21,7 @@ argument-hint:
 
 ### 1. 读取已有笔记（如有）
 
-如果 `--refine` 标志存在，先用 `read_project_note` 工具读取当前项目笔记内容，作为完善基础。
+如果 `--refine` 标志存在，先用 `read` 工具读取 `AGENTS.md` 文件内容（项目根目录下），作为完善基础。
 
 ### 2. 分析代码库
 
@@ -39,7 +39,7 @@ argument-hint:
 
 ### 3. 写入笔记
 
-用 `edit_project_note` 工具写入/更新项目笔记。
+用 `write` 工具写入/更新 `AGENTS.md` 文件。
 
 - **无 `--refine`**：全覆盖写入，内容约 150 行
 - **有 `--refine`**：在原有内容基础上追加/修改，保持已有结构不变
@@ -47,4 +47,4 @@ argument-hint:
 
 ### 4. 验证
 
-最终用 `read_project_note` 读取写入的内容，确认格式正确、内容完整。
+最终用 `read` 工具读取 `AGENTS.md`，确认格式正确、内容完整。

@@ -474,13 +474,11 @@ _TOOL_ICON_MAP = {
     # 文件工具 - 读取
     "read": "📖",
     "todoread": "📖",
-    "read_project_note": "📖",
     # 文件工具 - 写入/编辑
     "write": "✏️",
     "edit": "✏️",
     "multi_edit": "✏️",
     "todowrite": "✏️",
-    "edit_project_note": "✏️",
     # 文件工具 - 搜索/扫描
     "grep": "🔍",
     "glob": "🔍",
@@ -581,7 +579,7 @@ def _extract_screenshot_image_path(result: str) -> str:
 
 # 参数展示型工具 — 渲染为紧凑单行卡片（无折叠、无 body、无工具结果）
 _INLINE_TOOLS = frozenset({
-    "read", "todoread", "read_project_note",
+    "read", "todoread",
     "grep", "glob", "list", "scan_repo", "stage_files",
     "get_diagnostics",
 })
@@ -589,9 +587,9 @@ _INLINE_TOOLS = frozenset({
 
 def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
     """将工具调用转为自然语言描述（用于内联卡片和折叠头的预览）"""
-    # todoread / read_project_note 等即使无参数也应有描述
-    if tool_name in ("todoread", "read_project_note"):
-        label = {"todoread": "查看待办事项", "read_project_note": "查看项目笔记"}[tool_name]
+    # todoread 等即使无参数也应有描述
+    if tool_name == "todoread":
+        label = "查看待办事项"
         offset = tool_args.get("offset")
         limit = tool_args.get("limit")
         if offset is not None and limit is not None and offset > 1:
@@ -863,7 +861,7 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
         </div>"""
 
     # ── read: 代码预览（文件路径头 + 内容体） ──
-    if tool_name in ("read", "todoread", "read_project_note"):
+    if tool_name in ("read", "todoread"):
         path_hint = tool_args.get("path") or tool_args.get("file_path") or ""
         path_display = escape(path_hint[:100]) if path_hint else "file"
         return f"""
@@ -1278,7 +1276,7 @@ def render_tool_block(
     # ── 通用文本输出工具：bash/read/grep/webfetch/websearch/diagnostics 等 ──
     _RAW_OUTPUT_TOOLS = frozenset({
         "bash", "bg_start", "bg_logs", "bg_stop",
-        "read", "todoread", "read_project_note",
+        "read", "todoread",
         "grep", "glob", "list", "scan_repo", "stage_files",
         "webfetch", "websearch",
         "get_diagnostics",

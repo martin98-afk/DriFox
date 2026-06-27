@@ -279,7 +279,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         self.backend._current_project = self._current_project
-        # 同步项目到 tool_executor，确保 BuiltinTools.edit_project_note 等工具使用正确项目名
+        # 同步项目到 tool_executor，确保 BuiltinTools 使用正确项目名
         if self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(self._current_project)
         # 从后端获取组件（前端只负责 UI 逻辑）

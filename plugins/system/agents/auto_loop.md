@@ -10,8 +10,6 @@ permission:
   subagent_para: deny
   subagent_status: deny
   subagent_dag: deny
-  read_project_note: deny
-  edit_project_note: deny
 hidden: true
 ---
 

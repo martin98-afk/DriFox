@@ -588,10 +588,10 @@ class SessionStore:
         return {}
 
     def force_cleanup_project(self, project_name: str) -> bool:
-        """强制清理项目的所有关联数据（绕过 repo 层，直接 SQL 删除三张表）
+        """强制清理项目的所有关联数据（绕过 repo 层，直接 SQL 删除表记录）
 
-        归档时调用此方法，确保 sessions、key_documents、project_notes
-        三张表中该项目的所有记录都被删除，避免 UNION 查询让已归档项目"复活"。
+        归档时调用此方法，确保 sessions、key_documents
+        两张表中该项目的所有记录都被删除，避免 UNION 查询让已归档项目"复活"。
         """
         if not self._db or not self._db.is_connected:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
@@ -605,11 +605,6 @@ class SessionStore:
             # 删除关键文档
             self._execute(
                 'DELETE FROM key_documents WHERE project = ?',
-                (project_name,)
-            )
-            # 删除旧版项目笔记
-            self._execute(
-                'DELETE FROM project_notes WHERE project = ?',
                 (project_name,)
             )
             logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")

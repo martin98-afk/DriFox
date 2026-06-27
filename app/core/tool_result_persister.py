@@ -42,7 +42,6 @@ SKIP_TOOLS = frozenset({
     "list_skills",        # 技能列表
     "mcp_list_servers",   # MCP 服务器列表
     "skill",              # 技能加载结果
-    "read_project_note",  # 项目笔记
     "read_persisted_output",  # 已经恢复过的内容
 })
 

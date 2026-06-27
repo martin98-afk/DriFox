@@ -58,8 +58,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "estimate_tokens":         ("app.core.token_estimator", "estimate_tokens"),
     "count_messages_tokens":   ("app.core.token_estimator", "count_messages_tokens"),
     "TokenCounter":            ("app.core.token_estimator", "TokenCounter"),
-    # 子模块（直接返回 module 对象）
-    "project_notes_manager":   ("app.core.project_notes_manager", None),
     # 会话
     "ChatSession":             ("app.core.chat_session", "ChatSession"),
     "SessionManager":          ("app.core.chat_session", "SessionManager"),
@@ -106,8 +104,6 @@ __all__ = [
     # Store
     "SessionStore",
     "SubAgentLogRepository",
-    # 子模块
-    "project_notes_manager",
     # 消息处理
     "consolidate_messages",
     "content_to_text",

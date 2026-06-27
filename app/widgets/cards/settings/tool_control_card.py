@@ -37,7 +37,7 @@ TOOL_GROUPS = [
     ("💻 终端命令", ["bash", "bg_start", "bg_stop"]),
     ("🖱 桌面控制", ["mouse", "keyboard"]),
     ("☁️ 文件上传", ["upload_file"]),
-    ("📝 状态修改", ["edit_project_note", "todowrite", "stage_files"]),
+    ("📝 状态修改", ["todowrite", "stage_files"]),
     ("🤖 子智能体", ["subagent_para", "subagent_dag"]),
     ("✅ 安全操作", sorted(SAFE_TOOLS)),
 ]
@@ -52,7 +52,7 @@ TOOL_DESCRIPTIONS = {
     "mouse": "鼠标操作",
     "keyboard": "键盘操作",
     "upload_file": "上传本地文件到Gitee",
-    "edit_project_note": "编辑项目笔记",
+    
     "todowrite": "创建/更新待办",
     "stage_files": "标记相关文件",
     "subagent_para": "并行启动子智能体",
@@ -70,8 +70,7 @@ TOOL_DESCRIPTIONS = {
     "bg_list": "列出后台任务状态",
     "screenshot": "截取屏幕截图",
     "get_diagnostics": "获取代码诊断信息",
-    # 项目笔记与待办
-    "read_project_note": "读取项目笔记",
+    # 待办
     "todoread": "读取待办列表",
     # 交互与元工具
     "question": "向用户提问确认",

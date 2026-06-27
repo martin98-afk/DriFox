@@ -536,8 +536,6 @@ class ToolExecutor:
         "git_diff": [],
         "get_diagnostics": ["path"],
         "summarize_changes": ["text"],
-        "edit_project_note": ["oldString", "newString"],
-        "read_project_note": [],
         "todowrite": ["todos"],
         "todoread": [],
         "subagent_para": ["tasks"],
@@ -765,12 +763,6 @@ class ToolExecutor:
                 args.get("text", ""), args.get("limit", 1200)
             ),
             "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
-            "edit_project_note": lambda: self._builtin_tools.edit_project_note(
-                oldString=args.get("oldString", ""),
-                newString=args.get("newString", "")),
-            "read_project_note": lambda: self._builtin_tools.read_project_note(
-                args.get("offset", 1),
-                args.get("limit", 500)),
             "todoread": lambda: self._builtin_tools.todo_read(),
             "subagent_para": lambda: (
                 lambda tasks_val: self._builtin_tools.subagent_para_execute(
