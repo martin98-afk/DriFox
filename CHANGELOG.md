@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.2.12] - 2026-06-27
 
-自上一版本以来的变更 | 提交数：32 · 文件变更：50 · +5932/-5433 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：35 · 文件变更：53 · +5987/-5440 | 贡献者：dingma, mading
 
 ---
 
@@ -67,6 +67,7 @@ All notable changes to this project will be documented in this file.
 - **输入框占位提示优化**: 改进清晰度与随机性
 - **渲染间隔调整**: 优化 CodeWebViewer 立即渲染逻辑
 - **PixelPet 动画时序调整**: 改进动画流畅度
+- **`backend.py` logger.debug 多余 f-string 前缀**: 移除多余的 `f` 前缀避免日志格式异常
 
 ### ✅ 测试 (Tests)
 
@@ -96,3 +97,5 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - 版本升级至 v0.2.12（config / installer）
+- **CI: Release 日志自动提取修复**: 按 tag 名匹配 CHANGELOG 区块而非固定匹配第一个 `##` 章节，避免多版本共存时提取错误
+- **构建修复: 保留 QtPositioning.framework**: `to_remove_macos` 列表误删 `QtPositioning.framework`，导致 QtWebEngineWidgets 加载失败、macOS 启动闪退；CI 新增静态检查（check job）和产物依赖完整性验证（macOS verify 步骤）防止复发
