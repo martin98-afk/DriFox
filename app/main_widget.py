@@ -22,9 +22,10 @@ from PyQt5.QtCore import (
     Qt,
     QThreadPool,
     QTimer,
+    QUrl,
     pyqtSignal,
 )
-from PyQt5.QtGui import QColor, QPixmap
+from PyQt5.QtGui import QColor, QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -1911,6 +1912,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._project_selector_card_content.archiveProject.connect(
             self._on_archive_project
+        )
+        self._project_selector_card_content.openFolderRequested.connect(
+            self._on_open_project_folder
         )
 
         self._project_selector_card.content_layout.addWidget(
@@ -11424,6 +11428,24 @@ class OpenAIChatToolWindow(ToolWindow):
         # 操作完成，恢复正常状态
         if self.pixel_pet:
             self.pixel_pet.set_state("idle")
+
+    def _on_open_project_folder(self, project_name: str, root_dir: str):
+        """打开项目根目录（在文件管理器中打开）"""
+        if not root_dir:
+            return
+        path = Path(root_dir)
+        if not path.exists():
+            logger.warning(f"[MainWidget] 项目根目录不存在: {root_dir}")
+            InfoBar.warning(
+                title="路径不存在",
+                content=f"项目「{project_name}」的根目录已被移动或删除",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                parent=self,
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _on_memory_tab_changed(self, tab_id: str):
         """处理记忆管理标签切换"""
