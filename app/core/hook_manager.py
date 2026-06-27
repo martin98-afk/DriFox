@@ -207,6 +207,13 @@ class HookMatchRule:
             states = [s.strip() for s in self.matcher.split("|")]
             return session_state in states
 
+        # BuildSystemPrompt 智能体角色匹配
+        # matcher 格式如 "primary|subagent"，匹配 context["current_role"]
+        if event_name == "BuildSystemPrompt":
+            current_role = context.get("current_role", "primary")
+            roles = [r.strip() for r in self.matcher.split("|")]
+            return current_role in roles
+
         # 工具名匹配（支持别名）
         if self.matcher.startswith("tool:"):
             pattern = self.matcher[5:]

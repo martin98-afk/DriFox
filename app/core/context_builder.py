@@ -18,7 +18,6 @@ import anyio
 
 from app.core.message_content import consolidate_messages
 from app.core.token_estimator import count_messages_tokens
-from app.utils.config import Settings
 
 # 预算分配常量
 SYSTEM_PROMPT_RESERVE_RATIO = 0.15  # 预留 15% 给系统提示（含技能、记忆等）
@@ -101,30 +100,45 @@ class ContextBudgetAllocator:
         """
         messages: List[Dict[str, Any]] = []
 
-        # 获取系统提示
-        full_system_prompt = self._agent_manager.get_agent_system_prompt(
-            current_agent, is_subagent_call=False
-        )
-        prompt_parts = [full_system_prompt]
+        # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
+        # 仅在 agent 切换或首次调用时重建
+        cached_prompt = getattr(session, "system_prompt", "")
+        cached_agent = getattr(session, "_system_prompt_agent", "")
+        if cached_prompt and cached_agent == current_agent:
+            full_system_content = cached_prompt
+        else:
+            # 构建 extra_context 传递给 BuildSystemPrompt hooks（项目信息等）
+            extra_context: Dict[str, Any] = {}
+            if self.backend:
+                try:
+                    project_root = self.backend.tool_executor.get_workdir() if self.backend.tool_executor else ""
+                    project_name = self.backend.current_project or ""
+                    extra_context["project_root"] = project_root
+                    extra_context["project_name"] = project_name
+                    # 预取项目笔记供 BuildSystemPrompt hook 使用
+                    if self.backend.memory_manager:
+                        note = self.backend.memory_manager.get_project_note(
+                            project_name, workdir=project_root
+                        )
+                        if note and note.get("content"):
+                            extra_context["project_notes_content"] = note["content"]
+                except Exception:
+                    pass
 
-        # 添加启用的技能内容（放在 system prompt 最后，可能变化但相对稳定）
-        enabled_skills = Settings.get_instance().llm_enabled_skills.value
-        if enabled_skills and self._agent_manager:
-            skills_content = self._agent_manager.get_enabled_skills_content(enabled_skills)
-            if skills_content:
-                prompt_parts.append(skills_content)
+            # 获取系统提示（含 BuildSystemPrompt hook 注入）
+            full_system_prompt = self._agent_manager.get_agent_system_prompt(
+                current_agent, is_subagent_call=False, extra_context=extra_context
+            )
+            full_system_content = full_system_prompt
 
-        # 【不】将记忆上下文放入 system prompt，避免动态内容破坏缓存
-        # 记忆上下文将在 user message 中注入（见下方）
-        # 使用单一 join 操作
-        full_system_content = "\n\n".join(prompt_parts)
+            # 缓存起来，后续 tool iteration 直接复用
+            session.system_prompt = full_system_content
+            session._system_prompt_agent = current_agent
 
         messages.append({
             "role": "system",
             "content": full_system_content,
         })
-
-        session.system_prompt = full_system_content
 
         # 处理历史消息
         normalized_session_messages = consolidate_messages(session.get_context_messages())
@@ -163,10 +177,11 @@ class ContextBudgetAllocator:
             user_msg["timestamp"] = latest_user_timestamp
         messages.append(user_msg)
 
-        # 注意：长期记忆（条目记忆 + 关键文档）已由 PreUserMessage hook 注入，
-        #       项目笔记/路径建议/Worktree 由 SessionStart hook 注入，
-        #       当前系统时间由 PostUserMessage hook 注入。
-        # 此处不再需要任何硬编码的上下文注入。
+        # 注意：所有动态上下文已迁移至 hook 体系：
+        #   - BuildSystemPrompt: 行为约束、项目笔记、技能内容、子智能体列表
+        #   - PreUserMessage: 长期记忆、系统时间、命令/技能提示词
+        #   - SessionStart: 仅会话生命周期事件（其他插件可能监听）
+        # system prompt 中不再有任何硬编码的上下文注入。
         return messages
 
     def _allocate_history_budget(self, system_content: str, llm_config: Dict) -> int:

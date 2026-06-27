@@ -2161,6 +2161,7 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
+        print(sanitized)
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]

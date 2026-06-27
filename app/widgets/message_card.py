@@ -3239,10 +3239,17 @@ class CodeWebViewer(QWebEngineView):
                         // 自动滚动到 body 底部（流式时新内容在底部）
                         // 🐛 修复：只在用户已处于底部时才滚动到底部，避免与用户手动滚动冲突。
                         // 用 scrollHeight - scrollTop - clientHeight < 30 判断是否"接近底部"。
+                        // 🐛 修复2：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
+                        // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
+                        // 未滚动时强制 auto-scroll 到底部。
                         setTimeout(function() {{
-                            var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
-                            if (wasAtBottom) {{
+                            if (!window._userScrolledWithin) {{
                                 document.body.scrollTop = document.body.scrollHeight;
+                            }} else {{
+                                var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
+                                if (wasAtBottom) {{
+                                    document.body.scrollTop = document.body.scrollHeight;
+                                }}
                             }}
                         }}, 0);
 
@@ -3364,6 +3371,16 @@ class CodeWebViewer(QWebEngineView):
                     console.log('pywebview_action:subagent_log:' + taskIds);
                 }};
 
+                // ===== 用户滚动跟踪：判断用户是否主动滚动卡片内部内容 =====
+                // 🐛 修复：当卡片内容超出 MAX_HEIGHT 时，body 出现内部滚动条。
+                // 初始状态 scrollTop=0 导致 wasAtBottom 判断失败，auto-scroll 不触发。
+                // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
+                window._userScrolledWithin = false;
+                document.body.addEventListener('scroll', function() {{
+                    window._userScrolledWithin = true;
+                }});
+                // ======================================================
+
                 // ===== JS驱动的蛇形思考动画（替代CSS animation）=====
                 // 使用 requestAnimationFrame 持续更新 stroke-dashoffset，
                 // 即使 updateContent 重建DOM，新SVG元素在下一帧立即获得正确偏移，
@@ -3442,10 +3459,17 @@ class CodeWebViewer(QWebEngineView):
                     c.appendChild(p);
                 }}
                 // 流式增量追加时，仅在用户已处于底部时才滚动到最底部
+                // 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
+                // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
+                // 未滚动时强制 auto-scroll 到底部。
                 setTimeout(function() {{
-                    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
-                    if (wasAtBottom) {{
+                    if (!window._userScrolledWithin) {{
                         document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
+                        if (wasAtBottom) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                        }}
                     }}
                 }}, 0);
             }})();
@@ -5742,12 +5766,19 @@ class MessageCard(SimpleCardWidget):
         self.viewer.setFixedHeight(height)
         self.heightChanged.emit(height)
         # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
+        # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
+        # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
+        # 未滚动时强制 auto-scroll 到底部。
         if self._streaming and hasattr(self.viewer, 'page') and self.viewer.page():
             try:
                 self.viewer.page().runJavaScript(
                     "setTimeout(function() {"
-                    "  var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;"
-                    "  if (wasAtBottom) { document.body.scrollTop = document.body.scrollHeight; }"
+                    "  if (!window._userScrolledWithin) {"
+                    "    document.body.scrollTop = document.body.scrollHeight;"
+                    "  } else {"
+                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;"
+                    "    if (wasAtBottom) { document.body.scrollTop = document.body.scrollHeight; }"
+                    "  }"
                     "}, 0);"
                 )
             except RuntimeError:

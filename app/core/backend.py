@@ -342,6 +342,11 @@ class ChatBackend(QObject):
             if is_prompt_hook:
                 event_name = event_name[len("__prompt__:"):]
 
+            # BuildSystemPrompt hook 的输出已在 get_agent_system_prompt() 中直接注入 system prompt，
+            # 不需要再通过队列注入到 assistant 消息中，跳过回调避免双重注入。
+            if event_name == "BuildSystemPrompt":
+                return
+
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
 
             if not success:

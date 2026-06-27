@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-SessionStart Hook 函数 — 将预取的项目笔记（AGENTS.md）格式化为 LLM 提示
+BuildSystemPrompt Hook 函数 — 将预取的项目笔记（AGENTS.md）格式化为 LLM 提示
 
-所有数据由 backend.py _build_session_context() 预取后通过 context 传入，
+从 SessionStart 迁移至 BuildSystemPrompt，项目笔记随 system prompt 注入，
+不再作为独立的 assistant 消息。
+
+所有数据由 get_agent_system_prompt() 预取后通过 context 传入，
 本函数不做任何文件 I/O 或方法调用，仅负责格式化输出。
-
-注意：worktree 信息和路径使用建议已移至 PreUserMessage
-（format_memory_context.py），因其内容可能随分支切换发生变化。
 """
 
 def hook(event: str, context: dict) -> str:
     """将预取的项目笔记格式化为字符串
 
     Args:
-        event: 事件名称（SessionStart）
-        context: 由 _build_session_context() 预取的上下文，含：
+        event: 事件名称（BuildSystemPrompt）
+        context: 由 get_agent_system_prompt() 预取的上下文，含：
             - project_root/project_name/project_notes_content
-            - state: 会话状态（startup/resume/clear/compact）
+            - agent_name/current_role 等智能体信息
 
     Returns:
-        格式化的项目笔字符串
+        格式化的项目笔记字符串
     """
     project_root = context.get("project_root", "")
     project_name = context.get("project_name", "")

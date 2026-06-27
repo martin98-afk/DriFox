@@ -534,6 +534,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         # 保留 _hook_event 标记，确保能通过 save/load 持久化
         if "_hook_event" in message:
             normalized["_hook_event"] = message["_hook_event"]
+        else:
+            # 迁移旧数据：无 _hook_event 但内容格式匹配的 → 自动补上标记
+            _fill_hook_event = _check_hook_content(normalized.get("content", ""))
+            if _fill_hook_event is not None:
+                normalized["_hook_event"] = _fill_hook_event
+                # 用原消息更新持久化（直接回写 message 引用）
+                message["_hook_event"] = _fill_hook_event
+
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -575,6 +583,12 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     # 保留 _hook_event 标记，确保能通过 save/load 持久化
     if "_hook_event" in message:
         normalized["_hook_event"] = message["_hook_event"]
+    else:
+        # 迁移旧数据：为 assistant 和 user 角色的 hook 格式消息补上 _hook_event
+        _fill_hook_event = _check_hook_content(normalized.get("content", ""))
+        if _fill_hook_event is not None:
+            normalized["_hook_event"] = _fill_hook_event
+            message["_hook_event"] = _fill_hook_event
     return normalized
 
 
@@ -641,6 +655,70 @@ def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int
     return ranges
 
 
+# 预编译 hook 内容格式正则（模块级复用，避免重复编译）
+_HOOK_CONTENT_PATTERN = re.compile(
+    r'<system-reminder>\s*<([a-z0-9-]+-hook)>.*?</\1>\s*</system-reminder>',
+    re.DOTALL
+)
+
+
+def _check_hook_content(content: Any) -> Optional[str]:
+    """检查内容是否为 hook 格式，若是则返回提取的 event_name
+
+    用于迁移旧数据：当消息没有 _hook_event 字段但内容匹配 hook 格式时，
+    自动推断出 event_name 并补上 _hook_event。
+
+    Args:
+        content: 消息内容（str 或 list）
+
+    Returns:
+        event_name 字符串（如 "pre-user-message-hook"），
+        或 None（不匹配 hook 格式）
+    """
+    if isinstance(content, str):
+        m = _HOOK_CONTENT_PATTERN.search(content)
+        if m:
+            tag = m.group(1)  # e.g., "pre-user-message-hook"
+            return tag
+        return None
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = str(block.get("text", ""))
+                m = _HOOK_CONTENT_PATTERN.search(text)
+                if m:
+                    tag = m.group(1)  # e.g., "pre-user-message-hook"
+                    return tag
+        return None
+    return None
+
+
+def _is_hook_message(msg: Dict[str, Any]) -> bool:
+    """判断消息是否为 hook 内部通知消息
+
+    两层判断：
+    1. 首选 _hook_event 字段（精确标记，新消息都有）
+    2. 兜底内容格式匹配（<system-reminder><xxx-hook>...</xxx-hook></system-reminder>）
+       用于旧数据或字段丢失的极端情况
+
+    Returns:
+        True 表示是 hook 消息，应跳过渲染
+    """
+    if msg.get("_hook_event"):
+        return True
+    # 兜底：检查内容格式
+    content = msg.get("content", "")
+    if isinstance(content, str) and _HOOK_CONTENT_PATTERN.search(content):
+        return True
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = str(block.get("text", ""))
+                if _HOOK_CONTENT_PATTERN.search(text):
+                    return True
+    return False
+
+
 def group_messages_for_display(
         messages: List[Dict[str, Any]],
 ) -> List[List[Dict[str, Any]]]:
@@ -653,9 +731,8 @@ def group_messages_for_display(
         if role == "system":
             continue
         # 跳过 hook 内部通知消息（如 SessionStart、PostToolUse 等），
-        # 不显示为消息卡片。判定依据是 _hook_event 字段，
-        # 与内容格式（<system-reminder><event-name-hook>...</event-name-hook></system-reminder>）无关。
-        if msg.get("_hook_event"):
+        # 不显示为消息卡片。
+        if _is_hook_message(msg):
             continue
         if role == "user":
             if current_batch:
