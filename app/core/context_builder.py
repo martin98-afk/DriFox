@@ -117,7 +117,6 @@ class ContextBudgetAllocator:
         # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
         # 仅在 agent 切换或首次调用时重建
         cached_prompt = getattr(session, "system_prompt", None)
-        print(f"[ContextBuilder] cached_prompt: {cached_prompt is not None}, current_agent={current_agent}, session._system_prompt_agent={getattr(session, '_system_prompt_agent', None)}")
         if cached_prompt:
             # 直接复用缓存的 system prompt
             full_system_content = cached_prompt

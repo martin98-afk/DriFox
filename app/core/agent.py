@@ -759,7 +759,6 @@ Use the tools available to you based on your permissions."""
                         hook_ctx["available_subagents_content"] = sub_info
                 except Exception:
                     pass
-            print(f"[AgentManager] Triggering BuildSystemPrompt hooks for agent '{agent_name}' with context: {hook_ctx}")
             results = self._hook_manager.trigger_event(
                 "BuildSystemPrompt",
                 context=hook_ctx,

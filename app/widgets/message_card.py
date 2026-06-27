@@ -3112,7 +3112,12 @@ class CodeWebViewer(QWebEngineView):
                         }})();
                         _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *{{transition:none!important}}';
 
+                        // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件，
+                        // 导致 _userScrolledWithin 被误设为 true，后续 auto-scroll 失效。
+                        // 用 _suppressScrollEvent 标志抑制这次误触发。
+                        window._suppressScrollEvent = true;
                         container.innerHTML = newHtml;
+                        window._suppressScrollEvent = false;
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                         container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
@@ -3244,11 +3249,15 @@ class CodeWebViewer(QWebEngineView):
                         // 未滚动时强制 auto-scroll 到底部。
                         setTimeout(function() {{
                             if (!window._userScrolledWithin) {{
+                                window._suppressScrollEvent = true;
                                 document.body.scrollTop = document.body.scrollHeight;
+                                window._suppressScrollEvent = false;
                             }} else {{
                                 var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
                                 if (wasAtBottom) {{
+                                    window._suppressScrollEvent = true;
                                     document.body.scrollTop = document.body.scrollHeight;
+                                    window._suppressScrollEvent = false;
                                 }}
                             }}
                         }}, 0);
@@ -3376,7 +3385,13 @@ class CodeWebViewer(QWebEngineView):
                 // 初始状态 scrollTop=0 导致 wasAtBottom 判断失败，auto-scroll 不触发。
                 // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
                 window._userScrolledWithin = false;
+                window._suppressScrollEvent = false;
+                // 🐛 修复：_suppressScrollEvent 防误触 — updateContent 中
+                // innerHTML 替换重置 scrollTop 触发 scroll 事件，但这是 DOM 重建
+                // 而非用户主动滚动。在 container.innerHTML = newHtml 前后设置
+                // _suppressScrollEvent=true/false 来抑制这种误触发。
                 document.body.addEventListener('scroll', function() {{
+                    if (window._suppressScrollEvent) return;
                     window._userScrolledWithin = true;
                 }});
                 // ======================================================
@@ -3464,11 +3479,15 @@ class CodeWebViewer(QWebEngineView):
                 // 未滚动时强制 auto-scroll 到底部。
                 setTimeout(function() {{
                     if (!window._userScrolledWithin) {{
+                        window._suppressScrollEvent = true;
                         document.body.scrollTop = document.body.scrollHeight;
+                        window._suppressScrollEvent = false;
                     }} else {{
                         var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
                         if (wasAtBottom) {{
+                            window._suppressScrollEvent = true;
                             document.body.scrollTop = document.body.scrollHeight;
+                            window._suppressScrollEvent = false;
                         }}
                     }}
                 }}, 0);
@@ -5774,10 +5793,16 @@ class MessageCard(SimpleCardWidget):
                 self.viewer.page().runJavaScript(
                     "setTimeout(function() {"
                     "  if (!window._userScrolledWithin) {"
+                    "    window._suppressScrollEvent = true;"
                     "    document.body.scrollTop = document.body.scrollHeight;"
+                    "    window._suppressScrollEvent = false;"
                     "  } else {"
                     "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;"
-                    "    if (wasAtBottom) { document.body.scrollTop = document.body.scrollHeight; }"
+                    "    if (wasAtBottom) {"
+                    "      window._suppressScrollEvent = true;"
+                    "      document.body.scrollTop = document.body.scrollHeight;"
+                    "      window._suppressScrollEvent = false;"
+                    "    }"
                     "  }"
                     "}, 0);"
                 )

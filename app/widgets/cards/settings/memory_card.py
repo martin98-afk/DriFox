@@ -1445,6 +1445,19 @@ class MemoryCardContent(QWidget):
                 self._current_project,
                 get_project_color(self._current_project)
             )
+
+        if not workdir:
+            # 未设定工作目录时，编辑器只读并显示提示
+            self.notes_editor.setPlainText("")
+            self.notes_editor.setPlaceholderText("⚠️ 请先在「关键文档」选项卡中添加项目根目录作为工作目录")
+            self.notes_editor.setReadOnly(True)
+            self._update_notes_stats()
+            return
+
+        # 有工作目录时，恢复正常可编辑状态
+        self.notes_editor.setReadOnly(False)
+        self.notes_editor.setPlaceholderText("在此记录项目笔记，支持 Markdown 格式...")
+
         note = memory_mgr.get_or_create_project_note(
             self._current_project, workdir=workdir
         )
@@ -1458,14 +1471,19 @@ class MemoryCardContent(QWidget):
     def _save_project_note(self):
         """保存项目笔记（写入当前 workdir 的 AGENTS.md）"""
         memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            workdir = self._get_effective_workdir(self._current_project)
-            content = self.notes_editor.toPlainText()
-            success = memory_mgr.save_project_note(
-                self._current_project, content, workdir=workdir
-            )
-            if success:
-                self.projectNoteChanged.emit(self._current_project, content)
+        if not memory_mgr:
+            return
+
+        workdir = self._get_effective_workdir(self._current_project)
+        if not workdir:
+            return  # 无工作目录时跳过保存
+
+        content = self.notes_editor.toPlainText()
+        success = memory_mgr.save_project_note(
+            self._current_project, content, workdir=workdir
+        )
+        if success:
+            self.projectNoteChanged.emit(self._current_project, content)
 
     # ==================== 关键文档操作 ====================
 
