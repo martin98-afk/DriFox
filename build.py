@@ -122,7 +122,8 @@ to_remove_macos = [
     "PyQt5/Qt5/lib/QtQuickShapes.framework",
     "PyQt5/Qt5/lib/QtLocation.framework",
     "PyQt5/Qt5/lib/QtMultimedia.framework",
-    "PyQt5/Qt5/lib/QtPositioning.framework",
+    # QtPositioning 保留 —— QtWebEngineWidgets.abi3.so 依赖 @rpath/QtPositioning
+    # "PyQt5/Qt5/lib/QtPositioning.framework",
     # qml 目录（对应 Windows 的 qml 清理项）
     "PyQt5/Qt5/qml/QtQuick",
     "PyQt5/Qt5/qml/QtQuick3D",
