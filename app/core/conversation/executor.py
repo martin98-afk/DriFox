@@ -85,13 +85,6 @@ class ConversationExecutor:
         callbacks = callbacks or {}
         session = self._core.session_manager.get_current_session()
 
-        # 获取 compaction 提示词
-        compaction_prompt = ""
-        compaction_config = {}
-        if self._agent_manager and self._agent_manager.get_agent("compaction"):
-            compaction_prompt = self._agent_manager.get_agent_system_prompt("compaction")
-            compaction_config = self._agent_manager.get_agent_config("compaction")
-
         # 清理旧 Worker
         self.cleanup()
 
@@ -104,8 +97,6 @@ class ConversationExecutor:
             "tool_executor": self._tool_executor,
             "tool_start_callback": callbacks.get("tool_call_sync_requested"),
             "permission_check_callback": self._make_permission_checker(),
-            "compaction_prompt": compaction_prompt,
-            "compaction_config": compaction_config,
             "permission_cache": self._core.permission_cache,
             "compactor": self._core.compactor,
             "initial_compaction_cache": getattr(session, "compaction_cache", None),

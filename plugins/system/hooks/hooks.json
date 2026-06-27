@@ -21,25 +21,7 @@
             "add_output_to_context": true,
             "statusMessage": "正在注入主智能体约束...",
             "id": "builtin_primary_constraints"
-          }
-        ]
-      },
-      {
-        "matcher": "subagent",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "## 子智能体约束\n- 【禁止】使用 `question` 工具（需要用户交互，不支持）\n- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）\n- 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）\n- 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认\n- 【必须】独立完成任务，不需要主智能体介入\n- 如果遇到不确定的情况，根据已有信息做出合理假设并继续执行\n- 如需收集信息，使用 webfetch/websearch 工具代替提问",
-            "add_output_to_context": true,
-            "statusMessage": "正在注入子智能体约束...",
-            "id": "builtin_subagent_constraints"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
+          },
           {
             "type": "python",
             "function": ".read_project_notes:hook",
@@ -62,8 +44,21 @@
             "id": "builtin_inject_subagents"
           }
         ]
+      },
+      {
+        "matcher": "subagent",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "## 子智能体约束\n- 【禁止】使用 `question` 工具（需要用户交互，不支持）\n- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）\n- 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）\n- 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认\n- 【必须】独立完成任务，不需要主智能体介入\n- 如果遇到不确定的情况，根据已有信息做出合理假设并继续执行\n- 如需收集信息，使用 webfetch/websearch 工具代替提问",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入子智能体约束...",
+            "id": "builtin_subagent_constraints"
+          }
+        ]
       }
     ],
+    "SessionStart": [],
     "PreUserMessage": [
       {
         "hooks": [

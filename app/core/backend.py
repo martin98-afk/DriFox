@@ -107,7 +107,7 @@ def _make_hook_message(event_name: str, output: str) -> Dict[str, Any]:
     """构建一条 hook 消息 dict（带 _hook_event 标记和 timestamp）"""
     import datetime as _dt
     return {
-        "role": "assistant",
+        "role": "system",
         "content": _format_hook_output(event_name, output),
         "_hook_event": event_name,
         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -358,7 +358,7 @@ class ChatBackend(QObject):
             if event_name == "PreToolUse":
                 hook_output = _format_hook_output(event_name, output)
                 self._pre_tool_message_queue.put({
-                    "role": "assistant",
+                    "role": "system",
                     "content": hook_output,
                     "_hook_event": event_name,
                 })
@@ -366,7 +366,7 @@ class ChatBackend(QObject):
             elif is_prompt_hook or event_name == "PostToolUse":
                 hook_output = _format_hook_output(event_name, output)
                 self._hook_message_queue.put({
-                    "role": "assistant",
+                    "role": "system",
                     "content": hook_output,
                     "_hook_event": event_name,
                 })
@@ -1776,17 +1776,8 @@ class ChatBackend(QObject):
             "project_name": os.path.basename(project_root),
         }
 
-        # 项目笔记（AGENTS.md 内容）
-        if self._memory_manager:
-            try:
-                note = self._memory_manager.get_project_note(
-                    self._current_project,
-                    workdir=project_root,
-                )
-                if note and note.get("content"):
-                    ctx["project_notes_content"] = note["content"]
-            except Exception:
-                pass
+        # 项目笔记由 read_project_notes hook（BuildSystemPrompt）从本地 AGENTS.md 直接读取，
+        # SessionStart 不再预取 notes 内容
 
         # Worktree / git 分支信息
         try:

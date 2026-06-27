@@ -470,11 +470,21 @@ class UIEngine(BaseEngine):
                 "compacted_tokens": 0,
             }
 
-        # 直接构建消息
-        messages = self._build_messages(session, llm_config)
+        # 快速路径：直接用 session.messages + system prompt 算 token
+        # 不走 _build_messages → build_messages → compactor.compact 全流程，
+        # 避免在主线程上阻塞 UI 事件循环（anyio.run(to_thread.run_sync, compactor.compact)）。
+        # session.system_prompt 已在 context_builder.build_messages 中缓存，
+        # session.messages 由 _on_messages_updated → set_messages 更新，两者都是现成的。
+        # 精度：当 compaction 已被触发时，会高估用量（显示原始而非压缩后大小），
+        # 但对上下文指示器而言，高估比阻塞 UI 好，且超限本身也是有效信号。
+        system_prompt = getattr(session, "system_prompt", "") or ""
+        approx_messages: List[Dict] = []
+        if system_prompt:
+            approx_messages.append({"role": "system", "content": system_prompt})
+        approx_messages.extend(session.messages)
 
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
-        used_tokens = count_messages_tokens(messages)
+        used_tokens = count_messages_tokens(approx_messages)
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 
         # 计算普通上下文和压缩上下文的 token 分解

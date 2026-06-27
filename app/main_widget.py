@@ -3547,6 +3547,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
+        # 🛡️ 流式(工具迭代)中跳过，避免每次 finished_with_messages 都触发
+        # build_messages → compactor.compact 阻塞主线程。
+        # 流式结束后 _on_stream_finished 会将 _is_streaming 置 False，
+        # 此时 deferred QTimer 触发本方法会正常刷新。
+        if self._is_streaming:
+            return
+
         session = self.session_manager.get_current_session()
         llm_config = self._get_current_model_config()
         snapshot = self.backend.get_context_usage_snapshot(session, llm_config)

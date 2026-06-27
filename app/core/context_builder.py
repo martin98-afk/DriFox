@@ -102,35 +102,31 @@ class ContextBudgetAllocator:
 
         # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
         # 仅在 agent 切换或首次调用时重建
-        cached_prompt = getattr(session, "system_prompt", "")
-        cached_agent = getattr(session, "_system_prompt_agent", "")
-        if cached_prompt and cached_agent == current_agent:
+        # 构建 extra_context 传递给 BuildSystemPrompt hooks（项目信息等）
+        extra_context: Dict[str, Any] = {}
+        if self.backend:
+            try:
+                project_root = self.backend.tool_executor.get_workdir() if self.backend.tool_executor else ""
+                project_name = self.backend.current_project or ""
+                extra_context["project_root"] = project_root
+                extra_context["project_name"] = project_name
+                # 项目笔记由 read_project_notes hook 从本地 AGENTS.md 直接读取，不再预取
+            except Exception:
+                pass
+
+        # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
+        # 仅在 agent 切换或首次调用时重建
+        cached_prompt = getattr(session, "system_prompt", None)
+        print(f"[ContextBuilder] cached_prompt: {cached_prompt is not None}, current_agent={current_agent}, session._system_prompt_agent={getattr(session, '_system_prompt_agent', None)}")
+        if cached_prompt:
+            # 直接复用缓存的 system prompt
             full_system_content = cached_prompt
         else:
-            # 构建 extra_context 传递给 BuildSystemPrompt hooks（项目信息等）
-            extra_context: Dict[str, Any] = {}
-            if self.backend:
-                try:
-                    project_root = self.backend.tool_executor.get_workdir() if self.backend.tool_executor else ""
-                    project_name = self.backend.current_project or ""
-                    extra_context["project_root"] = project_root
-                    extra_context["project_name"] = project_name
-                    # 预取项目笔记供 BuildSystemPrompt hook 使用
-                    if self.backend.memory_manager:
-                        note = self.backend.memory_manager.get_project_note(
-                            project_name, workdir=project_root
-                        )
-                        if note and note.get("content"):
-                            extra_context["project_notes_content"] = note["content"]
-                except Exception:
-                    pass
-
-            # 获取系统提示（含 BuildSystemPrompt hook 注入）
+            # 首次调用或 agent 切换，重新构建 system prompt
             full_system_prompt = self._agent_manager.get_agent_system_prompt(
                 current_agent, is_subagent_call=False, extra_context=extra_context
             )
             full_system_content = full_system_prompt
-
             # 缓存起来，后续 tool iteration 直接复用
             session.system_prompt = full_system_content
             session._system_prompt_agent = current_agent
@@ -167,8 +163,9 @@ class ContextBudgetAllocator:
         session.set_compaction_state(compaction_state)
         session.set_compaction_cache(compaction_cache)
 
-        # 过滤 system 消息并添加到结果
-        filtered_history = [m for m in history_for_api if m.get("role") != "system"]
+        # 过滤旧 system 消息（保留 _hook_event 标记的系统消息，它们是由 hook 注入的动态上下文）
+        filtered_history = [m for m in history_for_api
+                           if m.get("role") != "system" or m.get("_hook_event")]
         messages.extend(filtered_history)
 
         # 添加用户消息

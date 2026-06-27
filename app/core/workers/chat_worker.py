@@ -84,8 +84,6 @@ class OpenAIChatWorker(QThread):
             get_stage_prompt=None,
             stage_changed_callback=None,
             permission_check_callback=None,
-            compaction_prompt: str = "",
-            compaction_config: Dict = None,
             permission_cache: PermissionCache = None,
             compactor=None,
             initial_compaction_cache: Dict = None,
@@ -101,8 +99,6 @@ class OpenAIChatWorker(QThread):
         self.get_stage_prompt = get_stage_prompt
         self.stage_changed_callback = stage_changed_callback
         self.permission_check_callback = permission_check_callback
-        self.compaction_prompt = compaction_prompt
-        self.compaction_config = compaction_config or {}
 
         # ========== 使用 ChatWorkerState 统一管理所有可变状态 ==========
         self._state = ChatWorkerState.from_constructor_args(
@@ -110,8 +106,6 @@ class OpenAIChatWorker(QThread):
             session_messages=session_messages or [],
             llm_config=llm_config,
             tools=tools,
-            compaction_prompt=compaction_prompt,
-            compaction_config=compaction_config,
             permission_cache=permission_cache or PermissionCache(),
             event_bus=WorkerEventBus(),
             tool_executor=tool_executor,
@@ -1574,14 +1568,6 @@ class OpenAIChatWorker(QThread):
                     if freed > 1000:
                         logger.debug(f"[MEM] GC后释放 {freed} 个对象")
 
-                # 性能优化：移除后台线程中的 processEvents() 和 sleep
-                # 原因：processEvents() 设计用于主线程，在后台线程调用会导致：
-                # 1. 信号丢失或延迟
-                # 2. UI 状态不一致
-                # 3. 可能的死锁
-                # 如果需要 UI 响应，应使用信号-槽机制而非强制事件处理
-                # time.sleep(0.01)
-
         except Exception as e:
             logger.exception("请求失败!")
             # 🔧 异常时保存已生成的部分消息到会话
@@ -2161,7 +2147,6 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
-        print(sanitized)
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]

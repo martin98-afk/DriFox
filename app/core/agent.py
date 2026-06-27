@@ -738,6 +738,9 @@ Use the tools available to you based on your permissions."""
                 "is_subagent_call": is_subagent_call,
                 "current_role": "subagent" if is_subagent_call else "primary",
             }
+            # 合并外部上下文（由 context_builder 传入 project_root/project_name）
+            if extra_context:
+                hook_ctx.update(extra_context)
             # 技能内容
             try:
                 from app.utils.config import Settings
@@ -756,10 +759,7 @@ Use the tools available to you based on your permissions."""
                         hook_ctx["available_subagents_content"] = sub_info
                 except Exception:
                     pass
-            # 合并外部上下文
-            if extra_context:
-                hook_ctx.update(extra_context)
-
+            print(f"[AgentManager] Triggering BuildSystemPrompt hooks for agent '{agent_name}' with context: {hook_ctx}")
             results = self._hook_manager.trigger_event(
                 "BuildSystemPrompt",
                 context=hook_ctx,
