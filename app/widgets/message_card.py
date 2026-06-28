@@ -129,7 +129,7 @@ _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTAL
 
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
-AUTO_SCROLL_THRESHOLD = 200      # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+AUTO_SCROLL_THRESHOLD = 1000      # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========

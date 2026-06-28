@@ -63,7 +63,19 @@
         ]
       }
     ],
-    "SessionStart": [],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".project_intel:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在识别项目元信息...",
+            "id": "builtin_project_intel"
+          }
+        ]
+      }
+    ],
     "PreUserMessage": [
       {
         "hooks": [
@@ -95,6 +107,20 @@
             "add_output_to_context": true,
             "statusMessage": "正在注入命令提示词...",
             "id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".safety_guard:hook",
+            "add_output_to_context": false,
+            "statusMessage": "安全护栏检查中...",
+            "id": "builtin_safety_guard"
           }
         ]
       }
