@@ -2,6 +2,7 @@
 """
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
 """
+
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -45,16 +46,16 @@ def _compute_context_budget(llm_config: Dict) -> int:
         可用于历史的 token 预算
     """
     if not isinstance(llm_config, dict):
-        logger.warning(f"[SubAgentExecutor] _compute_context_budget received non-dict llm_config: {type(llm_config).__name__}, using defaults")
+        logger.warning(
+            f"[SubAgentExecutor] _compute_context_budget received non-dict llm_config: {type(llm_config).__name__}, using defaults"
+        )
         return 96000  # 默认 128k * 0.75
 
     context_limit = resolve_context_limit(llm_config)
     max_output_tokens = resolve_max_output_tokens(llm_config)
 
     # O1/O3 模型需要更大的输出预留
-    model_name = str(
-        llm_config.get("模型名称", "") or llm_config.get("model", "")
-    ).lower()
+    model_name = str(llm_config.get("模型名称", "") or llm_config.get("model", "")).lower()
     reserved = min(800, max_output_tokens)
     if "o1" in model_name or "o3" in model_name:
         reserved = min(max_output_tokens, 32000)
@@ -72,16 +73,16 @@ class SubAgentExecutor(QThread):
     tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
 
     def __init__(
-            self,
-            task_id: str,
-            agent_name: str,
-            task_description: str,
-            llm_config: Dict,
-            agent_manager: Any,
-            tool_executor: Any = None,
-            parent_context: str = "",
-            is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 subagent_para）
-            max_iterations: int = 30,  # 最大迭代次数，默认 30
+        self,
+        task_id: str,
+        agent_name: str,
+        task_description: str,
+        llm_config: Dict,
+        agent_manager: Any,
+        tool_executor: Any = None,
+        parent_context: str = "",
+        is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 subagent_para）
+        max_iterations: int = 30,  # 最大迭代次数，默认 30
     ):
         super().__init__()
         self.task_id = task_id
@@ -171,9 +172,9 @@ class SubAgentExecutor(QThread):
             return []
 
         # 获取预算比例（优先从 agent 配置读取）
-        budget_ratio = getattr(
-            agent, 'inherit_history_budget_ratio', _CONTEXT_INJECTION_RATIO
-        ) or _CONTEXT_INJECTION_RATIO
+        budget_ratio = (
+            getattr(agent, "inherit_history_budget_ratio", _CONTEXT_INJECTION_RATIO) or _CONTEXT_INJECTION_RATIO
+        )
         # 确保比例在合理范围内
         budget_ratio = max(0.1, min(0.8, float(budget_ratio)))
 
@@ -197,9 +198,7 @@ class SubAgentExecutor(QThread):
             content = msg.get("content", "")
             if isinstance(content, list):
                 # multimodal 内容（图文混合），只从 text 部分估算
-                content_text = "".join(
-                    c.get("text", "") for c in content if isinstance(c, dict)
-                )
+                content_text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
             elif isinstance(content, str):
                 content_text = content
             else:
@@ -234,6 +233,7 @@ class SubAgentExecutor(QThread):
     def _add_log(self, log_type: str, content: str, extra: dict = None):
         """记录日志"""
         import time
+
         now = time.time()
         log_entry = {
             "type": log_type,
@@ -246,11 +246,19 @@ class SubAgentExecutor(QThread):
         # 每次输出日志都刷新活跃时间（供外部 stall 检测）
         self._last_activity_time = now
         # 实时保存到数据库
-        log_callback = getattr(self, '_log_store_callback', None)
+        log_callback = getattr(self, "_log_store_callback", None)
         if log_callback:
             try:
-                log_callback(self.task_id, self.agent_name, self.task_description, "running", None, None,
-                             self._logs, self.get_summary())
+                log_callback(
+                    self.task_id,
+                    self.agent_name,
+                    self.task_description,
+                    "running",
+                    None,
+                    None,
+                    self._logs,
+                    self.get_summary(),
+                )
             except Exception as e:
                 logger.warning(f"[SubAgentExecutor] 实时保存日志失败: {e}")
 
@@ -261,6 +269,7 @@ class SubAgentExecutor(QThread):
     def get_summary(self) -> dict:
         """获取任务摘要"""
         import time
+
         elapsed = int(time.time() - self._start_time) if self._start_time else 0
         return {
             "task_id": self.task_id,
@@ -274,12 +283,15 @@ class SubAgentExecutor(QThread):
 
     def run(self):
         import time
+
         self._start_time = time.time()
 
         try:
             # 防御：确保 llm_config 是 dict
             if not isinstance(self.llm_config, dict):
-                logger.warning(f"[SubAgentExecutor] run() llm_config is not a dict: {type(self.llm_config).__name__}={self.llm_config!r}")
+                logger.warning(
+                    f"[SubAgentExecutor] run() llm_config is not a dict: {type(self.llm_config).__name__}={self.llm_config!r}"
+                )
                 self.llm_config = {}
 
             agent = self.agent_manager.get_agent(self.agent_name)
@@ -300,6 +312,7 @@ class SubAgentExecutor(QThread):
                 pass
             try:
                 from app.utils.config import Settings
+
                 _sub_project_name = Settings.get_instance().llm_project_name.value or "DriFoxx"
             except Exception:
                 pass
@@ -315,17 +328,15 @@ class SubAgentExecutor(QThread):
 
             # 基于 context budget 构建主智能体历史上下文注入（返回消息对象列表）
             inherited_messages = []
-            if agent.inherit_history and getattr(self, '_get_history_messages', None):
+            if agent.inherit_history and getattr(self, "_get_history_messages", None):
                 try:
                     history_messages = self._get_history_messages() or []
                     if history_messages:
                         # 根据 inherit_history_count 限制消息数量
                         if agent.inherit_history_count is not None:
-                            history_messages = history_messages[-agent.inherit_history_count:]
+                            history_messages = history_messages[-agent.inherit_history_count :]
 
-                        inherited_messages = self._build_inherited_context(
-                            agent, history_messages
-                        )
+                        inherited_messages = self._build_inherited_context(agent, history_messages)
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 获取历史消息失败: {e}")
 
@@ -358,11 +369,21 @@ class SubAgentExecutor(QThread):
                 # 【关键修复】被取消时也要发射错误信号，让 DAG 知道节点结束了
                 # 不然 DAG 会永远卡在等这个节点的完成回调上
                 self._execution_error = "Task cancelled"
-                logger.warning(f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled, emitting error_occurred to notify DAG")
+                logger.warning(
+                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled, emitting error_occurred to notify DAG"
+                )
                 if self._log_store_callback:
                     try:
-                        self._log_store_callback(self.task_id, self.agent_name, self.task_description, "cancelled",
-                                                 "", "Task cancelled", self._logs, self.get_summary())
+                        self._log_store_callback(
+                            self.task_id,
+                            self.agent_name,
+                            self.task_description,
+                            "cancelled",
+                            "",
+                            "Task cancelled",
+                            self._logs,
+                            self.get_summary(),
+                        )
                     except Exception as e:
                         logger.warning(f"[SubAgentExecutor] 保存取消状态失败: {e}")
                 self.error_occurred.emit(self.task_id, "Task cancelled")
@@ -374,8 +395,16 @@ class SubAgentExecutor(QThread):
             # 任务完成，保存最终状态
             if self._log_store_callback:
                 try:
-                    self._log_store_callback(self.task_id, self.agent_name, self.task_description, "finished",
-                                             self._last_result, None, self._logs, self.get_summary())
+                    self._log_store_callback(
+                        self.task_id,
+                        self.agent_name,
+                        self.task_description,
+                        "finished",
+                        self._last_result,
+                        None,
+                        self._logs,
+                        self.get_summary(),
+                    )
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 保存完成状态失败: {e}")
 
@@ -387,8 +416,16 @@ class SubAgentExecutor(QThread):
             # 任务出错，保存错误状态
             if self._log_store_callback:
                 try:
-                    self._log_store_callback(self.task_id, self.agent_name, self.task_description, "error", None,
-                                             self._execution_error, self._logs, self.get_summary())
+                    self._log_store_callback(
+                        self.task_id,
+                        self.agent_name,
+                        self.task_description,
+                        "error",
+                        None,
+                        self._execution_error,
+                        self._logs,
+                        self.get_summary(),
+                    )
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 保存错误状态失败: {e}")
             self.error_occurred.emit(self.task_id, f"SubAgent execution error: {str(e)}")
@@ -422,9 +459,7 @@ class SubAgentExecutor(QThread):
             # 同步触发，hook 输出追加到 current_messages，让 LLM 在下一轮请求中看到
             self._trigger_hook_sync("PreAssistantMessage", current_messages)
 
-            response_content, tool_calls, reasoning_content = self._make_api_call(
-                current_messages, tools, llm_config
-            )
+            response_content, tool_calls, reasoning_content = self._make_api_call(current_messages, tools, llm_config)
             current_reasoning = reasoning_content
 
             # ====== PostAssistantMessage hook：assistant 响应后触发 ======
@@ -569,10 +604,11 @@ class SubAgentExecutor(QThread):
 
             # 收集成功执行的 hook 输出，注入 messages
             from app.core.backend import _make_hook_message
+
             injected = 0
             for r in results:
                 if r.success and r.output:
-                    msg = _make_hook_message(event_name, r.output)
+                    msg = _make_hook_message(event_name, r.output, r.status_message)
                     current_messages.append(msg)
                     injected += 1
             if injected:
@@ -629,7 +665,9 @@ class SubAgentExecutor(QThread):
         config = llm_config if llm_config is not None else self.llm_config
         # 防御：确保 config 是 dict（传递给子智能体的配置可能被意外覆盖为字符串）
         if not isinstance(config, dict):
-            logger.warning(f"[SubAgentExecutor] _make_api_call received non-dict config: {type(config).__name__}={config!r}, falling back to empty config")
+            logger.warning(
+                f"[SubAgentExecutor] _make_api_call received non-dict config: {type(config).__name__}={config!r}, falling back to empty config"
+            )
             config = {}
         api_key = config.get("API_KEY", "").strip()
         base_url = config.get("API_URL") or None
@@ -644,10 +682,23 @@ class SubAgentExecutor(QThread):
         extra_body = {}
 
         for cn_key, value in config.items():
-            if cn_key in {"API_KEY", "API_URL", "API_BASE", "认证方式", "模型名称",
-                          "系统提示", "启用技能",
-                          "name", "provider_name", "config_id", "display_name",
-                          "_suffix_index", "备注", "获取地址", "模型列表"}:
+            if cn_key in {
+                "API_KEY",
+                "API_URL",
+                "API_BASE",
+                "认证方式",
+                "模型名称",
+                "系统提示",
+                "启用技能",
+                "name",
+                "provider_name",
+                "config_id",
+                "display_name",
+                "_suffix_index",
+                "备注",
+                "获取地址",
+                "模型列表",
+            }:
                 continue
             if cn_key in QUOTA_EXCLUDE_KEYS:
                 continue
@@ -664,9 +715,7 @@ class SubAgentExecutor(QThread):
                 extra_body[en_key] = value
 
         if "max_tokens" in req_kwargs:
-            req_kwargs["max_tokens"] = self._cap_max_output_tokens(
-                model, req_kwargs["max_tokens"], config
-            )
+            req_kwargs["max_tokens"] = self._cap_max_output_tokens(model, req_kwargs["max_tokens"], config)
 
         # 处理思考模式
         thinking_mode = config.get("思考模式")
@@ -716,7 +765,8 @@ class SubAgentExecutor(QThread):
             return client.chat.completions.create(**req_kwargs, tools=tools)
 
         response = create_api_call_with_retry(
-            client, create_completion,
+            client,
+            create_completion,
             cancel_check=lambda: self._is_cancelled,
         )
 
@@ -734,14 +784,16 @@ class SubAgentExecutor(QThread):
         tool_calls_found = []
         if message.tool_calls:
             for tc in message.tool_calls:
-                tool_calls_found.append({
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,  # 已是 JSON 字符串
-                    },
-                })
+                tool_calls_found.append(
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,  # 已是 JSON 字符串
+                        },
+                    }
+                )
 
         return response_content, tool_calls_found, reasoning_content
 
@@ -821,7 +873,9 @@ class SubAgentExecutor(QThread):
                         arguments = parsed
                         logger.info(f"[SubAgent] ✓ JSON 智能修复成功: tool={tool_name}")
                     else:
-                        logger.warning(f"[SubAgent] ⚠️ JSON 解析失败且无法修复, tool={tool_name}, preview='{arguments[:200]}'")
+                        logger.warning(
+                            f"[SubAgent] ⚠️ JSON 解析失败且无法修复, tool={tool_name}, preview='{arguments[:200]}'"
+                        )
                         arguments = {}
 
             tool_call_id = tc["id"]
@@ -960,10 +1014,18 @@ class SubAgentManager(QObject):
         """设置会话存储（使用 SessionStore 统一管理）"""
         self._session_store = session_store
 
-    def _save_task_to_store(self, task_id: str, agent_name: str, task_description: str,
-                            status: str = "running", result: str = None, error: str = None,
-                            logs: List[Dict] = None, summary: Dict = None,
-                            session_id: str = ""):
+    def _save_task_to_store(
+        self,
+        task_id: str,
+        agent_name: str,
+        task_description: str,
+        status: str = "running",
+        result: str = None,
+        error: str = None,
+        logs: List[Dict] = None,
+        summary: Dict = None,
+        session_id: str = "",
+    ):
         """保存任务到数据库（通过 SessionStore），携带会话 ID 以实现会话隔离"""
         if not self._session_store:
             return
@@ -975,8 +1037,14 @@ class SubAgentManager(QObject):
                 if executor and hasattr(executor, "get_summary"):
                     summary = executor.get_summary()
             self._session_store.save_subagent_task(
-                task_id, agent_name, task_description, status, result, error,
-                logs or [], summary or {},
+                task_id,
+                agent_name,
+                task_description,
+                status,
+                result,
+                error,
+                logs or [],
+                summary or {},
                 session_id=session_id or self._current_session_id,
             )
         except Exception as e:
@@ -1007,6 +1075,7 @@ class SubAgentManager(QObject):
         由 QTimer 定时触发（默认每 10 秒）。
         """
         import time
+
         now = time.time()
         for task_id in list(self._running_tasks.keys()):
             executor = self._running_tasks.get(task_id)
@@ -1022,10 +1091,7 @@ class SubAgentManager(QObject):
                 continue
 
             # 检测到 stall（日志静默超时）
-            error_msg = (
-                f"Task stalled: no log activity for {int(idle_time)}s "
-                f"(timeout={self._stall_timeout}s)"
-            )
+            error_msg = f"Task stalled: no log activity for {int(idle_time)}s (timeout={self._stall_timeout}s)"
             logger.warning(
                 f"[SubAgentManager] ⚠️ Task {task_id[:8]} ({executor.agent_name}) "
                 f"stalled for {int(idle_time)}s, cancelling"
@@ -1038,7 +1104,7 @@ class SubAgentManager(QObject):
             agent_name = executor.agent_name
             task_description = executor.task_description
             logs = executor.get_logs()
-            task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
+            task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
             self._finished_tasks[task_id] = {
                 "result": "",
                 "error": error_msg,
@@ -1050,8 +1116,13 @@ class SubAgentManager(QObject):
 
             # 3. 保存数据库（status="stalled"）
             self._save_task_to_store(
-                task_id, agent_name, task_description,
-                "stalled", "", error_msg, logs,
+                task_id,
+                agent_name,
+                task_description,
+                "stalled",
+                "",
+                error_msg,
+                logs,
                 session_id=task_session_id,
             )
 
@@ -1062,9 +1133,7 @@ class SubAgentManager(QObject):
             try:
                 self.task_finished.emit(task_id, "")
             except Exception as e:
-                logger.error(
-                    f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}"
-                )
+                logger.error(f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}")
 
             # 6. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
             #    注意：executor 线程可能还在运行（卡在 API 调用中），
@@ -1074,18 +1143,18 @@ class SubAgentManager(QObject):
                 del self._running_tasks[task_id]
 
     def execute_task(
-            self,
-            task_id: str,
-            agent_name: str,
-            task_description: str,
-            parent_context: str = "",
-            on_finished: Callable[[str], None] = None,
-            on_error: Callable[[str], None] = None,
-            on_progress: Callable[[str], None] = None,
-            executor_ref: Dict = None,
-            share_context: bool = False,  # 是否共享主智能体上下文
-            session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
-            llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
+        self,
+        task_id: str,
+        agent_name: str,
+        task_description: str,
+        parent_context: str = "",
+        on_finished: Callable[[str], None] = None,
+        on_error: Callable[[str], None] = None,
+        on_progress: Callable[[str], None] = None,
+        executor_ref: Dict = None,
+        share_context: bool = False,  # 是否共享主智能体上下文
+        session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
+        llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
     ) -> bool:
         """执行子智能体任务
 
@@ -1105,7 +1174,12 @@ class SubAgentManager(QObject):
             error_msg = f"Agent not found: {agent_name}"
             logger.error(f"[SubAgentManager] {error_msg}")
             # 立即触发完成信号，让任务不卡在 running 状态
-            self._finished_tasks[task_id] = {"result": "", "error": error_msg, "agent_name": agent_name, "session_id": task_session_id}
+            self._finished_tasks[task_id] = {
+                "result": "",
+                "error": error_msg,
+                "agent_name": agent_name,
+                "session_id": task_session_id,
+            }
             if on_finished:
                 on_finished(error_msg)
             if on_error:
@@ -1116,7 +1190,12 @@ class SubAgentManager(QObject):
         if not agent.is_subagent():
             error_msg = f"Agent '{agent_name}' cannot be used as subagent (mode: {agent.mode})"
             logger.error(f"[SubAgentManager] {error_msg}")
-            self._finished_tasks[task_id] = {"result": "", "error": error_msg, "agent_name": agent_name, "session_id": task_session_id}
+            self._finished_tasks[task_id] = {
+                "result": "",
+                "error": error_msg,
+                "agent_name": agent_name,
+                "session_id": task_session_id,
+            }
             if on_finished:
                 on_finished(error_msg)
             if on_error:
@@ -1128,7 +1207,9 @@ class SubAgentManager(QObject):
                 llm_config = self._get_llm_config()
             elif not isinstance(llm_config, dict):
                 # 防御：非 dict 的 llm_config（可能从 main_widget 传入的异常值）
-                logger.warning(f"[SubAgentManager] execute_task llm_config is not a dict: {type(llm_config).__name__}={llm_config!r}, falling back to default")
+                logger.warning(
+                    f"[SubAgentManager] execute_task llm_config is not a dict: {type(llm_config).__name__}={llm_config!r}, falling back to default"
+                )
                 llm_config = self._get_llm_config()
             if not llm_config:
                 if on_error:
@@ -1148,9 +1229,7 @@ class SubAgentManager(QObject):
                             role = msg.get("role", "user")
                             content = msg.get("content", "")
                             if isinstance(content, list):
-                                content = "".join(
-                                    c.get("text", "") for c in content if isinstance(c, dict)
-                                )
+                                content = "".join(c.get("text", "") for c in content if isinstance(c, dict))
                             if content:
                                 truncated = content[:max_chars] + ("..." if len(content) > max_chars else "")
                                 history_lines.append(f"**{role}**: {truncated}")
@@ -1216,9 +1295,7 @@ class SubAgentManager(QObject):
             except Exception as e:
                 logger.error(f"[SubAgentManager] task_started.emit failed: {e}", exc_info=True)
 
-            logger.info(
-                f"[SubAgentManager] Started task {task_id} with agent {agent_name}"
-            )
+            logger.info(f"[SubAgentManager] Started task {task_id} with agent {agent_name}")
             return True
 
         except Exception as e:
@@ -1349,8 +1426,7 @@ class SubAgentManager(QObject):
 
         # 检查上游是否有失败的节点（failed 或 skipped 都级联跳过）
         upstream_failed = any(
-            node_map[up["from"]]["_status"] in ("failed", "skipped")
-            for up in dag_state["upstream_results"][nid]
+            node_map[up["from"]]["_status"] in ("failed", "skipped") for up in dag_state["upstream_results"][nid]
         )
         if upstream_failed:
             node["_status"] = "skipped"
@@ -1378,9 +1454,7 @@ class SubAgentManager(QObject):
             for up in dag_state["upstream_results"][nid]:
                 up_node = node_map[up["from"]]
                 result_text = up_node.get("_result", "") or "(无输出)"
-                context_parts.append(
-                    f"### {up['from']} ({up_node.get('agent', '')})\n{result_text}"
-                )
+                context_parts.append(f"### {up['from']} ({up_node.get('agent', '')})\n{result_text}")
         if node.get("context"):
             context_parts.append(node["context"])
         full_context = "\n\n".join(context_parts) if context_parts else ""
@@ -1459,7 +1533,7 @@ class SubAgentManager(QObject):
         行为差异（这种差异会导致 DAG 回调被静默丢弃而 UI 回调正常工作）。
         """
         # 只处理属于 DAG 的任务（在 _task_to_dag 中有记录的）
-        if not hasattr(self, '_task_to_dag') or task_id not in self._task_to_dag:
+        if not hasattr(self, "_task_to_dag") or task_id not in self._task_to_dag:
             return
         dag_id, nid = self._task_to_dag[task_id]
 
@@ -1474,9 +1548,7 @@ class SubAgentManager(QObject):
         executor.finished_with_result.connect(
             lambda tid, result: self._safe_dag_node_finished(dag_id, nid, tid, result)
         )
-        executor.error_occurred.connect(
-            lambda tid, error: self._safe_dag_node_error(dag_id, nid, tid, error)
-        )
+        executor.error_occurred.connect(lambda tid, error: self._safe_dag_node_error(dag_id, nid, tid, error))
         logger.info(f"[DAG] 🔗 DAG callbacks connected for nid={nid} (via task_started slot)")
 
     def _safe_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
@@ -1515,7 +1587,9 @@ class SubAgentManager(QObject):
         统一触发批次数和 _finished_tasks 写入，避免双重计数。
         """
         # 【关键诊断】在 dag_state 检查之前先记录，证明这个方法被实际调用了
-        logger.info(f"[DAG] 🔥 _on_dag_node_finished ENTERED: dag_id={dag_id}, nid={nid}, task_id={task_id[:8]}, has_dag_state={dag_id in getattr(self, '_dag_states', {})}")
+        logger.info(
+            f"[DAG] 🔥 _on_dag_node_finished ENTERED: dag_id={dag_id}, nid={nid}, task_id={task_id[:8]}, has_dag_state={dag_id in getattr(self, '_dag_states', {})}"
+        )
         dag_state = self._dag_states.get(dag_id)
         if not dag_state:
             logger.warning(f"[DAG] _on_dag_node_finished: dag_state 已为空! dag_id={dag_id}, nid={nid}")
@@ -1529,7 +1603,9 @@ class SubAgentManager(QObject):
         node["_status"] = "failed" if error else "completed"
         node["_result"] = result
         node["_error"] = error or ""
-        logger.info(f"[DAG] 节点完成: dag_id={dag_id}, nid={nid}, status={node['_status']}, has_downstream={bool(dag_state['adj'].get(nid))}")
+        logger.info(
+            f"[DAG] 节点完成: dag_id={dag_id}, nid={nid}, status={node['_status']}, has_downstream={bool(dag_state['adj'].get(nid))}"
+        )
 
         # 检查下游节点（用 try/except 包裹，防止因下游节点启动异常导致本节点状态和 all_done 检查被跳过）
         try:
@@ -1538,13 +1614,10 @@ class SubAgentManager(QObject):
             logger.error(f"[DAG] _on_dag_node_finished: 检查下游节点失败: {e}", exc_info=True)
 
         # 检查是否全部完成
-        all_done = all(
-            node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled")
-            for nid in node_map
-        )
+        all_done = all(node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled") for nid in node_map)
         if all_done:
             # DAG 整体完成，清理 _task_to_dag 映射
-            if hasattr(self, '_task_to_dag'):
+            if hasattr(self, "_task_to_dag"):
                 for n in node_map.values():
                     tid = n.get("_task_id", "")
                     if tid:
@@ -1597,13 +1670,10 @@ class SubAgentManager(QObject):
             logger.error(f"[DAG] _on_dag_node_error: 级联跳过下游节点失败: {e}", exc_info=True)
 
         # 检查是否全部完成
-        all_done = all(
-            node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled")
-            for nid in node_map
-        )
+        all_done = all(node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled") for nid in node_map)
         if all_done:
             # DAG 整体完成，清理 _task_to_dag 映射
-            if hasattr(self, '_task_to_dag'):
+            if hasattr(self, "_task_to_dag"):
                 for n in node_map.values():
                     tid = n.get("_task_id", "")
                     if tid:
@@ -1619,8 +1689,7 @@ class SubAgentManager(QObject):
         adj = dag_state.get("adj", {})
         adj_neighbors = list(adj.get(nid, []))
         logger.info(
-            f"[DAG] 检查下游: dag_id={dag_id}, nid={nid}, "
-            f"downstream_nodes={adj_neighbors}, adj_keys={list(adj.keys())}"
+            f"[DAG] 检查下游: dag_id={dag_id}, nid={nid}, downstream_nodes={adj_neighbors}, adj_keys={list(adj.keys())}"
         )
         if not adj_neighbors:
             return
@@ -1714,11 +1783,56 @@ class SubAgentManager(QObject):
         - skipped:   #9E9E9E (灰)
         """
         status_categories = [
-            {"name": "pending",   "itemStyle": {"color": "#FFC107", "borderColor": "#d4a020", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(255,193,7,0.4)"}},
-            {"name": "running",   "itemStyle": {"color": "#2196F3", "borderColor": "#1976D2", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(33,150,243,0.4)"}},
-            {"name": "completed", "itemStyle": {"color": "#4CAF50", "borderColor": "#388E3C", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(76,175,80,0.4)"}},
-            {"name": "failed",    "itemStyle": {"color": "#F44336", "borderColor": "#D32F2F", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(244,67,54,0.4)"}},
-            {"name": "skipped",   "itemStyle": {"color": "#9E9E9E", "borderColor": "#757575", "borderWidth": 2, "shadowBlur": 8, "shadowColor": "rgba(158,158,158,0.4)"}},
+            {
+                "name": "pending",
+                "itemStyle": {
+                    "color": "#FFC107",
+                    "borderColor": "#d4a020",
+                    "borderWidth": 2,
+                    "shadowBlur": 8,
+                    "shadowColor": "rgba(255,193,7,0.4)",
+                },
+            },
+            {
+                "name": "running",
+                "itemStyle": {
+                    "color": "#2196F3",
+                    "borderColor": "#1976D2",
+                    "borderWidth": 2,
+                    "shadowBlur": 8,
+                    "shadowColor": "rgba(33,150,243,0.4)",
+                },
+            },
+            {
+                "name": "completed",
+                "itemStyle": {
+                    "color": "#4CAF50",
+                    "borderColor": "#388E3C",
+                    "borderWidth": 2,
+                    "shadowBlur": 8,
+                    "shadowColor": "rgba(76,175,80,0.4)",
+                },
+            },
+            {
+                "name": "failed",
+                "itemStyle": {
+                    "color": "#F44336",
+                    "borderColor": "#D32F2F",
+                    "borderWidth": 2,
+                    "shadowBlur": 8,
+                    "shadowColor": "rgba(244,67,54,0.4)",
+                },
+            },
+            {
+                "name": "skipped",
+                "itemStyle": {
+                    "color": "#9E9E9E",
+                    "borderColor": "#757575",
+                    "borderWidth": 2,
+                    "shadowBlur": 8,
+                    "shadowColor": "rgba(158,158,158,0.4)",
+                },
+            },
         ]
         status_map = {c["name"]: i for i, c in enumerate(status_categories)}
 
@@ -1730,22 +1844,26 @@ class SubAgentManager(QObject):
             agent = n.get("agent", "")
             desc = n.get("description", "")
             # 用 agent 名作为节点显示名，tooltip 显示完整描述
-            echarts_nodes.append({
-                "id": nid,
-                "name": f"{nid} ({agent})",
-                "symbolSize": 50,
-                "category": status_map.get(status, 4),
-                "draggable": True,
-                "description": desc[:100],
-            })
+            echarts_nodes.append(
+                {
+                    "id": nid,
+                    "name": f"{nid} ({agent})",
+                    "symbolSize": 50,
+                    "category": status_map.get(status, 4),
+                    "draggable": True,
+                    "description": desc[:100],
+                }
+            )
 
         echarts_edges = []
         for e in edges:
-            echarts_edges.append({
-                "source": e["from"],
-                "target": e["to"],
-                "lineStyle": {"width": 2, "opacity": 0.6, "curveness": 0.15},
-            })
+            echarts_edges.append(
+                {
+                    "source": e["from"],
+                    "target": e["to"],
+                    "lineStyle": {"width": 2, "opacity": 0.6, "curveness": 0.15},
+                }
+            )
 
         chart_config = {
             "title": {
@@ -1757,51 +1875,53 @@ class SubAgentManager(QObject):
                 "trigger": "item",
                 "formatter": "{b}",
             },
-            "series": [{
-                "type": "graph",
-                "layout": "force",
-                "symbolSize": 50,
-                "roam": True,
-                "draggable": True,
-                "focusNodeAdjacency": True,
-                "edgeSymbol": ["none", "arrow"],
-                "edgeSymbolSize": [0, 8],
-                "label": {
-                    "show": True,
-                    "position": "bottom",
-                    "fontSize": 11,
-                    "fontWeight": "bold",
-                    "color": "#ccc",
-                    "offset": [0, 6],
-                },
-                "lineStyle": {
-                    "color": "source",
-                    "curveness": 0.15,
-                    "width": 1.5,
-                    "opacity": 0.6,
-                },
-                "force": {
-                    "repulsion": 500,
-                    "edgeLength": [80, 200],
-                    "layoutAnimation": True,
-                    "friction": 0.1,
-                    "gravity": 0.05,
-                },
-                "categories": status_categories,
-                "data": echarts_nodes,
-                "links": echarts_edges,
-                "emphasis": {
-                    "focus": "adjacency",
-                    "lineStyle": {"width": 3},
-                },
-                "blur": {"opacity": 0.2},
-                "animation": True,
-                "animationDuration": 1000,
-                "animationEasing": "cubicOut",
-            }],
+            "series": [
+                {
+                    "type": "graph",
+                    "layout": "force",
+                    "symbolSize": 50,
+                    "roam": True,
+                    "draggable": True,
+                    "focusNodeAdjacency": True,
+                    "edgeSymbol": ["none", "arrow"],
+                    "edgeSymbolSize": [0, 8],
+                    "label": {
+                        "show": True,
+                        "position": "bottom",
+                        "fontSize": 11,
+                        "fontWeight": "bold",
+                        "color": "#ccc",
+                        "offset": [0, 6],
+                    },
+                    "lineStyle": {
+                        "color": "source",
+                        "curveness": 0.15,
+                        "width": 1.5,
+                        "opacity": 0.6,
+                    },
+                    "force": {
+                        "repulsion": 500,
+                        "edgeLength": [80, 200],
+                        "layoutAnimation": True,
+                        "friction": 0.1,
+                        "gravity": 0.05,
+                    },
+                    "categories": status_categories,
+                    "data": echarts_nodes,
+                    "links": echarts_edges,
+                    "emphasis": {
+                        "focus": "adjacency",
+                        "lineStyle": {"width": 3},
+                    },
+                    "blur": {"opacity": 0.2},
+                    "animation": True,
+                    "animationDuration": 1000,
+                    "animationEasing": "cubicOut",
+                }
+            ],
         }
 
-        return json.dumps(chart_config, option=orjson.OPT_INDENT_2).decode('utf-8')
+        return json.dumps(chart_config, option=orjson.OPT_INDENT_2).decode("utf-8")
 
     def cancel_task(self, task_id: str) -> bool:
         """取消子智能体任务"""
@@ -1819,13 +1939,13 @@ class SubAgentManager(QObject):
         否则如果 executor 在 _is_cancelled 后没来得及发射信号就被从 _running_tasks 移除，
         DAG 会永远卡在"等这个节点完成"。
         """
-        if not hasattr(self, '_task_to_dag'):
+        if not hasattr(self, "_task_to_dag"):
             return
         info = self._task_to_dag.pop(task_id, None)
         if not info:
             return
         dag_id, nid = info
-        if not hasattr(self, '_dag_states') or dag_id not in self._dag_states:
+        if not hasattr(self, "_dag_states") or dag_id not in self._dag_states:
             return
         dag_state = self._dag_states[dag_id]
         node = dag_state.get("node_map", {}).get(nid)
@@ -1878,7 +1998,7 @@ class SubAgentManager(QObject):
                 tool_call_count = executor.tool_call_count
                 elapsed = int(time.time() - executor.start_time) if executor.start_time else 0
 
-                task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
+                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
                 # 如果 _on_sub_agent_task_finished 已经写入过，避免覆盖已有字段
                 if task_id not in self._finished_tasks:
                     self._finished_tasks[task_id] = {
@@ -1904,13 +2024,15 @@ class SubAgentManager(QObject):
                         self._finished_tasks[task_id]["error"] = error
 
                 # 更新数据库（传入锁定的 session_id）
-                self._save_task_to_store(task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id)
+                self._save_task_to_store(
+                    task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id
+                )
 
                 # 【安全网】如果这个 task 是一个 DAG 节点，但 DAG 回调没触发（节点还是 running），
                 # 手动触发 DAG cascade（否则 DAG 永远卡在第一层）
-                if hasattr(self, '_task_to_dag') and task_id in self._task_to_dag:
+                if hasattr(self, "_task_to_dag") and task_id in self._task_to_dag:
                     dag_id, nid = self._task_to_dag[task_id]
-                    dag_state = getattr(self, '_dag_states', {}).get(dag_id)
+                    dag_state = getattr(self, "_dag_states", {}).get(dag_id)
                     if dag_state and dag_state.get("node_map", {}).get(nid, {}).get("_status") == "running":
                         logger.warning(
                             f"[DAG] ⚠️ get_finished_tasks 发现 DAG 节点 {nid} 已完成但节点状态仍是 running，"
@@ -1932,6 +2054,7 @@ class SubAgentManager(QObject):
         Returns: 已清理的任务ID列表
         """
         import time
+
         cleaned = []
         now = time.time()
 
@@ -1945,7 +2068,7 @@ class SubAgentManager(QObject):
                 agent_name = executor.agent_name
                 task_description = executor.task_description
                 logs = executor.get_logs()
-                task_session_id = getattr(executor, '_task_session_id', self._current_session_id)
+                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
                 error_msg = f"Task cancelled due to timeout ({timeout_seconds}s)"
                 self._finished_tasks[task_id] = {
                     "result": "",
@@ -1956,7 +2079,9 @@ class SubAgentManager(QObject):
                     "logs": logs,
                 }
                 # 更新数据库（传入锁定的 session_id）
-                self._save_task_to_store(task_id, agent_name, task_description, "timeout", "", error_msg, session_id=task_session_id)
+                self._save_task_to_store(
+                    task_id, agent_name, task_description, "timeout", "", error_msg, session_id=task_session_id
+                )
                 del self._running_tasks[task_id]
                 # 【关键修复】通知 DAG：被超时清理的任务如果属于某个 DAG 节点，标记为 failed 并级联
                 self._notify_dag_task_failed(task_id, error_msg)
@@ -2014,7 +2139,7 @@ class SubAgentManager(QObject):
                 "logs": executor.get_logs(),
                 "found": True,
                 "status": "running",
-                "session_id": getattr(executor, '_task_session_id', ''),
+                "session_id": getattr(executor, "_task_session_id", ""),
             }
 
         # 检查已完成的任务（内存）
@@ -2050,35 +2175,39 @@ class SubAgentManager(QObject):
 
         # 收集运行中的任务
         for task_id, executor in self._running_tasks.items():
-            results.append({
-                "task_id": task_id,
-                "summary": executor.get_summary(),
-                "logs": executor.get_logs(),
-                "status": "running"
-            })
+            results.append(
+                {
+                    "task_id": task_id,
+                    "summary": executor.get_summary(),
+                    "logs": executor.get_logs(),
+                    "status": "running",
+                }
+            )
 
         # 收集已完成的任务
         for task_id, task_info in self._finished_tasks.items():
-            results.append({
-                "task_id": task_id,
-                "summary": {
+            results.append(
+                {
                     "task_id": task_id,
-                    "agent_name": task_info.get("agent_name", ""),
-                    "task_description": task_info.get("task_description", ""),
-                    "result": task_info.get("result", ""),
-                    "error": task_info.get("error", ""),
-                    "tool_call_count": task_info.get("tool_call_count", 0),
-                    "elapsed_seconds": task_info.get("elapsed_seconds", 0),
-                },
-                "logs": task_info.get("logs", []),
-                "status": "finished"
-            })
+                    "summary": {
+                        "task_id": task_id,
+                        "agent_name": task_info.get("agent_name", ""),
+                        "task_description": task_info.get("task_description", ""),
+                        "result": task_info.get("result", ""),
+                        "error": task_info.get("error", ""),
+                        "tool_call_count": task_info.get("tool_call_count", 0),
+                        "elapsed_seconds": task_info.get("elapsed_seconds", 0),
+                    },
+                    "logs": task_info.get("logs", []),
+                    "status": "finished",
+                }
+            )
 
         return results
 
     def get_tasks_status(self, task_ids: List[str], session_id: str = None) -> ToolResult:
         """获取指定任务的状态（会话隔离）
-        
+
         Args:
             session_id: 可选，传入时只返回属于该会话的任务
         """
@@ -2089,14 +2218,16 @@ class SubAgentManager(QObject):
                 executor = self._running_tasks[tid]
                 # 会话隔离：检查 running 任务的 session
                 if effective_session:
-                    task_session = getattr(executor, '_task_session_id', '')
+                    task_session = getattr(executor, "_task_session_id", "")
                     if task_session != effective_session:
                         continue
-                tasks_info.append({
-                    "task_id": tid,
-                    "status": "running" if executor.isRunning() else "finishing",
-                    "agent": executor.agent_name,
-                })
+                tasks_info.append(
+                    {
+                        "task_id": tid,
+                        "status": "running" if executor.isRunning() else "finishing",
+                        "agent": executor.agent_name,
+                    }
+                )
             elif tid in self._finished_tasks:
                 task_info = self._finished_tasks[tid]
                 task_session = task_info.get("session_id", "")
@@ -2104,16 +2235,19 @@ class SubAgentManager(QObject):
                 # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
                 if effective_session and task_session != effective_session:
                     continue
-                tasks_info.append({
-                    "task_id": tid,
-                    "status": "finished",
-                    "agent": task_info.get("agent_name", ""),
-                })
+                tasks_info.append(
+                    {
+                        "task_id": tid,
+                        "status": "finished",
+                        "agent": task_info.get("agent_name", ""),
+                    }
+                )
             # 其他情况（unknown）不返回，隐藏不存在或不属于当前会话的任务
         return ToolResult(True, content={"tasks": tasks_info})
 
-    def get_tasks_status_with_details(self, task_ids: List[str], with_log: bool = False,
-                                      with_result: bool = True, session_id: str = None) -> ToolResult:
+    def get_tasks_status_with_details(
+        self, task_ids: List[str], with_log: bool = False, with_result: bool = True, session_id: str = None
+    ) -> ToolResult:
         """获取指定任务的详细状态（按 task_id 精确查询，无会话限制）
 
         与 get_all_active_tasks_with_details 不同，本方法用于按 explicit task_id
@@ -2126,11 +2260,13 @@ class SubAgentManager(QObject):
         for tid in task_ids:
             task_data = self.get_task_logs(tid)
             if not task_data.get("found"):
-                tasks_info.append({
-                    "task_id": tid,
-                    "status": "unknown",
-                    "agent": "",
-                })
+                tasks_info.append(
+                    {
+                        "task_id": tid,
+                        "status": "unknown",
+                        "agent": "",
+                    }
+                )
                 continue
 
             status = task_data.get("status", "unknown")
@@ -2176,7 +2312,9 @@ class SubAgentManager(QObject):
 
         return ToolResult(True, content={"tasks": tasks_info})
 
-    def get_all_active_tasks_with_details(self, with_log: bool = False, with_result: bool = True, session_id: str = None) -> ToolResult:
+    def get_all_active_tasks_with_details(
+        self, with_log: bool = False, with_result: bool = True, session_id: str = None
+    ) -> ToolResult:
         """获取当前会话任务的详细状态（会话隔离），同时包含运行中与已完成。
 
         Args:
@@ -2265,7 +2403,9 @@ class SubAgentManager(QObject):
                     "**请勿重复调用 subagent_status 等待结果**——"
                     "任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
                     "届时再调用本工具获取详细结果。"
-                ) if status == "running" else "",
+                )
+                if status == "running"
+                else "",
             }
 
             if with_log:
@@ -2284,9 +2424,11 @@ class SubAgentManager(QObject):
         """获取所有活跃任务"""
         tasks_info = []
         for task_id, executor in self._running_tasks.items():
-            tasks_info.append({
-                "task_id": task_id,
-                "status": "running" if executor.isRunning() else "finishing",
-                "agent": executor.agent_name,
-            })
+            tasks_info.append(
+                {
+                    "task_id": task_id,
+                    "status": "running" if executor.isRunning() else "finishing",
+                    "agent": executor.agent_name,
+                }
+            )
         return ToolResult(True, content={"tasks": tasks_info})

@@ -129,7 +129,7 @@ _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTAL
 
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
-AUTO_SCROLL_THRESHOLD = 30       # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+AUTO_SCROLL_THRESHOLD = 200      # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -3243,7 +3243,7 @@ class CodeWebViewer(QWebEngineView):
 
                         // 自动滚动到 body 底部（流式时新内容在底部）
                         // 🐛 修复：只在用户已处于底部时才滚动到底部，避免与用户手动滚动冲突。
-                        // 用 scrollHeight - scrollTop - clientHeight < 30 判断是否"接近底部"。
+                        // 用 scrollHeight - scrollTop - clientHeight < {AUTO_SCROLL_THRESHOLD} 判断是否"接近底部"。
                         // 🐛 修复2：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
                         // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
                         // 未滚动时强制 auto-scroll 到底部。
@@ -3253,7 +3253,7 @@ class CodeWebViewer(QWebEngineView):
                                 document.body.scrollTop = document.body.scrollHeight;
                                 window._suppressScrollEvent = false;
                             }} else {{
-                                var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
+                                var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
                                 if (wasAtBottom) {{
                                     window._suppressScrollEvent = true;
                                     document.body.scrollTop = document.body.scrollHeight;
@@ -3483,7 +3483,7 @@ class CodeWebViewer(QWebEngineView):
                         document.body.scrollTop = document.body.scrollHeight;
                         window._suppressScrollEvent = false;
                     }} else {{
-                        var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
+                        var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
                         if (wasAtBottom) {{
                             window._suppressScrollEvent = true;
                             document.body.scrollTop = document.body.scrollHeight;
@@ -5797,7 +5797,7 @@ class MessageCard(SimpleCardWidget):
                     "    document.body.scrollTop = document.body.scrollHeight;"
                     "    window._suppressScrollEvent = false;"
                     "  } else {"
-                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;"
+                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < " + str(AUTO_SCROLL_THRESHOLD) + ";"
                     "    if (wasAtBottom) {"
                     "      window._suppressScrollEvent = true;"
                     "      document.body.scrollTop = document.body.scrollHeight;"

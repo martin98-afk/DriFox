@@ -420,7 +420,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "执行shell命令",
+            "description": "执行 shell 命令。仅用于内置工具无法完成的场景：项目构建/测试（pytest / ruff / python build.py）、git 操作（status / diff / log / add / commit）、进程与服务管理（ps / kill / lsof / netstat）、多命令管道组合（cat | grep | awk）、环境探测（python --version / which / env）。严禁用 bash 替代任何内置工具——读文件用 read、写文件用 write/edit/multi_edit、列目录用 list、按通配符找文件用 glob、搜文件内容用 grep、语法/类型检查用 get_diagnostics 或 lsp、跳定义/查引用用 lsp 的 goToDefinition/findReferences、启后台服务用 bg_start/bg_stop/bg_logs/bg_list、截屏/UI 自动化用 screenshot/mouse/keyboard、网络搜索用 websearch、抓取网页用 webfetch。每次调用前自检：有专用工具能完成这件事吗？有则改用专用工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -785,7 +785,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "skill",
-            "description": "【强制触发】当用户消息中出现 `@技能名` 格式时，必须立即调用此工具加载技能，**不得以任何理由延迟或绕过**。禁止：先理解上下文、先做其他事、先问问题。正确流程：检测到 @技能 → 立即调用 skill 工具 → 按技能指引执行。\n\nArgs:\n    name: 技能名称（如 brainstorming, tdd, debugging 等）",
+            "description": "加载智能体技能",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -14,6 +14,7 @@ import time
 # 可选依赖：psutil 用于内存诊断（不强制）
 try:
     import psutil as _psutil
+
     _HAS_PSUTIL = True
 except ImportError:
     _HAS_PSUTIL = False
@@ -75,20 +76,20 @@ class OpenAIChatWorker(QThread):
     _TOOL_LOOP_THRESHOLD = 3
 
     def __init__(
-            self,
-            messages: List[Dict],
-            session_messages: List[Dict],
-            llm_config: Dict,
-            tools: List[Dict] = None,
-            stream: bool = True,
-            tool_executor=None,
-            tool_start_callback=None,
-            get_stage_prompt=None,
-            stage_changed_callback=None,
-            permission_check_callback=None,
-            permission_cache: PermissionCache = None,
-            compactor=None,
-            initial_compaction_cache: Dict = None,
+        self,
+        messages: List[Dict],
+        session_messages: List[Dict],
+        llm_config: Dict,
+        tools: List[Dict] = None,
+        stream: bool = True,
+        tool_executor=None,
+        tool_start_callback=None,
+        get_stage_prompt=None,
+        stage_changed_callback=None,
+        permission_check_callback=None,
+        permission_cache: PermissionCache = None,
+        compactor=None,
+        initial_compaction_cache: Dict = None,
     ):
         super().__init__()
         self.messages = messages
@@ -144,14 +145,14 @@ class OpenAIChatWorker(QThread):
         self._current_response: Any = None
 
         # ========== 内存诊断 ==========
-        self._mem_diag_logged = False     # 防止重复日志刷屏
-        self._mem_diag_iter_count = 0     # 诊断计数器（工具迭代轮次）
-        self._mem_last_rss = 0.0          # 上一步 RSS 基线（MB）
-        self._mem_total_chunks_logged = 0 # 累计记录的流式 chunk 数
+        self._mem_diag_logged = False  # 防止重复日志刷屏
+        self._mem_diag_iter_count = 0  # 诊断计数器（工具迭代轮次）
+        self._mem_last_rss = 0.0  # 上一步 RSS 基线（MB）
+        self._mem_total_chunks_logged = 0  # 累计记录的流式 chunk 数
         # 环境变量控制：MEM_DIAG=1 启用内存诊断（默认关闭）
-        self._mem_diag_enabled = os.environ.get('MEM_DIAG') == '1'
+        self._mem_diag_enabled = os.environ.get("MEM_DIAG") == "1"
         # tracemalloc 深度追踪（MEM_TRACE=1 时启用，用于定位单步大分配）
-        self._mem_trace_enabled = os.environ.get('MEM_TRACE') == '1'
+        self._mem_trace_enabled = os.environ.get("MEM_TRACE") == "1"
         self._mem_trace_snapshot = None
 
         # ========== Stop hook 强制续命（Claude Code 兼容）==========
@@ -172,15 +173,12 @@ class OpenAIChatWorker(QThread):
         if self._result_persister is None:
             try:
                 from app.core.tool_result_persister import ToolResultPersister
+
                 # 优先用 worker 当前 session_id, 兜底用 "default"
                 session_id = (
-                    getattr(self, "_current_session_id", None)
-                    or getattr(self, "session_id", None)
-                    or "default"
+                    getattr(self, "_current_session_id", None) or getattr(self, "session_id", None) or "default"
                 )
-                self._result_persister = ToolResultPersister(
-                    session_id=str(session_id)
-                )
+                self._result_persister = ToolResultPersister(session_id=str(session_id))
             except Exception as e:
                 logger.exception(f"[Persist] 初始化失败: {e}")
                 return None
@@ -192,31 +190,38 @@ class OpenAIChatWorker(QThread):
             return
         try:
             import tracemalloc
+
             if not tracemalloc.is_tracing():
                 tracemalloc.start(25)
             gc.collect()
             snap = tracemalloc.take_snapshot()
             if self._mem_trace_snapshot is not None:
                 # 对比上一次，输出热点
-                diff = snap.compare_to(self._mem_trace_snapshot, 'lineno')
+                diff = snap.compare_to(self._mem_trace_snapshot, "lineno")
                 large = [d for d in diff if d.size_diff > 10 * 1024 * 1024]
                 if large:
                     large.sort(key=lambda d: d.size_diff, reverse=True)
                     log_path = _get_log_dir_path("mem_trace.log")
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        f.write(f"\n{'='*70}\n[MEM-TRACE] 分配 >10MB 的热点:\n{'='*70}\n")
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n{'=' * 70}\n[MEM-TRACE] 分配 >10MB 的热点:\n{'=' * 70}\n")
                         f.write(f"{'增量MB':>8} {'总计MB':>8} {'计数':>5}  位置\n")
-                        f.write(f"{'-'*70}\n")
+                        f.write(f"{'-' * 70}\n")
                         for stat in large[:15]:
                             frame = stat.traceback[0]
-                            loc = (frame.filename.split('site-packages')[-1]
-                                   if 'site-packages' in frame.filename
-                                   else frame.filename.split('python3')[-1]
-                                   if 'python3' in frame.filename
-                                   else frame.filename)
-                            f.write(f"{stat.size_diff/1024/1024:>7.1f}M {stat.size/1024/1024:>7.1f}M {stat.count_diff:>4}  {loc}:{frame.lineno}\n")
+                            loc = (
+                                frame.filename.split("site-packages")[-1]
+                                if "site-packages" in frame.filename
+                                else frame.filename.split("python3")[-1]
+                                if "python3" in frame.filename
+                                else frame.filename
+                            )
+                            f.write(
+                                f"{stat.size_diff / 1024 / 1024:>7.1f}M {stat.size / 1024 / 1024:>7.1f}M {stat.count_diff:>4}  {loc}:{frame.lineno}\n"
+                            )
                             for i, fr in enumerate(stat.traceback[:4]):
-                                f.write(f"   {'├─' if i < 3 else '└─'} {fr.filename.split(os.sep)[-1]}:{fr.lineno} {fr.name}\n")
+                                f.write(
+                                    f"   {'├─' if i < 3 else '└─'} {fr.filename.split(os.sep)[-1]}:{fr.lineno} {fr.name}\n"
+                                )
                     logger.warning(f"[MEM-TRACE] 发现 {len(large)} 个大分配热点 → {log_path}")
             self._mem_trace_snapshot = snap
         except Exception as e:
@@ -420,10 +425,10 @@ class OpenAIChatWorker(QThread):
                 确保 worker 结束时随 current_session_messages 一起持久化。
         """
         try:
-            backend = getattr(self.tool_executor, '_backend', None)
+            backend = getattr(self.tool_executor, "_backend", None)
             if not backend:
                 return
-            q = getattr(backend, '_hook_message_queue', None)
+            q = getattr(backend, "_hook_message_queue", None)
             if q is None:
                 return
 
@@ -450,10 +455,10 @@ class OpenAIChatWorker(QThread):
         在 tool result 之前、PostToolUse 在 tool result 之后出现。
         """
         try:
-            backend = getattr(self.tool_executor, '_backend', None)
+            backend = getattr(self.tool_executor, "_backend", None)
             if not backend:
                 return
-            q = getattr(backend, '_pre_tool_message_queue', None)
+            q = getattr(backend, "_pre_tool_message_queue", None)
             if q is None:
                 return
 
@@ -494,8 +499,9 @@ class OpenAIChatWorker(QThread):
                 否则返回 None。Stop hook 用此实现"强制续命"机制。
         """
         from app.core.backend import _make_hook_message
+
         try:
-            backend = getattr(self.tool_executor, '_backend', None)
+            backend = getattr(self.tool_executor, "_backend", None)
             if not backend or not backend.hook_manager:
                 return None
 
@@ -504,12 +510,13 @@ class OpenAIChatWorker(QThread):
                 workdir = backend.tool_executor.get_workdir()
             if not workdir:
                 import os as _os
+
                 workdir = _os.getcwd()
 
             # 获取 session_id
             _session_id = ""
             try:
-                _session = backend.get_current_session() if hasattr(backend, 'get_current_session') else None
+                _session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
                 if _session:
                     _session_id = _session.session_id or ""
             except Exception:
@@ -528,9 +535,10 @@ class OpenAIChatWorker(QThread):
             # 获取当前用户消息作为 current_message
             current_message_text = ""
             for msg in reversed(current_session_messages):
-                if msg.get('role') == 'user':
+                if msg.get("role") == "user":
                     from app.core.message_content import content_to_text
-                    current_message_text = content_to_text(msg.get('content', ''))
+
+                    current_message_text = content_to_text(msg.get("content", ""))
                     break
 
             results = backend.hook_manager.trigger_event(
@@ -544,7 +552,7 @@ class OpenAIChatWorker(QThread):
             block_reason: Optional[str] = None
             for r in results:
                 if r.success and r.output:
-                    msg = _make_hook_message(event_name, r.output)
+                    msg = _make_hook_message(event_name, r.output, r.status_message)
                     current_messages.append(msg)
                     current_session_messages.append(msg)
                     self._current_session_messages.append(msg)
@@ -560,14 +568,12 @@ class OpenAIChatWorker(QThread):
                 # 仅 Stop 事件实际消费该决策；其他事件也透传，由调用方决定
                 try:
                     from app.core.hook_manager import HookDecision
+
                     if r.decision == HookDecision.BLOCK:
                         reason = self._extract_block_reason(r.output)
                         if reason:
                             block_reason = reason
-                            logger.info(
-                                f"[HookManager] Worker hook BLOCK: {event_name} "
-                                f"reason_len={len(reason)}"
-                            )
+                            logger.info(f"[HookManager] Worker hook BLOCK: {event_name} reason_len={len(reason)}")
                 except ImportError:
                     pass
 
@@ -609,7 +615,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except (orjson.JSONDecodeError, TypeError, ValueError):
+        except orjson.JSONDecodeError, TypeError, ValueError:
             pass
 
         # 优先级 4: raw output 兜底
@@ -631,6 +637,7 @@ class OpenAIChatWorker(QThread):
             合成 user message dict
         """
         from datetime import datetime as _dt
+
         return {
             "role": "user",
             "content": block_reason,
@@ -640,8 +647,7 @@ class OpenAIChatWorker(QThread):
             "timestamp": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-    def _cancel_with_stop_hook(self, current_messages: List[Dict],
-                                current_session_messages: List[Dict]) -> None:
+    def _cancel_with_stop_hook(self, current_messages: List[Dict], current_session_messages: List[Dict]) -> None:
         """取消时保存 partial 响应并触发 Stop hook 后发射 finished 信号
 
         统一处理 3 处取消路径的重复逻辑：
@@ -663,7 +669,7 @@ class OpenAIChatWorker(QThread):
             current_messages, _ = self._fix_tool_result_order(current_messages)
             current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
             self._current_session_messages = list(current_session_messages)
-            self.full_response = ''.join(self._response_chunks)
+            self.full_response = "".join(self._response_chunks)
             # ====== Stop hook：取消退出前触发 ======
             # 取消时传递 reason="cancelled"，让 hook 能感知取消场景
             self._trigger_worker_hook(
@@ -679,8 +685,7 @@ class OpenAIChatWorker(QThread):
             # 取消路径：丢弃 block_reason，不强制续命
             self._stop_hook_active = False
             # 虽然信号可能已被断开，但事件总线仍可能接收
-            self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                     current_session_messages)
+            self._emit_with_callback("finished_with_messages", self.finished_with_messages, current_session_messages)
 
     @property
     def event_bus(self) -> WorkerEventBus:
@@ -889,6 +894,7 @@ class OpenAIChatWorker(QThread):
             # 先尝试用 json 解析，解析成功则重 dump 规范化；失败则退到"压缩连续空白"。
             try:
                 import json
+
                 obj = json.loads(s)
                 return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
             except Exception:
@@ -976,7 +982,7 @@ class OpenAIChatWorker(QThread):
     def _get_reasoning_content(self) -> str:
         """获取当前的 reasoning_content（从累积的 chunks 合成）"""
         if self._reasoning_chunks:
-            return ''.join(self._reasoning_chunks)
+            return "".join(self._reasoning_chunks)
         return self._reasoning_content
 
     def cleanup(self):
@@ -988,7 +994,7 @@ class OpenAIChatWorker(QThread):
         self.messages = []
         self.session_messages = []
         self._current_api_messages = []
-        self._current_system_prompt = ''
+        self._current_system_prompt = ""
 
         # 使用 ChatWorkerState 清理所有状态
         self._state.full_cleanup()
@@ -1010,12 +1016,12 @@ class OpenAIChatWorker(QThread):
         # 如果不清理，EventBus 的 _handlers 字典中保留所有订阅的 lambda 闭包，
         # 这些闭包捕获了 worker 自身的引用，形成循环引用阻止 GC。
         try:
-            if hasattr(self, '_event_bus') and self._event_bus is not None:
+            if hasattr(self, "_event_bus") and self._event_bus is not None:
                 self._event_bus.clear()
                 self._event_bus = None
         except Exception:
             pass
-        if hasattr(self, '_state') and self._state is not None:
+        if hasattr(self, "_state") and self._state is not None:
             self._state.event_bus = None
 
         # 🔧 修复：主动压缩进程堆，让 Python 分配器归还空闲 arena 给 OS
@@ -1024,7 +1030,7 @@ class OpenAIChatWorker(QThread):
 
     # ========== 缓存追踪方法 ==========
 
-    def get_cache_stats(self) -> 'AggregatedCacheStats':
+    def get_cache_stats(self) -> "AggregatedCacheStats":
         """获取缓存追踪统计"""
         return self._cache_tracker.get_session_stats()
 
@@ -1066,9 +1072,18 @@ class OpenAIChatWorker(QThread):
         # 缓存键必须包含所有影响 extra_body 的参数，否则改思考模式等不会生效
         sig_parts = [
             str(self.llm_config.get(k, ""))
-            for k in ("API_KEY", "API_URL", "模型名称",
-                      "思考模式", "思考等级", "思考预算",
-                      "温度", "top_p", "最大Token", "max_new_tokens")
+            for k in (
+                "API_KEY",
+                "API_URL",
+                "模型名称",
+                "思考模式",
+                "思考等级",
+                "思考预算",
+                "温度",
+                "top_p",
+                "最大Token",
+                "max_new_tokens",
+            )
         ]
         config_key = "|".join(sig_parts)
 
@@ -1094,10 +1109,23 @@ class OpenAIChatWorker(QThread):
             skip_params.update({"temperature", "top_p"})
 
         for cn_key, value in self.llm_config.items():
-            if cn_key in {"API_KEY", "API_URL", "API_BASE", "认证方式", "模型名称",
-                          "系统提示", "启用技能",
-                          "name", "provider_name", "config_id", "display_name",
-                          "_suffix_index", "备注", "获取地址", "模型列表"}:
+            if cn_key in {
+                "API_KEY",
+                "API_URL",
+                "API_BASE",
+                "认证方式",
+                "模型名称",
+                "系统提示",
+                "启用技能",
+                "name",
+                "provider_name",
+                "config_id",
+                "display_name",
+                "_suffix_index",
+                "备注",
+                "获取地址",
+                "模型列表",
+            }:
                 continue
             if cn_key in QUOTA_EXCLUDE_KEYS:
                 continue
@@ -1167,6 +1195,7 @@ class OpenAIChatWorker(QThread):
         auth_type = self.llm_config.get("认证方式", "bearer")
         if auth_type == "bce":
             import base64
+
             auth_str = f"{api_key}:{api_key}"
             b64_auth = base64.b64encode(auth_str.encode()).decode()
             auth_headers = {"Authorization": f"Basic {b64_auth}"}
@@ -1201,10 +1230,7 @@ class OpenAIChatWorker(QThread):
             self._permission_cache.deny(tool_name)
 
     def approve_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
-        if (
-                self._permission_pending
-                and self._permission_pending.get("tool_call_id") == tool_call_id
-        ):
+        if self._permission_pending and self._permission_pending.get("tool_call_id") == tool_call_id:
             tool_name = self._permission_pending.get("tool_name", "")
             if auto_allow:
                 self._permission_cache.allow_round(tool_name)
@@ -1214,10 +1240,7 @@ class OpenAIChatWorker(QThread):
             self._permission_pending = None
 
     def deny_permission(self, tool_call_id: str):
-        if (
-                self._permission_pending
-                and self._permission_pending.get("tool_call_id") == tool_call_id
-        ):
+        if self._permission_pending and self._permission_pending.get("tool_call_id") == tool_call_id:
             self._permission_approved = False
             self._permission_pending = None
 
@@ -1258,10 +1281,12 @@ class OpenAIChatWorker(QThread):
                 self._clear_pending_response_state()
 
                 # [MEM] API 调用前
-                self._mem_snapshot("before_api_call",
+                self._mem_snapshot(
+                    "before_api_call",
                     msg_count=len(current_messages),
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
-                    session_count=len(current_session_messages))
+                    session_count=len(current_session_messages),
+                )
 
                 # ⚠️ 客户端主动循环检测：避免触发 Qwen/DashScope 的 Repetitive tool calls 错误
                 # Qwen 服务端会拒绝"连续多轮相同 (name, args) 的工具调用"，返回 400。
@@ -1272,8 +1297,7 @@ class OpenAIChatWorker(QThread):
                 if loop_detected:
                     # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
                     logger.warning(
-                        f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，"
-                        f"静默清理重复轮次后继续。"
+                        f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，静默清理重复轮次后继续。"
                     )
                     current_session_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
                         current_session_messages, self._TOOL_LOOP_THRESHOLD
@@ -1310,7 +1334,7 @@ class OpenAIChatWorker(QThread):
                     try:
                         model_name = str(self.llm_config.get("model", "") or "gpt-4")
                         ctx_count = count_messages_tokens(current_messages, model=model_name)
-                    except (ValueError, TypeError, RuntimeError):
+                    except ValueError, TypeError, RuntimeError:
                         ctx_count = 0
                 if ctx_count > 0 and budget > 0:
                     self.context_updated.emit(ctx_count, budget)
@@ -1326,12 +1350,14 @@ class OpenAIChatWorker(QThread):
                     return
 
                 # [MEM] API 返回后
-                self._mem_snapshot("after_api_call",
+                self._mem_snapshot(
+                    "after_api_call",
                     tool_calls_found=tool_calls_found,
                     tool_args_pending=tool_args_pending,
                     resp_chunks=len(self._response_chunks),
                     resp_blocks=len(self._response_content_blocks),
-                    msg_count=len(current_messages))
+                    msg_count=len(current_messages),
+                )
 
                 if not tool_calls_found:
                     response_sequence = self._build_response_message_sequence()
@@ -1341,7 +1367,7 @@ class OpenAIChatWorker(QThread):
                     # 更新 API 消息缓存：追加响应消息
                     self._append_to_api_cache(response_sequence)
                     # 性能优化：在发送前才合成完整响应字符串
-                    self.full_response = ''.join(self._response_chunks)
+                    self.full_response = "".join(self._response_chunks)
 
                     # ====== PostAssistantMessage hook：assistant 响应后触发 ======
                     self._trigger_worker_hook(
@@ -1373,30 +1399,24 @@ class OpenAIChatWorker(QThread):
                     # 处理 block：第一次（_stop_hook_active=False）时真正强制续命
                     if block_reason and not self._stop_hook_active:
                         # 1. 构造合成 user message（来自 hook 的 reason 字段）
-                        synthetic_msg = self._build_stop_block_synthetic_user_message(
-                            block_reason
-                        )
+                        synthetic_msg = self._build_stop_block_synthetic_user_message(block_reason)
                         # 2. 追加到所有消息列表
                         current_messages.append(synthetic_msg)
                         current_session_messages.append(synthetic_msg)
                         self._current_session_messages.append(synthetic_msg)
                         # 3. 追加到 API 缓存（用 to_api_message 转换）
-                        api_synthetic = to_api_message(
-                            synthetic_msg, supports_vision=self._supports_vision
-                        )
+                        api_synthetic = to_api_message(synthetic_msg, supports_vision=self._supports_vision)
                         if self._api_messages_cache is not None:
                             self._api_messages_cache.append(api_synthetic)
                         # 4. 翻转 _stop_hook_active：下一轮 Stop 触发时 hook 端会看到 true
                         self._stop_hook_active = True
                         # 5. 发射 finished_with_messages 让 UI 看到合成消息（可选）
                         self._emit_with_callback(
-                            "finished_with_messages", self.finished_with_messages,
+                            "finished_with_messages",
+                            self.finished_with_messages,
                             current_session_messages,
                         )
-                        logger.info(
-                            f"[Stop hook] BLOCK detected, force continuation. "
-                            f"reason_len={len(block_reason)}"
-                        )
+                        logger.info(f"[Stop hook] BLOCK detected, force continuation. reason_len={len(block_reason)}")
                         # 6. 清理 pending state 后回到 while 顶部重跑 API
                         self._clear_pending_response_state()
                         continue  # 跳回 while 顶部，再来一轮
@@ -1404,8 +1424,9 @@ class OpenAIChatWorker(QThread):
                     # 真正结束：重置状态（无论本次是否 block）
                     self._stop_hook_active = False
 
-                    self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                             current_session_messages)
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
                     # 🔧 修复：先保存 full_response，再清理状态（_clear_pending_response_state
                     # 内部的 _sync_state_from_state 会用 state 中的旧值覆盖 self.full_response）
                     final_response = self.full_response
@@ -1415,9 +1436,7 @@ class OpenAIChatWorker(QThread):
 
                 # [MEM] 执行工具前
                 tool_count = len(self._current_tool_calls) if self._current_tool_calls else 0
-                self._mem_snapshot("before_tool_exec",
-                    tool_count=tool_count,
-                    msg_count=len(current_messages))
+                self._mem_snapshot("before_tool_exec", tool_count=tool_count, msg_count=len(current_messages))
 
                 tool_results = self._execute_all_tools()
 
@@ -1452,16 +1471,23 @@ class OpenAIChatWorker(QThread):
                     }
                     # 发射 tool_result_received，让 UI 在助理卡片中渲染可折叠工具块
                     result_obj = {"success": True, "content": self._pending_answer}
-                    self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                             q["tool_call_id"], "question", question_args, result_obj)
+                    self._emit_with_callback(
+                        "tool_result_received",
+                        self.tool_result_received,
+                        q["tool_call_id"],
+                        "question",
+                        question_args,
+                        result_obj,
+                    )
                     response_sequence = self._build_response_message_sequence([question_result])
                     current_messages.extend(response_sequence)
                     current_session_messages.extend(response_sequence)
                     self._current_session_messages = list(current_session_messages)
                     # 更新 API 消息缓存
                     self._append_to_api_cache(response_sequence)
-                    self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                             current_session_messages)
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
                     self._question_pending = None
                     self._pending_answer = None
                     self._answer_event.clear()
@@ -1471,11 +1497,15 @@ class OpenAIChatWorker(QThread):
                 result_count = len(tool_results) if tool_results else 0
                 tool_names = [r.get("name", "?") for r in (tool_results or [])[:3]]
                 tool_result_sizes = sum(len(str(r.get("content", ""))) for r in (tool_results or []))
-                self._mem_snapshot("after_tool_exec",
+                self._mem_snapshot(
+                    "after_tool_exec",
                     result_count=result_count,
                     tool_names=",".join(tool_names),
-                    result_sizes=f"{tool_result_sizes // 1024}KB" if tool_result_sizes > 1024 else f"{tool_result_sizes}B",
-                    msg_count=len(current_messages))
+                    result_sizes=f"{tool_result_sizes // 1024}KB"
+                    if tool_result_sizes > 1024
+                    else f"{tool_result_sizes}B",
+                    msg_count=len(current_messages),
+                )
 
                 # ========== 工具结果持久化 (入口管控) ==========
                 # 借鉴 Claude Code: 单结果 > 50K 字符 / 消息级 > 200K 字符 -> 落盘
@@ -1522,16 +1552,19 @@ class OpenAIChatWorker(QThread):
 
                 # ========== 视觉模型注入：截图/read图片 → base64 图片 ==========
                 vision_injected = self._try_inject_vision_content(
-                    tool_results, current_messages,
+                    tool_results,
+                    current_messages,
                     session_messages=current_session_messages,
                 )
                 # =====================================================
 
                 # [MEM] 消息构建后
-                self._mem_snapshot("after_build_msg",
+                self._mem_snapshot(
+                    "after_build_msg",
                     msg_count=len(current_messages),
                     session_count=len(current_session_messages),
-                    api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0)
+                    api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
+                )
 
                 # ========== 工具迭代中压缩 ==========
                 # 在每次 API 调用前检查是否需要压缩
@@ -1562,20 +1595,22 @@ class OpenAIChatWorker(QThread):
                     # 注意：如果 _try_inject_vision_content 已重建完整缓存，跳过追加避免重复
                     if not vision_injected:
                         self._append_to_api_cache(response_sequence)
-                self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                         current_session_messages)
+                self._emit_with_callback(
+                    "finished_with_messages", self.finished_with_messages, current_session_messages
+                )
 
                 # ========== 迭代结束：内存快照 ==========
                 self._mem_diag_iter_count += 1
                 _was_compacted = (  # 检测本轮是否执行了压缩
-                    'compacted' in locals()
-                    and locals().get('compacted') is not None
+                    "compacted" in locals() and locals().get("compacted") is not None
                 )
-                self._mem_snapshot("end_iter",
+                self._mem_snapshot(
+                    "end_iter",
                     msg_count=len(current_messages),
                     session_count=len(current_session_messages),
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
-                    compacted="yes" if _was_compacted else "no")
+                    compacted="yes" if _was_compacted else "no",
+                )
                 # 每 3 轮触发一次 GC，帮助回收循环引用
                 # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免 stop-the-world GC 阻塞 UI
                 if self._mem_diag_enabled and self._mem_diag_iter_count % 3 == 0:
@@ -1593,8 +1628,10 @@ class OpenAIChatWorker(QThread):
                 # ====== Stop hook：异常退出前触发 ======
                 # 异常路径：消费 block_reason 但不强制续命（与 cancel 路径一致）
                 # 理由：API 已异常，继续调用大概率再次失败，无意义
-                _cur_msgs = current_messages if 'current_messages' in locals() else self.messages
-                _cur_session = current_session_messages if 'current_session_messages' in locals() else list(self.session_messages)
+                _cur_msgs = current_messages if "current_messages" in locals() else self.messages
+                _cur_session = (
+                    current_session_messages if "current_session_messages" in locals() else list(self.session_messages)
+                )
                 self._trigger_worker_hook(
                     "Stop",
                     _cur_msgs,
@@ -1614,8 +1651,9 @@ class OpenAIChatWorker(QThread):
                 self._current_session_messages = list(current_session_messages)
                 # 只发射 finished_with_messages（保存消息到会话），不发射 finished_with_content
                 # （避免 UI 将其视为正常完成）
-                self._emit_with_callback("finished_with_messages", self.finished_with_messages,
-                                         current_session_messages)
+                self._emit_with_callback(
+                    "finished_with_messages", self.finished_with_messages, current_session_messages
+                )
             except Exception as save_err:
                 logger.warning(f"[ChatWorker] Failed to save partial messages on error: {save_err}")
             self._handle_error(e)
@@ -1867,14 +1905,13 @@ class OpenAIChatWorker(QThread):
                         ]
                         msg["content"] = content
                     elif isinstance(content, list):
-                        content.append(
-                            {"type": "image_url", "image_url": {"url": data_uri}}
-                        )
+                        content.append({"type": "image_url", "image_url": {"url": data_uri}})
                 return True
         return False
 
-    def _try_inject_vision_content(self, tool_results, current_messages,
-                                   session_messages: Optional[List[Dict]] = None) -> bool:
+    def _try_inject_vision_content(
+        self, tool_results, current_messages, session_messages: Optional[List[Dict]] = None
+    ) -> bool:
         """
         截图/read 图片工具结果在视觉模型 → 将图片以 base64 注入到最后一个用户消息。
 
@@ -1905,6 +1942,7 @@ class OpenAIChatWorker(QThread):
 
         # ---- 收集所有可注入的图片 data_uri ----
         import base64
+
         data_uris = []
 
         for r in tool_results:
@@ -1925,11 +1963,12 @@ class OpenAIChatWorker(QThread):
                     elif isinstance(content, str):
                         if content.startswith("{") and "absolute_path" in content:
                             import ast
+
                             try:
                                 d = ast.literal_eval(content)
                                 if isinstance(d, dict):
                                     img_path = d.get("absolute_path") or d.get("path")
-                            except (ValueError, SyntaxError):
+                            except ValueError, SyntaxError:
                                 pass
                         if not img_path:
                             m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -1940,8 +1979,14 @@ class OpenAIChatWorker(QThread):
                         with open(img_path, "rb") as f:
                             img_data = base64.b64encode(f.read()).decode("utf-8")
                         ext = os.path.splitext(img_path)[1].lower()
-                        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                                    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+                        mime_map = {
+                            ".png": "image/png",
+                            ".jpg": "image/jpeg",
+                            ".jpeg": "image/jpeg",
+                            ".gif": "image/gif",
+                            ".webp": "image/webp",
+                            ".bmp": "image/bmp",
+                        }
                         mime = mime_map.get(ext, "image/png")
                         data_uris.append(f"data:{mime};base64,{img_data}")
                     except Exception as e:
@@ -1955,9 +2000,7 @@ class OpenAIChatWorker(QThread):
                     data = img_data.get("data", "")
                     if data:
                         data_uris.append(f"data:{mime};base64,{data}")
-                        logger.debug(
-                            f"[Vision] read 图片注入: mime={mime}, base64_len={len(data)}"
-                        )
+                        logger.debug(f"[Vision] read 图片注入: mime={mime}, base64_len={len(data)}")
 
         if not data_uris:
             return False
@@ -1971,9 +2014,7 @@ class OpenAIChatWorker(QThread):
         if session_messages is not None:
             self._inject_images_to_user_message(session_messages, data_uris)
 
-        logger.info(
-            f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}"
-        )
+        logger.info(f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}")
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
         # 但 _api_messages_cache 仍是旧版本（无图片）。
@@ -2024,10 +2065,7 @@ class OpenAIChatWorker(QThread):
         # 这种情况下直接返回无需修复
         if not valid_tool_call_ids:
             # 检查是否有 assistant 消息包含 tool_calls
-            has_tool_calls = any(
-                msg.get("role") == "assistant" and msg.get("tool_calls")
-                for msg in messages
-            )
+            has_tool_calls = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in messages)
             if has_tool_calls:
                 logger.warning("[ToolCall修复] 检测到用户中断场景：assistant 有 tool_calls 但无任何 tool 结果")
                 # 移除所有 assistant 消息中的 tool_calls
@@ -2203,9 +2241,9 @@ class OpenAIChatWorker(QThread):
                 error_str = str(e)
                 # 检测 tool call result 错误码 2013
                 is_tool_call_order_error = (
-                        "2013" in error_str or
-                        "tool call result does not follow tool call" in error_str.lower() or
-                        "tool_calls" in error_str.lower()
+                    "2013" in error_str
+                    or "tool call result does not follow tool call" in error_str.lower()
+                    or "tool_calls" in error_str.lower()
                 )
 
                 if is_tool_call_order_error and attempt < max_retries - 1:
@@ -2230,7 +2268,9 @@ class OpenAIChatWorker(QThread):
                         logger.error("[API] 无法自动修复 tool call result 顺序问题 - 可能需要查看上面的消息结构")
 
                 # 检测 Missing required arguments 错误（工具参数丢失）
-                is_missing_args_error = "Missing required arguments" in error_str or "missing a required argument" in error_str.lower()
+                is_missing_args_error = (
+                    "Missing required arguments" in error_str or "missing a required argument" in error_str.lower()
+                )
 
                 if is_missing_args_error and attempt < max_retries - 1:
                     logger.warning("[API] 检测到工具参数丢失错误，尝试从历史消息中恢复...")
@@ -2268,15 +2308,20 @@ class OpenAIChatWorker(QThread):
                 is_retryable_protocol = isinstance(e, (httpx.ProtocolError, httpcore.ProtocolError))
                 is_rate_limit = isinstance(e, RateLimitError)
                 is_server_overload = isinstance(e, APIError) and (
-                        "2064" in error_str or "overload" in error_str.lower())
+                    "2064" in error_str or "overload" in error_str.lower()
+                )
                 is_conn_error = isinstance(e, APIConnectionError)
                 # 通用 5xx：服务端临时故障（如 MiniMax 的 999/1000、OpenAI 500）应重试
                 is_internal_server_error = isinstance(e, InternalServerError)
 
                 should_retry = (
-                        is_rate_limit or is_server_overload or is_conn_error or
-                        is_retryable_network or is_retryable_timeout or is_retryable_protocol or
-                        is_internal_server_error
+                    is_rate_limit
+                    or is_server_overload
+                    or is_conn_error
+                    or is_retryable_network
+                    or is_retryable_timeout
+                    or is_retryable_protocol
+                    or is_internal_server_error
                 )
 
                 if should_retry and attempt < max_retries - 1:
@@ -2325,7 +2370,7 @@ class OpenAIChatWorker(QThread):
             return False, False
         try:
             return self._process_response(response)
-        except (httpx.ReadError, httpcore.ReadError):
+        except httpx.ReadError, httpcore.ReadError:
             # 🛡️ 连接关闭异常（由 cancel() 关闭 HTTP 连接导致），视为用户取消
             # 此时 _response_chunks 和 _response_content_blocks 已有全部已接收数据，
             # 后续由 run() 中的 if self._is_cancelled: 分支保存 partial 响应
@@ -2410,7 +2455,9 @@ class OpenAIChatWorker(QThread):
             if self._is_cancelled:
                 # 🛡️ 取消前刷新待处理的 content/reasoning 批次，避免丢失最后一批内容
                 if _reasoning_batch:
-                    self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
+                    self._emit_with_callback(
+                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                    )
                     _reasoning_batch = ""
                 if _content_batch:
                     self._emit_with_callback("content_received", self.content_received, _content_batch)
@@ -2420,7 +2467,7 @@ class OpenAIChatWorker(QThread):
             # 兼容新模型（如 GPT-5.5）：流式响应可能包含 choices 为空的 chunk
             # （例如 usage 事件、ping 事件等），直接跳过即可
             if not chunk.choices:
-                #但仍需检查 usage 信息（部分模型在空 choices 的 chunk 中携带 usage）
+                # 但仍需检查 usage 信息（部分模型在空 choices 的 chunk 中携带 usage）
                 usage = getattr(chunk, "usage", None)
                 if usage:
                     self._last_usage = {
@@ -2516,21 +2563,23 @@ class OpenAIChatWorker(QThread):
                             }
 
                         if (
-                                tool_name
-                                and tool_name not in self._DEFERRED_PREVIEW_TOOLS
-                                and tc_id not in self._previewed_tool_call_ids
+                            tool_name
+                            and tool_name not in self._DEFERRED_PREVIEW_TOOLS
+                            and tc_id not in self._previewed_tool_call_ids
                         ):
                             self._previewed_tool_call_ids.add(tc_id)
                             # preview 阶段：arguments 可能还没接收完，显示 "加载中..." 而不是空 {}
                             preview_args = {"_status": "loading", "_preview_hint": "参数接收中..."}
                             if self.tool_start_callback:
-                                self.tool_start_callback(
-                                    tc_id, tool_name, preview_args, "preview"
-                                )
+                                self.tool_start_callback(tc_id, tool_name, preview_args, "preview")
                             else:
                                 self._emit_with_callback(
-                                    "tool_call_started", self.tool_call_started,
-                                    tc_id, tool_name, preview_args, "preview"
+                                    "tool_call_started",
+                                    self.tool_call_started,
+                                    tc_id,
+                                    tool_name,
+                                    preview_args,
+                                    "preview",
                                 )
                     if tc.function and tc.function.arguments:
                         # ⚠️ Qwen 末尾 chunk 的 arguments=null，跳过避免 TypeError
@@ -2552,7 +2601,8 @@ class OpenAIChatWorker(QThread):
                                 # 更新 _current_tool_calls 中对应 id 的 arguments
                                 if tc_id in self._current_tool_calls:
                                     self._current_tool_calls[tc_id]["function"]["arguments"] = buffer["function"][
-                                        "arguments"]
+                                        "arguments"
+                                    ]
                                 # 标记已完成解析（用于决定是否发送 tool_call_started）
                                 self._current_tool_calls[tc_id]["_args_parsed"] = True
                                 self._tool_calls_buffer.pop(tc_id, None)
@@ -2560,8 +2610,7 @@ class OpenAIChatWorker(QThread):
                                 # 使用 buffer 中的 name 而非局部 tool_name（后续 chunk 可能不含 name 字段）
                                 _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
-                                    "tool_args_updated", self.tool_args_updated,
-                                    tc_id, _buf_name or "工具", parsed_args
+                                    "tool_args_updated", self.tool_args_updated, tc_id, _buf_name or "工具", parsed_args
                                 )
                             except json.JSONDecodeError:
                                 # 短参数的 JSON 解析失败，记录到等待队列
@@ -2569,15 +2618,18 @@ class OpenAIChatWorker(QThread):
                                 prev = self._last_progress_len.get(tc_id, 0)
                                 if not prev or args_len - prev >= 200:
                                     self._last_progress_len[tc_id] = args_len
-                                    tail = buffer["function"]["arguments"][-40:].replace('\n', ' ')
+                                    tail = buffer["function"]["arguments"][-40:].replace("\n", " ")
                                     progress_args = {
                                         "_status": "loading",
                                         "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                     }
                                     _buf_name = buffer["function"].get("name", tool_name)
                                     self._emit_with_callback(
-                                        "tool_args_updated", self.tool_args_updated,
-                                        tc_id, _buf_name or "工具", progress_args
+                                        "tool_args_updated",
+                                        self.tool_args_updated,
+                                        tc_id,
+                                        _buf_name or "工具",
+                                        progress_args,
                                     )
                                 if tc_id not in self._waiting_tool_params:
                                     self._waiting_tool_params[tc_id] = {
@@ -2593,15 +2645,18 @@ class OpenAIChatWorker(QThread):
                             if not prev or args_len - prev >= 500:
                                 self._last_progress_len[tc_id] = args_len
                                 # 取累积参数末尾 50 字符作为实时预览（最新到达的内容）
-                                tail = buffer["function"]["arguments"][-50:].replace('\n', ' ')
+                                tail = buffer["function"]["arguments"][-50:].replace("\n", " ")
                                 progress_args = {
                                     "_status": "loading",
                                     "_preview_hint": f"接收参数中({args_len}字符):{tail}",
                                 }
                                 _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
-                                    "tool_args_updated", self.tool_args_updated,
-                                    tc_id, _buf_name or "工具", progress_args
+                                    "tool_args_updated",
+                                    self.tool_args_updated,
+                                    tc_id,
+                                    _buf_name or "工具",
+                                    progress_args,
                                 )
                             # 放入等待队列，等流结束后一次性解析
                             if tc_id not in self._waiting_tool_params:
@@ -2624,17 +2679,16 @@ class OpenAIChatWorker(QThread):
                 _reasoning_batch += reasoning_delta
                 now = time.time()
                 if len(_reasoning_batch) >= 10 or (now - _reasoning_batch_time) > 0.05:
-                    self._emit_with_callback("reasoning_content_received", self.reasoning_content_received,
-                                             _reasoning_batch)
+                    self._emit_with_callback(
+                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                    )
                     _reasoning_batch = ""
                     _reasoning_batch_time = now
 
             if content:
                 # 性能优化：使用 list append + join 代替字符串拼接
                 self._response_chunks.append(content)
-                self._response_content_blocks = append_text_block(
-                    self._response_content_blocks, content
-                )
+                self._response_content_blocks = append_text_block(self._response_content_blocks, content)
                 # 批量发送：积累到 15 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
                 _content_batch += content
                 now = time.time()
@@ -2691,10 +2745,11 @@ class OpenAIChatWorker(QThread):
                         _delta = _gc_rss - self._streaming_rss_base
                         try:
                             import ctypes
+
                             gc.collect()  # 双重 gc.collect 触发 pymalloc arena 合并
-                            msvcrt = ctypes.CDLL('msvcrt.dll')
+                            msvcrt = ctypes.CDLL("msvcrt.dll")
                             msvcrt._heapmin()
-                            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+                            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
                             heap = kernel32.GetProcessHeap()
                             if heap:
                                 kernel32.HeapCompact(heap, 0)
@@ -2892,9 +2947,10 @@ class OpenAIChatWorker(QThread):
         self._emit_with_callback(
             "tool_result_received",
             self.tool_result_received,
-            tool_call_id, tool_name, args,
-            type("ToolResult", (),
-                 {"success": False, "content": None, "error": "用户中止"})(),
+            tool_call_id,
+            tool_name,
+            args,
+            type("ToolResult", (), {"success": False, "content": None, "error": "用户中止"})(),
         )
 
     def _execute_tools_sequential(self, tool_calls):
@@ -2947,17 +3003,19 @@ class OpenAIChatWorker(QThread):
                 return self._handle_question_tool(tool_call_id, arguments)
 
             # ====== 执行工具 ======
-            result_obj, result_content, success = self._execute_tool(
-                tool_name, arguments, tool_call_id
-            )
+            result_obj, result_content, success = self._execute_tool(tool_name, arguments, tool_call_id)
             if result_obj is self._TOOL_CANCELLED:
                 return None
 
             # ====== 发射结果 ======
-            self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                     tool_call_id, tool_name, arguments, result_obj)
-            results.append(self._build_result_dict(tool_call_id, tool_name, arguments, result_content,
-                                                   success, round_id, result_obj))
+            self._emit_with_callback(
+                "tool_result_received", self.tool_result_received, tool_call_id, tool_name, arguments, result_obj
+            )
+            results.append(
+                self._build_result_dict(
+                    tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj
+                )
+            )
 
         return results
 
@@ -2986,7 +3044,9 @@ class OpenAIChatWorker(QThread):
 
             # JSON 参数解析
             if isinstance(arguments_str, str):
-                parsed, err_result = self._parse_tool_arguments(arguments_str, tool_name, arguments_str, tool_call_id, round_id)
+                parsed, err_result = self._parse_tool_arguments(
+                    arguments_str, tool_name, arguments_str, tool_call_id, round_id
+                )
                 if parsed is None:
                     if err_result:
                         pre_results.append(err_result)
@@ -3009,14 +3069,16 @@ class OpenAIChatWorker(QThread):
         # ====== Phase 2: 并行执行 ======
         parallel_results = []
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(len(tasks), 8)
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
             future_map = {}
             for idx, tool_name, tool_call_id, arguments, round_id in tasks:
                 future = executor.submit(
                     self._execute_one_tool_parallel,
-                    tool_name, tool_call_id, arguments, round_id, idx,
+                    tool_name,
+                    tool_call_id,
+                    arguments,
+                    round_id,
+                    idx,
                 )
                 future_map[future] = idx
 
@@ -3029,7 +3091,8 @@ class OpenAIChatWorker(QThread):
                         f.cancel()  # 取消尚未启动的任务
                     break
                 done, pending = concurrent.futures.wait(
-                    pending, timeout=0.5,
+                    pending,
+                    timeout=0.5,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 for future in done:
@@ -3084,21 +3147,28 @@ class OpenAIChatWorker(QThread):
 
     def _build_json_parse_error(self, tool_name, raw_args, tool_call_id, round_id, error_msg):
         """构建 JSON 解析失败的错误结果并发射信号"""
-        logger.warning(f"[ToolCall] ⚠️ JSON 解析失败且无法修复，tool={tool_name}, error={error_msg}, "
-                       f"preview='{raw_args[:200]}...'")
+        logger.warning(
+            f"[ToolCall] ⚠️ JSON 解析失败且无法修复，tool={tool_name}, error={error_msg}, preview='{raw_args[:200]}...'"
+        )
         preview_args = {"_raw_args": raw_args[:500], "_status": "parse_failed"}
         self._emit_tool_started(tool_call_id, tool_name, preview_args, round_id)
         error_result = {
-            "success": False, "content": None,
+            "success": False,
+            "content": None,
             "error": f"[参数错误] JSON 格式无效: {error_msg}\n"
-                     f"工具: {tool_name}\n原始内容(前500字): {raw_args[:500]}...",
+            f"工具: {tool_name}\n原始内容(前500字): {raw_args[:500]}...",
         }
-        self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                 tool_call_id, tool_name, preview_args, error_result)
+        self._emit_with_callback(
+            "tool_result_received", self.tool_result_received, tool_call_id, tool_name, preview_args, error_result
+        )
         return {
-            "role": "tool", "tool_call_id": tool_call_id, "name": tool_name,
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
             "arguments": {"_raw_args": raw_args[:500]},
-            "content": error_result["error"], "success": False, "round_id": round_id,
+            "content": error_result["error"],
+            "success": False,
+            "round_id": round_id,
         }
 
     def _check_required_args(self, tool_name, arguments, tool_call_id, round_id, original_args_str):
@@ -3108,13 +3178,16 @@ class OpenAIChatWorker(QThread):
         if missing_args:
             logger.warning(f"[ToolCall] ⚠️ 缺少必需参数: tool={tool_name}, missing={missing_args}")
             error_result = {
-                "success": False, "content": None,
+                "success": False,
+                "content": None,
                 "error": f"[参数缺失] 缺少必需参数: {missing_args}\n工具: {tool_name}",
             }
-            self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                     tool_call_id, tool_name, arguments, error_result)
+            self._emit_with_callback(
+                "tool_result_received", self.tool_result_received, tool_call_id, tool_name, arguments, error_result
+            )
             return {
-                "role": "tool", "tool_call_id": tool_call_id,
+                "role": "tool",
+                "tool_call_id": tool_call_id,
                 "content": f"Error: Missing required arguments: {missing_args}",
                 "round_id": round_id,
             }
@@ -3125,18 +3198,21 @@ class OpenAIChatWorker(QThread):
         if self.tool_start_callback:
             self.tool_start_callback(tool_call_id, tool_name, arguments, round_id)
         else:
-            self._emit_with_callback("tool_call_started", self.tool_call_started,
-                                     tool_call_id, tool_name, arguments, round_id)
+            self._emit_with_callback(
+                "tool_call_started", self.tool_call_started, tool_call_id, tool_name, arguments, round_id
+            )
 
     def _handle_question_tool(self, tool_call_id, arguments):
         """处理 question 工具调用（阻塞等待用户回答）"""
         questions = arguments.get("questions", [])
         if not questions and "question" in arguments:
-            questions = [{
-                "question": arguments["question"],
-                "options": arguments.get("options", []),
-                "multiple": arguments.get("multiple", False),
-            }]
+            questions = [
+                {
+                    "question": arguments["question"],
+                    "options": arguments.get("options", []),
+                    "multiple": arguments.get("multiple", False),
+                }
+            ]
         # 规范化选项格式
         for q in questions:
             opts = q.get("options", [])
@@ -3191,14 +3267,22 @@ class OpenAIChatWorker(QThread):
         if permission_result == "deny":
             # 🛡️ 工具被关闭/禁用：直接拒绝执行，追加错误结果，通知 UI
             logger.info(f"[Permission] tool={tool_name} 被拒绝（工具开关关闭）")
-            self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                     tool_call_id, tool_name, arguments,
-                                     type("ToolResult", (),
-                                          {"success": False, "error": f"Tool '{tool_name}' is disabled by tool toggle"})())
-            results.append({
-                "role": "tool", "tool_call_id": tool_call_id,
-                "content": f"Error: Tool '{tool_name}' is disabled (set tool_toggles to enable)", "round_id": round_id,
-            })
+            self._emit_with_callback(
+                "tool_result_received",
+                self.tool_result_received,
+                tool_call_id,
+                tool_name,
+                arguments,
+                type("ToolResult", (), {"success": False, "error": f"Tool '{tool_name}' is disabled by tool toggle"})(),
+            )
+            results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": f"Error: Tool '{tool_name}' is disabled (set tool_toggles to enable)",
+                    "round_id": round_id,
+                }
+            )
             return True  # 已处理，继续对话（工具不会真正执行）
 
         if permission_result == "ask":
@@ -3207,37 +3291,53 @@ class OpenAIChatWorker(QThread):
                 # 再次检查缓存（可能已被其他线程处理）
                 if self._permission_cache.is_allowed(tool_name):
                     return True
-                self._emit_with_callback("permission_approval_requested",
-                                         self.permission_approval_requested,
-                                         tool_call_id, tool_name, arguments)
+                self._emit_with_callback(
+                    "permission_approval_requested",
+                    self.permission_approval_requested,
+                    tool_call_id,
+                    tool_name,
+                    arguments,
+                )
                 self._permission_pending = {
-                    "tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": arguments,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
                 }
                 self._permission_approved = False
             # 锁在 while 循环前释放，避免阻塞主线程调用 approve_permission/deny_permission
             # 性能优化：移除后台线程中的 processEvents()
             # processEvents() 在非主线程调用会导致信号丢失、死锁等问题
             # UI 响应应通过信号-槽机制自然处理
-            while (self._permission_pending is not None
-                   and not self._is_cancelled
-                   and not self._tool_execution_cancelled):
+            while (
+                self._permission_pending is not None and not self._is_cancelled and not self._tool_execution_cancelled
+            ):
                 # if not self._legacy_direct_callbacks:
                 #     QApplication.processEvents()  # 移除：后台线程不应调用 processEvents()
                 time.sleep(0.1)  # 保留 sleep 用于轮询等待用户授权
 
             if self._is_cancelled or self._tool_execution_cancelled:
-                self._emit_cancelled_tool_result({"id": tool_call_id, "function": {"name": tool_name, "arguments": "{}"}})
+                self._emit_cancelled_tool_result(
+                    {"id": tool_call_id, "function": {"name": tool_name, "arguments": "{}"}}
+                )
                 return False
 
             if not self._permission_approved:
-                self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                         tool_call_id, tool_name, arguments,
-                                         type("ToolResult", (),
-                                              {"success": False, "error": "Permission denied by user"})())
-                results.append({
-                    "role": "tool", "tool_call_id": tool_call_id,
-                    "content": "Error: Permission denied by user", "round_id": round_id,
-                })
+                self._emit_with_callback(
+                    "tool_result_received",
+                    self.tool_result_received,
+                    tool_call_id,
+                    tool_name,
+                    arguments,
+                    type("ToolResult", (), {"success": False, "error": "Permission denied by user"})(),
+                )
+                results.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": "Error: Permission denied by user",
+                        "round_id": round_id,
+                    }
+                )
                 return True  # 已处理，继续（但不会执行工具）
 
         return True  # 允许执行
@@ -3245,17 +3345,20 @@ class OpenAIChatWorker(QThread):
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""
         try:
-            result = self.tool_executor.execute(
-                tool_name, arguments, call_id=tool_call_id
-            )
+            result = self.tool_executor.execute(tool_name, arguments, call_id=tool_call_id)
         except Exception as e:
             logger.exception(f"[Tool] Tool '{tool_name}' execution failed: {e}")
             return None, f"Tool execution error: {str(e)}", False
 
         if self._is_cancelled or self._tool_execution_cancelled:
-            self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                     tool_call_id, tool_name, arguments,
-                                     {"success": False, "content": None, "error": "用户中止"})
+            self._emit_with_callback(
+                "tool_result_received",
+                self.tool_result_received,
+                tool_call_id,
+                tool_name,
+                arguments,
+                {"success": False, "content": None, "error": "用户中止"},
+            )
             return self._TOOL_CANCELLED, None, None
 
         result_content = str(result) if result else ""
@@ -3282,6 +3385,9 @@ class OpenAIChatWorker(QThread):
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
             "image_data": getattr(result_obj, "image_data", None) if result_obj else None,
+            # LSP 诊断文本：to_api_message 会拼接到 content 末尾供 LLM 当前轮次查看，
+            # normalize_message 不保留此字段，session 历史消息不含诊断文本
+            "lsp_diagnostic": getattr(result_obj, "lsp_diagnostic", None) if result_obj else None,
         }
         if raw_content is not None:
             result["raw_content"] = raw_content
@@ -3324,16 +3430,15 @@ class OpenAIChatWorker(QThread):
                 return results_placeholder[0]  # 权限拒绝的结果
 
             # ====== 执行工具 ======
-            result_obj, result_content, success = self._execute_tool(
-                tool_name, arguments, tool_call_id
-            )
+            result_obj, result_content, success = self._execute_tool(tool_name, arguments, tool_call_id)
             if result_obj is self._TOOL_CANCELLED:
                 return None
 
             # ====== 发射结果信号（非关键，失败不阻断） ======
             try:
-                self._emit_with_callback("tool_result_received", self.tool_result_received,
-                                         tool_call_id, tool_name, arguments, result_obj)
+                self._emit_with_callback(
+                    "tool_result_received", self.tool_result_received, tool_call_id, tool_name, arguments, result_obj
+                )
             except Exception as e:
                 logger.warning(f"[ToolCall] 发射 tool_result_received 失败: {e}")
 
@@ -3344,8 +3449,7 @@ class OpenAIChatWorker(QThread):
         except Exception as e:
             logger.error(f"[ToolCall] 并行工具执行异常: tool={tool_name}, error={e}")
             return self._build_result_dict(
-                tool_call_id, tool_name, arguments,
-                f"Tool execution error: {str(e)}", False, round_id, None
+                tool_call_id, tool_name, arguments, f"Tool execution error: {str(e)}", False, round_id, None
             )
 
     def _handle_error(self, error):
@@ -3359,19 +3463,16 @@ class OpenAIChatWorker(QThread):
 
         error_msg = str(error)
 
-        if (
-                "peer closed connection" in error_msg.lower()
-                or "incomplete chunked read" in error_msg.lower()
-        ):
+        if "peer closed connection" in error_msg.lower() or "incomplete chunked read" in error_msg.lower():
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                "[连接中断] 服务器在响应中途关闭了连接，可能是服务器过载或网络不稳定。请稍后重试。"
+                "error_occurred",
+                self.error_occurred,
+                "[连接中断] 服务器在响应中途关闭了连接，可能是服务器过载或网络不稳定。请稍后重试。",
             )
             return
         if "ProtocolError" in error_msg or "RemoteProtocolError" in error_msg:
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                "[连接错误] 网络协议错误，可能是服务器关闭了连接。请稍后重试。"
+                "error_occurred", self.error_occurred, "[连接错误] 网络协议错误，可能是服务器关闭了连接。请稍后重试。"
             )
             return
 
@@ -3381,91 +3482,102 @@ class OpenAIChatWorker(QThread):
             # 错误消息：Repetitive tool calls detected in the conversation history...
             # 服务端会拒绝"连续多轮相同 (name, arguments) 的工具调用"，
             # 同样的请求序列重试仍会被拒，必须用户介入（修改输入/工具策略）。
-            if any(p in error_msg for p in (
+            if any(
+                p in error_msg
+                for p in (
                     "repetitive tool calls detected",
                     "repetitive tool calls",
                     "identical name and arguments has been repeated",
                     "tool call with identical name",
                     "internalerror.algo.invalidparameter",
-            )):
+                )
+            ):
                 self._emit_with_callback(
-                    "error_occurred", self.error_occurred,
+                    "error_occurred",
+                    self.error_occurred,
                     f"[工具调用循环] 模型在最近几轮反复用相同参数调用同一工具，"
                     f"Qwen/DashScope 服务端主动拒绝了请求（HTTP 400 InternalError.Algo.InvalidParameter）。\n\n"
                     f"原始错误：{error_msg[:300]}\n\n"
                     f"建议：\n"
                     f"  1. 修改输入，明确告诉模型何时该停止调用工具\n"
                     f"  2. 检查工具实现，确保每次返回结果有变化或包含终止信号\n"
-                    f"  3. 重新发起任务（如开启新会话）"
+                    f"  3. 重新发起任务（如开启新会话）",
                 )
                 return
             # 检测参数过大相关错误（不同 provider 的不同错误信息）
-            if any(kw in error_msg.lower() for kw in
-                   ["too large", "too long", "exceeds", "maximum length",
-                    "413", "payload", "request entity"]):
+            if any(
+                kw in error_msg.lower()
+                for kw in ["too large", "too long", "exceeds", "maximum length", "413", "payload", "request entity"]
+            ):
                 self._emit_with_callback(
-                    "error_occurred", self.error_occurred,
+                    "error_occurred",
+                    self.error_occurred,
                     f"[参数过长] 请求参数超出 provider 限制。\n"
                     f"这可能是工具调用的参数（如 write 的 content）过长导致的。\n"
                     f"建议: 减少一次性写入的内容长度，分批写入。\n"
-                    f"详情: {error_msg[:300]}"
+                    f"详情: {error_msg[:300]}",
                 )
             elif "json" in error_msg.lower() or "format" in error_msg.lower():
                 self._emit_with_callback(
-                    "error_occurred", self.error_occurred,
-                    f"[JSON格式错误] 请确保输入有效的JSON格式: {error_msg}"
+                    "error_occurred", self.error_occurred, f"[JSON格式错误] 请确保输入有效的JSON格式: {error_msg}"
                 )
-            elif "tool" in error_msg.lower() and any(kw in error_msg.lower()
-                                                      for kw in ["argument", "parameter", "missing", "required"]):
+            elif "tool" in error_msg.lower() and any(
+                kw in error_msg.lower() for kw in ["argument", "parameter", "missing", "required"]
+            ):
                 self._emit_with_callback(
-                    "error_occurred", self.error_occurred,
+                    "error_occurred",
+                    self.error_occurred,
                     f"[工具参数错误] 模型生成的工具参数不完整或格式错误。\n"
                     f"建议: 重新发送请求重试。\n"
-                    f"详情: {error_msg[:300]}"
+                    f"详情: {error_msg[:300]}",
                 )
             else:
                 self._emit_with_callback("error_occurred", self.error_occurred, f"[请求错误] {error_msg}")
         elif isinstance(error, RateLimitError):
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                f"[速率限制] 请求过于频繁，请稍后再试。详情: {error_msg}"
+                "error_occurred", self.error_occurred, f"[速率限制] 请求过于频繁，请稍后再试。详情: {error_msg}"
             )
         elif isinstance(error, APIConnectionError):
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                f"[连接失败] 无法连接到 API 服务器，请检查网络或 API_URL 设置。详情: {error_msg}"
+                "error_occurred",
+                self.error_occurred,
+                f"[连接失败] 无法连接到 API 服务器，请检查网络或 API_URL 设置。详情: {error_msg}",
             )
         elif isinstance(error, APITimeoutError):
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                f"[超时] 请求超时（300秒），请检查网络或模型负载。详情: {error_msg}"
+                "error_occurred",
+                self.error_occurred,
+                f"[超时] 请求超时（300秒），请检查网络或模型负载。详情: {error_msg}",
             )
         elif isinstance(error, APIError):
             if "context length" in error_msg and "overflow" in error_msg:
                 self._emit_with_callback(
-                    "error_occurred", self.error_occurred,
-                    f"[上下文超限] 输入内容过长，请缩短对话或清除历史记录。详情: {error_msg}"
+                    "error_occurred",
+                    self.error_occurred,
+                    f"[上下文超限] 输入内容过长，请缩短对话或清除历史记录。详情: {error_msg}",
                 )
             elif "insufficient_quota" in error_msg:
                 self._emit_with_callback(
-                    "error_occurred", self.error_occurred,
-                    "[配额不足] API配额已用完，请检查账户余额或更换API Key。"
+                    "error_occurred", self.error_occurred, "[配额不足] API配额已用完，请检查账户余额或更换API Key。"
                 )
             else:
                 self._emit_with_callback("error_occurred", self.error_occurred, f"[API错误] {error_msg}")
         elif "unrecognized_parameter" in error_msg or "extra_parameters" in error_msg:
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                f"[兼容性提示] 当前模型可能不支持某些高级设置（如思考模式或温度）。错误: {error_msg}"
+                "error_occurred",
+                self.error_occurred,
+                f"[兼容性提示] 当前模型可能不支持某些高级设置（如思考模式或温度）。错误: {error_msg}",
             )
         elif "max_tokens" in error_msg.lower() or "context length" in error_msg.lower():
             self._emit_with_callback(
-                "error_occurred", self.error_occurred,
-                "[错误] 模型上下文或最大Token超出限制，请减少输入长度或调低 max_tokens"
+                "error_occurred",
+                self.error_occurred,
+                "[错误] 模型上下文或最大Token超出限制，请减少输入长度或调低 max_tokens",
             )
         elif "authentication" in error_msg.lower() or "api key" in error_msg.lower():
-            self._emit_with_callback("error_occurred", self.error_occurred,
-                                     "[认证错误] API Key无效或已过期，请检查配置。")
+            self._emit_with_callback(
+                "error_occurred", self.error_occurred, "[认证错误] API Key无效或已过期，请检查配置。"
+            )
         else:
             self._emit_with_callback("error_occurred", self.error_occurred, f"[未知错误] {error_msg}")
 
@@ -3507,7 +3619,7 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
     if tool_name == "write":
         content_start = raw_str.find('"content"')
         if content_start >= 0:
-            colon = raw_str.find(':', content_start)
+            colon = raw_str.find(":", content_start)
             if colon >= 0:
                 # 找到 content 值的起始引号
                 first_quote = raw_str.find('"', colon)
@@ -3517,7 +3629,7 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                     content_end = -1
                     i = content_begin
                     while i < len(raw_str):
-                        if raw_str[i] == '\\' and i + 1 < len(raw_str):
+                        if raw_str[i] == "\\" and i + 1 < len(raw_str):
                             i += 2  # 跳过转义序列
                         elif raw_str[i] == '"':
                             content_end = i
@@ -3531,17 +3643,17 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
     if tool_name == "edit":
         ops_start = raw_str.find('"operations"')
         if ops_start >= 0:
-            colon = raw_str.find(':', ops_start)
+            colon = raw_str.find(":", ops_start)
             if colon >= 0:
-                arr_start = raw_str.find('[', colon)
+                arr_start = raw_str.find("[", colon)
                 if arr_start >= 0:
                     # 找匹配的 ]（考虑嵌套）
                     depth = 0
                     arr_end = -1
                     for i in range(arr_start, len(raw_str)):
-                        if raw_str[i] == '[':
+                        if raw_str[i] == "[":
                             depth += 1
-                        elif raw_str[i] == ']':
+                        elif raw_str[i] == "]":
                             depth -= 1
                             if depth == 0:
                                 arr_end = i + 1
@@ -3549,6 +3661,7 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
                     if arr_end > arr_start:
                         try:
                             import json
+
                             result["operations"] = json.loads(raw_str[arr_start:arr_end])
                         except json.JSONDecodeError:
                             pass
@@ -3572,7 +3685,7 @@ def _compact_process_heap():
     import sys as _sys
 
     # 检测测试环境：跳过堆压缩避免 access violation
-    if _sys.argv[0].endswith('pytest') or 'PYTEST_CURRENT_TEST' in os.environ:
+    if _sys.argv[0].endswith("pytest") or "PYTEST_CURRENT_TEST" in os.environ:
         return
 
     before = _psutil.Process(os.getpid()).memory_info().rss if _HAS_PSUTIL else 0
@@ -3592,25 +3705,27 @@ def _compact_process_heap():
     gc.collect(2)
 
     try:
-        if _sys.platform == 'win32':
+        if _sys.platform == "win32":
             import ctypes
-            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             heap = _call(kernel32.GetProcessHeap)
             if not heap:
                 return
             _call(kernel32.HeapCompact, heap, 0)
             # freed 返回值不稳定，不 try to log it
 
-        elif _sys.platform == 'linux':
+        elif _sys.platform == "linux":
             try:
                 import ctypes
-                libc = ctypes.CDLL('libc.so.6', use_last_error=True)
+
+                libc = ctypes.CDLL("libc.so.6", use_last_error=True)
                 if _call(libc.malloc_trim, 0) != 0:
                     logger.info("[MEM-HEAP] Linux malloc_trim(0) 释放了空闲堆内存")
             except Exception:
                 pass
 
-        elif _sys.platform == 'darwin':
+        elif _sys.platform == "darwin":
             logger.debug("[MEM-HEAP] macOS:  HeapCompact/malloc_trim 不可达，gc.collect(2) 已在上面调用")
     except Exception:
         pass
@@ -3626,6 +3741,7 @@ def _get_log_dir_path(filename: str) -> str:
     """获取日志目录路径"""
     try:
         from app.utils.utils import get_app_data_dir
+
         return str(get_app_data_dir() / "logs" / filename)
     except Exception:
         return filename

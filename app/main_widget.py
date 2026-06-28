@@ -10634,9 +10634,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._current_assistant_card.set_meta_info(token_usage=msg["token_usage"])
                     break
 
-        # 延迟刷新上下文指示器，让 UI 先完成消息更新再处理 compaction
-        # 延迟刷新上下文指示器，让 UI 先完成消息更新再处理 compaction
-        # 避免 finished_with_messages 信号处理过程中阻塞主线程
+        # 刷新上下文指示器
+        # 工具迭代（最后消息为 tool role）走本地估算以反映含 tool result 的累计上下文；
+        # 最终响应（最后消息为 assistant role）优先使用 API 返回的精确 prompt_tokens，
+        # 避免对话结束时本地估算与 API 结果不一致。
+        is_tool_iter = bool(messages and messages[-1].get("role") == "tool")
+        if not is_tool_iter:
+            last_tc = getattr(self, '_last_ctx_token_count', 0)
+            last_lim = getattr(self, '_last_ctx_limit', 0)
+            if last_tc > 0 and last_lim > 0:
+                ring = getattr(self, "context_usage_ring", None)
+                if ring:
+                    percent = min(100, int((last_tc / last_lim) * 100))
+                    ring.set_usage(percent, last_tc, last_lim)
+                    return
+
+        # 工具迭代中或没有 API 数据时：本地估算 + compaction 信息
         from PyQt5.QtCore import QTimer
 
         QTimer.singleShot(0, self._refresh_context_usage_indicator)
@@ -10710,6 +10723,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_context_updated(self, token_count: int, limit: int):
         """实时上下文占用更新回调"""
+        self._last_ctx_token_count = token_count
+        self._last_ctx_limit = limit
         ring = getattr(self, "context_usage_ring", None)
         if not ring or limit <= 0:
             return

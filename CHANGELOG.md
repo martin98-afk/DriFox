@@ -3,6 +3,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.13] - 2026-06-28
+
+自上一版本以来的变更 | 提交数：17 · 文件变更：52 · +2886/-2214 | 贡献者：martin98-afk, dingma
+
+---
+
+### ✨ 新功能 (New Features)
+
+- **BuildSystemPrompt Hook 实现与重构**: 新增 BuildSystemPrompt Hook 统一处理系统提示生成与上下文注入；重构项目笔记管理，移除 `project_notes_manager` 模块，改为直接从 `AGENTS.md` 读取项目笔记
+- **Hook 系统增强**: 增强 hook 管理，支持系统插件（system plugin）与上下文注入；matcher 占位符根据当前事件类型动态更新
+- **实时上下文用量显示**: 新增 `context_updated` 信号，实时推送上下文使用量，前端可即时展示上下文消耗
+- **多平台 LSP 诊断与命令执行**: 增强 LSP 诊断信息处理能力，改进跨平台命令执行逻辑
+- **项目管理增强**: 项目选择卡片新增"打开项目根目录"快捷功能
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Hook 注入空输出处理**: 处理 hook 注入时的空输出场景，避免重复触发
+- **Skill 工具描述优化**: 更新 Skill 工具描述文案，提升清晰度与简洁性
+- **卡片展开布局修复**: 卡片展开时正确触发布局失效与父布局激活，避免视觉残留与层级错乱
+- **MCP 编辑卡片响应式**: 调整 MCP 编辑卡片高度与模式，提升响应式表现
+- **PixelPet emoji 跨平台字体**: emoji 字体加载逻辑支持多平台，修复部分系统下图标显示问题
+- **调试日志清理**: 移除 `OpenAIChatWorker` 与编辑器中残留的 debug print 语句，避免日志噪声
+
+### ♻️ 代码重构 (Refactoring)
+
+- **项目笔记管理重构**: 移除 `project_notes_manager` 模块，统一通过 `AGENTS.md` 读取项目笔记，简化调用链
+- **操作约束与项目指南精简**: 精简项目指南文档与运营约束条款，提升可读性与可执行性
+
 ## [v0.2.12] - 2026-06-27
 
 自上一版本以来的变更 | 提交数：35 · 文件变更：53 · +5987/-5440 | 贡献者：dingma, mading

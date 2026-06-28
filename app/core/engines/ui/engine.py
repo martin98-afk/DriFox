@@ -5,6 +5,7 @@ UI 对话引擎 — 处理桌面 LLM 对话的核心逻辑
 从 app/core/chat_engine.py 迁移而来，类名改为 UIEngine。
 保留 ChatEngine 别名在 __init__.py 中提供向后兼容。
 """
+
 import os
 from typing import Any, Callable, Dict, List, Optional
 
@@ -63,6 +64,7 @@ class UIEngine(BaseEngine):
 
         # ===== ConversationExecutor（统一 Worker 执行）=====
         from app.core.conversation.executor import ConversationExecutor
+
         config = ConversationConfig(
             permission_strategy=PermissionStrategy.INTERACTIVE,
             interactive_check_callback=self._check_tool_permission,
@@ -88,7 +90,9 @@ class UIEngine(BaseEngine):
         self._adapter.tool_args_updated.connect(lambda i, n, p: self._emit("tool_args_updated", i, n, p))
         self._adapter.tool_result_received.connect(lambda i, n, a, r: self._emit("tool_result_received", i, n, a, r))
         self._adapter.question_asked.connect(lambda i, q, e: self._emit("question_asked", i, q, e))
-        self._adapter.permission_approval_requested.connect(lambda i, n, a: self._emit("permission_approval_requested", i, n, a))
+        self._adapter.permission_approval_requested.connect(
+            lambda i, n, a: self._emit("permission_approval_requested", i, n, a)
+        )
         self._adapter.stream_finished.connect(lambda r: self._on_worker_finished(r))
         self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))
         self._adapter.error_occurred.connect(lambda e: self._on_error(e))
@@ -120,7 +124,7 @@ class UIEngine(BaseEngine):
     @property
     def _current_worker(self):
         """向后兼容：Worker 已由 ConversationExecutor 管理"""
-        return getattr(self._conversation_executor, '_current_worker', None)
+        return getattr(self._conversation_executor, "_current_worker", None)
 
     # ========== 属性访问（正式接口）==========
 
@@ -159,7 +163,7 @@ class UIEngine(BaseEngine):
         self._session_manager = session_manager
         # 🔧 修复：同步 ConversationCore 的 session_manager 引用
         # 否则 ConversationExecutor.execute() 会通过 ConversationCore 读到旧的 session_manager
-        if hasattr(self, '_conversation_core'):
+        if hasattr(self, "_conversation_core"):
             self._conversation_core.session_manager = session_manager
 
     # ========== 权限检查 ==========
@@ -184,15 +188,14 @@ class UIEngine(BaseEngine):
         else:
             # 兜底：全局 Settings（API 模式等无 controller 的场景）
             from app.utils.config import Settings
+
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
             behavior = settings.tool_off_behavior.value
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            logger.info(
-                f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}"
-            )
+            logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}")
             return behavior  # "deny" 或 "ask"，由 ConversationExecutor 的 INTERACTIVE 策略驱动对话框
         # ========== 工具开关过滤结束 ==========
 
@@ -238,19 +241,17 @@ class UIEngine(BaseEngine):
             logger.warning(f"[ChatEngine] Permission check error: {e}")
             return "allow"
 
-    def _on_permission_approval_requested(
-        self, tool_call_id: str, tool_name: str, arguments: dict
-    ):
+    def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         self._emit("permission_approval_requested", tool_call_id, tool_name, arguments)
 
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
         """批准工具权限请求（转发给 Worker）"""
-        worker = getattr(self._conversation_executor, '_current_worker', None)
+        worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker:
             worker.approve_permission(tool_call_id, auto_allow, session_allow)
 
     def deny_tool_permission(self, tool_call_id: str):
-        worker = getattr(self._conversation_executor, '_current_worker', None)
+        worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker:
             worker.deny_permission(tool_call_id)
 
@@ -301,12 +302,7 @@ class UIEngine(BaseEngine):
 
     # ========== 消息发送 ==========
 
-    def send_message(
-        self,
-        user_text: str,
-        *args,
-        **kwargs
-    ) -> bool:
+    def send_message(self, user_text: str, *args, **kwargs) -> bool:
         if self._conversation_executor.is_streaming:
             logger.warning("[ChatEngine] Already streaming, ignoring new message")
             return False
@@ -330,13 +326,10 @@ class UIEngine(BaseEngine):
         # 公共辅助方法：同步触发 hook 并收集输出
         # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
         _window_workdir = (
-            self._backend.tool_executor.get_workdir()
-            if self._backend and self._backend.tool_executor
-            else os.getcwd()
+            self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else os.getcwd()
         )
 
-        def _trigger_and_inject(hook_mgr, event_name, extra_context=None, msg_text=None,
-                                inject_to_session=None):
+        def _trigger_and_inject(hook_mgr, event_name, extra_context=None, msg_text=None, inject_to_session=None):
             """同步触发 hook，收集输出并注入 session.messages（只追加不删除）"""
             if extra_context is None:
                 extra_context = {}
@@ -356,24 +349,29 @@ class UIEngine(BaseEngine):
             # 收集成功执行的 hook 输出，注入 session
             if inject_to_session:
                 from app.core.backend import _inject_hook_to_session
+
                 for r in results:
                     if r.success and r.output:
-                        _inject_hook_to_session(inject_to_session, event_name, r.output)
+                        _inject_hook_to_session(inject_to_session, event_name, r.output, r.status_message)
 
         # 获取 session_id（用于 hook context；必须先于 hook 触发块赋值，
         # 否则 L365/L378 会在 Python 编译期被识别为"先读后写"的局部变量，触发 UnboundLocalError）
         _session_id = session.session_id if session else ""
 
         # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager
-        hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
+        hook_mgr = getattr(self._backend, "hook_manager", None) if self._backend else None
 
         if hook_mgr:
             # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
-            _trigger_and_inject(hook_mgr, "UserPromptSubmit",
+            _trigger_and_inject(
+                hook_mgr,
+                "UserPromptSubmit",
                 {
                     "message": user_text,
                     "session_id": _session_id,
-                }, inject_to_session=session)
+                },
+                inject_to_session=session,
+            )
             # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文
             memory_ctx = {}
             worktree_ctx = {}
@@ -398,8 +396,7 @@ class UIEngine(BaseEngine):
                 pre_user_ctx["pending_command"] = pending_cmd
             if pending_skill:
                 pre_user_ctx["pending_skill"] = pending_skill
-            _trigger_and_inject(hook_mgr, "PreUserMessage",
-                                pre_user_ctx, inject_to_session=session)
+            _trigger_and_inject(hook_mgr, "PreUserMessage", pre_user_ctx, inject_to_session=session)
 
         session.add_user_message(content=content_to_store)
 
@@ -411,8 +408,7 @@ class UIEngine(BaseEngine):
             # 补充多模态内容（如有图片）
             if _user_content is not None and _user_content != user_text:
                 post_user_ctx["user_content"] = _user_content
-            _trigger_and_inject(hook_mgr, "PostUserMessage",
-                                post_user_ctx, inject_to_session=session)
+            _trigger_and_inject(hook_mgr, "PostUserMessage", post_user_ctx, inject_to_session=session)
 
             # 通知 UI 刷新（预对话 hook 已注入 session.messages）
             if self._backend:
@@ -424,9 +420,7 @@ class UIEngine(BaseEngine):
             current_agent=self._current_agent,
         )
         if self._current_agent:
-            available_tools = self._get_agent_manager().get_agent_tools_schema(
-                self._current_agent
-            )
+            available_tools = self._get_agent_manager().get_agent_tools_schema(self._current_agent)
         else:
             available_tools = get_builtin_tools_schema(
                 self._get_agent_manager(),
@@ -547,8 +541,12 @@ class UIEngine(BaseEngine):
 
         self._emit("stream_finished", response)
 
-        # Trigger PostAssistantMessage hook（成功路径）
-        self._trigger_post_assistant_message(response, is_error=False)
+        # ⚠️ 注意：不在此处触发 PostAssistantMessage hook
+        # chat_worker 内部已经在 _process_iteration 中通过 _trigger_worker_hook()
+        # 触发了 PostAssistantMessage（同步模式），且在 engine 层面再次触发会导致
+        # 所有 PostAssistantMessage hook 被调用两次（如语音播报播两遍）。
+        # Worker 内部触发也会将 hook 输出注入到消息流，而 engine 层面不会，
+        # 因此保留 worker 的触发即可覆盖所有场景（含错误路径由 chat_worker 的 Stop hook 处理）。
 
         # 保存缓存统计（在 worker 被清理前）
         self._save_cache_stats()
@@ -558,12 +556,13 @@ class UIEngine(BaseEngine):
     def _save_cache_stats(self):
         """保存 Worker 的缓存统计到 Backend（Worker 被清理后仍可访问）"""
         from loguru import logger
-        worker = getattr(self._conversation_executor, '_current_worker', None)
+
+        worker = getattr(self._conversation_executor, "_current_worker", None)
         if not worker:
             logger.debug("[_save_cache_stats] No worker found")
             return
         try:
-            if hasattr(worker, 'get_cache_stats'):
+            if hasattr(worker, "get_cache_stats"):
                 stats = worker.get_cache_stats()
                 if stats:
                     # stats 可能是 dict 或带 to_dict() 的对象
@@ -571,8 +570,8 @@ class UIEngine(BaseEngine):
                         stats_dict = stats
                     else:
                         stats_dict = stats.to_dict()
-                    hit_rate = stats_dict.get('hit_rate', 0.0)
-                    cache_read = stats_dict.get('cache_read_tokens', 0)
+                    hit_rate = stats_dict.get("hit_rate", 0.0)
+                    cache_read = stats_dict.get("cache_read_tokens", 0)
                     logger.debug(f"[_save_cache_stats] hit_rate={hit_rate}, read={cache_read}")
                     self._backend.set_last_cache_stats(stats_dict)
                 else:
@@ -585,7 +584,7 @@ class UIEngine(BaseEngine):
     def _trigger_post_assistant_message(self, response_or_error: str, is_error: bool = False):
         """统一触发 PostAssistantMessage hook"""
         # 多窗口隔离：使用当前窗口 Backend 的 HookManager
-        hook_mgr = getattr(self._backend, 'hook_manager', None) if self._backend else None
+        hook_mgr = getattr(self._backend, "hook_manager", None) if self._backend else None
         if not hook_mgr:
             return
 
@@ -594,17 +593,15 @@ class UIEngine(BaseEngine):
         session_id = ""
         if session:
             session_id = session.session_id or ""
-            if hasattr(session, 'messages'):
+            if hasattr(session, "messages"):
                 for msg in reversed(session.messages):
-                    if msg.get('role') == 'user':
-                        last_user_msg = content_to_text(msg.get('content', ''))
+                    if msg.get("role") == "user":
+                        last_user_msg = content_to_text(msg.get("content", ""))
                         break
 
         # 多窗口隔离：使用当前窗口的工作目录
         project_root = (
-            self._backend.tool_executor.get_workdir()
-            if self._backend and self._backend.tool_executor
-            else os.getcwd()
+            self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else os.getcwd()
         )
         context = {
             "project_root": project_root,
@@ -637,7 +634,7 @@ class UIEngine(BaseEngine):
         self._emit("retry_status", error_type, attempt, max_retries, wait_time)
 
     def provide_question_answer(self, answer: str):
-        worker = getattr(self._conversation_executor, '_current_worker', None)
+        worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker and hasattr(worker, "provide_answer"):
             worker.provide_answer(answer)
 
@@ -650,4 +647,4 @@ class UIEngine(BaseEngine):
 
     def get_current_worker(self):
         """获取当前 Worker 实例（供外部获取缓存统计等）"""
-        return getattr(self._conversation_executor, '_current_worker', None)
+        return getattr(self._conversation_executor, "_current_worker", None)
