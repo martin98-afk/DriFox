@@ -139,10 +139,14 @@ class _FlowLayout(QLayout):
         cur_line_items = []  # 当前行尚未布局的 items
 
         # 第一遍：分行 + 计算每行总宽度
+        # 注意：不跳过不可见的 widget。offscreen/异步渲染下，
+        # widget 从不可见变为可见的瞬间 layout 不会自动重跑，
+        # 若跳过 invisible widget，会留下 Qt 默认 (0,0,640,22) 的脏几何，
+        # 占满整行把其他 pill 全部覆盖（参考 test_flow_layout_initial_visibility）。
         items_to_layout = []
         for item in self._items:
             wid = item.widget()
-            if wid is None or not wid.isVisible():
+            if wid is None:
                 continue
             hint = item.sizeHint()
             items_to_layout.append((item, hint))
@@ -419,7 +423,7 @@ class HookEditCard(QWidget):
 
         # 文本输入框（放在 toggle 区上方）
         self.matcherEdit = QLineEdit()
-        self.matcherEdit.setPlaceholderText("如: startup|clear 或 Edit|Write|MultiEdit 或 .*帮助.*")
+        self.matcherEdit.setPlaceholderText("选择事件后此处显示对应的匹配示例")
         self.matcherEdit.textChanged.connect(self._on_matcher_text_changed)
         row, _ = _make_row("Matcher:", self.matcherEdit)
         matcher_section.addLayout(row)
@@ -438,11 +442,54 @@ class HookEditCard(QWidget):
 
         # 初始事件勾选框（新卡片时 eventCombo 有默认值但信号未触发）
         self._rebuild_matcher_checks(self.eventCombo.currentText())
+        self._update_matcher_placeholder(self.eventCombo.currentText())
 
     def _on_event_changed(self, event_name: str):
-        """事件切换时重建 matcher 勾选框"""
+        """事件切换时重建 matcher 勾选框 + 更新 placeholder"""
         self._rebuild_matcher_checks(event_name)
         self._sync_matcher_text_from_checks()
+        self._update_matcher_placeholder(event_name)
+
+    def _update_matcher_placeholder(self, event_name: str):
+        """根据事件类型更新 matcher 输入框的占位提示"""
+        placeholders = {
+            "BuildSystemPrompt": (
+                "匹配智能体角色：primary（主智能体）| subagent（子智能体）"
+            ),
+            "SessionStart": (
+                "匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）"
+            ),
+            "UserPromptSubmit": (
+                "匹配用户提交的提问内容，正则表达式，如 .*帮助.* 或 .*错误.*"
+            ),
+            "PreUserMessage": (
+                "匹配即将发送的用户消息，正则表达式，如 .*安全.* 或 .*密码.*"
+            ),
+            "PostUserMessage": (
+                "匹配已处理的用户消息，正则表达式，如 .*代码.* 或 .*文件.*"
+            ),
+            "PreAssistantMessage": (
+                "匹配即将回复的上下文（基于用户消息），如 .*总结.* 或 .*翻译.*"
+            ),
+            "PostAssistantMessage": (
+                "匹配助手回复的内容，正则表达式，如 .*敏感信息.* 或 .*请注意.*"
+            ),
+            "Stop": (
+                "匹配流式输出停止时的回复内容，如 .*完成.* 或 .*错误.*"
+            ),
+        }
+        # PreToolUse / PostToolUse 用 tool:xxx 示例
+        tool_ph = (
+            "匹配工具：tool:edit（精确）| Edit|Write（正则）| .*文件.*（内容）"
+        )
+
+        ph = placeholders.get(
+            event_name,
+            tool_ph if event_name in ("PreToolUse", "PostToolUse") else (
+                r".*  提示：输入空匹配所有，| 分隔多个条件"
+            ),
+        )
+        self.matcherEdit.setPlaceholderText(ph)
 
     def _rebuild_matcher_checks(self, event_name: str):
         """根据事件类型重建 matcher 勾选框"""

@@ -28,8 +28,13 @@ from PyQt5.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 from app.tools.tool_name_mapper import ToolNameMapper
 
 
+# 常见脚本扩展名（用于从 hook command 中解析脚本路径，以确定 cwd）
+_SCRIPT_EXTENSIONS = r"cmd|bat|ps1|sh|bash|py"
+
+
 class HookType(Enum):
     """Hook 类型"""
+
     COMMAND = "command"
     HTTP = "http"
     PYTHON = "python"
@@ -38,27 +43,30 @@ class HookType(Enum):
 
 class HookDecision(Enum):
     """Hook 决策结果"""
-    CONTINUE = "continue"      # 继续执行
-    BLOCK = "block"           # 阻止操作
-    DEFER = "defer"           # 延迟执行
+
+    CONTINUE = "continue"  # 继续执行
+    BLOCK = "block"  # 阻止操作
+    DEFER = "defer"  # 延迟执行
 
 
 class HookConditionType(Enum):
     """条件类型"""
-    ENV = "env"                # 环境变量条件，如 "env:DEBUG=true"
-    FILE_PATTERN = "file"      # 文件模式匹配，如 "file:*.py"
-    TOOL = "tool"             # 工具名匹配，如 "tool:bash"
-    REGEX = "regex"           # 正则匹配，如 "regex:.*关键词.*"
+
+    ENV = "env"  # 环境变量条件，如 "env:DEBUG=true"
+    FILE_PATTERN = "file"  # 文件模式匹配，如 "file:*.py"
+    TOOL = "tool"  # 工具名匹配，如 "tool:bash"
+    REGEX = "regex"  # 正则匹配，如 "regex:.*关键词.*"
 
 
 @dataclass
 class HookCondition:
     """单个条件配置"""
-    type: str                  # env, file, tool, regex
-    pattern: str               # 条件模式
+
+    type: str  # env, file, tool, regex
+    pattern: str  # 条件模式
 
     @classmethod
-    def from_dict(cls, d: dict) -> 'HookCondition':
+    def from_dict(cls, d: dict) -> "HookCondition":
         return cls(type=d.get("type", "env"), pattern=d.get("pattern", ""))
 
 
@@ -66,7 +74,7 @@ class HookCondition:
 class Hook:
     """
     单个 Hook 配置 (增强版)
-    
+
     支持字段:
     - id: 唯一标识符
     - type: hook 类型 (command/http/python/prompt)
@@ -82,6 +90,7 @@ class Hook:
     - retry: 重试次数
     - conditions: 执行条件列表
     """
+
     id: str = ""
     type: str = "command"
     command: str = ""
@@ -118,7 +127,7 @@ class Hook:
     is_system_plugin: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> 'Hook':
+    def from_dict(cls, d: dict) -> "Hook":
         conditions = [HookCondition.from_dict(c) for c in d.get("conditions", [])]
         hook_type = d.get("type", "command")
         # 根据类型规范化 command 值：优先取专用字段，再 fallback 到 command
@@ -186,11 +195,12 @@ class Hook:
 class HookMatchRule:
     """
     匹配规则，一个事件可以有多个匹配规则
-    
+
     支持 matcher 类型:
     - "tool:xxx" - 工具名匹配
     - 普通正则表达式 - 匹配用户消息
     """
+
     matcher: Optional[str] = None
     hooks: List[Hook] = field(default_factory=list)
 
@@ -224,8 +234,7 @@ class HookMatchRule:
             pattern = self.matcher[5:]
             actual = context.get("tool_name", "")
             # 两边都用 ToolNameMapper 归一化
-            return (ToolNameMapper.to_native(pattern) ==
-                    ToolNameMapper.to_native(actual))
+            return ToolNameMapper.to_native(pattern) == ToolNameMapper.to_native(actual)
 
         # 正则匹配用户消息
         message = context.get("message", "")
@@ -234,6 +243,17 @@ class HookMatchRule:
                 return True
         except re.error:
             pass
+
+        # 对于 PostAssistantMessage/Stop 等事件，也尝试匹配 assistant 回复内容
+        # context["response"] 是 DriFoxx 自有格式，context["assistant_response"] 是 Claude Code 兼容格式
+        # 两个字段通常指向同一内容，取第一个非空值即可
+        resp_text = context.get("assistant_response") or context.get("response", "")
+        if resp_text:
+            try:
+                if re.match(self.matcher, resp_text):
+                    return True
+            except re.error:
+                pass
 
         # 对于工具相关事件，也尝试匹配工具名（大小写不敏感）
         # 这样 "Write|Edit" 这样的 matcher 可以直接匹配工具名
@@ -249,8 +269,9 @@ class HookMatchRule:
         return False
 
     @classmethod
-    def from_dict(cls, d: dict, skill_root: str = "", config_file: str = "",
-                  is_system_plugin: bool = False) -> 'HookMatchRule':
+    def from_dict(
+        cls, d: dict, skill_root: str = "", config_file: str = "", is_system_plugin: bool = False
+    ) -> "HookMatchRule":
         hooks = [Hook.from_dict(h) for h in d.get("hooks", [])]
         for h in hooks:
             h.skill_root = skill_root
@@ -264,15 +285,19 @@ class HookMatchRule:
 
 class HookExecutionResult:
     """Hook 执行结果"""
-    def __init__(self, success: bool, output: str = "", decision: str = "continue"):
+
+    def __init__(self, success: bool, output: str = "", decision: str = "continue", status_message: str = ""):
         self.success = success
         self.output = output
         self.decision: HookDecision = HookDecision(decision) if decision else HookDecision.CONTINUE
+        self.status_message = status_message
 
 
 class HookWorkerSignals(QObject):
     """Worker 信号，用于执行完后回调"""
-    finished = pyqtSignal(str, str, bool)  # event_name, output, success
+
+    finished = pyqtSignal(str, str, bool, str)  # event_name, output, success, status_message
+    status_changed = pyqtSignal(str, str, bool)  # event_name, status_message, is_start
 
 
 class HookOverrideManager:
@@ -280,7 +305,7 @@ class HookOverrideManager:
     Hook 覆写层管理器
     用于覆盖 plugin/skill hooks 的配置字段（不影响源文件）
     存储位置: ~/.drifox/plugins/user-custom/hooks_overrides.json
-    
+
     格式:
     {
       "hook_id": {
@@ -290,7 +315,7 @@ class HookOverrideManager:
         "commandWindows": "win cmd"
       }
     }
-    
+
     编辑 plugin/skill hook 时只写此文件，不碰源文件。
     """
 
@@ -305,6 +330,7 @@ class HookOverrideManager:
     def _init_storage_path(self):
         """初始化存储路径（与项目 get_app_data_dir 保持一致）"""
         from app.utils.utils import get_app_data_dir
+
         storage_dir = get_app_data_dir() / "plugins" / "user-custom"
         storage_dir.mkdir(parents=True, exist_ok=True)
         self._storage_path = str(storage_dir / self.OVERRIDES_FILE)
@@ -314,7 +340,7 @@ class HookOverrideManager:
         if not self._storage_path or not os.path.exists(self._storage_path):
             return
         try:
-            with open(self._storage_path, 'r', encoding='utf-8') as f:
+            with open(self._storage_path, "r", encoding="utf-8") as f:
                 self._overrides = json.load(f)
             logger.debug(f"[HookOverrideManager] Loaded {len(self._overrides)} overrides")
         except Exception as e:
@@ -326,7 +352,7 @@ class HookOverrideManager:
         if not self._storage_path:
             return
         try:
-            with open(self._storage_path, 'w', encoding='utf-8') as f:
+            with open(self._storage_path, "w", encoding="utf-8") as f:
                 json.dump(self._overrides, f, indent=2, ensure_ascii=False)
             logger.debug(f"[HookOverrideManager] Saved {len(self._overrides)} overrides")
         except Exception as e:
@@ -357,7 +383,7 @@ class HookOverrideManager:
 
     def set_hook_overrides(self, hook_id: str, overrides: dict):
         """批量设置 hook 的字段覆写
-        
+
         Args:
             hook_id: hook 唯一标识
             overrides: 要覆写的字段字典，如 {"command": "new", "matcher": "startup|clear"}
@@ -369,7 +395,7 @@ class HookOverrideManager:
 
     def remove_hook_overrides(self, hook_id: str, fields: list = None):
         """移除 hook 的指定字段覆写（不传 fields 则移除全部）
-        
+
         Args:
             hook_id: hook 唯一标识
             fields: 要移除的字段列表，None=移除全部
@@ -393,8 +419,15 @@ class HookOverrideManager:
 
 class HookWorker(QRunnable):
     """异步执行 Hook 的 Worker"""
-    def __init__(self, hook: Hook, cwd: Optional[str], signals: HookWorkerSignals,
-                 event_name: str = "", context: Dict[str, Any] = None):
+
+    def __init__(
+        self,
+        hook: Hook,
+        cwd: Optional[str],
+        signals: HookWorkerSignals,
+        event_name: str = "",
+        context: Dict[str, Any] = None,
+    ):
         super().__init__()
         self.hook = hook
         self.cwd = cwd
@@ -403,8 +436,9 @@ class HookWorker(QRunnable):
         self.context = context or {}
 
     @staticmethod
-    def _run_command_sync(command: str, cwd: Optional[str] = None, timeout: int = 300,
-                          stdin_data: Optional[str] = None) -> tuple:
+    def _run_command_sync(
+        command: str, cwd: Optional[str] = None, timeout: int = 300, stdin_data: Optional[str] = None
+    ) -> tuple:
         """
         统一的命令同步执行方法（公共提取，避免代码重复）。
         返回 (output, success, exit_code)。
@@ -413,13 +447,15 @@ class HookWorker(QRunnable):
         """
         # echo 快捷方式 — 仅对纯单行 echo 有效，无任何命令分隔符
         # 排除换行/&&/||/;/&/| 等，避免截胡多命令（如 echo "msg"\nexit 2）
-        if (command.startswith("echo ")
+        if (
+            command.startswith("echo ")
             and "\n" not in command
             and "&&" not in command
             and "||" not in command
             and ";" not in command
             and " & " not in command
-            and " |" not in command):
+            and " |" not in command
+        ):
             output = command[5:].strip()
             if output.startswith('"') and output.endswith('"'):
                 output = output[1:-1]
@@ -428,8 +464,8 @@ class HookWorker(QRunnable):
             return output, True, 0
 
         # 修复路径分隔符问题：Unix / 转 Windows \
-        if os.name == 'nt':
-            command = command.replace('/', '\\')
+        if os.name == "nt":
+            command = command.replace("/", "\\")
             # Windows cmd.exe 对 `subprocess.run(..., shell=True)` 传入的多行命令里 `\n`
             # 处理不可靠（实际只跑第一行）。统一转换为 `&` 分隔符确保 exit 2 等能真正执行。
             if "\n" in command:
@@ -437,39 +473,34 @@ class HookWorker(QRunnable):
 
         # 构造 subprocess 参数
         subprocess_kwargs = {
-            'cwd': cwd,
-            'shell': True,
-            'capture_output': True,
-            'text': True,
-            'errors': 'replace',
-            'timeout': timeout,
-            'creationflags': subprocess.CREATE_NO_WINDOW
-            if os.name == 'nt'
-            else 0,
+            "cwd": cwd,
+            "shell": True,
+            "capture_output": True,
+            "text": True,
+            "errors": "replace",
+            "timeout": timeout,
+            "creationflags": subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         }
         if stdin_data is not None:
-            subprocess_kwargs['input'] = stdin_data
+            subprocess_kwargs["input"] = stdin_data
         else:
-            subprocess_kwargs['stdin'] = subprocess.DEVNULL
+            subprocess_kwargs["stdin"] = subprocess.DEVNULL
 
-        if os.name == 'nt':
+        if os.name == "nt":
             import locale
+
             # Windows: cmd.exe 的 echo 输出编码跟随系统代码页（中文 Windows 通常 GBK/gb2312），
             # 用 UTF-8 解码会变乱码。优先用系统首选编码，与 cmd.exe 输出一致。
-            preferred = locale.getpreferredencoding(False) or 'gbk'
-            if preferred.upper() in ('UTF-8', 'UTF8'):
-                enc = 'utf-8'
+            preferred = locale.getpreferredencoding(False) or "gbk"
+            if preferred.upper() in ("UTF-8", "UTF8"):
+                enc = "utf-8"
             else:
                 enc = preferred
             try:
-                result = subprocess.run(
-                    command, encoding=enc, **subprocess_kwargs
-                )
-            except (UnicodeDecodeError, LookupError):
+                result = subprocess.run(command, encoding=enc, **subprocess_kwargs)
+            except UnicodeDecodeError, LookupError:
                 # 解码失败时回退到 UTF-8 with errors='replace'
-                result = subprocess.run(
-                    command, encoding='utf-8', **subprocess_kwargs
-                )
+                result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
             exit_code = result.returncode
             if exit_code != 0:
                 # exit code 2: Claude Code BLOCK 约定，用 stdout 作为 output
@@ -478,9 +509,7 @@ class HookWorker(QRunnable):
                 return result.stderr or f"Command failed with exit code {exit_code}", False, exit_code
             return result.stdout or "", True, exit_code
         else:
-            result = subprocess.run(
-                command, encoding='utf-8', **subprocess_kwargs
-            )
+            result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
 
         exit_code = result.returncode
         if exit_code != 0:
@@ -492,6 +521,10 @@ class HookWorker(QRunnable):
 
     def run(self):
         """执行命令，收集输出"""
+        status_message = self.hook.statusMessage or ""
+
+        # 注意：is_start=True 由 HookManager._execute_hook() 在主线程上直接发射，
+        # 异步场景下 worker 不再重复发射 start 事件，避免 UI 收到两次开始回调。
         try:
             output = ""
             success = False
@@ -508,10 +541,16 @@ class HookWorker(QRunnable):
                 output = f"Unknown hook type: {self.hook.type}"
                 success = False
 
-            self.signals.finished.emit(self.event_name, output, success)
+            # 发出执行结束状态
+            if status_message:
+                self.signals.status_changed.emit(self.event_name, status_message, False)
+
+            self.signals.finished.emit(self.event_name, output, success, status_message)
         except Exception as e:
             logger.error(f"[HookWorker] Execution failed: {e}")
-            self.signals.finished.emit(self.event_name, f"Error: {str(e)}", False)
+            if status_message:
+                self.signals.status_changed.emit(self.event_name, status_message, False)
+            self.signals.finished.emit(self.event_name, f"Error: {str(e)}", False, status_message)
 
     def _execute_prompt(self) -> tuple:
         """执行 prompt 类型：直接返回 prompt 文本"""
@@ -522,16 +561,16 @@ class HookWorker(QRunnable):
         """执行命令（委托给公共静态方法），传递 context 作为 stdin"""
         import json as _json
         import os
+
         # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
         effective_cmd = self.hook.command
-        if os.name == 'nt' and self.hook.commandWindows:
+        if os.name == "nt" and self.hook.commandWindows:
             effective_cmd = self.hook.commandWindows
         # 变量插值（含 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量）
         effective_cmd = HookManager._interpolate_variables(effective_cmd, self.context)
         stdin_data = _json.dumps(self.context) if self.context else None
         output, success, _ = HookWorker._run_command_sync(
-            effective_cmd, self.cwd, self.hook.timeout,
-            stdin_data=stdin_data
+            effective_cmd, self.cwd, self.hook.timeout, stdin_data=stdin_data
         )
         return output, success
 
@@ -546,15 +585,17 @@ class HookWorker(QRunnable):
             headers["Content-Type"] = "application/json"
 
             # 构建请求数据
-            data = json.dumps({
-                "event": self.event_name,
-                "context": self.context,
-            }).encode('utf-8')
+            data = json.dumps(
+                {
+                    "event": self.event_name,
+                    "context": self.context,
+                }
+            ).encode("utf-8")
 
-            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
             with urllib.request.urlopen(req, timeout=self.hook.timeout) as response:
-                output = response.read().decode('utf-8')
+                output = response.read().decode("utf-8")
                 return output, True
         except Exception as e:
             return f"HTTP request failed: {str(e)}", False
@@ -593,9 +634,9 @@ class HookWorker(QRunnable):
 
         try:
             import importlib.util
+
             spec = importlib.util.spec_from_file_location(
-                f"_hook_relative_{relative_dotted.replace('/', '_')}",
-                str(abs_path)
+                f"_hook_relative_{relative_dotted.replace('/', '_')}", str(abs_path)
             )
             if spec is None or spec.loader is None:
                 return None
@@ -623,13 +664,12 @@ class HookWorker(QRunnable):
             # 相对路径：基于 hooks.json 目录解析
             func = None
             if module_path.startswith(".") and self.hook.config_file:
-                func = HookWorker._import_relative_function(
-                    self.hook.function, self.hook.config_file
-                )
+                func = HookWorker._import_relative_function(self.hook.function, self.hook.config_file)
 
             # 标准路径：importlib.import_module
             if func is None:
                 import importlib
+
                 module = importlib.import_module(module_path)
                 func = getattr(module, func_name, None)
 
@@ -656,7 +696,7 @@ class HookWorker(QRunnable):
 class HookManager:
     """
     Hook 管理器 (增强版)
-    
+
     功能特性:
     - 动态生命周期管理（热重载、enable/disable）
     - 多种 Hook 类型（command、http、python）
@@ -684,11 +724,14 @@ class HookManager:
         # 线程池
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
 
-        # 完成回调（每个窗口独立）
-        self._on_finished_callback: Optional[Callable[[str, str, bool], None]] = None
+        # 完成回调（每个窗口独立）(event_name, output, success, status_message)
+        self._on_finished_callback: Optional[Callable[[str, str, bool, str], None]] = None
 
         # 决策回调（每个窗口独立）
         self._on_decision_callback: Optional[Callable[[str, HookDecision], None]] = None
+
+        # 执行状态回调（每个窗口独立）(event_name, status_message, is_start)
+        self._on_status_callback: Optional[Callable[[str, str, bool], None]] = None
 
         # 配置热重载监控（类级别共享）
         self._config_watchers: Dict[str, float] = HookManager._shared_config_watchers
@@ -721,9 +764,13 @@ class HookManager:
                 d[key] = val
         return d
 
-    def set_on_finished_callback(self, callback: Callable[[str, str, bool], None]):
-        """设置 Hook 执行完成回调"""
+    def set_on_finished_callback(self, callback: Callable[[str, str, bool, str], None]):
+        """设置 Hook 执行完成回调 (event_name, output, success, status_message)"""
         self._on_finished_callback = callback
+
+    def set_on_status_callback(self, callback: Optional[Callable[[str, str, bool], None]]):
+        """设置执行状态回调 (event_name, status_message, is_start)"""
+        self._on_status_callback = callback
 
     def set_on_decision_callback(self, callback: Callable[[str, HookDecision], None]):
         """设置决策回调 (当 hook 返回 block/continue 等决策时调用)"""
@@ -740,26 +787,31 @@ class HookManager:
             del self._registered_functions[name]
             logger.debug(f"[HookManager] Unregistered function: {name}")
 
-    def register_hooks_from_json(self, skill_name: str, skill_root: str,
-                                  hooks_config: Union[dict, str], config_file: str = None,
-                                  is_system_plugin: bool = False) -> int:
+    def register_hooks_from_json(
+        self,
+        skill_name: str,
+        skill_root: str,
+        hooks_config: Union[dict, str],
+        config_file: str = None,
+        is_system_plugin: bool = False,
+    ) -> int:
         """
         从 JSON 加载 hooks 配置
-        
+
         支持两种格式:
         1. 新格式 (带 hooks 数组):
            {"hooks": {"EventName": [{"matcher": "...", "hooks": [...]}]}}
-        
+
         2. 旧格式 (简化):
            {"EventName": [{"command": "..."}]}
-        
+
         注意：相同的 config_file 只注册一次，防止重复注册。
         """
         # 处理字符串路径
         if isinstance(hooks_config, str):
             config_file = hooks_config
             try:
-                with open(hooks_config, 'r', encoding='utf-8') as f:
+                with open(hooks_config, "r", encoding="utf-8") as f:
                     hooks_config = json.load(f)
             except Exception as e:
                 logger.error(f"[HookManager] Failed to load hooks from {hooks_config}: {e}")
@@ -796,8 +848,9 @@ class HookManager:
                         # 旧格式兼容
                         rule_data = {"hooks": [rule_data]}
 
-                    match_rule = HookMatchRule.from_dict(rule_data, skill_root, config_file,
-                                                       is_system_plugin=is_system_plugin)
+                    match_rule = HookMatchRule.from_dict(
+                        rule_data, skill_root, config_file, is_system_plugin=is_system_plugin
+                    )
                     if match_rule.hooks:
                         rule_index = len(self._hooks[event_name])
                         self._hooks[event_name].append(match_rule)
@@ -827,14 +880,14 @@ class HookManager:
 
     def _persist_hook_ids_to_file(self, config_file: str):
         """将内存中 hook 的 id 写回到 JSON 配置文件
-        
+
         按 config_file 匹配内存中的 hook，而不是按全局位置索引。
         避免不同来源（如不同插件）的 hook 拿到相同的 id。
         """
         if not config_file or not os.path.exists(config_file):
             return
         try:
-            with open(config_file, 'r', encoding='utf-8') as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
             raw_hooks = config.get("hooks", config)
@@ -867,7 +920,7 @@ class HookManager:
                             idx += 1
 
             if modified:
-                with open(config_file, 'w', encoding='utf-8') as f:
+                with open(config_file, "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=2, ensure_ascii=False)
                 logger.debug(f"[HookManager] Persisted hook ids to {config_file}")
         except Exception as e:
@@ -878,7 +931,7 @@ class HookManager:
         if skill_name not in self._skill_to_hooks:
             return
 
-        for (event_name, rule_index) in reversed(self._skill_to_hooks[skill_name]):
+        for event_name, rule_index in reversed(self._skill_to_hooks[skill_name]):
             if event_name in self._hooks and rule_index < len(self._hooks[event_name]):
                 self._hooks[event_name].pop(rule_index)
 
@@ -925,17 +978,18 @@ class HookManager:
             return True
         return False
 
-    def dynamic_register_hook(self, skill_name: str, event_name: str,
-                             hook: Union[Hook, dict], matcher: str = None) -> int:
+    def dynamic_register_hook(
+        self, skill_name: str, event_name: str, hook: Union[Hook, dict], matcher: str = None
+    ) -> int:
         """
         动态注册单个 Hook
-        
+
         Args:
             skill_name: 所属技能名
             event_name: 事件名
             hook: Hook 配置
             matcher: 匹配规则 (可选)
-        
+
         Returns:
             注册的 hook 索引，-1 表示失败
         """
@@ -956,16 +1010,15 @@ class HookManager:
         logger.info(f"[HookManager] Dynamically registered hook: {event_name} for {skill_name}")
         return rule_index
 
-    def dynamic_unregister_hook(self, skill_name: str, event_name: str,
-                               hook_index: int) -> bool:
+    def dynamic_unregister_hook(self, skill_name: str, event_name: str, hook_index: int) -> bool:
         """
         动态注销单个 Hook
-        
+
         Args:
             skill_name: 所属技能名
             event_name: 事件名
             hook_index: Hook 索引
-        
+
         Returns:
             是否成功
         """
@@ -981,9 +1034,7 @@ class HookManager:
         # 更新技能索引
         if skill_name in self._skill_to_hooks:
             self._skill_to_hooks[skill_name] = [
-                (e, i - 1 if i > hook_index else i)
-                for (e, i) in self._skill_to_hooks[skill_name]
-                if i != hook_index
+                (e, i - 1 if i > hook_index else i) for (e, i) in self._skill_to_hooks[skill_name] if i != hook_index
             ]
 
         logger.info(f"[HookManager] Dynamically unregistered hook: {event_name}[{hook_index}]")
@@ -992,10 +1043,10 @@ class HookManager:
     def reload_hooks_config(self, config_file: str = None) -> bool:
         """
         热重载 hooks 配置
-        
+
         Args:
             config_file: 配置文件路径，默认使用上次加载的文件
-        
+
         Returns:
             是否成功重载
         """
@@ -1011,7 +1062,7 @@ class HookManager:
                 return False  # 文件未修改
 
             # 重新加载配置
-            with open(config_file, 'r', encoding='utf-8') as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
             # 更新监控时间
@@ -1055,12 +1106,15 @@ class HookManager:
             return bool(os.environ.get(pattern))
 
         elif cond_type == "file":
-            # 文件模式匹配
+            # 文件模式匹配：用 re.search 而非 re.match，允许模式匹配路径中任意位置。
+            # 行为差异：对典型通配符模式（如 `*.py`、`*main*`）两者等价，因为 `*` → `.*` 的转换
+            # 已使模式无锚定。仅当 pattern 直接以字面前缀（无通配符）开头时，re.search 会匹配
+            # 路径中部，而 re.match 会不匹配。例如 `"src/"` 现在可匹配 `"foo/src/bar.py"`。
             current_file = context.get("file", "")
             if not current_file:
                 return False
             try:
-                return bool(re.match(pattern.replace("*", ".*"), current_file))
+                return bool(re.search(pattern.replace("*", ".*"), current_file))
             except re.error:
                 return False
 
@@ -1081,18 +1135,18 @@ class HookManager:
 
     # ========== 事件触发 ==========
 
-    def trigger_event(self, event_name: str, context: Dict[str, Any] = None,
-                     current_message: str = "",
-                     trigger_async: bool = True) -> List[HookExecutionResult]:
+    def trigger_event(
+        self, event_name: str, context: Dict[str, Any] = None, current_message: str = "", trigger_async: bool = True
+    ) -> List[HookExecutionResult]:
         """
         触发事件，执行所有匹配的 Hooks
-        
+
         Args:
             event_name: 事件名
             context: 上下文信息
             current_message: 当前消息 (用于 matcher 匹配)
             trigger_async: 是否异步执行
-        
+
         Returns:
             执行结果列表
         """
@@ -1116,9 +1170,7 @@ class HookManager:
             for hook in rule.hooks:
                 # 检查启用状态（走覆写层：plugin/skill 看 override，user-custom 看源文件）
                 if not self._is_user_custom_hook(hook):
-                    effective_enabled = self._override_manager.get_effective_enabled(
-                        hook.id, hook.enabled
-                    )
+                    effective_enabled = self._override_manager.get_effective_enabled(hook.id, hook.enabled)
                     if not effective_enabled:
                         continue
                 else:
@@ -1164,8 +1216,7 @@ class HookManager:
         if matcher_override is not None:
             rule.matcher = matcher_override or None
 
-    def _execute_hook(self, hook: Hook, context: Dict[str, Any],
-                     trigger_async: bool = True) -> HookExecutionResult:
+    def _execute_hook(self, hook: Hook, context: Dict[str, Any], trigger_async: bool = True) -> HookExecutionResult:
         """执行单个 Hook"""
         # cwd: 智能解析（显式设置 > 从命令脚本路径推导 > 默认项目根目录）
         cwd = self._resolve_command_cwd(hook, context)
@@ -1175,28 +1226,65 @@ class HookManager:
 
         # 变量替换
         # Windows 上优先使用 commandWindows（Claude Code 插件兼容）
-        if os.name == 'nt' and hook.commandWindows:
+        if os.name == "nt" and hook.commandWindows:
             effective_command = hook.commandWindows
         else:
             effective_command = hook.command
         command = self._interpolate_variables(effective_command, context)
         url = self._interpolate_variables(hook.url or "", context)
 
-        if trigger_async and hook.type == HookType.COMMAND.value:
+        # 异步执行条件：
+        # - PROMPT 类型必须同步（输出文本需立即注入 prompt）
+        # - COMMAND 类型始终支持异步（输出通过回调队列注入）
+        # - HTTP/PYTHON 仅在不需要注入消息列表时异步（add_output_to_context=False）
+        #   ⚠️ PreToolUse 场景：异步 HTTP/PYTHON hook 若返回 BLOCK 决策，
+        #     将不会被同步处理（罕见情况，需确保此类 hook 保留 add_output_to_context=True）
+        can_async = (
+            trigger_async
+            and hook.type != HookType.PROMPT.value
+            and (
+                hook.type == HookType.COMMAND.value  # COMMAND 始终异步
+                or not hook.add_output_to_context  # HTTP/PYTHON：仅非消息注入时异步
+            )
+        )
+        # 提取 status_message 供后续传播
+        status_message = hook.statusMessage or ""
+
+        if can_async:
             signals = HookWorkerSignals()
             worker = HookWorker(hook, cwd, signals, context.get("event_name", ""), context)
 
-            # 仅在 hook 声明 add_output_to_context=True 时才连接完成回调
+            # 连接完成回调（携带 status_message）
             if hook.add_output_to_context and self._on_finished_callback:
                 signals.finished.connect(self._on_finished_callback)
 
-            self._thread_pool.start(worker)
-            logger.debug(f"[HookManager] Hook triggered (async): {context.get('event_name')} "
-                        f"(add_output_to_context={hook.add_output_to_context})")
+            # 连接状态回调（异步结束时触发 is_start=False）
+            if status_message and self._on_status_callback:
+                signals.status_changed.connect(
+                    lambda evt, msg, start: (
+                        self._on_status_callback(evt, msg, start) if self._on_status_callback else None
+                    )
+                )
 
-            return HookExecutionResult(success=True, output="")
+            self._thread_pool.start(worker)
+
+            # 发出执行开始状态
+            if status_message and self._on_status_callback:
+                self._on_status_callback(context.get("event_name", ""), status_message, True)
+
+            logger.debug(
+                f"[HookManager] Hook triggered (async): {context.get('event_name')} "
+                f"(type={hook.type}, add_output_to_context={hook.add_output_to_context})"
+            )
+
+            return HookExecutionResult(success=True, output="", status_message=status_message)
         else:
             # 同步执行
+
+            # 发出执行开始状态
+            if status_message and self._on_status_callback:
+                self._on_status_callback(context.get("event_name", ""), status_message, True)
+
             try:
                 output = ""
                 success = False
@@ -1204,23 +1292,22 @@ class HookManager:
 
                 if hook.type == HookType.COMMAND.value:
                     output, success, exit_code = HookWorker._run_command_sync(
-                        command, cwd, hook.timeout,
-                        stdin_data=json.dumps(context)
+                        command, cwd, hook.timeout, stdin_data=json.dumps(context)
                     )
-                    _exit2_skip = (exit_code == 2)
+                    _exit2_skip = exit_code == 2
 
                 elif hook.type == HookType.HTTP.value:
                     import urllib.error
                     import urllib.request
 
-                    data = json.dumps({"event": context.get("event_name"), "context": context}).encode('utf-8')
+                    data = json.dumps({"event": context.get("event_name"), "context": context}).encode("utf-8")
                     headers = hook.headers or {}
                     headers["Content-Type"] = "application/json"
 
-                    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
                     with urllib.request.urlopen(req, timeout=hook.timeout) as response:
-                        output = response.read().decode('utf-8')
+                        output = response.read().decode("utf-8")
                         success = True
 
                 elif hook.type == HookType.PROMPT.value:
@@ -1251,13 +1338,12 @@ class HookManager:
 
                                 # 相对路径：基于 hooks.json 目录解析
                                 if module_path.startswith(".") and hook.config_file:
-                                    func = HookWorker._import_relative_function(
-                                        hook.function, hook.config_file
-                                    )
+                                    func = HookWorker._import_relative_function(hook.function, hook.config_file)
 
                                 # 标准路径：importlib.import_module
                                 if func is None:
                                     import importlib
+
                                     module = importlib.import_module(module_path)
                                     func = getattr(module, func_name, None)
 
@@ -1298,26 +1384,37 @@ class HookManager:
                 if decision != HookDecision.CONTINUE and self._on_decision_callback:
                     self._on_decision_callback(context.get("event_name", ""), decision)
 
+                # 发出执行结束状态
+                if status_message and self._on_status_callback:
+                    self._on_status_callback(context.get("event_name", ""), status_message, False)
+
                 # 触发完成回调
                 if hook.add_output_to_context and self._on_finished_callback:
                     callback_event = context.get("event_name", "")
                     # PROMPT 类型 hook 用前缀标记，backend 据此总是加入消息列表
                     if hook.type == HookType.PROMPT.value:
                         callback_event = f"__prompt__:{callback_event}"
-                    self._on_finished_callback(callback_event, output, success)
+                    self._on_finished_callback(callback_event, output, success, status_message)
 
                 logger.info(f"[HookManager] Hook executed: {context.get('event_name')}")
 
-                return HookExecutionResult(success=success, output=output, decision=decision.value)
+                return HookExecutionResult(
+                    success=success, output=output, decision=decision.value, status_message=status_message
+                )
 
             except Exception as e:
                 logger.error(f"[HookManager] Hook failed: {context.get('event_name')} - {e}")
+
+                # 发出执行结束状态（失败）
+                if status_message and self._on_status_callback:
+                    self._on_status_callback(context.get("event_name", ""), status_message, False)
+
                 if hook.add_output_to_context and self._on_finished_callback:
                     callback_event = context.get("event_name", "")
                     if hook.type == HookType.PROMPT.value:
                         callback_event = f"__prompt__:{callback_event}"
-                    self._on_finished_callback(callback_event, f"Error: {str(e)}", False)
-                return HookExecutionResult(success=False, output=str(e))
+                    self._on_finished_callback(callback_event, f"Error: {str(e)}", False, status_message)
+                return HookExecutionResult(success=False, output=str(e), status_message=status_message)
 
     def _resolve_command_cwd(self, hook: Hook, context: Dict[str, Any]) -> Optional[str]:
         """
@@ -1326,7 +1423,7 @@ class HookManager:
         1. 显式设置的 cwd（配置文件中指定）
         2. 从命令中解析脚本文件路径，使用该文件所在目录
         3. None（使用 subprocess 默认 CWD=项目根目录）
-        
+
         结果会缓存 30 秒（因为 hook.command 和 hook.skill_root 是静态的），
         避免每次事件触发都重复扫描磁盘。
         """
@@ -1337,6 +1434,7 @@ class HookManager:
 
         # 2. 检查缓存（key 基于 hook.command + hook.skill_root，两者都是静态的）
         import time
+
         cache_key = id(hook)
         cached = self._cwd_resolve_cache.get(cache_key)
         if cached and time.monotonic() - cached[1] < self._CWD_CACHE_TTL:
@@ -1348,12 +1446,12 @@ class HookManager:
             logger.debug("[HookManager] No command, returning None for cwd")
             return None
 
-        # 匹配常见的脚本调用模式：
+        # 匹配常见的脚本调用模式（扩展名常量定义在模块顶部）：
         # ./script, script.ext, bash script, cmd script, python script 等
         patterns = [
-            r'^\s*\.?/?([^\s]+\.(cmd|bat|ps1|sh|bash))\s',  # 相对路径脚本
-            r'\s+([^\s/]+\.(cmd|bat|ps1|sh|bash))\s',       # 空格后的脚本
-            r'\s+([^\s/]+/[^\s]+\.(cmd|bat|ps1|sh|bash))\s',  # 带目录的脚本
+            rf"^\s*\.?/?([^\s]+\.({_SCRIPT_EXTENSIONS}))(?:\s|$)",  # 相对路径脚本
+            rf"\s+([^\s/]+\.({_SCRIPT_EXTENSIONS}))(?:\s|$)",  # 空格后的脚本
+            rf"\s+([^\s/]+/[^\s]+\.({_SCRIPT_EXTENSIONS}))(?:\s|$)",  # 带目录的脚本
         ]
 
         for pattern in patterns:
@@ -1367,7 +1465,7 @@ class HookManager:
                 if hook.skill_root:
                     search_dirs.append(hook.skill_root)
                     # 如果 skill_root 下有 hooks 子目录，也加入搜索
-                    hooks_dir = os.path.join(hook.skill_root, 'hooks')
+                    hooks_dir = os.path.join(hook.skill_root, "hooks")
                     if os.path.isdir(hooks_dir):
                         search_dirs.append(hooks_dir)
                 search_dirs.append(os.getcwd())
@@ -1419,8 +1517,8 @@ class HookManager:
                 text = text.replace(var, str(value))
 
         # 环境变量替换（CLAUDE_PLUGIN_ROOT 已在上面处理，不会走这里）
-        text = re.sub(r'\$\{(\w+)\}', lambda m: os.environ.get(m.group(1), ""), text)
-        text = re.sub(r'\$(\w+)', lambda m: os.environ.get(m.group(1), ""), text)
+        text = re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), text)
+        text = re.sub(r"\$(\w+)", lambda m: os.environ.get(m.group(1), ""), text)
 
         return text
 
@@ -1447,10 +1545,7 @@ class HookManager:
             for rule in rules:
                 hooks_data = [h.to_dict() for h in rule.hooks]
                 if hooks_data:
-                    rules_data.append({
-                        "matcher": rule.matcher,
-                        "hooks": hooks_data
-                    })
+                    rules_data.append({"matcher": rule.matcher, "hooks": hooks_data})
             if rules_data:
                 hooks[event_name] = rules_data
         return {"hooks": hooks}
@@ -1472,9 +1567,9 @@ class HookManager:
     def get_all_hooks_grouped(self) -> Dict[str, Dict[str, List[dict]]]:
         """
         获取所有已注册的 hooks，按 plugin/skill/user 分组
-        
+
         每个 hook dict 包含 _source_type 和 _display_name 字段用于 UI 来源标签。
-        
+
         Returns:
             {"plugin": {...}, "skill": {...}, "user": {...}}
         """
@@ -1536,13 +1631,8 @@ class HookManager:
                 hooks_list = rule.get("hooks", [])
                 for hook_idx, h in enumerate(hooks_list):
                     hook_id = h.get("id", "") or ""
-                    hook_cmd = (
-                        h.get("command", "") or h.get("url", "") or
-                        h.get("function", "") or h.get("prompt", "")
-                    )
-                    target_cmd = (
-                        hook.command or hook.url or hook.function or hook.prompt or ""
-                    )
+                    hook_cmd = h.get("command", "") or h.get("url", "") or h.get("function", "") or h.get("prompt", "")
+                    target_cmd = hook.command or hook.url or hook.function or hook.prompt or ""
                     if hook_id == hook.id or hook_cmd == target_cmd:
                         return (event_name, rule_idx, hook_idx)
         return None
@@ -1571,7 +1661,8 @@ class HookManager:
         if old_event and found_skill_name and old_event != new_event_name:
             # 从旧位置移除
             self._skill_to_hooks[found_skill_name] = [
-                (e, r) for (e, r) in self._skill_to_hooks[found_skill_name]
+                (e, r)
+                for (e, r) in self._skill_to_hooks[found_skill_name]
                 if not (e == old_event and r == old_rule_idx)
             ]
             # 添加到新位置
@@ -1583,7 +1674,7 @@ class HookManager:
             return
 
         try:
-            with open(hook.config_file, 'r', encoding='utf-8') as f:
+            with open(hook.config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
             # 查找 hook 位置
@@ -1631,17 +1722,27 @@ class HookManager:
                     hook.config_file = hook.config_file  # 保持不变
 
                 # 处理其他字段
-                for key in ["type", "cwd", "add_output_to_context", "skill_root",
-                            "timeout", "retry", "conditions", "headers",
-                            "allowedEnvVars", "function_args",
-                            "commandWindows", "statusMessage"]:
+                for key in [
+                    "type",
+                    "cwd",
+                    "add_output_to_context",
+                    "skill_root",
+                    "timeout",
+                    "retry",
+                    "conditions",
+                    "headers",
+                    "allowedEnvVars",
+                    "function_args",
+                    "commandWindows",
+                    "statusMessage",
+                ]:
                     if key in new_data:
                         hook_entry[key] = new_data[key]
 
             # 确保 id 字段存在
             hook_entry["id"] = hook.id
 
-            with open(hook.config_file, 'w', encoding='utf-8') as f:
+            with open(hook.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
 
             logger.debug(f"[HookManager] Saved hook {hook.id} to {hook.config_file}")
@@ -1651,11 +1752,11 @@ class HookManager:
     def edit_hook_by_id(self, hook_id: str, new_data: dict) -> bool:
         """
         通过 id 编辑 hook
-        
+
         Args:
             hook_id: hook 唯一标识
             new_data: 要更新的字段（如 {"command": "new_cmd", "enabled": False}）
-        
+
         Returns:
             是否成功
         """
@@ -1729,10 +1830,7 @@ class HookManager:
                 self._hooks[new_event].append(new_rule)
 
             # 找到新 rule 索引
-            new_rule_idx = next(
-                (i for i, r in enumerate(self._hooks[new_event]) if hook in r.hooks),
-                0
-            )
+            new_rule_idx = next((i for i, r in enumerate(self._hooks[new_event]) if hook in r.hooks), 0)
             self._update_skill_index_for_hook(hook, new_event, new_rule_idx)
         else:
             # 同事件内更新 matcher
@@ -1752,11 +1850,11 @@ class HookManager:
     def toggle_hook_by_id(self, hook_id: str, enabled: bool) -> bool:
         """
         通过 id 切换 hook 启用状态
-        
+
         Args:
             hook_id: hook 唯一标识
             enabled: 是否启用
-        
+
         Returns:
             是否成功
         """
@@ -1820,7 +1918,7 @@ class HookManager:
         # 从源文件删除（仅 user-custom hook 操作源文件，plugin/skill 只清覆写层）
         if self._is_user_custom_hook(hook) and config_file and os.path.exists(config_file):
             try:
-                with open(config_file, 'r', encoding='utf-8') as f:
+                with open(config_file, "r", encoding="utf-8") as f:
                     config = json.load(f)
 
                 location = self._find_hook_fields(hook, config)
@@ -1833,7 +1931,7 @@ class HookManager:
                     if not raw_hooks.get(ev):
                         del raw_hooks[ev]
 
-                    with open(config_file, 'w', encoding='utf-8') as f:
+                    with open(config_file, "w", encoding="utf-8") as f:
                         json.dump(config, f, indent=2, ensure_ascii=False)
 
                 logger.debug(f"[HookManager] Deleted hook {hook_id} from {config_file}")
@@ -1860,13 +1958,13 @@ class HookManager:
     def _save_hook_to_file(self, hook: Hook, event_name: str):
         """保存单个 hook 的状态到配置文件"""
         try:
-            with open(hook.config_file, 'r', encoding='utf-8') as f:
+            with open(hook.config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
             # 递归查找并更新 hook
             self._update_hook_in_config(config, event_name, hook)
 
-            with open(hook.config_file, 'w', encoding='utf-8') as f:
+            with open(hook.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
 
             logger.debug(f"[HookManager] Saved hook enabled={hook.enabled} to {hook.config_file}")
@@ -1896,7 +1994,7 @@ class HookManager:
             return
 
         try:
-            with open(config_file, 'r', encoding='utf-8') as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
             # 先注销旧的全局 hooks（统一用 "user-custom" skill_name）
@@ -1920,6 +2018,7 @@ class HookManager:
         """
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
                 return
@@ -1959,7 +2058,7 @@ class HookManager:
             hooks_file = agent_dir / "hooks" / "hooks.json"
             if hooks_file.exists():
                 try:
-                    with open(hooks_file, 'r', encoding='utf-8') as f:
+                    with open(hooks_file, "r", encoding="utf-8") as f:
                         config = json.load(f)
                     n = self.register_hooks_from_json(
                         agent_dir.name,
@@ -1975,8 +2074,9 @@ class HookManager:
                     logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
         return count
 
-    def load_hooks_from_directory_flat(self, dir_path: Path, skill_name: str = None,
-                                       is_system_plugin: bool = False) -> int:
+    def load_hooks_from_directory_flat(
+        self, dir_path: Path, skill_name: str = None, is_system_plugin: bool = False
+    ) -> int:
         """从目录直接加载 hooks.json（插件顶层 hooks/ 目录）
 
         加载 {dir_path}/hooks.json 文件（如果有）。
@@ -1995,7 +2095,7 @@ class HookManager:
             return count
 
         try:
-            with open(hooks_file, 'r', encoding='utf-8') as f:
+            with open(hooks_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
             n = self.register_hooks_from_json(
                 skill_name or dir_path.name,
@@ -2044,14 +2144,9 @@ class HookManager:
             hooks_file = skill_dir / "hooks" / "hooks.json"
             if hooks_file.exists():
                 try:
-                    with open(hooks_file, 'r', encoding='utf-8') as f:
+                    with open(hooks_file, "r", encoding="utf-8") as f:
                         config = json.load(f)
-                    n = self.register_hooks_from_json(
-                        skill_name,
-                        str(skill_dir.absolute()),
-                        config,
-                        str(hooks_file)
-                    )
+                    n = self.register_hooks_from_json(skill_name, str(skill_dir.absolute()), config, str(hooks_file))
                     count += n
                     if n > 0:
                         logger.info(f"[HookManager] Loaded {n} hooks from skill {skill_name}")
@@ -2073,7 +2168,7 @@ class HookManager:
         """从 SKILL.md frontmatter 加载 hooks 配置"""
         import re
 
-        content = md_file.read_text(encoding='utf-8')
+        content = md_file.read_text(encoding="utf-8")
 
         # 解析 frontmatter
         if not content.startswith("---"):
@@ -2088,7 +2183,7 @@ class HookManager:
         skill_name = f"__skill__{skill_dir.name}"
 
         # 查找 <hooks> 块
-        hooks_pattern = r'<hooks>(.*?)</hooks>'
+        hooks_pattern = r"<hooks>(.*?)</hooks>"
         hooks_match = re.search(hooks_pattern, body, re.DOTALL)
 
         if not hooks_match:
@@ -2098,12 +2193,7 @@ class HookManager:
         config = self._parse_inline_hooks(hooks_text)
 
         if config.get("hooks"):
-            n = self.register_hooks_from_json(
-                skill_name,
-                str(skill_dir.absolute()),
-                config,
-                str(md_file)
-            )
+            n = self.register_hooks_from_json(skill_name, str(skill_dir.absolute()), config, str(md_file))
             if n > 0:
                 logger.info(f"[HookManager] Loaded {n} hooks from SKILL.md of {skill_name}")
             return n
@@ -2116,7 +2206,7 @@ class HookManager:
         current_event = None
         current_rules = []
 
-        for line in hooks_text.split('\n'):
+        for line in hooks_text.split("\n"):
             line = line.rstrip()
             if not line:
                 continue
@@ -2136,9 +2226,9 @@ class HookManager:
 
                 # 解析简化的 hook 格式
                 hook_data = {}
-                parts = line.strip().lstrip('- ')
-                if ':' in parts:
-                    key, value = parts.split(':', 1)
+                parts = line.strip().lstrip("- ")
+                if ":" in parts:
+                    key, value = parts.split(":", 1)
                     hook_data[key.strip()] = value.strip()
 
                 if hook_data:

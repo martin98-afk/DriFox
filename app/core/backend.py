@@ -3,6 +3,7 @@
 ChatBackend - 统一后端接口
 后端自己创建和管理所有组件，前端只负责 UI 调用
 """
+
 import asyncio
 import os
 import queue
@@ -25,7 +26,7 @@ from app.core.workers.subagent_worker import SubAgentManager
 from app.utils.history_manager import HistoryManager
 
 # 支持的图片扩展名
-_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 def _event_to_tag(event_name: str) -> str:
@@ -41,8 +42,8 @@ def _event_to_tag(event_name: str) -> str:
     """
     # PascalCase / camelCase → kebab-case
     # UserPromptSubmit → User-Prompt-Submit → user-prompt-submit
-    kebab = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', event_name)
-    kebab = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1-\2', kebab)
+    kebab = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", event_name)
+    kebab = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1-\2", kebab)
     return kebab.lower()
 
 
@@ -58,35 +59,31 @@ def _strip_hook_wrapper(content: str) -> str:
 
     # Claude Code 格式：<xxx-hook>...</xxx-hook>
     # 用启发式：只要匹配 <xxx-hook>...</xxx-hook> 且标签以 -hook 结尾
-    m = re.search(
-        r'<([a-z0-9-]+-hook)>\s*(.*?)\s*</\1>',
-        content, re.DOTALL
-    )
+    m = re.search(r"<([a-z0-9-]+-hook)>\s*(.*?)\s*</\1>", content, re.DOTALL)
     if m:
         return m.group(2).strip()
 
     # 旧分隔线格式
-    if content.startswith('---') and '🔌 **Hook 内部通知**' in content:
-        match = re.search(
-            r'---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---',
-            content, re.DOTALL
-        )
+    if content.startswith("---") and "🔌 **Hook 内部通知**" in content:
+        match = re.search(r"---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---", content, re.DOTALL)
         if match:
             return match.group(1).strip()
         return content
 
     # 最早旧格式
-    match = re.search(r'<hook[^>]*>(.*?)</hook>', content, re.DOTALL)
+    match = re.search(r"<hook[^>]*>(.*?)</hook>", content, re.DOTALL)
     if match:
         return match.group(1).strip()
     return content
 
 
-def _format_hook_output(event_name: str, output: str) -> str:
+def _format_hook_output(event_name: str, output: str, status_message: str = "") -> str:
     """格式化 hook 输出为 Claude Code 兼容的双层 XML 标签格式
 
     外层: <system-reminder>...</system-reminder>
     内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+
+    当传入 status_message 时，在 <system-reminder> 和 <xxx-hook> 之间插入 <status> 标签。
 
     与 Claude Code 实际格式对齐：
     - <system-reminder> 是 Claude Code 通用系统注入容器
@@ -94,33 +91,35 @@ def _format_hook_output(event_name: str, output: str) -> str:
     LLM 收到时按 system prompt 约定识别为 hook 注入内容。
     """
     tag = _event_to_tag(event_name)
-    return (
-        f"<system-reminder>\n"
-        f"<{tag}-hook>\n"
-        f"{output}\n"
-        f"</{tag}-hook>\n"
-        f"</system-reminder>"
-    )
+    parts = ["<system-reminder>"]
+    if status_message:
+        parts.append(f"<status>{status_message}</status>")
+    parts.append(f"<{tag}-hook>")
+    parts.append(output)
+    parts.append(f"</{tag}-hook>")
+    parts.append("</system-reminder>")
+    return "\n".join(parts)
 
 
-def _make_hook_message(event_name: str, output: str) -> Dict[str, Any]:
+def _make_hook_message(event_name: str, output: str, status_message: str = "") -> Dict[str, Any]:
     """构建一条 hook 消息 dict（带 _hook_event 标记和 timestamp）"""
     import datetime as _dt
+
     return {
         "role": "system",
-        "content": _format_hook_output(event_name, output),
+        "content": _format_hook_output(event_name, output, status_message),
         "_hook_event": event_name,
         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
-def _inject_hook_to_session(session, event_name: str, output: str):
+def _inject_hook_to_session(session, event_name: str, output: str, status_message: str = ""):
     """将 hook 输出追加到 session.messages（只追加不删除，保证历史稳定）"""
     if not session:
         return
     if not output or not output.strip():
         return
-    msg = _make_hook_message(event_name, output)
+    msg = _make_hook_message(event_name, output, status_message)
     session.messages.append(msg)
     session._update_timestamp()
 
@@ -128,13 +127,13 @@ def _inject_hook_to_session(session, event_name: str, output: str):
 def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
     """
     从 Markdown 内容中提取本地图片文件路径。
-    
+
     检测 ![alt](path) 语法，只提取本地存在的图片文件。
     对远程 URL、不存在的文件、非图片文件均不提取。
-    
+
     Args:
         content: Markdown 文本内容
-    
+
     Returns:
         (clean_content, image_paths) - 清理后的文本和本地图片路径列表
     """
@@ -149,14 +148,14 @@ def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
                 return ""  # 移除图片标记
         return match.group(0)  # 保留原样
 
-    cleaned = re.sub(r'!\[.*?\]\((.+?)\)', _replace_img, content)
+    cleaned = re.sub(r"!\[.*?\]\((.+?)\)", _replace_img, content)
     return cleaned, image_paths
 
 
 class ChatBackend(QObject):
     """
     聊天后端 - 自己创建所有核心组件，暴露统一接口给前端
-    
+
     职责：
     1. 创建并管理 ChatEngine, SessionManager, ToolExecutor 等
     2. 暴露统一的 API 给前端（UI 层）
@@ -199,6 +198,11 @@ class ChatBackend(QObject):
 
     # 插件热更新信号（watchfiles 检测到变更时触发）
     plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
+
+    # Hook 执行状态信号（event_name, status_message, is_start）
+    # TODO: 当前没有 UI 订阅此信号。状态消息字段 (`statusMessage`) 已可解析但尚未展示。
+    #       待 hook_setting_card 或状态栏/通知组件接入后即可移除此 TODO。
+    hook_status_changed = pyqtSignal(str, str, bool)
     # 后台线程请求主线程执行插件重载（内部信号）
     _hot_reload_requested = pyqtSignal(str, str)  # (插件名, 组件), ""=全量/空组件=全部组件
     # _watch_loop 检测到新插件时，用此 sentinel 作为 plugin_name 标记走增量加载路径
@@ -300,7 +304,7 @@ class ChatBackend(QObject):
     ):
         """
         后端初始化 - 自己创建所有组件（不依赖 Qt）
-        
+
         Args:
             get_model_config: 获取模型配置的回调
             agent_manager: 已有的 AgentManager（可选）
@@ -335,14 +339,14 @@ class ChatBackend(QObject):
         # Hook 完成回调 — 仅处理需要通过队列传递给 worker 的事件
         # 预对话事件（SessionStart, PreUserMessage, PostUserMessage 等）不经过此回调，
         # 由 engine.py 收集 trigger_event 返回值后直接注入 session.messages
-        def on_hook_finished(event_name: str, output: str, success: bool):
-            if not getattr(self, '_ui_valid', True):
+        def on_hook_finished(event_name: str, output: str, success: bool, status_message: str = ""):
+            if not getattr(self, "_ui_valid", True):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
 
             is_prompt_hook = event_name.startswith("__prompt__:")
             if is_prompt_hook:
-                event_name = event_name[len("__prompt__:"):]
+                event_name = event_name[len("__prompt__:") :]
 
             # BuildSystemPrompt hook 的输出已在 get_agent_system_prompt() 中直接注入 system prompt，
             # 不需要再通过队列注入到 assistant 消息中，跳过回调避免双重注入。
@@ -362,24 +366,36 @@ class ChatBackend(QObject):
             # PostToolUse → 主队列（在 loop 顶部消费，出现在 tool result 之后）
             # prompt hooks → 主队列
             if event_name == "PreToolUse":
-                hook_output = _format_hook_output(event_name, output)
-                self._pre_tool_message_queue.put({
-                    "role": "system",
-                    "content": hook_output,
-                    "_hook_event": event_name,
-                })
+                hook_output = _format_hook_output(event_name, output, status_message)
+                self._pre_tool_message_queue.put(
+                    {
+                        "role": "system",
+                        "content": hook_output,
+                        "_hook_event": event_name,
+                    }
+                )
                 logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
             elif is_prompt_hook or event_name == "PostToolUse":
-                hook_output = _format_hook_output(event_name, output)
-                self._hook_message_queue.put({
-                    "role": "system",
-                    "content": hook_output,
-                    "_hook_event": event_name,
-                })
+                hook_output = _format_hook_output(event_name, output, status_message)
+                self._hook_message_queue.put(
+                    {
+                        "role": "system",
+                        "content": hook_output,
+                        "_hook_event": event_name,
+                    }
+                )
                 self._hook_messages_updated.emit()
                 logger.debug(f"[HookManager] Hook queued for worker: {event_name}")
 
         self._hook_manager.set_on_finished_callback(on_hook_finished)
+
+        # Hook 执行状态回调 — 转发为 Qt 信号供 UI 使用
+        def on_hook_status(event_name: str, status_message: str, is_start: bool):
+            if not getattr(self, "_ui_valid", True):
+                return
+            self.hook_status_changed.emit(event_name, status_message, is_start)
+
+        self._hook_manager.set_on_status_callback(on_hook_status)
 
         # 4. 创建初始会话（不触发 SessionStart hook，避免重复初始化）
         self.create_session(trigger_hook=False)
@@ -391,12 +407,13 @@ class ChatBackend(QObject):
 
         # 加载全局 hooks（从 PluginManager 获取路径）
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             global_hooks_file = pm.get_global_hooks_file()
             if global_hooks_file.exists() and "user-custom" not in self._hook_manager._skill_to_hooks:
                 try:
-                    with open(global_hooks_file, 'rb') as f:
+                    with open(global_hooks_file, "rb") as f:
                         config = json.loads(f.read())
                     skill_root = str(global_hooks_file.parent)
                     count = self._hook_manager.register_hooks_from_json(
@@ -418,7 +435,7 @@ class ChatBackend(QObject):
         if self._memory_manager and self._memory_manager.key_documents:
             self._tool_executor.set_key_documents_repo(
                 self._memory_manager.key_documents,
-                "默认项目"  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
+                "默认项目",  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
             )
         logger.info("[ChatBackend] ToolExecutor 创建完成")
 
@@ -428,7 +445,7 @@ class ChatBackend(QObject):
             get_model_config=get_model_config,
             tool_executor=self._tool_executor,
             agent_manager=self._agent_manager,
-            get_chat_cards=getattr(self, '_build_chat_cards_context', None),
+            get_chat_cards=getattr(self, "_build_chat_cards_context", None),
             backend=self,  # 暂时设为 None，后面通过 setter 设置
         )
         logger.info("[ChatBackend] ChatEngine 创建完成")
@@ -438,6 +455,7 @@ class ChatBackend(QObject):
 
         # 创建 GatewayEngine（全局单例，多个窗口共享）
         from app.core.engines.gateway import GatewayEngine
+
         self._gateway_engine = GatewayEngine.get_instance(
             get_model_config=get_model_config,
             tool_executor=self._tool_executor,
@@ -452,6 +470,7 @@ class ChatBackend(QObject):
 
         def _get_subagent_llm_config():
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
             saved = cfg.llm_subagent_default_model.value
             if saved and self._subagent_model_resolver:
@@ -497,6 +516,7 @@ class ChatBackend(QObject):
         # 初始化 Gateway（后台进行，不阻塞）
         # 使用 get_platform_manager() 判断是否已存在管理器实例，避免重复初始化
         from app.gateway.manager import get_platform_manager
+
         existing_mgr = get_platform_manager()
         if existing_mgr is not None:
             self._gateway_manager = existing_mgr
@@ -526,7 +546,7 @@ class ChatBackend(QObject):
         （_inject_pending_hook_messages，在 worker 线程中运行）承担，
         避免跨线程直接访问 worker 内部状态带来的竞态风险。
         """
-        if not getattr(self, '_ui_valid', True):
+        if not getattr(self, "_ui_valid", True):
             return
 
         session = self.get_current_session()
@@ -582,26 +602,24 @@ class ChatBackend(QObject):
                 # ── 初始化 LSP 管理器（仅首次，多窗口共享单例）──
                 try:
                     from app.core.lsp.lsp_manager import LspManager
+
                     lsp_mgr = LspManager.get_instance()
                     lsp_configs = pm.get_lsp_configs()
                     # 使用项目根目录作为 LSP workspace root，而非 os.getcwd()
                     # 避免 pyright 扫描整个上级目录（如 d:\work 下所有项目）
                     # backend.py 位于 app/core/backend.py，项目根在其上 3 层
-                    workdir = os.path.dirname(
-                        os.path.dirname(
-                            os.path.dirname(os.path.abspath(__file__))
-                        )
-                    )
+                    workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                     lsp_mgr.initialize(workdir, lsp_configs)
-                    logger.info(f"[ChatBackend] LspManager 初始化完成，"
-                               f"已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
+                    logger.info(f"[ChatBackend] LspManager 初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
                     lsp_mgr.start_all_background()
                 except Exception as e:
                     logger.error(f"[ChatBackend] LspManager 初始化失败: {e}")
 
-            logger.info(f"[ChatBackend] PluginManager 初始化完成，"
-                       f"已加载 {len(pm.list_plugins())} 个插件，"
-                       f"智能体 {len(self._agent_manager.list_agents())} 个")
+            logger.info(
+                f"[ChatBackend] PluginManager 初始化完成，"
+                f"已加载 {len(pm.list_plugins())} 个插件，"
+                f"智能体 {len(self._agent_manager.list_agents())} 个"
+            )
 
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
@@ -610,12 +628,13 @@ class ChatBackend(QObject):
         """插件系统初始化后，重新加载插件主题"""
         try:
             from app.utils.theme_manager import theme_manager
+
             theme_manager.reload()
             # 同时更新 Settings 中的主题选项
             from app.utils.config import update_theme_options
+
             update_theme_options()
-            logger.info(f"[ChatBackend] 插件主题刷新完成，"
-                       f"共 {len(theme_manager.list_themes())} 个主题")
+            logger.info(f"[ChatBackend] 插件主题刷新完成，共 {len(theme_manager.list_themes())} 个主题")
         except Exception as e:
             logger.error(f"[ChatBackend] 刷新插件主题失败: {e}")
 
@@ -637,13 +656,14 @@ class ChatBackend(QObject):
 
         # 收集需要监听的插件目录
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
 
         watch_paths = []
         from pathlib import Path as _Path
 
         # 系统插件目录
-        if hasattr(pm, '_SYSTEM_PLUGIN_DIR') and pm._SYSTEM_PLUGIN_DIR.exists():
+        if hasattr(pm, "_SYSTEM_PLUGIN_DIR") and pm._SYSTEM_PLUGIN_DIR.exists():
             watch_paths.append(str(pm._SYSTEM_PLUGIN_DIR.resolve()))
         # 用户插件目录（开发环境下可能是相对路径，统一 resolve 为绝对路径）
         if pm._app_data_dir:
@@ -745,7 +765,7 @@ class ChatBackend(QObject):
                     relevant_changes = []
                     for change_type, change_path in changes:
                         p = change_path.lower()
-                        if '.git' in p or '__pycache__' in p or p.endswith('.pyc'):
+                        if ".git" in p or "__pycache__" in p or p.endswith(".pyc"):
                             continue
                         relevant_changes.append((change_type, change_path))
 
@@ -755,15 +775,10 @@ class ChatBackend(QObject):
                     current_prefixes = _prefixes_ref[0]
 
                     # 识别变更所属插件
-                    plugin_name = self._identify_plugin_from_changes(
-                        relevant_changes, current_prefixes
-                    )
+                    plugin_name = self._identify_plugin_from_changes(relevant_changes, current_prefixes)
 
                     if plugin_name == "__ALL__":
-                        logger.info(
-                            f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处)，"
-                            f"请求主线程全量重载..."
-                        )
+                        logger.info(f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处)，请求主线程全量重载...")
                         # 不提前 _rebuild_prefixes()，改在 _on_hot_reload_requested 重载完成后重建
                         self._hot_reload_requested.emit("", "")
                     elif plugin_name:
@@ -791,10 +806,7 @@ class ChatBackend(QObject):
                         # 无法通过路径索引识别：尝试直接从文件系统检测新插件
                         new_name = _try_identify_new_plugin(relevant_changes)
                         if new_name:
-                            logger.info(
-                                f"[ChatBackend] 检测到新插件「{new_name}」文件变更，"
-                                f"请求增量重载..."
-                            )
+                            logger.info(f"[ChatBackend] 检测到新插件「{new_name}」文件变更，请求增量重载...")
                             # 预填充 dedup cache，防止路径索引重建后同一批 watch 事件
                             # 的剩余部分以已知插件路径再次触发（ghost trigger）
                             _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
@@ -803,8 +815,7 @@ class ChatBackend(QObject):
                             self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
                         else:
                             logger.info(
-                                f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: "
-                                f"{relevant_changes[0][1]}"
+                                f"[ChatBackend] 文件变更无法识别所属插件，触发全量重扫: {relevant_changes[0][1]}"
                             )
                             # 注意：此处不调用 _rebuild_prefixes()，因为 pm.rescan() 还没执行
                             # 路径重建改在 _on_hot_reload_requested 重载完成后进行
@@ -823,16 +834,15 @@ class ChatBackend(QObject):
             {小写路径: 插件名}
         """
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
         prefixes = {}
         for plugin in pm.list_plugins():
-            path = str(plugin.path.resolve()).lower().rstrip('\\/')
+            path = str(plugin.path.resolve()).lower().rstrip("\\/")
             prefixes[path] = plugin.name
         return prefixes
 
-    def _identify_plugin_from_changes(
-        self, changes: list, plugin_prefixes: Dict[str, str]
-    ) -> Optional[str]:
+    def _identify_plugin_from_changes(self, changes: list, plugin_prefixes: Dict[str, str]) -> Optional[str]:
         """从变更文件路径识别所属插件名称
 
         Args:
@@ -866,9 +876,7 @@ class ChatBackend(QObject):
         logger.debug(f"[ChatBackend] 跨插件变更: {found}，触发全量重载")
         return "__ALL__"
 
-    def _identify_component_from_changes(
-        self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str
-    ) -> str:
+    def _identify_component_from_changes(self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str) -> str:
         """从变更文件路径识别所属组件子目录
 
         Args:
@@ -900,7 +908,7 @@ class ChatBackend(QObject):
             if cp == plugin_path:
                 continue  # 插件根目录本身变更，全量
             if cp.startswith(plugin_path + os.sep):
-                rel = cp[len(plugin_path) + 1:]  # 去掉 "plugin_path\"
+                rel = cp[len(plugin_path) + 1 :]  # 去掉 "plugin_path\"
                 first_seg = rel.split(os.sep)[0] if os.sep in rel else rel
                 if first_seg in KNOWN_COMPONENTS:
                     return first_seg
@@ -937,7 +945,7 @@ class ChatBackend(QObject):
 
     def _rebuild_watcher_prefixes(self):
         """重建 watchfiles 线程的插件路径索引（主线程调用）"""
-        prefixes_ref = getattr(self, '_watcher_prefixes_ref', None)
+        prefixes_ref = getattr(self, "_watcher_prefixes_ref", None)
         if prefixes_ref is not None:
             prefixes_ref[0] = self._build_plugin_path_index()
 
@@ -957,11 +965,19 @@ class ChatBackend(QObject):
             {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
              "skills": bool, "mcp": bool, "lsp": bool}
         """
-        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
-                        "skills": False, "mcp": False, "lsp": False}
+        result: dict = {
+            "agents": 0,
+            "commands": False,
+            "hooks": False,
+            "themes": False,
+            "skills": False,
+            "mcp": False,
+            "lsp": False,
+        }
 
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
                 logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
@@ -984,6 +1000,7 @@ class ChatBackend(QObject):
                 result["hooks"] = True  # agents 组件包含 hooks 重载
                 try:
                     from app.core.builtin_commands import reload_all_commands
+
                     reload_all_commands()
                     result["commands"] = True
                 except (ImportError, Exception) as e:
@@ -997,6 +1014,7 @@ class ChatBackend(QObject):
             if comps.get("commands") and not result["commands"]:
                 try:
                     from app.core.builtin_commands import reload_all_commands
+
                     reload_all_commands()
                     result["commands"] = True
                 except (ImportError, Exception) as e:
@@ -1007,6 +1025,7 @@ class ChatBackend(QObject):
                 try:
                     from app.utils.config import update_theme_options
                     from app.utils.theme_manager import theme_manager
+
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
@@ -1021,21 +1040,22 @@ class ChatBackend(QObject):
             if comps.get("lsp"):
                 try:
                     from app.core.lsp.lsp_manager import LspManager
+
                     lsp_mgr = LspManager.get_instance()
                     lsp_config = pm.get_plugin_lsp_config(plugin_name)
                     if lsp_config:
                         count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
                         result["lsp"] = count > 0
-                    logger.info(
-                        f"[ChatBackend] Plugin '{plugin_name}' LSP 增量加载完成"
-                    )
+                    logger.info(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量加载完成")
                 except Exception as e:
                     logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量加载失败: {e}")
 
-            logger.info(f"[ChatBackend] 新插件增量加载「{plugin_name}」完成: "
-                       f"agents={result['agents']}, commands={result['commands']}, "
-                       f"themes={result['themes']}, skills={result['skills']}, "
-                       f"mcp={result['mcp']}, lsp={result['lsp']}")
+            logger.info(
+                f"[ChatBackend] 新插件增量加载「{plugin_name}」完成: "
+                f"agents={result['agents']}, commands={result['commands']}, "
+                f"themes={result['themes']}, skills={result['skills']}, "
+                f"mcp={result['mcp']}, lsp={result['lsp']}"
+            )
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload new plugin '{plugin_name}': {e}")
 
@@ -1062,11 +1082,19 @@ class ChatBackend(QObject):
         Returns:
             {"agents": int, "commands": bool, "themes": bool, "skills": bool, "mcp": bool}
         """
-        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
-                        "skills": False, "mcp": False, "lsp": False}
+        result: dict = {
+            "agents": 0,
+            "commands": False,
+            "hooks": False,
+            "themes": False,
+            "skills": False,
+            "mcp": False,
+            "lsp": False,
+        }
 
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
                 logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
@@ -1084,6 +1112,7 @@ class ChatBackend(QObject):
                     self._agent_manager.cleanup_plugin_artifacts(plugin_name)
                 try:
                     from app.core.builtin_commands import reload_all_commands
+
                     reload_all_commands()
                     result["commands"] = True
                 except (ImportError, Exception) as e:
@@ -1091,6 +1120,7 @@ class ChatBackend(QObject):
                 try:
                     from app.utils.config import update_theme_options
                     from app.utils.theme_manager import theme_manager
+
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
@@ -1105,17 +1135,17 @@ class ChatBackend(QObject):
                 # LSP：重新初始化 LspManager（停止旧服务 → 仅加载剩余插件的新配置 → 启动新服务）
                 try:
                     from app.core.lsp.lsp_manager import LspManager
+
                     lsp_mgr = LspManager.get_instance()
                     lsp_configs = pm.get_lsp_configs()
                     workdir = os.getcwd()
-                    if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                    if self._tool_executor and getattr(self._tool_executor, "_workdir", None):
                         workdir = str(self._tool_executor._workdir)
                     lsp_mgr.initialize(workdir, lsp_configs)
                     lsp_mgr.start_all_background()
                     result["lsp"] = True
                     logger.info(
-                        f"[ChatBackend] Plugin '{plugin_name}' LSP 已清理，"
-                        f"剩余 {len(lsp_mgr._clients)} 个服务器"
+                        f"[ChatBackend] Plugin '{plugin_name}' LSP 已清理，剩余 {len(lsp_mgr._clients)} 个服务器"
                     )
                 except Exception as e:
                     logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 清理失败: {e}")
@@ -1130,6 +1160,7 @@ class ChatBackend(QObject):
                 # 确保 CommandManager 中的 agent 命令同步更新，否则 /silent-failure-hunter 等命令无法识别
                 try:
                     from app.core.builtin_commands import reload_all_commands
+
                     reload_all_commands()
                     result["commands"] = True
                     logger.debug(f"[ChatBackend] Commands reloaded after agent change for plugin: {plugin_name}")
@@ -1146,6 +1177,7 @@ class ChatBackend(QObject):
             if component == "commands" and plugin.has_component("commands"):
                 try:
                     from app.core.builtin_commands import reload_all_commands
+
                     reload_all_commands()
                     result["commands"] = True
                 except (ImportError, Exception) as e:
@@ -1159,6 +1191,7 @@ class ChatBackend(QObject):
                 try:
                     from app.utils.config import update_theme_options
                     from app.utils.theme_manager import theme_manager
+
                     theme_manager.reload()
                     update_theme_options()
                     result["themes"] = True
@@ -1184,6 +1217,7 @@ class ChatBackend(QObject):
             if component == "lsp":
                 try:
                     from app.core.lsp.lsp_manager import LspManager
+
                     lsp_mgr = LspManager.get_instance()
                     # 先移除旧服务器（如果 .lsp.json 被删除也需要清理）
                     lsp_mgr.remove_plugin_servers(plugin_name)
@@ -1192,16 +1226,16 @@ class ChatBackend(QObject):
                     if lsp_config:
                         count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
                         result["lsp"] = count > 0
-                    logger.info(
-                        f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载完成"
-                    )
+                    logger.info(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载完成")
                 except Exception as e:
                     logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载失败: {e}")
 
-            logger.info(f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
-                       f"agents={result['agents']}, commands={result['commands']}, "
-                       f"themes={result['themes']}, skills={result['skills']}, "
-                       f"mcp={result['mcp']}, lsp={result.get('lsp', False)}")
+            logger.info(
+                f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
+                f"agents={result['agents']}, commands={result['commands']}, "
+                f"themes={result['themes']}, skills={result['skills']}, "
+                f"mcp={result['mcp']}, lsp={result.get('lsp', False)}"
+            )
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin '{plugin_name}': {e}")
 
@@ -1218,11 +1252,19 @@ class ChatBackend(QObject):
              "skills": bool, "mcp": bool}
             各子系统的重载结果
         """
-        result: dict = {"agents": 0, "commands": False, "hooks": False, "themes": False,
-                        "skills": False, "mcp": False, "lsp": False}
+        result: dict = {
+            "agents": 0,
+            "commands": False,
+            "hooks": False,
+            "themes": False,
+            "skills": False,
+            "mcp": False,
+            "lsp": False,
+        }
 
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
                 logger.warning("[ChatBackend] PluginManager not initialized, cannot reload")
@@ -1254,6 +1296,7 @@ class ChatBackend(QObject):
                     # 智能体文件同时也是命令源（/agent_name）
                     try:
                         from app.core.builtin_commands import reload_all_commands
+
                         reload_all_commands()
                         result["commands"] = True
                     except (ImportError, Exception) as e:
@@ -1268,6 +1311,7 @@ class ChatBackend(QObject):
                 if comps.get("commands") and not result["commands"]:
                     try:
                         from app.core.builtin_commands import reload_all_commands
+
                         reload_all_commands()
                         result["commands"] = True
                     except (ImportError, Exception) as e:
@@ -1278,6 +1322,7 @@ class ChatBackend(QObject):
                     try:
                         from app.utils.config import update_theme_options
                         from app.utils.theme_manager import theme_manager
+
                         theme_manager.reload()
                         update_theme_options()
                         result["themes"] = True
@@ -1295,21 +1340,22 @@ class ChatBackend(QObject):
                 if comps.get("lsp"):
                     try:
                         from app.core.lsp.lsp_manager import LspManager
+
                         lsp_mgr = LspManager.get_instance()
                         lsp_config = pm.get_plugin_lsp_config(name)
                         if lsp_config:
                             count = lsp_mgr.add_plugin_servers(name, lsp_config["config"])
                             result["lsp"] = count > 0
-                        logger.info(
-                            f"[ChatBackend] Plugin '{name}' LSP 增量加载完成"
-                        )
+                        logger.info(f"[ChatBackend] Plugin '{name}' LSP 增量加载完成")
                     except Exception as e:
                         logger.error(f"[ChatBackend] Plugin '{name}' LSP 增量加载失败: {e}")
 
-                logger.info(f"[ChatBackend] 增量重载「{name}」完成: "
-                           f"agents={result['agents']}, commands={result['commands']}, "
-                           f"themes={result['themes']}, skills={result['skills']}, "
-                           f"mcp={result['mcp']}, lsp={result['lsp']}")
+                logger.info(
+                    f"[ChatBackend] 增量重载「{name}」完成: "
+                    f"agents={result['agents']}, commands={result['commands']}, "
+                    f"themes={result['themes']}, skills={result['skills']}, "
+                    f"mcp={result['mcp']}, lsp={result['lsp']}"
+                )
                 return result
 
             # ── 全量重载（多插件变更/移除/覆盖，或非 watchfiles 触发） ──
@@ -1322,6 +1368,7 @@ class ChatBackend(QObject):
             # 3. 重载命令
             try:
                 from app.core.builtin_commands import reload_all_commands
+
                 reload_all_commands()
                 result["commands"] = True
             except (ImportError, Exception) as e:
@@ -1331,6 +1378,7 @@ class ChatBackend(QObject):
             try:
                 from app.utils.config import update_theme_options
                 from app.utils.theme_manager import theme_manager
+
                 theme_manager.reload()
                 update_theme_options()
                 result["themes"] = True
@@ -1346,24 +1394,24 @@ class ChatBackend(QObject):
             # 7. LSP 配置：重新初始化 LspManager（停止旧服务 → 加载新配置 → 启动新服务）
             try:
                 from app.core.lsp.lsp_manager import LspManager
+
                 lsp_mgr = LspManager.get_instance()
                 lsp_configs = pm.get_lsp_configs()
                 workdir = os.getcwd()
-                if self._tool_executor and getattr(self._tool_executor, '_workdir', None):
+                if self._tool_executor and getattr(self._tool_executor, "_workdir", None):
                     workdir = str(self._tool_executor._workdir)
                 lsp_mgr.initialize(workdir, lsp_configs)
                 lsp_mgr.start_all_background()
                 result["lsp"] = True
-                logger.info(
-                    f"[ChatBackend] LSP 全量重载完成，"
-                    f"已注册 {len(lsp_mgr._clients)} 个服务器"
-                )
+                logger.info(f"[ChatBackend] LSP 全量重载完成，已注册 {len(lsp_mgr._clients)} 个服务器")
             except Exception as e:
                 logger.error(f"[ChatBackend] LSP 全量重载失败: {e}")
 
-            logger.info(f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
-                       f"commands={result['commands']}, themes={result['themes']}, "
-                       f"skills={result['skills']}, mcp={result['mcp']}, lsp={result.get('lsp', False)}")
+            logger.info(
+                f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
+                f"commands={result['commands']}, themes={result['themes']}, "
+                f"skills={result['skills']}, mcp={result['mcp']}, lsp={result.get('lsp', False)}"
+            )
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
 
@@ -1429,8 +1477,7 @@ class ChatBackend(QObject):
         mcp_manager.connect_all_background(
             servers,
             on_done=lambda ok, total, failed: logger.info(
-                f"[ChatBackend] MCP 后台连接完成: {ok}/{total}"
-                + (f", 失败: {failed}" if failed else "")
+                f"[ChatBackend] MCP 后台连接完成: {ok}/{total}" + (f", 失败: {failed}" if failed else "")
             ),
         )
 
@@ -1474,7 +1521,7 @@ class ChatBackend(QObject):
     def cleanup(self):
         """
         清理窗口独有资源，不影响其他窗口。
-        
+
         安全规则：
         - 不清除任何单例/共享组件（AgentManager/MemoryManagerCore/HistoryManager/BuiltinTools）
         - 仅释放本窗口创建的实例和引用
@@ -1531,12 +1578,11 @@ class ChatBackend(QObject):
 
     def get_last_cache_stats(self) -> Optional[Dict]:
         """获取最后一次的缓存统计（Worker 被清理后仍可访问）"""
-        return getattr(self, '_last_cache_stats', None)
+        return getattr(self, "_last_cache_stats", None)
 
     def set_last_cache_stats(self, stats: Dict):
         """保存最后一次的缓存统计"""
         self._last_cache_stats = stats
-
 
     def get_context_usage_snapshot(self, session, llm_config) -> Dict:
         """获取上下文使用快照"""
@@ -1600,7 +1646,7 @@ class ChatBackend(QObject):
     def file_recorder(self):
         """获取文件操作记录器"""
         if self._tool_executor:
-            return getattr(self._tool_executor, 'file_recorder', None)
+            return getattr(self._tool_executor, "file_recorder", None)
         return None
 
     def execute_skill(self, method: str, params: Dict):
@@ -1618,7 +1664,7 @@ class ChatBackend(QObject):
     # ========== MemoryManager 代理方法 ==========
     def get_memory_context_string(self, limit: int = 100) -> str:
         """获取记忆上下文字符串
-        
+
         多窗口隔离：优先使用 tool_executor 中的实例级 workdir，
         避免 DB 中其他窗口写入的工作目录值。
         """
@@ -1653,7 +1699,7 @@ class ChatBackend(QObject):
     def add_user_memory(self, content: str, **kwargs):
         """添加用户记忆"""
         if self._memory_manager:
-            self._memory_manager.add_entry_memory(content, kwargs.get('source', 'assistant'))
+            self._memory_manager.add_entry_memory(content, kwargs.get("source", "assistant"))
 
     def update_user_memories(self, memories: List[Dict]) -> bool:
         """更新用户记忆"""
@@ -1706,7 +1752,7 @@ class ChatBackend(QObject):
                 for doc in docs:
                     file_path = doc.get("file_path", "")
                     file_name = doc.get("file_name", "")
-                    is_url = file_path and (file_path.startswith('http://') or file_path.startswith('https://'))
+                    is_url = file_path and (file_path.startswith("http://") or file_path.startswith("https://"))
                     is_wd = file_path == wd_path
                     if not is_url and not is_wd and file_path and wd_path:
                         try:
@@ -1717,12 +1763,14 @@ class ChatBackend(QObject):
                         display = file_path
                     else:
                         display = file_path
-                    doc_items.append({
-                        "file_name": file_name,
-                        "display": display,
-                        "is_url": is_url,
-                        "is_wd": is_wd,
-                    })
+                    doc_items.append(
+                        {
+                            "file_name": file_name,
+                            "display": display,
+                            "is_url": is_url,
+                            "is_wd": is_wd,
+                        }
+                    )
                 if doc_items:
                     ctx["key_documents"] = doc_items
         except Exception:
@@ -1749,6 +1797,7 @@ class ChatBackend(QObject):
         # Worktree / git 分支信息
         try:
             from app.utils.git_worktree import GitWorktreeDetector
+
             repo_info = GitWorktreeDetector.get_repo_info(project_root)
             if repo_info and repo_info.worktrees:
                 ctx["worktree"] = {
@@ -1756,9 +1805,7 @@ class ChatBackend(QObject):
                     "current_branch": repo_info.current_branch,
                     "workdir": project_root,
                     "is_worktree": project_root != repo_info.root,
-                    "other_branches": [
-                        wt.branch for wt in repo_info.worktrees if not wt.is_current
-                    ],
+                    "other_branches": [wt.branch for wt in repo_info.worktrees if not wt.is_current],
                 }
         except Exception:
             pass
@@ -1788,6 +1835,7 @@ class ChatBackend(QObject):
         # Worktree / git 分支信息
         try:
             from app.utils.git_worktree import GitWorktreeDetector
+
             repo_info = GitWorktreeDetector.get_repo_info(project_root)
             if repo_info and repo_info.worktrees:
                 ctx["worktree"] = {
@@ -1795,9 +1843,7 @@ class ChatBackend(QObject):
                     "current_branch": repo_info.current_branch,
                     "workdir": project_root,
                     "is_worktree": project_root != repo_info.root,
-                    "other_branches": [
-                        wt.branch for wt in repo_info.worktrees if not wt.is_current
-                    ],
+                    "other_branches": [wt.branch for wt in repo_info.worktrees if not wt.is_current],
                 }
         except Exception:
             pass
@@ -1806,7 +1852,7 @@ class ChatBackend(QObject):
 
     def create_session(self, trigger_hook: bool = True) -> ChatSession:
         """创建新会话
-        
+
         Args:
             trigger_hook: 是否触发 SessionStart hook。初始化时设为 False 避免重复触发。
         """
@@ -1825,7 +1871,7 @@ class ChatBackend(QObject):
             )
             for r in results:
                 if r.success and r.output:
-                    _inject_hook_to_session(session, "SessionStart", r.output)
+                    _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
             self._hook_messages_updated.emit()
 
         return session
@@ -1846,13 +1892,15 @@ class ChatBackend(QObject):
         if extra_context:
             ctx.update(extra_context)
         results = self._hook_manager.trigger_event(
-            "SessionStart", context=ctx, current_message="",
+            "SessionStart",
+            context=ctx,
+            current_message="",
             trigger_async=False,  # 同步执行，收集输出直接注入
         )
         if session:
             for r in results:
                 if r.success and r.output:
-                    _inject_hook_to_session(session, "SessionStart", r.output)
+                    _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
             self._hook_messages_updated.emit()
 
     def get_current_session(self) -> Optional[ChatSession]:
@@ -1927,7 +1975,7 @@ class ChatBackend(QObject):
 
     def _build_memory_context(self, query: str = "", project: str = "默认项目") -> str:
         """构建长期记忆上下文（供 ChatEngine 调用）
-        
+
         多窗口隔离：优先使用 tool_executor 中的实例级 workdir。
         """
         if not self._memory_manager:
@@ -2123,12 +2171,7 @@ class ChatBackend(QObject):
 
                 # 创建消息处理回调
                 async def process_message(
-                    session_id: str,
-                    text: str,
-                    platform: Any,
-                    chat_id: str,
-                    user_id: str,
-                    **kwargs
+                    session_id: str, text: str, platform: Any, chat_id: str, user_id: str, **kwargs
                 ) -> str:
                     """处理 Gateway 消息"""
                     # 这里调用 AI 处理
@@ -2154,17 +2197,12 @@ class ChatBackend(QObject):
 
         # 在后台线程运行
         import threading
+
         t = threading.Thread(target=_do_init, daemon=True)
         t.start()
 
     async def _gateway_process_message(
-        self,
-        session_id: str,
-        text: str,
-        platform: Any,
-        chat_id: str,
-        user_id: str,
-        **kwargs
+        self, session_id: str, text: str, platform: Any, chat_id: str, user_id: str, **kwargs
     ) -> str:
         """
         处理 Gateway 消息 - 调用 AI
@@ -2174,21 +2212,22 @@ class ChatBackend(QObject):
         logger.info(f"[Gateway] Processing message from {platform.value}:{user_id}: {text[:50]}...")
 
         # 先发送"思考中"占位回复
-        await self._gateway_send_message(
-            platform, chat_id, "🤔 正在思考，请稍候..."
-        )
+        await self._gateway_send_message(platform, chat_id, "🤔 正在思考，请稍候...")
 
         # 用 signal 发送到主线程
         import concurrent.futures
+
         future = concurrent.futures.Future()
 
-        self.gateway_input_received.emit({
-            "text": text,
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "platform": platform.value,
-            "future": future,
-        })
+        self.gateway_input_received.emit(
+            {
+                "text": text,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "platform": platform.value,
+                "future": future,
+            }
+        )
 
         try:
             # 异步等待 AI 结果（不超时，AI 回复多久等多久）
