@@ -318,6 +318,9 @@ class AgentManager:
         self._builtin_tools = None  # BuiltinTools 实例，用于获取 MCP schema
         # 插件来源跟踪：plugin_name -> set of agent_names，用于增量重载
         self._plugin_agents: Dict[str, Set[str]] = {}
+        # 系统提示词缓存：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
+        # key: (agent_name, is_subagent_call), value: system_prompt string
+        self._system_prompt_cache: Dict[tuple, str] = {}
         self._load_agents()
 
     def _load_agents(self, force: bool = False):
@@ -433,7 +436,10 @@ class AgentManager:
         if hooks_file.exists():
             self._hook_manager._clear_config_watcher(str(hooks_file))
         if hooks_dir.exists() and hooks_dir.is_dir():
-            self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+            # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
+            self._hook_manager.load_hooks_from_directory_flat(
+                hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
+            )
             return True
         return False
 
@@ -447,7 +453,10 @@ class AgentManager:
             # 清除配置去重缓存，允许用新 key 重新注册
             self._hook_manager._clear_config_watcher(str(hooks_file))
             self._hook_manager.unregister_skill_hooks(plugin.name)
-            self._hook_manager.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
+            # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
+            self._hook_manager.load_hooks_from_directory_flat(
+                hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
+            )
 
     def _unload_plugin_hooks(self):
         """注销所有插件级 hooks（reload 时调用）"""
@@ -508,8 +517,9 @@ class AgentManager:
                     if not hooks_dir.exists() or not hooks_dir.is_dir():
                         continue
                     # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
+                    # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
                     self._hook_manager.load_hooks_from_directory_flat(
-                        hooks_dir, skill_name=plugin.name
+                        hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
                     )
         except (ImportError, Exception):
             pass
@@ -693,6 +703,7 @@ class AgentManager:
             agent_name: str,
             base_prompt: str = "",
             is_subagent_call: bool = False,
+            extra_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         获取智能体的系统提示词。
@@ -703,98 +714,69 @@ class AgentManager:
             is_subagent_call: 是否为子智能体调用上下文。
                 - True: 主智能体通过 subagent_para 调用子智能体（子智能体看到的是任务描述，不是完整上下文）
                 - False: 主智能体自身运行，或子智能体独立运行
+            extra_context: 额外上下文（如 project_root/project_name），传递给 BuildSystemPrompt hook
         """
         agent = self.get_agent(agent_name)
-        if not agent:
-            return base_prompt
 
-        # 通用编码契约（所有智能体）
-        global_contract = """
-### 【绝对不能违反的铁律】只改任务范围内的文件
-- **只能修改任务明确指定的文件**，或在实现新功能时需要创建的**新文件**。
-- **绝对禁止**修改、重置（`git checkout`/`git restore`）、删除任何未经任务指定的文件。
-- 发现不属于自己改动范围的文件有变化 → **跳过它，不要碰**。谁改的谁负责。
-- `git diff --stat` 显示的无关文件变更 → 跳过，不要撤销。
-""".strip()
-
-        # 子智能体额外约束
-        subagent_constraints = """
-## 子智能体约束
-- 【禁止】使用 `question` 工具（需要用户交互，不支持）
-- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）
-- 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）
-- 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认
-- 【必须】独立完成任务，不需要主智能体介入
-- 如果遇到不确定的情况，根据已有信息做出合理假设并继续执行
-- 如需收集信息，使用 webfetch/websearch 工具代替提问
-""".strip()
-
-        # 主智能体额外约束
-        primary_constraints = """
-## 主智能体约束
-### 主动提问规范
-- 需要向用户确认的信息，优先使用 `question` 工具。
-
-### 推荐问题规范
-- 当你预测到用户接下来可能需要的帮助时，请按以下格式给出追问清单（放在回复末尾）：
-  - [问题描述1](ask)
-  - [问题描述2](ask)
-
-### 消息渲染能力
-- 支持 Markdown 渲染、代码高亮
-- 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）
-- 工具卡片的 diff 差异对比会自动渲染，无需手动处理
-""".strip()
-
-        # 【核心修复】根据 is_subagent_call 区分调用上下文
-        # 场景1: 主智能体自身运行（primary mode，is_subagent_call=False）
-        # 场景2: 主智能体通过 subagent_para 调用子智能体（子智能体看到任务描述，is_subagent_call=True）
-        # 场景3: 子智能体独立运行（subagent mode，is_subagent_call=False）
-        subagents_info = ""
-        if is_subagent_call:
-            # 场景2：被主智能体调用，子智能体看到的是任务描述
-            role_constraints = subagent_constraints
+        if agent and agent.prompt:
+            base = agent.prompt
         else:
-            # 场景1：主智能体运行
-            role_constraints = primary_constraints
-            # 主智能体需要动态注入可用子智能体列表
-            subagents_info = self.get_available_subagents_for_prompt()
-
-        # 【缓存优化】稳定前缀在前：global_contract + role_constraints 不随 Agent 变化
-        # agent.prompt 放在后面作为动态后缀，切换 Agent 时不影响前缀缓存命中
-        if agent.prompt:
-            return "\n\n".join(
-                part for part in [global_contract, role_constraints, agent.prompt, base_prompt, subagents_info] if part
-            )
-
-        # Fallback 提示词（同样遵循稳定前缀在前原则）
-        fallback_header = f"""# {agent.name}
+            # Fallback 提示词
+            if agent:
+                base = f"""# {agent.name}
 {agent.description}
 
 ## Available Tools
 Use the tools available to you based on your permissions."""
-        return "\n\n".join(part for part in [global_contract, role_constraints, fallback_header, base_prompt, subagents_info] if part)
+            else:
+                base = base_prompt or ""
 
-    def get_unified_system_prompt(self) -> str:
-        return """# LLM Chatter
-你是一个智能编程助手，基于大语言模型。
-使用工具来帮助用户完成编程任务。
+        if base_prompt and base:
+            base = base + "\n\n" + base_prompt
+        elif base_prompt:
+            base = base_prompt
 
-## 后台任务回调消息
-当收到格式为 `[后台任务状态]` 的用户消息时，表示子智能体任务回调通知。
-消息中包含本次完成的任务列表（任务名、任务ID）。
-你应该：
-1. 使用 subagent_status 工具，传入消息中提到的任务ID，获取详细结果
-2. 根据结果评估完成情况
-3. 输出总结或后续建议（如有需要）
+        # Collect BuildSystemPrompt hook contributions
+        if self._hook_manager:
+            # 预取技能内容和子智能体列表，通过 context 传递给 hooks
+            # （hooks 不能直接 import app 内部模块，所有数据必须从 context 读取）
+            hook_ctx: Dict[str, Any] = {
+                "agent_name": agent_name,
+                "is_subagent_call": is_subagent_call,
+                "current_role": "subagent" if is_subagent_call else "primary",
+            }
+            # 合并外部上下文（由 context_builder 传入 project_root/project_name）
+            if extra_context:
+                hook_ctx.update(extra_context)
+            # 技能内容
+            try:
+                from app.utils.config import Settings
+                enabled_skills = Settings.get_instance().llm_enabled_skills.value
+                if enabled_skills:
+                    sk_content = self.get_enabled_skills_content(enabled_skills)
+                    if sk_content:
+                        hook_ctx["enabled_skills_content"] = sk_content
+            except Exception:
+                pass
+            # 子智能体列表（仅主智能体需要）
+            if not is_subagent_call:
+                try:
+                    sub_info = self.get_available_subagents_for_prompt()
+                    if sub_info:
+                        hook_ctx["available_subagents_content"] = sub_info
+                except Exception:
+                    pass
+            results = self._hook_manager.trigger_event(
+                "BuildSystemPrompt",
+                context=hook_ctx,
+                current_message="",
+                trigger_async=False,
+            )
+            contributions = [r.output.strip() for r in results if r.success and r.output.strip()]
+            if contributions:
+                base = base + "\n\n" + "\n\n".join(contributions)
 
-不要在回复中重复消息内容，直接给出检查结果和建议。
-
-## 子智能体查询约定
-- subagent_status 返回的 status 可能是 running / finishing / finished / failed / unknown。
-- 对于 running / finishing（附带 `_hint` 字段），**不要重复调用 subagent_status 轮询结果**。
-  任务完成后系统会自动通过 `[后台任务状态]` 消息通知，届时再查询。
-- 仅在确实需要重新查看已完成任务的详情时，才按 task_id 显式查询。""".strip()
+        return base
 
     def get_enabled_skills_content(self, enabled_skills: List[str]) -> str:
         """获取已启用的技能内容"""

@@ -506,6 +506,8 @@ class LspManager:
             line_n = int(m.group(2))
             col_n = int(m.group(3))
             diags.append({
+                "line": line_n,
+                "column": col_n,
                 "range": {"start": {"line": line_n - 1, "character": col_n - 1}},
                 "severity": m.group(4),
                 "message": m.group(6),

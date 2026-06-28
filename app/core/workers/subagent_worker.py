@@ -289,8 +289,27 @@ class SubAgentExecutor(QThread):
 
             # 子智能体被调用时 is_subagent_call=True，此时应该使用 subagent_constraints
             # 用于区分"主智能体通过 subagent_para 调用子智能体"的情况
+            # 【修复】补 extra_context（project_root/project_name），
+            # 让 read_project_notes / inject_skills_content 能正确注入项目笔记和技能配置
+            _sub_workdir = ""
+            _sub_project_name = ""
+            try:
+                if self.tool_executor and hasattr(self.tool_executor, "get_workdir"):
+                    _sub_workdir = self.tool_executor.get_workdir() or ""
+            except Exception:
+                pass
+            try:
+                from app.utils.config import Settings
+                _sub_project_name = Settings.get_instance().llm_project_name.value or "DriFoxx"
+            except Exception:
+                pass
             system_prompt = self.agent_manager.get_agent_system_prompt(
-                self.agent_name, is_subagent_call=self.is_subagent_call
+                self.agent_name,
+                is_subagent_call=self.is_subagent_call,
+                extra_context={
+                    "project_root": _sub_workdir,
+                    "project_name": _sub_project_name,
+                },
             )
             tools = self.agent_manager.get_agent_tools_schema(self.agent_name, is_subagent_call=self.is_subagent_call)
 
@@ -394,13 +413,28 @@ class SubAgentExecutor(QThread):
                 self._add_log("progress", f"已达到最大迭代次数 ({self.max_iterations})，强制结束并总结")
                 final_summary_prompt = self._build_final_summary_prompt()
                 current_messages.append({"role": "user", "content": final_summary_prompt})
+                # 强制续命前也触发 PreAssistantMessage（与正常轮次一致）
+                self._trigger_hook_sync("PreAssistantMessage", current_messages)
                 response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
                 return self._filter_thinking_content(response_content)
+
+            # ====== PreAssistantMessage hook：每次 API 调用前触发 ======
+            # 同步触发，hook 输出追加到 current_messages，让 LLM 在下一轮请求中看到
+            self._trigger_hook_sync("PreAssistantMessage", current_messages)
 
             response_content, tool_calls, reasoning_content = self._make_api_call(
                 current_messages, tools, llm_config
             )
             current_reasoning = reasoning_content
+
+            # ====== PostAssistantMessage hook：assistant 响应后触发 ======
+            # 注入 response_content（_make_api_call 拿到的纯文本）作为上下文，
+            # 让 hook 能基于最近一次回复做检查（如敏感词、协议格式等）
+            self._trigger_hook_sync(
+                "PostAssistantMessage",
+                current_messages,
+                extra_context={"assistant_response": response_content or ""},
+            )
 
             # 记录大模型生成内容（thinking + ai_response），排除工具调用结果
             if current_reasoning:
@@ -469,6 +503,107 @@ class SubAgentExecutor(QThread):
         if not content:
             return content
         return _THINKING_PATTERN.sub("", content)
+
+    # ========== Hook 集成（让子智能体也能应用所有 hook） ==========
+    # 设计目标：与 chat_worker 对齐，让子智能体也能触发/消费以下 hook：
+    #   - PreAssistantMessage / PostAssistantMessage：子智能体自己同步触发
+    #   - PreToolUse / PostToolUse：tool_executor.execute() 已触发，消息进 backend 队列，
+    #     此处只需消费对应队列
+    # 所有 hook context 都会注入 current_role="subagent" + agent_name，
+    # 让 hook 脚本能识别当前执行角色并按需分支。
+
+    def _build_hook_context(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """构造 hook context：基础字段（current_role/agent_name/task_id/workdir）+ 调用方扩展"""
+        ctx: Dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "current_role": "subagent",  # 关键：让 hook 知道当前是子智能体
+            "is_subagent_call": self.is_subagent_call,
+            "task_id": self.task_id,
+            "task_description": self.task_description,
+        }
+        # project_root：用于 read_project_notes 等需要 workdir 的 hook
+        try:
+            if self.tool_executor and hasattr(self.tool_executor, "get_workdir"):
+                ctx["project_root"] = self.tool_executor.get_workdir() or ""
+        except Exception:
+            pass
+        if extra:
+            ctx.update(extra)
+        return ctx
+
+    def _trigger_hook_sync(
+        self,
+        event_name: str,
+        current_messages: List[Dict],
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """同步触发 hook 并把每条 hook 输出追加到 current_messages（in-place）
+
+        与 chat_worker._trigger_worker_hook 行为一致：
+        - 使用 trigger_event(sync) 同步执行 hook
+        - 用 _make_hook_message 包装成 system 消息
+        - 直接 append 到 current_messages，下次 API 调用时 LLM 即可看到
+        """
+        try:
+            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+            if not backend or not backend.hook_manager:
+                return
+
+            ctx = self._build_hook_context(extra=extra_context)
+
+            # 取最新 user 消息作为 current_message（用于 matcher 匹配）
+            cur_msg = ""
+            for m in reversed(current_messages):
+                if m.get("role") == "user":
+                    c = m.get("content", "")
+                    if isinstance(c, str):
+                        cur_msg = c
+                    break
+
+            results = backend.hook_manager.trigger_event(
+                event_name,
+                context=ctx,
+                current_message=cur_msg,
+                trigger_async=False,
+            )
+
+            # 收集成功执行的 hook 输出，注入 messages
+            from app.core.backend import _make_hook_message
+            injected = 0
+            for r in results:
+                if r.success and r.output:
+                    msg = _make_hook_message(event_name, r.output)
+                    current_messages.append(msg)
+                    injected += 1
+            if injected:
+                logger.debug(f"[SubAgent] Hook '{event_name}' injected {injected} msg(s) into messages")
+        except Exception as e:
+            logger.debug(f"[SubAgent] Hook '{event_name}' trigger failed: {e}")
+
+    def _drain_hook_queues(self) -> List[Dict[str, Any]]:
+        """消费 backend 的 _pre_tool_message_queue 和 _hook_message_queue
+
+        tool_executor.execute() 内部已同步触发 PreToolUse/PostToolUse，
+        对应消息已分别进 _pre_tool_message_queue 和 _hook_message_queue。
+        这里把两个队列的消息全取出来，由调用方按需插入到 tool_result 之前/之后。
+        """
+        msgs: List[Dict[str, Any]] = []
+        try:
+            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+            if not backend:
+                return msgs
+            for q_attr in ("_pre_tool_message_queue", "_hook_message_queue"):
+                q = getattr(backend, q_attr, None)
+                if q is None:
+                    continue
+                while True:
+                    try:
+                        msgs.append(q.get_nowait())
+                    except Exception:
+                        break
+        except Exception as e:
+            logger.debug(f"[SubAgent] drain hook queues failed: {e}")
+        return msgs
 
     def _parse_tool_arguments_json(self, raw_arguments: Any):
         if isinstance(raw_arguments, dict):
@@ -662,7 +797,13 @@ class SubAgentExecutor(QThread):
         return min(requested_int, absolute_limit)
 
     def _execute_tools(self, tool_calls: List[Dict]) -> Optional[List[Dict]]:
-        """执行工具调用"""
+        """执行工具调用
+
+        同步执行所有 tool_executor.execute()，并在末尾消费 backend 的 hook 队列：
+        - _pre_tool_message_queue → PreToolUse 消息（应在 tool_result 之前注入）
+        - _hook_message_queue    → PostToolUse 消息（应在 tool_result 之后注入）
+        把这些 hook 消息夹在 tool_result 序列之间，让 LLM 看到 hook 反馈。
+        """
         if not tool_calls or not self.tool_executor:
             return []
 
@@ -695,12 +836,19 @@ class SubAgentExecutor(QThread):
 
             # 工具执行也算活跃（避免 stall 检测器误杀）
             self._last_activity_time = time.time()
+            # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
+            # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue
             result = self.tool_executor.execute(tool_name, arguments)
             result_content = str(result) if result else ""
             success = getattr(result, "success", True) if result else False
 
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
             QCoreApplication.processEvents()
+
+            # 在每个 tool_result 之前，先消费 PreToolUse 队列（按 Claude Code 约定：PreToolUse 在 result 前）
+            pretool_msgs = self._drain_pretool_queue()
+            if pretool_msgs:
+                results.extend(pretool_msgs)
 
             raw_result = {
                 "role": "tool",
@@ -716,7 +864,50 @@ class SubAgentExecutor(QThread):
             # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
             results.append(to_api_message(raw_result) or raw_result)
 
+            # 在 tool_result 之后，再消费 PostToolUse 队列（按 Claude Code 约定：PostToolUse 在 result 后）
+            posttool_msgs = self._drain_posttool_queue()
+            if posttool_msgs:
+                results.extend(posttool_msgs)
+
         return results
+
+    def _drain_pretool_queue(self) -> List[Dict[str, Any]]:
+        """仅消费 backend 的 _pre_tool_message_queue（PreToolUse 消息）"""
+        msgs: List[Dict[str, Any]] = []
+        try:
+            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+            if not backend:
+                return msgs
+            q = getattr(backend, "_pre_tool_message_queue", None)
+            if q is None:
+                return msgs
+            while True:
+                try:
+                    msgs.append(q.get_nowait())
+                except Exception:
+                    break
+        except Exception as e:
+            logger.debug(f"[SubAgent] drain pretool queue failed: {e}")
+        return msgs
+
+    def _drain_posttool_queue(self) -> List[Dict[str, Any]]:
+        """仅消费 backend 的 _hook_message_queue（PostToolUse 消息）"""
+        msgs: List[Dict[str, Any]] = []
+        try:
+            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+            if not backend:
+                return msgs
+            q = getattr(backend, "_hook_message_queue", None)
+            if q is None:
+                return msgs
+            while True:
+                try:
+                    msgs.append(q.get_nowait())
+                except Exception:
+                    break
+        except Exception as e:
+            logger.debug(f"[SubAgent] drain posttool queue failed: {e}")
+        return msgs
 
 
 class SubAgentManager(QObject):

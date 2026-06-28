@@ -178,6 +178,7 @@ class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
     clicked = pyqtSignal(str)
     archiveClicked = pyqtSignal(str)
+    openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
 
     # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
     _SINGLE_LINE_HEIGHT = 30
@@ -190,6 +191,7 @@ class ProjectItem(QWidget):
         self._session_count = 0
         self._worktree_count = 0
         self._project_color = get_project_color(name)
+        self._root_dir = ""
         self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
@@ -245,6 +247,25 @@ class ProjectItem(QWidget):
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
+        # 打开根目录按钮（默认隐藏，有根目录且 hover 时显示）
+        self._open_folder_btn = TransparentToolButton(get_icon("根目录"), self)
+        self._open_folder_btn.setFixedSize(24, 24)
+        self._open_folder_btn.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                border: none;
+                font-size: {scale_font_size(12)}px;
+            }}
+            QToolButton:hover {{
+                background: rgba(255, 255, 255, 50);
+                border-radius: 4px;
+            }}
+        """)
+        self._open_folder_btn.clicked.connect(self._emit_open_folder)
+        self._open_folder_btn.setToolTip("打开项目根目录")
+        self._open_folder_btn.hide()
+        layout.addWidget(self._open_folder_btn)
+
         # 归档按钮（默认隐藏）
         self._archive_btn = TransparentToolButton(get_icon("归档"), self)
         self._archive_btn.setFixedSize(24, 24)
@@ -279,6 +300,10 @@ class ProjectItem(QWidget):
     def _emit_archive(self):
         self.archiveClicked.emit(self._name)
 
+    def _emit_open_folder(self):
+        if self._root_dir:
+            self.openFolderClicked.emit(self._name, self._root_dir)
+
     def mousePressEvent(self, event):
         self.clicked.emit(self._name)
         super().mousePressEvent(event)
@@ -300,6 +325,7 @@ class ProjectItem(QWidget):
 
     def set_root_dir(self, root_dir: str):
         """设置项目根目录路径（空字符串/None 则隐藏根目录行）"""
+        self._root_dir = root_dir or ""
         if not root_dir:
             # 切换回单行高度，与未设置根目录的项目保持紧凑
             self._root_dir_label.hide()
@@ -332,6 +358,8 @@ class ProjectItem(QWidget):
             f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};"
         )
         self._archive_btn.show()
+        if self._root_dir:
+            self._open_folder_btn.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -342,6 +370,7 @@ class ProjectItem(QWidget):
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
         )
         self._archive_btn.hide()
+        self._open_folder_btn.hide()
         super().leaveEvent(event)
 
 
@@ -351,6 +380,7 @@ class ProjectSelectorCardContent(QWidget):
     projectSelected = pyqtSignal(str)
     newProjectCreated = pyqtSignal(str)
     archiveProject = pyqtSignal(str)
+    openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -457,6 +487,7 @@ class ProjectSelectorCardContent(QWidget):
             item.set_root_dir(self._root_dir_map.get(proj_name, ""))
             item.clicked.connect(self._on_project_item_clicked)
             item.archiveClicked.connect(self._on_archive_clicked)
+            item.openFolderClicked.connect(self._on_open_folder_clicked)
             self._content_layout.addWidget(item)
 
         self._content_layout.addStretch(1)
@@ -464,6 +495,10 @@ class ProjectSelectorCardContent(QWidget):
     def _on_project_item_clicked(self, name: str):
         """项目被点击"""
         self.projectSelected.emit(name)
+
+    def _on_open_folder_clicked(self, project_name: str, root_dir: str):
+        """打开项目根目录按钮被点击"""
+        self.openFolderRequested.emit(project_name, root_dir)
 
     def _on_archive_clicked(self, project_name: str):
         """归档按钮被点击"""

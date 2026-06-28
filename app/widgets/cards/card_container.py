@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
 
+from loguru import logger
 from PyQt5.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QTimer
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
@@ -82,7 +83,7 @@ class CardContainer(QWidget):
             return
         self._schedule_expand()
 
-    def _schedule_expand(self):
+    def _schedule_expand(self, source: str = ""):
         """防抖调度：有可见卡片则展开，否则折叠
 
         注意：不在"已展开"时早 return。
@@ -144,29 +145,54 @@ class CardContainer(QWidget):
             # resize 窗口后恢复正常）。activate() 确保子 widget 的最新内容
             # 被计入容器高度。
             self._layout.activate()
+
             natural_h = max(
                 self._layout.sizeHint().height(),
                 self._layout.minimumSize().height(),
             )
             if natural_h <= 0:
-                # 兜底：layout 没算出高度（布局管道尚未完成测量），
-                # 延迟重试，让 Qt 在下一轮事件循环完成几何计算后再展开
-                self._expand_retry_count += 1
-                if self._expand_retry_count >= 5:
-                    # 重试 5 次仍为 0，强行 snap 到最小高度兜底
-                    # （防止 layout cache 持续过期的极端情况导致卡片不可见）
-                    self._expand_retry_count = 0
-                    self.setMaximumHeight(self._layout.minimumSize().height())
+                # 兜底：layout 没算出高度，尝试强制子控件 adjustSize + 父级布局激活后重测
+                for w in self._cards.values():
+                    if w.isVisible():
+                        try:
+                            w.adjustSize()
+                        except RuntimeError:
+                            pass
+                self._layout.activate()
+                # 🛠️ 父级布局强制激活（仅在此重测路径中），让容器 height()
+                # 反映正确的分配；主展开路径不激活父级，以保留动画触发时机。
+                p = self.parent()
+                pl = p.layout() if hasattr(p, 'layout') else None
+                if pl is not None:
+                    pl.invalidate()
+                    pl.activate()
+                natural_h = max(
+                    self._layout.sizeHint().height(),
+                    self._layout.minimumSize().height(),
+                )
+
+                if natural_h <= 0:
+                    # 仍然为 0：渐进重试，让 Qt 在下一轮事件循环完成测量
+                    self._expand_retry_count += 1
+                    if self._expand_retry_count >= 5:
+                        # 重试 5 次仍为 0：不锁为 0，保留 EXPAND_MAX 让父级
+                        # 在后续 layout pass 中通过 sizeHint 自行分配高度。
+                        self._expand_retry_count = 0
+                        self.setMaximumHeight(self._EXPAND_MAX)
+                        return
+                    QTimer.singleShot(0, self._do_expand)
                     return
-                QTimer.singleShot(0, self._do_expand)
-                return
+
             self._expand_retry_count = 0
+            # ⚡ 读 current_h 前不激活父级布局 — 父级此刻仍用过期高度（如 0），
+            # current_h ≈ 0 而 natural_h ≈ 200，差值巨大 → 触发平滑展开动画。
+            # 父级布局在动画中通过 maximumHeight 的 updateGeometry 级联刷新。
             current_h = self.height()
+
             # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
                 return
             if skip_anim:
-                # 声明跳过动画：直接 snap，避免 resize / 拖拽期间高度延迟
                 self.setMaximumHeight(natural_h)
                 return
             self._animate_height(current_h, natural_h, on_finished=None)

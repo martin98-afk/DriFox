@@ -41,6 +41,7 @@ class ChatSession:
         self.compaction_state: Dict = self._default_compaction_state()
         self.compaction_cache: Dict = self._default_compaction_cache()
         self.system_prompt: str = ""
+        self._system_prompt_agent: str = ""  # 缓存 system prompt 对应的 agent 名
         self.metadata: Dict[str, Any] = {}  # 扩展元数据（如模型/Agent 覆盖）
 
     @staticmethod

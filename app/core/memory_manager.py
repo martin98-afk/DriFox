@@ -1,22 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-长期记忆管理模块 - 重构为 3 种记忆架构
+长期记忆管理模块 - 重构为 2 种记忆架构
 1. 条目记忆 (Entry Memories) - 用户手动管理
-2. 项目笔记 (Project Notes) - 与项目绑定
-3. 关键文档 (Key Documents) - 项目文件关联
+2. 关键文档 (Key Documents) - 项目文件关联
+
+注意：项目笔记已交由 BuildSystemPrompt hook (read_project_notes) 从 AGENTS.md 读取注入。
 """
 
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from loguru import logger
 
-from app.core import project_notes_manager
 from app.core.store import (
     KeyDocumentsRepository,
     MemoryRepository,
-    ProjectNotesRepository,
     SessionStore,
 )
 
@@ -47,10 +45,8 @@ class MemoryManagerCore:
         self._session_store: Optional[SessionStore] = None
         self._db_manager = None
 
-        # 三个仓储
+        # 两个仓储
         self._entry_memories_repo: Optional[MemoryRepository] = None
-        # SQLite 仓储：用于 (1) 无 workdir 项目的笔记存储，(2) 一次性从历史数据迁出
-        self._sqlite_project_notes_repo: Optional[ProjectNotesRepository] = None
         self._key_documents_repo: Optional[KeyDocumentsRepository] = None
 
         # 初始化存储
@@ -64,9 +60,8 @@ class MemoryManagerCore:
                 self._db_manager = self._session_store._db
                 logger.info("[MemoryManager] SQLite 存储已启用")
 
-                # 初始化三个仓储
+                # 初始化仓储
                 self._entry_memories_repo = MemoryRepository(self._db_manager)
-                self._sqlite_project_notes_repo = ProjectNotesRepository(self._db_manager)
                 self._key_documents_repo = KeyDocumentsRepository(self._db_manager)
 
                 return
@@ -128,64 +123,56 @@ class MemoryManagerCore:
             return False
         return self._entry_memories_repo.save_all(memories)
 
-    # ==================== 项目笔记 API（按 workdir 路由：有走文件 / 无走 SQLite） ====================
-
-    def get_project_note(self, project: str, workdir: Optional[str] = None) -> Optional[Dict]:
-        """读取项目笔记（不创建）
-
-        路由：
-        - 有 workdir → 文件版（{workdir}/AGENTS.md）
-        - 无 workdir → SQLite 版（project_notes 表）
-        """
-        workdir = workdir or self.get_working_directory(project)
-        if workdir:
-            return project_notes_manager.get_note(workdir, project)
-        # SQLite 路径
-        if not self._sqlite_project_notes_repo:
-            return None
-        note = self._sqlite_project_notes_repo.get(project)
-        if not note:
-            return None
-        return {
-            "project": project,
-            "content": note.get("content", ""),
-            "path": "",
-        }
-
-    def save_project_note(self, project: str, content: str, workdir: Optional[str] = None) -> bool:
-        """保存项目笔记
-
-        路由：
-        - 有 workdir → 文件版
-        - 无 workdir → SQLite 版
-        """
-        workdir = workdir or self.get_working_directory(project)
-        if workdir:
-            return project_notes_manager.save_note(workdir, project, content)
-        if not self._sqlite_project_notes_repo:
-            return False
-        return self._sqlite_project_notes_repo.save(project, content)
+    # ==================== 项目笔记（精简版，仅文件读写，无 SQLite） ====================
 
     def get_or_create_project_note(self, project: str, workdir: Optional[str] = None) -> Dict:
-        """读取或创建项目笔记
+        """读取或创建项目笔记（直接从 workdir/AGENTS.md 读写，无 SQLite）
 
-        路由：
-        - 有 workdir → 文件版（首次访问自动从 SQLite 迁/写默认模板）
-        - 无 workdir → SQLite 版（首次访问自动用默认模板创建）
+        Args:
+            project: 项目名称
+            workdir: 工作目录路径
+
+        Returns:
+            Dict: {"project": str, "content": str, "path": str}
         """
         workdir = workdir or self.get_working_directory(project)
-        if workdir:
-            return project_notes_manager.get_or_create_note(
-                workdir, project, legacy_repo=self._sqlite_project_notes_repo
-            )
-        if not self._sqlite_project_notes_repo:
+        if not workdir:
             return {"project": project, "content": "", "path": ""}
-        note = self._sqlite_project_notes_repo.get_or_create(project)
-        return {
-            "project": project,
-            "content": note.get("content", ""),
-            "path": "",
-        }
+
+        path = Path(workdir) / "AGENTS.md"
+        if not path.exists():
+            return {"project": project, "content": "", "path": str(path)}
+
+        try:
+            content = path.read_text(encoding="utf-8")
+            return {"project": project, "content": content, "path": str(path)}
+        except Exception as e:
+            logger.error(f"[MemoryManager] 读取 {path} 失败: {e}")
+            return {"project": project, "content": "", "path": str(path)}
+
+    def save_project_note(self, project: str, content: str, workdir: Optional[str] = None) -> bool:
+        """保存项目笔记（直接写入 workdir/AGENTS.md）
+
+        Args:
+            project: 项目名称
+            content: 笔记内容
+            workdir: 工作目录路径
+
+        Returns:
+            bool: 是否成功
+        """
+        workdir = workdir or self.get_working_directory(project)
+        if not workdir:
+            return False
+
+        path = Path(workdir) / "AGENTS.md"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return True
+        except Exception as e:
+            logger.error(f"[MemoryManager] 写入 {path} 失败: {e}")
+            return False
 
     # ==================== 关键文档 API ====================
 
@@ -252,19 +239,19 @@ class MemoryManagerCore:
         entry_limit: int = 100,
         doc_limit: int = 50,
         workdir_override: Optional[str] = None,
-        include_project_context: bool = True,
     ) -> str:
         """
         格式化记忆注入到 prompt
-        
+
+        注意：项目笔记/路径建议/Worktree 信息已交由
+        BuildSystemPrompt + PreUserMessage hooks 注入。
+
         Args:
             project: 当前项目名称
             entry_limit: 条目记忆最大数量
             doc_limit: 关键文档最大数量
             workdir_override: 工作目录覆盖（多窗口隔离：实例缓存优先于 DB）
-            include_project_context: 是否包含项目笔记/路径建议/Worktree 信息。
-                每轮消息中不包含，由 SessionStart hook 注入
-        
+
         Returns:
             str: 格式化后的记忆字符串
         """
@@ -281,19 +268,7 @@ class MemoryManagerCore:
             lines.append("- 暂无条目记忆")
         lines.append("")
 
-        # 2. 项目笔记（从当前 workdir 读取，适配 worktree 多分支独立）
-        # 注意：每轮消息中已不包含项目笔记，改由 SessionStart hook 注入
-        if include_project_context:
-            lines.append("### 项目笔记")
-            lines.append(f"[当前项目: {project}]")
-            note = self.get_project_note(project, workdir=workdir_override)
-            if note and note.get("content"):
-                lines.append(note.get("content", ""))
-            else:
-                lines.append("- 暂无项目笔记")
-            lines.append("")
-
-        # 3. 关键文档
+        # 2. 关键文档
         lines.append("### 关键文档")
         docs = self.get_key_documents(project)[:doc_limit]
         # 确保根目录（is_working_dir）始终在结果中，即使超过了 doc_limit
@@ -331,40 +306,6 @@ class MemoryManagerCore:
         else:
             lines.append("- 暂无关键文档")
         lines.append("")
-
-        # 3.5 路径使用建议（仅当关键文档中存在项目根目录标记时）
-        # 注意：每轮消息中已不包含，改由 SessionStart hook 注入
-        if include_project_context and has_root_doc and wd_path:
-            lines.append("### 路径使用建议")
-            lines.append(f"- 项目根目录: {wd_path}")
-            lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
-            lines.append("- 根目录外：用绝对路径")
-            lines.append("")
-
-        # 4. Worktree 上下文（仅当工作目录在 git 仓库中且有 worktree 时）
-        # 注意：每轮消息中已不包含，改由 SessionStart hook 注入
-        if include_project_context and wd_path:
-            try:
-                from app.utils.git_worktree import GitWorktreeDetector
-                repo_info = GitWorktreeDetector.get_repo_info(wd_path)
-                if repo_info and len(repo_info.worktrees) > 0:
-                    lines.append("### 当前 Worktree")
-                    lines.append(f"- 仓库: {os.path.basename(repo_info.root)}")
-                    lines.append(f"- 当前分支: {repo_info.current_branch}")
-                    lines.append(f"- 工作目录: {wd_path}")
-                    is_on_worktree = wd_path != repo_info.root
-                    if is_on_worktree:
-                        lines.append("- ⚠️ 当前在 worktree 分支上工作，文件操作不影响主仓库代码")
-                    # 列出其他分支
-                    other_branches = [
-                        wt.branch for wt in repo_info.worktrees
-                        if not wt.is_current
-                    ]
-                    if other_branches:
-                        lines.append(f"- 其他分支: {', '.join(other_branches)}")
-                    lines.append("")
-            except Exception:
-                pass
 
         return "\n".join(lines)
 

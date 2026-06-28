@@ -7,7 +7,6 @@ and aggregates tools from separate tool modules, eliminating the need
 for manual method forwarding in a shallow facade.
 """
 
-import difflib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -245,95 +244,6 @@ class BuiltinTools(QObject):
 
         self.workdir = Path(workdir)
         logger.info(f"[BuiltinTools] Workdir updated to: {self.workdir}")
-
-    def edit_project_note(
-        self,
-        oldString: str,
-        newString: str,
-    ) -> ToolResult:
-        if not self._memory_manager:
-            return ToolResult(False, error="Memory manager not available")
-
-        project = getattr(self, "_current_project", "默认项目") or "默认项目"
-        workdir = str(self.workdir) if self.workdir else None
-        note = self._memory_manager.get_project_note(project, workdir=workdir)
-        old_text = note.get("content", "") if note else ""
-
-        if not old_text:
-            return ToolResult(False, error="项目笔记为空，无法编辑")
-
-        if oldString not in old_text:
-            return ToolResult(
-                False,
-                error="The specified 'oldString' was not found in the project note. Ensure exact match.",
-            )
-
-        new_text = old_text.replace(oldString, newString, 1)
-        success = self._memory_manager.save_project_note(project, new_text, workdir=workdir)
-        if not success:
-            return ToolResult(False, error="保存项目笔记失败")
-
-        diff_lines = list(
-            difflib.unified_diff(
-                old_text.splitlines(),
-                new_text.splitlines(),
-                fromfile="project_note",
-                tofile="project_note",
-                lineterm="",
-            )
-        )
-        diff_str = "\n".join(diff_lines) if diff_lines else ""
-
-        return ToolResult(
-            True,
-            content="Successfully edited project note.",
-            diff=diff_str,
-        )
-
-    def read_project_note(
-        self,
-        offset: int = 1,
-        limit: int = 500,
-    ) -> ToolResult:
-        """
-        读取当前项目笔记内容。
-
-        Args:
-            offset: 起始行号（从 1 开始），默认 1
-            limit: 读取行数，默认 500
-        """
-        if not self._memory_manager:
-            return ToolResult(False, error="Memory manager not available")
-
-        project = getattr(self, "_current_project", "默认项目") or "默认项目"
-        workdir = str(self.workdir) if self.workdir else None
-        note = self._memory_manager.get_project_note(project, workdir=workdir)
-        full_content = note.get("content", "") if note else ""
-
-        if not full_content:
-            full_content = "(项目笔记为空)"
-
-        line_list = full_content.splitlines()
-        total_lines = len(line_list)
-        if offset < 1:
-            offset = 1
-
-        start = offset - 1
-        end = min(total_lines, start + limit) if limit > 0 else total_lines
-        selected_lines = line_list[start:end]
-
-        return ToolResult(
-            True,
-            content={
-                "project": project,
-                "content": "\n".join(selected_lines),
-                "total_lines": total_lines,
-                "offset": offset,
-                "limit": limit if limit > 0 else total_lines,
-                "returned_lines": len(selected_lines),
-                "total_length": len(full_content),
-            },
-        )
 
 
 def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
@@ -754,42 +664,6 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["files"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_project_note",
-            "description": "精确文本替换编辑项目笔记。编辑前检查文件是否被外部修改。生成 unified diff 用于审查。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "oldString": {
-                        "type": "string",
-                        "description": "要替换的旧文本（精确匹配）",
-                    },
-                    "newString": {"type": "string", "description": "替换后的新文本"},
-                },
-                "required": ["oldString", "newString"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_project_note",
-            "description": "读取当前项目笔记内容。返回原文，可选通过 offset/limit 分页读取。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "offset": {
-                        "type": "integer",
-                        "description": "起始行号（从 1 开始），默认 1",
-                    },
-                    "limit": {"type": "integer", "description": "读取行数，默认 500"},
-                },
-                "required": [],
             },
         },
     },

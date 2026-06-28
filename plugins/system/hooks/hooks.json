@@ -1,19 +1,69 @@
 {
   "hooks": {
-    "SessionStart": [
+    "BuildSystemPrompt": [
       {
-        "matcher": "startup|resume|clear|compact",
         "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "### 【绝对不能违反的铁律】只改任务范围内的文件\n- **只能修改任务明确指定的文件**，或在实现新功能时需要创建的**新文件**。\n- **绝对禁止**修改、重置（`git checkout`/`git restore`）、删除任何未经任务指定的文件。\n- 发现不属于自己改动范围的文件有变化 → **跳过它，不要碰**。谁改的谁负责。\n- `git diff --stat` 显示的无关文件变更 → 跳过，不要撤销。",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入编码契约...",
+            "id": "builtin_global_contract"
+          }
+        ]
+      },
+      {
+        "matcher": "primary",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "## 主智能体约束\n### 主动提问规范\n- 需要向用户确认的信息，优先使用 `question` 工具。\n\n### 推荐问题规范\n- 当你预测到用户接下来可能需要的帮助时，请按以下格式给出追问清单（放在回复末尾）：\n  - [问题描述1](ask)\n  - [问题描述2](ask)\n\n### 消息渲染能力\n- 支持 Markdown 渲染、代码高亮\n- 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）\n- 工具卡片的 diff 差异对比会自动渲染，无需手动处理",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入主智能体约束...",
+            "id": "builtin_primary_constraints"
+          },
+          {
+            "type": "python",
+            "function": ".inject_subagent_info:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入子智能体列表...",
+            "id": "builtin_inject_subagents"
+          }
+        ]
+      },
+      {
+        "matcher": "primary|subagent",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_skills_content:hook",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入技能配置...",
+            "id": "builtin_inject_skills"
+          },
           {
             "type": "python",
             "function": ".read_project_notes:hook",
             "add_output_to_context": true,
             "statusMessage": "正在读取项目上下文...",
-            "id": "99899bbb075f4df3ad373c9dc98b7133"
+            "id": "builtin_read_project_notes"
+          }
+        ]
+      },
+      {
+        "matcher": "subagent",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "## 子智能体约束\n- 【禁止】使用 `question` 工具（需要用户交互，不支持）\n- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）\n- 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）\n- 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认\n- 【必须】独立完成任务，不需要主智能体介入\n- 如果遇到不确定的情况，根据已有信息做出合理假设并继续执行\n- 如需收集信息，使用 webfetch/websearch 工具代替提问",
+            "add_output_to_context": true,
+            "statusMessage": "正在注入子智能体约束...",
+            "id": "builtin_subagent_constraints"
           }
         ]
       }
     ],
+    "SessionStart": [],
     "PreUserMessage": [
       {
         "hooks": [

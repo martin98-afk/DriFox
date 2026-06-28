@@ -37,6 +37,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
     QEasingCurve,
+    QPointF,
     Qt,
     QTimer,
     QTimerEvent,
@@ -125,6 +126,11 @@ _TOOL_RESULT_PATTERN = re.compile(r"^result:\s*(.*)$", re.MULTILINE)
 _NEXT_FIELD_PATTERN = re.compile(r"\n(?:success|tool_call_id|diff|echarts):")
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
+
+# ======== 滚动行为常量 ========
+SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
+AUTO_SCROLL_THRESHOLD = 30       # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+# =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
 WELCOME_GREETINGS = [
@@ -1812,6 +1818,9 @@ class CodeWebViewer(QWebEngineView):
         # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
         self._thinking_finalized = False
 
+        # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
+        self._document_height = 0
+
         # 1. 渲染定时器
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -1897,11 +1906,11 @@ class CodeWebViewer(QWebEngineView):
         return super().event(event)
 
     def wheelEvent(self, event: QWheelEvent):
-        # 获取滚动条（向上递归找 QScrollArea chat_scroll_area）
+        # 策略：只有当内部 WebView 无法继续滚动时，才将滚动事件转发到外部 chat_scroll_area。
+        # 如果内部有可滚动内容且未到达边界，让内部 WebView 自己处理滚动。
         try:
             widget = self
-            # 一直向上遍历父控件直到找到 chat_scroll_area
-            for _ in range(5):  # 最多找5层
+            for _ in range(5):
                 if hasattr(widget, 'chat_scroll_area'):
                     break
                 parent_widget = widget.parent()
@@ -1909,20 +1918,59 @@ class CodeWebViewer(QWebEngineView):
                     break
                 widget = parent_widget
 
-            if hasattr(widget, 'chat_scroll_area'):
-                scroll_area = getattr(widget, 'chat_scroll_area')
-                if scroll_area:
-                    vbar = scroll_area.verticalScrollBar()
-                    if vbar and vbar.minimum() != vbar.maximum():
-                        # 让外部 ScrollArea 滚动
-                        delta = event.angleDelta().y()
-                        vbar.setValue(vbar.value() - delta // 2)
-                        event.accept()  # 标记事件已处理
-                        return
-        except Exception:
-            pass
+            outer_area = getattr(widget, 'chat_scroll_area', None) if hasattr(widget, 'chat_scroll_area') else None
+            if not outer_area:
+                super().wheelEvent(event)
+                return
 
-        super().wheelEvent(event)
+            outer_vbar = outer_area.verticalScrollBar()
+            if not outer_vbar or outer_vbar.minimum() == outer_vbar.maximum():
+                # 外部没有可滚动范围 → 直接内部处理
+                super().wheelEvent(event)
+                return
+
+            # 检查内部 WebView 是否有可滚动内容（文档高度 > 视口高度）
+            viewport_h = self.height()
+            doc_h = self._document_height
+
+            # 🐛 修复竞态：_document_height 通过 JS 异步上报，初始值为 0，
+            # 此时保守处理——让内部先处理（super().wheelEvent），
+            # 等 _on_height_reported 上报实际高度后再启用边界转发逻辑。
+            if doc_h <= 0:
+                super().wheelEvent(event)
+                return
+
+            inner_has_overflow = doc_h > viewport_h and viewport_h >= 40
+
+            if not inner_has_overflow:
+                # 内部没有溢出 → 转发到外部
+                delta = event.angleDelta().y()
+                outer_vbar.setValue(outer_vbar.value() - delta // 2)
+                event.accept()
+                return
+
+            # 内部有溢出：检查当前滚动位置是否在边界
+            scroll_pos = self.page().scrollPosition() if self.page() else QPointF(0, 0)
+            scroll_y = scroll_pos.y()
+
+            scrolling_down = event.angleDelta().y() < 0
+            scrolling_up = event.angleDelta().y() > 0
+
+            # 判断是否到达滚动边界
+            at_top = scroll_y <= SCROLL_BOUNDARY_TOLERANCE
+            at_bottom = scroll_y >= (doc_h - viewport_h - SCROLL_BOUNDARY_TOLERANCE)
+
+            if (scrolling_down and at_bottom) or (scrolling_up and at_top):
+                # 内部已到达边界 → 转发到外部
+                delta = event.angleDelta().y()
+                outer_vbar.setValue(outer_vbar.value() - delta // 2)
+                event.accept()
+                return
+
+            # 内部还有可滚动空间 → 让内部处理
+            super().wheelEvent(event)
+        except Exception:
+            super().wheelEvent(event)
 
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出"""
@@ -2032,6 +2080,7 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_height_reported(self, h):
         self._height_report_pending = False
+        self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
         final_h = h + 2
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
@@ -3063,7 +3112,12 @@ class CodeWebViewer(QWebEngineView):
                         }})();
                         _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *{{transition:none!important}}';
 
+                        // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件，
+                        // 导致 _userScrolledWithin 被误设为 true，后续 auto-scroll 失效。
+                        // 用 _suppressScrollEvent 标志抑制这次误触发。
+                        window._suppressScrollEvent = true;
                         container.innerHTML = newHtml;
+                        window._suppressScrollEvent = false;
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                         container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
@@ -3188,9 +3242,24 @@ class CodeWebViewer(QWebEngineView):
                         }}
 
                         // 自动滚动到 body 底部（流式时新内容在底部）
-                        // setTimeout 确保 Qt WebEngine 在 innerHTML 替换后完成布局再滚动
+                        // 🐛 修复：只在用户已处于底部时才滚动到底部，避免与用户手动滚动冲突。
+                        // 用 scrollHeight - scrollTop - clientHeight < 30 判断是否"接近底部"。
+                        // 🐛 修复2：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
+                        // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
+                        // 未滚动时强制 auto-scroll 到底部。
                         setTimeout(function() {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            if (!window._userScrolledWithin) {{
+                                window._suppressScrollEvent = true;
+                                document.body.scrollTop = document.body.scrollHeight;
+                                window._suppressScrollEvent = false;
+                            }} else {{
+                                var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
+                                if (wasAtBottom) {{
+                                    window._suppressScrollEvent = true;
+                                    document.body.scrollTop = document.body.scrollHeight;
+                                    window._suppressScrollEvent = false;
+                                }}
+                            }}
                         }}, 0);
 
                         // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
@@ -3311,6 +3380,22 @@ class CodeWebViewer(QWebEngineView):
                     console.log('pywebview_action:subagent_log:' + taskIds);
                 }};
 
+                // ===== 用户滚动跟踪：判断用户是否主动滚动卡片内部内容 =====
+                // 🐛 修复：当卡片内容超出 MAX_HEIGHT 时，body 出现内部滚动条。
+                // 初始状态 scrollTop=0 导致 wasAtBottom 判断失败，auto-scroll 不触发。
+                // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
+                window._userScrolledWithin = false;
+                window._suppressScrollEvent = false;
+                // 🐛 修复：_suppressScrollEvent 防误触 — updateContent 中
+                // innerHTML 替换重置 scrollTop 触发 scroll 事件，但这是 DOM 重建
+                // 而非用户主动滚动。在 container.innerHTML = newHtml 前后设置
+                // _suppressScrollEvent=true/false 来抑制这种误触发。
+                document.body.addEventListener('scroll', function() {{
+                    if (window._suppressScrollEvent) return;
+                    window._userScrolledWithin = true;
+                }});
+                // ======================================================
+
                 // ===== JS驱动的蛇形思考动画（替代CSS animation）=====
                 // 使用 requestAnimationFrame 持续更新 stroke-dashoffset，
                 // 即使 updateContent 重建DOM，新SVG元素在下一帧立即获得正确偏移，
@@ -3388,10 +3473,23 @@ class CodeWebViewer(QWebEngineView):
                     p.textContent = {json.dumps(escaped)};
                     c.appendChild(p);
                 }}
-                // 流式增量追加时，让 body 内部滚动到最底部
-                // 使用 setTimeout(0) 确保 Qt WebEngine 布局更新完毕后再滚动
+                // 流式增量追加时，仅在用户已处于底部时才滚动到最底部
+                // 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
+                // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
+                // 未滚动时强制 auto-scroll 到底部。
                 setTimeout(function() {{
-                    document.body.scrollTop = document.body.scrollHeight;
+                    if (!window._userScrolledWithin) {{
+                        window._suppressScrollEvent = true;
+                        document.body.scrollTop = document.body.scrollHeight;
+                        window._suppressScrollEvent = false;
+                    }} else {{
+                        var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;
+                        if (wasAtBottom) {{
+                            window._suppressScrollEvent = true;
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._suppressScrollEvent = false;
+                        }}
+                    }}
                 }}, 0);
             }})();
             """
@@ -4068,17 +4166,18 @@ class CodeWebViewer(QWebEngineView):
             self._resize_unlock_timer.start()
 
     def wheelEvent(self, event: QWheelEvent):
-        # 获取滚动条（向上找 QScrollArea）
-        scroll_area = self.parent().parent()._parent.chat_scroll_area
-        if scroll_area:
-            vbar = scroll_area.verticalScrollBar()
-            if vbar and vbar.minimum() != vbar.maximum():
-                # 让外部 ScrollArea 滚动
-                delta = event.angleDelta().y()
-                vbar.setValue(vbar.value() - delta // 2)
-                event.accept()  # 标记事件已处理
-                return
-
+        # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部
+        try:
+            scroll_area = self.parent().parent()._parent.chat_scroll_area
+            if scroll_area:
+                vbar = scroll_area.verticalScrollBar()
+                if vbar and vbar.minimum() != vbar.maximum():
+                    delta = event.angleDelta().y()
+                    vbar.setValue(vbar.value() - delta // 2)
+                    event.accept()
+                    return
+        except Exception:
+            pass
         super().wheelEvent(event)
 
     def cleanup(self):
@@ -5685,11 +5784,27 @@ class MessageCard(SimpleCardWidget):
         self._last_applied_viewer_height = height
         self.viewer.setFixedHeight(height)
         self.heightChanged.emit(height)
-        # viewer 高度变化后 body 视口可能改变，重新滚动到底部确保溢出时内部滚动位置正确
+        # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
+        # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
+        # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
+        # 未滚动时强制 auto-scroll 到底部。
         if self._streaming and hasattr(self.viewer, 'page') and self.viewer.page():
             try:
                 self.viewer.page().runJavaScript(
-                    "setTimeout(function() { document.body.scrollTop = document.body.scrollHeight; }, 0);"
+                    "setTimeout(function() {"
+                    "  if (!window._userScrolledWithin) {"
+                    "    window._suppressScrollEvent = true;"
+                    "    document.body.scrollTop = document.body.scrollHeight;"
+                    "    window._suppressScrollEvent = false;"
+                    "  } else {"
+                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 30;"
+                    "    if (wasAtBottom) {"
+                    "      window._suppressScrollEvent = true;"
+                    "      document.body.scrollTop = document.body.scrollHeight;"
+                    "      window._suppressScrollEvent = false;"
+                    "    }"
+                    "  }"
+                    "}, 0);"
                 )
             except RuntimeError:
                 pass
@@ -5779,15 +5894,13 @@ class MessageCard(SimpleCardWidget):
             self.viewer.update_height()
 
     def wheelEvent(self, event: QWheelEvent):
+        # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
+        # 此时说明内部没有可滚动内容，或内部已达边界 → 直接转发到外部。
         try:
             scroll_area = self._parent.chat_scroll_area
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
-                if (
-                        vbar
-                        and vbar.minimum() != vbar.maximum()
-                        and event.angleDelta().y() != 0
-                ):
+                if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
                     vbar.setValue(vbar.value() - event.angleDelta().y() // 2)
                     event.accept()
                     return

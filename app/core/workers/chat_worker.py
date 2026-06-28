@@ -41,6 +41,7 @@ from app.core.message_content import append_text_block, consolidate_messages, me
 from app.core.model_capabilities import get_model_capabilities
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
+from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
 from app.core.workers.worker_event_bus import WorkerEvent, WorkerEventBus
@@ -64,6 +65,7 @@ class OpenAIChatWorker(QThread):
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
+    context_updated = pyqtSignal(int, int)  # token_count, limit，每轮 API 调用后实时更新
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
@@ -84,8 +86,6 @@ class OpenAIChatWorker(QThread):
             get_stage_prompt=None,
             stage_changed_callback=None,
             permission_check_callback=None,
-            compaction_prompt: str = "",
-            compaction_config: Dict = None,
             permission_cache: PermissionCache = None,
             compactor=None,
             initial_compaction_cache: Dict = None,
@@ -101,8 +101,6 @@ class OpenAIChatWorker(QThread):
         self.get_stage_prompt = get_stage_prompt
         self.stage_changed_callback = stage_changed_callback
         self.permission_check_callback = permission_check_callback
-        self.compaction_prompt = compaction_prompt
-        self.compaction_config = compaction_config or {}
 
         # ========== 使用 ChatWorkerState 统一管理所有可变状态 ==========
         self._state = ChatWorkerState.from_constructor_args(
@@ -110,8 +108,6 @@ class OpenAIChatWorker(QThread):
             session_messages=session_messages or [],
             llm_config=llm_config,
             tools=tools,
-            compaction_prompt=compaction_prompt,
-            compaction_config=compaction_config,
             permission_cache=permission_cache or PermissionCache(),
             event_bus=WorkerEventBus(),
             tool_executor=tool_executor,
@@ -522,6 +518,9 @@ class OpenAIChatWorker(QThread):
             ctx = {
                 "project_root": workdir,
                 "session_id": _session_id,  # Claude Code 兼容字段
+                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+                "current_role": "primary",
+                "is_subagent_call": False,
             }
             if extra_context:
                 ctx.update(extra_context)
@@ -1303,6 +1302,19 @@ class OpenAIChatWorker(QThread):
                 if self._is_cancelled:
                     self._cancel_with_stop_hook(current_messages, current_session_messages)
                     return
+                # ====== 实时上下文占用更新（每轮 API 调用后）======
+                # 优先用 API 返回的精确 prompt_tokens，没有则估算
+                if self._last_usage and self._last_usage.get("prompt_tokens", 0) > 0:
+                    ctx_count = self._last_usage["prompt_tokens"]
+                else:
+                    try:
+                        model_name = str(self.llm_config.get("model", "") or "gpt-4")
+                        ctx_count = count_messages_tokens(current_messages, model=model_name)
+                    except (ValueError, TypeError, RuntimeError):
+                        ctx_count = 0
+                if ctx_count > 0 and budget > 0:
+                    self.context_updated.emit(ctx_count, budget)
+                # ==============================================
                 if tool_calls_found and tool_args_pending:
                     # 🛡️ continue 之前检查取消状态，否则 while 循环直接退出绕过保存
                     if self._is_cancelled:
@@ -1573,14 +1585,6 @@ class OpenAIChatWorker(QThread):
                     freed = before_gc - after_gc
                     if freed > 1000:
                         logger.debug(f"[MEM] GC后释放 {freed} 个对象")
-
-                # 性能优化：移除后台线程中的 processEvents() 和 sleep
-                # 原因：processEvents() 设计用于主线程，在后台线程调用会导致：
-                # 1. 信号丢失或延迟
-                # 2. UI 状态不一致
-                # 3. 可能的死锁
-                # 如果需要 UI 响应，应使用信号-槽机制而非强制事件处理
-                # time.sleep(0.01)
 
         except Exception as e:
             logger.exception("请求失败!")
@@ -3278,9 +3282,6 @@ class OpenAIChatWorker(QThread):
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
             "image_data": getattr(result_obj, "image_data", None) if result_obj else None,
-            # LSP 诊断文本：to_api_message 会拼接到 content 末尾供 LLM 当前轮次查看，
-            # normalize_message 不保留此字段，session 历史消息不含诊断文本
-            "lsp_diagnostic": getattr(result_obj, "lsp_diagnostic", None) if result_obj else None,
         }
         if raw_content is not None:
             result["raw_content"] = raw_content

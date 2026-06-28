@@ -113,6 +113,10 @@ class Hook:
     # config_file: 所属的 hooks.json 配置文件路径（用于 UI 保存）
     config_file: Optional[str] = None
 
+    # 是否来自系统内置插件（plugins/system/）。系统级 hook 在 UI 上禁止删除。
+    # 该字段由 HookManager.register_hooks_from_json() 注入，不会写回源文件。
+    is_system_plugin: bool = False
+
     @classmethod
     def from_dict(cls, d: dict) -> 'Hook':
         conditions = [HookCondition.from_dict(c) for c in d.get("conditions", [])]
@@ -148,6 +152,7 @@ class Hook:
             function_args=d.get("function_args"),
             config_file=d.get("config_file"),
             prompt=d.get("prompt"),
+            is_system_plugin=d.get("is_system_plugin", False),
         )
 
     def to_dict(self) -> dict:
@@ -207,6 +212,13 @@ class HookMatchRule:
             states = [s.strip() for s in self.matcher.split("|")]
             return session_state in states
 
+        # BuildSystemPrompt 智能体角色匹配
+        # matcher 格式如 "primary|subagent"，匹配 context["current_role"]
+        if event_name == "BuildSystemPrompt":
+            current_role = context.get("current_role", "primary")
+            roles = [r.strip() for r in self.matcher.split("|")]
+            return current_role in roles
+
         # 工具名匹配（支持别名）
         if self.matcher.startswith("tool:"):
             pattern = self.matcher[5:]
@@ -237,11 +249,13 @@ class HookMatchRule:
         return False
 
     @classmethod
-    def from_dict(cls, d: dict, skill_root: str = "", config_file: str = "") -> 'HookMatchRule':
+    def from_dict(cls, d: dict, skill_root: str = "", config_file: str = "",
+                  is_system_plugin: bool = False) -> 'HookMatchRule':
         hooks = [Hook.from_dict(h) for h in d.get("hooks", [])]
         for h in hooks:
             h.skill_root = skill_root
             h.config_file = config_file  # 传递 config_file
+            h.is_system_plugin = is_system_plugin  # 标记系统级 hook
         return cls(
             matcher=d.get("matcher"),
             hooks=hooks,
@@ -317,6 +331,10 @@ class HookOverrideManager:
             logger.debug(f"[HookOverrideManager] Saved {len(self._overrides)} overrides")
         except Exception as e:
             logger.error(f"[HookOverrideManager] Failed to save overrides: {e}")
+
+    def reload(self):
+        """从文件重新加载覆写配置（用于多窗口同步）"""
+        self._load()
 
     def get_effective_enabled(self, hook_id: str, default: bool) -> bool:
         """获取 hook 的有效 enabled 状态（覆写优先）"""
@@ -723,7 +741,8 @@ class HookManager:
             logger.debug(f"[HookManager] Unregistered function: {name}")
 
     def register_hooks_from_json(self, skill_name: str, skill_root: str,
-                                  hooks_config: Union[dict, str], config_file: str = None) -> int:
+                                  hooks_config: Union[dict, str], config_file: str = None,
+                                  is_system_plugin: bool = False) -> int:
         """
         从 JSON 加载 hooks 配置
         
@@ -777,7 +796,8 @@ class HookManager:
                         # 旧格式兼容
                         rule_data = {"hooks": [rule_data]}
 
-                    match_rule = HookMatchRule.from_dict(rule_data, skill_root, config_file)
+                    match_rule = HookMatchRule.from_dict(rule_data, skill_root, config_file,
+                                                       is_system_plugin=is_system_plugin)
                     if match_rule.hooks:
                         rule_index = len(self._hooks[event_name])
                         self._hooks[event_name].append(match_rule)
@@ -1472,6 +1492,8 @@ class HookManager:
                     source_type, display_name = hook_source_map.get(hook.id, ("user", "自定义"))
                     hook_dict["_source_type"] = source_type
                     hook_dict["_display_name"] = display_name
+                    # 系统级 hook 标记（来自 plugins/system/），UI 据此禁用删除按钮
+                    hook_dict["_is_system_plugin"] = hook.is_system_plugin
 
                     if event_name not in grouped[source_type]:
                         grouped[source_type][event_name] = []
@@ -1760,10 +1782,12 @@ class HookManager:
     def delete_hook_by_id(self, hook_id: str) -> bool:
         """
         通过 id 删除 hook
-        
+
+        系统内置插件（plugins/system/）的 hook 不可删除。
+
         Args:
             hook_id: hook 唯一标识
-        
+
         Returns:
             是否成功
         """
@@ -1773,6 +1797,12 @@ class HookManager:
             return False
 
         event_name, rule_idx, hook_idx, hook = result
+
+        # 系统级 hook 拒绝删除
+        if hook.is_system_plugin:
+            logger.warning(f"[HookManager] Refused to delete system plugin hook {hook_id}")
+            return False
+
         config_file = hook.config_file
 
         # 从内存中删除
@@ -1912,8 +1942,13 @@ class HookManager:
         except Exception as e:
             logger.error(f"[HookManager] Failed to reload all plugin hooks: {e}")
 
-    def load_hooks_from_directory(self, agents_dir: Path) -> int:
-        """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)"""
+    def load_hooks_from_directory(self, agents_dir: Path, is_system_plugin: bool = False) -> int:
+        """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)
+
+        Args:
+            agents_dir: agents 目录路径
+            is_system_plugin: 是否来自系统内置插件（plugins/system/），标记的 hook 在 UI 上禁止删除
+        """
         count = 0
         if not agents_dir.exists():
             return count
@@ -1930,7 +1965,8 @@ class HookManager:
                         agent_dir.name,
                         str(agent_dir.absolute()),
                         config,
-                        str(hooks_file)
+                        str(hooks_file),
+                        is_system_plugin=is_system_plugin,
                     )
                     count += n
                     if n > 0:
@@ -1939,7 +1975,8 @@ class HookManager:
                     logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
         return count
 
-    def load_hooks_from_directory_flat(self, dir_path: Path, skill_name: str = None) -> int:
+    def load_hooks_from_directory_flat(self, dir_path: Path, skill_name: str = None,
+                                       is_system_plugin: bool = False) -> int:
         """从目录直接加载 hooks.json（插件顶层 hooks/ 目录）
 
         加载 {dir_path}/hooks.json 文件（如果有）。
@@ -1947,6 +1984,7 @@ class HookManager:
         Args:
             dir_path: hooks 目录路径
             skill_name: 注册用的 skill 名称。为 None 时使用 dir_path.name（兼容旧调用）
+            is_system_plugin: 是否来自系统内置插件（plugins/system/），标记的 hook 在 UI 上禁止删除
         """
         count = 0
         if not dir_path.exists() or not dir_path.is_dir():
@@ -1963,7 +2001,8 @@ class HookManager:
                 skill_name or dir_path.name,
                 str(dir_path.absolute()),
                 config,
-                str(hooks_file)
+                str(hooks_file),
+                is_system_plugin=is_system_plugin,
             )
             count += n
             if n > 0:

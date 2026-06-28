@@ -51,8 +51,6 @@ class ToolNameMapper:
         "bg_logs": ["BgLogs", "bg_logs"],
         "bg_list": ["BgList", "bg_list"],
         "stage_files": ["StageFiles", "stage_files"],
-        "read_project_note": ["ReadProjectNote", "read_project_note"],
-        "edit_project_note": ["EditProjectNote", "edit_project_note"],
         "mcp": ["Mcp"],  # MCP 工具前缀
     }
 

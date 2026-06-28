@@ -653,9 +653,9 @@ class QuestionFloatingWidget(QWidget):
             QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
         """)
 
-        footer.addWidget(self._back_btn)
         footer.addWidget(self._ignore_btn)
         footer.addStretch()
+        footer.addWidget(self._back_btn)
         footer.addWidget(self._preview_btn)
         footer.addWidget(self._next_btn)
 

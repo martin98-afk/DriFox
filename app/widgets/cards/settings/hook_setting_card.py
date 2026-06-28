@@ -33,17 +33,35 @@ from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
 
-# 事件顺序定义（按触发先后排列）
-# - UserPromptSubmit：用户提交原始 prompt，发生在 PreUserMessage 之前
-# - Stop：流式输出被 stop_streaming 停止时，同步触发
+# 事件顺序定义（按实际会话触发先后排列）
+# 正确顺序: BuildSystemPrompt → SessionStart → UserPromptSubmit
+# → PreUserMessage → PostUserMessage
+# → PreAssistantMessage → (PreToolUse → PostToolUse)* → PostAssistantMessage → Stop
+# 其中 PreToolUse/PostToolUse 在助手回复过程中可能多次触发
 HOOK_EVENT_ORDER = [
+    "BuildSystemPrompt",
     "SessionStart",
     "UserPromptSubmit",
     "PreUserMessage", "PostUserMessage",
-    "PreAssistantMessage", "PostAssistantMessage",
+    "PreAssistantMessage",
     "PreToolUse", "PostToolUse",
+    "PostAssistantMessage",
     "Stop",
 ]
+
+# 事件中文描述（用于 UI 标题显示）
+HOOK_EVENT_DISPLAY_NAMES = {
+    "BuildSystemPrompt": "构建系统提示词",
+    "SessionStart": "会话启动",
+    "UserPromptSubmit": "用户提交提问",
+    "PreUserMessage": "用户消息处理前",
+    "PostUserMessage": "用户消息处理后",
+    "PreAssistantMessage": "助手回复前",
+    "PostAssistantMessage": "助手回复后",
+    "PreToolUse": "工具调用前",
+    "PostToolUse": "工具调用后",
+    "Stop": "停止流式输出",
+}
 
 
 # ── Claude Code 插件路径变量 ──
@@ -243,6 +261,12 @@ class HookItem(QWidget):
         self.delBtn.setStyleSheet(ButtonStyles.tool_button())
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
 
+        # 系统级 hook（来自 plugins/system/ 内置插件）禁止删除
+        is_system_plugin = self._hook_data.get("_is_system_plugin", False)
+        if is_system_plugin:
+            self.delBtn.setEnabled(False)
+            self.delBtn.setToolTip("系统级 Hook 不可删除")
+
         self.setFixedHeight(40)
         self.hBoxLayout.setContentsMargins(8, 0, 4, 0)  # ponytail: 左 padding 从 48 缩到 8
         self.hBoxLayout.addWidget(self.sourceLabel, 0)
@@ -430,7 +454,9 @@ class HookEditCard(QWidget):
 
         # 根据事件类型获取选项列表
         options = []
-        if event_name == "SessionStart":
+        if event_name == "BuildSystemPrompt":
+            options = ["primary", "subagent"]
+        elif event_name == "SessionStart":
             options = list(self.SESSION_STATES)
         elif event_name in ("PreToolUse", "PostToolUse"):
             options = sorted(ToolNameMapper.ALIAS_MAP.keys())
@@ -808,8 +834,10 @@ class HookListSettingCard(ExpandSettingCard):
             if not event_hooks:
                 continue
 
-            # 事件标题
-            header = QLabel(f"Event: {event}", self.view)
+            # 事件标题（含中文描述）
+            cn_name = HOOK_EVENT_DISPLAY_NAMES.get(event, "")
+            header_text = f"Event: {event}  ·  {cn_name}" if cn_name else f"Event: {event}"
+            header = QLabel(header_text, self.view)
             header.setStyleSheet(
                 f"background-color: #F0F0F0; color: #333; font-weight: bold; "
                 f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
@@ -840,15 +868,19 @@ class HookListSettingCard(ExpandSettingCard):
     def _delete_hook_by_id(self, hook_id: str):
         """删除 hook"""
         if self._hook_manager:
-            self._hook_manager.delete_hook_by_id(hook_id)
+            success = self._hook_manager.delete_hook_by_id(hook_id)
+            if not success:
+                # 系统级 hook 或不存在时给出轻量提示
+                from PyQt5.QtWidgets import QToolTip
+                QToolTip.showText(QPoint(0, 0), "系统级 Hook 不可删除")
+                return
             self._refresh(reload=True)
             self.hooksChanged.emit()
 
     def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
-        """切换 hook 启用状态"""
+        """切换 hook 启用状态（仅持久化 + 通知，不重建 UI）"""
         if self._hook_manager:
             self._hook_manager.toggle_hook_by_id(hook_id, enabled)
-            self._refresh(reload=True)
             self.hooksChanged.emit()
 
     def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command",

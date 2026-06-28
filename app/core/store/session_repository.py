@@ -343,11 +343,11 @@ class SessionRepository:
             return []
 
     def get_projects(self) -> List[str]:
-        """获取所有项目名称列表（含无会话但有关键文档/笔记的项目）
+        """获取所有项目名称列表（含无会话但有关键文档的项目）
 
         关键修复：与归档清理配合使用——归档时必须同时清理 sessions、
-        key_documents、project_notes 三张表，否则已归档项目会从
-        key_documents/project_notes "复活"。
+        key_documents 两张表，否则已归档项目会从
+        key_documents "复活"。
         """
         if not self.is_initialized:
             return ["默认项目"]
@@ -359,8 +359,6 @@ class SessionRepository:
                     SELECT project FROM {self.TABLE_NAME}
                     UNION
                     SELECT project FROM key_documents
-                    UNION
-                    SELECT project FROM project_notes
                 ) ORDER BY project
                 """
             )

@@ -1276,6 +1276,27 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     return viewer
 
 
+# 预编译 hook 内容格式正则（与 message_content.py 中的 _is_hook_message 保持一致）
+_HOOK_CONTENT_PATTERN = re.compile(
+    r'<system-reminder>\s*<[a-z0-9-]+-hook>.*?</[a-z0-9-]+-hook>\s*</system-reminder>',
+    re.DOTALL
+)
+
+
+def _is_hook_message_ui(msg: dict) -> bool:
+    """判断消息是否为 hook 内部通知消息（UI 层兜底检查）
+
+    与 message_content._is_hook_message 保持逻辑一致，
+    用于渲染路径的防御性检查（正常情况下 batch 已被 group_messages_for_display 过滤）。
+    """
+    if msg.get("_hook_event"):
+        return True
+    content = msg.get("content", "")
+    if isinstance(content, str) and _HOOK_CONTENT_PATTERN.search(content):
+        return True
+    return False
+
+
 def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
     """
     将消息批次渲染到 assistant 卡片
@@ -1287,7 +1308,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
     for msg in batch:
         if msg.get("role") == "assistant":
             # 跳过 hook 消息（内部通知不显示到 UI，仅用于 LLM 上下文）
-            if msg.get("_hook_event"):
+            if _is_hook_message_ui(msg):
                 continue
 
             # 处理思考内容：将 reasoning_content 转换成 <think> 标签格式

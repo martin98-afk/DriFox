@@ -43,7 +43,8 @@ class ToolExecutor:
         self._homepage = homepage
         self._backend = backend  # ChatBackend 引用，用于访问 HookManager
         self._builtin_tools: Optional[BuiltinTools] = None
-        self._workdir = workdir
+        # P002: 初始就用默认路径兜底，避免 self._workdir 与 _builtin_tools.workdir 不一致
+        self._workdir = workdir or self._default_workdir()
         self._custom_tools: Dict[str, Callable] = {}
         self._session_id: Optional[str] = None
         self._call_id: Optional[str] = None
@@ -336,6 +337,9 @@ class ToolExecutor:
             # Claude Code 兼容字段（字段名已标准化）
             "tool_input": _normalized_input,
             "session_id": local_session_id,
+            # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+            "current_role": "primary",
+            "is_subagent_call": False,
         }
 
         # 注入工具结果信息（PostToolUse 最核心的增强）
@@ -440,15 +444,11 @@ class ToolExecutor:
             logger.warning(f"[ToolExecutor] 自动 LSP 快速诊断失败: {e}")
             return result
 
-        # 诊断文本存入独立字段，不混入 result.content
-        # to_api_message 会将 lsp_diagnostic 拼接到 API 请求的 tool content 末尾，
-        # 但 normalize_message 不保留此字段，因此 session 历史消息不含诊断文本，
-        # 避免累积诊断文本触发上下文压缩（soft_limit 超限 → prompt_tokens 骤减）
-        if not diag_result:
-            # diag_result 为 None 表示 CLI 返回空或不可用（工具未安装/超时/真无问题）
-            result.lsp_diagnostic = "[LSP 自动诊断] 未发现问题"
-        else:
-            result.lsp_diagnostic = diag_result
+        # 诊断文本追加到 result.content 末尾，使其自然通过消息持久化路径保留（
+        # consolidate_messages → normalize_message 保留 content 字段），
+        # 确保 LLM 在各轮次都能看到诊断结果，避免跨轮 content 变化导致 KV 缓存命中丢失。
+        diag_msg = "[LSP 自动诊断] 未发现问题" if not diag_result else diag_result
+        result.content = f"{result.content}\n\n{diag_msg}"
 
         logger.debug(
             f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}"
@@ -487,24 +487,39 @@ class ToolExecutor:
             logger.info(f"[ToolExecutor] set_current_project({project})")
 
     def get_workdir(self) -> Optional[str]:
-        """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）"""
-        return self._workdir
+        """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）
+
+        兜底：当 self._workdir 未设置时返回默认工作目录（项目根 / exe 根），
+        避免上游调用方在 None 上崩溃（如 os.path.basename）。
+        """
+        return self._workdir or self._default_workdir()
 
     def set_workdir(self, workdir: Optional[str]):
         """设置工作目录（None 或 "" 表示恢复默认）"""
-        self._workdir = workdir
-        if self._builtin_tools:
-            if workdir:
+        if workdir:
+            self._workdir = workdir
+            if self._builtin_tools:
                 self._builtin_tools.set_workdir(workdir)
-            else:
-                # 恢复默认：用 resource_path
-                try:
-                    from app.utils.utils import resource_path
-                    default_wd = resource_path("")
-                except Exception:
-                    default_wd = str(Path(__file__).parent.parent.parent)
+        else:
+            # P002: 恢复默认时，self._workdir 与 _builtin_tools.workdir 保持一致
+            # 否则上游 get_workdir() 返回 None，触发 os.path.basename(None) 崩溃
+            default_wd = self._default_workdir()
+            self._workdir = default_wd
+            if self._builtin_tools:
                 self._builtin_tools.workdir = Path(default_wd)
-            logger.info(f"[ToolExecutor] Workdir updated: {workdir or 'default'}")
+        logger.info(f"[ToolExecutor] Workdir updated: {workdir or 'default'}")
+
+    def _default_workdir(self) -> str:
+        """获取默认工作目录（项目根 / exe 根，与 _initialize_builtin_tools 一致）
+
+        规范化：用 Path 解析后转为 str，避免 Windows 路径带尾随反斜杠
+        （如 'D:\\work\\DriFoxx\\' 导致 os.path.basename 返回空字符串）。
+        """
+        try:
+            from app.utils.utils import resource_path
+            return str(Path(resource_path("")).resolve())
+        except Exception:
+            return str(Path(__file__).resolve().parent.parent.parent)
 
     def set_key_documents_repo(self, repo, project: str = "默认项目"):
         """设置关键文档仓储和当前项目"""
@@ -536,8 +551,6 @@ class ToolExecutor:
         "git_diff": [],
         "get_diagnostics": ["path"],
         "summarize_changes": ["text"],
-        "edit_project_note": ["oldString", "newString"],
-        "read_project_note": [],
         "todowrite": ["todos"],
         "todoread": [],
         "subagent_para": ["tasks"],
@@ -619,6 +632,9 @@ class ToolExecutor:
                 # Claude Code 兼容字段（字段名已标准化）
                 "tool_input": _normalized_input,
                 "session_id": local_session_id,
+                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
+                "current_role": "primary",
+                "is_subagent_call": False,
             }
             file_path = args.get("path") or args.get("file")
             if file_path:
@@ -765,12 +781,6 @@ class ToolExecutor:
                 args.get("text", ""), args.get("limit", 1200)
             ),
             "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
-            "edit_project_note": lambda: self._builtin_tools.edit_project_note(
-                oldString=args.get("oldString", ""),
-                newString=args.get("newString", "")),
-            "read_project_note": lambda: self._builtin_tools.read_project_note(
-                args.get("offset", 1),
-                args.get("limit", 500)),
             "todoread": lambda: self._builtin_tools.todo_read(),
             "subagent_para": lambda: (
                 lambda tasks_val: self._builtin_tools.subagent_para_execute(

@@ -104,8 +104,6 @@ class ChatWorkerState:
     initial_session_messages: List[Dict] = field(default_factory=list)
     llm_config: Dict = field(default_factory=dict)
     tools: List = field(default_factory=list)
-    compaction_prompt: str = ""
-    compaction_config: Dict = field(default_factory=dict)
 
     # === 状态分组 ===
     api_cache: ApiCacheState = field(default_factory=ApiCacheState)
@@ -136,8 +134,6 @@ class ChatWorkerState:
         session_messages: List[Dict],
         llm_config: Dict,
         tools: List[Dict],
-        compaction_prompt: str,
-        compaction_config: Dict,
         permission_cache: Any,
         event_bus: Any,
         tool_executor: Any,
@@ -150,8 +146,6 @@ class ChatWorkerState:
             initial_session_messages=session_messages,
             llm_config=llm_config,
             tools=tools or [],
-            compaction_prompt=compaction_prompt,
-            compaction_config=compaction_config or {},
             api_cache=ApiCacheState(
                 cache=None,
                 built=False,

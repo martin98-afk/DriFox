@@ -46,6 +46,10 @@ jobs:
           # 只导入 app.core 包，验证模块结构可加载；不触发 PyQt5 懒加载（Linux+Py3.14 下 PyQt5 会段错误）
           uv run python -c "import app.core; print('check: imports OK')"
 
+      - name: Check build.py cleanup list for QtPositioning
+        run: |
+          uv run python3 -c 'import sys; lines=open("build.py").readlines(); [sys.exit(print("ERROR: Line "+str(i)+": QtPositioning.framework in cleanup list")) for i,l in enumerate(lines,1) if "QtPositioning.framework" in l.strip() and not l.strip().startswith("#")]; print("OK: QtPositioning.framework not in cleanup list")'
+
   # ════════════════════════════════════════════════
   # Job 1: Windows (PyInstaller + Inno Setup)
   # ════════════════════════════════════════════════
@@ -172,11 +176,63 @@ jobs:
       - name: Verify PyInstaller output
         shell: bash
         run: |
-          if [ ! -d "dist/Drifox.app" ]; then
+          APP="dist/Drifox.app"
+          FRAMEWORKS="$APP/Contents/Frameworks"
+
+          if [ ! -d "$APP" ]; then
             echo "❌ PyInstaller 没有产出 dist/Drifox.app"
             exit 1
           fi
           echo "✅ PyInstaller 打包成功"
+
+          # ── 依赖完整性检查 ──
+          echo ""
+          echo "📦 依赖完整性检查..."
+
+          # QtPositioning —— QtWebEngineWidgets 必需
+          if [ -L "$FRAMEWORKS/QtPositioning" ] && [ -f "$(readlink -f "$FRAMEWORKS/QtPositioning" 2>/dev/null || echo "")" ]; then
+            echo "  ✅ QtPositioning (符号链接有效)"
+          elif [ -f "$FRAMEWORKS/QtPositioning" ]; then
+            echo "  ✅ QtPositioning (文件存在)"
+          else
+            echo "  ❌ QtPositioning 缺失或断链"
+            ls -la "$FRAMEWORKS/QtPositioning" 2>/dev/null || true
+            echo ""
+            echo "⚠️  请检查 build.py 的 to_remove_macos 列表是否误删了 QtPositioning.framework"
+            exit 1
+          fi
+
+          # QtPositioningQuick
+          if [ -f "$FRAMEWORKS/QtPositioningQuick" ]; then
+            echo "  ✅ QtPositioningQuick"
+          else
+            echo "  ⚠️  QtPositioningQuick 未找到（可选依赖）"
+          fi
+
+          # 关键 Qt5 framework（Core / Gui / Widgets / WebEngine）
+          # 打包后结构：Frameworks/QtCore -> PyQt5/Qt5/lib/QtCore.framework/Versions/5/QtCore
+          for fw in QtCore QtGui QtWidgets QtWebEngineCore; do
+            target="$FRAMEWORKS/$fw"
+            if [ -f "$target" ]; then
+              echo "  ✅ $fw (文件存在)"
+            elif [ -L "$target" ]; then
+              # 符号链接，解析相对路径检查目标
+              link_target=$(readlink "$target")
+              real_target="$FRAMEWORKS/$link_target"
+              if [ -f "$real_target" ]; then
+                echo "  ✅ $fw (符号链接有效 -> $link_target)"
+              else
+                echo "  ❌ $fw 符号链接断链: $link_target"
+                exit 1
+              fi
+            else
+              echo "  ❌ $fw 缺失"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "✅ 依赖完整性检查通过"
 
       # ── 代码签名说明 ──
       # 不做 ad-hoc 签名。原因：
@@ -349,15 +405,17 @@ jobs:
           import re, sys
           with open('CHANGELOG.md') as f:
               content = f.read()
-          # Extract the first version entry (from ## to next ## or EOF)
-          match = re.search(r'## .*?(?=\n## |\Z)', content, re.DOTALL)
+          tag = '${{ github.ref_name }}'
+          # Extract the version entry matching current tag (## [vX.Y.Z] ...)
+          tag_escaped = re.escape(tag)
+          match = re.search(rf'## \[{tag_escaped}\].*?(?=\n## |\Z)', content, re.DOTALL)
           if match:
               body = match.group().strip()
               with open('release_body.txt', 'w') as f:
                   f.write(body)
-              print('Release body extracted from CHANGELOG.md')
+              print(f'Release body extracted from CHANGELOG.md (tag: {tag})')
           else:
-              print('WARNING: no version entry found in CHANGELOG.md, using empty body')
+              print(f'WARNING: no version entry found in CHANGELOG.md for tag {tag}, using empty body')
               open('release_body.txt', 'w').close()
           "
 

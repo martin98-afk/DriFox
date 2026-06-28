@@ -204,7 +204,6 @@ class MCPEditCard(QWidget):
 
         # ── 环境变量（stdio） ──
         self.envEdit = QPlainTextEdit()
-        self.envEdit.setMaximumHeight(100)
         self.envEdit.setMinimumHeight(48)
         self.envEdit.setPlaceholderText('可选 JSON，例如: {"API_KEY": "xxx"}')
         saved_env = self._server_data.get("env")

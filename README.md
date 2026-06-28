@@ -691,7 +691,7 @@ permission:
 | **任务** | todowrite, todoread, task, task_batch, task_wait, skill, list_skills |
 | **子智能体** | subagent_para（并行分发）, subagent_dag（DAG 工作流）, subagent_status（状态查询）|
 | **MCP** | `mcp__server__tool` — 连接 MCP Server 后自动出现 |
-| **其他** | scan_repo, stage_files, question, read_project_note, edit_project_note |
+| **其他** | scan_repo, stage_files, question |
 
 ---
 

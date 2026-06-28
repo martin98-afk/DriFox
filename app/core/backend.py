@@ -107,7 +107,7 @@ def _make_hook_message(event_name: str, output: str) -> Dict[str, Any]:
     """构建一条 hook 消息 dict（带 _hook_event 标记和 timestamp）"""
     import datetime as _dt
     return {
-        "role": "assistant",
+        "role": "system",
         "content": _format_hook_output(event_name, output),
         "_hook_event": event_name,
         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -342,6 +342,11 @@ class ChatBackend(QObject):
             if is_prompt_hook:
                 event_name = event_name[len("__prompt__:"):]
 
+            # BuildSystemPrompt hook 的输出已在 get_agent_system_prompt() 中直接注入 system prompt，
+            # 不需要再通过队列注入到 assistant 消息中，跳过回调避免双重注入。
+            if event_name == "BuildSystemPrompt":
+                return
+
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
 
             if not success:
@@ -353,15 +358,15 @@ class ChatBackend(QObject):
             if event_name == "PreToolUse":
                 hook_output = _format_hook_output(event_name, output)
                 self._pre_tool_message_queue.put({
-                    "role": "assistant",
+                    "role": "system",
                     "content": hook_output,
                     "_hook_event": event_name,
                 })
-                logger.debug(f"[HookManager] PreToolUse queued to pre-tool queue")
+                logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
             elif is_prompt_hook or event_name == "PostToolUse":
                 hook_output = _format_hook_output(event_name, output)
                 self._hook_message_queue.put({
-                    "role": "assistant",
+                    "role": "system",
                     "content": hook_output,
                     "_hook_event": event_name,
                 })
@@ -970,6 +975,7 @@ class ChatBackend(QObject):
             # 2. 智能体 + hooks
             if comps.get("agents") and self._agent_manager:
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
+                result["hooks"] = True  # agents 组件包含 hooks 重载
                 try:
                     from app.core.builtin_commands import reload_all_commands
                     reload_all_commands()
@@ -979,6 +985,7 @@ class ChatBackend(QObject):
 
             if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
                 self._agent_manager.reload_plugin_hooks(plugin_name)
+                result["hooks"] = True
 
             # 3. 命令
             if comps.get("commands") and not result["commands"]:
@@ -1237,6 +1244,7 @@ class ChatBackend(QObject):
                 # 智能体 + hooks（agents 组件同时处理 hooks）
                 if comps.get("agents") and self._agent_manager:
                     result["agents"] = self._agent_manager.reload_plugin_agents(name)
+                    result["hooks"] = True  # agents 组件包含 hooks 重载
                     # 智能体文件同时也是命令源（/agent_name）
                     try:
                         from app.core.builtin_commands import reload_all_commands
@@ -1248,6 +1256,7 @@ class ChatBackend(QObject):
                 # hooks-only（没有 agents 但有 hooks）
                 if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
                     self._agent_manager.reload_plugin_hooks(name)
+                    result["hooks"] = True
 
                 # 命令（非 agents 触发的独立命令目录）
                 if comps.get("commands") and not result["commands"]:
@@ -1767,17 +1776,8 @@ class ChatBackend(QObject):
             "project_name": os.path.basename(project_root),
         }
 
-        # 项目笔记（AGENTS.md 内容）
-        if self._memory_manager:
-            try:
-                note = self._memory_manager.get_project_note(
-                    self._current_project,
-                    workdir=project_root,
-                )
-                if note and note.get("content"):
-                    ctx["project_notes_content"] = note["content"]
-            except Exception:
-                pass
+        # 项目笔记由 read_project_notes hook（BuildSystemPrompt）从本地 AGENTS.md 直接读取，
+        # SessionStart 不再预取 notes 内容
 
         # Worktree / git 分支信息
         try:

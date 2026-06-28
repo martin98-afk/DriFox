@@ -9,7 +9,7 @@ DANGEROUS_TOOLS = frozenset({
     "bash", "bg_start", "bg_stop",           # 终端命令
     "mouse", "keyboard",                      # 桌面控制
     "upload_file",                            # 文件上传
-    "edit_project_note", "todowrite",         # 状态修改
+    "todowrite",                              # 状态修改
     "stage_files",                            # 文件标记
     "subagent_para", "subagent_dag",          # 子智能体（可执行任意代码/修改文件）
 })
@@ -21,7 +21,7 @@ SAFE_TOOLS = frozenset({
     "bg_logs", "bg_list",                             # 后台查看
     "screenshot",                                     # 截图
     "get_diagnostics",                                # 诊断
-    "read_project_note", "todoread",                  # 笔记/待办只读
+    "todoread",                                       # 待办只读
     "question", "skill", "list_skills",               # 交互/技能
     "subagent_status",                                # 子智能体（只读查询）
     "mcp_list_servers",                               # MCP列表
