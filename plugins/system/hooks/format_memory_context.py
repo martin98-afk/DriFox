@@ -21,9 +21,19 @@ PreUserMessage Hook 函数 — 将条目记忆、关键文档、worktree 上下�
 
 from __future__ import annotations
 
+import concurrent.futures
+import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
+
+# Windows 专属：防止 subprocess 调 git 时弹出黑色 cmd 窗口
+# CREATE_NO_WINDOW = 0x08000000，仅 Windows 有效
+_CREATE_NO_WINDOW = (
+    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+)
 
 # ============================================================
 # Git 状态收集（移植自 .drifox/plugins/git-status/hooks/git_status.py）
@@ -37,6 +47,13 @@ _MAX_UNTRACKED_ITEMS = 20
 _MAX_RECENT_COMMITS = 5
 # 同一 cwd 只尝试一次自动 git init，避免每条用户消息都触发破坏性操作
 _AUTO_INITED: set[str] = set()
+
+# === 性能优化（方案 A + B）===
+# 同 cwd 在 TTL 秒内复用 git 命令结果，避免每轮 PreUserMessage 反复跑 8 次 git
+_GIT_CACHE_TTL = 5.0
+_GIT_CACHE: dict[str, tuple[float, Any]] = {}
+# git 是否安装：一个进程只检查一次
+_GIT_AVAILABLE: bool | None = None
 
 
 def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
@@ -53,6 +70,7 @@ def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
             encoding="utf-8",
             errors="replace",
             timeout=_GIT_TIMEOUT,
+            creationflags=_CREATE_NO_WINDOW,
         )
         # 只去末尾换行符，保留前导空格（porcelain X=' ' 是有效信息）
         return result.stdout.rstrip("\n"), result.stderr.rstrip("\n"), result.returncode
@@ -65,9 +83,15 @@ def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
 
 
 def _is_git_available() -> bool:
-    """检查系统是否安装了 git（cwd='.' 不依赖具体目录）"""
-    _, _, code = _run_git(".", "--version")
-    return code == 0
+    """检查系统是否安装了 git（cwd='.' 不依赖具体目录）
+
+    进程级缓存：只在第一次调用时实际执行 git --version
+    """
+    global _GIT_AVAILABLE
+    if _GIT_AVAILABLE is None:
+        _, _, code = _run_git(".", "--version")
+        _GIT_AVAILABLE = (code == 0)
+    return _GIT_AVAILABLE
 
 
 def _is_git_repo(cwd: str) -> bool:
@@ -108,76 +132,79 @@ def _auto_git_init(cwd: str) -> bool:
     return _is_git_repo(cwd)
 
 
-def _collect_branch_info(cwd: str) -> dict[str, Any]:
-    """收集分支名 + ahead/behind 提交数"""
-    info: dict[str, Any] = {"branch": "", "ahead": 0, "behind": 0}
-    stdout, _, code = _run_git(cwd, "branch", "--show-current")
-    if code == 0 and stdout:
-        info["branch"] = stdout
-    else:
-        # detached HEAD 场景
-        stdout, _, code = _run_git(cwd, "rev-parse", "--short", "HEAD")
-        if code == 0 and stdout:
-            info["branch"] = f"(detached @ {stdout})"
-    stdout, _, code = _run_git(cwd, "rev-list", "--left-right", "--count", "HEAD...@{u}")
-    if code == 0 and stdout:
-        parts = stdout.split()
-        if len(parts) == 2:
-            try:
-                info["ahead"] = int(parts[0])
-                info["behind"] = int(parts[1])
-            except ValueError:
-                pass
-    return info
+def _parse_branch_header(line: str) -> dict[str, Any]:
+    """解析 `git status --porcelain=v1 --branch` 输出里的 ## 头行
 
+    支持：
+        ## dev                              → branch=dev, ahead=0, behind=0
+        ## dev...origin/dev                 → branch=dev
+        ## dev...origin/dev [ahead 2, behind 0]
+        ## HEAD (detached at abc123)        → branch="(detached @ abc123)"
+        ## master (root-commit) ...         → branch=master
+    """
+    out: dict[str, Any] = {"branch": "", "ahead": 0, "behind": 0, "is_detached": False}
+    if line.startswith("## HEAD (detached at "):
+        m = re.search(r"detached at ([0-9a-f]+)", line)
+        if m:
+            out["branch"] = f"(detached @ {m.group(1)})"
+            out["is_detached"] = True
+        return out
 
-def _collect_file_status(cwd: str) -> dict[str, list]:
-    """收集工作树文件状态（porcelain v1）"""
-    status: dict[str, list] = {"staged": [], "unstaged": [], "untracked": []}
-    stdout, _, code = _run_git(
-        cwd,
-        "status",
-        "--porcelain=v1",
-        "-uall",
-        "--no-renames",
+    # 标准格式：## branch[...upstream] [ahead N, behind N]
+    # branch 用 greedy [^\s.]+：从首字符开始匹配，遇到空白或点停止
+    m = re.match(
+        r"^## (?P<branch>[^\s.]+)(?:\.{3}(?P<up>[^\s\[]+))?"
+        r"(?: \[ahead (?P<ahead>\d+)(?:, behind (?P<behind>\d+))?\])?",
+        line,
     )
-    if code != 0 or not stdout:
-        return status
-    for line in stdout.splitlines():
+    if m:
+        out["branch"] = m.group("branch")
+        if m.group("ahead"):
+            out["ahead"] = int(m.group("ahead"))
+        if m.group("behind"):
+            out["behind"] = int(m.group("behind"))
+    return out
+
+
+def _parse_status_v1(out: str) -> dict[str, Any]:
+    """解析 git status --porcelain=v1 --branch 的输出
+
+    头行 ## ... 携带分支信息；其余 XY path 行携带文件状态。
+    """
+    files: dict[str, list] = {"staged": [], "unstaged": [], "untracked": []}
+    branch_info: dict[str, Any] = {"branch": "", "ahead": 0, "behind": 0, "is_detached": False}
+
+    for line in out.splitlines():
+        if not line:
+            continue
+        if line.startswith("## "):
+            branch_info = _parse_branch_header(line)
+            continue
         if len(line) < 3:
             continue
         x = line[0]
         y = line[1]
         path = line[3:]
         if x == "?" and y == "?":
-            status["untracked"].append(path)
+            files["untracked"].append(path)
         else:
             if x != " ":
-                status["staged"].append((x, path))
+                files["staged"].append((x, path))
             if y != " ":
-                status["unstaged"].append((y, path))
-    return status
+                files["unstaged"].append((y, path))
+    return {"branch_info": branch_info, "files": files}
 
 
-def _collect_diff_stats(cwd: str) -> dict[str, tuple[int, int]]:
-    """每个文件的 diff 行数（numstat → {path: (added, removed)}）
-
-    替代 --shortstat 聚合输出，让 LLM 能直接看到每个文件的改动规模，
-    避免出现"250 行变化但不知道是哪个文件"的信息黑洞。
-
-    二进制文件返回 (0, 0)。
-    """
-    stdout, _, code = _run_git(cwd, "diff", "--numstat")
-    if code != 0 or not stdout:
-        return {}
+def _parse_numstat(out: str) -> dict[str, tuple[int, int]]:
+    """解析 git diff --numstat 输出（按 tab 分：added<TAB>removed<TAB>path）"""
     stats: dict[str, tuple[int, int]] = {}
-    for line in stdout.splitlines():
+    for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) != 3:
             continue
         added, removed, path = parts
         if added == "-" and removed == "-":
-            stats[path] = (0, 0)  # 二进制文件
+            stats[path] = (0, 0)  # 二进制
         else:
             try:
                 stats[path] = (int(added), int(removed))
@@ -186,23 +213,90 @@ def _collect_diff_stats(cwd: str) -> dict[str, tuple[int, int]]:
     return stats
 
 
-def _collect_stash_count(cwd: str) -> int:
-    """stash 数量（git stash list）"""
-    stdout, _, code = _run_git(cwd, "stash", "list")
-    if code != 0 or not stdout:
-        return 0
-    return len(stdout.splitlines())
+def _collect_all_git(cwd: str) -> dict[str, Any]:
+    """并发跑所有 git 命令并合并结果。结果按 cwd 缓存 5 秒。
 
+    命令合并：原本 8 个串行命令 → 4 个并行命令：
+        1. git status --porcelain=v1 --branch   （分支 + ahead/behind + 文件状态）
+        2. git diff --numstat                    （每个文件 diff 行数）
+        3. git log -n5 --pretty=format:%h %s (%cr) （最近 commits）
+        4. git stash list                        （stash 数）
 
-def _collect_recent_commits(cwd: str, n: int = _MAX_RECENT_COMMITS) -> list[str]:
-    """最近 N 条 commit（短 hash + subject + 相对时间）
-
-    %cr 输出形如 "3 minutes ago" / "2 days ago"，帮助 AI 判断活跃度。
+    Returns:
+        {
+            "branch": str, "ahead": int, "behind": int, "is_detached": bool,
+            "files": {"staged": [...], "unstaged": [...], "untracked": [...]},
+            "diff_stats": {path: (added, removed)},
+            "stash_count": int,
+            "commits": list[str],
+        }
     """
-    stdout, _, code = _run_git(cwd, "log", f"-n{n}", "--pretty=format:%h %s (%cr)")
-    if code == 0 and stdout:
-        return stdout.splitlines()
-    return []
+    # 5 秒内同 cwd 复用
+    now = time.monotonic()
+    cached = _GIT_CACHE.get(cwd)
+    if cached is not None:
+        ts, val = cached
+        if now - ts < _GIT_CACHE_TTL:
+            return val
+
+    empty: dict[str, Any] = {
+        "branch": "", "ahead": 0, "behind": 0, "is_detached": False,
+        "files": {"staged": [], "unstaged": [], "untracked": []},
+        "diff_stats": {}, "stash_count": 0, "commits": [],
+    }
+
+    def _branch_and_status() -> str:
+        out, _, code = _run_git(
+            cwd, "status", "--porcelain=v1", "--branch", "-uall", "--no-renames",
+        )
+        return out if code == 0 else ""
+
+    def _diff() -> str:
+        out, _, code = _run_git(cwd, "diff", "--numstat")
+        return out if code == 0 else ""
+
+    def _commits() -> str:
+        out, _, code = _run_git(
+            cwd, "log", f"-n{_MAX_RECENT_COMMITS}", "--pretty=format:%h %s (%cr)",
+        )
+        return out if code == 0 else ""
+
+    def _stash() -> str:
+        out, _, code = _run_git(cwd, "stash", "list")
+        return out if code == 0 else ""
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            f_bs = ex.submit(_branch_and_status)
+            f_diff = ex.submit(_diff)
+            f_commits = ex.submit(_commits)
+            f_stash = ex.submit(_stash)
+            bs_out = f_bs.result()
+            diff_out = f_diff.result()
+            commits_out = f_commits.result()
+            stash_out = f_stash.result()
+    except Exception:
+        return empty
+
+    if not bs_out:
+        return empty
+
+    parsed = _parse_status_v1(bs_out)
+    branch_info = parsed["branch_info"]
+    files = parsed["files"]
+
+    result = {
+        "branch": branch_info["branch"],
+        "ahead": branch_info["ahead"],
+        "behind": branch_info["behind"],
+        "is_detached": branch_info["is_detached"],
+        "files": files,
+        "diff_stats": _parse_numstat(diff_out),
+        "stash_count": len(stash_out.splitlines()) if stash_out else 0,
+        "commits": commits_out.splitlines() if commits_out else [],
+    }
+    _GIT_CACHE[cwd] = (now, result)
+    return result
 
 
 _STATUS_CODE_DESC = {
@@ -218,13 +312,6 @@ _STATUS_CODE_DESC = {
 
 def _describe_status(code: str) -> str:
     return _STATUS_CODE_DESC.get(code, code)
-
-
-def _format_branch(info: dict[str, Any]) -> str:
-    branch = info["branch"] or "(未知)"
-    ahead = f" ↑{info['ahead']}" if info["ahead"] else ""
-    behind = f" ↓{info['behind']}" if info["behind"] else ""
-    return f"**当前分支**: `{branch}`{ahead}{behind}"
 
 
 def _format_file_list(
@@ -454,16 +541,28 @@ def _auto_generate_or_append_gitignore(cwd: str) -> dict[str, Any]:
 
 
 def _build_git_status_block(cwd: str) -> list[str] | None:
-    """组装 Git 状态段，返回 None 表示不可用（让调用方 fallback）"""
+    """组装 Git 状态段，返回 None 表示不可用（让调用方 fallback）
+
+    一次性从 _collect_all_git 拿到所有数据（已并发 + 已缓存），
+    本函数只负责格式化，不再做任何 subprocess 调用。
+    """
     if not _auto_git_init(cwd):
         return None
-    branch_info = _collect_branch_info(cwd)
-    files = _collect_file_status(cwd)
-    diff_stats = _collect_diff_stats(cwd)
-    stash_count = _collect_stash_count(cwd)
-    commits = _collect_recent_commits(cwd)
+    info = _collect_all_git(cwd)
+    branch = info["branch"]
+    ahead = info["ahead"]
+    behind = info["behind"]
+    files = info["files"]
+    diff_stats = info["diff_stats"]
+    stash_count = info["stash_count"]
+    commits = info["commits"]
 
-    parts: list[str] = ["## Git 仓库状态", _format_branch(branch_info)]
+    parts: list[str] = [
+        "## Git 仓库状态",
+        f"**当前分支**: `{branch}`"
+        + (f" ↑{ahead}" if ahead else "")
+        + (f" ↓{behind}" if behind else ""),
+    ]
     if stash_count:
         parts.append(f"**Stash**: {stash_count} 条未保存的工作")
     parts.extend(_format_status_section(files, diff_stats))
