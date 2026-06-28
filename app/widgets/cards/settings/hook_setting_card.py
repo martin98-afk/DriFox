@@ -41,10 +41,12 @@ from app.widgets.elided_label import _ElidedLabel
 HOOK_EVENT_ORDER = [
     "BuildSystemPrompt",
     "SessionStart",
+    "PreUserMessage", 
     "UserPromptSubmit",
-    "PreUserMessage", "PostUserMessage",
+    "PostUserMessage",
     "PreAssistantMessage",
-    "PreToolUse", "PostToolUse",
+    "PreToolUse", 
+    "PostToolUse",
     "PostAssistantMessage",
     "Stop",
 ]
@@ -53,8 +55,8 @@ HOOK_EVENT_ORDER = [
 HOOK_EVENT_DISPLAY_NAMES = {
     "BuildSystemPrompt": "构建系统提示词",
     "SessionStart": "会话启动",
-    "UserPromptSubmit": "用户提交提问",
     "PreUserMessage": "用户消息处理前",
+    "UserPromptSubmit": "用户提交提问",
     "PostUserMessage": "用户消息处理后",
     "PreAssistantMessage": "助手回复前",
     "PostAssistantMessage": "助手回复后",

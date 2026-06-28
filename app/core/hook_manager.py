@@ -686,7 +686,7 @@ class HookWorker(QRunnable):
             if isinstance(result, str):
                 return result, True
             elif isinstance(result, dict):
-                return json.dumps(result), True
+                return json.dumps(result, ensure_ascii=False), True
             else:
                 return str(result), True
         except Exception as e:
@@ -1323,7 +1323,7 @@ class HookManager:
                         args = hook.function_args or {}
                         args.update({"event": context.get("event_name"), "context": context})
                         result = func(**args)
-                        output = result if isinstance(result, str) else json.dumps(result)
+                        output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
                         success = True
                     else:
                         # 尝试解析 Python 函数
@@ -1355,7 +1355,7 @@ class HookManager:
                                     args["event"] = context.get("event_name")
                                     args["context"] = context
                                     result = func(**args)
-                                    output = result if isinstance(result, str) else json.dumps(result)
+                                    output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
                                     success = True
                         except Exception as e:
                             output = f"Python hook failed: {str(e)}"
@@ -1377,6 +1377,9 @@ class HookManager:
                         decision_str = output_data.get("decision", "continue")
                         if decision_str in ["block", "continue", "defer"]:
                             decision = HookDecision(decision_str)
+                        # 提取 output 字段覆盖外层 output（解决 json.dumps(ensure_ascii=True) 转义乱码）
+                        if "output" in output_data:
+                            output = str(output_data["output"])
                 except json.JSONDecodeError:
                     pass
 
