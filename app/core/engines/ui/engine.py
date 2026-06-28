@@ -547,8 +547,12 @@ class UIEngine(BaseEngine):
 
         self._emit("stream_finished", response)
 
-        # Trigger PostAssistantMessage hook（成功路径）
-        self._trigger_post_assistant_message(response, is_error=False)
+        # ⚠️ 注意：不在此处触发 PostAssistantMessage hook
+        # chat_worker 内部已经在 _process_iteration 中通过 _trigger_worker_hook()
+        # 触发了 PostAssistantMessage（同步模式），且在 engine 层面再次触发会导致
+        # 所有 PostAssistantMessage hook 被调用两次（如语音播报播两遍）。
+        # Worker 内部触发也会将 hook 输出注入到消息流，而 engine 层面不会，
+        # 因此保留 worker 的触发即可覆盖所有场景（含错误路径由 chat_worker 的 Stop hook 处理）。
 
         # 保存缓存统计（在 worker 被清理前）
         self._save_cache_stats()

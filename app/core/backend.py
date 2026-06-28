@@ -118,6 +118,8 @@ def _inject_hook_to_session(session, event_name: str, output: str):
     """将 hook 输出追加到 session.messages（只追加不删除，保证历史稳定）"""
     if not session:
         return
+    if not output or not output.strip():
+        return
     msg = _make_hook_message(event_name, output)
     session.messages.append(msg)
     session._update_timestamp()
@@ -350,6 +352,10 @@ class ChatBackend(QObject):
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
 
             if not success:
+                return
+
+            # 跳过空输出（禁用/无匹配的 hook 不产生实际内容）
+            if not output or not output.strip():
                 return
 
             # PreToolUse → 独立队列（worker 在 tool 执行后立即消费，插入 tool result 之前）

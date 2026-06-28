@@ -3282,6 +3282,9 @@ class OpenAIChatWorker(QThread):
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
             "image_data": getattr(result_obj, "image_data", None) if result_obj else None,
+            # LSP 诊断文本：to_api_message 会拼接到 content 末尾供 LLM 当前轮次查看，
+            # normalize_message 不保留此字段，session 历史消息不含诊断文本
+            "lsp_diagnostic": getattr(result_obj, "lsp_diagnostic", None) if result_obj else None,
         }
         if raw_content is not None:
             result["raw_content"] = raw_content
