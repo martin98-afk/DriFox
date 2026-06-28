@@ -3,14 +3,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.2.13] - 2026-06-28
+## [v0.2.13] - 2026-06-29
 
-自上一版本以来的变更 | 提交数：17 · 文件变更：52 · +2886/-2214 | 贡献者：martin98-afk, dingma
+自上一版本以来的变更 | 提交数：24 · 文件变更：57 · +4001/-2094 | 贡献者：dingma, martin98-afk
 
 ---
 
 ### ✨ 新功能 (New Features)
 
+- **Hook 系统全面完善**: 新增 `project_intel`（项目智能）与 `safety_guard`（安全守卫）两个系统级 Hook，提供项目上下文智能理解、安全隐患检测与防护能力
+- **Git 状态集成到 Memory Context Hook**: 在 PreUserMessage 内存上下文 Hook 中注入 Git 状态信息，包括文件变更统计、储藏计数、相对时间和临时文件提示
+- **Git 子进程 Windows 弹窗修复**: 在 Windows 平台执行 Git 子进程时隐藏命令行窗口，避免黑窗闪烁
+- **自动生成 .gitignore 规则**: 根据项目上下文自动检测并附加 .gitignore 规则，提升项目配置体验
 - **BuildSystemPrompt Hook 实现与重构**: 新增 BuildSystemPrompt Hook 统一处理系统提示生成与上下文注入；重构项目笔记管理，移除 `project_notes_manager` 模块，改为直接从 `AGENTS.md` 读取项目笔记
 - **Hook 系统增强**: 增强 hook 管理，支持系统插件（system plugin）与上下文注入；matcher 占位符根据当前事件类型动态更新
 - **实时上下文用量显示**: 新增 `context_updated` 信号，实时推送上下文使用量，前端可即时展示上下文消耗
