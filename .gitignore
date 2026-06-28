@@ -46,3 +46,25 @@ app.config
 "nul"  
 /.mypy_cache/
 /memory/
+# ── Auto-appended by format_memory_context hook ──
+
+# Python 生态
+*.pyc
+*.pyo
+*.pyd
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 系统文件
+desktop.ini
+$RECYCLE.BIN/
+
+# IDE/编辑器
+*.swn
+*~
+.project
+.pycpath
