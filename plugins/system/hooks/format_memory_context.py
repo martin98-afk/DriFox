@@ -159,15 +159,47 @@ def _collect_file_status(cwd: str) -> dict[str, list]:
     return status
 
 
-def _collect_diff_stats(cwd: str) -> str:
-    """工作区 diff --shortstat（一行摘要）"""
-    stdout, _, code = _run_git(cwd, "diff", "--shortstat")
-    return stdout if code == 0 else ""
+def _collect_diff_stats(cwd: str) -> dict[str, tuple[int, int]]:
+    """每个文件的 diff 行数（numstat → {path: (added, removed)}）
+
+    替代 --shortstat 聚合输出，让 LLM 能直接看到每个文件的改动规模，
+    避免出现"250 行变化但不知道是哪个文件"的信息黑洞。
+
+    二进制文件返回 (0, 0)。
+    """
+    stdout, _, code = _run_git(cwd, "diff", "--numstat")
+    if code != 0 or not stdout:
+        return {}
+    stats: dict[str, tuple[int, int]] = {}
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        added, removed, path = parts
+        if added == "-" and removed == "-":
+            stats[path] = (0, 0)  # 二进制文件
+        else:
+            try:
+                stats[path] = (int(added), int(removed))
+            except ValueError:
+                continue
+    return stats
+
+
+def _collect_stash_count(cwd: str) -> int:
+    """stash 数量（git stash list）"""
+    stdout, _, code = _run_git(cwd, "stash", "list")
+    if code != 0 or not stdout:
+        return 0
+    return len(stdout.splitlines())
 
 
 def _collect_recent_commits(cwd: str, n: int = _MAX_RECENT_COMMITS) -> list[str]:
-    """最近 N 条 commit（短 hash + subject）"""
-    stdout, _, code = _run_git(cwd, "log", f"-n{n}", "--pretty=format:%h %s")
+    """最近 N 条 commit（短 hash + subject + 相对时间）
+
+    %cr 输出形如 "3 minutes ago" / "2 days ago"，帮助 AI 判断活跃度。
+    """
+    stdout, _, code = _run_git(cwd, "log", f"-n{n}", "--pretty=format:%h %s (%cr)")
     if code == 0 and stdout:
         return stdout.splitlines()
     return []
@@ -195,7 +227,13 @@ def _format_branch(info: dict[str, Any]) -> str:
     return f"**当前分支**: `{branch}`{ahead}{behind}"
 
 
-def _format_file_list(items: list, max_items: int, label: str) -> list[str]:
+def _format_file_list(
+    items: list,
+    max_items: int,
+    label: str,
+    diff_stats: dict[str, tuple[int, int]] | None = None,
+) -> list[str]:
+    """格式化文件列表，可选附加每文件 diff 行数 (Opt 1: 内联变更统计)"""
     if not items:
         return []
     lines = [f"- {label} ({len(items)}):"]
@@ -203,7 +241,14 @@ def _format_file_list(items: list, max_items: int, label: str) -> list[str]:
     for entry in shown:
         if isinstance(entry, tuple):
             code, path = entry
-            lines.append(f"  - [{_describe_status(code)}] `{path}`")
+            extra = ""
+            if diff_stats and path in diff_stats:
+                added, removed = diff_stats[path]
+                if added == 0 and removed == 0:
+                    extra = " [二进制]"
+                elif added or removed:
+                    extra = f" (+{added}/-{removed})"
+            lines.append(f"  - [{_describe_status(code)}] `{path}`{extra}")
         else:
             lines.append(f"  - `{entry}`")
     if overflow:
@@ -211,9 +256,12 @@ def _format_file_list(items: list, max_items: int, label: str) -> list[str]:
     return lines
 
 
-def _format_status_section(files: dict[str, list]) -> list[str]:
-    staged = _format_file_list(files["staged"], _MAX_STAGED_ITEMS, "已暂存")
-    unstaged = _format_file_list(files["unstaged"], _MAX_UNSTAGED_ITEMS, "未暂存")
+def _format_status_section(
+    files: dict[str, list],
+    diff_stats: dict[str, tuple[int, int]] | None = None,
+) -> list[str]:
+    staged = _format_file_list(files["staged"], _MAX_STAGED_ITEMS, "已暂存", diff_stats)
+    unstaged = _format_file_list(files["unstaged"], _MAX_UNSTAGED_ITEMS, "未暂存", diff_stats)
     untracked = _format_file_list(files["untracked"], _MAX_UNTRACKED_ITEMS, "未跟踪")
     if not (staged or unstaged or untracked):
         return ["**工作树状态**: 工作树干净，无未提交修改 ✓"]
@@ -229,6 +277,32 @@ def _format_recent_commits(commits: list[str]) -> str:
     return "\n".join(lines)
 
 
+# 疑似临时调试文件命名模式（Opt 4: 脏文件提示）
+_TEMP_FILE_PATTERNS = (
+    "_diag",
+    ".diag",
+    ".tmp",
+    ".bak",
+    ".swp",
+    ".swo",
+    "debug_",
+    "scratch_",
+    "test_",
+)
+
+
+def _detect_temp_files(untracked: list[str]) -> list[str]:
+    """识别疑似临时调试文件，避免污染工作树提示"""
+    matched: list[str] = []
+    for path in untracked:
+        basename = Path(path).name.lower()
+        for pattern in _TEMP_FILE_PATTERNS:
+            if pattern in basename:
+                matched.append(path)
+                break
+    return matched
+
+
 def _build_git_status_block(cwd: str) -> list[str] | None:
     """组装 Git 状态段，返回 None 表示不可用（让调用方 fallback）"""
     if not _auto_git_init(cwd):
@@ -236,13 +310,22 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
     branch_info = _collect_branch_info(cwd)
     files = _collect_file_status(cwd)
     diff_stats = _collect_diff_stats(cwd)
+    stash_count = _collect_stash_count(cwd)
     commits = _collect_recent_commits(cwd)
 
     parts: list[str] = ["## Git 仓库状态", _format_branch(branch_info)]
-    parts.extend(_format_status_section(files))
-    if diff_stats:
+    if stash_count:
+        parts.append(f"**Stash**: {stash_count} 条未保存的工作")
+    parts.extend(_format_status_section(files, diff_stats))
+
+    # 临时文件提示（Opt 4）
+    temp_files = _detect_temp_files(files["untracked"])
+    if temp_files:
+        names = ", ".join(f"`{p}`" for p in temp_files[:3])
+        more = f" 等 {len(temp_files)} 个" if len(temp_files) > 3 else ""
         parts.append("")
-        parts.append(f"**变更统计**: {diff_stats}")
+        parts.append(f"💡 检测到疑似临时调试文件：{names}{more}（建议清理或加入 .gitignore）")
+
     parts.append("")
     parts.append(_format_recent_commits(commits))
 
