@@ -2165,6 +2165,7 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
+        print(sanitized)
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]
@@ -3282,9 +3283,6 @@ class OpenAIChatWorker(QThread):
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
             "image_data": getattr(result_obj, "image_data", None) if result_obj else None,
-            # LSP 诊断文本：to_api_message 会拼接到 content 末尾供 LLM 当前轮次查看，
-            # normalize_message 不保留此字段，session 历史消息不含诊断文本
-            "lsp_diagnostic": getattr(result_obj, "lsp_diagnostic", None) if result_obj else None,
         }
         if raw_content is not None:
             result["raw_content"] = raw_content

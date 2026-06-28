@@ -77,7 +77,9 @@ prompt_sections:
 ## ⚠️ 铁律
 
 - **所有 `write` 操作 → 立即执行 `lsp(path="<文件路径>", operation="diagnostics")` 验证文件被正确写入**
-- **每安装完一个语言后，立即验证 LSP 二进制在 PATH 中可用**：`bash("which <command>")` 或 `bash("<command> --version")`
+- **每安装完一个语言后，立即验证 LSP 二进制在 PATH 中可用**：
+  - macOS/Linux: `which <command> && <command> --version`
+  - Windows: `where <command> && <command> --version`
 - **如果安装失败，明确告知用户失败原因和替代方案**
 - **使用 `todowrite` 跟踪多步骤任务**
 - **不要修改已有插件文件，只创建新的**
@@ -129,8 +131,37 @@ prompt_sections:
     "startupTimeout": 10000,
     "maxRestarts": 3,
     "transport": "stdio",
-    "installHint": "<install-command>"
+    "installHint": "<install-command>",
+    "cliFallback": {
+      "command": "<cli-command>",
+      "argsTemplate": ["<arg1>", "${file}"],
+      "parser": "<tsc|pyright|raw>"
+    }
   }
+}
+```
+
+#### cliFallback 说明
+
+部分 LSP 服务器属于**被动型**（不会在 `didOpen` 后主动推送诊断），需要 `cliFallback` 作为诊断兜底：
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `command` | CLI 命令名 | `"tsc"`、`"pyright"` |
+| `argsTemplate` | 参数模板（`${file}` 会被替换为文件路径） | `["--noEmit", "--strict", "${file}"]` |
+| `parser` | 输出解析器：`"tsc"` 解析 `file.ts(line,col): error TS...` 格式，`"pyright"` 解析 JSON 格式，`"raw"` 返回原始输出 | `"tsc"` |
+
+**何时需要 cliFallback：**
+- LSP 服务器为被动型（typescript-language-server、rust-analyzer 等）
+- 不需要复杂的 LSP 协议握手，CLI 工具能秒级完成诊断
+- Windows 环境下 `cmd /c` 会自动包装，无需担心 `.cmd` 后缀
+
+**典型配置示例（TypeScript）：**
+```json
+"cliFallback": {
+  "command": "tsc",
+  "argsTemplate": ["--noEmit", "--strict", "${file}"],
+  "parser": "tsc"
 }
 ```
 
@@ -163,12 +194,30 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 2. 按模板写入 `plugin.json`、`.lsp.json`、`README.md`
 3. 验证写入：对每个文件执行 `lsp(path="～/.drifox/plugins/lsp-<lang>/.lsp.json", operation="diagnostics")`
 
-### 步骤 5：通知用户
+### 步骤 5：测试诊断是否正常
+
+创建一个带语法错误的临时文件，验证自动诊断能正确检测：
+
+```bash
+# TypeScript 示例 — 写入有语法错误的 TS 文件
+write(path="～/Desktop/_lsp_test_temp.ts", content="const x: number = 'string'")
+# 预期：自动诊断应秒级返回 [LSP Diagnostic] ... (1 issue(s)):
+#       或通过 cliFallback 回退到 tsc --noEmit 给出错误
+```
+
+验证完成后删除测试文件：
+```bash
+bash("rm ～/Desktop/_lsp_test_temp.ts")
+```
+
+> **如果诊断不返回任何问题**：说明该 LSP 是被动型服务器，检查 `.lsp.json` 是否配置了 `cliFallback`。详见上方 cliFallback 说明。
+
+### 步骤 6：通知用户
 安装完成告知：
 - ✅ 安装成功
 - 📂 插件路径：`～/.drifox/plugins/lsp-<lang>/`
 - 🔄 watchfiles 将在 1-3 秒内自动加载
-- 🧪 可立即测试：编辑对应语言文件，LSP 诊断自动生效
+- 🧪 已测试诊断功能正常（行号应正确显示，非 `?:?`）
 
 ---
 
@@ -206,6 +255,9 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 | **设置 (settings)** | `{}` |
 | **初始化选项** | `{}` |
 | **启动参数** | `["--stdio"]` |
+| **CLI 兜底 (cliFallback)** | `{"command": "tsc", "argsTemplate": ["--noEmit", "--strict", "${file}"], "parser": "tsc"}` |
+
+> **注意**：`typescript-language-server` 是被动型 LSP 服务器（不会在 `didOpen` 后自动推送诊断），**必须**配置 `cliFallback`，否则 DriFox 的诊断功能会等待 30 秒超时后静默返回"无问题"。详见上方 `.lsp.json` 模板的 `cliFallback` 说明。
 <!-- end -->
 <!-- section:lang-rust -->
 ### Rust
@@ -221,6 +273,7 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 | **设置 (settings)** | `{"rust-analyzer.checkOnSave.command": "clippy"}` |
 | **初始化选项** | `{}` |
 | **启动参数** | `[]` |
+| **CLI 兜底 (cliFallback)** | 可选：`{"command": "cargo", "argsTemplate": ["check", "--message-format=json"], "parser": "raw"}` |
 <!-- end -->
 <!-- section:lang-go -->
 ### Go
@@ -275,7 +328,7 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 |------|-----|
 | **插件名** | `lsp-json` |
 | **LSP 服务器** | `vscode-json-language-server` |
-| **二进制名** | `vscode-json-languageserver` |
+| **二进制名** | `vscode-json-language-server` |
 | **安装命令 (跨平台)** | `npm install -g vscode-langservers-extracted` |
 | **文件扩展名** | `.json`, `.jsonc`, `.json5` |
 | **语言 ID** | `json` (`.json`), `jsonc` (`.jsonc`, `.json5`) |
@@ -289,7 +342,7 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 |------|-----|
 | **插件名** | `lsp-html` |
 | **LSP 服务器** | `vscode-html-language-server` |
-| **二进制名** | `vscode-html-languageserver` |
+| **二进制名** | `vscode-html-language-server` |
 | **安装命令 (跨平台)** | `npm install -g vscode-langservers-extracted` |
 | **文件扩展名** | `.html`, `.htm` |
 | **语言 ID** | `html` |
@@ -298,12 +351,12 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 | **启动参数** | `["--stdio"]` |
 <!-- end -->
 <!-- section:lang-css -->
-### CSS
+### CSS / SCSS / Less
 | 字段 | 值 |
 |------|-----|
 | **插件名** | `lsp-css` |
 | **LSP 服务器** | `vscode-css-language-server` |
-| **二进制名** | `vscode-css-languageserver` |
+| **二进制名** | `vscode-css-language-server` |
 | **安装命令 (跨平台)** | `npm install -g vscode-langservers-extracted` |
 | **文件扩展名** | `.css`, `.scss`, `.less` |
 | **语言 ID** | `css` (`.css`), `scss` (`.scss`), `less` (`.less`) |
@@ -457,7 +510,7 @@ test -d ～/.drifox/plugins/lsp-<lang> && echo "EXISTS" || echo "NOT_FOUND"
 ```
 
 如果 `EXISTS`，**跳过安装**并告知用户：
-> ⏭️ lsp-<lang> 已存在，跳��。如需重装请先卸载：`/plugin --uninstall=lsp-<lang>`
+> ⏭️ lsp-<lang> 已存在，跳过。如需重装请先卸载：`/plugin --uninstall=lsp-<lang>`
 
 ## 🧹 安装失败回退
 
@@ -472,26 +525,26 @@ test -d ～/.drifox/plugins/lsp-<lang> && echo "EXISTS" || echo "NOT_FOUND"
 ### `--list`
 列出所有支持的编程语言，格式如下：
 
-| 语言 | 插件名 | LSP 服务器 | 安装方式 | 支持的扩展名 |
-|------|--------|-----------|----------|-------------|
-| Python | lsp-python | pyright | pip/brew/npm | .py, .pyi |
-| TypeScript/JS | lsp-typescript | typescript-language-server | npm | .ts, .tsx, .js, .jsx, .mjs, .cjs, .mts, .cts |
-| Rust | lsp-rust | rust-analyzer | rustup/brew | .rs |
-| Go | lsp-go | gopls | go install/brew | .go |
-| C/C++ | lsp-cpp | clangd | brew/apt/winget | .c, .cpp, .cc, .cxx, .h, .hpp, .hxx, .m, .mm |
-| Lua | lsp-lua | lua-language-server | brew/npm | .lua |
-| JSON | lsp-json | vscode-json-language-server | npm | .json, .jsonc, .json5 |
-| HTML | lsp-html | vscode-html-language-server | npm | .html, .htm |
-| CSS | lsp-css | vscode-css-language-server | npm | .css, .scss, .less |
-| YAML | lsp-yaml | yaml-language-server | npm | .yaml, .yml |
-| Bash/Shell | lsp-bash | bash-language-server | npm | .sh, .bash, .zsh |
-| Markdown | lsp-markdown | marksman | brew/npm | .md, .mdx, .markdown |
-| Vue | lsp-vue | vue-language-server | npm | .vue |
-| Svelte | lsp-svelte | svelte-language-server | npm | .svelte |
-| Zig | lsp-zig | zls | brew/手动下载 | .zig, .zon |
-| Dart | lsp-dart | dart (内置 LSP) | Dart SDK | .dart |
-| TOML | lsp-toml | taplo | brew/npm | .toml |
-| Dockerfile | lsp-docker | dockerfile-language-server | npm | Dockerfile, .dockerfile |
+| 语言 | 插件名 | LSP 服务器 | 二进制名 | 安装方式 | 需要 cliFallback | 支持的扩展名 |
+|------|--------|-----------|---------|----------|:---:|-------------|
+| Python | lsp-python | pyright | `pyright-langserver` | pip/brew/npm | | .py, .pyi |
+| TypeScript/JS | lsp-typescript | typescript-language-server | `typescript-language-server` | npm | ✅ **必须** | .ts, .tsx, .js, .jsx, .mjs, .cjs, .mts, .cts |
+| Rust | lsp-rust | rust-analyzer | `rust-analyzer` | rustup/brew | 可选 | .rs |
+| Go | lsp-go | gopls | `gopls` | go install/brew | | .go |
+| C/C++ | lsp-cpp | clangd | `clangd` | brew/apt/winget | | .c, .cpp, .cc, .cxx, .h, .hpp, .hxx, .m, .mm |
+| Lua | lsp-lua | lua-language-server | `lua-language-server` | brew/npm | | .lua |
+| JSON | lsp-json | vscode-json-language-server | `vscode-json-language-server` | npm | | .json, .jsonc, .json5 |
+| HTML | lsp-html | vscode-html-language-server | `vscode-html-language-server` | npm | | .html, .htm |
+| CSS | lsp-css | vscode-css-language-server | `vscode-css-language-server` | npm | | .css, .scss, .less |
+| YAML | lsp-yaml | yaml-language-server | `yaml-language-server` | npm | | .yaml, .yml |
+| Bash/Shell | lsp-bash | bash-language-server | `bash-language-server` | npm | | .sh, .bash, .zsh |
+| Markdown | lsp-markdown | marksman | `marksman` | brew/npm | | .md, .mdx, .markdown |
+| Vue | lsp-vue | vue-language-server | `vue-language-server` | npm | 可选 | .vue |
+| Svelte | lsp-svelte | svelte-language-server | `svelteserver` | npm | 可选 | .svelte |
+| Zig | lsp-zig | zls | `zls` | brew/手动下载 | | .zig, .zon |
+| Dart | lsp-dart | dart (内置 LSP) | `dart` | Dart SDK | | .dart |
+| TOML | lsp-toml | taplo | `taplo` | brew/npm | | .toml |
+| Dockerfile | lsp-docker | dockerfile-language-server | `docker-langserver` | npm | | Dockerfile, .dockerfile |
 
 使用方式：`/lsp-install --language=<语言名>`（如 `--language=python`）
 

@@ -47,6 +47,9 @@ class DiagnosticsTools:
         }.get(ext, "unknown")
 
     def _run_quietly(self, cmd: list, cwd: Optional[str] = None, timeout: int = 30):
+        # Windows: 如果命令不以 .exe/.cmd/.bat 结尾，通过 cmd /c 包装以支持 PATHEXT（如 tsc → tsc.cmd）
+        if sys.platform == "win32" and cmd and not cmd[0].lower().endswith((".exe", ".cmd", ".bat")):
+            cmd = ["cmd", "/c"] + cmd
         try:
             r = subprocess.run(
                 cmd,
