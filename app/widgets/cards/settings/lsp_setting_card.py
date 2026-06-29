@@ -4,6 +4,7 @@ LSP 状态卡片 — 在系统设置中展示已注册的 LSP 语言服务器及
 
 参考 MCPListSettingCard 模式，但更简单：只读展示，无需编辑/启停功能。
 """
+
 from __future__ import annotations
 
 from typing import Dict
@@ -39,8 +40,7 @@ class LspServerRow(CardWidget):
 
     installRequested = pyqtSignal(str, str)  # (server_name, install_hint)
 
-    def __init__(self, name: str, extensions: list, is_running: bool,
-                 install_hint: str = "", parent=None):
+    def __init__(self, name: str, extensions: list, is_running: bool, install_hint: str = "", parent=None):
         super().__init__(parent)
         self._name = name
         self._extensions = extensions
@@ -53,23 +53,28 @@ class LspServerRow(CardWidget):
         if running:
             self._status_dot.setText("●")
             self._status_dot.setStyleSheet(
-                f"color: #22c55e; font-size: {scale_font_size(16)}px; "
-                f"background: transparent; padding: 0;"
+                f"color: #22c55e; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("运行中")
             # 运行中隐藏安装按钮
-            if hasattr(self, '_install_btn'):
+            if hasattr(self, "_install_btn"):
                 self._install_btn.setVisible(False)
         else:
             self._status_dot.setText("●")
             self._status_dot.setStyleSheet(
-                f"color: #6b7280; font-size: {scale_font_size(16)}px; "
-                f"background: transparent; padding: 0;"
+                f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("未启动")
             # 未运行时，若未安装则显示安装按钮
-            if hasattr(self, '_install_btn'):
+            if hasattr(self, "_install_btn"):
                 self._install_btn.setVisible(bool(self._install_hint))
+
+    def refresh_style(self):
+        """主题变更时刷新扩展名后缀文字颜色"""
+        Colors.refresh()
+        self._ext_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -82,8 +87,7 @@ class LspServerRow(CardWidget):
         self._status_dot.setAlignment(Qt.AlignCenter)
         self._status_dot.setToolTip("未启动")
         self._status_dot.setStyleSheet(
-            f"color: #6b7280; font-size: {scale_font_size(16)}px; "
-            f"background: transparent; padding: 0;"
+            f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
         )
         layout.addWidget(self._status_dot)
 
@@ -98,29 +102,21 @@ class LspServerRow(CardWidget):
         if len(self._extensions) > 8:
             exts += f" +{len(self._extensions) - 8}"
 
-        ext_label = _ElidedLabel(exts)
-        ext_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; "
-            f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        self._ext_label = _ElidedLabel(exts)
+        self._ext_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
-        ext_label.setMinimumWidth(40)
-        ext_label.setToolTip(", ".join(self._extensions))
-        layout.addWidget(ext_label, 1)
+        self._ext_label.setMinimumWidth(40)
+        self._ext_label.setToolTip(", ".join(self._extensions))
+        layout.addWidget(self._ext_label, 1)
 
         # 安装按钮（仅当有 installHint 时创建，不占用空间直到可见）
         self._install_btn = PushButton("安装", self)
         self._install_btn.setFixedWidth(56)
         self._install_btn.setFixedHeight(24)
-        self._install_btn.setStyleSheet(
-            f"font-size: {scale_font_size(11)}px; "
-            f"padding: 2px 8px;"
-        )
-        self._install_btn.setToolTip(
-            f"执行: {self._install_hint}" if self._install_hint else "未提供安装命令"
-        )
-        self._install_btn.clicked.connect(
-            lambda: self.installRequested.emit(self._name, self._install_hint)
-        )
+        self._install_btn.setStyleSheet(f"font-size: {scale_font_size(11)}px; padding: 2px 8px;")
+        self._install_btn.setToolTip(f"执行: {self._install_hint}" if self._install_hint else "未提供安装命令")
+        self._install_btn.clicked.connect(lambda: self.installRequested.emit(self._name, self._install_hint))
         self._install_btn.setVisible(False)
         layout.addWidget(self._install_btn)
 
@@ -143,6 +139,8 @@ class LspListSettingCard(ExpandSettingCard):
         self._refresh_timer.timeout.connect(self._refresh_status)
 
         self._setup_ui()
+        # 将 refresh_style 指向私有方法（避免在 _setup_ui 前定义）
+        self.refresh_style = self._refresh_lsp_style
         self._rebuild()
         # 首次加载后延迟刷新一次状态
         QTimer.singleShot(500, self._refresh_status)
@@ -152,9 +150,23 @@ class LspListSettingCard(ExpandSettingCard):
         """获取 LspManager 实例"""
         try:
             from app.core.lsp.lsp_manager import LspManager
+
             return LspManager.get_instance()
         except Exception:
             return None
+
+    def _refresh_lsp_style(self):
+        """主题变更时刷新自动诊断文字和所有扩展名后缀颜色"""
+        Colors.refresh()
+        self._diag_desc.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
+        for row in self._rows.values():
+            if hasattr(row, "refresh_style"):
+                try:
+                    row.refresh_style()
+                except RuntimeError:
+                    pass
 
     def _setup_ui(self):
         self.viewLayout.setSpacing(0)
@@ -169,16 +181,15 @@ class LspListSettingCard(ExpandSettingCard):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(2)
 
-        diag_desc = QLabel("自动诊断")
-        diag_desc.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; "
-            f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        self._diag_desc = QLabel("自动诊断")
+        self._diag_desc.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
-        diag_desc.setToolTip(
+        self._diag_desc.setToolTip(
             "开启后，write / edit / multi_edit 编辑文件时，"
             "若文件后缀命中已注册 LSP 服务器，自动运行诊断并随编辑结果返回"
         )
-        row_layout.addWidget(diag_desc)
+        row_layout.addWidget(self._diag_desc)
 
         self._auto_diag_switch = SwitchButton(self._auto_diag_row)
         SwitchStyles.configure(self._auto_diag_switch)
@@ -214,8 +225,7 @@ class LspListSettingCard(ExpandSettingCard):
         if not mgr or not mgr._clients:
             empty_label = QLabel("暂无 LSP 服务器", self.view)
             empty_label.setStyleSheet(
-                f"color: #888; padding: 16px; "
-                f"{get_font_family_css()} font-size: {scale_font_size(12)}px;"
+                f"color: #888; padding: 16px; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
             )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
@@ -224,12 +234,10 @@ class LspListSettingCard(ExpandSettingCard):
                 exts = list(client.config.extension_to_language.keys())
                 # 检查二进制是否可用
                 is_installed = client.is_command_available()
-                install_hint = (
-                    "" if is_installed
-                    else client.config.install_hint
-                )
+                install_hint = "" if is_installed else client.config.install_hint
                 row = LspServerRow(
-                    name, exts,
+                    name,
+                    exts,
                     client.is_running,
                     install_hint=install_hint,
                     parent=self.view,
@@ -239,6 +247,7 @@ class LspListSettingCard(ExpandSettingCard):
                 self.viewLayout.addWidget(row)
 
         from PyQt5.QtCore import QCoreApplication
+
         QCoreApplication.processEvents()
         self.viewLayout.activate()
         self.view.updateGeometry()
@@ -290,6 +299,7 @@ class LspListSettingCard(ExpandSettingCard):
         # 优先 uv（项目标准），其次 python -m pip，最后原样
         import shutil
         import sys
+
         _cmd = install_hint
         if _cmd.startswith("pip "):
             pkg = _cmd[4:]  # "install pyright"
@@ -305,10 +315,7 @@ class LspListSettingCard(ExpandSettingCard):
         # 避免 PyQt5 原生 QMessageBox 在深色主题下显示为系统默认全黑窗口）
         w = Dialog(
             f"安装 LSP 服务器 — {server_name}",
-            f"即将在终端中执行以下安装命令：\n\n"
-            f"    {_cmd}\n\n"
-            f"安装完成后请点击「刷新」按钮重新连接。\n\n"
-            f"是否继续？",
+            f"即将在终端中执行以下安装命令：\n\n    {_cmd}\n\n安装完成后请点击「刷新」按钮重新连接。\n\n是否继续？",
             self.window(),
         )
         w.yesButton.setText("确定")
@@ -330,9 +337,7 @@ class LspListSettingCard(ExpandSettingCard):
                 )
             elif sys.platform == "darwin":
                 # macOS: 用 osascript 打开 Terminal
-                script = (
-                    f'tell application "Terminal" to do script "{_cmd}"'
-                )
+                script = f'tell application "Terminal" to do script "{_cmd}"'
                 subprocess.Popen(["osascript", "-e", script])
             else:
                 # Linux: 尝试常见终端模拟器

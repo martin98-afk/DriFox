@@ -76,9 +76,7 @@ class ToolWindowTitleBar(QWidget):
             f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
         )
         self._memory_label.hide()  # 默认隐藏，子类可以控制显示
-        layout.insertWidget(
-            layout.indexOf(self._action_container) - 1, self._memory_label
-        )
+        layout.insertWidget(layout.indexOf(self._action_container) - 1, self._memory_label)
 
         # 内存刷新定时器
         self._memory_timer = QTimer(self)
@@ -152,9 +150,7 @@ class ToolWindowTitleBar(QWidget):
         self._title_label.setText(title)
 
     def add_button(self, widget, stretch=0):
-        self._action_layout.insertWidget(
-            self._action_layout.count() - 2, widget, stretch=stretch
-        )
+        self._action_layout.insertWidget(self._action_layout.count() - 2, widget, stretch=stretch)
         self._custom_buttons.append(widget)
 
     def insert_button(self, index, widget, stretch=0):
@@ -169,6 +165,58 @@ class ToolWindowTitleBar(QWidget):
 
     def _on_popup_clicked(self):
         self.popupRequested.emit()
+
+    def refresh_style(self):
+        """主题/字体变更时刷新标题栏样式"""
+        Colors.refresh()
+        # 重新读取字体
+        try:
+            font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            try:
+                font_name = Settings.get_instance().canvas_font_selected.value
+            except Exception:
+                font_name = "Microsoft YaHei"
+
+        title_color = Colors.TEXT_PRIMARY
+        btn_hover = Colors.HOVER_BG
+        border_color = Colors.BORDER
+
+        # 整体标题栏样式
+        self.setStyleSheet(f"""
+            ToolWindowTitleBar {{
+                background-color: {Colors.CONTENT_BG};
+                border-bottom: 1px solid {border_color};
+            }}
+            #titleLabel {{
+                color: {title_color};
+                font-size: {scale_font_size(13)}px;
+                font-weight: bold;
+                font-family: "{font_name}";
+                padding: 0 3px;
+            }}
+            #actionContainer {{
+                background-color: transparent;
+            }}
+            ToolButton {{
+                background-color: transparent;
+                border: none;
+                border-radius: 3px;
+                padding: 1px;
+            }}
+            ToolButton:hover {{
+                background-color: {btn_hover};
+            }}
+            ToolButton:pressed {{
+                background-color: {btn_hover};
+            }}
+        """)
+
+        # 内存标签样式（单独设置，因为其 objectName 与整体样式不冲突）
+        self._memory_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
+            f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
+        )
 
     def show_memory_label(self):
         """显示内存标签并开始刷新"""
@@ -267,9 +315,7 @@ class OpacitySlider(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
 
-        bg_color = (
-            QColor(38, 38, 38, 230) if isDarkTheme() else QColor(245, 245, 245, 230)
-        )
+        bg_color = QColor(38, 38, 38, 230) if isDarkTheme() else QColor(245, 245, 245, 230)
         painter.setBrush(bg_color)
         painter.drawRoundedRect(self.rect(), 8, 8)
 
@@ -278,9 +324,7 @@ class OpacitySlider(QWidget):
         track_x = (self.width() - track_width) // 2
         track_y = self._track_padding
 
-        track_bg = (
-            QColor(100, 100, 100, 150) if isDarkTheme() else QColor(180, 180, 180, 150)
-        )
+        track_bg = QColor(100, 100, 100, 150) if isDarkTheme() else QColor(180, 180, 180, 150)
         painter.setBrush(track_bg)
         painter.drawRoundedRect(track_x, track_y, track_width, track_height, 2, 2)
 
@@ -299,15 +343,11 @@ class OpacitySlider(QWidget):
         knob_y = track_y + track_height - fill_height - self._knob_height // 2
         knob_color = QColor(255, 255, 255) if isDarkTheme() else QColor(80, 80, 80)
         painter.setBrush(knob_color)
-        painter.drawEllipse(
-            QPoint(self.width() // 2, knob_y + self._knob_height // 2), 7, 7
-        )
+        painter.drawEllipse(QPoint(self.width() // 2, knob_y + self._knob_height // 2), 7, 7)
 
         painter.setPen(QColor(200, 200, 200) if isDarkTheme() else QColor(80, 80, 80))
         painter.setFont(self.font())
-        painter.drawText(
-            self.rect(), Qt.AlignBottom | Qt.AlignHCenter, f"{self._opacity}%"
-        )
+        painter.drawText(self.rect(), Qt.AlignBottom | Qt.AlignHCenter, f"{self._opacity}%")
 
     def setOpacity(self, value: int, *, emit_change: bool = True):
         clamped = max(0, min(100, value))
@@ -336,10 +376,7 @@ class OpacitySlider(QWidget):
 
     def enterEvent(self, e):
         super().enterEvent(e)
-        if (
-            hasattr(self.parent(), "_hide_timer")
-            and self.parent()._hide_timer.isActive()
-        ):
+        if hasattr(self.parent(), "_hide_timer") and self.parent()._hide_timer.isActive():
             self.parent()._hide_timer.stop()
 
     def leaveEvent(self, e):
@@ -454,9 +491,7 @@ class LockButtonWidget(QWidget):
 
             # 本应用在前台，无对话框 → 正常提升 z-order
             hwnd = wintypes.HWND(int(self.winId()))
-            user32.SetWindowPos(
-                hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
-            )
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
             self.raise_()
         except Exception:
             pass  # 忽略可能的异常
@@ -567,13 +602,13 @@ class ResizeEdge(QWidget):
             self.setCursor(Qt.SizeVerCursor)
         elif self._edge == ResizeEdge.EDGE_LEFT or self._edge == ResizeEdge.EDGE_RIGHT:
             self.setCursor(Qt.SizeHorCursor)
-        elif self._edge == (
-            ResizeEdge.EDGE_TOP | ResizeEdge.EDGE_LEFT
-        ) or self._edge == (ResizeEdge.EDGE_BOTTOM | ResizeEdge.EDGE_RIGHT):
+        elif self._edge == (ResizeEdge.EDGE_TOP | ResizeEdge.EDGE_LEFT) or self._edge == (
+            ResizeEdge.EDGE_BOTTOM | ResizeEdge.EDGE_RIGHT
+        ):
             self.setCursor(Qt.SizeFDiagCursor)
-        elif self._edge == (
-            ResizeEdge.EDGE_TOP | ResizeEdge.EDGE_RIGHT
-        ) or self._edge == (ResizeEdge.EDGE_BOTTOM | ResizeEdge.EDGE_LEFT):
+        elif self._edge == (ResizeEdge.EDGE_TOP | ResizeEdge.EDGE_RIGHT) or self._edge == (
+            ResizeEdge.EDGE_BOTTOM | ResizeEdge.EDGE_LEFT
+        ):
             self.setCursor(Qt.SizeBDiagCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
@@ -608,12 +643,7 @@ class ToolPopupDialog(QDialog):
         self._snap_locked_offset = None  # 吸附迟滞锁（防止抖动）
         self._edge_size = 15  # 边缘检测区域宽度（加大，方便拖拽）
         self.setWindowTitle(tool_instance.name)
-        self.setWindowFlags(
-            Qt.Window
-            | Qt.FramelessWindowHint
-            | Qt.WindowSystemMenuHint
-            | Qt.WindowStaysOnTopHint
-        )
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(360, 260)
         # 禁用系统 SizeGrip，使用自定义边缘拖拽（边缘区域已加大，更易用）
@@ -730,9 +760,7 @@ class ToolPopupDialog(QDialog):
     def _sync_slider_position(self):
         """同步 slider 位置到对话框右侧（锁定按钮下方）"""
         if self._opacity_slider and not self._lock_mode:
-            pos = self.mapToGlobal(
-                QPoint(self.width(), 10 + 30)
-            )  # 往下移30px，避开锁定按钮
+            pos = self.mapToGlobal(QPoint(self.width(), 10 + 30))  # 往下移30px，避开锁定按钮
             self._opacity_slider.move(pos)
 
     def _set_window_passthrough(self, enabled: bool):
@@ -858,9 +886,7 @@ class ToolPopupDialog(QDialog):
             return
 
         # Ctrl+Shift+G: 排列选中窗口为网格
-        if event.key() == Qt.Key_G and event.modifiers() == (
-            Qt.ControlModifier | Qt.ShiftModifier
-        ):
+        if event.key() == Qt.Key_G and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
             TrayManager.get_instance().arrange_selected_windows_grid()
             event.accept()
             return
@@ -886,7 +912,7 @@ class ToolPopupDialog(QDialog):
 
             # 🔧 内存泄漏修复：隐藏到托盘时停止位置保存 timer
             # 避免隐藏后 timer 仍在运行，持续触发回调
-            if hasattr(self, '_geometry_save_timer'):
+            if hasattr(self, "_geometry_save_timer"):
                 try:
                     self._geometry_save_timer.stop()
                 except Exception:
@@ -921,6 +947,7 @@ class ToolPopupDialog(QDialog):
                     # （仅设置 _is_destroyed 不够，会跳过资源释放）
                     try:
                         from PyQt5.QtGui import QCloseEvent
+
                         close_ev = QCloseEvent()
                         self.tool_instance.closeEvent(close_ev)
                     except Exception as e:
@@ -1089,9 +1116,7 @@ class ToolPopupDialog(QDialog):
             is_title_bar_click = False
             if title_bar is not None and title_bar.isVisible():
                 title_bar_global = title_bar.geometry()
-                title_bar_global.moveTopLeft(
-                    title_bar.mapToGlobal(title_bar_global.topLeft())
-                )
+                title_bar_global.moveTopLeft(title_bar.mapToGlobal(title_bar_global.topLeft()))
                 is_title_bar_click = title_bar_global.contains(event.globalPos())
             if is_title_bar_click:
                 # 标题栏拖拽（不影响分组，仅非选中窗口不触发批量移动）
@@ -1112,9 +1137,7 @@ class ToolPopupDialog(QDialog):
 
     def mouseMoveEvent(self, event):
         # 只在有拖拽/缩放操作时才清理光标覆盖，避免干扰 Qt 内部窗口管理
-        if event.buttons() != Qt.NoButton and (
-            self._resize_edge != ResizeEdge.EDGE_NONE or self._drag_pos is not None
-        ):
+        if event.buttons() != Qt.NoButton and (self._resize_edge != ResizeEdge.EDGE_NONE or self._drag_pos is not None):
             while QApplication.overrideCursor() is not None:
                 QApplication.restoreOverrideCursor()
         # 始终更新光标（不受拖拽状态影响）
@@ -1125,9 +1148,7 @@ class ToolPopupDialog(QDialog):
         is_title_bar_area = False
         if title_bar is not None and title_bar.isVisible():
             title_bar_global = title_bar.geometry()
-            title_bar_global.moveTopLeft(
-                title_bar.mapToGlobal(title_bar_global.topLeft())
-            )
+            title_bar_global.moveTopLeft(title_bar.mapToGlobal(title_bar_global.topLeft()))
             is_title_bar_area = title_bar_global.contains(event.globalPos())
         if is_title_bar_area:
             # 标题栏区域：保持正常光标
@@ -1170,9 +1191,7 @@ class ToolPopupDialog(QDialog):
                     tray._handle_batch_move(self, delta)
 
                 # 检查吸附（带迟滞锁，防止抖动）
-                snap_x, snap_y, snapped_x, snapped_y = tray._snap_position(
-                    self.geometry(), self
-                )
+                snap_x, snap_y, snapped_x, snapped_y = tray._snap_position(self.geometry(), self)
                 # 如果已吸附且在锁定范围内，不重复吸附
                 if self._snap_locked_offset:
                     locked_x = self._snap_locked_offset.x()
@@ -1257,9 +1276,7 @@ class ToolPopupDialog(QDialog):
             self._opacity_slider = OpacitySlider(self)
             self._opacity_slider.opacityChanged.connect(self._on_opacity_changed)
         # 同步滑块位置但不触发 opacityChanged 信号（避免无意义的重绘链）
-        self._opacity_slider.setOpacity(
-            int(self.windowOpacity() * 100), emit_change=False
-        )
+        self._opacity_slider.setOpacity(int(self.windowOpacity() * 100), emit_change=False)
         if self._lock_mode:
             self._reparent_slider_to_desktop()
         else:

@@ -494,3 +494,19 @@ class ProviderListSettingCard(ExpandSettingCard):
         self.default_provider = item.config_id
         qconfig.set(self.defaultProviderItem, self.default_provider, save=True)
         self.defaultProviderChanged.emit(self.default_provider)
+
+    def _get_focus_item(self):
+        """展开卡片时滚到当前默认 provider 的 item（找不到默认则回退到第一个 item）
+
+        被 LLMSettingsCard._scroll_focus_item_to_top 通过约定接口调用。
+        """
+        first_item = None
+        for i in range(self.viewLayout.count()):
+            w = self.viewLayout.itemAt(i).widget()
+            if not isinstance(w, ProviderItem):
+                continue
+            if first_item is None:
+                first_item = w
+            if getattr(w, "is_default", False):
+                return w
+        return first_item

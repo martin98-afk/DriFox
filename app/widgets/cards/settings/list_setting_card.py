@@ -72,7 +72,15 @@ class SkillItem(CardWidget):
     def __init__(self, name: str, description: str, is_enabled: bool, parent=None):
         super().__init__(parent=parent)
         self.name = name
+        self._description = description
         self._setup_ui(name, description, is_enabled)
+
+    def refresh_style(self):
+        """主题变更时刷新描述文字颜色"""
+        Colors.refresh()
+        self._desc_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+        )
 
     def _setup_ui(self, name: str, description: str, is_enabled: bool):
         from qfluentwidgets import SwitchButton
@@ -89,20 +97,18 @@ class SkillItem(CardWidget):
         layout.addWidget(name_label)
 
         # 描述（自动省略）
-        desc_label = _ElidedLabel(description)
-        desc_label.setStyleSheet(
+        self._desc_label = _ElidedLabel(description)
+        self._desc_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
         )
-        desc_label.setMinimumWidth(40)
-        layout.addWidget(desc_label, 1)
+        self._desc_label.setMinimumWidth(40)
+        layout.addWidget(self._desc_label, 1)
 
         # 开关
         self.switch = SwitchButton()
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(is_enabled)
-        self.switch.checkedChanged.connect(
-            lambda v: self.enabled_changed.emit(self.name, v)
-        )
+        self.switch.checkedChanged.connect(lambda v: self.enabled_changed.emit(self.name, v))
         layout.addWidget(self.switch)
 
 
@@ -124,9 +130,7 @@ class SkillListSettingCard(ExpandSettingCard):
         super().__init__(icon, title, content, parent)
         self.title = title
         self.configItem = configItem
-        self.enabled_skills = (
-            qconfig.get(configItem).copy() if qconfig.get(configItem) else []
-        )
+        self.enabled_skills = qconfig.get(configItem).copy() if qconfig.get(configItem) else []
         self._discover_skills()
         self.__initWidget()
 
@@ -141,6 +145,7 @@ class SkillListSettingCard(ExpandSettingCard):
         # ---- Phase 1: PluginManager 路径（带插件上下文，最高优先级） ----
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for item in pm.get_skills_with_plugin():
@@ -181,8 +186,7 @@ class SkillListSettingCard(ExpandSettingCard):
                     self.all_skills.append(entry)
 
     @staticmethod
-    def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
-                         is_system: bool = True) -> dict | None:
+    def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None, is_system: bool = True) -> dict | None:
         """解析技能目录，返回技能信息字典（与 utils._parse_skill_dir 逻辑一致）"""
         import yaml
 
@@ -216,31 +220,32 @@ class SkillListSettingCard(ExpandSettingCard):
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
 
-
         header_widget = QWidget(self.view)
         header_widget.setStyleSheet("background-color: transparent;")
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(12, 6, 12, 6)
 
-        header_title = QLabel("技能名称", header_widget)
-        header_title.setFixedWidth(120)
-        header_title.setStyleSheet(
+        self._header_title = QLabel("技能名称", header_widget)
+        self._header_title.setFixedWidth(120)
+        self._header_title.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )
 
-        header_desc = QLabel("描述", header_widget)
-        header_desc.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}")
-
-        header_state = QLabel("启用", header_widget)
-        header_state.setFixedWidth(50)
-        header_state.setStyleSheet(
+        self._header_desc = QLabel("描述", header_widget)
+        self._header_desc.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )
-        header_state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        header_layout.addWidget(header_title)
-        header_layout.addWidget(header_desc, 1)
-        header_layout.addWidget(header_state)
+        self._header_state = QLabel("启用", header_widget)
+        self._header_state.setFixedWidth(50)
+        self._header_state.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
+        )
+        self._header_state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        header_layout.addWidget(self._header_title)
+        header_layout.addWidget(self._header_desc, 1)
+        header_layout.addWidget(self._header_state)
 
         self.viewLayout.addWidget(header_widget)
 
@@ -250,9 +255,28 @@ class SkillListSettingCard(ExpandSettingCard):
         self._update_skill_token_count()
         self._adjustViewSize()
 
+    def refresh_style(self):
+        """主题变更时刷新表头文字颜色"""
+        Colors.refresh()
+        self._header_title.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
+        )
+        self._header_desc.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
+        )
+        self._header_state.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
+        )
+        # 刷新所有 SkillItem 的描述颜色
+        for i in range(self.viewLayout.count()):
+            w = self.viewLayout.itemAt(i).widget()
+            if isinstance(w, SkillItem) and hasattr(w, "refresh_style"):
+                w.refresh_style()
+
     def _sync_skill_states(self):
         """轻量同步：只更新 enabled_skills 和现有开关状态，不重建列表"""
         from qfluentwidgets import qconfig
+
         self.enabled_skills = qconfig.get(self.configItem).copy() if qconfig.get(self.configItem) else []
         for i in range(self.viewLayout.count()):
             w = self.viewLayout.itemAt(i).widget()
@@ -263,6 +287,7 @@ class SkillListSettingCard(ExpandSettingCard):
     def _refresh_skills(self):
         # 从配置重新读取启用状态（跨窗口同步需要）
         from qfluentwidgets import qconfig
+
         self.enabled_skills = qconfig.get(self.configItem).copy() if qconfig.get(self.configItem) else []
         self._discover_skills()
         # 从后往前遍历，只移除 SkillItem 类型的 widgets
@@ -320,6 +345,7 @@ class SkillListSettingCard(ExpandSettingCard):
 
         # 使用 Settings.set() 而非 qconfig.set()，确保持久化到正确的配置文件
         from app.utils.config import Settings
+
         Settings.get_instance().set(self.configItem, self.enabled_skills, save=True)
         self._update_skill_token_count()
         self.skillsChanged.emit(self.enabled_skills)
@@ -327,6 +353,13 @@ class SkillListSettingCard(ExpandSettingCard):
     def setContent(self, text: str):
         """更新卡片头部 subtitle（服务器计数 + token 占用）"""
         card = self.card
-        if hasattr(card, 'contentLabel'):
+        if hasattr(card, "contentLabel"):
             card.contentLabel.setText(text)
 
+    def _get_focus_item(self):
+        """展开卡片时滚到第一个真正的 SkillItem（跳过表格 header 行）"""
+        for i in range(self.viewLayout.count()):
+            w = self.viewLayout.itemAt(i).widget()
+            if isinstance(w, SkillItem):
+                return w
+        return None

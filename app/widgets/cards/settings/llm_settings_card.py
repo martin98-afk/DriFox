@@ -5,7 +5,7 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QFontComboBox,
@@ -60,10 +60,12 @@ class RefreshableThemeComboBox(ComboBox):
         self._themes_changed = False
         # 注册热重载回调：后端检测到主题文件变更后会触发
         from app.utils.theme_manager import theme_manager
+
         theme_manager.on_reload(self._mark_themes_changed)
 
     def destroy(self, destroyWindow=True, destroySubWindows=True):
         from app.utils.theme_manager import theme_manager
+
         theme_manager.remove_reload_callback(self._mark_themes_changed)
         super().destroy(destroyWindow, destroySubWindows)
 
@@ -77,15 +79,16 @@ class RefreshableThemeComboBox(ComboBox):
     def _refresh_items(self):
         """从当前 theme_manager 重建下拉列表项（不重复 reload）"""
         from app.utils.theme_manager import theme_manager
+
         themes = theme_manager.list_themes()
         new_options = {tid: {"label": name} for tid, name in themes.items()}
         card = self.parent()
-        if not card or not hasattr(card, 'config_item'):
+        if not card or not hasattr(card, "config_item"):
             p = self.parent()
-            while p and not hasattr(p, 'config_item'):
+            while p and not hasattr(p, "config_item"):
                 p = p.parent()
             card = p
-        if card and hasattr(card, 'config_item'):
+        if card and hasattr(card, "config_item"):
             current_key = card.config_item.value
             card.options = new_options
             card.value_by_label = {data["label"]: key for key, data in new_options.items()}
@@ -149,6 +152,7 @@ class ManualUpdateCard(SettingCard):
             self.updateBtn.setText("检查更新")
             self.updateBtn.setEnabled(True)
             from qfluentwidgets import InfoBar, InfoBarPosition
+
             InfoBar.error(
                 title="检查更新失败",
                 content=msg,
@@ -183,12 +187,15 @@ class LLMSettingsCard(SystemCardFrame):
         self._section_anchors = {}
 
         # 设置顶部 Tab 导航
-        self.setup_tabs([
-            ("llm", "大模型"),
-            ("common", "通用设置"),
-            ("appearance", "外观样式"),
-            ("update", "版本更新"),
-        ], default_tab="llm")
+        self.setup_tabs(
+            [
+                ("llm", "大模型"),
+                ("common", "通用设置"),
+                ("appearance", "外观样式"),
+                ("update", "版本更新"),
+            ],
+            default_tab="llm",
+        )
         self.tabChanged.connect(self._on_tab_changed)
 
         self._setup_content()
@@ -202,8 +209,7 @@ class LLMSettingsCard(SystemCardFrame):
         sep_label = StrongBodyLabel(text, self)
         sep_label.setFont(get_unified_font(10, True))
         sep_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; padding: 4px 0;"
-            f"{get_font_family_css()} font-weight: bold;"
+            f"color: {Colors.TEXT_MUTED}; padding: 4px 0;{get_font_family_css()} font-weight: bold;"
         )
         return sep_label
 
@@ -241,7 +247,7 @@ class LLMSettingsCard(SystemCardFrame):
         # Hooks 管理
         from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
 
-        hook_manager = getattr(self.parent(), 'backend', None)
+        hook_manager = getattr(self.parent(), "backend", None)
         if hook_manager:
             hook_manager = hook_manager.hook_manager
 
@@ -266,6 +272,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # LSP 语言服务器状态
         from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
+
         self.lspListCard = LspListSettingCard(
             icon=get_icon("lsp"),
             title="LSP 语言服务器",
@@ -320,7 +327,6 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         content_layout.addWidget(self.llmSoundCard)
-
 
         # ---- 外观样式分隔标签 ----
         self._sep_appearance_label = self._make_sep_label("外观样式")
@@ -396,6 +402,75 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
         self.cfg.pet_size.valueChanged.connect(self._on_settings_changed)
 
+        # 列表形式配置卡片手风琴：展开一个时自动收起其他
+        self._list_cards = [
+            self.llmProviderCard,
+            self.llmSkillsCard,
+            self.hookListCard,
+            self.mcpListCard,
+            self.lspListCard,
+            self.gatewayCard,
+        ]
+        self._apply_list_accordion()
+
+    def _apply_list_accordion(self):
+        """为列表形式配置卡片应用手风琴效果
+
+        包装每个 ExpandSettingCard 子类的 setExpand 方法：展开某张卡片时，
+        自动收起其他已展开的列表卡片，并把当前卡片的 header 滚到弹窗顶部。
+        点击已展开卡片头部仍可正常收起。
+        """
+        for card in self._list_cards:
+            original_set_expand = card.setExpand
+            # 通过闭包捕获当前 card 和其他兄弟卡片
+            siblings = [c for c in self._list_cards if c is not card]
+
+            def _wrapped_set_expand(is_expand, _orig=original_set_expand, _sibs=siblings, _card=card):
+                if is_expand:
+                    for sib in _sibs:
+                        if sib.isExpand:
+                            sib.setExpand(False)
+                _orig(is_expand)
+                # 展开后等动画/布局稳定，再把卡片内的「焦点 item」滚到弹窗顶部
+                # 例如：ProviderListSettingCard 滚到默认 provider；其他卡片 fallback 到第一项
+                if is_expand:
+                    # qfluentwidgets 展开动画通常 200ms+，等动画结束再算坐标
+                    QTimer.singleShot(350, lambda c=_card: self._scroll_focus_item_to_top(c))
+
+            card.setExpand = _wrapped_set_expand
+
+    def _scroll_focus_item_to_top(self, card):
+        """把卡片 header 滚到外层 scroll_area 顶部，让卡片标题 + 下方 item 都在弹窗可见区
+
+        ExpandSettingCard.card 是 HeaderSettingCard（含卡片标题行），
+        滚到它的顶部后，下方 item list 自然跟在后面同时显示。
+        """
+        try:
+            scroll_area = self.scroll_area
+            if scroll_area is None:
+                logger.warning("[FocusScroll] scroll_area 为空，提前 return")
+                return
+            content_widget = scroll_area.widget()
+            if content_widget is None:
+                return
+            # ExpandSettingCard 自带的 header widget（含图标/标题/展开按钮）
+            header_widget = getattr(card, "card", None)
+            if header_widget is None:
+                logger.warning(f"[FocusScroll] {card.__class__.__name__} 没有 .card 属性")
+                return
+            doc_y = header_widget.mapTo(content_widget, QPoint(0, 0)).y()
+            # header 顶部对齐视窗顶部，留 5px 边距
+            target = max(0, doc_y - 5)
+            scroll_bar = scroll_area.verticalScrollBar()
+            old_val = scroll_bar.value()
+            scroll_bar.setValue(target)
+            logger.info(
+                f"[FocusScroll] {card.__class__.__name__} -> header doc_y={doc_y} target={target} "
+                f"old={old_val} new={scroll_bar.value()}"
+            )
+        except Exception as e:
+            logger.warning(f"[FocusScroll] 异常: {e}")
+
     def _on_tab_changed(self, tab_id: str):
         """Tab 切换时滚动到对应区域"""
         if tab_id in self._section_anchors:
@@ -427,7 +502,9 @@ class LLMSettingsCard(SystemCardFrame):
                     self.comboBox = NoWheelComboBox(self)
                 self.comboBox.setMaxVisibleItems(6)
                 self.comboBox.addItems([data["label"] for data in options.values()])
-                self.comboBox.setCurrentText(self.label_by_value.get(config_item.value, next(iter(self.value_by_label))))
+                self.comboBox.setCurrentText(
+                    self.label_by_value.get(config_item.value, next(iter(self.value_by_label)))
+                )
                 self.comboBox.setMinimumWidth(130)
                 self.comboBox.setStyleSheet(ComboBoxStyles.dark_combo())
                 self.comboBox.currentTextChanged.connect(self._on_changed)
@@ -438,6 +515,11 @@ class LLMSettingsCard(SystemCardFrame):
             def _build_lookup_tables(self):
                 self.value_by_label = {data["label"]: key for key, data in self.options.items()}
                 self.label_by_value = {key: data["label"] for key, data in self.options.items()}
+
+            def refresh_style(self):
+                """主题变更时刷新下拉框样式"""
+                Colors.refresh()
+                self.comboBox.setStyleSheet(ComboBoxStyles.dark_combo())
 
             def _on_changed(self, label):
                 value = self.value_by_label.get(label)
@@ -470,10 +552,10 @@ class LLMSettingsCard(SystemCardFrame):
     def _build_theme_options(self) -> dict:
         """从 ThemeManager 动态构建主题选项"""
         from app.utils.config import update_theme_options
+
         update_theme_options()
         themes = theme_manager.list_themes()
         return {tid: {"label": name} for tid, name in themes.items()}
-
 
     def _setup_font_card(self):
         """创建字体设置卡片"""
@@ -506,6 +588,10 @@ class LLMSettingsCard(SystemCardFrame):
                 view.setPalette(palette)
                 view.setAutoFillBackground(True)
                 view.setTextElideMode(Qt.ElideRight)
+
+            def refresh_style(self):
+                """主题变更时刷新字体下拉框样式"""
+                self._apply_font_combo_style()
 
             def _on_font_changed(self, font):
                 self.cfg.set(self.cfg.llm_font_family, font.family(), save=True)
@@ -544,9 +630,7 @@ class LLMSettingsCard(SystemCardFrame):
                 while parent and not hasattr(parent, "llmApiEnabledCard"):
                     parent = parent.parent()
                 if parent and hasattr(parent, "llmApiEnabledCard"):
-                    parent.llmApiEnabledCard.setContent(
-                        f"http://localhost:{value}/docs"
-                    )
+                    parent.llmApiEnabledCard.setContent(f"http://localhost:{value}/docs")
 
         self.llmApiPortCard = PortSettingCard(
             "API 端口",
@@ -598,6 +682,16 @@ class LLMSettingsCard(SystemCardFrame):
         for card in self.findChildren(BaseSettingsCard):
             if hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 刷新 AppearanceComboCard / FontSettingCard 的下拉样式（SettingCard 子类，不在以上遍历范围）
+        for card_name in ("uiFontSizeCard", "uiThemeStyleCard", "llmFontCard"):
+            card = getattr(self, card_name, None)
+            if card is not None and hasattr(card, "refresh_style"):
+                card.refresh_style()
+        # 刷新手风琴类卡片中的文字颜色（ExpandSettingCard 子类，不在以上遍历范围）
+        for card_name in ("llmSkillsCard", "mcpListCard", "lspListCard"):
+            card = getattr(self, card_name, None)
+            if card is not None and hasattr(card, "refresh_style"):
+                card.refresh_style()
         # 刷新分隔标签
         self._refresh_sep_labels()
 
@@ -605,24 +699,23 @@ class LLMSettingsCard(SystemCardFrame):
         """刷新所有分隔标签的样式"""
         Colors.refresh()
         sep_labels = [
-            getattr(self, '_sep_llm_label', None),
-            getattr(self, '_sep_common_label', None),
-            getattr(self, '_sep_appearance_label', None),
-            getattr(self, '_sep_update_label', None),
+            getattr(self, "_sep_llm_label", None),
+            getattr(self, "_sep_common_label", None),
+            getattr(self, "_sep_appearance_label", None),
+            getattr(self, "_sep_update_label", None),
         ]
         for label in sep_labels:
             if label is not None:
                 label.setStyleSheet(
-                    f"color: {Colors.TEXT_MUTED}; padding: 4px 0;"
-                    f"{get_font_family_css()} font-weight: bold;"
+                    f"color: {Colors.TEXT_MUTED}; padding: 4px 0;{get_font_family_css()} font-weight: bold;"
                 )
 
     def refresh_theme_options(self):
         """热更新后刷新主题下拉列表（外部由 _on_plugin_hot_reload 调用）"""
-        if hasattr(self, 'uiThemeStyleCard') and hasattr(self.uiThemeStyleCard, 'comboBox'):
+        if hasattr(self, "uiThemeStyleCard") and hasattr(self.uiThemeStyleCard, "comboBox"):
             try:
                 combo = self.uiThemeStyleCard.comboBox
-                if hasattr(combo, '_refresh_items'):
+                if hasattr(combo, "_refresh_items"):
                     combo._refresh_items()
                     logger.debug("[ThemeComboBox] 主题下拉已主动刷新")
             except Exception as e:
@@ -645,9 +738,11 @@ class LLMSettingsCard(SystemCardFrame):
             if enabled:
                 # 开启前检查平台支持
                 import os
+
                 if os.name != "nt":
                     self.autoStartCard.switchButton.setChecked(False)
                     from qfluentwidgets import InfoBar, InfoBarPosition
+
                     InfoBar.error(
                         title="开机自启",
                         content="当前平台不支持开机自启配置。",
@@ -668,6 +763,7 @@ class LLMSettingsCard(SystemCardFrame):
                 self.autoStartCard.switchButton.setChecked(not enabled)
                 self.cfg.set(self.cfg.auto_start, not enabled, save=True)
                 from qfluentwidgets import InfoBar, InfoBarPosition
+
                 InfoBar.error(
                     title="开机自启设置失败",
                     content=str(exc),
@@ -711,11 +807,10 @@ class LLMSettingsCard(SystemCardFrame):
             self.llmApiEnabledCard.setContent(f"http://localhost:{port}/docs")
 
     def showEvent(self, event):
-        if hasattr(self, 'llmProviderCard'):
+        if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
         super().showEvent(event)
 
     def set_opacity(self, opacity: float):
         """设置透明度（保留接口，暂不实现动态透明度）"""
         pass
-

@@ -318,8 +318,23 @@ def _compress_git(command: str, output: str) -> Optional[str]:
 
 
 def _compress_git_status(output: str) -> str:
-    """git status 压缩为核心信息"""
-    lines = output.strip().split('\n')
+    """git status 压缩为核心信息
+
+    支持两种格式：
+    1. 长格式：`On branch ...` + `Changes to be committed:` + `modified: ...`
+    2. --short / --porcelain 格式：`XY  filename`（两列状态码）
+
+    注意：不能用 `output.strip().split()`，因为 --short 的 X 列可能是空格，
+    strip 会吞掉首字符，破坏状态码。
+    """
+    lines = output.split('\n')
+
+    # --short / --porcelain 格式：第一行匹配 XY<space>filename
+    # 长格式第一行永远是 "On branch ..." 或 "HEAD detached..."，不会误判
+    if lines and re.match(r'^[ MADURC?!]{2} ', lines[0]):
+        return _compress_git_status_short(lines)
+
+    # ---- 长格式 ----
     branch = "?"
     staged = []
     unstaged = []
@@ -391,6 +406,76 @@ def _compress_git_status(output: str) -> str:
         parts.append("clean")
 
     return '\n'.join(parts)
+
+
+def _compress_git_status_short(lines: list) -> str:
+    """git status --short / --porcelain 格式压缩
+
+    输入行格式：`XY<space>filename` 或 `XY ->filename`（重命名时）
+    - X（第 1 列，暂存区）：M=modified, A=added, D=deleted, R=renamed,
+                            C=copied, U=updated, ?=untracked, !=ignored
+    - Y（第 2 列，工作区）：M=modified, D=deleted, U=updated,
+                            ?=untracked, !=ignored, ' '=clean
+    """
+    staged = []
+    unstaged = []
+    untracked = []
+
+    for line in lines:
+        t = line.rstrip()
+        if not t or len(t) < 4:
+            continue
+        x, y = t[0], t[1]
+        # 切到第一个连续空白之后，规避路径里含空格的情况
+        parts_split = t.split(None, 1)
+        if len(parts_split) < 2:
+            continue
+        name = parts_split[1].lstrip()  # 去掉箭头前缀的多余空格
+
+        # 第 1 列 → 暂存区
+        if x == 'M':
+            staged.append(f"~{name}")
+        elif x == 'A':
+            staged.append(f"+{name}")
+        elif x == 'D':
+            staged.append(f"-{name}")
+        elif x == 'R':
+            staged.append(f"->{name}")
+        elif x == '?':
+            untracked.append(name)
+        elif x == '!':
+            untracked.append(f"!{name}")
+
+        # 第 2 列 → 工作区
+        if y == 'M':
+            unstaged.append(f"~{name}")
+        elif y == 'D':
+            unstaged.append(f"-{name}")
+        elif y == '?':
+            # 第 1 列已是 ? 时只记一次 untracked
+            if x != '?':
+                untracked.append(name)
+        elif y == '!':
+            untracked.append(f"!{name}")
+
+    # --short 格式无分支信息，用 "-" 占位（与长格式 "?" 的"未知"语义区分）
+    parts = ["-"]
+    if staged:
+        parts.append(_format_short_list("staged:", staged))
+    if unstaged:
+        parts.append(_format_short_list("unstaged:", unstaged))
+    if untracked:
+        parts.append(_format_short_list("untracked:", untracked))
+
+    return '\n'.join(parts)
+
+
+def _format_short_list(prefix: str, items: list, max_show: int = 4) -> str:
+    """短格式列表展示：超过阈值时截断，避免单行过长"""
+    if len(items) <= max_show:
+        return f"{prefix} {' '.join(items)}"
+    shown = items[:max_show]
+    return f"{prefix} {' '.join(shown)} ... (+{len(items) - max_show} more)"
 
 
 def _compress_git_log(command: str, output: str) -> str:
