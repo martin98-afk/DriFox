@@ -29,6 +29,11 @@ from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36
 MAX_VISIBLE_ITEMS = 8
+# 最大渲染 widget 数。超过此数量的匹配项仅保留在 _filtered_items 中供搜索，
+# 不创建 widget（不可见不可选中），但打分排序仍然参与——用户输更具体的 query
+# 就可能把目标文件"拉"进可见区。
+# 注：删除/修改此值前请同步更新 _render_incremental 的切片逻辑。
+MAX_RENDERED_ITEMS = 300
 
 
 class FileMentionItemWidget(QWidget):
@@ -288,7 +293,7 @@ class FileMentionCard(QWidget):
         # ---- 防抖计时器：合并连续快速敲键的筛选调用 ----
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
-        self._filter_timer.setInterval(20)  # 20ms，足够覆盖快速打字
+        self._filter_timer.setInterval(0)  # 0ms → 下一轮事件循环执行
         self._filter_timer.timeout.connect(self._do_filter_and_render)
         self._pending_filter_query = ""  # 待处理的筛选 query
 
@@ -858,10 +863,26 @@ class FileMentionCard(QWidget):
     def _render_incremental(self):
         """增量渲染——复用现有 widget，避免反复创建/销毁
 
-        核心优化：只变化的部分才动，匹配的 item 更新数据后复用。
-        目录有 500 项 + 用户只改一个字符 → 最多只创建/删除几个 widget。
+        只渲染 _filtered_items 的前 MAX_RENDERED_ITEMS 项（通常 300）。
+        超过此数的匹配项不会创建 widget，但保留在 _filtered_items 中——
+        用户继续输入更精确的 query 即可将其"拉"进可见列表。
+
+        快速路径：新旧 items 完全相同则跳过全量重建，仅刷新 query 高亮。
         """
-        new_items = self._filtered_items
+        # 仅取前 MAX_RENDERED_ITEMS 项用于 widget 创建，避免大规模 widget 管理开销
+        new_items = self._filtered_items[:MAX_RENDERED_ITEMS]
+
+        # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
+        if len(self._item_widgets) == len(new_items):
+            same = all(
+                self._item_widgets[i].item_data["path"] == new_items[i]["path"]
+                for i in range(len(new_items))
+            )
+            if same:
+                for w, item in zip(self._item_widgets, new_items):
+                    w.update_data(item, self._current_query)
+                return
+
         old_widgets = list(self._item_widgets)  # 复制
 
         # 构建旧 widget 的 path→widget 映射
@@ -942,50 +963,46 @@ class FileMentionCard(QWidget):
         return False
 
     def load_items(self, query: str = ""):
-        """根据 query 即时筛选并防抖渲染（多关键字 + 增量剪枝 + fuzzy）
+        """根据 query 即时筛选并防抖渲染（多关键字 + fuzzy）
 
-        支持多关键字语法：
-          key1|key2  → OR（含 key1 或 key2）
-          key1&key2  → AND（同时含 key1 与 key2）
-          不含 |& 时沿用原有 fuzzy 评分排序。
+        _filtered_items 始终包含**全量匹配结果**，搜索永不丢失文件。
+        视觉上的 widget 创建由 _render_incremental 截断到 MAX_RENDERED_ITEMS 项。
 
-        增量剪枝：当用户连续追加字符时（'re' → 'req'），
-        新结果是旧结果的子集，直接在上次 _filtered_items 上过滤，
-        避免全量遍历 500 项 _file_cache。
-        注意：含 | 时不剪枝（OR 可能扩大结果集）。
+        无 query 时按「目录深度浅→深 + 目录优先 → 同名不区分大小写」排序，
+        保证各个文件夹的文件都能出现在列表前端，不会出现一个文件夹霸占全部显示。
         """
         query = query.strip().lower()
         self._current_query = query
 
         if not query:
-            self._filtered_items = list(self._file_cache)
+            # 按目录深度排序（浅的在前），同深度目录优先，再按名不区分大小写
+            self._filtered_items = sorted(
+                self._file_cache,
+                key=lambda x: (
+                    x["relative_path"].count('/'),  # 深度，浅在前
+                    0 if x["type"] == "dir" else 1,  # 目录优先
+                    x["name"].lower(),  # 不区分大小写
+                ),
+            )
         else:
             q_lower = query.lower()
-            # 增量剪枝：含 | 时不剪枝（OR 可能扩大结果集）
-            can_prune = (
-                self._last_query
-                and query.startswith(self._last_query)
-                and '|' not in query
-            )
-            source = self._filtered_items if can_prune else self._file_cache
 
             if '|' in query or '&' in query:
-                # 多关键字模式：布尔匹配，保持原有 dir→name 排序
+                # 多关键字模式：布尔匹配
                 self._filtered_items = [
-                    item for item in source
+                    item for item in self._file_cache
                     if self._matches_multi(item, query)
                 ]
             else:
-                # 单关键字模式：fuzzy 评分 + 排序
+                # 单关键字模式：全量评分 + 全排序
                 scored = [
-                    (item, self._score_item(item, q_lower))
-                    for item in source
+                    (self._score_item(item, q_lower), item)
+                    for item in self._file_cache
                 ]
-                scored = [(item, s) for item, s in scored if s > 0]
-                scored.sort(key=lambda x: -x[1])
-                self._filtered_items = [item for item, _ in scored]
+                scored = [(s, item) for s, item in scored if s > 0]
+                scored.sort(key=lambda x: -x[0])
+                self._filtered_items = [item for _, item in scored]
 
-        self._last_query = query
         # 防抖调度渲染
         self._filter_timer.stop()
         self._filter_timer.start()

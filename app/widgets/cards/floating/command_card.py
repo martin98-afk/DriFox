@@ -1552,9 +1552,24 @@ class CommandCard(QWidget):
 
         Args:
             incremental: 是否增量更新（保留匹配项，重用已有 widget）
+
+        快速路径：新旧 items 完全相同（names+types 一致）时跳过全量重建，
+        仅刷新 widget 高亮，避免快速敲键时反复重排布局。
         """
         new_items = self._filtered_items
         old_widgets = list(self._item_widgets)  # 复制一份
+
+        # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
+        if len(old_widgets) == len(new_items):
+            same = all(
+                old_widgets[i].item_data.get("name") == new_items[i]["name"]
+                and old_widgets[i].item_data.get("type") == new_items[i]["type"]
+                for i in range(len(new_items))
+            )
+            if same:
+                for w, item in zip(old_widgets, new_items):
+                    w.reuse(item, self._current_text_query)
+                return
 
         # 构建旧 widget 的 key 映射
         old_by_key = {}
