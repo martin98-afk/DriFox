@@ -9511,7 +9511,10 @@ class OpenAIChatToolWindow(ToolWindow):
             status_icon = "✅" if success else "❌"
             desc_preview = task_description[:80] + ("..." if len(task_description) > 80 else "")
             agent_label = f"[{agent_name}]" if agent_name else ""
-            content = f"子智能体任务完成: {status_icon} {agent_label} {desc_preview} (id: {task_id})"
+            content = (
+                f"子智能体任务完成: {status_icon} {agent_label} {desc_preview} (id: {task_id})\n"
+                f"如需查看详细执行结果，请调用 subagent_status 查询。"
+            )
 
         # 使用 hook 消息格式包裹
         from app.core.backend import _format_hook_output
