@@ -42,8 +42,28 @@ class ToolPermissionController(QObject):
             all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
             saved_toggles = get_default_toggles(all_tools)
 
+        # 清理已删除工具的残留配置(只保留当前已知的工具)
+        known_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
+        cleaned_toggles = {k: v for k, v in saved_toggles.items() if k in known_tools}
+        # 补全新增工具的默认开启
+        for tool in known_tools:
+            if tool not in cleaned_toggles:
+                cleaned_toggles[tool] = True
+        # 若发现残留,持久化清理后的结果,避免下次启动仍带过期条目
+        if cleaned_toggles != saved_toggles:
+            try:
+                settings.tool_toggles.value = dict(cleaned_toggles)
+                settings.save()
+                stale = set(saved_toggles.keys()) - set(cleaned_toggles.keys())
+                if stale:
+                    logger.info(
+                        f"[ToolPermission] 清理已删除工具的残留开关: {sorted(stale)}"
+                    )
+            except Exception as e:
+                logger.warning(f"[ToolPermission] 持久化清理残留开关失败: {e}")
+
         # 用户偏好
-        self._user_tool_toggles: Dict[str, bool] = dict(saved_toggles)
+        self._user_tool_toggles: Dict[str, bool] = dict(cleaned_toggles)
         self._user_tool_off_behavior: str = settings.tool_off_behavior.value or "deny"
 
         # 当前生效(初始 = 用户偏好)
@@ -58,9 +78,17 @@ class ToolPermissionController(QObject):
     # ===================================================================
 
     def _complete_toggles(self, toggles: Dict[str, bool]) -> Dict[str, bool]:
-        """补全未知工具的默认值(用于支持运行时新增的工具)"""
+        """补全未知工具的默认值,并清理已删除工具的残留配置
+
+        工具被删除后,旧 toggle 还残留在配置中会导致统计数量虚高
+        (例如 input box 显示的危险/安全总数比 TOOL_GROUPS 实际列表多)。
+        这里统一过滤掉不在当前 DANGEROUS+SAFE 集合里的工具。
+        """
         all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
-        result = dict(toggles)
+        all_tools_set = set(all_tools)
+        # 清理已删除工具的残留开关
+        result = {tool: enabled for tool, enabled in toggles.items() if tool in all_tools_set}
+        # 补全新增工具的默认开启
         for tool in all_tools:
             if tool not in result:
                 result[tool] = True

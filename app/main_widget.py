@@ -9463,6 +9463,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 "session_id": task_session_id,
             }
 
+        # ====== 流式注入：单个子智能体完成时，立即注入到流中（不中断） ======
+        is_currently_streaming = (
+            self.backend.chat_engine and self.backend.chat_engine.is_streaming
+        )
+        if is_currently_streaming:
+            self._inject_subagent_completion_into_stream(
+                task_id, result, success, agent_name, task_description
+            )
+            # 流式场景下仍继续累加批次计数器，以便所有完成时通过 _do_trigger_callback 发送汇总
+
         # 批次完成检查：只有当所有任务都完成时才触发回调
         sub_agent_mgr._batch_completed += 1
         if sub_agent_mgr._batch_completed >= sub_agent_mgr._batch_total and sub_agent_mgr._batch_total > 0:
@@ -9473,12 +9483,52 @@ class OpenAIChatToolWindow(ToolWindow):
             sub_agent_mgr._batch_completed = 0
             sub_agent_mgr._batch_task_ids = set()
 
+    def _inject_subagent_completion_into_stream(
+        self, task_id: str, result: str, success: bool,
+        agent_name: str, task_description: str
+    ):
+        """将子智能体完成信号注入到正在流式输出的消息流中（不中断流式）
+
+        使用与 hook 相同的 _hook_message_queue 机制，worker 在下一轮 API 调用前
+        自动消费队列并注入到上下文，LLM 在下一轮响应中即可感知完成信息。
+
+        Args:
+            task_id: 任务 ID（汇总消息传 "__batch_summary__"）
+            result: 执行结果
+            success: 是否成功
+            agent_name: 智能体名称
+            task_description: 任务描述
+        """
+        # 构建消息内容
+        if task_id == "__batch_summary__":
+            # 最终汇总消息
+            content = result
+        else:
+            # 单个任务完成消息
+            status_icon = "✅" if success else "❌"
+            desc_preview = task_description[:80] + ("..." if len(task_description) > 80 else "")
+            agent_label = f"[{agent_name}]" if agent_name else ""
+            content = f"子智能体任务完成: {status_icon} {agent_label} {desc_preview} (id: {task_id})"
+
+        # 使用 hook 消息格式包裹
+        from app.core.backend import _format_hook_output
+        hook_content = _format_hook_output("SubAgentFinished", content)
+
+        # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
+        self.backend._hook_message_queue.put({
+            "role": "system",
+            "content": hook_content,
+            "_hook_event": "SubAgentFinished",
+        })
+        self.backend._hook_messages_updated.emit()
+        logger.debug(f"[SubAgent] 流式注入完成信号: task_id={task_id[:12]}")
+
     def _do_trigger_callback(self, sub_agent_mgr):
         """执行回调触发 - 支持强制中断当前流式输出
 
-        两种场景：
-        1. 流式中回调（LLM 调用子智能体）：中断当前流式，发送回调消息
-        2. 非流式回调（如 /compact 手动命令）：需要创建 UI 卡片后发送回调消息
+        三种场景：
+        1. 流式中回调（LLM 调用子智能体，持续流式）：注入汇总到流，不中断
+        2. 非流式中回调（如 /compact 手动命令）：强制中断并创建新对话轮次
         """
         # 只提取本次批次完成的任务信息（不是所有历史任务）
         batch_ids = sub_agent_mgr._batch_task_ids
@@ -9508,44 +9558,35 @@ class OpenAIChatToolWindow(ToolWindow):
 
         task_list_text = "\n".join(task_lines) if task_lines else "- (无任务详情)"
 
-        callback_text = f"""[后台任务状态]
-子智能体任务执行完成（共 {total} 个，成功 {total - failed} 个，失败 {failed} 个）。
-本次完成的任务：
-{task_list_text}
-
-请使用 subagent_status 工具查询以上任务的详细结果。"""
+        callback_content = (
+            f"子智能体全部完成。\n"
+            f"共 {total} 个，成功 {total - failed} 个，失败 {failed} 个。\n"
+            f"本次完成的任务：\n{task_list_text}\n"
+            f"可使用 subagent_status 查询详细结果。"
+        )
 
         is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
 
-        # 检查是否正在流式输出，如果是则强制中断并保存已有内容
+        # ====== 流式路径：注入汇总到流中，不中断 ======
         if is_currently_streaming:
-            logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming")
+            logger.info("[ChatEngine] Sub-agent all done during streaming: injecting summary without interrupt")
+            self._inject_subagent_completion_into_stream(
+                task_id="__batch_summary__",
+                result=callback_content,
+                success=(failed == 0),
+                agent_name="",
+                task_description="",
+            )
+            return
 
-            # 1. 非阻塞取消流式输出（断开信号、设置取消标志）
-            self.backend.cancel_streaming()
-
-            # 2. 标记 UI 停止流式状态（_is_streaming 在 _on_stream_finished 中会被重置）
-            self._is_streaming = False
-
-            # 3. 完成当前卡片的流式动画（保留已显示的内容）
-            if self._current_assistant_card:
-                self._current_assistant_card.finish_streaming()
-
-            # 4. 阻塞获取中断消息并清理 worker（内部会等待线程结束，最多 3s）
-            interrupted_msgs = self.backend.finalize_stop()
-            if interrupted_msgs:
-                logger.info(f"[ChatEngine] Saved {len(interrupted_msgs)} interrupted messages")
-
-            # 5. 重置状态
-            self._toggle_send_stop(False)
+        # ====== 非流式路径：强制中断并创建新对话轮次 ======
+        logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming (non-streaming path)")
 
         # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
-        # 🔧 修复：流式路径之前缺失此步骤，导致 _current_assistant_card 仍指向旧卡片，
-        # 后续流式输出写入旧卡片而非新卡片
-        self._prepare_ui_for_callback_message(callback_text)
+        self._prepare_ui_for_callback_message(callback_content)
 
         # 发送回调消息到引擎（非流式场景下 UI 已在 _prepare_ui_for_callback_message 中准备好）
-        if not self.backend.send_message_to_engine(callback_text):
+        if not self.backend.send_message_to_engine(callback_content):
             # 发送失败（通常是正在流式或配置无效），回滚 UI 状态
             logger.warning("[ChatEngine] Sub-agent callback: send_message_to_engine failed, rolling back UI")
             self._is_streaming = False
@@ -9555,9 +9596,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_assistant_card = None
         else:
             # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
-            # 🔧 修复：移除 `if not is_currently_streaming` 条件，无论流式/非流式路径都需同步
             self._sync_batch_structures()
-            self._fix_new_card_message_index(user_text=callback_text)
+            self._fix_new_card_message_index(user_text=callback_content)
             self._visible_batch_end = len(self._message_batch)
             # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
             self._sync_node_preview_to_last()

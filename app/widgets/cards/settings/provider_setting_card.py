@@ -24,7 +24,7 @@ from qfluentwidgets import (
 from app.constants import (
     PROVIDER_ICONS,
 )
-from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css
+from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -150,7 +150,8 @@ class ProviderIconWidget(IconWidget):
     def __init__(self, provider_name: str, size: int = 32, parent=None):
         super().__init__(parent)
         self.provider_name = provider_name
-        self.setFixedSize(size, size)
+        self._base_size = size
+        self.setFixedSize(scale_icon_size(size), scale_icon_size(size))
         self._init_icon()
 
     def _init_icon(self):
@@ -167,6 +168,12 @@ class ProviderIconWidget(IconWidget):
         if len(letters) > 2:
             letters = letters[:2]
         self._text = letters
+
+    def refresh_style(self):
+        """随系统字号缩放图标大小"""
+        s = scale_icon_size(self._base_size)
+        self.setFixedSize(s, s)
+        self.update()
 
     def paintEvent(self, event):
         if not hasattr(self, "_text") or not self._text:
@@ -315,6 +322,9 @@ class ProviderItem(QWidget):
                 }}
             """
             self.setStyleSheet(indicator_style)
+        # 同步刷新服务商图标大小
+        if hasattr(self.iconWidget, "refresh_style"):
+            self.iconWidget.refresh_style()
 
     def update_info(self, name: str, info: dict):
         self.provider_name = name

@@ -1355,7 +1355,9 @@ class HookManager:
                                     args["event"] = context.get("event_name")
                                     args["context"] = context
                                     result = func(**args)
-                                    output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                                    output = (
+                                        result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                                    )
                                     success = True
                         except Exception as e:
                             output = f"Python hook failed: {str(e)}"
@@ -1604,8 +1606,6 @@ class HookManager:
         for skill_name, entries in self._skill_to_hooks.items():
             if skill_name == "user-custom":
                 source_type, display_name = "user", "自定义"
-            elif skill_name.startswith("__skill__"):
-                source_type, display_name = "skill", skill_name.replace("__skill__", "")
             else:
                 source_type, display_name = "plugin", skill_name
 
@@ -2115,130 +2115,5 @@ class HookManager:
 
         return count
 
-    def load_hooks_from_skills(self, skills_dir: Path, force: bool = False) -> int:
-        """从 skills_dir 加载 hooks.json 和 SKILL.md
-
-        Args:
-            skills_dir: skills 根目录
-            force: 为 True 时强制重新加载（reload_agents 时调用）
-        """
-        count = 0
-        if not skills_dir.exists():
-            return count
-
-        # reload_agents 时 force=True，全量重新加载
-        if force:
-            # 先注销该 skills 目录下的所有 hooks
-            for skill_dir in skills_dir.iterdir():
-                if not skill_dir.is_dir():
-                    continue
-                # 使用 __skill__ 前缀命名空间，避免与同名的插件 hooks 冲突
-                # 例如插件 evolver 注册 skill_name="evolver"
-                # 而技能 evolver 注册 skill_name="__skill__evolver"
-                self.unregister_skill_hooks(f"__skill__{skill_dir.name}")
-
-        for skill_dir in skills_dir.iterdir():
-            if not skill_dir.is_dir():
-                continue
-            # 使用 __skill__ 前缀，避免与插件 hooks 共享同一 skill_name
-            skill_name = f"__skill__{skill_dir.name}"
-
-            # 加载 hooks.json
-            hooks_file = skill_dir / "hooks" / "hooks.json"
-            if hooks_file.exists():
-                try:
-                    with open(hooks_file, "r", encoding="utf-8") as f:
-                        config = json.load(f)
-                    n = self.register_hooks_from_json(skill_name, str(skill_dir.absolute()), config, str(hooks_file))
-                    count += n
-                    if n > 0:
-                        logger.info(f"[HookManager] Loaded {n} hooks from skill {skill_name}")
-                except Exception as e:
-                    logger.error(f"[HookManager] Failed to load hooks from skill {hooks_file}: {e}")
-
-            # 加载 SKILL.md 中的 frontmatter hooks
-            skill_md = skill_dir / "SKILL.md"
-            if skill_md.exists():
-                try:
-                    n = self._load_skill_hooks_from_markdown(skill_dir, skill_md)
-                    count += n
-                except Exception as e:
-                    logger.error(f"[HookManager] Failed to load hooks from SKILL.md {skill_md}: {e}")
-
-        return count
-
-    def _load_skill_hooks_from_markdown(self, skill_dir: Path, md_file: Path) -> int:
-        """从 SKILL.md frontmatter 加载 hooks 配置"""
-        import re
-
-        content = md_file.read_text(encoding="utf-8")
-
-        # 解析 frontmatter
-        if not content.startswith("---"):
-            return 0
-
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return 0
-
-        body = parts[2]
-        # 使用 __skill__ 前缀，与 load_hooks_from_skills 保持一致
-        skill_name = f"__skill__{skill_dir.name}"
-
-        # 查找 <hooks> 块
-        hooks_pattern = r"<hooks>(.*?)</hooks>"
-        hooks_match = re.search(hooks_pattern, body, re.DOTALL)
-
-        if not hooks_match:
-            return 0
-
-        hooks_text = hooks_match.group(1).strip()
-        config = self._parse_inline_hooks(hooks_text)
-
-        if config.get("hooks"):
-            n = self.register_hooks_from_json(skill_name, str(skill_dir.absolute()), config, str(md_file))
-            if n > 0:
-                logger.info(f"[HookManager] Loaded {n} hooks from SKILL.md of {skill_name}")
-            return n
-        return 0
-
-    def _parse_inline_hooks(self, hooks_text: str) -> dict:
-        """解析内联 hooks 文本格式"""
-
-        config = {"hooks": {}}
-        current_event = None
-        current_rules = []
-
-        for line in hooks_text.split("\n"):
-            line = line.rstrip()
-            if not line:
-                continue
-
-            # 检查是否是事件名行（不以空格开头）
-            if line and not line[0].isspace():
-                # 保存上一个事件的 hooks
-                if current_event:
-                    config["hooks"][current_event] = current_rules
-
-                current_event = line.strip()
-                current_rules = []
-            else:
-                # 是 hook 规则行
-                if current_event is None:
-                    continue
-
-                # 解析简化的 hook 格式
-                hook_data = {}
-                parts = line.strip().lstrip("- ")
-                if ":" in parts:
-                    key, value = parts.split(":", 1)
-                    hook_data[key.strip()] = value.strip()
-
-                if hook_data:
-                    current_rules.append(hook_data)
-
-        # 保存最后一个事件
-        if current_event:
-            config["hooks"][current_event] = current_rules
-
-        return config
+    # [已移除] 旧技能 hooks 加载路径（load_hooks_from_skills / _load_skill_hooks_from_markdown / _parse_inline_hooks）
+    # 所有 hooks 现在只从插件 hooks/ 目录加载

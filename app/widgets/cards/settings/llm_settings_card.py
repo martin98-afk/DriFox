@@ -28,6 +28,7 @@ from app.utils.design_tokens import (
     ComboBoxStyles,
     apply_font_size_to_widget,
     get_ui_font_size,
+    scale_icon_size,
 )
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
@@ -692,6 +693,10 @@ class LLMSettingsCard(SystemCardFrame):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 刷新所有配置项（SettingCard 子类）的图标大小，使其跟随系统字号缩放
+        icon_sz = scale_icon_size(16)
+        for card in self.findChildren(SettingCard):
+            card.setIconSize(icon_sz, icon_sz)
         # 刷新分隔标签
         self._refresh_sep_labels()
 

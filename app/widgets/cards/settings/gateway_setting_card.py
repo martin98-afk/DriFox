@@ -45,6 +45,7 @@ from app.utils.design_tokens import (
     Sizes,
     SwitchStyles,
     font_size_css,
+    scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.floating.command_card import _ElidedLabel
@@ -172,9 +173,9 @@ class PlatformStatusRow(CardWidget):
         layout.setSpacing(10)
 
         # 平台图标
-        icon_label = IconWidget(self._icon)
-        icon_label.setFixedSize(24, 24)
-        layout.addWidget(icon_label)
+        self._platform_icon = IconWidget(self._icon)
+        self._platform_icon.setFixedSize(scale_icon_size(24), scale_icon_size(24))
+        layout.addWidget(self._platform_icon)
 
         # 名称
         self.name_label = StrongBodyLabel(self._name)
@@ -368,6 +369,12 @@ class PlatformStatusRow(CardWidget):
 
     def set_enabled(self, enabled: bool):
         self.enable_switch.setChecked(enabled)
+
+    def refresh_style(self):
+        """平台图标随系统字号缩放"""
+        if hasattr(self, '_platform_icon') and self._platform_icon is not None:
+            s = scale_icon_size(24)
+            self._platform_icon.setFixedSize(s, s)
 
 
 

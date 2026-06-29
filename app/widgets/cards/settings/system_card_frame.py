@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, PrimaryToolButton, StrongBodyLabel, TransparentToolButton
 
-from app.utils.design_tokens import Colors, TabStyles, font_size_css
+from app.utils.design_tokens import Colors, TabStyles, font_size_css, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -156,6 +156,12 @@ class SystemCardFrame(QFrame):
         self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
         if self.icon_label is not None:
             self.icon_label.setFont(get_unified_font(12))
+        # 头部自定义图标 widget 同步缩放
+        icon_widget = getattr(self, '_icon_widget', None)
+        if icon_widget is not None:
+            base_size = getattr(self, '_icon_base_size', 20)
+            s = scale_icon_size(base_size)
+            icon_widget.setFixedSize(s, s)
         self._count_label.setFont(get_unified_font(10))
         self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; padding-left: 2px;")
         self.scroll_area.setStyleSheet(self._scroll_style())
@@ -242,7 +248,11 @@ class SystemCardFrame(QFrame):
             self.icon_label.setText(icon)
 
     def set_icon_widget(self, widget):
-        """用自定义 widget 替换头部文字图标（如 ProviderIconWidget）"""
+        """用自定义 widget 替换头部文字图标（如 ProviderIconWidget）
+
+        图标大小随系统字体大小自适应。默认基准 20px，按 FONT_SIZE_OPTIONS.delta 缩放。
+        子类如需使用其他基准尺寸，可在 set_icon_widget 之后手动 setFixedSize。
+        """
         old = getattr(self, '_icon_widget', None)
         if old is not None:
             self._header_layout.replaceWidget(old, widget)
@@ -254,7 +264,9 @@ class SystemCardFrame(QFrame):
                 self.icon_label.deleteLater()
                 self.icon_label = None
         self._icon_widget = widget
-        widget.setFixedSize(20, 20)
+        self._icon_base_size = 20
+        s = scale_icon_size(self._icon_base_size)
+        widget.setFixedSize(s, s)
 
     def set_title_text(self, text: str):
         self.title_label.setText(text)
