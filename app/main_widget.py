@@ -3682,6 +3682,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if hook_id == "builtin_inject_agent_identity" and "agent" in values:
                 try:
                     from app.utils.config import Settings
+
                     selected_agent = values["agent"]
                     Settings.get_instance().llm_primary_agent.value = selected_agent
                     # 切换主智能体后必须清空 session 缓存，否则下次构建会复用旧身份
@@ -3691,8 +3692,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         except Exception:
                             pass
                     logger.info(
-                        f"[_on_hook_edit_saved] llm_primary_agent = {selected_agent}, "
-                        "session cache invalidated"
+                        f"[_on_hook_edit_saved] llm_primary_agent = {selected_agent}, session cache invalidated"
                     )
                 except Exception as e:
                     logger.warning(f"[_on_hook_edit_saved] Failed to sync llm_primary_agent: {e}")
@@ -3702,6 +3702,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 hm.edit_hook_by_id(hook_id, values)
                 hm.reload_global_hooks(str(self._settings_popup.hookListCard._hooks_config_file))
                 self._settings_popup.hookListCard._refresh(reload=True)
+                # 编辑后自动保存预设（更新 hook 状态和 agent_identity）
+                self._settings_popup.hookListCard._auto_save_preset()
             elif hm:
                 # 新增 hook
                 add_kwargs = dict(
@@ -3714,6 +3716,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 if "commandWindows" in values:
                     add_kwargs["commandWindows"] = values["commandWindows"]
                 self._settings_popup.hookListCard._add_hook(**add_kwargs)
+                # 新增 hook 后自动保存预设
+                self._settings_popup.hookListCard._auto_save_preset()
         # 广播给所有其他窗口刷新 hook 列表
         for win in OpenAIChatToolWindow._instances:
             if win._is_destroyed or win is self:
@@ -9343,8 +9347,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for task_id, executor in running_tasks.items():
             llm_cfg = getattr(executor, "llm_config", {}) or {}
             model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
-            compact.add_task(task_id, executor.agent_name, executor.task_description,
-                             model_name=model_name)
+            compact.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
 
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
@@ -9522,13 +9525,9 @@ class OpenAIChatToolWindow(ToolWindow):
             }
 
         # ====== 流式注入：单个子智能体完成时，立即注入到流中（不中断） ======
-        is_currently_streaming = (
-            self.backend.chat_engine and self.backend.chat_engine.is_streaming
-        )
+        is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
         if is_currently_streaming:
-            self._inject_subagent_completion_into_stream(
-                task_id, result, success, agent_name, task_description
-            )
+            self._inject_subagent_completion_into_stream(task_id, result, success, agent_name, task_description)
             # 流式场景下仍继续累加批次计数器，以便所有完成时通过 _do_trigger_callback 发送汇总
 
         # 批次完成检查：只有当所有任务都完成时才触发回调
@@ -9542,8 +9541,7 @@ class OpenAIChatToolWindow(ToolWindow):
             sub_agent_mgr._batch_task_ids = set()
 
     def _inject_subagent_completion_into_stream(
-        self, task_id: str, result: str, success: bool,
-        agent_name: str, task_description: str
+        self, task_id: str, result: str, success: bool, agent_name: str, task_description: str
     ):
         """将子智能体完成信号注入到正在流式输出的消息流中（不中断流式）
 
@@ -9572,7 +9570,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 结果截断以防太长
             MAX_RESULT_CHARS = 4096
             if result and len(result) > MAX_RESULT_CHARS:
-                result_preview = result[:MAX_RESULT_CHARS] + f"\n\n[... 已省略 {len(result) - MAX_RESULT_CHARS} 个字符 ...]"
+                result_preview = (
+                    result[:MAX_RESULT_CHARS] + f"\n\n[... 已省略 {len(result) - MAX_RESULT_CHARS} 个字符 ...]"
+                )
             else:
                 result_preview = result or "(无输出)"
             content = (
@@ -9582,14 +9582,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 使用 hook 消息格式包裹
         from app.core.backend import _format_hook_output
+
         hook_content = _format_hook_output("SubAgentFinished", content)
 
         # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
-        self.backend._hook_message_queue.put({
-            "role": "system",
-            "content": hook_content,
-            "_hook_event": "SubAgentFinished",
-        })
+        self.backend._hook_message_queue.put(
+            {
+                "role": "system",
+                "content": hook_content,
+                "_hook_event": "SubAgentFinished",
+            }
+        )
         # 注意：不再 emit _hook_messages_updated，因为 backend.py:380 的 on_hook_finished
         # 回调已经在 put 后 emit 过了，重复 emit 会导致前端刷新两次
         logger.debug(f"[SubAgent] 流式注入完成信号: task_id={task_id[:12]}")
