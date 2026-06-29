@@ -688,7 +688,7 @@ class LLMSettingsCard(SystemCardFrame):
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
         # 刷新手风琴类卡片中的文字颜色（ExpandSettingCard 子类，不在以上遍历范围）
-        for card_name in ("llmSkillsCard", "mcpListCard", "lspListCard"):
+        for card_name in ("llmSkillsCard", "llmProviderCard", "mcpListCard", "lspListCard"):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
