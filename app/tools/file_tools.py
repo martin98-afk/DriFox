@@ -10,6 +10,7 @@
 - 搜索：grep, scan_repo
 - 批量编辑：multi_edit（支持多次替换）
 """
+
 import difflib
 import fnmatch
 import os
@@ -25,28 +26,65 @@ from app.tools.result import ToolResult
 MAX_GREP_CONTENT_LENGTH = 15000
 
 # ========== 性能优化：模块级别常量和缓存 ==========
-_GREP_EXCLUDE_DIRS = frozenset({
-    '.drifox', '.mypy_cache', '.git', 'node_modules', '__pycache__',
-    'venv', '.venv', 'dist', 'build', '.idea', '.vscode'
-})
+_GREP_EXCLUDE_DIRS = frozenset(
+    {
+        ".drifox",
+        ".mypy_cache",
+        ".git",
+        "node_modules",
+        "__pycache__",
+        "venv",
+        ".venv",
+        "dist",
+        "build",
+        ".idea",
+        ".vscode",
+    }
+)
 
 # scan_repo 专用排除集合：grep 集合的超集，覆盖更多构建产物与缓存目录
 # 使用 fnmatch 风格通配符：'*' 匹配任意字符序列（涵盖 .venv/.venv_old/.venv.bak 这类变体）
-_SCAN_EXCLUDE_DIRS = frozenset({
-    # 来自 grep 集合（保证 scan 至少和 grep 一样严格）
-    '.drifox', '.mypy_cache*', '.git*', 'node_modules*', '__pycache__',
-    'venv*', '.venv*', 'dist*', 'build*', '.idea*', '.vscode*',
-    # Python 测试/打包
-    '.pytest_cache*', '.tox*', 'site-packages*', '.eggs*',
-    '.ipynb_checkpoints*', 'htmlcov*', '.ruff_cache*',
-    # JS/前端构建产物
-    '.next*', '.nuxt*', '.svelte-kit*', '.cache*', '.parcel-cache*',
-    '.turbo*', '.nyc_output*', 'coverage*', '.vercel*',
-    # C/C++/Rust
-    'target*', 'cmake-build-debug*', 'cmake-build-release*',
-    # Java/Kotlin
-    '.gradle*', 'out*',
-})
+_SCAN_EXCLUDE_DIRS = frozenset(
+    {
+        # 来自 grep 集合（保证 scan 至少和 grep 一样严格）
+        ".drifox",
+        ".mypy_cache*",
+        ".git*",
+        "node_modules*",
+        "__pycache__",
+        "venv*",
+        ".venv*",
+        "dist*",
+        "build*",
+        ".idea*",
+        ".vscode*",
+        # Python 测试/打包
+        ".pytest_cache*",
+        ".tox*",
+        "site-packages*",
+        ".eggs*",
+        ".ipynb_checkpoints*",
+        "htmlcov*",
+        ".ruff_cache*",
+        # JS/前端构建产物
+        ".next*",
+        ".nuxt*",
+        ".svelte-kit*",
+        ".cache*",
+        ".parcel-cache*",
+        ".turbo*",
+        ".nyc_output*",
+        "coverage*",
+        ".vercel*",
+        # C/C++/Rust
+        "target*",
+        "cmake-build-debug*",
+        "cmake-build-release*",
+        # Java/Kotlin
+        ".gradle*",
+        "out*",
+    }
+)
 
 
 @lru_cache(maxsize=128)
@@ -119,24 +157,25 @@ class FileTools:
                 return ToolResult(
                     False,
                     error=f"⚠️ 文件已被外部修改: {full_path.name}\n\n"
-                          f"该文件在你读取后被其他人/进程修改过。\n"
-                          f"你的编辑可能会覆盖他人的更改。\n\n"
-                          f"建议: 请先重新读取文件(Read)确认最新内容后再进行编辑。"
+                    f"该文件在你读取后被其他人/进程修改过。\n"
+                    f"你的编辑可能会覆盖他人的更改。\n\n"
+                    f"建议: 请先重新读取文件(Read)确认最新内容后再进行编辑。",
                 )
         except OSError:
             pass
 
         return None
 
-    def read_file(self, path: str, offset: int = 1, limit: int = 500,
-                  show_line_numbers: bool = False) -> ToolResult:
+    def read_file(
+        self, path: str, startline: int = 1, endline: int | None = None, show_line_numbers: bool = False
+    ) -> ToolResult:
         """
         读取文件内容
 
         Args:
             path: 文件路径
-            offset: 起始行号（从1开始）
-            limit: 最大读取行数
+            startline: 起始行号（从1开始）
+            endline: 结束行号（包含，从1开始）。不传时自动推断为 startline + 499
             show_line_numbers: 是否显示行号，默认 False（返回原文）
 
         读取时记录文件的修改时间，用于后续编辑时检测文件是否被外部修改
@@ -153,17 +192,22 @@ class FileTools:
                 return self.list_directory(path)
 
             # ===== 图片文件检测：自动读取为 base64，供视觉模型使用 =====
-            _IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+            _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
             ext = full_path.suffix.lower()
             if ext in _IMAGE_EXTENSIONS:
                 import base64
+
                 with open(full_path, "rb") as f:
                     img_bytes = f.read()
                 img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
                 _MIME_MAP = {
-                    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".gif": "image/gif",
+                    ".webp": "image/webp",
+                    ".bmp": "image/bmp",
                 }
                 mime = _MIME_MAP.get(ext, "image/png")
 
@@ -189,8 +233,11 @@ class FileTools:
                 all_lines = f.readlines()
 
             total_lines = len(all_lines)
-            start_idx = max(0, offset - 1)
-            end_idx = min(total_lines, start_idx + limit)
+            start_idx = max(0, startline - 1)
+            if endline is not None:
+                end_idx = min(total_lines, endline)
+            else:
+                end_idx = min(total_lines, start_idx + 500)
 
             content_slice = all_lines[start_idx:end_idx]
             # 文件头用相对路径（根目录外 fallback 到原始路径）
@@ -201,9 +248,7 @@ class FileTools:
             res_info = f"#File: {display_path} (Lines {start_idx + 1}-{end_idx} of {total_lines})\n\n#Content:\n"
             if show_line_numbers:
                 # 带行号格式
-                formatted_content = "".join(
-                    f"{i + start_idx + 1:6d}|{line}" for i, line in enumerate(content_slice)
-                )
+                formatted_content = "".join(f"{i + start_idx + 1:6d}|{line}" for i, line in enumerate(content_slice))
 
                 return ToolResult(True, content=res_info + formatted_content)
             else:
@@ -242,10 +287,7 @@ class FileTools:
             except ValueError:
                 return ToolResult(
                     False,
-                    error=(
-                        f"Access denied: {file_path} is outside the "
-                        f"tool-results directory."
-                    ),
+                    error=(f"Access denied: {file_path} is outside the tool-results directory."),
                 )
             if not p.exists() or p.suffix != ".txt":
                 return ToolResult(
@@ -257,15 +299,11 @@ class FileTools:
             # 二级软截断: 避免"恢复"时再爆 context
             if len(content) > 200_000:
                 content = (
-                    content[:200_000]
-                    + f"\n\n[Truncated at 200,000 chars. "
-                    f"Full size on disk: {p.stat().st_size} bytes]"
+                    content[:200_000] + f"\n\n[Truncated at 200,000 chars. Full size on disk: {p.stat().st_size} bytes]"
                 )
             return ToolResult(True, content=content)
         except Exception as e:
-            return ToolResult(
-                False, error=f"Read persisted output error: {str(e)}"
-            )
+            return ToolResult(False, error=f"Read persisted output error: {str(e)}")
 
     def write_file(self, path: str, content: str) -> ToolResult:
         """
@@ -296,12 +334,11 @@ class FileTools:
             # 计算 unified diff
             diff_str = ""
             if old_content or content:
-                diff_lines = list(difflib.unified_diff(
-                    old_content.splitlines(),
-                    (content or "").splitlines(),
-                    fromfile=path, tofile=path,
-                    lineterm=''
-                ))
+                diff_lines = list(
+                    difflib.unified_diff(
+                        old_content.splitlines(), (content or "").splitlines(), fromfile=path, tofile=path, lineterm=""
+                    )
+                )
                 diff_str = "\n".join(diff_lines)
 
             # 更新修改时间记录
@@ -311,8 +348,7 @@ class FileTools:
         except Exception as e:
             return ToolResult(False, error=f"Write error: {str(e)}")
 
-    def edit_file(self, path: str, oldString: str, newString: str,
-                  replaceAll: bool = False) -> ToolResult:
+    def edit_file(self, path: str, oldString: str, newString: str, replaceAll: bool = False) -> ToolResult:
         """
         精确文本替换编辑。包含唯一性校验，防止误改多处代码。
         编辑前检查文件是否被外部修改。
@@ -345,15 +381,15 @@ class FileTools:
                 return ToolResult(
                     False,
                     error="The specified 'oldString' was not found in the file. "
-                          "Ensure exact match including whitespace and indentation."
+                    "Ensure exact match including whitespace and indentation.",
                 )
 
             if count > 1 and not replaceAll:
                 return ToolResult(
                     False,
                     error=f"The 'oldString' appears {count} times in the file. "
-                          f"Please provide a more specific context to ensure uniqueness, "
-                          f"or set replaceAll=True."
+                    f"Please provide a more specific context to ensure uniqueness, "
+                    f"or set replaceAll=True.",
                 )
 
             new_content = old_content.replace(oldString, newString, -1 if replaceAll else 1)
@@ -361,12 +397,11 @@ class FileTools:
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
             # ── 生成 unified diff ──
-            diff_lines = list(difflib.unified_diff(
-                old_content.splitlines(),
-                new_content.splitlines(),
-                fromfile=path, tofile=path,
-                lineterm=''
-            ))
+            diff_lines = list(
+                difflib.unified_diff(
+                    old_content.splitlines(), new_content.splitlines(), fromfile=path, tofile=path, lineterm=""
+                )
+            )
             diff_str = "\n".join(diff_lines) if diff_lines else ""
 
             return ToolResult(
@@ -416,12 +451,11 @@ class FileTools:
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
             # ── 生成 unified diff ──
-            diff_lines = list(difflib.unified_diff(
-                old_content.splitlines(),
-                content.splitlines(),
-                fromfile=path, tofile=path,
-                lineterm=''
-            ))
+            diff_lines = list(
+                difflib.unified_diff(
+                    old_content.splitlines(), content.splitlines(), fromfile=path, tofile=path, lineterm=""
+                )
+            )
             diff_str = "\n".join(diff_lines) if diff_lines else ""
 
             result = f"Applied {applied}/{len(edits)} edits to {path}."
@@ -455,7 +489,7 @@ class FileTools:
 
                     file_path = Path(root) / filename
                     try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                             for i, line in enumerate(f, 1):
                                 if regex.search(line):
                                     try:
@@ -464,14 +498,20 @@ class FileTools:
                                         rel_path = file_path
                                     results.append(f"{rel_path}:{i}: {line.strip()}")
                                     if len(results) >= 100:
-                                        return ToolResult(True, content="\n".join(
-                                            results) + "\n\n... (Too many matches, please refine your search pattern)")
+                                        return ToolResult(
+                                            True,
+                                            content="\n".join(results)
+                                            + "\n\n... (Too many matches, please refine your search pattern)",
+                                        )
                     except Exception:
                         continue
 
             content = "\n".join(results) if results else "No matches found."
             if len(content) > MAX_GREP_CONTENT_LENGTH:
-                content = content[:MAX_GREP_CONTENT_LENGTH] + f"\n\n... (Content truncated, exceeds {MAX_GREP_CONTENT_LENGTH} characters limit)"
+                content = (
+                    content[:MAX_GREP_CONTENT_LENGTH]
+                    + f"\n\n... (Content truncated, exceeds {MAX_GREP_CONTENT_LENGTH} characters limit)"
+                )
             return ToolResult(True, content=content)
         except Exception as e:
             return ToolResult(False, error=f"Grep error: {str(e)}")
@@ -581,9 +621,7 @@ class FileTools:
         except Exception as e:
             return ToolResult(False, error=f"scan_repo error: {str(e)}")
 
-    def diff_files(
-        self, file1: str, file2: str = None, use_git: bool = False
-    ) -> ToolResult:
+    def diff_files(self, file1: str, file2: str = None, use_git: bool = False) -> ToolResult:
         import subprocess
         import sys
 
@@ -608,9 +646,7 @@ class FileTools:
                     return ToolResult(False, error="Not a git repository")
                 diff_output = result.stdout or result.stderr
                 if not diff_output:
-                    return ToolResult(
-                        True, content=f"No changes in {file1} (compared to git)"
-                    )
+                    return ToolResult(True, content=f"No changes in {file1} (compared to git)")
                 return ToolResult(True, content=diff_output)
 
             if file2:
@@ -636,14 +672,10 @@ class FileTools:
                     creationflags=_cf,
                 )
                 if result.returncode != 0 and "not a git repository" in result.stderr:
-                    return ToolResult(
-                        False, error="Not a git repository and no second file provided"
-                    )
+                    return ToolResult(False, error="Not a git repository and no second file provided")
                 return ToolResult(
                     True,
-                    content=result.stdout
-                    if result.stdout
-                    else f"No changes in {file1} (compared to git HEAD)",
+                    content=result.stdout if result.stdout else f"No changes in {file1} (compared to git HEAD)",
                 )
 
             if not result.stdout:

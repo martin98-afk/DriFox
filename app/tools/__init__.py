@@ -79,9 +79,7 @@ class BuiltinTools(QObject):
         self._get_session_messages = None
         self._current_project = "默认项目"  # 当前项目（由 set_current_project() 设置）
 
-        logger.info(
-            f"[BuiltinTools] Workdir: {self.workdir}, loaded {len(self._tools)} tool modules"
-        )
+        logger.info(f"[BuiltinTools] Workdir: {self.workdir}, loaded {len(self._tools)} tool modules")
 
     def _register_tools(self):
         """Register all tool modules - add new tools here"""
@@ -145,9 +143,7 @@ class BuiltinTools(QObject):
                 return method
 
         # If not found, raise AttributeError (Python default)
-        raise AttributeError(
-            f"'{self.__class__.__name__}' object has no attribute '{name}'"
-        )
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     # The following methods have special handling (additional logic)
     # so they are kept here instead of dynamic dispatch
@@ -263,15 +259,14 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "文件路径"},
-                    "offset": {
+                    "startline": {
                         "type": "integer",
                         "description": "起始行号 (从1开始)",
                         "default": 1,
                     },
-                    "limit": {
+                    "endline": {
                         "type": "integer",
-                        "description": "读取的行数",
-                        "default": 500,
+                        "description": "结束行号 (包含，从1开始)。不传时默认 startline+499，即读取约 500 行",
                     },
                     "show_line_numbers": {
                         "type": "boolean",
@@ -842,7 +837,7 @@ TOOL_SCHEMAS = [
                     },
                     "edges": {
                         "type": "array",
-                        "description": "节点间的依赖关系。例如 [{\"from\": \"step1\", \"to\": \"step2\"}] 表示 step2 依赖 step1",
+                        "description": '节点间的依赖关系。例如 [{"from": "step1", "to": "step2"}] 表示 step2 依赖 step1',
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1016,9 +1011,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         "【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
     )
     if subagent_names:
-        subagent_para_desc += (
-            "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
-        )
+        subagent_para_desc += "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
 
     # Update the subagent_para schema
     for schema in schemas:
@@ -1045,13 +1038,12 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     # 动态注入 LSP 服务器状态到 lsp 工具描述
     try:
         from app.core.lsp.lsp_manager import LspManager
+
         lsp_mgr = LspManager.get_instance()
         clients = lsp_mgr._clients
         if clients:
             running = [n for n, c in clients.items() if c.is_running]
-            status_text = (
-                f"当前已启动的 LSP 服务器: {', '.join(running) if running else '(无)'}。"
-            )
+            status_text = f"当前已启动的 LSP 服务器: {', '.join(running) if running else '(无)'}。"
             for schema in schemas:
                 if schema["function"]["name"] == "lsp":
                     schema["function"]["description"] += f"\n\n{status_text}"

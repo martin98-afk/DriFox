@@ -2,6 +2,7 @@
 """
 工具执行器模块 - 统一处理各种工具调用
 """
+
 import os
 import re
 import threading
@@ -16,7 +17,7 @@ from app.core.message_content import content_to_text
 from app.tools.tool_name_mapper import ToolNameMapper
 
 # 预编译正则表达式
-_FILE_PREFIX_PATTERN = re.compile(r'^file:/{1,3}')
+_FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
 from app.core.lsp.lsp_manager import LspManager
 from app.tools import BuiltinTools, ToolResult
@@ -31,9 +32,7 @@ class ToolExecutor:
     """工具执行器 - 统一调度各种工具"""
 
     # 需要记录的文件操作
-    _FILE_OPS_TO_TRACK = {
-        "write", "edit", "multi_edit"
-    }
+    _FILE_OPS_TO_TRACK = {"write", "edit", "multi_edit"}
 
     # 注意：BuiltinTools 不再跨窗口共享，每个窗口拥有独立实例
     # 确保工作目录（workdir）完全隔离，多窗口互不影响
@@ -70,11 +69,7 @@ class ToolExecutor:
 
             workdir = resource_path("")
         except Exception:
-            workdir = os.path.dirname(
-                os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                )
-            )
+            workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
         logger.info(f"[ToolExecutor] Initialized with workdir: {workdir}")
         self._builtin_tools = BuiltinTools(self._homepage, workdir)
@@ -91,6 +86,7 @@ class ToolExecutor:
         try:
             # 如果对象已删除，尝试访问 sip 会有异常
             from PyQt5 import sip
+
             if sip.isdeleted(self._builtin_tools):
                 return False
         except Exception:
@@ -116,7 +112,7 @@ class ToolExecutor:
     def cleanup(self):
         """
         清理窗口独有状态。
-        
+
         清理当前窗口的 BuiltinTools（释放 MCP 引用计数），
         其他窗口不受影响。
         """
@@ -168,8 +164,7 @@ class ToolExecutor:
         """获取文件操作记录器"""
         return self._file_recorder
 
-    def _record_file_operation_before(self, tool_name: str, args: dict,
-                                       session_id: str = None, call_id: str = None):
+    def _record_file_operation_before(self, tool_name: str, args: dict, session_id: str = None, call_id: str = None):
         """
         在文件操作执行前记录备份信息
 
@@ -205,23 +200,21 @@ class ToolExecutor:
         # 处理 URL 格式的文件路径 (如 file:/D:/xxx 或 file:///D:/xxx)
         if path.startswith("file:"):
             # 移除 file: 前缀，处理单斜杠或双斜杠
-            path = _FILE_PREFIX_PATTERN.sub('', path)
+            path = _FILE_PREFIX_PATTERN.sub("", path)
 
         # 获取完整的文件路径
         if hasattr(self._builtin_tools, "_file_tools"):
             full_path = self._builtin_tools._file_tools._resolve_path(path)
         else:
             from pathlib import Path
+
             full_path = Path(path).resolve()
 
         # 记录操作（内部会处理文件不存在的情况）
         try:
             with self._lock:
                 backup_path = self._file_recorder.record_operation(
-                    session_id=sid,
-                    call_id=cid,
-                    tool_name=tool_name,
-                    file_path=str(full_path)
+                    session_id=sid, call_id=cid, tool_name=tool_name, file_path=str(full_path)
                 )
             if backup_path:
                 logger.info(f"[FileRecorder] 已备份: {full_path} -> {backup_path}")
@@ -234,8 +227,9 @@ class ToolExecutor:
 
         return str(full_path)
 
-    def _record_file_operation_after(self, tool_name: str, args: dict, file_path_before: str,
-                                      session_id: str = None, call_id: str = None):
+    def _record_file_operation_after(
+        self, tool_name: str, args: dict, file_path_before: str, session_id: str = None, call_id: str = None
+    ):
         """
         在文件操作执行成功后备份编辑后的文件
 
@@ -264,10 +258,7 @@ class ToolExecutor:
         try:
             with self._lock:
                 self._file_recorder.record_after_operation(
-                    session_id=sid,
-                    call_id=cid,
-                    tool_name=tool_name,
-                    file_path=file_path_before
+                    session_id=sid, call_id=cid, tool_name=tool_name, file_path=file_path_before
                 )
         except Exception as e:
             # 记录失败不阻塞主流程
@@ -312,8 +303,10 @@ class ToolExecutor:
         # 创建标准化 tool_input 副本（兼容 Claude Code 字段命名）
         _normalized_input = dict(args)
         for _src, _dst in [
-            ("newString", "new_string"), ("oldString", "old_string"),
-            ("path", "file_path"), ("file", "file_path"),
+            ("newString", "new_string"),
+            ("oldString", "old_string"),
+            ("path", "file_path"),
+            ("file", "file_path"),
         ]:
             if _src in _normalized_input and _dst not in _normalized_input:
                 _normalized_input[_dst] = _normalized_input[_src]
@@ -354,7 +347,7 @@ class ToolExecutor:
                     content = orjson.dumps(content).decode("utf-8", errors="replace")
                 else:
                     content = ""
-            result_str = (content or result.error or "")
+            result_str = content or result.error or ""
             is_truncated = len(result_str) > _MAX_RESULT_LEN
             # DriFoxx 自有格式（向后兼容）
             context["result_content"] = result_str[:_MAX_RESULT_LEN]
@@ -377,10 +370,10 @@ class ToolExecutor:
         current_message_text = ""
         if self._backend.session_manager:
             session = self._backend.get_current_session()
-            if session and hasattr(session, 'messages'):
+            if session and hasattr(session, "messages"):
                 for msg in reversed(session.messages):
-                    if msg.get('role') == 'user':
-                        current_message_text = content_to_text(msg.get('content', ''))
+                    if msg.get("role") == "user":
+                        current_message_text = content_to_text(msg.get("content", ""))
                         break
 
         # PostToolUse hook 同步执行，确保 hook 输出在 worker 构建消息序列前
@@ -394,9 +387,7 @@ class ToolExecutor:
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========
 
-    def _try_auto_lsp_diagnose(
-        self, tool_name: str, args: dict, result: "ToolResult"
-    ) -> "ToolResult":
+    def _try_auto_lsp_diagnose(self, tool_name: str, args: dict, result: "ToolResult") -> "ToolResult":
         """文件编辑成功后，若开启自动诊断则运行 LSP 诊断并追加到结果
 
         Args:
@@ -450,9 +441,7 @@ class ToolExecutor:
         diag_msg = "[LSP 自动诊断] 未发现问题" if not diag_result else diag_result
         result.content = f"{result.content}\n\n{diag_msg}"
 
-        logger.debug(
-            f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}"
-        )
+        logger.debug(f"[ToolExecutor] 自动 LSP 诊断完成: {tool_name} → {file_path}")
         return result
 
     def set_memory_manager(self, memory_manager):
@@ -468,9 +457,7 @@ class ToolExecutor:
     def set_session_messages_getter(self, getter: Callable):
         if self._builtin_tools:
             self._builtin_tools.set_session_messages_getter(getter)
-            logger.info(
-                "[ToolExecutor] Session messages getter attached to BuiltinTools"
-            )
+            logger.info("[ToolExecutor] Session messages getter attached to BuiltinTools")
 
     def set_agent_manager(self, agent_manager):
         """设置 AgentManager 实例，用于动态生成工具 schema"""
@@ -517,6 +504,7 @@ class ToolExecutor:
         """
         try:
             from app.utils.utils import resource_path
+
             return str(Path(resource_path("")).resolve())
         except Exception:
             return str(Path(__file__).resolve().parent.parent.parent)
@@ -554,7 +542,7 @@ class ToolExecutor:
         "todowrite": ["todos"],
         "todoread": [],
         "subagent_para": ["tasks"],
-        "subagent_dag": ["nodes", "edges"],
+        "subagent_dag": ["nodes"],
         "task_wait": ["task_ids"],
         "subagent_status": [],
         "skill": ["name"],
@@ -606,8 +594,10 @@ class ToolExecutor:
             # 创建标准化 tool_input 副本（兼容 Claude Code 字段命名）
             _normalized_input = dict(args)  # 浅拷贝，不污染原始 args
             for _src, _dst in [
-                ("newString", "new_string"), ("oldString", "old_string"),
-                ("path", "file_path"), ("file", "file_path"),
+                ("newString", "new_string"),
+                ("oldString", "old_string"),
+                ("path", "file_path"),
+                ("file", "file_path"),
                 ("content", "tool_input_content"),  # 额外别名（部分钩子用）
             ]:
                 if _src in _normalized_input and _dst not in _normalized_input:
@@ -654,10 +644,10 @@ class ToolExecutor:
             current_message_text = ""
             if self._backend.session_manager:
                 session = self._backend.get_current_session()
-                if session and hasattr(session, 'messages'):
+                if session and hasattr(session, "messages"):
                     for msg in reversed(session.messages):
-                        if msg.get('role') == 'user':
-                            current_message_text = content_to_text(msg.get('content', ''))
+                        if msg.get("role") == "user":
+                            current_message_text = content_to_text(msg.get("content", ""))
                             break
 
             # 同步执行 PreToolUse hooks
@@ -665,21 +655,24 @@ class ToolExecutor:
                 "PreToolUse",
                 context=context,
                 current_message=current_message_text,
-                trigger_async=False   # 关键：同步执行，才能检测 BLOCK 决策
+                trigger_async=False,  # 关键：同步执行，才能检测 BLOCK 决策
             )
 
             # 检查是否有 hook 要求跳过工具执行（exit 2 或 JSON {"decision":"block"}）
             for result in results:
                 if result.decision == HookDecision.BLOCK:
                     # Hook 要求跳过工具执行，将 hook 输出作为工具结果回填
-                    logger.info(f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}")
+                    logger.info(
+                        f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}"
+                    )
 
                     # 返回 hook 输出作为工具结果
                     # ⚠️ hook 输出已由 on_hook_finished 回调排入 _pre_tool_message_queue，
                     #    worker 的 _inject_pending_pretool_messages() 会将其注入到会话中。
                     return ToolResult(
                         True,
-                        content=result.output or f"Tool '{tool_name}' was blocked by PreToolUse hook (exit code 2 / decision:block)."
+                        content=result.output
+                        or f"Tool '{tool_name}' was blocked by PreToolUse hook (exit code 2 / decision:block).",
                     )
 
         # 校验必需参数
@@ -710,12 +703,10 @@ class ToolExecutor:
         tool_map = {
             "read": lambda: self._builtin_tools.read_file(
                 path=args.get("path"),  # 统一使用 path
-                offset=int(args.get("offset")) if args.get("offset") is not None else 1,
-                limit=int(args.get("limit")) if args.get("limit") is not None else 500
+                startline=int(args.get("startline")) if args.get("startline") is not None else 1,
+                endline=int(args.get("endline")) if args.get("endline") is not None else None,
             ),
-            "write": lambda: self._builtin_tools.write_file(
-                path=args.get("path"), content=args.get("content", "")
-            ),
+            "write": lambda: self._builtin_tools.write_file(path=args.get("path"), content=args.get("content", "")),
             "edit": lambda: self._builtin_tools.edit_file(
                 path=args.get("path"),
                 oldString=args.get("oldString", ""),
@@ -739,44 +730,21 @@ class ToolExecutor:
                 path=args.get("path", "")  # 默认当前路径
             ),
             "git_status": lambda: self._builtin_tools.git_status(args.get("path")),
-            "git_log": lambda: self._builtin_tools.git_log(
-                args.get("path"), args.get("max_count", 10)
-            ),
-            "git_diff": lambda: self._builtin_tools.git_diff(
-                args.get("ref1"), args.get("ref2"), args.get("path")
-            ),
-            "bash": lambda: self._builtin_tools.execute_bash(
-                args.get("command", ""), args.get("timeout", 120)
-            ),
+            "git_log": lambda: self._builtin_tools.git_log(args.get("path"), args.get("max_count", 10)),
+            "git_diff": lambda: self._builtin_tools.git_diff(args.get("ref1"), args.get("ref2"), args.get("path")),
+            "bash": lambda: self._builtin_tools.execute_bash(args.get("command", ""), args.get("timeout", 120)),
             # 后台任务工具
-            "bg_start": lambda: self._builtin_tools.bg_start(
-                args.get("command", ""),
-                args.get("cwd")
-            ),
-            "bg_stop": lambda: self._builtin_tools.bg_stop(
-                args.get("task_id", "")
-            ),
-            "bg_logs": lambda: self._builtin_tools.bg_logs(
-                args.get("task_id", ""),
-                args.get("lines", 100)
-            ),
+            "bg_start": lambda: self._builtin_tools.bg_start(args.get("command", ""), args.get("cwd")),
+            "bg_stop": lambda: self._builtin_tools.bg_stop(args.get("task_id", "")),
+            "bg_logs": lambda: self._builtin_tools.bg_logs(args.get("task_id", ""), args.get("lines", 100)),
             "bg_list": lambda: self._builtin_tools.bg_list(),
             "webfetch": lambda: self._builtin_tools.fetch_web(
-                args.get("url", ""), args.get("format", "markdown"),
-                args.get("max_chars", 26000)
+                args.get("url", ""), args.get("format", "markdown"), args.get("max_chars", 26000)
             ),
-            "websearch": lambda: self._builtin_tools.search_web(
-                args.get("query", ""), args.get("num_results", 10)
-            ),
-            "scan_repo": lambda: self._builtin_tools.scan_repo(
-                args.get("path"), args.get("max_depth", 2)
-            ),
-            "stage_files": lambda: self._builtin_tools.stage_files(
-                args.get("files", [])
-            ),
-            "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(
-                args.get("path", ""), args.get("language")
-            ),
+            "websearch": lambda: self._builtin_tools.search_web(args.get("query", ""), args.get("num_results", 10)),
+            "scan_repo": lambda: self._builtin_tools.scan_repo(args.get("path"), args.get("max_depth", 2)),
+            "stage_files": lambda: self._builtin_tools.stage_files(args.get("files", [])),
+            "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(args.get("path", ""), args.get("language")),
             "summarize_changes": lambda: self._builtin_tools.summarize_changes(
                 args.get("text", ""), args.get("limit", 1200)
             ),
@@ -809,20 +777,15 @@ class ToolExecutor:
                 args.get("questions"),
                 **args,
             ),
-            "mcp_list_servers": lambda: ToolResult(
-                True,
-                content=self._builtin_tools._mcp_manager.get_status()
-            ),
+            "mcp_list_servers": lambda: ToolResult(True, content=self._builtin_tools._mcp_manager.get_status()),
             "gitee_upload": lambda: self._builtin_tools.gitee_upload(
                 local_path=args.get("local_path", ""),
             ),
             "upload_file": lambda: self._builtin_tools.gitee_upload(
                 local_path=args.get("local_path", ""),
             ),
-            "read_persisted_output": lambda: (
-                self._builtin_tools.read_persisted_output(
-                    file_path=args.get("file_path", "")
-                )
+            "read_persisted_output": lambda: self._builtin_tools.read_persisted_output(
+                file_path=args.get("file_path", "")
             ),
             # ========== 桌面自动化 (AutomationTools) ==========
             "mouse": lambda: self._builtin_tools.mouse(
@@ -843,10 +806,7 @@ class ToolExecutor:
             ),
             "screenshot": lambda: self._builtin_tools.screenshot(
                 path=args.get("path", "") or "",
-                region=(
-                    tuple(args.get("region", []))
-                    if args.get("region") else None
-                ),
+                region=(tuple(args.get("region", [])) if args.get("region") else None),
             ),
             # ========== LSP 工具 ==========
             "lsp": lambda: self._builtin_tools._lsp_tools.lsp(
@@ -879,7 +839,9 @@ class ToolExecutor:
                         result.content = (result.content or "") + "\n[警告: UI 在执行过程中已关闭]"
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
                 if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
-                    self._record_file_operation_after(tool_name, args, file_path_before, local_session_id, local_call_id)
+                    self._record_file_operation_after(
+                        tool_name, args, file_path_before, local_session_id, local_call_id
+                    )
 
                 # 自动 LSP 诊断：文件编辑成功后，若开启则自动诊断
                 if result and result.success and tool_name in ("write", "edit", "multi_edit"):
@@ -976,16 +938,14 @@ class ToolExecutor:
                 # 接受两种入参形式：
                 # 1) 'server__tool'（缺前缀但带 server）
                 # 2) 'tool'（仅工具名，需在所有 server 中唯一）
-                stripped = full[len(prefix):]
+                stripped = full[len(prefix) :]
                 if tool_name == stripped or tool_name == t.name:
                     matches.append(full)
 
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            logger.warning(
-                f"[ToolExecutor] MCP 前缀恢复歧义：'{tool_name}' 命中多个候选 {matches}，放弃补全"
-            )
+            logger.warning(f"[ToolExecutor] MCP 前缀恢复歧义：'{tool_name}' 命中多个候选 {matches}，放弃补全")
         return None
 
     def set_sub_agent_manager(self, sub_agent_manager):
@@ -996,6 +956,4 @@ class ToolExecutor:
         if self._builtin_tools:
             self._builtin_tools._sub_agent_manager = sub_agent_manager
             self._builtin_tools._task_tools._sub_agent_manager = sub_agent_manager
-            logger.info(
-                "[ToolExecutor] SubAgentManager attached to instance and BuiltinTools"
-            )
+            logger.info("[ToolExecutor] SubAgentManager attached to instance and BuiltinTools")

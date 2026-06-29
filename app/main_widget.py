@@ -10362,7 +10362,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 ring = getattr(self, "context_usage_ring", None)
                 if ring:
                     percent = min(100, int((last_tc / last_lim) * 100))
-                    ring.set_usage(percent, last_tc, last_lim)
+                    # 获取压缩状态，避免缓存路径丢失压缩信息
+                    session = self.session_manager.get_current_session()
+                    compaction_state = dict(getattr(session, "compaction_state", {}) or {})
+                    normal_tokens = last_tc
+                    compacted_tokens = 0
+                    if compaction_state.get("active"):
+                        compaction_cache = dict(getattr(session, "compaction_cache", {}) or {})
+                        summary_msg = compaction_cache.get("summary_message")
+                        if isinstance(summary_msg, dict):
+                            content = str(summary_msg.get("content", "") or "")
+                            compacted_tokens = max(10, len(content) // 4)
+                            normal_tokens = max(0, last_tc - compacted_tokens)
+                    ring.set_usage(percent, last_tc, last_lim, compaction_state, normal_tokens, compacted_tokens)
                     return
 
         # 工具迭代中或没有 API 数据时：本地估算 + compaction 信息
@@ -10439,7 +10451,22 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring or limit <= 0:
             return
         percent = min(100, int((token_count / limit) * 100))
-        ring.set_usage(percent, token_count, limit)
+
+        # 获取压缩状态，以便圆环 tooltip 显示压缩信息
+        session = self.session_manager.get_current_session()
+        compaction_state = dict(getattr(session, "compaction_state", {}) or {})
+        normal_tokens = token_count
+        compacted_tokens = 0
+        if compaction_state.get("active"):
+            compaction_cache = dict(getattr(session, "compaction_cache", {}) or {})
+            summary_msg = compaction_cache.get("summary_message")
+            if isinstance(summary_msg, dict):
+                # 用字符长度估算摘要 token 数（仅显示用，不需要精确）
+                content = str(summary_msg.get("content", "") or "")
+                compacted_tokens = max(10, len(content) // 4)
+                normal_tokens = max(0, token_count - compacted_tokens)
+
+        ring.set_usage(percent, token_count, limit, compaction_state, normal_tokens, compacted_tokens)
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
