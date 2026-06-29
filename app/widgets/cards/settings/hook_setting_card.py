@@ -407,6 +407,15 @@ class HookEditCard(QWidget):
             current_val = ""
             if not self._is_new:
                 current_val = self._hook_data.get("agent", "")
+            # 如果 hook_data 中没有 agent 字段，回退到 Settings.llm_primary_agent
+            # （系统内置 inject_agent_identity hook 的 agent 选择存储在 Settings 中）
+            if not current_val:
+                try:
+                    from app.utils.config import Settings
+
+                    current_val = Settings.get_instance().llm_primary_agent.value or ""
+                except Exception:
+                    pass
             # 用 addItems 一次性加入，避免多次调用 addItem 产生 Qt model 重置 bug
             agent_names = [a.name for a in agents]
             if agent_names:
@@ -1042,11 +1051,21 @@ class HookListSettingCard(ExpandSettingCard):
         self._preset_combo.blockSignals(False)
         # 显示预设 bar（只在有预设时显示）
         self._preset_bar.setVisible(len(presets) > 0 or self._preset_combo.count() > 0)
+        # 更新按钮状态
+        self._update_preset_buttons()
+
+    def _update_preset_buttons(self):
+        """根据当前预设更新按钮状态（默认预设不可删除）"""
+        current = self._preset_combo.currentText()
+        is_default = current == "default"
+        self._del_preset_btn.setEnabled(not is_default)
+        self._del_preset_btn.setToolTip("默认预设不可删除" if is_default else "删除预设")
 
     def _on_preset_selected(self, name: str):
         """预设下拉框选中变化时应用预设"""
         if not name or not self._hook_manager:
             return
+        self._update_preset_buttons()
         pm = self._hook_manager.get_hook_preset_manager()
         current = pm.get_current_preset_name()
         if name == current:
@@ -1065,12 +1084,21 @@ class HookListSettingCard(ExpandSettingCard):
 
     def _new_preset(self):
         """新建预设"""
-        from PyQt5.QtWidgets import QInputDialog
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
 
-        name, ok = QInputDialog.getText(self, "新建预设", "请输入预设名称：")
-        if not ok or not name.strip():
+        dialog = SingleInputDialog(
+            title="新建预设",
+            placeholder="输入预设名称...",
+            hint="将当前所有 Hook 的开关状态保存为新预设",
+            confirm_text="创建",
+            cancel_text="取消",
+            parent=self,
+        )
+        if not dialog.exec_():
             return
-        name = name.strip()
+        name = dialog.input.text().strip()
+        if not name:
+            return
 
         if not self._hook_manager:
             return
@@ -1085,17 +1113,24 @@ class HookListSettingCard(ExpandSettingCard):
 
     def _rename_preset(self):
         """重命名当前预设"""
-        from PyQt5.QtWidgets import QInputDialog
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
 
         current = self._preset_combo.currentText()
         if not current:
             return
 
-        name, ok = QInputDialog.getText(self, "重命名预设", "请输入新名称：", text=current)
-        if not ok or not name.strip():
+        dialog = SingleInputDialog(
+            title="重命名预设",
+            placeholder="输入新名称...",
+            default_text=current,
+            confirm_text="重命名",
+            cancel_text="取消",
+            parent=self,
+        )
+        if not dialog.exec_():
             return
-        name = name.strip()
-        if name == current:
+        name = dialog.input.text().strip()
+        if not name or name == current:
             return
 
         if not self._hook_manager:
@@ -1110,7 +1145,7 @@ class HookListSettingCard(ExpandSettingCard):
 
     def _delete_preset(self):
         """删除当前预设"""
-        from PyQt5.QtWidgets import QMessageBox
+        from qfluentwidgets import MessageBox
 
         current = self._preset_combo.currentText()
         if not current:
@@ -1123,10 +1158,10 @@ class HookListSettingCard(ExpandSettingCard):
             QToolTip.showText(QPoint(0, 0), "默认预设不可删除")
             return
 
-        reply = QMessageBox.question(
-            self, "确认删除", f"确定要删除预设「{current}」吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
+        msg = MessageBox("确认删除", f"确定要删除预设「{current}」吗？", self)
+        msg.yesButton.setText("删除")
+        msg.cancelButton.setText("取消")
+        if not msg.exec_():
             return
 
         if not self._hook_manager:
@@ -1134,6 +1169,12 @@ class HookListSettingCard(ExpandSettingCard):
         success = self._hook_manager.delete_preset(current)
         if success:
             self._reload_preset_combo()
+            # 删除后自动加载当前预设（默认会切到第一个可用预设）
+            new_current = self._preset_combo.currentText()
+            if new_current:
+                self._hook_manager.apply_preset(new_current)
+                self._refresh(reload=True)
+                self.hooksChanged.emit()
 
     # ── 核心刷新 ──
 
