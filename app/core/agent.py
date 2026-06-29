@@ -699,34 +699,63 @@ class AgentManager:
                 - False: 主智能体自身运行，或子智能体独立运行
             extra_context: 额外上下文（如 project_root/project_name），传递给 BuildSystemPrompt hook
         """
+        # ── 主智能体身份覆盖：优先使用用户在 inject_agent_identity hook 中选择的智能体 ──
+        # 钩子的下拉框选择会写入 Settings.llm_primary_agent，
+        # 覆盖 chat engine 传入的默认 agent_name（通常为 "build"），
+        # 使 BuildSystemPrompt 钩子注入的身份定义与用户选择保持一致。
+        if not is_subagent_call:
+            try:
+                from app.utils.config import Settings
+                primary_agent = Settings.get_instance().llm_primary_agent.value
+                if primary_agent and primary_agent != agent_name:
+                    if self.get_agent(primary_agent):
+                        agent_name = primary_agent
+                    else:
+                        from loguru import logger as _logger
+                        _logger.warning(
+                            f"[AgentManager] Settings.llm_primary_agent='{primary_agent}' "
+                            f"对应的智能体不存在，回退到 '{agent_name}'"
+                        )
+            except Exception:
+                pass
+
         agent = self.get_agent(agent_name)
 
-        if agent and agent.prompt:
-            base = agent.prompt
-        else:
-            # Fallback 提示词
-            if agent:
-                base = f"""# {agent.name}
+        # ── 构建 agent identity 内容，通过 context 传递给 BuildSystemPrompt hook ──
+        # 主智能体：hook (inject_agent_identity) 负责注入；子智能体：直接作为 base
+        if agent:
+            if agent.prompt:
+                agent_identity = agent.prompt
+            else:
+                agent_identity = f"""# {agent.name}
 {agent.description}
 
 ## Available Tools
 Use the tools available to you based on your permissions."""
-            else:
-                base = base_prompt or ""
+        else:
+            agent_identity = base_prompt or ""
 
-        if base_prompt and base:
-            base = base + "\n\n" + base_prompt
-        elif base_prompt:
-            base = base_prompt
+        # ── 构建 base prompt ──
+        # 子智能体：agent 身份作为 base + 任务描述（base_prompt）附加
+        # 主智能体：agent 身份由 hook 注入，base 仅为 base_prompt（通常为空）
+        if is_subagent_call:
+            base = agent_identity
+            if base_prompt and base:
+                base = base + "\n\n" + base_prompt
+            elif base_prompt:
+                base = base_prompt
+        else:
+            base = base_prompt or ""
 
         # Collect BuildSystemPrompt hook contributions
         if self._hook_manager:
-            # 预取技能内容和子智能体列表，通过 context 传递给 hooks
+            # 预取智能体身份/技能内容/子智能体列表，通过 context 传递给 hooks
             # （hooks 不能直接 import app 内部模块，所有数据必须从 context 读取）
             hook_ctx: Dict[str, Any] = {
                 "agent_name": agent_name,
                 "is_subagent_call": is_subagent_call,
                 "current_role": "subagent" if is_subagent_call else "primary",
+                "agent_identity_content": agent_identity,
             }
             # 合并外部上下文（由 context_builder 传入 project_root/project_name）
             if extra_context:

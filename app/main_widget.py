@@ -3676,6 +3676,27 @@ class OpenAIChatToolWindow(ToolWindow):
             hook_id = original.get("id", "") if original else ""
             hm = self._settings_popup.hookListCard._hook_manager
 
+            # ── inject_agent_identity hook：同步下拉框选择到 Settings.llm_primary_agent ──
+            # 下拉框是用户主智能体身份定义的源头，写入 Settings 后
+            # AgentManager.get_agent_system_prompt() 会优先用其构建身份内容。
+            if hook_id == "builtin_inject_agent_identity" and "agent" in values:
+                try:
+                    from app.utils.config import Settings
+                    selected_agent = values["agent"]
+                    Settings.get_instance().llm_primary_agent.value = selected_agent
+                    # 切换主智能体后必须清空 session 缓存，否则下次构建会复用旧身份
+                    if self.backend and self.backend.chat_engine:
+                        try:
+                            self.backend.chat_engine._invalidate_session_system_prompt_cache()
+                        except Exception:
+                            pass
+                    logger.info(
+                        f"[_on_hook_edit_saved] llm_primary_agent = {selected_agent}, "
+                        "session cache invalidated"
+                    )
+                except Exception as e:
+                    logger.warning(f"[_on_hook_edit_saved] Failed to sync llm_primary_agent: {e}")
+
             if hook_id and hm:
                 # 编辑已有 hook（edit_hook_by_id 内部处理事件变更移动逻辑）
                 hm.edit_hook_by_id(hook_id, values)

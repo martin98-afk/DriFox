@@ -7,7 +7,10 @@ from uuid import uuid4
 
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QSize
+from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -29,7 +32,7 @@ from qfluentwidgets import (
 
 from app.tools.tool_name_mapper import ToolNameMapper
 from app.utils.design_tokens import ButtonStyles, Colors, Sizes, SwitchStyles, scale_font_size
-from app.utils.utils import get_app_data_dir, get_font_family_css
+from app.utils.utils import get_app_data_dir, get_font_family_css, get_unified_font
 from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
 
@@ -305,6 +308,29 @@ class HookItem(QWidget):
         return raw
 
 
+# ── 为 inject_agent_identity hook 准备的智能体下拉框 ──
+# 设计说明：放弃自定义 QStyledItemDelegate 的双行 item 渲染（与 EDIT_CARD_STYLE
+# 主题冲突导致下拉视图黑屏）。改为：下拉项只显示名称，描述存到 tooltip。
+# 用 NoWheelComboBox（与事件下拉框完全一致），只通过 stylesheet 调整背景色。
+
+
+class _AgentComboBox(NoWheelComboBox):
+    """智能体选择下拉框：复用现有 NoWheelComboBox + tooltip 显示描述
+
+    设计：保持与事件下拉框完全一致（无自定义样式），避免黑屏。
+    - 名称作为显示文本（默认 Qt 样式渲染）
+    - 描述存到 itemData(Qt.ToolTipRole)，鼠标悬停时显示
+    """
+
+    def add_agent(self, name: str, description: str = ""):
+        """添加一个智能体选项（名称 + 描述 tooltip）"""
+        self.addItem(name)
+        idx = self.count() - 1
+        if description:
+            self.setItemData(idx, description, Qt.ToolTipRole)
+            self.setItemData(idx, description, Qt.WhatsThisRole)
+
+
 class HookEditCard(QWidget):
     """
     Hook 编辑卡片（卡片形态）
@@ -315,6 +341,7 @@ class HookEditCard(QWidget):
     - 智能 Matcher 选择：
       - SessionStart → startup/resume/clear/compact 勾选框
       - PreToolUse/PostToolUse → 工具名列表勾选框
+      - BuildSystemPrompt + inject_agent_identity → 智能体下拉框（名称+描述）
       - 其他事件 → 仅文本输入框
     - 勾选框与文本输入框双向同步
     - 来源自动填充（从已加载插件解析）
@@ -334,11 +361,81 @@ class HookEditCard(QWidget):
         self._matcher_checkboxes = []  # [(QPushButton, value), ...]
         self._syncing_matcher = False  # 防递归同步标志
         self._source_display = ""  # 来源显示名称（供外部卡片标题栏展示）
+        self._agents_populated = False  # 防止 _populate_agent_combo 重复填充
         self._setup_ui()
         if not self._is_new:
             self._load_data()
         # 初始化后同步 matcher 状态
         self._sync_matcher_text_from_checks()
+
+    def _is_agent_identity_hook(self) -> bool:
+        """判断当前编辑的是否为 inject_agent_identity 系统 hook"""
+        return self._hook_data.get("id", "") == "builtin_inject_agent_identity"
+
+    def _populate_agent_combo(self):
+        """填充智能体下拉框
+
+        防重复填充：使用 _agents_loaded 标记，若已加载且 AgentManager 数量未变则跳过。
+        每次 _setup_ui / _load_data 都可能触发此函数，所以必须幂等。
+        """
+        from loguru import logger
+        combo = self._agent_combo
+        combo.blockSignals(True)
+        combo.clear()
+
+        try:
+            from app.core.agent import AgentManager
+            am = AgentManager.get_instance()
+            # 确保所有插件 agent 都已加载（避免初始化时序问题）
+            try:
+                from app.core.plugin_manager import PluginManager as _PM
+                _pm = _PM.get_instance()
+                if _pm.is_initialized() and not getattr(am, "_agents", {}):
+                    logger.info("[HookEditCard] PluginManager ready but AgentManager empty, calling reload_agents")
+                    am.reload_agents()
+            except Exception as e:
+                logger.warning(f"[HookEditCard] reload check failed: {e}")
+            # 列出所有非隐藏智能体
+            agents = am.list_agents(include_hidden=False)
+            if not agents:
+                agents = am.list_agents(include_hidden=True)
+            # 按名称排序
+            agents = sorted(agents, key=lambda a: a.name)
+            current_val = ""
+            if not self._is_new:
+                current_val = self._hook_data.get("agent", "")
+            # 用 addItems 一次性加入，避免多次调用 addItem 产生 Qt model 重置 bug
+            agent_names = [a.name for a in agents]
+            if agent_names:
+                combo.addItems(agent_names)
+                # 逐个设置 tooltip（qfluentwidgets.ComboBox.setItemData 只支持 2 参数，
+                # 需要用 setItemData(i, value) + 默认 role，或直接用 item(i).setData）
+                for i, a in enumerate(agents):
+                    desc = a.description if isinstance(a.description, str) else ""
+                    if desc:
+                        # 通过底层 model 设置 tooltip role
+                        try:
+                            combo.model().setData(combo.model().index(i, 0), desc, Qt.ToolTipRole)
+                        except Exception:
+                            pass
+                # 选中默认 agent
+                if current_val and current_val in agent_names:
+                    combo.setCurrentText(current_val)
+                else:
+                    combo.setCurrentIndex(0)
+                logger.info(f"[HookEditCard] Populated agent combo: {combo.count()} items, current={combo.currentText()}")
+            else:
+                combo.addItem("build")
+                try:
+                    combo.model().setData(combo.model().index(0, 0), "默认主智能体", Qt.ToolTipRole)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"[HookEditCard] _populate_agent_combo failed: {e}")
+            combo.clear()
+            combo.addItem("build")
+            combo.addItem(f"（加载失败: {e}）")
+        combo.blockSignals(False)
 
     def get_original_data(self) -> dict:
         """返回原始 hook 数据（编辑时使用），新增时返回空 dict"""
@@ -368,6 +465,13 @@ class HookEditCard(QWidget):
         self.typeCombo.currentTextChanged.connect(self._on_type_changed)
         row, _ = _make_row("类型:", self.typeCombo)
         main_layout.addLayout(row)
+
+        # ── 状态消息（statusMessage，Hook 触发时显示在消息中）──
+        # 放在类型之后、命令之前（用户要求：排在类型之后）
+        self.statusMessageEdit = QLineEdit()
+        self.statusMessageEdit.setPlaceholderText("如：正在注入智能体身份...")
+        status_row, _ = _make_row("状态消息:", self.statusMessageEdit)
+        main_layout.addLayout(status_row)
 
         # ── 命令 ──
         self.commandEdit = _CompactTextEdit()
@@ -424,11 +528,14 @@ class HookEditCard(QWidget):
         matcher_section.setSpacing(4)
 
         # 文本输入框（放在 toggle 区上方）
+        # 用 QFrame 承载整行（含 label），便于 inject_agent_identity hook 时整行隐藏
         self.matcherEdit = QLineEdit()
         self.matcherEdit.setPlaceholderText("选择事件后此处显示对应的匹配示例")
         self.matcherEdit.textChanged.connect(self._on_matcher_text_changed)
-        row, _ = _make_row("Matcher:", self.matcherEdit)
-        matcher_section.addLayout(row)
+        self._matcher_row_frame = QFrame()
+        _matcher_row_inner, _ = _make_row("Matcher:", self.matcherEdit)
+        self._matcher_row_frame.setLayout(_matcher_row_inner)
+        matcher_section.addWidget(self._matcher_row_frame)
 
         # toggle 按钮容器（FlowLayout 宽度自适应换行，右对齐）
         self._matcher_checks_frame = QFrame()
@@ -439,6 +546,16 @@ class HookEditCard(QWidget):
 
         main_layout.addLayout(matcher_section)
 
+        # ── 智能体选择下拉框（仅 inject_agent_identity hook 使用） ──
+        self._agent_row_frame = QFrame()
+        self._agent_row_frame.setVisible(False)
+        self._agent_combo = _AgentComboBox()
+        self._agent_combo.setMinimumWidth(220)
+        self._agent_combo.setMaxVisibleItems(12)
+        agent_row, _ = _make_row("智能体:", self._agent_combo)
+        self._agent_row_frame.setLayout(agent_row)
+        main_layout.addWidget(self._agent_row_frame)
+
         # 初始类型
         self._on_type_changed(self.typeCombo.currentText())
 
@@ -448,6 +565,12 @@ class HookEditCard(QWidget):
 
     def _on_event_changed(self, event_name: str):
         """事件切换时重建 matcher 勾选框 + 更新 placeholder"""
+        # inject_agent_identity hook 强制固定在 BuildSystemPrompt
+        if self._is_agent_identity_hook() and event_name != "BuildSystemPrompt":
+            self.eventCombo.blockSignals(True)
+            self.eventCombo.setCurrentText("BuildSystemPrompt")
+            self.eventCombo.blockSignals(False)
+            return
         self._rebuild_matcher_checks(event_name)
         self._sync_matcher_text_from_checks()
         self._update_matcher_placeholder(event_name)
@@ -494,12 +617,29 @@ class HookEditCard(QWidget):
         self.matcherEdit.setPlaceholderText(ph)
 
     def _rebuild_matcher_checks(self, event_name: str):
-        """根据事件类型重建 matcher 勾选框"""
+        """根据事件类型重建 matcher 勾选框
+
+        特殊处理：inject_agent_identity hook 使用智能体下拉框代替 matcher
+        """
         # 清除旧勾选框
         for cb, _ in self._matcher_checkboxes:
             self._matcher_checks_layout.removeWidget(cb)
             cb.deleteLater()
         self._matcher_checkboxes.clear()
+
+        # ── inject_agent_identity：用智能体下拉框代替 matcher ──
+        if self._is_agent_identity_hook() and event_name == "BuildSystemPrompt":
+            # 隐藏 matcher 输入框（含 label）和 toggle 区
+            self._matcher_row_frame.setVisible(False)
+            self._matcher_checks_frame.setVisible(False)
+            # 显示并填充智能体下拉框
+            self._agent_row_frame.setVisible(True)
+            self._populate_agent_combo()
+            return
+
+        # 普通 matcher：显示文本输入框，隐藏智能体下拉框
+        self._matcher_row_frame.setVisible(True)
+        self._agent_row_frame.setVisible(False)
 
         # 根据事件类型获取选项列表
         options = []
@@ -688,14 +828,16 @@ class HookEditCard(QWidget):
             if self._cmdwin_row:
                 self._cmdwin_row.setVisible(True)
 
-        # matcher
+        # matcher（inject_agent_identity hook 使用智能体下拉框代替）
         matcher = d.get("matcher", "")
         self.matcherEdit.setText(matcher)
 
         # 重建勾选框并同步
         event = d.get("_event", self.eventCombo.currentText())
         self._rebuild_matcher_checks(event)
-        self._sync_matcher_checks_from_text(matcher)
+        # 仅非 agent identity hook 时同步 matcher 勾选框
+        if not self._is_agent_identity_hook():
+            self._sync_matcher_checks_from_text(matcher)
 
         # 来源标注（保存供外部卡片标题栏展示）
         source_type = d.get("_source_type", "")
@@ -710,6 +852,9 @@ class HookEditCard(QWidget):
         if hook_type == "prompt":
             self.addOutputCtxSwitch.setChecked(True)
 
+        # statusMessage（状态消息）
+        self.statusMessageEdit.setText(d.get("statusMessage", "") or "")
+
         # 重新同步 UI 可见性（确保 _cmdwin_row 等与当前数据一致）
         self._on_type_changed(hook_type)
 
@@ -719,7 +864,15 @@ class HookEditCard(QWidget):
     def get_values(self) -> dict:
         hook_type = self.typeCombo.currentText()
         value = self.commandEdit.toPlainText().strip()
-        matcher = self.matcherEdit.text().strip()
+
+        # inject_agent_identity hook：使用智能体下拉框值作为 agent 字段
+        agent_identity_hook = self._is_agent_identity_hook()
+        if agent_identity_hook:
+            # 从下拉框取选中的智能体名，matcher 固定为 "primary"
+            agent_name = self._agent_combo.currentText()
+            matcher = "primary"
+        else:
+            matcher = self.matcherEdit.text().strip()
 
         # prompt 类型始终输出到消息
         add_output = True if hook_type == "prompt" else self.addOutputCtxSwitch.isChecked()
@@ -733,11 +886,18 @@ class HookEditCard(QWidget):
             "add_output_to_context": add_output,
         }
 
+        # inject_agent_identity hook：额外保存选中的智能体名
+        if agent_identity_hook:
+            result["agent"] = self._agent_combo.currentText()
+
         # commandWindows
         cmdwin = self.commandWindowsEdit.toPlainText().strip()
         if cmdwin:
             result["commandWindows"] = cmdwin
-
+        # statusMessage（状态消息，hook 触发时显示在消息列表）
+        status_message = self.statusMessageEdit.text().strip()
+        if status_message:
+            result["statusMessage"] = status_message
         # 清理旧专用字段，避免类型切换时残留
         result.pop("function", None)
         result.pop("url", None)

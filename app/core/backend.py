@@ -83,7 +83,7 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     外层: <system-reminder>...</system-reminder>
     内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
 
-    当传入 status_message 时，在 <system-reminder> 和 <xxx-hook> 之间插入 <status> 标签。
+    当传入 status_message 时，在 <system-reminder> 和 <xxx-hook> 之间以纯文本形式插入状态描述。
 
     与 Claude Code 实际格式对齐：
     - <system-reminder> 是 Claude Code 通用系统注入容器
@@ -93,7 +93,7 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     tag = _event_to_tag(event_name)
     parts = ["<system-reminder>"]
     if status_message:
-        parts.append(f"<status>{status_message}</status>")
+        parts.append(status_message)
     parts.append(f"<{tag}-hook>")
     parts.append(output)
     parts.append(f"</{tag}-hook>")

@@ -287,6 +287,7 @@ class UIEngine(BaseEngine):
         agent_manager = self._get_agent_manager()
         if agent_name is None or agent_name.lower() in ("default", "通用"):
             self._current_agent = "build"
+            self._invalidate_session_system_prompt_cache()
             logger.info("[ChatEngine] Switched to default agent: build")
             self._emit("agent_switched", "build")
             return
@@ -297,8 +298,30 @@ class UIEngine(BaseEngine):
             return
 
         self._current_agent = agent_name
+        # 🔧 修复：切换智能体时必须清空当前 session 的 system_prompt 缓存，
+        # 否则下次 build_messages 会复用旧 agent 的 prompt（包括 BuildSystemPrompt hook 注入的身份定义）
+        self._invalidate_session_system_prompt_cache()
         logger.info(f"[ChatEngine] Switched to agent: {agent_name}")
         self._emit("agent_switched", agent_name)
+
+    def _invalidate_session_system_prompt_cache(self):
+        """清空当前 session 的 system_prompt 缓存，强制下次重建
+
+        当智能体切换、agent 配置变更、hook 配置变更时调用，
+        避免 BuildSystemPrompt hook 注入的旧 agent 身份定义残留。
+        """
+        try:
+            session = self._session_manager.get_current_session()
+            if session is None:
+                return
+            session.system_prompt = ""
+            if hasattr(session, "_system_prompt_agent"):
+                session._system_prompt_agent = ""
+            logger.debug(
+                f"[ChatEngine] Invalidated system_prompt cache for session {session.session_id}"
+            )
+        except Exception as e:
+            logger.warning(f"[ChatEngine] Failed to invalidate system_prompt cache: {e}")
 
     # ========== 消息发送 ==========
 
