@@ -102,7 +102,7 @@ class CommandItemWidget(QWidget):
         # 注意：_name_label 和 _desc_label 的样式在 _apply_style 中动态更新
         self._shortcut_label.setStyleSheet(f"""
             QLabel {{
-                color: {Colors.TEXT_MUTED};
+                color: {Colors.TEXT_SECONDARY};
                 {get_font_family_css()} {font_size_css(10)};
                 background: rgba(128,128,128,0.1);
                 border-radius: 3px;
@@ -190,7 +190,7 @@ class CommandItemWidget(QWidget):
         # 快捷键标签样式：类键盘键帽风格，加粗
         shortcut = self._data.get("shortcut", "")
         if item_type == "command" and shortcut:
-            shortcut_fg = Colors.TEXT_MUTED
+            shortcut_fg = Colors.TEXT_SECONDARY
             self._shortcut_label.setStyleSheet(f"""
                 QLabel {{
                     color: {shortcut_fg};
@@ -357,49 +357,73 @@ class ParameterItemWidget(QWidget):
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(8)
 
-        # 必填/选填标签（放在最前面）
-        if self._param.param_type != "positional":
-            req_tag = QLabel("必填" if self._param.required else "可选")
-            req_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            req_color = Colors.TEXT_ACCENT if self._param.required else Colors.TEXT_MUTED
-            req_tag.setStyleSheet(f"""
-                color: {req_color};
-                background: rgba(128,128,128,0.06);
-                border-radius: 3px;
-                padding: 1px 6px;
-                font-weight: bold;
-            """)
-            layout.addWidget(req_tag)
-
-        # 参数名（加粗）
-        self._name_label = QLabel(self._param.name)
+        # 参数名（必填：前缀红色 ERROR 星号；可选：纯参数名）
+        # 使用 HTML 让 QLabel 自动按 span 着色；color 不走 stylesheet，
+        # 而由 _update_name_label_text 内的 HTML <span> 控制
+        self._name_label = QLabel()
         self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        self._name_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; background: transparent; font-weight: bold;")
         layout.addWidget(self._name_label)
 
-        # 参数说明
+        # 参数说明（占据 stretch 1，最大化利用空间）
+        self._desc_label = None
         if self._param.description:
-            desc_label = _ElidedLabel(self._param.description)
-            desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            desc_label.setMinimumWidth(0)
-            desc_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent;")
-            layout.addWidget(desc_label, 1)
+            self._desc_label = _ElidedLabel(self._param.description)
+            self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._desc_label.setMinimumWidth(0)
+            layout.addWidget(self._desc_label, 1)
 
-        # 类型标签
-        type_map = {"flag": "标志", "value": "值", "positional": "参数"}
-        type_tag = QLabel(type_map.get(self._param.param_type, ""))
-        type_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        type_tag.setStyleSheet(f"""
-            color: {Colors.TEXT_MUTED};
-            background: rgba(128,128,128,0.1);
-            border-radius: 3px;
-            padding: 1px 6px;
-        """)
-        layout.addWidget(type_tag)
+        # 集中应用一次静态样式（颜色 / 字体 / 背景由主题 token 驱动）
+        self._apply_subwidget_styles()
 
+    def _apply_subwidget_styles(self):
+        """刷新 ParameterItemWidget 的子标签样式（颜色、字体、背景）
 
+        颜色 / 字体 / 背景全部由主题 token 驱动；切主题后通过 refresh_style 再次调用即可。
+        字体大小/族使用 font_size_css + get_font_family_css 与全局 UI 字号联动。
+
+        视觉规范：
+        - 参数名：font-size 12、bold；默认色 SEND_BTN_START，必填时 HTML <span> 覆盖星号为 ERROR 红色
+        - 参数说明：font-size 11、TEXT_SECONDARY、stretch 撑满
+        """
+        Colors.refresh()
+        font_css = get_font_family_css()
+        # 参数名（12px + bold；默认色 SEND_BTN_START，必填时 HTML <span> 覆盖星号色为 ERROR）
+        if hasattr(self, '_name_label') and self._name_label is not None:
+            self._name_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.SEND_BTN_START};
+                    background: transparent;
+                    font-weight: bold;
+                    {font_css} {font_size_css(12)};
+                }}
+            """)
+            self._update_name_label_text()
+        # 参数说明（次要：11px + TEXT_SECONDARY，stretch 撑满剩余空间）
+        if getattr(self, '_desc_label', None) is not None:
+            self._desc_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_SECONDARY};
+                    background: transparent;
+                    {font_css} {font_size_css(11)};
+                }}
+            """)
+
+    def _update_name_label_text(self):
+        """根据必填/可选更新参数名（必填时前缀红色 ERROR 星号）
+
+        QLabel 在 RichText 模式下，未包裹在带 color 的 span 内的文本
+        会用默认调色板色（通常为黑），不会继承 stylesheet color。
+        因此把参数名也用 <span> 显式包裹，统一走 SEND_BTN_START。
+        """
+        if not hasattr(self, '_name_label') or self._name_label is None:
+            return
+        escaped = html.escape(self._param.name)
+        star = f'<span style="color: {Colors.ERROR};">*</span>' if self._param.required else ''
+        self._name_label.setText(
+            f'{star}<span style="color: {Colors.SEND_BTN_START};">{escaped}</span>'
+        )
 
     @property
     def param_name(self) -> str:
@@ -411,6 +435,11 @@ class ParameterItemWidget(QWidget):
 
     def set_selected(self, selected: bool):
         self._selected = selected
+        self._apply_style()
+
+    def refresh_style(self):
+        """响应主题切换：刷新子标签样式 + 自身 hover/selected 背景"""
+        self._apply_subwidget_styles()
         self._apply_style()
 
     def _apply_style(self):
@@ -490,18 +519,7 @@ class CommandCard(QWidget):
 
         # 自身样式：使用系统实时卡片背景色，底部直角与输入框融合
         Colors.refresh()
-        self.setStyleSheet(f"""
-            CommandCard {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }}
-        """)
+        self._apply_self_style()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -563,6 +581,89 @@ class CommandCard(QWidget):
         self._detail_container.setStyleSheet("background: transparent; border: none;")
         layout.addWidget(self._detail_container)
 
+    def _apply_self_style(self):
+        """应用 CommandCard 自身的样式（背景/边框/圆角）。
+
+        抽出为独立方法以便主题切换时重新调用。
+        """
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            CommandCard {{
+                background-color: {Colors.REALTIME_BG};
+                border: 1px solid {Colors.REALTIME_BORDER};
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }}
+        """)
+
+    def _apply_scroll_area_styles(self, scroll_area: "QScrollArea"):
+        """应用列表/参数/值三个滚动区的统一样式（滚动条 + viewport）
+
+        Args:
+            scroll_area: 目标 QScrollArea（_detail_params_scroll / _detail_value_scroll）
+        """
+        Colors.refresh()
+        scroll_area.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
+            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
+            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """)
+        scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
+
+    def refresh_style(self):
+        """响应主题切换：刷新 CommandCard 内所有主题相关的样式
+
+        覆盖范围：
+        - CommandCard 自身（背景 / 边框 / 圆角）
+        - detail 容器内的静态 widget（描述 / 位置参数提示 / 静态 hint）
+        - detail 滚动区（参数列表 + 值选择列表）
+        - 命令列表 widget（CommandItemWidget._apply_style）
+        - 参数列表 widget（ParameterItemWidget.refresh_style）
+        - 值选择列表项（按当前选中状态）
+        - 分隔线（如有，刷新颜色）
+        """
+        Colors.refresh()
+        # 1. CommandCard 自身
+        self._apply_self_style()
+        # 2. detail 容器内的静态 widget
+        self._apply_detail_desc_style()
+        self._apply_detail_positional_hint_style()
+        self._apply_detail_hint_style()
+        # 3. detail 滚动区
+        if hasattr(self, '_detail_params_scroll') and self._detail_params_scroll is not None:
+            self._apply_scroll_area_styles(self._detail_params_scroll)
+        if hasattr(self, '_detail_value_scroll') and self._detail_value_scroll is not None:
+            self._apply_scroll_area_styles(self._detail_value_scroll)
+        # 4. 命令列表 widget（hover/selected 背景）
+        for w in list(self._item_widgets):
+            try:
+                w._apply_style()
+            except RuntimeError:
+                continue
+        # 5. 参数列表 widget（背景 + 子标签）
+        for w in list(self._param_widgets):
+            try:
+                w.refresh_style()
+            except RuntimeError:
+                continue
+        # 6. 值选择列表项（按当前选中状态）
+        for i, w in enumerate(self._value_widgets):
+            try:
+                self._apply_value_widget_style(w, selected=(i == self._selected_value_index))
+            except RuntimeError:
+                continue
+        # 7. 分隔线（如有）
+        if self._divider is not None:
+            try:
+                self._divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+            except RuntimeError:
+                pass
+
     def _setup_detail_widget(self):
         """构建 detail 模式下的交互式参数 UI"""
         detail_layout = QVBoxLayout(self._detail_container)
@@ -571,44 +672,25 @@ class CommandCard(QWidget):
 
         # 第一行：命令说明（始终显示）
         self._detail_desc_label = QLabel()
-        self._detail_desc_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
-        """)
         self._detail_desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._detail_desc_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_desc_label)
+        self._apply_detail_desc_style()
 
         # 位置参数提示（交互式参数列表上方显示，如 "<query> — 研究主题"）
         self._detail_positional_hint = QLabel()
-        self._detail_positional_hint.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_ACCENT};
-                {get_font_family_css()} {font_size_css(11)};
-                background: rgba(128,128,128,0.06);
-                border-radius: 4px;
-                padding: 2px 8px;
-                margin: 0;
-            }}
-        """)
         self._detail_positional_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._detail_positional_hint.setWordWrap(True)
         self._detail_positional_hint.setVisible(False)
         detail_layout.addWidget(self._detail_positional_hint)
+        self._apply_detail_positional_hint_style()
 
         # 参数列表滚动区（有 parameters 时显示）
         self._detail_params_scroll = QScrollArea()
         self._detail_params_scroll.setWidgetResizable(True)
         self._detail_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._detail_params_scroll.setStyleSheet(f"""
-            QScrollArea {{ background: transparent; border: none; }}
-            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
-            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
-            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        """)
-        self._detail_params_scroll.viewport().setStyleSheet("background: transparent; border: none;")
+        self._apply_scroll_area_styles(self._detail_params_scroll)
         self._detail_params_scroll.setVisible(False)
 
         self._detail_params_content = QWidget()
@@ -624,15 +706,7 @@ class CommandCard(QWidget):
         self._detail_value_scroll.setWidgetResizable(True)
         self._detail_value_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_value_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._detail_value_scroll.setStyleSheet(f"""
-            QScrollArea {{ background: transparent; border: none; }}
-            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
-            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
-            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        """)
-        self._detail_value_scroll.viewport().setStyleSheet("background: transparent; border: none;")
+        self._apply_scroll_area_styles(self._detail_value_scroll)
         self._detail_value_scroll.setVisible(False)
 
         self._detail_value_content = QWidget()
@@ -645,15 +719,63 @@ class CommandCard(QWidget):
 
         # 回退：静态参数提示（命令无 parameters 时显示）
         self._detail_hint_label = QLabel()
-        self._detail_hint_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
-        """)
         self._detail_hint_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_hint_label)
+        self._apply_detail_hint_style()
 
         # 点击整块等同于选中当前命令并发送
         self._detail_container.setCursor(Qt.PointingHandCursor)
         self._detail_container.mousePressEvent = self._on_detail_clicked
+
+    def _apply_detail_desc_style(self):
+        """刷新 detail 模式命令说明标签的样式"""
+        Colors.refresh()
+        if not hasattr(self, '_detail_desc_label') or self._detail_desc_label is None:
+            return
+        self._detail_desc_label.setStyleSheet(f"""
+            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+        """)
+
+    def _apply_detail_positional_hint_style(self):
+        """刷新 detail 模式位置参数提示标签的样式"""
+        Colors.refresh()
+        if not hasattr(self, '_detail_positional_hint') or self._detail_positional_hint is None:
+            return
+        self._detail_positional_hint.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_ACCENT};
+                {get_font_family_css()} {font_size_css(11)};
+                background: {Colors.DIVIDER_COLOR};
+                border-radius: 4px;
+                padding: 2px 8px;
+                margin: 0;
+            }}
+        """)
+
+    def _apply_detail_hint_style(self):
+        """刷新 detail 模式静态参数提示标签的样式"""
+        Colors.refresh()
+        if not hasattr(self, '_detail_hint_label') or self._detail_hint_label is None:
+            return
+        self._detail_hint_label.setStyleSheet(f"""
+            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+        """)
+
+    def _apply_value_widget_style(self, widget: "QLabel", selected: bool = False):
+        """设置值选择列表项的样式（统一入口，供创建/刷新/选中切换调用）
+
+        Args:
+            widget: 值列表 QLabel
+            selected: 是否处于选中状态（高亮背景）
+        """
+        Colors.refresh()
+        bg = Colors.REALTIME_TAG_BG if selected else "transparent"
+        widget.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY}; background: {bg};
+                padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
+            }}
+        """)
 
     # ---- Detail 模式 ----
 
@@ -951,12 +1073,7 @@ class CommandCard(QWidget):
             item = QLabel(val)
             item.setFixedHeight(ITEM_HEIGHT)
             item.setCursor(Qt.PointingHandCursor)
-            item.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_PRIMARY}; background: transparent;
-                    padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
-                }}
-            """)
+            self._apply_value_widget_style(item, selected=False)
             # 用 lambda 捕获值
             item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
             self._detail_value_layout.addWidget(item)
@@ -1080,12 +1197,7 @@ class CommandCard(QWidget):
             item = QLabel(val)
             item.setFixedHeight(ITEM_HEIGHT)
             item.setCursor(Qt.PointingHandCursor)
-            item.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_PRIMARY}; background: transparent;
-                    padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
-                }}
-            """)
+            self._apply_value_widget_style(item, selected=False)
             item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
             self._detail_value_layout.addWidget(item)
             self._value_widgets.append(item)
@@ -1301,7 +1413,6 @@ class CommandCard(QWidget):
 
     def _update_value_selection(self):
         """更新值列表选中高亮，滚动到可见"""
-        # Colors.refresh() 不在导航路径中调用——颜色在 show_card 时刷新一次即可
         old_idx = self._last_selected_value_index if hasattr(self, '_last_selected_value_index') else -1
         new_idx = self._selected_value_index
         self._last_selected_value_index = new_idx
@@ -1309,20 +1420,11 @@ class CommandCard(QWidget):
         # 只更新变化的项
         if old_idx != new_idx:
             if 0 <= old_idx < len(self._value_widgets):
-                self._value_widgets[old_idx].setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
+                self._apply_value_widget_style(self._value_widgets[old_idx], selected=False)
             if 0 <= new_idx < len(self._value_widgets):
-                self._value_widgets[new_idx].setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
+                self._apply_value_widget_style(self._value_widgets[new_idx], selected=True)
         elif 0 <= new_idx < len(self._value_widgets):
-            self._value_widgets[new_idx].setStyleSheet(f"""
-                QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
-                         padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-            """)
+            self._apply_value_widget_style(self._value_widgets[new_idx], selected=True)
 
         # 滚动到可见
         if 0 <= self._selected_value_index < len(self._value_widgets):
