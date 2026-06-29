@@ -261,7 +261,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
-        self.backend = ChatBackend()
+        self.backend = ChatBackend(window_id=self._window_id)
         # 注入工具权限控制器（在 initialize 之前,engine 创建时会用到）
         self.backend.set_tool_permission_controller(self._tool_permission_controller)
         self.backend.initialize(
@@ -852,6 +852,19 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._tool_permission_controller.copy_state_from(self._tool_permission_controller)
             except Exception:
                 pass  # 忽略权限复制失败
+
+            # ── 多窗口隔离：复制源窗口的 hook 预设到新窗口 ──
+            try:
+                src_pm = self.backend.hook_manager.get_hook_preset_manager()
+                dst_pm = new_instance.backend.hook_manager.get_hook_preset_manager()
+                src_current = src_pm.get_current_preset_name()
+                if src_current and dst_pm.has_preset(src_current):
+                    # 在新窗口的 per_window 记录中写入源窗口的预设
+                    dst_pm.set_current_preset(src_current)
+                    # 实际应用该预设到新窗口
+                    new_instance.backend.hook_manager.apply_preset(src_current)
+            except Exception:
+                pass  # 忽略 hook 预设复制失败
 
             # 设置 session 初始化的标志，避免重复创建新 session
             # 并标记为新会话模式，跳过历史会话恢复
@@ -1569,6 +1582,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "subagents": self._handle_subagents_command,
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
+            "hook-preset": self._handle_hook_preset_command,
         }
 
         # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
@@ -3920,7 +3934,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     hm._override_manager.reload()
                     # 2. 重新加载全局 hooks 配置（user-custom hooks 开关存在于此）
                     hm.reload_global_hooks(str(hook_card._hooks_config_file))
-                hook_card._refresh(reload=True)
+                    # 3. 重新加载预设数据（多窗口预设同步）
+                    pm = hm.get_hook_preset_manager()
+                    pm.reload()
+                    hook_card._reload_preset_combo()
+                    hook_card._refresh(reload=True)
 
     def _on_mcp_servers_toggled(self):
         """MCP 服务器开关变更 → 广播到其他窗口刷新列表"""
@@ -9351,6 +9369,117 @@ class OpenAIChatToolWindow(ToolWindow):
 
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
+
+    def _get_next_hook_preset(self, presets: list) -> str:
+        """获取下一个预设名称（循环）"""
+        try:
+            hook_mgr = self.backend.hook_manager
+            preset_mgr = hook_mgr._preset_manager
+            current = preset_mgr.get_current_preset_name()
+            if current in presets:
+                idx = presets.index(current)
+                next_idx = (idx + 1) % len(presets)
+                return presets[next_idx]
+        except Exception:
+            pass
+        return presets[0]
+
+    def _handle_hook_preset_command(self, args: str):
+        """/hook-preset 命令：快速切换 Hook 预设
+
+        参数：
+          无参数 → 切换到下一个预设
+          <name> → 切换到指定预设
+        """
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        hook_mgr = self.backend.hook_manager
+        if not hook_mgr:
+            InfoBar.warning(
+                title="Hook 未就绪",
+                content="Hook 管理器未初始化",
+                parent=self,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        presets = hook_mgr.get_preset_names()
+        if not presets:
+            InfoBar.info(
+                title="无可用预设",
+                content="当前没有可用的 Hook 预设，请在设置中创建一个",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        args = (args or "").strip()
+
+        # 确定目标预设
+        if args:
+            if args in presets:
+                target = args
+            else:
+                # 参数不匹配，切到下一个
+                target = self._get_next_hook_preset(presets)
+        else:
+            # 无参数，切换到下一个
+            target = self._get_next_hook_preset(presets)
+
+        # 应用预设
+        success = hook_mgr.apply_preset(target)
+        if success:
+            # 同步刷新所有窗口（当前窗口 + 其他窗口）
+            self._sync_hook_preset_to_all_windows()
+            current = hook_mgr.get_current_preset_name()
+            InfoBar.success(
+                title="Hook 预设",
+                content=f"已切换到「{current}」",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.error(
+                title="切换失败",
+                content=f"无法切换至「{target}」预设",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    def _sync_hook_preset_to_all_windows(self):
+        """预设切换后同步所有窗口的 Hook 状态 + 预设数据
+
+        当前窗口和其他窗口都会刷新，确保 Hook 开关和预设下拉框一致。
+        """
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            hook_card = getattr(settings_popup, "hookListCard", None)
+            if hook_card is None:
+                continue
+            hm = hook_card._hook_manager
+            if hm is None:
+                continue
+
+            # 1. 重新加载覆写层（plugin/skill hooks 开关存在于此）
+            hm._override_manager.reload()
+            # 2. 重新加载全局 hooks 配置（user-custom hooks 开关存在于此）
+            if hook_card._hooks_config_file:
+                hm.reload_global_hooks(str(hook_card._hooks_config_file))
+            # 3. 重新加载预设数据（多窗口预设同步）
+            pm = hm.get_hook_preset_manager()
+            pm.reload()
+            # 4. 刷新 UI（如果设置页可见）
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                hook_card._reload_preset_combo()
+                hook_card._refresh(reload=True)
 
     def _update_subagents_param_description(self):
         """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""

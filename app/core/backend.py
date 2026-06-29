@@ -208,8 +208,11 @@ class ChatBackend(QObject):
     # _watch_loop 检测到新插件时，用此 sentinel 作为 plugin_name 标记走增量加载路径
     _NEW_PLUGIN_SENTINEL = "__NEW__"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, window_id: str = ""):
         super().__init__(parent)
+
+        # 窗口标识（用于 per-window 隔离，如 hook 预设）
+        self._window_id: str = window_id
 
         # 核心组件（后端自己创建）
         self._session_manager: Optional[SessionManager] = None
@@ -324,7 +327,7 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] MemoryManager 创建完成")
 
         # 3. 创建 HookManager（必须在 create_session 之前）
-        self._hook_manager = HookManager(self._thread_pool)
+        self._hook_manager = HookManager(self._thread_pool, window_id=self._window_id)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 

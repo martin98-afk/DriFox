@@ -716,13 +716,16 @@ class HookManager:
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
 
-    def __init__(self, thread_pool: Optional[QThreadPool] = None):
+    def __init__(self, thread_pool: Optional[QThreadPool] = None, window_id: str = ""):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
         self._hooks: Dict[str, List[HookMatchRule]] = HookManager._shared_hooks
         self._skill_to_hooks: Dict[str, List[tuple[str, int]]] = HookManager._shared_skill_to_hooks
 
         # 线程池
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
+
+        # 窗口标识（用于 per-window 预设隔离）
+        self._window_id: str = window_id
 
         # 完成回调（每个窗口独立）(event_name, output, success, status_message)
         self._on_finished_callback: Optional[Callable[[str, str, bool, str], None]] = None
@@ -747,8 +750,8 @@ class HookManager:
         # 覆写层管理器
         self._override_manager = HookOverrideManager()
 
-        # 预设管理器（所有窗口共享同一个实例）
-        self._preset_manager = HookPresetManager()
+        # 预设管理器（每个窗口独立实例，按 window_id 隔离）
+        self._preset_manager = HookPresetManager(window_id=window_id)
 
     def _is_user_custom_hook(self, hook: Hook) -> bool:
         """判断 hook 是否为用户自定义（非 plugin/skill）"""
@@ -2176,7 +2179,11 @@ class HookPresetManager:
 
     格式:
     {
-        "current": "coding",
+        "current": "coding",           # 全局默认预设（新窗口使用）
+        "per_window": {                # 各窗口独立选择的预设（窗口ID → 预设名）
+            "a1b2c3d4": "coding",
+            "e5f6g7h8": "writing"
+        },
         "presets": {
             "coding": {
                 "name": "编码模式",
@@ -2196,9 +2203,10 @@ class HookPresetManager:
     # 预留的默认预设名称
     DEFAULT_PRESET = "default"
 
-    def __init__(self):
+    def __init__(self, window_id: str = ""):
         self._storage_path: Optional[str] = None
-        self._data: Dict[str, Any] = {"current": self.DEFAULT_PRESET, "presets": {}}
+        self._data: Dict[str, Any] = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
+        self._window_id: str = window_id
         self._init_storage_path()
 
     def _init_storage_path(self):
@@ -2214,15 +2222,18 @@ class HookPresetManager:
         """从文件加载预设配置"""
         if not self._storage_path or not os.path.exists(self._storage_path):
             # 文件不存在时初始化默认预设
-            self._data = {"current": self.DEFAULT_PRESET, "presets": {}}
+            self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
             return
         try:
             with open(self._storage_path, "r", encoding="utf-8") as f:
                 self._data = json.load(f)
+            # 兼容旧格式：若缺少 per_window 字段，自动补全
+            if "per_window" not in self._data:
+                self._data["per_window"] = {}
             logger.debug(f"[HookPresetManager] Loaded {len(self._data.get('presets', {}))} presets")
         except Exception as e:
             logger.error(f"[HookPresetManager] Failed to load presets: {e}")
-            self._data = {"current": self.DEFAULT_PRESET, "presets": {}}
+            self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
 
     def _save(self):
         """保存预设配置到文件"""
@@ -2246,7 +2257,16 @@ class HookPresetManager:
         return list(self._data.get("presets", {}).keys())
 
     def get_current_preset_name(self) -> str:
-        """获取当前激活的预设名称"""
+        """获取当前窗口激活的预设名称
+
+        优先返回 per_window 中当前窗口的记录，
+        若无窗口级记录则返回全局默认 current。
+        """
+        if self._window_id:
+            per_window = self._data.get("per_window", {})
+            win_preset = per_window.get(self._window_id)
+            if win_preset and win_preset in self._data.get("presets", {}):
+                return win_preset
         return self._data.get("current", self.DEFAULT_PRESET)
 
     def get_preset(self, name: str) -> Optional[dict]:
@@ -2308,6 +2328,11 @@ class HookPresetManager:
         # 如果重命名的是当前预设，同步更新
         if self._data.get("current") == old_name:
             self._data["current"] = new_name
+        # 同步更新 per_window 中的引用（所有窗口）
+        per_window = self._data.get("per_window", {})
+        for wid, preset_name in list(per_window.items()):
+            if preset_name == old_name:
+                per_window[wid] = new_name
 
         self._save()
         return True
@@ -2324,16 +2349,30 @@ class HookPresetManager:
         if self._data.get("current") == name:
             available = list(presets.keys())
             self._data["current"] = available[0] if available else self.DEFAULT_PRESET
+        # 清理 per_window 中对已删除预设的引用（所有窗口）
+        per_window = self._data.get("per_window", {})
+        for wid, preset_name in list(per_window.items()):
+            if preset_name == name or preset_name not in presets:
+                del per_window[wid]
 
         self._save()
         return True
 
     def set_current_preset(self, name: str) -> bool:
-        """设置当前激活的预设（不实际应用，只记录）"""
+        """设置当前窗口激活的预设（不实际应用，只记录）
+
+        如果有 window_id，记录到 per_window；
+        同时更新全局 current 作为新窗口的默认值。
+        """
         presets = self._data.get("presets", {})
         if name not in presets:
             return False
+        # 始终更新全局 current（新窗口以此为默认值）
         self._data["current"] = name
+        # 如果有 window_id，记录到 per_window
+        if self._window_id:
+            per_window = self._data.setdefault("per_window", {})
+            per_window[self._window_id] = name
         self._save()
         return True
 
@@ -2400,6 +2439,9 @@ class HookPresetManager:
 
         # 如果是覆盖保存且当前没有预设指向它，自动设为当前
         self._data["current"] = name
+        if self._window_id:
+            per_window = self._data.setdefault("per_window", {})
+            per_window[self._window_id] = name
         self._save()
         logger.info(f"[HookPresetManager] Saved current state as preset '{name}' ({len(hook_states)} hooks)")
         return True
@@ -2482,8 +2524,11 @@ class HookPresetManager:
             except Exception as e:
                 logger.warning(f"[HookPresetManager] Failed to set agent identity: {e}")
 
-        # 4. 更新当前预设记录
+        # 4. 更新当前预设记录（per-window + 全局默认）
         self._data["current"] = name
+        if self._window_id:
+            per_window = self._data.setdefault("per_window", {})
+            per_window[self._window_id] = name
         self._save()
 
         logger.info(f"[HookPresetManager] Applied preset '{name}': toggled {changed_count} hooks")
