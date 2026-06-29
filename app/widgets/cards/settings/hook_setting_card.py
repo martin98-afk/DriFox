@@ -957,44 +957,34 @@ class HookListSettingCard(ExpandSettingCard):
         )
         preset_layout.addWidget(preset_label)
 
-        # 预设下拉框
+        # 预设下拉框（stretch 1 填满整行）
         self._preset_combo = ComboBox(self._preset_bar)
-        self._preset_combo.setMinimumWidth(140)
-        self._preset_combo.setMaximumWidth(200)
+        self._preset_combo.setMinimumWidth(100)
         self._preset_combo.currentTextChanged.connect(self._on_preset_selected)
-        preset_layout.addWidget(self._preset_combo)
+        preset_layout.addWidget(self._preset_combo, 1)
 
         preset_layout.addSpacing(4)
 
-        # 保存按钮（覆盖当前预设）
-        self._save_btn = ToolButton(FluentIcon.SAVE, self._preset_bar)
-        self._save_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
-        self._save_btn.setToolTip("保存当前状态到当前预设")
-        self._save_btn.clicked.connect(self._save_current_preset)
-        preset_layout.addWidget(self._save_btn)
-
         # 新建预设
         self._new_btn = ToolButton(FluentIcon.ADD, self._preset_bar)
-        self._new_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._new_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self._new_btn.setToolTip("新建预设")
         self._new_btn.clicked.connect(self._new_preset)
         preset_layout.addWidget(self._new_btn)
 
         # 重命名预设
         self._rename_btn = ToolButton(FluentIcon.EDIT, self._preset_bar)
-        self._rename_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._rename_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self._rename_btn.setToolTip("重命名预设")
         self._rename_btn.clicked.connect(self._rename_preset)
         preset_layout.addWidget(self._rename_btn)
 
         # 删除预设
         self._del_preset_btn = ToolButton(FluentIcon.DELETE, self._preset_bar)
-        self._del_preset_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._del_preset_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self._del_preset_btn.setToolTip("删除预设")
         self._del_preset_btn.clicked.connect(self._delete_preset)
         preset_layout.addWidget(self._del_preset_btn)
-
-        preset_layout.addStretch(1)
 
         # 预设 bar 不固定在 viewLayout 中——而是放在 header 区域
         # 先把预设 bar 加到 viewLayout 待会 render 时再挪
@@ -1072,19 +1062,6 @@ class HookListSettingCard(ExpandSettingCard):
             # 刷新 UI
             self._refresh(reload=True)
             self.hooksChanged.emit()
-
-    def _save_current_preset(self):
-        """保存当前状态到当前预设"""
-        if not self._hook_manager:
-            return
-        current = self._preset_combo.currentText()
-        if not current:
-            return
-
-        self._hook_manager.save_preset(current)
-        from PyQt5.QtWidgets import QToolTip
-
-        QToolTip.showText(QPoint(0, 0), f"已保存到预设「{current}」")
 
     def _new_preset(self):
         """新建预设"""
@@ -1276,10 +1253,20 @@ class HookListSettingCard(ExpandSettingCard):
             self.hooksChanged.emit()
 
     def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
-        """切换 hook 启用状态（仅持久化 + 通知，不重建 UI）"""
+        """切换 hook 启用状态（自动持久化 + 保存预设 + 通知）"""
         if self._hook_manager:
             self._hook_manager.toggle_hook_by_id(hook_id, enabled)
+            # 自动保存到当前预设
+            self._auto_save_preset()
             self.hooksChanged.emit()
+
+    def _auto_save_preset(self):
+        """自动保存当前 hook 状态到当前预设"""
+        if not self._hook_manager:
+            return
+        current = self._preset_combo.currentText()
+        if current:
+            self._hook_manager.save_preset(current)
 
     def _add_hook(
         self,
