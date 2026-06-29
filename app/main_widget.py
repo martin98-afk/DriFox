@@ -9529,6 +9529,10 @@ class OpenAIChatToolWindow(ToolWindow):
         使用与 hook 相同的 _hook_message_queue 机制，worker 在下一轮 API 调用前
         自动消费队列并注入到上下文，LLM 在下一轮响应中即可感知完成信息。
 
+        优化：流式场景下直接注入子智能体的执行结果，不再要求 LLM 调用
+        subagent_status 去查询——LLM 在下一轮响应中直接看到结果。
+        只有用户中断流式后，才需要使用 subagent_status 查询。
+
         Args:
             task_id: 任务 ID（汇总消息传 "__batch_summary__"）
             result: 执行结果
@@ -9541,13 +9545,18 @@ class OpenAIChatToolWindow(ToolWindow):
             # 最终汇总消息
             content = result
         else:
-            # 单个任务完成消息
+            # 单个任务完成消息：直接嵌入执行结果
             status_icon = "✅" if success else "❌"
-            desc_preview = task_description[:80] + ("..." if len(task_description) > 80 else "")
             agent_label = f"[{agent_name}]" if agent_name else ""
+            # 结果截断以防太长
+            MAX_RESULT_CHARS = 4096
+            if result and len(result) > MAX_RESULT_CHARS:
+                result_preview = result[:MAX_RESULT_CHARS] + f"\n\n[... 已省略 {len(result) - MAX_RESULT_CHARS} 个字符 ...]"
+            else:
+                result_preview = result or "(无输出)"
             content = (
-                f"子智能体任务完成: {status_icon} {agent_label} {desc_preview} (id: {task_id})\n"
-                f"如需查看详细执行结果，请调用 subagent_status 查询。"
+                f"子智能体任务完成: {status_icon} {agent_label} {task_description} (id: {task_id})\n"
+                f"执行结果：\n{result_preview}"
             )
 
         # 使用 hook 消息格式包裹
@@ -9570,6 +9579,9 @@ class OpenAIChatToolWindow(ToolWindow):
         三种场景：
         1. 流式中回调（LLM 调用子智能体，持续流式）：注入汇总到流，不中断
         2. 非流式中回调（如 /compact 手动命令）：强制中断并创建新对话轮次
+
+        优化：流式场景下直接注入每个任务的执行结果，不再要求 LLM 调用
+        subagent_status 查询。只有非流式中断场景才需要后续主动查询。
         """
         # 只提取本次批次完成的任务信息（不是所有历史任务）
         batch_ids = sub_agent_mgr._batch_task_ids
@@ -9577,12 +9589,16 @@ class OpenAIChatToolWindow(ToolWindow):
         for tid in batch_ids:
             task_info = sub_agent_mgr._finished_tasks.get(tid, {})
             is_error = bool(task_info.get("error"))
+            result_text = task_info.get("result", "") or "(无输出)"
+            error_text = task_info.get("error", "") or ""
             batch_tasks.append(
                 {
                     "task_id": tid,
                     "agent_name": task_info.get("agent_name", ""),
                     "task_description": task_info.get("task_description", ""),
                     "success": not is_error,
+                    "result": result_text,
+                    "error": error_text,
                 }
             )
 
