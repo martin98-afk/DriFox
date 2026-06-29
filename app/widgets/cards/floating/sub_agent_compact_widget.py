@@ -107,7 +107,17 @@ class _AgentTaskRow(QFrame):
     # ── UI 构建 ──────────────────────────────────────
 
     def _setup_ui(self):
-        self.setStyleSheet("QFrame { background: transparent; border: none; }")
+        self.setObjectName("AgentTaskRow")
+        self.setStyleSheet(f"""
+            #AgentTaskRow {{
+                background: rgba(255,255,255,0.03);
+                border: none;
+                border-radius: 6px;
+            }}
+            #AgentTaskRow:hover {{
+                background: rgba(255,255,255,0.06);
+            }}
+        """)
 
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(0, 0, 0, 0)
@@ -115,10 +125,20 @@ class _AgentTaskRow(QFrame):
 
         # ── 顶栏行 ──
         self._header_widget = QFrame(self)
-        self._header_widget.setStyleSheet("QFrame { background: transparent; border: none; }")
+        self._header_widget.setObjectName("AgentTaskHeader")
+        self._header_widget.setStyleSheet("QFrame#AgentTaskHeader { background: transparent; border: none; }")
         header_layout = QHBoxLayout(self._header_widget)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(3, 5, 6, 5)
         header_layout.setSpacing(6)
+
+        # 【展开指示器 → 放到最前面】
+        self._expand_indicator = QLabel("▾", self._header_widget)
+        self._expand_indicator.setFont(get_unified_font(10))
+        self._expand_indicator.setFixedWidth(14)
+        Colors.refresh()
+        self._expand_indicator.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
+        self._expand_indicator.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(self._expand_indicator)
 
         # 旋转图标
         self._rotating_icon.setFixedSize(16, 16)
@@ -131,7 +151,7 @@ class _AgentTaskRow(QFrame):
         Colors.refresh()
         self.agent_label.setStyleSheet(
             f"color: {Colors.REALTIME_ACCENT}; background-color: {Colors.REALTIME_TAG_BG}; "
-            f"padding: 0px 0px; border-radius: 4px;"
+            f"padding: 1px 4px; border-radius: 4px;"
         )
         header_layout.addWidget(self.agent_label)
 
@@ -149,12 +169,6 @@ class _AgentTaskRow(QFrame):
         self.desc_label.setMinimumWidth(20)
         header_layout.addWidget(self.desc_label, 1)
 
-        # 展开指示器
-        self._expand_indicator = QLabel("▾", self._header_widget)
-        self._expand_indicator.setFont(get_unified_font(8))
-        self._expand_indicator.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
-        header_layout.addWidget(self._expand_indicator)
-
         # 工具调用次数
         self.tool_count_label = QLabel("🔧0", self._header_widget)
         self.tool_count_label.setFont(get_unified_font(9))
@@ -171,7 +185,8 @@ class _AgentTaskRow(QFrame):
 
         # ── 详情面板（默认隐藏） ──
         self._detail_panel = QFrame(self)
-        self._detail_panel.setStyleSheet("QFrame { background: transparent; border: none; }")
+        self._detail_panel.setObjectName("AgentTaskDetail")
+        self._detail_panel.setStyleSheet("QFrame#AgentTaskDetail { background: transparent; border: none; }")
         self._detail_panel.setVisible(False)
         self._setup_detail_panel()
         self._main_layout.addWidget(self._detail_panel)
@@ -181,13 +196,13 @@ class _AgentTaskRow(QFrame):
         Colors.refresh()
         # 使用 2 列网格布局，每个格子内含 icon+label
         detail_layout = QGridLayout(self._detail_panel)
-        detail_layout.setContentsMargins(22, 2, 0, 2)
-        detail_layout.setSpacing(4)
+        detail_layout.setContentsMargins(28, 4, 8, 4)
+        detail_layout.setSpacing(6)
 
         def _make_item(icon_char: str, text: str, text_color: str = None) -> tuple:
             """返回 (icon_widget, label_widget)"""
             icon = QLabel(icon_char, self._detail_panel)
-            icon.setFont(get_unified_font(8))
+            icon.setFont(get_unified_font(9))
             label = QLabel(text, self._detail_panel)
             label.setFont(get_unified_font(8))
             c = text_color if text_color else f"{Colors.REALTIME_TEXT_SECONDARY}"
@@ -338,14 +353,24 @@ class _AgentTaskRow(QFrame):
     def refresh_row_style(self):
         """响应主题切换，刷新所有标签颜色"""
         Colors.refresh()
+        self.setStyleSheet(f"""
+            #AgentTaskRow {{
+                background: rgba(255,255,255,0.03);
+                border: none;
+                border-radius: 6px;
+            }}
+            #AgentTaskRow:hover {{
+                background: rgba(255,255,255,0.06);
+            }}
+        """)
         self.agent_label.setStyleSheet(
             f"color: {Colors.REALTIME_ACCENT}; background-color: {Colors.REALTIME_TAG_BG}; "
-            f"padding: 0px 0px; border-radius: 4px;"
+            f"padding: 1px 4px; border-radius: 4px;"
         )
         self.desc_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self.tool_count_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self.time_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
-        self._expand_indicator.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+        self._expand_indicator.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
         self._status_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._model_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._tool_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
@@ -479,8 +504,8 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._scroll_content = QWidget(self._scroll_area)
         self._scroll_content.setStyleSheet("background: transparent;")
         self._body_layout = QVBoxLayout(self._scroll_content)
-        self._body_layout.setContentsMargins(12, 0, 0, 0)
-        self._body_layout.setSpacing(2)
+        self._body_layout.setContentsMargins(0, 0, 8, 0)
+        self._body_layout.setSpacing(4)
 
         self._scroll_area.setWidget(self._scroll_content)
         main_layout.addWidget(self._scroll_area, 1)
