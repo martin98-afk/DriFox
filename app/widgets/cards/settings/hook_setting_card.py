@@ -1092,7 +1092,7 @@ class HookListSettingCard(ExpandSettingCard):
             hint="将当前所有 Hook 的开关状态保存为新预设",
             confirm_text="创建",
             cancel_text="取消",
-            parent=self,
+            parent=self.window(),
         )
         if not dialog.exec_():
             return
@@ -1125,7 +1125,7 @@ class HookListSettingCard(ExpandSettingCard):
             default_text=current,
             confirm_text="重命名",
             cancel_text="取消",
-            parent=self,
+            parent=self.window(),
         )
         if not dialog.exec_():
             return
@@ -1158,7 +1158,7 @@ class HookListSettingCard(ExpandSettingCard):
             QToolTip.showText(QPoint(0, 0), "默认预设不可删除")
             return
 
-        msg = MessageBox("确认删除", f"确定要删除预设「{current}」吗？", self)
+        msg = MessageBox("确认删除", f"确定要删除预设「{current}」吗？", self.window())
         msg.yesButton.setText("删除")
         msg.cancelButton.setText("取消")
         if not msg.exec_():

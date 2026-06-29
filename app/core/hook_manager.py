@@ -2469,6 +2469,16 @@ class HookPresetManager:
                 if current_agent != agent_identity:
                     Settings.get_instance().llm_primary_agent.value = agent_identity
                     logger.info(f"[HookPresetManager] Switched agent identity to '{agent_identity}'")
+
+                # 同时更新 inject_agent_identity hook 的 agent 字段（覆写层）
+                # 让 hook 数据中也持有正确的 agent 值，编辑卡片打开时能正确显示
+                hook_result = hook_manager._find_hook_by_id("builtin_inject_agent_identity")
+                if hook_result:
+                    _, _, _, hook_obj = hook_result
+                    if not hook_manager._is_user_custom_hook(hook_obj):
+                        hook_manager._override_manager.set_hook_overrides(
+                            "builtin_inject_agent_identity", {"agent": agent_identity}
+                        )
             except Exception as e:
                 logger.warning(f"[HookPresetManager] Failed to set agent identity: {e}")
 
