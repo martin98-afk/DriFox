@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     PushButton,
@@ -44,11 +45,11 @@ from app.widgets.elided_label import _ElidedLabel
 HOOK_EVENT_ORDER = [
     "BuildSystemPrompt",
     "SessionStart",
-    "PreUserMessage", 
+    "PreUserMessage",
     "UserPromptSubmit",
     "PostUserMessage",
     "PreAssistantMessage",
-    "PreToolUse", 
+    "PreToolUse",
     "PostToolUse",
     "PostAssistantMessage",
     "Stop",
@@ -191,8 +192,9 @@ class _FlowLayout(QLayout):
 
 class HookItem(QWidget):
     """单个 Hook 条目"""
+
     removed = pyqtSignal(str)  # hook_id
-    edited = pyqtSignal(str)   # hook_id
+    edited = pyqtSignal(str)  # hook_id
     toggled = pyqtSignal(str, bool)  # hook_id, enabled
 
     def __init__(self, hook_data: dict, parent=None):
@@ -238,9 +240,7 @@ class HookItem(QWidget):
         display_cmd = self._get_effective_command()
         self.commandLabel = _ElidedLabel(display_cmd, self)
         self.commandLabel.setObjectName("titleLabel")
-        self.commandLabel.setStyleSheet(
-            f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-        )
+        self.commandLabel.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(13)}px;")
         self.commandLabel.setMinimumWidth(40)
 
         # Windows 标签（仅在 commandWindows 存在时显示）
@@ -379,16 +379,19 @@ class HookEditCard(QWidget):
         每次 _setup_ui / _load_data 都可能触发此函数，所以必须幂等。
         """
         from loguru import logger
+
         combo = self._agent_combo
         combo.blockSignals(True)
         combo.clear()
 
         try:
             from app.core.agent import AgentManager
+
             am = AgentManager.get_instance()
             # 确保所有插件 agent 都已加载（避免初始化时序问题）
             try:
                 from app.core.plugin_manager import PluginManager as _PM
+
                 _pm = _PM.get_instance()
                 if _pm.is_initialized() and not getattr(am, "_agents", {}):
                     logger.info("[HookEditCard] PluginManager ready but AgentManager empty, calling reload_agents")
@@ -423,7 +426,9 @@ class HookEditCard(QWidget):
                     combo.setCurrentText(current_val)
                 else:
                     combo.setCurrentIndex(0)
-                logger.info(f"[HookEditCard] Populated agent combo: {combo.count()} items, current={combo.currentText()}")
+                logger.info(
+                    f"[HookEditCard] Populated agent combo: {combo.count()} items, current={combo.currentText()}"
+                )
             else:
                 combo.addItem("build")
                 try:
@@ -578,41 +583,21 @@ class HookEditCard(QWidget):
     def _update_matcher_placeholder(self, event_name: str):
         """根据事件类型更新 matcher 输入框的占位提示"""
         placeholders = {
-            "BuildSystemPrompt": (
-                "匹配智能体角色：primary（主智能体）| subagent（子智能体）"
-            ),
-            "SessionStart": (
-                "匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）"
-            ),
-            "UserPromptSubmit": (
-                "匹配用户提交的提问内容，正则表达式，如 .*帮助.* 或 .*错误.*"
-            ),
-            "PreUserMessage": (
-                "匹配即将发送的用户消息，正则表达式，如 .*安全.* 或 .*密码.*"
-            ),
-            "PostUserMessage": (
-                "匹配已处理的用户消息，正则表达式，如 .*代码.* 或 .*文件.*"
-            ),
-            "PreAssistantMessage": (
-                "匹配即将回复的上下文（基于用户消息），如 .*总结.* 或 .*翻译.*"
-            ),
-            "PostAssistantMessage": (
-                "匹配助手回复的内容，正则表达式，如 .*敏感信息.* 或 .*请注意.*"
-            ),
-            "Stop": (
-                "匹配流式输出停止时的回复内容，如 .*完成.* 或 .*错误.*"
-            ),
+            "BuildSystemPrompt": ("匹配智能体角色：primary（主智能体）| subagent（子智能体）"),
+            "SessionStart": ("匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）"),
+            "UserPromptSubmit": ("匹配用户提交的提问内容，正则表达式，如 .*帮助.* 或 .*错误.*"),
+            "PreUserMessage": ("匹配即将发送的用户消息，正则表达式，如 .*安全.* 或 .*密码.*"),
+            "PostUserMessage": ("匹配已处理的用户消息，正则表达式，如 .*代码.* 或 .*文件.*"),
+            "PreAssistantMessage": ("匹配即将回复的上下文（基于用户消息），如 .*总结.* 或 .*翻译.*"),
+            "PostAssistantMessage": ("匹配助手回复的内容，正则表达式，如 .*敏感信息.* 或 .*请注意.*"),
+            "Stop": ("匹配流式输出停止时的回复内容，如 .*完成.* 或 .*错误.*"),
         }
         # PreToolUse / PostToolUse 用 tool:xxx 示例
-        tool_ph = (
-            "匹配工具：tool:edit（精确）| Edit|Write（正则）| .*文件.*（内容）"
-        )
+        tool_ph = "匹配工具：tool:edit（精确）| Edit|Write（正则）| .*文件.*（内容）"
 
         ph = placeholders.get(
             event_name,
-            tool_ph if event_name in ("PreToolUse", "PostToolUse") else (
-                r".*  提示：输入空匹配所有，| 分隔多个条件"
-            ),
+            tool_ph if event_name in ("PreToolUse", "PostToolUse") else (r".*  提示：输入空匹配所有，| 分隔多个条件"),
         )
         self.matcherEdit.setPlaceholderText(ph)
 
@@ -661,7 +646,7 @@ class HookEditCard(QWidget):
         _accent = Colors.TEXT_ACCENT
         # 将 hex 主题色转为低透明度 rgba 作为选中背景（淡主题色效果）
         _accent_rgba = _accent
-        if _accent.startswith('#') and len(_accent) == 7:
+        if _accent.startswith("#") and len(_accent) == 7:
             _r, _g, _b = int(_accent[1:3], 16), int(_accent[3:5], 16), int(_accent[5:7], 16)
             _accent_rgba = f"rgba({_r}, {_g}, {_b}, 0.15)"
         _toggle_style = (
@@ -773,6 +758,7 @@ class HookEditCard(QWidget):
         skill_root = self._hook_data.get("skill_root", "")
         if skill_root:
             from pathlib import Path as _P
+
             plugin_root = str(_P(skill_root).parent) if _P(skill_root).name == "hooks" else skill_root
         else:
             plugin_root = "（执行时自动解析为插件根目录）"
@@ -930,8 +916,7 @@ class HookListSettingCard(ExpandSettingCard):
     showAddHookCard = pyqtSignal()  # 显示添加 Hook 卡片
     showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (hook_id, hook_data)
 
-    def __init__(self, icon: QIcon, title: str, content: str = None, parent=None, home=None,
-                 hook_manager=None):
+    def __init__(self, icon: QIcon, title: str, content: str = None, parent=None, home=None, hook_manager=None):
         self.home = home
         self._hook_manager = hook_manager
         super().__init__(icon, title, content, parent)
@@ -945,6 +930,7 @@ class HookListSettingCard(ExpandSettingCard):
         """获取全局 hooks 文件路径"""
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 return pm.get_global_hooks_file()
@@ -957,6 +943,64 @@ class HookListSettingCard(ExpandSettingCard):
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
 
+        # ── 预设工具栏 ──
+        self._preset_bar = QFrame(self.view)
+        self._preset_bar.setStyleSheet("background-color: transparent;")
+        preset_layout = QHBoxLayout(self._preset_bar)
+        preset_layout.setContentsMargins(4, 4, 4, 4)
+        preset_layout.setSpacing(4)
+
+        # 预设标签
+        preset_label = QLabel("预设:", self._preset_bar)
+        preset_label.setStyleSheet(
+            f"{get_font_family_css()} font-size: {scale_font_size(12)}px; font-weight: bold; color: {Colors.TEXT_PRIMARY};"
+        )
+        preset_layout.addWidget(preset_label)
+
+        # 预设下拉框
+        self._preset_combo = ComboBox(self._preset_bar)
+        self._preset_combo.setMinimumWidth(140)
+        self._preset_combo.setMaximumWidth(200)
+        self._preset_combo.currentTextChanged.connect(self._on_preset_selected)
+        preset_layout.addWidget(self._preset_combo)
+
+        preset_layout.addSpacing(4)
+
+        # 保存按钮（覆盖当前预设）
+        self._save_btn = ToolButton(FluentIcon.SAVE, self._preset_bar)
+        self._save_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._save_btn.setToolTip("保存当前状态到当前预设")
+        self._save_btn.clicked.connect(self._save_current_preset)
+        preset_layout.addWidget(self._save_btn)
+
+        # 新建预设
+        self._new_btn = ToolButton(FluentIcon.ADD, self._preset_bar)
+        self._new_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._new_btn.setToolTip("新建预设")
+        self._new_btn.clicked.connect(self._new_preset)
+        preset_layout.addWidget(self._new_btn)
+
+        # 重命名预设
+        self._rename_btn = ToolButton(FluentIcon.EDIT, self._preset_bar)
+        self._rename_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._rename_btn.setToolTip("重命名预设")
+        self._rename_btn.clicked.connect(self._rename_preset)
+        preset_layout.addWidget(self._rename_btn)
+
+        # 删除预设
+        self._del_preset_btn = ToolButton(FluentIcon.DELETE, self._preset_bar)
+        self._del_preset_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ, Sizes.TOOL_BUTTON_SZ)
+        self._del_preset_btn.setToolTip("删除预设")
+        self._del_preset_btn.clicked.connect(self._delete_preset)
+        preset_layout.addWidget(self._del_preset_btn)
+
+        preset_layout.addStretch(1)
+
+        # 预设 bar 不固定在 viewLayout 中——而是放在 header 区域
+        # 先把预设 bar 加到 viewLayout 待会 render 时再挪
+        self._preset_bar.setVisible(False)
+        self.viewLayout.addWidget(self._preset_bar)
+
         self.addButton = PushButton("添加", self, FluentIcon.ADD)
         self.addButton.setObjectName("_hook_add_btn")
         self.addButton.clicked.connect(self.showAddHookCard.emit)
@@ -964,10 +1008,13 @@ class HookListSettingCard(ExpandSettingCard):
         self.addWidget(self.addButton)
         self._update_button_position()
 
+        # 加载预设并同步当前选中
+        self._reload_preset_combo()
+
     def _update_button_position(self):
         """将 addButton 移到卡片头部 expandButton 左侧"""
         card = self.card
-        if not hasattr(card, 'hBoxLayout'):
+        if not hasattr(card, "hBoxLayout"):
             return
         card.hBoxLayout.removeWidget(self.addButton)
         for i in range(card.hBoxLayout.count()):
@@ -979,22 +1026,164 @@ class HookListSettingCard(ExpandSettingCard):
                 card.hBoxLayout.insertSpacing(i + 1, 4)
                 break
 
+    # ── 预设管理 ──
+
+    def _reload_preset_combo(self):
+        """刷新预设下拉框"""
+        if not self._hook_manager:
+            return
+        pm = self._hook_manager.get_hook_preset_manager()
+        presets = pm.list_presets()
+        current = pm.get_current_preset_name()
+
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.clear()
+
+        if not presets:
+            # 没有预设时，自动创建一个默认预设
+            self._preset_combo.addItem("default")
+            if self._hook_manager:
+                self._hook_manager.create_preset("default")
+        else:
+            self._preset_combo.addItems(presets)
+            if current in presets:
+                self._preset_combo.setCurrentText(current)
+
+        self._preset_combo.blockSignals(False)
+        # 显示预设 bar（只在有预设时显示）
+        self._preset_bar.setVisible(len(presets) > 0 or self._preset_combo.count() > 0)
+
+    def _on_preset_selected(self, name: str):
+        """预设下拉框选中变化时应用预设"""
+        if not name or not self._hook_manager:
+            return
+        pm = self._hook_manager.get_hook_preset_manager()
+        current = pm.get_current_preset_name()
+        if name == current:
+            return
+
+        # 应用预设
+        success = self._hook_manager.apply_preset(name)
+        if success:
+            # 更新当前选中状态
+            self._preset_combo.blockSignals(True)
+            self._preset_combo.setCurrentText(name)
+            self._preset_combo.blockSignals(False)
+            # 刷新 UI
+            self._refresh(reload=True)
+            self.hooksChanged.emit()
+
+    def _save_current_preset(self):
+        """保存当前状态到当前预设"""
+        if not self._hook_manager:
+            return
+        current = self._preset_combo.currentText()
+        if not current:
+            return
+
+        self._hook_manager.save_preset(current)
+        from PyQt5.QtWidgets import QToolTip
+
+        QToolTip.showText(QPoint(0, 0), f"已保存到预设「{current}」")
+
+    def _new_preset(self):
+        """新建预设"""
+        from PyQt5.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "新建预设", "请输入预设名称：")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        if not self._hook_manager:
+            return
+        success = self._hook_manager.create_preset(name)
+        if success:
+            self._reload_preset_combo()
+            self._preset_combo.setCurrentText(name)
+        else:
+            from PyQt5.QtWidgets import QToolTip
+
+            QToolTip.showText(QPoint(0, 0), f"预设「{name}」已存在")
+
+    def _rename_preset(self):
+        """重命名当前预设"""
+        from PyQt5.QtWidgets import QInputDialog
+
+        current = self._preset_combo.currentText()
+        if not current:
+            return
+
+        name, ok = QInputDialog.getText(self, "重命名预设", "请输入新名称：", text=current)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name == current:
+            return
+
+        if not self._hook_manager:
+            return
+        success = self._hook_manager.rename_preset(current, name)
+        if success:
+            self._reload_preset_combo()
+        else:
+            from PyQt5.QtWidgets import QToolTip
+
+            QToolTip.showText(QPoint(0, 0), f"重命名失败，名称「{name}」可能已存在")
+
+    def _delete_preset(self):
+        """删除当前预设"""
+        from PyQt5.QtWidgets import QMessageBox
+
+        current = self._preset_combo.currentText()
+        if not current:
+            return
+
+        # 默认预设禁止删除
+        if current == "default":
+            from PyQt5.QtWidgets import QToolTip
+
+            QToolTip.showText(QPoint(0, 0), "默认预设不可删除")
+            return
+
+        reply = QMessageBox.question(
+            self, "确认删除", f"确定要删除预设「{current}」吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if not self._hook_manager:
+            return
+        success = self._hook_manager.delete_preset(current)
+        if success:
+            self._reload_preset_combo()
+
+    # ── 核心刷新 ──
+
     def _refresh(self, reload=True):
         """刷新 hook 列表"""
         was_expanded = self.isExpand
         if reload:
             self._load_hooks()
 
-        # 清空 viewLayout
+        # 清空 viewLayout（保留 preset_bar）
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             w = item.widget()
             if w is not None:
+                # 保留 preset_bar 不删除
+                if w is self._preset_bar:
+                    continue
                 w.deleteLater()
+
+        # 重新添加 preset_bar 到最前面（如果还在）
+        if self._preset_bar not in [self.viewLayout.itemAt(i).widget() for i in range(self.viewLayout.count())]:
+            self.viewLayout.insertWidget(0, self._preset_bar)
 
         self._render_hooks()
 
         from PyQt5.QtCore import QCoreApplication
+
         QCoreApplication.processEvents()
         self.viewLayout.activate()
         self.view.updateGeometry()
@@ -1079,8 +1268,8 @@ class HookListSettingCard(ExpandSettingCard):
         if self._hook_manager:
             success = self._hook_manager.delete_hook_by_id(hook_id)
             if not success:
-                # 系统级 hook 或不存在时给出轻量提示
                 from PyQt5.QtWidgets import QToolTip
+
                 QToolTip.showText(QPoint(0, 0), "系统级 Hook 不可删除")
                 return
             self._refresh(reload=True)
@@ -1092,17 +1281,24 @@ class HookListSettingCard(ExpandSettingCard):
             self._hook_manager.toggle_hook_by_id(hook_id, enabled)
             self.hooksChanged.emit()
 
-    def _add_hook(self, event: str, command: str, matcher: str = "", hook_type: str = "command",
-                  enabled: bool = True, commandWindows: str = "", statusMessage: str = ""):
+    def _add_hook(
+        self,
+        event: str,
+        command: str,
+        matcher: str = "",
+        hook_type: str = "command",
+        enabled: bool = True,
+        commandWindows: str = "",
+        statusMessage: str = "",
+    ):
         """添加新 hook（写入 user-custom hooks 文件）"""
-        # 构建 hook 条目
         hook_id = uuid4().hex
         hook_entry = {
             "id": hook_id,
             "type": hook_type,
             "command": command,
             "matcher": matcher or "",
-            "enabled": enabled
+            "enabled": enabled,
         }
         if commandWindows:
             hook_entry["commandWindows"] = commandWindows
@@ -1115,13 +1311,12 @@ class HookListSettingCard(ExpandSettingCard):
         elif hook_type == "prompt":
             hook_entry["prompt"] = command
 
-        # 加载/创建配置文件
         config_file = self._hooks_config_file
         config_file.parent.mkdir(parents=True, exist_ok=True)
 
         if config_file.exists():
             try:
-                with open(config_file, 'r', encoding='utf-8') as f:
+                with open(config_file, "r", encoding="utf-8") as f:
                     config = json.load(f)
             except Exception:
                 config = {}
@@ -1130,22 +1325,16 @@ class HookListSettingCard(ExpandSettingCard):
 
         raw_hooks = config.get("hooks", config)
 
-        # 追加到对应事件
         if event not in raw_hooks:
             raw_hooks[event] = []
 
-        raw_hooks[event].append({
-            "matcher": matcher or "",
-            "hooks": [hook_entry]
-        })
+        raw_hooks[event].append({"matcher": matcher or "", "hooks": [hook_entry]})
 
-        # 写文件
-        with open(config_file, 'w', encoding='utf-8') as f:
+        with open(config_file, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
 
-        # 同步 HookManager 内存
         if self._hook_manager:
             self._hook_manager.reload_global_hooks(str(config_file))
 
-        self._refresh(reload=True)  # reload=True: 从 HookManager 重新读取 grouped_hooks
+        self._refresh(reload=True)
         self.hooksChanged.emit()

@@ -747,6 +747,9 @@ class HookManager:
         # 覆写层管理器
         self._override_manager = HookOverrideManager()
 
+        # 预设管理器（所有窗口共享同一个实例）
+        self._preset_manager = HookPresetManager()
+
     def _is_user_custom_hook(self, hook: Hook) -> bool:
         """判断 hook 是否为用户自定义（非 plugin/skill）"""
         return "user-custom" in (hook.config_file or "") or not hook.config_file
@@ -763,6 +766,48 @@ class HookManager:
                     continue  # matcher 属于 Rule 层，不在 Hook dict 中
                 d[key] = val
         return d
+
+    # ── 预设管理 ──
+
+    def get_hook_preset_manager(self) -> "HookPresetManager":
+        """获取预设管理器实例"""
+        return self._preset_manager
+
+    def has_preset(self, name: str) -> bool:
+        """检查预设是否存在"""
+        return self._preset_manager.has_preset(name)
+
+    def get_preset_names(self) -> List[str]:
+        """获取所有预设名称列表"""
+        return self._preset_manager.list_presets()
+
+    def get_current_preset_name(self) -> str:
+        """获取当前预设名称"""
+        return self._preset_manager.get_current_preset_name()
+
+    def create_preset(self, name: str) -> bool:
+        """将当前 hook 状态保存为新预设"""
+        hook_states = HookPresetManager.collect_hook_states(self)
+        agent_identity = HookPresetManager.collect_agent_identity()
+        return self._preset_manager.create_preset(name, hook_states, agent_identity)
+
+    def save_preset(self, name: str) -> bool:
+        """以当前状态覆盖更新已有预设"""
+        hook_states = HookPresetManager.collect_hook_states(self)
+        agent_identity = HookPresetManager.collect_agent_identity()
+        return self._preset_manager.save_current_state_as_preset(name, self, agent_identity)
+
+    def rename_preset(self, old_name: str, new_name: str) -> bool:
+        """重命名预设"""
+        return self._preset_manager.rename_preset(old_name, new_name)
+
+    def delete_preset(self, name: str) -> bool:
+        """删除预设"""
+        return self._preset_manager.delete_preset(name)
+
+    def apply_preset(self, name: str) -> bool:
+        """应用指定预设"""
+        return self._preset_manager.apply_preset(name, self)
 
     def set_on_finished_callback(self, callback: Callable[[str, str, bool, str], None]):
         """设置 Hook 执行完成回调 (event_name, output, success, status_message)"""
@@ -2117,3 +2162,324 @@ class HookManager:
 
     # [已移除] 旧技能 hooks 加载路径（load_hooks_from_skills / _load_skill_hooks_from_markdown / _parse_inline_hooks）
     # 所有 hooks 现在只从插件 hooks/ 目录加载
+
+
+class HookPresetManager:
+    """
+    Hook 预设管理器
+
+    管理不同场景下的 Hook 配置预设（preset）。
+    每个预设只存储 Hook 的开关状态（enabled/disabled）和智能体身份（agent_identity）。
+    不存储 Hook 的内容（command/prompt/function 等），这些由 hooks.json 定义。
+
+    存储位置: ~/.drifox/plugins/user-custom/hooks/hook_presets.json
+
+    格式:
+    {
+        "current": "coding",
+        "presets": {
+            "coding": {
+                "name": "编码模式",
+                "hook_states": {
+                    "builtin_global_contract": true,
+                    "builtin_inject_skills": false,
+                    ...
+                },
+                "agent_identity": "build"
+            }
+        }
+    }
+    """
+
+    PRESETS_FILE = "hook_presets.json"
+
+    # 预留的默认预设名称
+    DEFAULT_PRESET = "default"
+
+    def __init__(self):
+        self._storage_path: Optional[str] = None
+        self._data: Dict[str, Any] = {"current": self.DEFAULT_PRESET, "presets": {}}
+        self._init_storage_path()
+
+    def _init_storage_path(self):
+        """初始化存储路径（与 HookOverrideManager 保持一致）"""
+        from app.utils.utils import get_app_data_dir
+
+        storage_dir = get_app_data_dir() / "plugins" / "user-custom" / "hooks"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        self._storage_path = str(storage_dir / self.PRESETS_FILE)
+        self._load()
+
+    def _load(self):
+        """从文件加载预设配置"""
+        if not self._storage_path or not os.path.exists(self._storage_path):
+            # 文件不存在时初始化默认预设
+            self._data = {"current": self.DEFAULT_PRESET, "presets": {}}
+            return
+        try:
+            with open(self._storage_path, "r", encoding="utf-8") as f:
+                self._data = json.load(f)
+            logger.debug(f"[HookPresetManager] Loaded {len(self._data.get('presets', {}))} presets")
+        except Exception as e:
+            logger.error(f"[HookPresetManager] Failed to load presets: {e}")
+            self._data = {"current": self.DEFAULT_PRESET, "presets": {}}
+
+    def _save(self):
+        """保存预设配置到文件"""
+        if not self._storage_path:
+            return
+        try:
+            with open(self._storage_path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2, ensure_ascii=False)
+            logger.debug(f"[HookPresetManager] Saved {len(self._data.get('presets', {}))} presets")
+        except Exception as e:
+            logger.error(f"[HookPresetManager] Failed to save presets: {e}")
+
+    def reload(self):
+        """从文件重新加载（用于多窗口同步）"""
+        self._load()
+
+    # ── 查询方法 ──
+
+    def list_presets(self) -> List[str]:
+        """返回所有预设名称列表"""
+        return list(self._data.get("presets", {}).keys())
+
+    def get_current_preset_name(self) -> str:
+        """获取当前激活的预设名称"""
+        return self._data.get("current", self.DEFAULT_PRESET)
+
+    def get_preset(self, name: str) -> Optional[dict]:
+        """获取指定预设的数据"""
+        return self._data.get("presets", {}).get(name)
+
+    def has_preset(self, name: str) -> bool:
+        """检查预设是否存在"""
+        return name in self._data.get("presets", {})
+
+    # ── 预设管理 ──
+
+    def create_preset(self, name: str, hook_states: Dict[str, bool], agent_identity: str = "") -> bool:
+        """
+        创建新预设
+
+        Args:
+            name: 预设名称（用于 UI 显示和标识）
+            hook_states: hook_id -> enabled 的映射
+            agent_identity: 智能体身份（用于 inject_agent_identity hook）
+
+        Returns:
+            是否成功
+        """
+        presets = self._data.setdefault("presets", {})
+        if name in presets:
+            logger.warning(f"[HookPresetManager] Preset '{name}' already exists")
+            return False
+        if not name.strip():
+            return False
+
+        presets[name] = {
+            "name": name,
+            "hook_states": dict(hook_states),
+            "agent_identity": agent_identity or "",
+        }
+
+        # 如果还没有当前预设，设置为这个
+        if not self._data.get("current"):
+            self._data["current"] = name
+
+        self._save()
+        logger.info(f"[HookPresetManager] Created preset '{name}' with {len(hook_states)} hook states")
+        return True
+
+    def rename_preset(self, old_name: str, new_name: str) -> bool:
+        """重命名预设"""
+        presets = self._data.get("presets", {})
+        if old_name not in presets:
+            return False
+        if new_name in presets:
+            return False
+        if not new_name.strip():
+            return False
+
+        presets[new_name] = presets.pop(old_name)
+        presets[new_name]["name"] = new_name
+
+        # 如果重命名的是当前预设，同步更新
+        if self._data.get("current") == old_name:
+            self._data["current"] = new_name
+
+        self._save()
+        return True
+
+    def delete_preset(self, name: str) -> bool:
+        """删除预设"""
+        presets = self._data.get("presets", {})
+        if name not in presets:
+            return False
+
+        del presets[name]
+
+        # 如果删除了当前预设，切换到第一个可用的
+        if self._data.get("current") == name:
+            available = list(presets.keys())
+            self._data["current"] = available[0] if available else self.DEFAULT_PRESET
+
+        self._save()
+        return True
+
+    def set_current_preset(self, name: str) -> bool:
+        """设置当前激活的预设（不实际应用，只记录）"""
+        presets = self._data.get("presets", {})
+        if name not in presets:
+            return False
+        self._data["current"] = name
+        self._save()
+        return True
+
+    # ── 状态采集与应用 ──
+
+    @staticmethod
+    def collect_hook_states(hook_manager: "HookManager") -> Dict[str, bool]:
+        """
+        从 HookManager 收集所有 hook 的当前开关状态
+
+        Args:
+            hook_manager: HookManager 实例
+
+        Returns:
+            {hook_id: enabled, ...}
+        """
+        states: Dict[str, bool] = {}
+        for event_name, rules in hook_manager._hooks.items():
+            for rule in rules:
+                for hook in rule.hooks:
+                    hook_id = hook.id
+                    if not hook_id:
+                        continue
+                    # 使用覆写层判断有效 enabled 状态
+                    if hook_manager._is_user_custom_hook(hook):
+                        states[hook_id] = hook.enabled
+                    else:
+                        effective = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
+                        states[hook_id] = effective
+        return states
+
+    @staticmethod
+    def collect_agent_identity() -> str:
+        """收集当前设置的 agent_identity（从 Settings 读取）"""
+        try:
+            from app.utils.config import Settings
+
+            return Settings.get_instance().llm_primary_agent.value or ""
+        except Exception:
+            return ""
+
+    def save_current_state_as_preset(self, name: str, hook_manager: "HookManager", agent_identity: str = None) -> bool:
+        """
+        将当前状态保存为预设（如果已存在则覆盖）
+
+        Args:
+            name: 预设名称
+            hook_manager: HookManager 实例
+            agent_identity: 智能体身份，None 则从 Settings 自动读取
+
+        Returns:
+            是否成功
+        """
+        hook_states = self.collect_hook_states(hook_manager)
+        if agent_identity is None:
+            agent_identity = self.collect_agent_identity()
+
+        presets = self._data.setdefault("presets", {})
+        presets[name] = {
+            "name": name,
+            "hook_states": hook_states,
+            "agent_identity": agent_identity or "",
+        }
+
+        # 如果是覆盖保存且当前没有预设指向它，自动设为当前
+        self._data["current"] = name
+        self._save()
+        logger.info(f"[HookPresetManager] Saved current state as preset '{name}' ({len(hook_states)} hooks)")
+        return True
+
+    def apply_preset(self, name: str, hook_manager: "HookManager") -> bool:
+        """
+        应用指定预设到 HookManager
+
+        遍历 preset 中的 hook_states，对每个 hook_id 调用 toggle_hook_by_id。
+        如果 preset 中有 agent_identity，更新 Settings.llm_primary_agent。
+
+        Args:
+            name: 预设名称
+            hook_manager: HookManager 实例
+
+        Returns:
+            是否成功
+        """
+        presets = self._data.get("presets", {})
+        if name not in presets:
+            logger.warning(f"[HookPresetManager] Preset '{name}' not found")
+            return False
+
+        preset = presets[name]
+        hook_states = preset.get("hook_states", {})
+        agent_identity = preset.get("agent_identity", "")
+
+        # 1. 先快速统计需要变更的 hook 数量
+        to_toggle = 0
+        for hook_id, target_enabled in hook_states.items():
+            result = hook_manager._find_hook_by_id(hook_id)
+            if result is None:
+                continue
+            _, _, _, hook = result
+            if hook_manager._is_user_custom_hook(hook):
+                current = hook.enabled
+            else:
+                current = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
+            if current != target_enabled:
+                to_toggle += 1
+
+        logger.info(
+            f"[HookPresetManager] Applying preset '{name}': {to_toggle} hooks to change out of {len(hook_states)}"
+        )
+
+        # 2. 逐个切换 hook 状态
+        changed_count = 0
+        for hook_id, target_enabled in hook_states.items():
+            result = hook_manager._find_hook_by_id(hook_id)
+            if result is None:
+                continue
+            _, _, _, hook = result
+            if hook_manager._is_user_custom_hook(hook):
+                current = hook.enabled
+            else:
+                current = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
+            if current != target_enabled:
+                hook_manager.toggle_hook_by_id(hook_id, target_enabled)
+                changed_count += 1
+
+        # 3. 应用 agent_identity（如果预设中有设置）
+        if agent_identity:
+            try:
+                from app.utils.config import Settings
+
+                current_agent = Settings.get_instance().llm_primary_agent.value
+                if current_agent != agent_identity:
+                    Settings.get_instance().llm_primary_agent.value = agent_identity
+                    logger.info(f"[HookPresetManager] Switched agent identity to '{agent_identity}'")
+            except Exception as e:
+                logger.warning(f"[HookPresetManager] Failed to set agent identity: {e}")
+
+        # 4. 更新当前预设记录
+        self._data["current"] = name
+        self._save()
+
+        logger.info(f"[HookPresetManager] Applied preset '{name}': toggled {changed_count} hooks")
+        return True
+
+    def get_current_preset_data(self) -> Optional[dict]:
+        """获取当前预设的完整数据"""
+        current = self.get_current_preset_name()
+        return self.get_preset(current)

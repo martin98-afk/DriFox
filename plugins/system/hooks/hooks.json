@@ -74,19 +74,6 @@
         ]
       }
     ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".project_intel:hook",
-            "add_output_to_context": true,
-            "statusMessage": "项目元信息:",
-            "id": "builtin_project_intel"
-          }
-        ]
-      }
-    ],
     "PreUserMessage": [
       {
         "hooks": [
