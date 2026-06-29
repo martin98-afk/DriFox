@@ -4964,6 +4964,9 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 刷新命令卡片主题（detail 模式参数列表 / 值选择列表的字体颜色需随主题变化）
+        if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
+            self._command_card.refresh_style()
         # 刷新消息卡片主题
         for card in self.findChildren(MessageCard):
             if hasattr(card, "refresh_theme"):
@@ -9520,7 +9523,8 @@ class OpenAIChatToolWindow(ToolWindow):
             "content": hook_content,
             "_hook_event": "SubAgentFinished",
         })
-        self.backend._hook_messages_updated.emit()
+        # 注意：不再 emit _hook_messages_updated，因为 backend.py:380 的 on_hook_finished
+        # 回调已经在 put 后 emit 过了，重复 emit 会导致前端刷新两次
         logger.debug(f"[SubAgent] 流式注入完成信号: task_id={task_id[:12]}")
 
     def _do_trigger_callback(self, sub_agent_mgr):
