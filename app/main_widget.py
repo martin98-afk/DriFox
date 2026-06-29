@@ -9320,7 +9320,10 @@ class OpenAIChatToolWindow(ToolWindow):
         compact.clear()
 
         for task_id, executor in running_tasks.items():
-            compact.add_task(task_id, executor.agent_name, executor.task_description)
+            llm_cfg = getattr(executor, "llm_config", {}) or {}
+            model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
+            compact.add_task(task_id, executor.agent_name, executor.task_description,
+                             model_name=model_name)
 
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
@@ -9363,7 +9366,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if not compact._batch_started:
             compact.clear()
         compact._batch_started = True
-        compact.add_task(task_id, agent_name, task_description)
+
+        # 从 executor 提取模型名称
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor_for_model = sub_agent_mgr._running_tasks.get(task_id)
+        model_name = ""
+        if executor_for_model:
+            llm_cfg = getattr(executor_for_model, "llm_config", {}) or {}
+            model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
+
+        compact.add_task(task_id, agent_name, task_description, model_name=model_name)
         if not compact.isVisible():
             compact.setVisible(True)
 
@@ -9408,11 +9420,33 @@ class OpenAIChatToolWindow(ToolWindow):
                     else None
                 )
             )
+            executor.token_usage_updated.connect(
+                lambda tid, pt, ct, tt: (
+                    self._on_sub_agent_token_usage(tid, pt, ct, tt)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
+                )
+            )
             executor.finished_with_result.connect(
                 lambda tid, result: (
                     self._on_sub_agent_finished(tid, result) if not getattr(self, "_is_destroyed", False) else None
                 )
             )
+
+    def _on_sub_agent_token_usage(self, task_id: str, prompt_tokens: int, completion_tokens: int, total_tokens: int):
+        """子智能体 token 用量更新"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 更新紧凑卡片的上下文用量行
+        if hasattr(self, "_sub_agent_compact_widget"):
+            # 显示累计 token 总数
+            executor = self.backend.sub_agent_manager._running_tasks.get(task_id)
+            acc_total = getattr(executor, "_total_tokens", total_tokens) if executor else total_tokens
+            if acc_total >= 1000:
+                display = f"{acc_total / 1000:.1f}K tokens"
+            else:
+                display = f"{acc_total} tokens"
+            self._sub_agent_compact_widget.set_task_context(task_id, display)
 
     def _on_sub_agent_task_finished(self, task_id: str, result: str):
         """子智能体任务完成"""
