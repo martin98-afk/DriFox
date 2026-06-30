@@ -1895,6 +1895,16 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
+        # ===== UI 插件系统集成 =====
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+            ui_registry = UIPluginRegistry.get_instance()
+            ui_registry.set_main_widget(self)
+            # 加载所有已启用的 UI 插件
+            self._load_all_ui_plugins()
+        except Exception as e:
+            logger.error(f"[MainWidget] UI plugin init failed: {e}")
+
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
@@ -2468,6 +2478,23 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
         self._command_shortcuts = []
+
+    def _load_all_ui_plugins(self):
+        """加载所有已启用的 UI 插件"""
+        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.core.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            return
+        registry = UIPluginRegistry.get_instance()
+        plugin_dirs = []
+        for plugin in pm.get_enabled_plugins():
+            if plugin.has_component("ui"):
+                plugin_dirs.append((plugin.name, plugin.path))
+        count = registry.load_all_enabled_plugins(plugin_dirs)
+        if count > 0:
+            logger.info(f"[MainWidget] Loaded {count} UI plugins")
 
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
