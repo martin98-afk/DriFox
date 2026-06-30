@@ -99,7 +99,7 @@ class UIEngine(BaseEngine):
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
         self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))
         self._adapter.stream_started.connect(lambda: self._emit("stream_started"))
-        self._adapter.context_updated.connect(lambda tc, lim: self._on_context_updated(tc, lim))
+        self._adapter.context_updated.connect(lambda tc, lim: self._emit("context_updated", tc, lim))
 
         # 调用父类构造
         super().__init__(self._conversation_core, self._conversation_executor)
@@ -272,14 +272,6 @@ class UIEngine(BaseEngine):
         """清除所有 UI 回调，防止异步回调访问已销毁的 widget"""
         self._callbacks.clear()
 
-    def _on_context_updated(self, token_count: int, limit: int):
-        """上下文更新时保存 token_count 到当前会话，同时转发给 UI"""
-        if self._backend:
-            session = self._backend.session_manager.get_current_session() if self._backend.session_manager else None
-            if session and token_count > 0:
-                session.token_count = max(session.token_count, token_count)
-        self._emit("context_updated", token_count, limit)
-
     def _emit(self, event: str, *args, **kwargs):
         # API 模式优先使用 _worker_callbacks
         callback = self._callbacks.get(event)
@@ -325,7 +317,9 @@ class UIEngine(BaseEngine):
             session.system_prompt = ""
             if hasattr(session, "_system_prompt_agent"):
                 session._system_prompt_agent = ""
-            logger.debug(f"[ChatEngine] Invalidated system_prompt cache for session {session.session_id}")
+            logger.debug(
+                f"[ChatEngine] Invalidated system_prompt cache for session {session.session_id}"
+            )
         except Exception as e:
             logger.warning(f"[ChatEngine] Failed to invalidate system_prompt cache: {e}")
 
@@ -514,7 +508,9 @@ class UIEngine(BaseEngine):
 
         # 获取工具 schema（与实际 API 请求一致），计入上下文占用
         if self._current_agent:
-            available_tools = self._get_agent_manager().get_agent_tools_schema(self._current_agent)
+            available_tools = self._get_agent_manager().get_agent_tools_schema(
+                self._current_agent
+            )
         else:
             available_tools = get_builtin_tools_schema(
                 self._get_agent_manager(),

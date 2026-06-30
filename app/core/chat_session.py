@@ -12,7 +12,6 @@ ChatSession & SessionManager - 会话管理模块
 - 持久化：会话通过 SQLite 数据库长期存储，加载时采用懒加载策略
 - 压缩合并：支持多轮对话的历史压缩合并（保留摘要或固定尾部）
 """
-
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -39,7 +38,6 @@ class ChatSession:
         self.created_at: str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.last_updated: str = self.created_at
         self.message_count: int = len(self.messages)
-        self.token_count: int = 0  # 最近一次保存时的消息 token 总数，由 chat_worker 在 api 返回后更新
         self.compaction_state: Dict = self._default_compaction_state()
         self.compaction_cache: Dict = self._default_compaction_cache()
         self.system_prompt: str = ""
@@ -110,7 +108,11 @@ class ChatSession:
 
     def add_user_message(self, content, **kwargs):
         """添加用户消息，支持 str 和 list（multimodal content）"""
-        msg = {"role": "user", "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        msg = {
+            "role": "user",
+            "content": content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
         if kwargs.get("params"):
             msg["params"] = kwargs["params"]
         self.messages.append(msg)
@@ -120,19 +122,6 @@ class ChatSession:
     def _update_timestamp(self):
         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.message_count = len(self.messages)
-        # 快速估算 token 数：中文≈0.5 token/字，英文≈0.25 token/字符
-        total_chars = 0
-        for msg in self.messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        total_chars += len(block.get("text", ""))
-        chinese = sum(1 for c in str(total_chars) if "\u4e00" <= c <= "\u9fff") if False else 0
-        # 简化估算
-        self.token_count = max(total_chars // 4, 1)
 
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
@@ -180,7 +169,6 @@ class ChatSession:
             "created_at": self.created_at,
             "last_updated": self.last_updated,
             "message_count": self.message_count,
-            "token_count": self.token_count,
             "compaction_state": self.compaction_state,
             "compaction_cache": self.compaction_cache,
             "system_prompt": self.system_prompt,
@@ -198,10 +186,11 @@ class ChatSession:
         summary = data.get("topic_summary", "")
         if summary:
             session.set_topic_summary(summary)
-        session.created_at = data.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        session.created_at = data.get(
+            "created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
         session.last_updated = data.get("last_updated", session.created_at)
         session.message_count = len(session.messages)
-        session.token_count = data.get("token_count", 0)
         session.set_compaction_state(data.get("compaction_state"))
         session.set_compaction_cache(data.get("compaction_cache"))
         session.system_prompt = data.get("system_prompt", "") or ""
@@ -241,7 +230,6 @@ class SessionManager(QObject):
     def _touch_session(self, session_id: str):
         """更新会话最后访问时间"""
         import time
-
         self._last_access[session_id] = time.time()
 
     def _evict_if_needed(self):
@@ -255,9 +243,9 @@ class SessionManager(QObject):
 
         # 找出所有非当前会话，按访问时间排序（最久未访问在前）
         candidates = [
-            (sid, t)
-            for sid, t in self._last_access.items()
-            if sid != current_id and any(s.session_id == sid for s in self.sessions)
+            (sid, t) for sid, t in self._last_access.items()
+            if sid != current_id
+            and any(s.session_id == sid for s in self.sessions)
         ]
         if not candidates:
             return

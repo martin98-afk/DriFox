@@ -244,14 +244,14 @@ def _fetch_session_stats() -> dict:
             except ValueError, TypeError:
                 pass
 
-        # 5. ═══ Token 用量（从 token_count 列读取，由 chat_backend 实时写入） ═══
+        # 5. ═══ 估算 Token 用量（按 created_at 日期汇总各会话的完整消息 JSON） ═══
         cursor.execute(
-            "SELECT DATE(created_at) as day, COALESCE(SUM(token_count), 0) as tokens "
+            "SELECT DATE(created_at) as day, messages "
             "FROM sessions "
             "WHERE created_at >= date('now', '-14 days') "
             "AND project NOT LIKE '__archived__%' "
-            "AND token_count > 0 "
-            "GROUP BY DATE(created_at) ORDER BY day"
+            "AND messages IS NOT NULL AND messages != '' "
+            "ORDER BY created_at DESC"
         )
         for row in cursor.fetchall():
             day_str = row["day"]
@@ -259,7 +259,10 @@ def _fetch_session_stats() -> dict:
                 continue
             try:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
-                daily_tokens_map[label] += row["tokens"]
+                msg_data = row["messages"]
+                if isinstance(msg_data, (str, bytes)):
+                    tokens = _fast_estimate_tokens(str(msg_data)[:100000])
+                    daily_tokens_map[label] += tokens
             except ValueError, TypeError:
                 pass
 
@@ -968,29 +971,25 @@ class ContextUsageStatsCard(QWidget):
         stats_widget.setStyleSheet("background: transparent;")
         self._content_layout.addWidget(stats_widget)
 
-        # ── 1️⃣ Token 用量折线图（最重要，放最前面） ──
+        # ── 估算 Token 用量折线图 ──
         daily_tokens = data.get("daily_tokens", [])
-        has_token_data = any(v for _, v in daily_tokens)
-        token_widget = _LineChartWidget(
-            "🔤 Token 用量趋势" if has_token_data else "🔤 Token 用量趋势（数据收集中）",
-            daily_tokens,
-            color_key="accent",
-        )
-        self._content_layout.addWidget(token_widget)
+        if daily_tokens and any(v for _, v in daily_tokens):
+            token_widget = _LineChartWidget("🔤 估算 Token 用量趋势", daily_tokens, color_key="accent")
+            self._content_layout.addWidget(token_widget)
 
-        # ── 2️⃣ 消息量趋势折线图 ──
+        # ── 消息量趋势折线图 ──
         daily_messages = data.get("daily_messages", [])
         if daily_messages and any(v for _, v in daily_messages):
             line_widget = _LineChartWidget("📈 每日消息量趋势", daily_messages, color_key="line")
             self._content_layout.addWidget(line_widget)
 
-        # ── 3️⃣ 会话活跃度柱状图 ──
+        # ── 会话活跃度柱状图 ──
         daily_sessions = data.get("daily_sessions", [])
         if daily_sessions and any(v for _, v in daily_sessions):
             bar_widget = _BarChartWidget("📊 每日会话活跃度", daily_sessions)
             self._content_layout.addWidget(bar_widget)
 
-        # ── 4️⃣ 项目分布柱状图（水平，最后） ──
+        # ── 项目分布柱状图（水平） ──
         sessions_per_project = data.get("sessions_per_project", {})
         if sessions_per_project:
             sorted_projects = sorted(sessions_per_project.items(), key=lambda x: -x[1])[:8]
