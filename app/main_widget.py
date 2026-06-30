@@ -1895,6 +1895,22 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
+        # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
+        self._init_builtin_commands()
+
+        # ===== UI 插件系统集成 =====
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            ui_registry = UIPluginRegistry.get_instance()
+            ui_registry.set_main_widget(self)
+            # 加载所有已启用的 UI 插件
+            self._load_all_ui_plugins()
+            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
+            ui_registry.re_register_all_commands()
+        except Exception as e:
+            logger.error(f"[MainWidget] UI plugin init failed: {e}")
+
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
@@ -2024,9 +2040,7 @@ class OpenAIChatToolWindow(ToolWindow):
         #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
         self._truncation_sentinel = None
 
-        # 初始化内置命令
-        self._init_builtin_commands()
-        # （此时命令已注册）更新 /subagents --model= 参数描述
+        # （内置命令已在上方注册）更新 /subagents --model= 参数描述
         self._update_subagents_param_description()
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
@@ -2468,6 +2482,49 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
         self._command_shortcuts = []
+
+    def _load_all_ui_plugins(self):
+        """加载所有已启用的 UI 插件"""
+        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.core.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            return
+        registry = UIPluginRegistry.get_instance()
+        plugin_dirs = []
+        for plugin in pm.get_enabled_plugins():
+            if plugin.has_component("ui"):
+                plugin_dirs.append((plugin.name, plugin.path))
+        count = registry.load_all_enabled_plugins(plugin_dirs)
+        if count > 0:
+            logger.info(f"[MainWidget] Loaded {count} UI plugins")
+
+    def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
+        """统一的创建消息 widget 入口：先让插件工厂尝试处理
+
+        Returns:
+            QWidget 实例（可能是 MessageCard 或插件自定义 widget），
+            无工厂处理时返回 None（调用方应使用默认逻辑）
+        """
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        message_data = {
+            "role": role,
+            "content": content,
+            "timestamp": timestamp,
+            **kwargs,
+        }
+        registry = UIPluginRegistry.get_instance()
+        for factory in registry.get_message_factories():
+            try:
+                if factory.condition_func(message_data):
+                    widget = factory.factory_func(message_data, self)
+                    if widget is not None:
+                        return widget
+            except Exception as e:
+                logger.error(f"[MainWidget] Message factory {factory.name} failed: {e}")
+        return None
 
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
@@ -4827,10 +4884,14 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.debug(
             f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
             f"commands={result.get('commands')}, themes={result.get('themes')}, "
-            f"skills={result.get('skills')}, mcp={result.get('mcp')}"
+            f"skills={result.get('skills')}, mcp={result.get('mcp')}, "
+            f"ui={result.get('ui')}"
         )
 
-        needs_invalidation = result.get("commands") or result.get("skills") or result.get("agents", 0) > 0
+        # UI 插件可能注册了浮动卡片命令，需要一并失效命令缓存
+        needs_invalidation = (
+            result.get("commands") or result.get("skills") or result.get("agents", 0) > 0 or result.get("ui")
+        )
 
         # 广播给所有窗口实例
         for win in OpenAIChatToolWindow._instances:
@@ -5055,6 +5116,11 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 刷新卡片容器主题（浮动卡片的背景 + 边框随主题变化）
+        if hasattr(self, "_top_card_container") and self._top_card_container and hasattr(self._top_card_container, "refresh_style"):
+            self._top_card_container.refresh_style()
+        if hasattr(self, "_bottom_card_container") and self._bottom_card_container and hasattr(self._bottom_card_container, "refresh_style"):
+            self._bottom_card_container.refresh_style()
         # 刷新命令卡片主题（detail 模式参数列表 / 值选择列表的字体颜色需随主题变化）
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()
@@ -7000,6 +7066,22 @@ class OpenAIChatToolWindow(ToolWindow):
         def on_context_action(action, context):
             self.handle_recommended_question(action, context)
             self.contextActionRequested.emit(action, context)
+
+        # ===== UI 插件消息工厂钩子 =====
+        # 让插件工厂先尝试处理这条消息（高优先级先尝试）
+        custom_widget = self._create_message_widget(
+            role="assistant",
+            content=None,
+            timestamp=timestamp,
+            round_index=(round_index if round_index is not None else self._current_assistant_round_index),
+            model_name=model_name,
+            provider_name=provider_name,
+        )
+        if custom_widget is not None:
+            self._add_chat_widget(custom_widget, insert_index=insert_index)
+            if scroll and not self._suspend_auto_scroll:
+                self._scroll_to_bottom()
+            return custom_widget
 
         card = create_assistant_card_widget(
             parent=self,
@@ -9640,9 +9722,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         # 更新紧凑卡片的上下文用量行
         if hasattr(self, "_sub_agent_compact_widget"):
-            # 显示累计 token 总数
-            executor = self.backend.sub_agent_manager._running_tasks.get(task_id)
-            acc_total = getattr(executor, "_total_tokens", total_tokens) if executor else total_tokens
+            # 显示单次 API 调用的 token 数（不累加，避免随多次工具调用无限膨胀）
+            acc_total = total_tokens
             if acc_total >= 1000:
                 display = f"{acc_total / 1000:.1f}K tokens"
             else:

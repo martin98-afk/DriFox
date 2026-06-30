@@ -38,6 +38,7 @@ from app.tools.tool_name_mapper import ToolNameMapper
 # function 命令的处理器注册表
 # ============================================================
 
+
 class FunctionCommandHandlers:
     """
     function 类型命令的处理器映射表
@@ -46,6 +47,7 @@ class FunctionCommandHandlers:
     - builtin_commands.py: 定义命令（从 .md 文件加载）
     - main_widget.py: 注册处理器并执行
     """
+
     _handlers: Dict[str, Callable] = {}
 
     @classmethod
@@ -81,6 +83,7 @@ _cache_disabled = False  # 调试用，设为 True 跳过缓存
 def _get_cache_dir() -> Path:
     """获取缓存目录"""
     from app.utils.utils import get_app_data_dir
+
     cache_dir = get_app_data_dir() / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
@@ -92,7 +95,7 @@ def _get_cache_file() -> Path:
 
 def _collect_all_source_files() -> List[Tuple[str, float]]:
     """收集所有命令和智能体文件的 (绝对路径, mtime) 列表
-    
+
     用于生成 cache_key：任一文件变更即触发重新解析。
     """
     files: List[Tuple[str, float]] = []
@@ -142,7 +145,7 @@ def _try_load_cache(key: str) -> Optional[dict]:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
         if data.get("cache_key") == key:
             return data
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         pass
     return None
 
@@ -170,26 +173,39 @@ def _serialize_params(params: list) -> list:
     """将 CommandParameter 列表序列化为可 JSON 序列化的 dict 列表"""
     result = []
     for p in params:
-        if hasattr(p, 'name'):
-            result.append({
-                "name": p.name,
-                "description": getattr(p, 'description', ''),
-                "param_type": getattr(p, 'param_type', 'flag'),
-                "required": getattr(p, 'required', False),
-                "mutex_group": getattr(p, 'mutex_group', ''),
-                "value_options": list(getattr(p, 'value_options', []) or []),
-            })
+        if hasattr(p, "name"):
+            result.append(
+                {
+                    "name": p.name,
+                    "description": getattr(p, "description", ""),
+                    "param_type": getattr(p, "param_type", "flag"),
+                    "required": getattr(p, "required", False),
+                    "mutex_group": getattr(p, "mutex_group", ""),
+                    "value_options": list(getattr(p, "value_options", []) or []),
+                }
+            )
         elif isinstance(p, dict):
-            result.append({
-                "name": p.get("name", ""),
-                "description": p.get("description", ""),
-                "param_type": p.get("param_type", "flag"),
-                "required": p.get("required", False),
-                "mutex_group": p.get("mutex_group", ""),
-                "value_options": list(p.get("value_options", []) or []),
-            })
+            result.append(
+                {
+                    "name": p.get("name", ""),
+                    "description": p.get("description", ""),
+                    "param_type": p.get("param_type", "flag"),
+                    "required": p.get("required", False),
+                    "mutex_group": p.get("mutex_group", ""),
+                    "value_options": list(p.get("value_options", []) or []),
+                }
+            )
         else:
-            result.append({"name": str(p), "description": "", "param_type": "flag", "required": False, "mutex_group": "", "value_options": []})
+            result.append(
+                {
+                    "name": str(p),
+                    "description": "",
+                    "param_type": "flag",
+                    "required": False,
+                    "mutex_group": "",
+                    "value_options": [],
+                }
+            )
     return result
 
 
@@ -197,14 +213,16 @@ def _deserialize_params(params: list) -> list:
     """从 JSON 反序列化 CommandParameter 列表"""
     result = []
     for p in params:
-        result.append(CommandParameter(
-            name=p.get("name", ""),
-            description=p.get("description", ""),
-            param_type=p.get("param_type", "flag"),
-            required=p.get("required", False),
-            mutex_group=p.get("mutex_group", ""),
-            value_options=p.get("value_options", []),
-        ))
+        result.append(
+            CommandParameter(
+                name=p.get("name", ""),
+                description=p.get("description", ""),
+                param_type=p.get("param_type", "flag"),
+                required=p.get("required", False),
+                mutex_group=p.get("mutex_group", ""),
+                value_options=p.get("value_options", []),
+            )
+        )
     return result
 
 
@@ -231,7 +249,9 @@ def _register_from_cached_agents(cmd_mgr: CommandManager, cached_agents: list) -
     agent_params = [
         CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）", required=False),
         CommandParameter("--with-context", "传递当前会话历史给子智能体", required=False),
-        CommandParameter("--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False),
+        CommandParameter(
+            "--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False
+        ),
         CommandParameter("<task-desc>", "子智能体任务描述", param_type="positional", required=False),
     ]
     count = 0
@@ -250,6 +270,7 @@ def _register_from_cached_agents(cmd_mgr: CommandManager, cached_agents: list) -
 # ============================================================
 # 命令文件加载器
 # ============================================================
+
 
 def _parse_param_name(name_raw: str) -> dict:
     """解析参数名，提取 [] 包裹的可选标记
@@ -302,21 +323,29 @@ def _parse_raw_params_to_command_params(raw: any, mutex_groups: dict = None) -> 
                 ptype = "flag"
             else:
                 ptype = "positional"
-            params.append(CommandParameter(
-                name=name, description=desc,
-                param_type=ptype, required=parsed["required"],
-                mutex_group=mutex_map.get(name, ""),
-            ))
+            params.append(
+                CommandParameter(
+                    name=name,
+                    description=desc,
+                    param_type=ptype,
+                    required=parsed["required"],
+                    mutex_group=mutex_map.get(name, ""),
+                )
+            )
     elif isinstance(raw, list):
         # 格式 1：数组 [{name, desc, mutex, enum/value_options, ...}]
         for p in raw:
             if isinstance(p, str):
                 # 列表元素是纯字符串 → 视为 positional 参数名
                 parsed = _parse_param_name(p)
-                params.append(CommandParameter(
-                    name=parsed["name"], description="",
-                    param_type="positional", required=parsed["required"],
-                ))
+                params.append(
+                    CommandParameter(
+                        name=parsed["name"],
+                        description="",
+                        param_type="positional",
+                        required=parsed["required"],
+                    )
+                )
                 continue
             name = p.get("name", "")
             if not name:
@@ -341,12 +370,16 @@ def _parse_raw_params_to_command_params(raw: any, mutex_groups: dict = None) -> 
             value_options = p.get("value_options", p.get("enum", []))
             if not isinstance(value_options, list):
                 value_options = []
-            params.append(CommandParameter(
-                name=name, description=desc,
-                param_type=ptype, required=required,
-                mutex_group=mg,
-                value_options=value_options,
-            ))
+            params.append(
+                CommandParameter(
+                    name=name,
+                    description=desc,
+                    param_type=ptype,
+                    required=required,
+                    mutex_group=mg,
+                    value_options=value_options,
+                )
+            )
 
     return params
 
@@ -373,7 +406,7 @@ def _load_command_file(file_path: Path) -> Optional[Dict[str, Any]]:
             return None
 
         frontmatter = "\n".join(lines[1:close_idx])
-        body = "\n".join(lines[close_idx + 1:]).strip()
+        body = "\n".join(lines[close_idx + 1 :]).strip()
 
         meta = yaml.safe_load(frontmatter)
         if not meta:
@@ -480,9 +513,7 @@ def register_all_commands():
         # 缓存命中：直接注册，跳过文件解析
         cmd_count = _register_from_cached_commands(cmd_mgr, cached.get("commands", []))
         agent_count = _register_from_cached_agents(cmd_mgr, cached.get("agents", []))
-        logger.info(
-            f"[BuiltinCommands] 缓存命中，注册 {cmd_count} 命令 + {agent_count} 智能体"
-        )
+        logger.info(f"[BuiltinCommands] 缓存命中，注册 {cmd_count} 命令 + {agent_count} 智能体")
         # 🛡️ 防御：缓存返回 0 命令时忽略缓存（如 PluginManager 未初始化时写入的空缓存）
         # 重新走完整解析路径以重建正确的缓存
         if cmd_count == 0 and agent_count == 0:
@@ -491,6 +522,13 @@ def register_all_commands():
             for name in list(cmd_mgr.get_command_names()):
                 cmd_mgr.unregister(name)
         else:
+            # 🛡️ 恢复 UI 插件命令（register_all_commands 清空了所有命令）
+            try:
+                from app.core.ui_plugin_registry import UIPluginRegistry
+
+                UIPluginRegistry.get_instance().re_register_all_commands()
+            except Exception:
+                pass
             _registered = True
             return
 
@@ -500,32 +538,41 @@ def register_all_commands():
     agents = _register_builtin_agents_as_commands(cmd_mgr)
     elapsed = time.perf_counter() - t0
 
-    logger.info(
-        f"[BuiltinCommands] 解析注册完成: {len(commands)} 命令 + {len(agents)} 智能体 "
-        f"({elapsed*1000:.0f}ms)"
-    )
+    logger.info(f"[BuiltinCommands] 解析注册完成: {len(commands)} 命令 + {len(agents)} 智能体 ({elapsed * 1000:.0f}ms)")
 
     # ---- 写回缓存 ----
     serialized_commands = []
     for cmd in commands:
-        serialized_commands.append({
-            "name": cmd["name"],
-            "type": cmd["type"],
-            "description": cmd.get("description", ""),
-            "argument_hint": cmd.get("argument_hint", ""),
-            "prompt_text": cmd.get("prompt_text", ""),
-            "parameters": _serialize_params(cmd.get("parameters", [])),
-            "shortcut": cmd.get("shortcut", ""),
-            "prompt_sections": cmd.get("prompt_sections", {}),
-        })
+        serialized_commands.append(
+            {
+                "name": cmd["name"],
+                "type": cmd["type"],
+                "description": cmd.get("description", ""),
+                "argument_hint": cmd.get("argument_hint", ""),
+                "prompt_text": cmd.get("prompt_text", ""),
+                "parameters": _serialize_params(cmd.get("parameters", [])),
+                "shortcut": cmd.get("shortcut", ""),
+                "prompt_sections": cmd.get("prompt_sections", {}),
+            }
+        )
     serialized_agents = []
     for ag in agents:
-        serialized_agents.append({
-            "name": ag["name"],
-            "description": ag.get("description", ""),
-            "prompt_text": ag.get("prompt_text", ""),
-        })
+        serialized_agents.append(
+            {
+                "name": ag["name"],
+                "description": ag.get("description", ""),
+                "prompt_text": ag.get("prompt_text", ""),
+            }
+        )
     _save_cache(cache_key, serialized_commands, serialized_agents)
+
+    # 🛡️ 恢复 UI 插件命令
+    try:
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        UIPluginRegistry.get_instance().re_register_all_commands()
+    except Exception:
+        pass
 
     _registered = True
 
@@ -547,34 +594,43 @@ def reload_all_commands():
     agents = _register_builtin_agents_as_commands(cmd_mgr)
     elapsed = time.perf_counter() - t0
 
-    logger.info(
-        f"[BuiltinCommands] Reloaded {len(commands)} commands + {len(agents)} agents "
-        f"({elapsed*1000:.0f}ms)"
-    )
+    logger.info(f"[BuiltinCommands] Reloaded {len(commands)} commands + {len(agents)} agents ({elapsed * 1000:.0f}ms)")
 
     # 重新生成缓存（写回最新解析结果）
     source_files = _collect_all_source_files()
     cache_key = _compute_cache_key(source_files)
     serialized_commands = []
     for cmd in commands:
-        serialized_commands.append({
-            "name": cmd["name"],
-            "type": cmd["type"],
-            "description": cmd.get("description", ""),
-            "argument_hint": cmd.get("argument_hint", ""),
-            "prompt_text": cmd.get("prompt_text", ""),
-            "parameters": _serialize_params(cmd.get("parameters", [])),
-            "shortcut": cmd.get("shortcut", ""),
-            "prompt_sections": cmd.get("prompt_sections", {}),
-        })
+        serialized_commands.append(
+            {
+                "name": cmd["name"],
+                "type": cmd["type"],
+                "description": cmd.get("description", ""),
+                "argument_hint": cmd.get("argument_hint", ""),
+                "prompt_text": cmd.get("prompt_text", ""),
+                "parameters": _serialize_params(cmd.get("parameters", [])),
+                "shortcut": cmd.get("shortcut", ""),
+                "prompt_sections": cmd.get("prompt_sections", {}),
+            }
+        )
     serialized_agents = []
     for ag in agents:
-        serialized_agents.append({
-            "name": ag["name"],
-            "description": ag.get("description", ""),
-            "prompt_text": ag.get("prompt_text", ""),
-        })
+        serialized_agents.append(
+            {
+                "name": ag["name"],
+                "description": ag.get("description", ""),
+                "prompt_text": ag.get("prompt_text", ""),
+            }
+        )
     _save_cache(cache_key, serialized_commands, serialized_agents)
+
+    # 🛡️ 恢复 UI 插件命令（reload 会清空所有命令，UI 插件使用独立注册表）
+    try:
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        UIPluginRegistry.get_instance().re_register_all_commands()
+    except ImportError, Exception:
+        pass
 
     _registered = True
 
@@ -583,9 +639,11 @@ def reload_all_commands():
 # PluginManager 集成
 # ============================================================
 
+
 def _get_command_sources() -> list:
     """获取命令文件源列表"""
     from app.core.plugin_manager import PluginManager
+
     pm = PluginManager.get_instance()
     if pm.is_initialized():
         cmd_files = pm.get_command_files()
@@ -598,6 +656,7 @@ def _get_command_sources() -> list:
 def _get_agent_files() -> list:
     """获取智能体文件列表"""
     from app.core.plugin_manager import PluginManager
+
     pm = PluginManager.get_instance()
     if pm.is_initialized():
         agent_files = pm.get_agent_files()
@@ -631,6 +690,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
 # ============================================================
 # agents 目录加载（通过 PluginManager）
 # ============================================================
+
 
 def _generate_tool_restriction_text(meta: dict) -> str:
     """从 frontmatter 生成工具限制说明文本（放在提示词第一行）
@@ -694,7 +754,7 @@ def _generate_tool_restriction_text(meta: dict) -> str:
 
 def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
     """加载智能体命令：优先 PluginManager 路径，回退到 app/agents/
-    
+
     Returns:
         已注册的智能体元数据列表，供缓存使用
     """
@@ -708,7 +768,9 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
     agent_params = [
         CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）", required=False),
         CommandParameter("--with-context", "传递当前会话历史给子智能体", required=False),
-        CommandParameter("--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False),
+        CommandParameter(
+            "--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False
+        ),
         CommandParameter("<task-desc>", "子智能体任务描述", param_type="positional", required=False),
     ]
 
@@ -731,7 +793,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
                 continue
 
             frontmatter = "\n".join(lines[1:close_idx])
-            body = "\n".join(lines[close_idx + 1:]).strip()
+            body = "\n".join(lines[close_idx + 1 :]).strip()
 
             try:
                 meta = yaml.safe_load(frontmatter)
@@ -754,13 +816,17 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
                 prompt_text=enhanced_body,
                 parameters=agent_params,
             )
-            logger.info(f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
-                        f"{' (with tool restrictions)' if restriction_text else ''}")
-            registered.append({
-                "name": md_file.stem,
-                "description": description,
-                "prompt_text": enhanced_body,
-            })
+            logger.info(
+                f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
+                f"{' (with tool restrictions)' if restriction_text else ''}"
+            )
+            registered.append(
+                {
+                    "name": md_file.stem,
+                    "description": description,
+                    "prompt_text": enhanced_body,
+                }
+            )
 
         except Exception as e:
             logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")

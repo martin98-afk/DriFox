@@ -108,7 +108,7 @@ class _AgentTaskRow(QFrame):
 
     def _setup_ui(self):
         self.setObjectName("AgentTaskRow")
-        self.setStyleSheet(f"""
+        self.setStyleSheet("""
             #AgentTaskRow {{
                 background: rgba(255,255,255,0.03);
                 border: none;
@@ -353,7 +353,7 @@ class _AgentTaskRow(QFrame):
     def refresh_row_style(self):
         """响应主题切换，刷新所有标签颜色"""
         Colors.refresh()
-        self.setStyleSheet(f"""
+        self.setStyleSheet("""
             #AgentTaskRow {{
                 background: rgba(255,255,255,0.03);
                 border: none;

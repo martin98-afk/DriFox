@@ -24,4 +24,4 @@ def hook(event: str, context: dict) -> str:
         格式化的系统时间字符串
     """
     now = datetime.now()
-    return f"当前系统时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
+    return now.strftime('%Y-%m-%d %H:%M:%S')

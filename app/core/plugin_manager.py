@@ -234,9 +234,12 @@ class PluginManager:
             result["added"].append(new_plugins[name])
             self._plugins[name] = new_plugins[name]
             logger.info(f"[PluginManager] Rescan: new plugin '{name}' detected")
+            # 自动加载新插件的 UI 组件
+            self._load_plugin_ui(name)
 
         for name in removed_names:
             result["removed"].append(self._plugins[name])
+            self._unload_plugin_ui(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Rescan: plugin '{name}' removed")
 
@@ -345,6 +348,8 @@ class PluginManager:
             enabled.add(name)
             self._save_enabled_set(enabled)
             logger.info(f"[PluginManager] Enabled plugin: {name}")
+        # 联动加载 UI 组件
+        self._load_plugin_ui(name)
 
     def disable_plugin(self, name: str):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）"""
@@ -356,6 +361,27 @@ class PluginManager:
             enabled.discard(name)
             self._save_enabled_set(enabled)
             logger.info(f"[PluginManager] Disabled plugin: {name}")
+        # 联动卸载 UI 组件
+        self._unload_plugin_ui(name)
+
+    def _load_plugin_ui(self, name: str):
+        """加载指定插件的 UI 组件"""
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+        except ImportError:
+            return
+        plugin = self._plugins.get(name)
+        if plugin is None or not plugin.has_component("ui"):
+            return
+        UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
+
+    def _unload_plugin_ui(self, name: str):
+        """卸载指定插件的 UI 组件"""
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+        except ImportError:
+            return
+        UIPluginRegistry.get_instance().unload_plugin(name)
 
     def _get_enabled_set(self) -> set:
         """从 Settings 读取已启用的插件名集合"""
@@ -425,6 +451,9 @@ class PluginManager:
                     components["mcp"] = True
                 if (item / ".lsp.json").exists():
                     components["lsp"] = True
+                # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
+                if (item / "ui").exists() and (item / "ui" / "__init__.py").exists():
+                    components["ui"] = True
                 if "components" not in manifest or not manifest["components"]:
                     manifest["components"] = components
                 elif isinstance(manifest["components"], dict):
@@ -483,6 +512,9 @@ class PluginManager:
                 detected_components["mcp"] = True
             if (plugin_dir / ".lsp.json").exists():
                 detected_components["lsp"] = True
+            # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
+            if (plugin_dir / "ui").exists() and (plugin_dir / "ui" / "__init__.py").exists():
+                detected_components["ui"] = True
 
             if "components" not in manifest or not manifest["components"]:
                 manifest["components"] = detected_components

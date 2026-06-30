@@ -227,6 +227,16 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
                             echarts=item.get("echarts"),
                         )
                     )
+                elif item_type == "custom":
+                    # 自定义内容块：{ "type": "custom", "custom_type": "<type>", "data": {...} }
+                    custom_type = item.get("custom_type", "")
+                    data = item.get("data", {}) or {}
+                    if custom_type:
+                        blocks.append({
+                            "type": "custom",
+                            "custom_type": custom_type,
+                            "data": data,
+                        })
                 else:
                     # 其他类型也当作文本处理
                     text = str(item.get("text", ""))
@@ -315,7 +325,32 @@ def content_to_markdown(content: Any) -> str:
     blocks = content if isinstance(content, list) else ensure_content_blocks(content)
     for block in blocks:
         block_type = block.get("type")
-        if block_type == "reasoning":
+        if block_type == "custom":
+            # 调用注册渲染器获取 HTML
+            from app.core.ui_plugin_registry import UIPluginRegistry
+            custom_type = block.get("custom_type", "")
+            data = block.get("data", {}) or {}
+            try:
+                registry = UIPluginRegistry.get_instance()
+                renderer = registry.get_content_renderer(custom_type)
+            except Exception:
+                renderer = None
+            if renderer:
+                try:
+                    html = renderer.render_func(data, None)
+                    # 用 <div class="custom-block"> 包裹，方便后续处理
+                    parts.append(
+                        f'<div class="custom-block" data-type="{custom_type}">\n{html}\n</div>'
+                    )
+                except Exception as e:
+                    from loguru import logger
+                    logger.error(
+                        f"[content_to_markdown] 渲染自定义块失败 {custom_type}: {e}"
+                    )
+                    parts.append(f"[自定义内容块 {custom_type} 渲染失败]")
+            else:
+                parts.append(f"[自定义内容块: {custom_type}]")
+        elif block_type == "reasoning":
             # 思考内容：输出为 <think> 标签，由渲染器 _inject_think_cards 处理
             reasoning_content = str(block.get("content", "") or "")
             if reasoning_content:

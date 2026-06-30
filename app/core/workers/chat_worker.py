@@ -529,6 +529,27 @@ class OpenAIChatWorker(QThread):
                 "current_role": "primary",
                 "is_subagent_call": False,
             }
+
+            # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
+            # 让 hook（如 context_auto_compact）能检测当前 token 占比
+            if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
+                try:
+                    from app.core.model_capabilities import resolve_context_limit
+
+                    token_count = count_messages_tokens(current_messages)
+                    token_limit = 0
+                    llm_config = getattr(self, "llm_config", None)
+                    if llm_config:
+                        token_limit = resolve_context_limit(llm_config)
+                    ctx["token_count"] = token_count
+                    ctx["token_limit"] = token_limit
+                    if token_count > 0 and token_limit > 0:
+                        ctx["token_ratio"] = token_count / token_limit
+                    else:
+                        ctx["token_ratio"] = 0.0
+                except Exception:
+                    pass
+
             if extra_context:
                 ctx.update(extra_context)
 
@@ -551,7 +572,8 @@ class OpenAIChatWorker(QThread):
             # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
             block_reason: Optional[str] = None
             for r in results:
-                if r.success and r.output:
+                # ★ 修复：只有标记为 add_to_context 的 hook 输出才注入消息列表
+                if r.success and r.output and r.add_to_context:
                     msg = _make_hook_message(event_name, r.output, r.status_message)
                     current_messages.append(msg)
                     current_session_messages.append(msg)
@@ -559,7 +581,7 @@ class OpenAIChatWorker(QThread):
                     # 追加到 API 缓存
                     self._append_to_api_cache([msg])
 
-                    logger.debug(f"[HookManager] Worker hook injected: {event_name}")
+                    logger.debug(f"[HookManager] Worker hook injected: {event_name}, message: {msg[:100]}...")
 
                 # 检查 BLOCK 决策（Claude Code Stop hook 强制续命机制）
                 # HookDecision.BLOCK 来自 hook_manager.py，对应：
@@ -577,11 +599,42 @@ class OpenAIChatWorker(QThread):
                 except ImportError:
                     pass
 
+            # 检查 auto-compact 触发信号（context_auto_compact hook 的输出）
+            # 将 results 中 JSON 的 auto_compact 信号转发给 backend
+            if event_name == "PreAssistantMessage":
+                self._check_results_auto_compact(results, backend)
+
             return block_reason
 
         except Exception as e:
-            logger.debug(f"[HookManager] Worker hook trigger failed: {event_name} - {e}")
+            logger.error(f"[HookManager] Worker hook exception: {event_name} - {e}")
             return None
+
+    def _check_results_auto_compact(self, results: list, backend) -> None:
+        """检查 hook 结果中是否有 auto-compact 触发信号
+
+        从各 hook 返回的 JSON 解析 auto_compact 字段，
+        有信号则调用 backend.request_auto_compact。
+
+        Args:
+            results: trigger_event 返回的 HookExecutionResult 列表
+            backend: ChatBackend 实例
+        """
+        import json as _json
+
+        if not results:
+            return
+        for r in results:
+            if not r.success or not r.output:
+                continue
+            try:
+                data = _json.loads(r.output)
+                if isinstance(data, dict) and data.get("auto_compact"):
+                    ratio = float(data.get("ratio", 0.0))
+                    backend.request_auto_compact(ratio)
+                    return  # 只触发一次
+            except _json.JSONDecodeError, ValueError, TypeError:
+                pass
 
     @staticmethod
     def _extract_block_reason(output: str) -> Optional[str]:
@@ -2239,7 +2292,7 @@ class OpenAIChatWorker(QThread):
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
                     return self._process_response(response)
-                except (httpx.ReadError, httpcore.ReadError):
+                except httpx.ReadError, httpcore.ReadError:
                     # 用户取消（cancel()关闭HTTP连接），不是真正的错误
                     return False, False
             except BadRequestError as e:

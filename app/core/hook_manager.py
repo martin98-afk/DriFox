@@ -321,11 +321,21 @@ class HookMatchRule:
 class HookExecutionResult:
     """Hook 执行结果"""
 
-    def __init__(self, success: bool, output: str = "", decision: str = "continue", status_message: str = ""):
+    def __init__(
+        self,
+        success: bool,
+        output: str = "",
+        decision: str = "continue",
+        status_message: str = "",
+        add_to_context: bool = True,
+    ):
         self.success = success
         self.output = output
         self.decision: HookDecision = HookDecision(decision) if decision else HookDecision.CONTINUE
         self.status_message = status_message
+        # 标记此结果是否应注入到消息列表
+        # 对应 Hook.add_output_to_context，由 _execute_hook 传递
+        self.add_to_context = add_to_context
 
 
 class HookWorkerSignals(QObject):
@@ -1500,7 +1510,11 @@ class HookManager:
                 logger.info(f"[HookManager] Hook executed: {context.get('event_name')}")
 
                 return HookExecutionResult(
-                    success=success, output=output, decision=decision.value, status_message=status_message
+                    success=success,
+                    output=output,
+                    decision=decision.value,
+                    status_message=status_message,
+                    add_to_context=hook.add_output_to_context,
                 )
 
             except Exception as e:
