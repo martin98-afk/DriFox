@@ -10437,6 +10437,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_node_preview()
 
     def _on_messages_updated(self, messages: List[Dict[str, Any]]):
+        # 🛡️ 关闭窗口路径守护：强制停止后 closeEvent 同步清理 backend，
+        # 跨线程 queued 的 finished_with_messages 可能在 widget 已 _is_destroyed 后才被
+        # 主线程事件循环处理。closeEvent 路径已主动同步应用 + 持久化（见 _apply_interrupted_messages_to_session），
+        # 这里无需再 set_messages，避免 UI 副作用（set_meta_info/ring 刷新）访问已销毁的 widget。
+        if getattr(self, "_is_destroyed", False):
+            return
         session = self.session_manager.get_current_session()
         if not session:
             return
@@ -11736,12 +11742,37 @@ class OpenAIChatToolWindow(ToolWindow):
                 except TypeError, RuntimeError:
                     pass
 
+            # 🛡️ 关键修复：同步收集中断消息并应用到会话
+            #
+            # 背景：`backend.stop_streaming()` 内部是 cancel_worker()+finalize_stop()，
+            # 同步等待 worker.run() 退出。worker.run() 退出前会通过
+            # _cancel_with_stop_hook() emit `finished_with_messages(current_session_messages)`，
+            # 但 PyQt 跨线程信号是 queued，emit 后立即把 slot 调用入主线程事件队列。
+            #
+            # 关闭路径不依赖事件队列处理（事件队列中消息会在 closeEvent 之后才被处理），
+            # 如果不主动应用中断消息就调用 _auto_save_current_session()，保存的是
+            # **没有 partial assistant 消息的旧 session.messages**（内存漏掉）。
+            # UI 卡片有 partial（因为 content_received 是实时 emit 并同步更新卡片）
+            # 但 SQLite 不存 → 重启/切换会话后丢失。
+            #
+            # 修复：直接从 stop_streaming() 返回值拿 interrupted_messages，
+            # 主动同步应用并立即持久化，确保 closeEvent 退出时历史落盘已包含 partial。
+            interrupted_messages = None
             try:
-                self.backend.stop_streaming()
+                interrupted_messages = self.backend.stop_streaming()
                 self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
                 self.backend.cleanup()
             except Exception:
                 pass
+
+            if interrupted_messages:
+                try:
+                    self._apply_interrupted_messages_to_session(interrupted_messages)
+                    if self.history_manager:
+                        self._save_current_session_to_history()
+                        self.history_manager.flush()
+                except Exception as e:
+                    logger.warning(f"[ChatWindow] closeEvent 应用中断消息失败: {e}")
 
         # 标记初始化已完成（防止窗口在初始化期间关闭导致竞态条件）
         self._initialization_in_progress = False
@@ -11882,6 +11913,46 @@ class OpenAIChatToolWindow(ToolWindow):
             self._save_current_session_to_history()
             self.history_manager.flush()
 
+    def _apply_interrupted_messages_to_session(self, interrupted_messages: List[Dict[str, Any]]) -> bool:
+        """将 worker 中断时的快照应用到当前 session（同步）。
+
+        这是强制停止后保证 partial 消息不丢失的核心路径。
+        与 _on_messages_updated 的差异：
+        1. 不读取/刷新 UI 控件（ring/卡片）—— 可以在 widget 已销毁的 closeEvent 中调用。
+        2. 不写入 elapsed 字段（避免重复覆盖 _on_stop_clicked 第一阶段写入的值）。
+        3. 不重置 _history_preview_messages / 不触发 GC 等额外副作用。
+        4. 仍尊重 truncation_sentinel：若用户/系统在 finalize 期间发生截断，
+           则丢弃 worker 的过期快照，避免覆盖新状态。
+
+        Args:
+            interrupted_messages: ChatWorker.get_interrupted_messages() 返回的快照。
+
+        Returns:
+            True = 已应用到 session；False = 未应用（原因通常是：session 不存在、
+            sentinel 命中、或 interrupted_messages 为空）。
+        """
+        if not interrupted_messages:
+            return False
+        session = self.session_manager.get_current_session()
+        if not session:
+            return False
+
+        sentinel = self._truncation_sentinel
+        if sentinel and sentinel.get("session_id") == session.session_id:
+            from loguru import logger
+
+            logger.warning(
+                "[ApplyInterrupted] 检测到截断哨兵，跳过 worker 快照以保护会话状态："
+                f"worker_len={len(interrupted_messages)}, current_len={len(session.messages)}, "
+                f"session_id={session.session_id[:8]}"
+            )
+            return False
+
+        # 直接写入 session，不走 _on_messages_updated（避免触发 ring/卡片刷新副作用）
+        # preserve_compaction=False：worker 送回的是未压缩消息，保留旧缓存会导致 state 不一致
+        session.set_messages(interrupted_messages, preserve_compaction=False)
+        return True
+
     def _on_finalize_complete(self, interrupted_messages: List[Dict[str, Any]]):
         """主线程回调：处理 finalize_stop 异步完成后的消息保存
 
@@ -11889,29 +11960,45 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
-        if interrupted_messages:
-            current_session = self.session_manager.get_current_session()
-            should_apply = True
-            sentinel = self._truncation_sentinel
-            if sentinel and current_session and sentinel.get("session_id") == current_session.session_id:
-                logger.warning(
-                    "[FinalizeStop] 检测到截断/恢复后到达的 finalize 回调，丢弃覆盖以保护会话状态："
-                    f"worker_len={len(interrupted_messages)}, current_len={len(current_session.messages)}, "
-                    f"session_id={current_session.session_id[:8]}"
-                )
-                should_apply = False
-            self._truncation_sentinel = None
 
-            if should_apply:
-                self._on_messages_updated(interrupted_messages)
-                # 兜底：_on_messages_updated 可能因 _response_start_time 已清除而跳过
+        current_session = self.session_manager.get_current_session()
+        sentinel = self._truncation_sentinel
+        # 无论后续走哪条分支，截断哨兵是单次使用的，进来立即清空，
+        # 避免后续异步 finalize 重复误判。
+        self._truncation_sentinel = None
+
+        # 截断命中：用户在 finalize 期间发生了删除/截断。
+        # Worker 送回的快照可能污染已截断的正确状态，必须丢弃。
+        # 但仍然补一次 _persist_stop_elapsed，否则 stop 时长统计会丢（修复前是 bug）。
+        if sentinel and current_session and sentinel.get("session_id") == current_session.session_id:
+            logger.warning(
+                "[FinalizeStop] 检测到截断哨兵，丢弃覆盖以保护会话状态："
+                f"worker_len={len(interrupted_messages) if interrupted_messages else 0}, "
+                f"current_len={len(current_session.messages)}, "
+                f"session_id={current_session.session_id[:8]}"
+            )
+            self._persist_stop_elapsed()
+            return
+
+        if interrupted_messages:
+            self._apply_interrupted_messages_to_session(interrupted_messages)
+            # 兜底：_apply_interrupted_messages_to_session 不写入 elapsed
+            self._persist_stop_elapsed()
+            if self.history_manager:
+                self._save_current_session_to_history()
+                self.history_manager.flush()
+        else:
+            # interrupted_messages 为空（如：closeEvent 路径已同步获取、
+            # 或 daemon finalize 过程中并发被另一线程释放）。
+            # 这种情况下，worker 已 emit 的 finished_with_messages 在主线程事件队列中，
+            # _on_messages_updated 已经被 dispatch 处理并把 partial 写入 session.messages，
+            # 但 _on_messages_updated 不触发 _save_current_session_to_history。
+            # 所以这里补一次持久化，避免 partial 丢失。
+            if current_session and current_session.messages:
                 self._persist_stop_elapsed()
                 if self.history_manager:
                     self._save_current_session_to_history()
                     self.history_manager.flush()
-        else:
-            # interrupted_messages 为空（如提前取消），独立持久化 elapsed
-            self._persist_stop_elapsed()
 
         # 清理计时相关状态
         self._response_start_time = None
