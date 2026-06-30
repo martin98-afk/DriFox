@@ -26,6 +26,7 @@ from PyQt5.QtCore import QObject, QPointF, QRectF, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -182,7 +183,7 @@ def _fetch_session_stats() -> dict:
     try:
         cursor = conn.cursor()
 
-        # 1. 基础统计
+        # 1. ═══ 基础统计 ═══
         cursor.execute(
             "SELECT COUNT(*) as cnt, COALESCE(SUM(message_count), 0) as msgs "
             "FROM sessions WHERE project NOT LIKE '__archived__%'"
@@ -193,86 +194,72 @@ def _fetch_session_stats() -> dict:
         result["total_sessions"] = total_sessions
         result["total_messages"] = total_messages
 
-        # 2. 压缩统计
+        # 2. ═══ 压缩统计（精确检查 compaction_state 中 active:true） ═══
         cursor.execute(
-            "SELECT COUNT(*) as cnt FROM sessions "
-            "WHERE compaction_state IS NOT NULL "
-            "AND compaction_state != '' "
-            "AND compaction_state != '{}' "
-            "AND project NOT LIKE '__archived__%'"
+            "SELECT compaction_state FROM sessions "
+            "WHERE project NOT LIKE '__archived__%' "
+            "AND instr(compaction_state, 'true') > 0"
         )
-        row = cursor.fetchone()
-        result["total_compacted"] = row["cnt"] if row else 0
-        result["compaction_rate"] = result["total_compacted"] / total_sessions if total_sessions > 0 else 0.0
+        compacted_count = 0
+        for row in cursor.fetchall():
+            raw = row["compaction_state"]
+            if isinstance(raw, str) and '"active":true' in raw:
+                compacted_count += 1
+        result["total_compacted"] = compacted_count
+        result["compaction_rate"] = compacted_count / total_sessions if total_sessions > 0 else 0.0
 
-        # 3. 按项目统计
+        # 3. ═══ 按项目统计 ═══
         cursor.execute(
             "SELECT project, COUNT(*) as cnt FROM sessions "
             "WHERE project NOT LIKE '__archived__%' "
             "GROUP BY project ORDER BY cnt DESC"
         )
-        rows = cursor.fetchall()
-        for row in rows:
+        for row in cursor.fetchall():
             result["sessions_per_project"][row["project"]] = row["cnt"]
 
-        # 4. 最近 14 天的按日统计（基于 updated_at）
+        # 4. ═══ 最近 14 天按日统计（基于 created_at：反映「哪天发起了对话」） ═══
         today = datetime.now()
-        date_labels = []
-        for i in range(13, -1, -1):
-            date_labels.append((today - timedelta(days=i)).strftime("%m-%d"))
+        date_labels = [(today - timedelta(days=i)).strftime("%m-%d") for i in range(13, -1, -1)]
 
-        # 初始化每日数据
-        daily_sessions_map: Dict[str, int] = {}
-        daily_messages_map: Dict[str, int] = {}
-        daily_tokens_map: Dict[str, int] = {}
-        for dl in date_labels:
-            daily_sessions_map[dl] = 0
-            daily_messages_map[dl] = 0
-            daily_tokens_map[dl] = 0
+        daily_sessions_map: Dict[str, int] = {dl: 0 for dl in date_labels}
+        daily_messages_map: Dict[str, int] = {dl: 0 for dl in date_labels}
+        daily_tokens_map: Dict[str, int] = {dl: 0 for dl in date_labels}
 
-        # 查询最近 14 天会话数（按 updated_at 日期聚合）
         cursor.execute(
-            "SELECT DATE(updated_at) as day, COUNT(*) as cnt, "
+            "SELECT DATE(created_at) as day, COUNT(*) as cnt, "
             "COALESCE(SUM(message_count), 0) as msgs "
             "FROM sessions "
-            "WHERE updated_at >= date('now', '-14 days') "
+            "WHERE created_at >= date('now', '-14 days') "
             "AND project NOT LIKE '__archived__%' "
-            "GROUP BY DATE(updated_at) "
-            "ORDER BY day"
+            "GROUP BY DATE(created_at) ORDER BY day"
         )
-        rows = cursor.fetchall()
-        for row in rows:
-            day_str = row["day"]
-            if day_str:
-                try:
-                    dt = datetime.strptime(day_str, "%Y-%m-%d")
-                    label = dt.strftime("%m-%d")
-                    daily_sessions_map[label] = row["cnt"]
-                    daily_messages_map[label] = row["msgs"]
-                except ValueError:
-                    pass
-
-        # 5. 估算每日 token 量（对最近 14 天内有更新的会话的 messages 字段采样）
-        cursor.execute(
-            "SELECT session_id, DATE(updated_at) as day, messages, message_count "
-            "FROM sessions "
-            "WHERE updated_at >= date('now', '-14 days') "
-            "AND project NOT LIKE '__archived__%' "
-            "AND messages IS NOT NULL AND messages != '' "
-            "ORDER BY updated_at DESC"
-        )
-        rows = cursor.fetchall()
-        for row in rows:
+        for row in cursor.fetchall():
             day_str = row["day"]
             if not day_str:
                 continue
             try:
-                dt = datetime.strptime(day_str, "%Y-%m-%d")
-                label = dt.strftime("%m-%d")
-                msg_data = row["messages"]
-                if isinstance(msg_data, (str, bytes)):
-                    tokens = _fast_estimate_tokens(str(msg_data)[:50000])
-                    daily_tokens_map[label] += tokens
+                label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
+                daily_sessions_map[label] = row["cnt"]
+                daily_messages_map[label] = row["msgs"]
+            except ValueError, TypeError:
+                pass
+
+        # 5. ═══ Token 用量（从 token_count 列读取，由 chat_backend 实时写入） ═══
+        cursor.execute(
+            "SELECT DATE(created_at) as day, COALESCE(SUM(token_count), 0) as tokens "
+            "FROM sessions "
+            "WHERE created_at >= date('now', '-14 days') "
+            "AND project NOT LIKE '__archived__%' "
+            "AND token_count > 0 "
+            "GROUP BY DATE(created_at) ORDER BY day"
+        )
+        for row in cursor.fetchall():
+            day_str = row["day"]
+            if not day_str:
+                continue
+            try:
+                label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
+                daily_tokens_map[label] += row["tokens"]
             except ValueError, TypeError:
                 pass
 
@@ -282,7 +269,7 @@ def _fetch_session_stats() -> dict:
             result["daily_messages"].append((dl, daily_messages_map[dl]))
             result["daily_tokens"].append((dl, daily_tokens_map[dl]))
 
-        # 6. 平均消息数
+        # 6. ═══ 平均消息数 ═══
         result["avg_messages_per_session"] = round(total_messages / total_sessions, 1) if total_sessions > 0 else 0.0
 
         conn.close()
@@ -376,11 +363,11 @@ class _BarChartWidget(QWidget):
         w = self.width()
         h = self.height()
 
-        # 边距
-        margin_left = 40
-        margin_right = 16
-        margin_top = 32
-        margin_bottom = 48
+        # 自适应边距：窄宽度时缩小边距
+        margin_left = 32 if w >= 400 else 24
+        margin_right = 12 if w >= 400 else 8
+        margin_top = 28
+        margin_bottom = 44 if w >= 400 else 36
 
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
@@ -390,10 +377,11 @@ class _BarChartWidget(QWidget):
             return
 
         # ── 标题 ──
+        title_size = 10 if w >= 400 else 9
         painter.setPen(colors["text"])
-        title_font = QFont("Microsoft YaHei", 11, QFont.Bold)
+        title_font = QFont("Microsoft YaHei", title_size, QFont.Bold)
         painter.setFont(title_font)
-        painter.drawText(QRectF(margin_left, 4, chart_w, 24), Qt.AlignLeft | Qt.AlignVCenter, self._title)
+        painter.drawText(QRectF(margin_left, 4, chart_w, 22), Qt.AlignLeft | Qt.AlignVCenter, self._title)
 
         # ── 计算数据范围 ──
         values = [v for _, v in self._data]
@@ -404,13 +392,14 @@ class _BarChartWidget(QWidget):
         # ── Y 轴 ──
         painter.setPen(colors["grid"])
         y_ticks = 4
+        tick_font_size = 7 if w >= 400 else 6
         for i in range(y_ticks + 1):
             y = margin_top + chart_h * (1 - i / y_ticks)
             painter.drawLine(QPointF(margin_left, y), QPointF(w - margin_right, y))
 
             val = int(max_val * i / y_ticks)
             painter.setPen(colors["text_secondary"])
-            tick_font = QFont("Microsoft YaHei", 8)
+            tick_font = QFont("Microsoft YaHei", tick_font_size)
             painter.setFont(tick_font)
             painter.drawText(
                 QRectF(0, y - 10, margin_left - 4, 20),
@@ -425,7 +414,7 @@ class _BarChartWidget(QWidget):
             painter.end()
             return
 
-        bar_width = chart_w / n * 0.6
+        bar_width = chart_w / n * (0.65 if w >= 400 else 0.55)
         bar_spacing = chart_w / n
 
         bar_color = colors.get(self._color_key, colors["bar_fill"])
@@ -446,7 +435,8 @@ class _BarChartWidget(QWidget):
 
             # X 轴标签
             painter.setPen(colors["text_secondary"])
-            tick_font = QFont("Microsoft YaHei", 7)
+            x_tick_size = 7 if w >= 400 else 6
+            tick_font = QFont("Microsoft YaHei", x_tick_size)
             painter.setFont(tick_font)
             # 显示 "01-15\n周一" 格式（仅周末/周一标注星期）
             try:
@@ -465,15 +455,15 @@ class _BarChartWidget(QWidget):
                 display_label = label
 
             painter.drawText(
-                QRectF(x - bar_spacing / 2, h - margin_bottom + 4, bar_spacing, 40),
+                QRectF(x - bar_spacing / 2, h - margin_bottom + 4, bar_spacing, 36),
                 Qt.AlignCenter,
                 display_label,
             )
 
-            # 值标签（柱顶）
-            if value > 0:
+            # 值标签（柱顶，窄宽度时隐藏小值）
+            if value > 0 and (w >= 350 or value >= max_val * 0.3):
                 painter.setPen(colors["text"])
-                val_font = QFont("Microsoft YaHei", 8, QFont.Bold)
+                val_font = QFont("Microsoft YaHei", 8 if w >= 400 else 7, QFont.Bold)
                 painter.setFont(val_font)
                 painter.drawText(
                     QRectF(x, y - 18, bar_width, 16),
@@ -510,10 +500,11 @@ class _LineChartWidget(QWidget):
         w = self.width()
         h = self.height()
 
-        margin_left = 40
-        margin_right = 16
-        margin_top = 32
-        margin_bottom = 48
+        # 自适应边距：窄宽度时缩小边距
+        margin_left = 32 if w >= 400 else 24
+        margin_right = 12 if w >= 400 else 8
+        margin_top = 28
+        margin_bottom = 44 if w >= 400 else 36
 
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
@@ -523,10 +514,11 @@ class _LineChartWidget(QWidget):
             return
 
         # ── 标题 ──
+        title_size = 10 if w >= 400 else 9
         painter.setPen(colors["text"])
-        title_font = QFont("Microsoft YaHei", 11, QFont.Bold)
+        title_font = QFont("Microsoft YaHei", title_size, QFont.Bold)
         painter.setFont(title_font)
-        painter.drawText(QRectF(margin_left, 4, chart_w, 24), Qt.AlignLeft | Qt.AlignVCenter, self._title)
+        painter.drawText(QRectF(margin_left, 4, chart_w, 22), Qt.AlignLeft | Qt.AlignVCenter, self._title)
 
         # ── 计算数据范围 ──
         values = [v for _, v in self._data]
@@ -549,7 +541,8 @@ class _LineChartWidget(QWidget):
 
             val = int(min_val + (adjusted_max - min_val) * i / y_ticks)
             painter.setPen(colors["text_secondary"])
-            tick_font = QFont("Microsoft YaHei", 8)
+            tick_font_size = 7 if w >= 400 else 6
+            tick_font = QFont("Microsoft YaHei", tick_font_size)
             painter.setFont(tick_font)
             painter.drawText(
                 QRectF(0, y - 10, margin_left - 4, 20),
@@ -614,8 +607,9 @@ class _LineChartWidget(QWidget):
                 )
 
         # ── X 轴标签 ──
+        x_tick_size = 7 if w >= 400 else 6
         painter.setPen(colors["text_secondary"])
-        tick_font = QFont("Microsoft YaHei", 7)
+        tick_font = QFont("Microsoft YaHei", x_tick_size)
         painter.setFont(tick_font)
         for i, (label, _) in enumerate(self._data):
             x = margin_left + chart_w * i / (n - 1) if n > 1 else margin_left + chart_w / 2
@@ -639,7 +633,7 @@ class _LineChartWidget(QWidget):
 
             x_spacing = chart_w / n if n > 0 else chart_w
             painter.drawText(
-                QRectF(x - x_spacing, h - margin_bottom + 4, x_spacing * 2, 40),
+                QRectF(x - x_spacing, h - margin_bottom + 4, x_spacing * 2, 36),
                 Qt.AlignCenter,
                 display,
             )
@@ -694,6 +688,106 @@ class _StatCard(QFrame):
             layout.addWidget(sub_lb)
 
 
+class _ProjectBarWidget(QWidget):
+    """项目分布水平柱状图"""
+
+    def __init__(self, data: List[Tuple[str, int]], title: str = "📁 项目分布", parent=None):
+        super().__init__(parent)
+        self._data = data
+        self._title = title
+        self.setMinimumHeight(160)
+        self.setMaximumHeight(260)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_data(self, data: List[Tuple[str, int]]):
+        self._data = data
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._data:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        colors = _chart_colors()
+        w = self.width()
+        h = self.height()
+
+        # 标题区域
+        title_h = 24
+        margin_left = 16
+        margin_right = 16
+        margin_top = title_h + 4
+        margin_bottom = 8
+
+        chart_w = w - margin_left - margin_right
+        chart_h = h - margin_top - margin_bottom
+
+        if chart_w < 10 or chart_h < 10:
+            painter.end()
+            return
+
+        # ── 标题 ──
+        title_size = 10 if w >= 400 else 9
+        painter.setPen(colors["text"])
+        title_font = QFont("Microsoft YaHei", title_size, QFont.Bold)
+        painter.setFont(title_font)
+        painter.drawText(QRectF(margin_left, 2, chart_w, title_h), Qt.AlignLeft | Qt.AlignVCenter, self._title)
+
+        n = len(self._data)
+        if n == 0:
+            painter.end()
+            return
+
+        max_val = max(v for _, v in self._data)
+        if max_val == 0:
+            max_val = 1
+
+        row_h = chart_h / n
+        bar_h = max(row_h * 0.6, 14)
+        bar_h = min(bar_h, 28)
+
+        label_font = QFont("Microsoft YaHei", 10)
+        val_font = QFont("Microsoft YaHei", 9, QFont.Bold)
+
+        for i, (label, value) in enumerate(self._data):
+            y = margin_top + i * row_h + (row_h - bar_h) / 2
+
+            # 标签
+            painter.setPen(colors["text"])
+            painter.setFont(label_font)
+            display_label = label if len(label) <= 12 else label[:11] + "…"
+            painter.drawText(
+                QRectF(margin_left, y, 80, bar_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                display_label,
+            )
+
+            # 柱条
+            bar_w = (value / max_val) * (chart_w - 80 - 60) if max_val > 0 else 0
+            bar_x = margin_left + 84
+
+            bar_color = QColor(colors["accent"])
+            bar_color.setAlpha(180)
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(bar_x, y + 2, max(bar_w, 2), bar_h - 4), 4, 4)
+            painter.fillPath(path, bar_color)
+            painter.setPen(QPen(colors["accent"], 1))
+            painter.drawPath(path)
+
+            # 数值
+            painter.setPen(colors["text"])
+            painter.setFont(val_font)
+            painter.drawText(
+                QRectF(bar_x + max(bar_w, 2) + 6, y, 50, bar_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                str(value),
+            )
+
+        painter.end()
+
+
 # ══════════════════════════════════════════════════════════
 # 主卡片
 # ══════════════════════════════════════════════════════════
@@ -719,8 +813,8 @@ class ContextUsageStatsCard(QWidget):
     # ── 界面搭建 ──
 
     def _setup_ui(self):
-        self.setMinimumWidth(560)
-        self.setMinimumHeight(500)
+        self.setMinimumWidth(300)
+        self.setMinimumHeight(400)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("ContextUsageStatsCard { background: transparent; }")
 
@@ -851,31 +945,18 @@ class ContextUsageStatsCard(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        # ── 概要统计卡片行 ──
-        stats_row = QHBoxLayout()
-        stats_row.setSpacing(10)
-
+        # ── 概要统计卡片（紧凑单行） ──
         total_sessions = data.get("total_sessions", 0)
         total_messages = data.get("total_messages", 0)
-        total_compacted = data.get("total_compacted", 0)
         avg_msgs = data.get("avg_messages_per_session", 0.0)
-        compact_rate = data.get("compaction_rate", 0.0)
+
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(8)
 
         stat_cards = [
-            (
-                FluentIcon.CHAT,
-                "总会话数",
-                str(total_sessions),
-                f"其中 {total_compacted} 个已压缩" if total_compacted > 0 else "",
-            ),
+            (FluentIcon.CHAT, "总会话数", str(total_sessions), ""),
             (FluentIcon.MESSAGE, "总消息数", _format_number(total_messages), f"平均 {avg_msgs} 条/会话"),
-            (FluentIcon.ZIP_FOLDER, "压缩率", _format_pct(compact_rate), f"{total_compacted}/{total_sessions} 个会话"),
-            (
-                FluentIcon.PEOPLE,
-                "项目数",
-                str(len(data.get("sessions_per_project", {}))),
-                f"共 {total_sessions} 会话分布",
-            ),
+            (FluentIcon.PEOPLE, "项目数", str(len(data.get("sessions_per_project", {}))), ""),
         ]
 
         for ic, title, val, sub in stat_cards:
@@ -887,47 +968,34 @@ class ContextUsageStatsCard(QWidget):
         stats_widget.setStyleSheet("background: transparent;")
         self._content_layout.addWidget(stats_widget)
 
-        # ── 项目分布标签 ──
-        sessions_per_project = data.get("sessions_per_project", {})
-        if sessions_per_project:
-            proj_widget = QWidget()
-            proj_widget.setStyleSheet("background: transparent;")
-            proj_layout = QHBoxLayout(proj_widget)
-            proj_layout.setContentsMargins(0, 0, 0, 0)
-            proj_layout.setSpacing(8)
+        # ── 1️⃣ Token 用量折线图（最重要，放最前面） ──
+        daily_tokens = data.get("daily_tokens", [])
+        has_token_data = any(v for _, v in daily_tokens)
+        token_widget = _LineChartWidget(
+            "🔤 Token 用量趋势" if has_token_data else "🔤 Token 用量趋势（数据收集中）",
+            daily_tokens,
+            color_key="accent",
+        )
+        self._content_layout.addWidget(token_widget)
 
-            proj_label = QLabel("项目分布:", proj_widget)
-            proj_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
-            proj_layout.addWidget(proj_label)
-
-            for proj, cnt in sorted(sessions_per_project.items(), key=lambda x: -x[1])[:6]:
-                tag = QLabel(f"「{proj}」{cnt}个", proj_widget)
-                tag.setStyleSheet(
-                    f"color: {_text_color()}; font-size: 11px; background: rgba(128,128,128,0.08); "
-                    f"border-radius: 4px; padding: 2px 8px;"
-                )
-                proj_layout.addWidget(tag)
-            proj_layout.addStretch(1)
-
-            self._content_layout.addWidget(proj_widget)
-
-        # ── 会话活跃度柱状图 ──
-        daily_sessions = data.get("daily_sessions", [])
-        if daily_sessions and any(v for _, v in daily_sessions):
-            bar_widget = _BarChartWidget("📊 每日会话活跃度", daily_sessions)
-            self._content_layout.addWidget(bar_widget)
-
-        # ── 消息量趋势折线图 ──
+        # ── 2️⃣ 消息量趋势折线图 ──
         daily_messages = data.get("daily_messages", [])
         if daily_messages and any(v for _, v in daily_messages):
             line_widget = _LineChartWidget("📈 每日消息量趋势", daily_messages, color_key="line")
             self._content_layout.addWidget(line_widget)
 
-        # ── 估算 Token 用量折线图 ──
-        daily_tokens = data.get("daily_tokens", [])
-        if daily_tokens and any(v for _, v in daily_tokens):
-            token_widget = _LineChartWidget("🔤 估算 Token 用量趋势", daily_tokens, color_key="accent")
-            self._content_layout.addWidget(token_widget)
+        # ── 3️⃣ 会话活跃度柱状图 ──
+        daily_sessions = data.get("daily_sessions", [])
+        if daily_sessions and any(v for _, v in daily_sessions):
+            bar_widget = _BarChartWidget("📊 每日会话活跃度", daily_sessions)
+            self._content_layout.addWidget(bar_widget)
+
+        # ── 4️⃣ 项目分布柱状图（水平，最后） ──
+        sessions_per_project = data.get("sessions_per_project", {})
+        if sessions_per_project:
+            sorted_projects = sorted(sessions_per_project.items(), key=lambda x: -x[1])[:8]
+            proj_bar = _ProjectBarWidget(sorted_projects)
+            self._content_layout.addWidget(proj_bar)
 
         # ── 无数据提示 ──
         if not daily_sessions or not any(v for _, v in daily_sessions):

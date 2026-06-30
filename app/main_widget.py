@@ -1935,6 +1935,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 跳过已注册的（如内置 subagents 等）
                 if cmd_name in self._function_command_handlers:
                     continue
+
                 # 注册当前窗口的处理器：传入 main_widget=self 确保卡片显示在本窗口
                 def _make_handler(cid=card_id, mw=self):
                     return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
@@ -10682,6 +10683,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 获取压缩状态，以便圆环 tooltip 显示压缩信息
         session = self.session_manager.get_current_session()
+        # 同步 token 数到会话，写入 DB 供统计插件使用
+        if session and token_count > 0:
+            session.token_count = max(session.token_count, token_count)
         compaction_state = dict(getattr(session, "compaction_state", {}) or {})
         normal_tokens = token_count
         compacted_tokens = 0

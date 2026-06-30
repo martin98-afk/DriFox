@@ -177,7 +177,6 @@ class MarketplaceCard(QWidget):
     # ── 界面搭建 ──
 
     def _setup_ui(self):
-        self.setMinimumWidth(480)
         self.setMinimumHeight(400)
         # 半透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
