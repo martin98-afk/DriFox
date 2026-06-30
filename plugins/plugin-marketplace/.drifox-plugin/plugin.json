@@ -1,0 +1,14 @@
+{
+    "name": "plugin-marketplace",
+    "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/drifox-plugins",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "ui": true
+    }
+}

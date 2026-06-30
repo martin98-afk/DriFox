@@ -1,0 +1,14 @@
+{
+    "name": "plugin-manager",
+    "description": "插件管理器 — 查看、启用、禁用、卸载已安装的插件",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "ui": true
+    }
+}
