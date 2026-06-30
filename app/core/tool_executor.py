@@ -3,9 +3,11 @@
 工具执行器模块 - 统一处理各种工具调用
 """
 
+import json as _json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -14,6 +16,8 @@ from loguru import logger
 
 from app.core.hook_manager import HookDecision
 from app.core.message_content import content_to_text
+from app.core.model_capabilities import resolve_context_limit
+from app.core.token_estimator import count_messages_tokens
 from app.tools.tool_name_mapper import ToolNameMapper
 
 # 预编译正则表达式
@@ -282,6 +286,50 @@ class ToolExecutor:
 
     # ========== PostToolUse hook 统一触发 ==========
 
+    # Auto-compact 防重复触发冷却（秒）
+    _AUTO_COMPACT_COOLDOWN = 30.0
+
+    def _get_context_usage_info(self) -> tuple:
+        """获取当前会话的 token 使用量和上下文限制
+
+        从 session 的消息估算 token 数，从模型配置解析上下文窗口限制。
+
+        Returns:
+            (token_count, token_limit):
+                token_count: 当前对话已占用的 token 数（估算值）
+                token_limit: 当前模型的最大上下文窗口限制
+                任一为 0 表示无法获取。
+        """
+        if not (self._backend and self._backend.session_manager):
+            return 0, 0
+
+        session = self._backend.get_current_session()
+        if not session or not getattr(session, "messages", None):
+            return 0, 0
+
+        messages = session.messages
+        if not messages:
+            return 0, 0
+
+        # 估算 token 数
+        token_count = 0
+        try:
+            token_count = count_messages_tokens(messages)
+        except Exception:
+            pass
+
+        # 解析上下文限制
+        token_limit = 0
+        try:
+            getter = getattr(self._backend, "_get_model_config", None)
+            if getter and callable(getter):
+                llm_config = getter() or {}
+                token_limit = resolve_context_limit(llm_config)
+        except Exception:
+            pass
+
+        return token_count, token_limit
+
     def _trigger_post_tool_use(self, tool_name: str, args: dict, result=None) -> None:
         """触发 PostToolUse hook（统一方法，减少重复代码）
 
@@ -376,14 +424,53 @@ class ToolExecutor:
                         current_message_text = content_to_text(msg.get("content", ""))
                         break
 
+        # ====== 注入上下文使用量信息（供 auto-compact hook 检测）======
+        token_count, token_limit = self._get_context_usage_info()
+        context["token_count"] = token_count
+        context["token_limit"] = token_limit
+        if token_count > 0 and token_limit > 0:
+            context["token_ratio"] = token_count / token_limit
+        else:
+            context["token_ratio"] = 0.0
+        # ============================================================
+
         # PostToolUse hook 同步执行，确保 hook 输出在 worker 构建消息序列前
         # 完成并注入到 session，使得 LLM 能感知 hook 的验证/处理结果
-        self._backend.hook_manager.trigger_event(
+        results = self._backend.hook_manager.trigger_event(
             "PostToolUse",
             context=context,
             current_message=current_message_text,
             trigger_async=False,
         )
+
+        # ====== 检查 PostToolUse hook 结果，触发 auto-compact ======
+        self._check_auto_compact(results)
+        # ============================================================
+
+    def _check_auto_compact(self, results: list) -> None:
+        """检查 PostToolUse hook 结果中是否有 auto-compact 触发信号
+
+        hook 函数的返回值（JSON）格式：
+            {"auto_compact": true, "ratio": 0.85}
+
+        Args:
+            results: trigger_event 返回的 HookExecutionResult 列表
+        """
+        if not results or not self._backend:
+            return
+
+        for r in results:
+            if not r.success or not r.output:
+                continue
+            try:
+                data = _json.loads(r.output)
+                if isinstance(data, dict) and data.get("auto_compact"):
+                    ratio = float(data.get("ratio", 0.0))
+                    # 交给后端处理（带冷却）
+                    self._backend.request_auto_compact(ratio)
+                    return  # 只触发一次
+            except _json.JSONDecodeError, ValueError, TypeError:
+                pass
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========
 

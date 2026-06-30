@@ -276,6 +276,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend.set_subagent_model_resolver(self._resolve_subagent_model_config)
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
+        # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
+        self.backend.auto_compact_requested.connect(self._on_auto_compact_requested)
         self.backend._current_project = self._current_project
         # 同步项目到 tool_executor，确保 BuiltinTools 使用正确项目名
         if self.backend.tool_executor:
@@ -2807,6 +2809,42 @@ class OpenAIChatToolWindow(ToolWindow):
             on_finished=on_finished_cb,
             on_error=None,
             session_id=session.session_id,  # 显式传 session_id，避免回退到 SubAgentManager 内部可能陈旧的值
+        )
+
+    def _on_auto_compact_requested(self, ratio: float):
+        """自动上下文压缩请求处理
+
+        当 PostToolUse hook 检测到上下文使用比例超过阈值时，
+        由 backend.auto_compact_requested 信号触发。
+
+        静默执行 /compact --clear，不弹出 InfoBar（避免打扰用户）。
+        仅当会话有消息且子智能体就绪时触发。
+
+        Args:
+            ratio: 触发时的上下文使用比例 (0.0 ~ 1.0)
+        """
+        logger.info(f"[MainWidget] 自动上下文压缩触发 (ratio={ratio:.1%})")
+        session = self.session_manager.get_current_session()
+        if not session or not session.messages:
+            return
+
+        sub_agent_mgr = self.backend.sub_agent_manager
+        if not sub_agent_mgr:
+            return
+
+        # 静默执行 compact --clear
+        base_task = "请压缩当前对话上下文，生成详细的工作摘要。完成后清空所有历史消息。"
+        on_finished_cb = lambda tid, result, _sid=session.session_id: self._on_compact_clear_finished(tid, result, _sid)
+
+        sub_agent_mgr.execute_task(
+            task_id=f"compact_{uuid.uuid4().hex[:8]}",
+            agent_name="compaction",
+            task_description=base_task,
+            parent_context="",
+            share_context=True,
+            on_finished=on_finished_cb,
+            on_error=None,
+            session_id=session.session_id,
         )
 
     def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):

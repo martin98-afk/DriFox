@@ -786,7 +786,7 @@ class HookEditCard(QWidget):
             self.commandEdit.setPlaceholderText("如: https://example.com/hook")
         elif hook_type == "python":
             self._cmd_label.setText("脚本:")
-            self.commandEdit.setPlaceholderText("如: my_module.hook_handler")
+            self.commandEdit.setPlaceholderText("如: my_module.hook_handler 或 .relative:hook?key=val 传递参数")
         elif hook_type == "prompt":
             self._cmd_label.setText("提示:")
             self.commandEdit.setPlaceholderText("如: Before ending, check for uncommitted changes...")

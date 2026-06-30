@@ -15,6 +15,9 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
+# Auto-compact 防重复触发冷却（秒）
+_AUTO_COMPACT_COOLDOWN = 30.0
+
 from app.core.agent import AgentManager
 from app.core.chat_session import ChatSession, SessionManager
 from app.core.engines.ui import ChatEngine
@@ -190,6 +193,9 @@ class ChatBackend(QObject):
     # 上下文
     context_updated = pyqtSignal(int, int)  # token_count, limit
 
+    # Auto-compact 请求（由 tool_executor 在 PostToolUse hook 中检测阈值触发）
+    auto_compact_requested = pyqtSignal(float)  # ratio
+
     # Gateway 状态
     gateway_status_changed = pyqtSignal(dict)  # status dict
 
@@ -243,6 +249,9 @@ class ChatBackend(QObject):
         self._gateway_engine: Optional[GatewayEngine] = None
         self._gateway_initialized = False
 
+        # Auto-compact 防重复触发时间戳
+        self._last_auto_compact_time = 0.0
+
     # ========== 属性访问 ==========
 
     @property
@@ -261,6 +270,28 @@ class ChatBackend(QObject):
     def set_tool_permission_controller(self, controller):
         """注入 per-window 工具权限控制器(必须在 initialize 之前调用)"""
         self._tool_permission_controller = controller
+
+    def request_auto_compact(self, ratio: float):
+        """请求自动上下文压缩（带冷却防抖）
+
+        tool_executor 的 PostToolUse hook 检测到上下文使用比例超过阈值时，
+        调用此方法发射 auto_compact_requested 信号。
+        主窗口收到信号后触发 /compact --clear。
+
+        Args:
+            ratio: 当前 token 使用比例 (0.0 ~ 1.0)
+        """
+        now = time.time()
+        if now - self._last_auto_compact_time < _AUTO_COMPACT_COOLDOWN:
+            logger.info(
+                f"[ChatBackend] Auto-compact 触发被冷却抑制 "
+                f"(ratio={ratio:.1%}, 距上次={now - self._last_auto_compact_time:.0f}s)"
+            )
+            return
+        self._last_auto_compact_time = now
+
+        logger.info(f"[ChatBackend] Auto-compact 触发 (ratio={ratio:.1%})")
+        self.auto_compact_requested.emit(ratio)
 
     @property
     def chat_engine(self) -> ChatEngine:

@@ -32,6 +32,41 @@ from app.tools.tool_name_mapper import ToolNameMapper
 _SCRIPT_EXTENSIONS = r"cmd|bat|ps1|sh|bash|py"
 
 
+def _parse_function_params(function_path: str) -> tuple:
+    """从 Python hook 的函数路径中分离查询参数
+
+    支持 URL 风格的参数内联写法：
+        ".module:func?key1=val1&key2=val2" → (".module:func", {"key1": "val1", "key2": "val2"})
+        ".module:func" → (".module:func", {})
+
+    数值类参数自动转为 int/float，保持直观。
+
+    Args:
+        function_path: 原始函数路径（可能含 ? 参数）
+
+    Returns:
+        (clean_path: str, params: dict) — 清理后的路径和参数字典
+    """
+    if "?" not in function_path:
+        return function_path, {}
+
+    base_path, query = function_path.split("?", 1)
+    params = {}
+    if query:
+        for pair in query.split("&"):
+            if "=" in pair:
+                key, val = pair.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                # 自动类型转换：int → float → str
+                try:
+                    val = int(val) if "." not in val else float(val)
+                except ValueError:
+                    pass  # 保留字符串
+                params[key] = val
+    return base_path, params
+
+
 class HookType(Enum):
     """Hook 类型"""
 
@@ -654,8 +689,11 @@ class HookWorker(QRunnable):
             if not self.hook.function:
                 return "No function specified", False
 
+            # 解析函数路径中的内联参数（?key=val 语法）
+            clean_function, inline_params = _parse_function_params(self.hook.function)
+
             # 解析函数路径 (module.path:function_name)
-            parts = self.hook.function.rsplit(":", 1)
+            parts = clean_function.rsplit(":", 1)
             if len(parts) != 2:
                 return f"Invalid function path: {self.hook.function}", False
 
@@ -664,7 +702,7 @@ class HookWorker(QRunnable):
             # 相对路径：基于 hooks.json 目录解析
             func = None
             if module_path.startswith(".") and self.hook.config_file:
-                func = HookWorker._import_relative_function(self.hook.function, self.hook.config_file)
+                func = HookWorker._import_relative_function(clean_function, self.hook.config_file)
 
             # 标准路径：importlib.import_module
             if func is None:
@@ -676,8 +714,9 @@ class HookWorker(QRunnable):
             if not callable(func):
                 return f"Function not found: {self.hook.function}", False
 
-            # 执行函数
-            args = self.hook.function_args or {}
+            # 执行函数（合并：内联参数 > function_args > event/context 标准参数）
+            args = dict(inline_params)
+            args.update(self.hook.function_args or {})
             args["event"] = self.event_name
             args["context"] = self.context
 
@@ -1366,50 +1405,59 @@ class HookManager:
                     if not hook.function:
                         output = "No function specified"
                         success = False
-                    elif hook.function in self._registered_functions:
-                        func = self._registered_functions[hook.function]
-                        args = hook.function_args or {}
-                        args.update({"event": context.get("event_name"), "context": context})
-                        result = func(**args)
-                        output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                        success = True
                     else:
-                        # 尝试解析 Python 函数
-                        try:
-                            parts = hook.function.rsplit(":", 1)
-                            if len(parts) != 2:
-                                output = f"Function not registered (invalid path): {hook.function}"
-                                success = False
-                            else:
-                                module_path, func_name = parts
-                                func = None
+                        # 解析函数路径中的内联参数（?key=val 语法）
+                        clean_function, inline_params = _parse_function_params(hook.function)
 
-                                # 相对路径：基于 hooks.json 目录解析
-                                if module_path.startswith(".") and hook.config_file:
-                                    func = HookWorker._import_relative_function(hook.function, hook.config_file)
-
-                                # 标准路径：importlib.import_module
-                                if func is None:
-                                    import importlib
-
-                                    module = importlib.import_module(module_path)
-                                    func = getattr(module, func_name, None)
-
-                                if not callable(func):
-                                    output = f"Function not found: {hook.function}"
+                        # 注册函数表也用清理后的路径查找
+                        if clean_function in self._registered_functions:
+                            func = self._registered_functions[clean_function]
+                            args = dict(inline_params)
+                            args.update(hook.function_args or {})
+                            args.update({"event": context.get("event_name"), "context": context})
+                            result = func(**args)
+                            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                            success = True
+                        else:
+                            # 尝试解析 Python 函数
+                            try:
+                                parts = clean_function.rsplit(":", 1)
+                                if len(parts) != 2:
+                                    output = f"Function not registered (invalid path): {hook.function}"
                                     success = False
                                 else:
-                                    args = hook.function_args or {}
-                                    args["event"] = context.get("event_name")
-                                    args["context"] = context
-                                    result = func(**args)
-                                    output = (
-                                        result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                                    )
-                                    success = True
-                        except Exception as e:
-                            output = f"Python hook failed: {str(e)}"
-                            success = False
+                                    module_path, func_name = parts
+                                    func = None
+
+                                    # 相对路径：基于 hooks.json 目录解析
+                                    if module_path.startswith(".") and hook.config_file:
+                                        func = HookWorker._import_relative_function(clean_function, hook.config_file)
+
+                                    # 标准路径：importlib.import_module
+                                    if func is None:
+                                        import importlib
+
+                                        module = importlib.import_module(module_path)
+                                        func = getattr(module, func_name, None)
+
+                                    if not callable(func):
+                                        output = f"Function not found: {hook.function}"
+                                        success = False
+                                    else:
+                                        args = dict(inline_params)
+                                        args.update(hook.function_args or {})
+                                        args["event"] = context.get("event_name")
+                                        args["context"] = context
+                                        result = func(**args)
+                                        output = (
+                                            result
+                                            if isinstance(result, str)
+                                            else json.dumps(result, ensure_ascii=False)
+                                        )
+                                        success = True
+                            except Exception as e:
+                                output = f"Python hook failed: {str(e)}"
+                                success = False
 
                 # 检查决策（支持 JSON decision 和 exit code 2 两种方式）
                 decision = HookDecision.CONTINUE

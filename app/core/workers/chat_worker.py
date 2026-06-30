@@ -2236,7 +2236,12 @@ class OpenAIChatWorker(QThread):
                 response = client.chat.completions.create(**req_kwargs)
                 if attempt > 0:
                     self.retry_resolved.emit()
-                break
+                # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
+                try:
+                    return self._process_response(response)
+                except (httpx.ReadError, httpcore.ReadError):
+                    # 用户取消（cancel()关闭HTTP连接），不是真正的错误
+                    return False, False
             except BadRequestError as e:
                 error_str = str(e)
                 # 检测 tool call result 错误码 2013
@@ -2330,6 +2335,10 @@ class OpenAIChatWorker(QThread):
                         logger.info("[API] 检测到取消，放弃重试")
                         return None, None
 
+                    # 🛡️ 流式协议错误重试：清除已接收的部分响应状态
+                    if is_retryable_protocol:
+                        self._clear_pending_response_state()
+
                     wait_time = retry_delay * (attempt + 1)
                     if is_rate_limit:
                         retry_reason = "RateLimit"
@@ -2364,17 +2373,6 @@ class OpenAIChatWorker(QThread):
                     resp_body = getattr(e.response, "text", "") or ""
                     logger.error(f"[API] Error response body: {resp_body[:500]}")
                 raise
-
-        # 用户在重试等待中取消时 response 可能为 None
-        if response is None:
-            return False, False
-        try:
-            return self._process_response(response)
-        except httpx.ReadError, httpcore.ReadError:
-            # 🛡️ 连接关闭异常（由 cancel() 关闭 HTTP 连接导致），视为用户取消
-            # 此时 _response_chunks 和 _response_content_blocks 已有全部已接收数据，
-            # 后续由 run() 中的 if self._is_cancelled: 分支保存 partial 响应
-            return False, False
 
     def _cap_max_output_tokens(self, model: str, requested: int) -> int:
         """
