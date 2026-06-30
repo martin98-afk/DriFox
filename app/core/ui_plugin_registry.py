@@ -4,6 +4,7 @@
 单例模式，与 AgentManager/MemoryManagerCore 一致。
 插件通过 register_ui(registry) 在加载时注册组件。
 """
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -22,6 +23,7 @@ class ContentRendererInfo:
         priority: 优先级（同 type_name 时高者覆盖低者）
         metadata: 附加元数据
     """
+
     plugin_name: str
     type_name: str
     render_func: Callable[[Dict[str, Any], Optional[Any]], str]
@@ -40,6 +42,7 @@ class MessageFactoryInfo:
         factory_func: 创建 widget  (message: dict, parent) -> QWidget
         priority: 优先级（高者优先尝试）
     """
+
     plugin_name: str
     name: str
     condition_func: Callable[[Dict[str, Any]], bool]
@@ -60,6 +63,7 @@ class FloatingCardInfo:
         default_visible: 默认是否可见
         metadata: 附加元数据
     """
+
     plugin_name: str
     card_id: str
     widget_class: type
@@ -80,6 +84,7 @@ class UIPluginRegistry:
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._loaded_plugins: set = set()
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用
+        self._card_widget_instances: Dict[str, Any] = {}  # card_id -> widget 实例缓存
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -141,13 +146,15 @@ class UIPluginRegistry:
             factory_func: 创建 widget  (message, parent) -> QWidget
             priority: 优先级（高者优先尝试）
         """
-        self._message_factories.append(MessageFactoryInfo(
-            plugin_name=plugin_name,
-            name=name,
-            condition_func=condition_func,
-            factory_func=factory_func,
-            priority=priority,
-        ))
+        self._message_factories.append(
+            MessageFactoryInfo(
+                plugin_name=plugin_name,
+                name=name,
+                condition_func=condition_func,
+                factory_func=factory_func,
+                priority=priority,
+            )
+        )
 
     def register_floating_card(
         self,
@@ -217,19 +224,50 @@ class UIPluginRegistry:
             description=card_info.title or f"打开 {card_info.card_id}",
             argument_hint="",
         )
+
         # 注册处理器：延迟到执行时获取 main_widget
         def _handler(args: str, cid=card_info.card_id):
             self._show_floating_card(cid)
+
         FunctionCommandHandlers.register(cmd_name, _handler)
 
     def _show_floating_card(self, card_id: str) -> None:
-        """显示浮动卡片（由 main_widget 注入后可用）"""
+        """显示浮动卡片（由 main_widget 注入后可用）
+
+        首次调用时自动创建 widget 实例、加入容器布局并注册到 CardManager。
+        """
         if self._main_widget is None:
             return
         card_manager = getattr(self._main_widget, "_card_manager", None)
         window_id = getattr(self._main_widget, "_window_id", None)
-        if card_manager is not None:
-            card_manager.show_card(card_id, window_id)
+        if card_manager is None or window_id is None:
+            return
+
+        card_info = self._floating_cards.get(card_id)
+        if card_info is None:
+            return
+
+        # 获取或创建 widget 实例（延迟创建 + 缓存）
+        widget = self._card_widget_instances.get(card_id)
+        if widget is None:
+            from app.widgets.cards.card_manager import ContainerType
+
+            # 确定容器类型
+            container_type = ContainerType.TOP if card_info.container == "top" else ContainerType.BOTTOM
+            # 获取正确的容器控件（TopCardContainer / BottomCardContainer）
+            container_attr = "_top_card_container" if card_info.container == "top" else "_bottom_card_container"
+            container = getattr(self._main_widget, container_attr, None)
+            if container is None:
+                return
+            # 以容器为父级创建卡片 widget
+            widget = card_info.widget_class(parent=container)
+            self._card_widget_instances[card_id] = widget
+            # 加入容器布局并注册到 CardManager
+            container.add_card(card_id, widget)
+            card_manager.register_card(window_id, container_type, card_id, widget)
+
+        # toggle：显示/隐藏切换
+        card_manager.toggle_card(card_id, window_id)
 
     def load_plugin(self, plugin_name: str, plugin_path) -> bool:
         """加载插件的 ui 组件
@@ -242,6 +280,7 @@ class UIPluginRegistry:
             True 加载成功；False 失败（不影响其他插件）
         """
         from loguru import logger
+
         if plugin_path is None:
             return False
         ui_init = plugin_path / "ui" / "__init__.py"
@@ -255,6 +294,7 @@ class UIPluginRegistry:
         try:
             import importlib.util
             import sys
+
             # 将连字符替换为下划线（Python 模块名不允许连字符）
             safe_name = plugin_name.replace("-", "_").replace(":", "_")
             ui_path = str(plugin_path / "ui")
@@ -264,9 +304,7 @@ class UIPluginRegistry:
             module_name = f"ui_plugin_{safe_name}"
             if module_name in sys.modules:
                 del sys.modules[module_name]
-            spec = importlib.util.spec_from_file_location(
-                module_name, ui_init
-            )
+            spec = importlib.util.spec_from_file_location(module_name, ui_init)
             if spec is None or spec.loader is None:
                 logger.error(f"[UIPluginRegistry] Failed to load spec for {plugin_name}")
                 return False
@@ -276,8 +314,7 @@ class UIPluginRegistry:
             register_func = getattr(module, "register_ui", None)
             if register_func is None:
                 logger.error(
-                    f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py "
-                    "missing register_ui(registry) function"
+                    f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py missing register_ui(registry) function"
                 )
                 return False
             register_func(self)
@@ -295,26 +332,20 @@ class UIPluginRegistry:
     def unload_plugin(self, plugin_name: str) -> bool:
         """卸载插件 UI，清理所有该插件的注册"""
         from loguru import logger
+
         if plugin_name not in self._loaded_plugins:
             return False
         # 清理 content renderers
-        self._content_renderers = {
-            k: v for k, v in self._content_renderers.items()
-            if v.plugin_name != plugin_name
-        }
+        self._content_renderers = {k: v for k, v in self._content_renderers.items() if v.plugin_name != plugin_name}
         # 清理 message factories
-        self._message_factories = [
-            f for f in self._message_factories
-            if f.plugin_name != plugin_name
-        ]
+        self._message_factories = [f for f in self._message_factories if f.plugin_name != plugin_name]
         # 清理 floating cards + 对应命令
-        cards_to_remove = [
-            cid for cid, info in self._floating_cards.items()
-            if info.plugin_name == plugin_name
-        ]
+        cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
             self._unregister_command_for_card(cid)
             self._floating_cards.pop(cid, None)
+            # 清理缓存的 widget 实例
+            self._card_widget_instances.pop(cid, None)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         return True
@@ -361,6 +392,15 @@ class UIPluginRegistry:
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
 
+    def re_register_all_commands(self) -> None:
+        """重新注册所有浮动卡片命令到 CommandManager
+
+        用于 register_all_commands / reload_all_commands 之后
+        恢复 UI 插件命令（这些命令会被 reload 清空）。
+        """
+        for card_info in self._floating_cards.values():
+            self._register_command_for_card(card_info)
+
     def reset(self) -> None:
         """清空所有状态（仅供测试使用）"""
         self._content_renderers.clear()
@@ -368,3 +408,4 @@ class UIPluginRegistry:
         self._floating_cards.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
+        self._card_widget_instances.clear()

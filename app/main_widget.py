@@ -1895,13 +1895,19 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
+        # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
+        self._init_builtin_commands()
+
         # ===== UI 插件系统集成 =====
         try:
             from app.core.ui_plugin_registry import UIPluginRegistry
+
             ui_registry = UIPluginRegistry.get_instance()
             ui_registry.set_main_widget(self)
             # 加载所有已启用的 UI 插件
             self._load_all_ui_plugins()
+            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
+            ui_registry.re_register_all_commands()
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin init failed: {e}")
 
@@ -2034,9 +2040,7 @@ class OpenAIChatToolWindow(ToolWindow):
         #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
         self._truncation_sentinel = None
 
-        # 初始化内置命令
-        self._init_builtin_commands()
-        # （此时命令已注册）更新 /subagents --model= 参数描述
+        # （内置命令已在上方注册）更新 /subagents --model= 参数描述
         self._update_subagents_param_description()
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
@@ -2519,9 +2523,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if widget is not None:
                         return widget
             except Exception as e:
-                logger.error(
-                    f"[MainWidget] Message factory {factory.name} failed: {e}"
-                )
+                logger.error(f"[MainWidget] Message factory {factory.name} failed: {e}")
         return None
 
     def _register_command_shortcuts(self):
