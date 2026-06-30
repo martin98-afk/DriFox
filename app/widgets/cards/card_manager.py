@@ -391,3 +391,53 @@ class CardManager:
     def get_all_windows(self) -> List[str]:
         """获取所有已注册的窗口ID"""
         return list(self._window_data.keys())
+
+    # ============================================================
+    # 外部卡片注册（由 UI 插件调用）
+    # ============================================================
+
+    def register_external_card(
+        self,
+        window_id: str,
+        card_id: str,
+        widget_class: type,
+        container: "ContainerType",
+        default_visible: bool = False,
+    ) -> None:
+        """注册外部卡片（由 UI 插件调用）
+
+        Args:
+            window_id: 窗口 ID（多窗口隔离）
+            card_id: 卡片唯一 ID
+            widget_class: QWidget 子类
+            container: 容器位置
+            default_visible: 默认是否可见
+        """
+        if not hasattr(self, "_external_cards"):
+            self._external_cards: Dict[str, Dict[str, dict]] = {}
+        if window_id not in self._external_cards:
+            self._external_cards[window_id] = {}
+        self._external_cards[window_id][card_id] = {
+            "widget_class": widget_class,
+            "container": container,
+            "default_visible": default_visible,
+        }
+
+    def unregister_external_card(self, window_id: str, card_id: str) -> None:
+        """注销外部卡片"""
+        if not hasattr(self, "_external_cards"):
+            return
+        cards = self._external_cards.get(window_id, {})
+        cards.pop(card_id, None)
+
+    def get_external_card(self, window_id: str, card_id: str) -> Optional[dict]:
+        """获取外部卡片信息"""
+        if not hasattr(self, "_external_cards"):
+            return None
+        return self._external_cards.get(window_id, {}).get(card_id)
+
+    def list_external_cards(self, window_id: str) -> Dict[str, dict]:
+        """列出窗口的所有外部卡片"""
+        if not hasattr(self, "_external_cards"):
+            return {}
+        return dict(self._external_cards.get(window_id, {}))
