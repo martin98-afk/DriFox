@@ -94,9 +94,7 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
     from qfluentwidgets.components.widgets.switch_button import SwitchButton
 
     for card in widget.findChildren(SettingCard):
-        card.titleLabel.setStyleSheet(
-            f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
-        )
+        card.titleLabel.setStyleSheet(f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
         card.contentLabel.setStyleSheet(
             f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
         )
@@ -115,9 +113,7 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     # SwitchButton 内部 QLabel 也硬编码了 font: 14px
     for switch in widget.findChildren(SwitchButton):
-        switch.setStyleSheet(
-            f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
-        )
+        switch.setStyleSheet(f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
 
 
 def current_theme() -> dict:
@@ -320,7 +316,7 @@ class Colors:
     BUTTON_TEXT_ON_ACCENT = "#1A1F2B"
     STATUS_INFO = "#7FDBFF"
     STATUS_DANGER_BG = "rgba(255, 80, 80, 0.8)"
-    STATUS_DANGER_BG_DARK = "#8B4A4A"       # 暗红（工具按钮用）
+    STATUS_DANGER_BG_DARK = "#8B4A4A"  # 暗红（工具按钮用）
     STATUS_ARCHIVE_BG = "rgba(139, 92, 246, 0.8)"
     CARD_BG_DIM = "rgba(255, 255, 255, 0.04)"
     ARCHIVED_CARD_BG = "rgba(255, 180, 100, 0.08)"
@@ -340,13 +336,15 @@ class Colors:
     TAG_PURPLE_TEXT = "#d1b3ff"
     TAG_ORANGE = "#ffb366"
     TAG_ORANGE_TEXT = "#ffc999"
+    TAG_GREEN = "#34d399"
+    TAG_GREEN_TEXT = "#6ee7b7"
 
     # accent_warm 的 Colors 映射（主题已有该值，但 Colors 未暴露）
     ACCENT_WARM = "#f59e0b"
 
     # 语义色
     SUCCESS = "#22c55e"
-    SUCCESS_DARK = "#3D7A5A"                # 暗绿（工具按钮用）
+    SUCCESS_DARK = "#3D7A5A"  # 暗绿（工具按钮用）
     WARNING = "#f59e0b"
     ERROR = "#ef4444"
     INFO = "#3b82f6"
@@ -360,10 +358,10 @@ class Colors:
     # 以下列出非标准映射（YAML key → 不同的 Colors 属性名）。
     # 标准 1:1 映射由 refresh() 自动派生，无需在此声明。
     _COLOR_ALIASES = {
-        "TEXT_ACCENT": "accent",                  # YAML "accent" → Colors.TEXT_ACCENT
-        "TAB_ACTIVE_BG": "selected_bg",            # YAML "selected_bg" → Colors.TAB_ACTIVE_BG
-        "TAB_HOVER_BG": "hover_bg",                # YAML "hover_bg" → Colors.TAB_HOVER_BG
-        "TEXT_SECONDARY_HOVER": "text_primary",    # YAML "text_primary" → Colors.TEXT_SECONDARY_HOVER
+        "TEXT_ACCENT": "accent",  # YAML "accent" → Colors.TEXT_ACCENT
+        "TAB_ACTIVE_BG": "selected_bg",  # YAML "selected_bg" → Colors.TAB_ACTIVE_BG
+        "TAB_HOVER_BG": "hover_bg",  # YAML "hover_bg" → Colors.TAB_HOVER_BG
+        "TEXT_SECONDARY_HOVER": "text_primary",  # YAML "text_primary" → Colors.TEXT_SECONDARY_HOVER
     }
 
     # Colors 属性名白名单 — 仅有这些属性经由主题 YAML 填充。
@@ -431,6 +429,7 @@ class Colors:
         if preset_name:
             if not cls.apply_glow_preset(preset_name):
                 import warnings
+
                 warnings.warn(
                     f"[design_tokens] Unknown input_glow_preset: {preset_name!r} "
                     f"(valid: {sorted(GLOW_PRESETS.keys())}); falling back to class defaults."
@@ -452,18 +451,10 @@ class Colors:
         preset = GLOW_PRESETS.get(preset_name)
         if preset is None:
             return False
-        cls.INPUT_GLOW_PRIMARY_ALPHA = preset.get(
-            "input_glow_primary_alpha", cls.INPUT_GLOW_PRIMARY_ALPHA
-        )
-        cls.INPUT_GLOW_PRIMARY_BLUR = preset.get(
-            "input_glow_primary_blur", cls.INPUT_GLOW_PRIMARY_BLUR
-        )
-        cls.INPUT_GLOW_AMBIENT_ALPHA = preset.get(
-            "input_glow_ambient_alpha", cls.INPUT_GLOW_AMBIENT_ALPHA
-        )
-        cls.INPUT_GLOW_AMBIENT_BLUR = preset.get(
-            "input_glow_ambient_blur", cls.INPUT_GLOW_AMBIENT_BLUR
-        )
+        cls.INPUT_GLOW_PRIMARY_ALPHA = preset.get("input_glow_primary_alpha", cls.INPUT_GLOW_PRIMARY_ALPHA)
+        cls.INPUT_GLOW_PRIMARY_BLUR = preset.get("input_glow_primary_blur", cls.INPUT_GLOW_PRIMARY_BLUR)
+        cls.INPUT_GLOW_AMBIENT_ALPHA = preset.get("input_glow_ambient_alpha", cls.INPUT_GLOW_AMBIENT_ALPHA)
+        cls.INPUT_GLOW_AMBIENT_BLUR = preset.get("input_glow_ambient_blur", cls.INPUT_GLOW_AMBIENT_BLUR)
         cls.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA = preset.get(
             "input_glow_unfocused_ambient_alpha",
             cls.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA,

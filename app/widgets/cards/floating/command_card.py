@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
+from app.core.ui_plugin_registry import UIPluginRegistry
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.widgets.elided_label import _ElidedLabel
@@ -73,27 +74,19 @@ class CommandItemWidget(QWidget):
         self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         layout.addWidget(self._shortcut_label)
 
-        # 类型标签（技能显示【技能】，智能体显示【智能体】，提示词显示【提示词】）
-        item_type = self._data["type"]
-        if item_type == "skill":
-            self._tag_label = QLabel("【技能】")
-            self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-            layout.addWidget(self._tag_label)
-        elif item_type == "agent":
-            self._tag_label = QLabel("【智能体】")
-            self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-            layout.addWidget(self._tag_label)
-        elif item_type == "prompt":
-            self._tag_label = QLabel("【提示词】")
-            self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-            layout.addWidget(self._tag_label)
+        # 类型标签（始终创建，根据 item 类型动态显示/隐藏）
+        self._tag_label = QLabel()
+        self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        layout.addWidget(self._tag_label)
+        self._update_tag_visibility()
 
         # 快捷键文本（仅 command 类型且有快捷键时显示）
+        # UI 插件命令不显示快捷键
         shortcut = self._data.get("shortcut", "")
-        if item_type == "command" and shortcut:
+        item_type = self._data["type"]
+        is_ui_plugin = item_type == "command" and self._data.get("subtype") == "ui_plugin"
+        if item_type == "command" and shortcut and not is_ui_plugin:
             self._shortcut_label.setText(shortcut)
             self._shortcut_label.setVisible(True)
         else:
@@ -145,9 +138,20 @@ class CommandItemWidget(QWidget):
             }}
         """)
 
-        # 标签样式：技能蓝色，智能体紫色，提示词橙色
+        # 标签样式：UI 插件绿色，技能蓝色，智能体紫色，提示词橙色
         item_type = self._data["type"]
-        if item_type == "skill":
+        is_ui_plugin = item_type == "command" and self._data.get("subtype") == "ui_plugin"
+        if is_ui_plugin:
+            tag_fg = Colors.TAG_GREEN if not self._selected else Colors.TAG_GREEN_TEXT
+            self._tag_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {tag_fg};
+                    {get_font_family_css()} {font_size_css(11)};
+                    font-weight: bold;
+                    background: transparent;
+                }}
+            """)
+        elif item_type == "skill":
             tag_fg = Colors.TAG_ACCENT if not self._selected else Colors.TAG_ACCENT_TEXT
             self._tag_label.setStyleSheet(f"""
                 QLabel {{
@@ -188,9 +192,9 @@ class CommandItemWidget(QWidget):
             }}
         """)
 
-        # 快捷键标签样式：类键盘键帽风格，加粗
+        # 快捷键标签样式：类键盘键帽风格，加粗（仅非 UI 插件的命令）
         shortcut = self._data.get("shortcut", "")
-        if item_type == "command" and shortcut:
+        if item_type == "command" and shortcut and not is_ui_plugin:
             shortcut_fg = Colors.TEXT_SECONDARY
             self._shortcut_label.setStyleSheet(f"""
                 QLabel {{
@@ -286,6 +290,25 @@ class CommandItemWidget(QWidget):
             if hls:
                 self._desc_label.setHighlights(hls, Colors.SEND_BTN_START)
 
+    def _update_tag_visibility(self):
+        """根据 item 类型和 subtype 更新标签文本和可见性"""
+        item_type = self._data["type"]
+        is_ui_plugin = item_type == "command" and self._data.get("subtype") == "ui_plugin"
+        if is_ui_plugin:
+            self._tag_label.setText("【UI】")
+            self._tag_label.setVisible(True)
+        elif item_type == "skill":
+            self._tag_label.setText("【技能】")
+            self._tag_label.setVisible(True)
+        elif item_type == "agent":
+            self._tag_label.setText("【智能体】")
+            self._tag_label.setVisible(True)
+        elif item_type == "prompt":
+            self._tag_label.setText("【提示词】")
+            self._tag_label.setVisible(True)
+        else:
+            self._tag_label.setVisible(False)
+
     def set_selected(self, selected: bool):
         """设置选中状态"""
         self._selected = selected
@@ -303,9 +326,13 @@ class CommandItemWidget(QWidget):
         self._hovered = False
         self._selected = False
         self._update_display()
+        # 刷新标签可见性
+        self._update_tag_visibility()
         # 刷新快捷键标签
+        item_type = item_data["type"]
+        is_ui_plugin = item_type == "command" and item_data.get("subtype") == "ui_plugin"
         shortcut = item_data.get("shortcut", "")
-        if item_data["type"] == "command" and shortcut:
+        if item_type == "command" and shortcut and not is_ui_plugin:
             self._shortcut_label.setText(shortcut)
             self._shortcut_label.setVisible(True)
         else:
@@ -508,7 +535,7 @@ class CommandCard(QWidget):
         self._selected_index = 0
         self._last_selected_index = -1  # 上次选中索引，用于增量更新
         self._item_widgets: List[CommandItemWidget] = []
-        self._divider = None  # 缓存分隔线 QFrame，避免积累
+        self._dividers: List[QFrame] = []  # 分区间的分隔线列表
         self._visible = False
         self._current_query = ""
         self._current_text_query = ""  # 去除类别过滤器后的纯文本 query，用于 widget 高亮
@@ -676,10 +703,10 @@ class CommandCard(QWidget):
                 self._apply_value_widget_style(w, selected=(i == self._selected_value_index))
             except RuntimeError:
                 continue
-        # 7. 分隔线（如有）
-        if self._divider is not None:
+        # 7. 分隔线列表
+        for div in list(self._dividers):
             try:
-                self._divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+                div.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
             except RuntimeError:
                 pass
 
@@ -1513,6 +1540,13 @@ class CommandCard(QWidget):
 
         cmd_mgr = CommandManager.get_instance()
         commands = cmd_mgr.get_all_commands()
+
+        # 标记 UI 插件命令（用于排序、分区和标签显示）
+        ui_cmd_names = UIPluginRegistry.get_instance().get_ui_command_names()
+        for cmd in commands:
+            if cmd["name"] in ui_cmd_names:
+                cmd["subtype"] = "ui_plugin"
+
         skills = [
             {"name": s["name"], "description": s.get("description", ""), "type": "skill"} for s in get_local_skills()
         ]
@@ -1656,9 +1690,16 @@ class CommandCard(QWidget):
             if type_filter:
                 self._filtered_items = [item for item in self._filtered_items if item["type"] in type_filter]
 
-        # 排序：命令/技能在前，智能体在后，同类型按名称
-        sort_order = {"command": 0, "skill": 1, "agent": 2}
-        self._filtered_items.sort(key=lambda x: (sort_order.get(x["type"], 99), x["name"]))
+        # 排序：内置命令→UI 插件命令→技能→智能体，同类型按名称
+        sort_order = {"command": 0, "skill": 2, "agent": 3}
+
+        def _sort_key(item):
+            base = sort_order.get(item["type"], 99)
+            if item.get("subtype") == "ui_plugin":
+                base = 1  # UI 插件命令排在内置命令之后、技能之前
+            return (base, item["name"])
+
+        self._filtered_items.sort(key=_sort_key)
 
         self._last_query = query
         # 存储去除类别过滤器后的纯文本 query，供 _render 传给 widget 用于高亮
@@ -1691,6 +1732,7 @@ class CommandCard(QWidget):
             same = all(
                 old_widgets[i].item_data.get("name") == new_items[i]["name"]
                 and old_widgets[i].item_data.get("type") == new_items[i]["type"]
+                and old_widgets[i].item_data.get("subtype") == new_items[i].get("subtype")
                 for i in range(len(new_items))
             )
             if same:
@@ -1709,16 +1751,6 @@ class CommandCard(QWidget):
                     old_by_key[key] = w
             except RuntimeError:
                 continue
-
-        # 检查是否需要分隔线（命令/技能 与 智能体/提示词之间）
-        has_commands_or_skills = any(item["type"] in ("command", "skill") for item in new_items)
-        has_agents_or_prompts = any(item["type"] in ("agent", "prompt") for item in new_items)
-        insert_divider = has_commands_or_skills and has_agents_or_prompts
-
-        # 增量模式：需要分隔线但还没有时，退化到全量（简化逻辑）
-        if incremental and insert_divider and self._divider is None:
-            self._render(incremental=False)
-            return
 
         # 重建 _item_widgets：根据新顺序匹配或创建 widget
         new_widgets: List[CommandItemWidget] = []
@@ -1749,15 +1781,15 @@ class CommandCard(QWidget):
             except RuntimeError:
                 continue
 
-        # 处理分隔线（仅非增量模式）
+        # 删除旧分隔线（仅非增量模式）
         if not incremental:
-            if self._divider is not None:
+            for div in self._dividers:
                 try:
-                    self._scroll_layout.removeWidget(self._divider)
-                    self._divider.deleteLater()
+                    self._scroll_layout.removeWidget(div)
+                    div.deleteLater()
                 except RuntimeError:
                     pass
-                self._divider = None
+            self._dividers.clear()
 
         # 清空 layout，重新按正确顺序添加 widget
         while self._scroll_layout.count():
@@ -1765,36 +1797,41 @@ class CommandCard(QWidget):
             if child.widget():
                 pass  # 仅移除，不删除（widget 在 _item_widgets 中）
 
-        # 添加 widget，按顺序
-        divider_inserted = False
-        for i, widget in enumerate(self._item_widgets):
-            # 在第一个智能体或提示词前插入分隔线（非增量模式）
-            if not incremental and insert_divider and not divider_inserted:
-                item = new_items[i]
-                if i > 0 and item["type"] in ("agent", "prompt") and new_items[i - 1]["type"] in ("command", "skill"):
-                    divider = QFrame()
-                    divider.setFrameShape(QFrame.HLine)
-                    divider.setFixedHeight(1)
-                    divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
-                    divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                    self._scroll_layout.addWidget(divider)
-                    self._divider = divider
-                    divider_inserted = True
-            self._scroll_layout.addWidget(widget)
+        # 计算每个 item 所属的分区编号
+        # 0=内置命令, 1=UI 插件, 2=技能, 3=智能体/提示词
+        def _section(item):
+            t = item["type"]
+            if t == "command" and item.get("subtype") == "ui_plugin":
+                return 1
+            if t == "command":
+                return 0
+            if t == "skill":
+                return 2
+            return 3  # agent/prompt
 
-        # 非增量模式下添加分隔线
-        if not incremental and insert_divider and self._divider is None:
-            divider = QFrame()
-            divider.setFrameShape(QFrame.HLine)
-            divider.setFixedHeight(1)
-            divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
-            divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._scroll_layout.addWidget(divider)
-            self._divider = divider
+        divider_positions = []  # 需要在索引 i 前插入分隔线的位置列表
+        if not incremental:
+            for i in range(1, len(new_items)):
+                if _section(new_items[i]) != _section(new_items[i - 1]):
+                    divider_positions.append(i)
+
+        # 添加 widget 和分隔线，按顺序
+        next_div_idx = 0
+        for i, widget in enumerate(self._item_widgets):
+            if next_div_idx < len(divider_positions) and i == divider_positions[next_div_idx]:
+                divider = QFrame()
+                divider.setFrameShape(QFrame.HLine)
+                divider.setFixedHeight(1)
+                divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+                divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                self._scroll_layout.addWidget(divider)
+                self._dividers.append(divider)
+                next_div_idx += 1
+            self._scroll_layout.addWidget(widget)
 
         # 计算卡片高度
         item_count = len(new_items)
-        divider_count = 1 if (divider_inserted and not incremental) else 0
+        divider_count = len(self._dividers)
         total_items = item_count + divider_count
 
         if total_items == 0:

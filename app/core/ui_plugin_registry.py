@@ -85,6 +85,7 @@ class UIPluginRegistry:
         self._loaded_plugins: set = set()
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用
         self._card_widget_instances: Dict[str, Any] = {}  # card_id -> widget 实例缓存
+        self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -224,6 +225,7 @@ class UIPluginRegistry:
             description=card_info.title or f"打开 {card_info.card_id}",
             argument_hint="",
         )
+        self._ui_command_names.add(cmd_name)
 
         # 注册处理器：延迟到执行时获取 main_widget
         def _handler(args: str, cid=card_info.card_id):
@@ -268,10 +270,8 @@ class UIPluginRegistry:
 
             # 连接 closed 信号：手动关闭时同步 CardManager 状态
             # 避免再次 toggle 时 visible_cards 状态过时导致无法显示
-            if hasattr(widget, 'closed'):
-                widget.closed.connect(
-                    lambda c=card_id, w=window_id: card_manager.hide_card(c, w)
-                )
+            if hasattr(widget, "closed"):
+                widget.closed.connect(lambda c=card_id, w=window_id: card_manager.hide_card(c, w))
 
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
@@ -367,6 +367,7 @@ class UIPluginRegistry:
         cmd_name = card_id
         cmd_mgr.unregister(cmd_name)
         FunctionCommandHandlers._handlers.pop(cmd_name, None)
+        self._ui_command_names.discard(cmd_name)
 
     def load_all_enabled_plugins(self, plugin_dirs) -> int:
         """批量加载所有已启用的 UI 插件
@@ -396,6 +397,10 @@ class UIPluginRegistry:
     def list_loaded_plugins(self) -> List[str]:
         return sorted(self._loaded_plugins)
 
+    def get_ui_command_names(self) -> set:
+        """获取所有由 UI 插件注册的命令名集合"""
+        return self._ui_command_names.copy()
+
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
 
@@ -415,4 +420,5 @@ class UIPluginRegistry:
         self._floating_cards.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
+        self._ui_command_names.clear()
         self._card_widget_instances.clear()

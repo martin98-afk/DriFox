@@ -596,6 +596,27 @@ class SubAgentExecutor(QThread):
 
             ctx = self._build_hook_context(extra=extra_context)
 
+            # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
+            # 让 hook（如 context_auto_compact）能检测当前 token 占比
+            if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
+                try:
+                    from app.core.token_estimator import count_messages_tokens as _count
+                    from app.core.model_capabilities import resolve_context_limit as _resolve_limit
+
+                    token_count = _count(current_messages)
+                    token_limit = 0
+                    llm_config = getattr(self, "llm_config", None)
+                    if llm_config:
+                        token_limit = _resolve_limit(llm_config)
+                    ctx["token_count"] = token_count
+                    ctx["token_limit"] = token_limit
+                    if token_count > 0 and token_limit > 0:
+                        ctx["token_ratio"] = token_count / token_limit
+                    else:
+                        ctx["token_ratio"] = 0.0
+                except Exception:
+                    pass
+
             # 取最新 user 消息作为 current_message（用于 matcher 匹配）
             cur_msg = ""
             for m in reversed(current_messages):
@@ -613,11 +634,12 @@ class SubAgentExecutor(QThread):
             )
 
             # 收集成功执行的 hook 输出，注入 messages
+            # ★ 只注入标记为 add_to_context=true 的 hook 结果
             from app.core.backend import _make_hook_message
 
             injected = 0
             for r in results:
-                if r.success and r.output:
+                if r.success and r.output and r.add_to_context:
                     msg = _make_hook_message(event_name, r.output, r.status_message)
                     current_messages.append(msg)
                     injected += 1
