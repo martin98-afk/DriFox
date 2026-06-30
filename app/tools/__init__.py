@@ -254,7 +254,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": "读取文件内容。返回原文，可选带行号。支持文本和图片文件（.png/.jpg/.jpeg/.gif/.webp/.bmp）。读取图片时返回 base64 编码数据，由系统自动处理。读取时记录文件修改时间，用于后续编辑时检测外部修改。",
+            "description": "读文件。返回原文，可选行号。支持文本/图片(.png/.jpg/.jpeg/.gif/.webp/.bmp)，图片返base64。记录mtime检测外部修改。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -266,7 +266,7 @@ TOOL_SCHEMAS = [
                     },
                     "endline": {
                         "type": "integer",
-                        "description": "结束行号 (包含，从1开始)。不传时默认 startline+499，即读取约 500 行",
+                        "description": "结束行号(从1开始)。不传默认 startline+499≈500行",
                     },
                     "show_line_numbers": {
                         "type": "boolean",
@@ -282,7 +282,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write",
-            "description": "创建新文件或覆盖现有文件,会自动创建不存在的目录，避免一次性写入超大型文件，超大型文件采用多次工具编辑实现。",
+            "description": "创建/覆盖文件。自动建目录。超大文件用多次 edit 写入。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -297,19 +297,19 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit",
-            "description": "精确文本替换编辑。",
+            "description": "精确文本替换。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "文件路径"},
                     "oldString": {
                         "type": "string",
-                        "description": "要替换的旧文本（精确匹配，包含空白字符）",
+                        "description": "旧文本(精确匹配，含空白)",
                     },
                     "newString": {"type": "string", "description": "替换后的新文本"},
                     "replaceAll": {
                         "type": "boolean",
-                        "description": "是否替换所有匹配项（默认 False，只替换第一个）。当 oldString 出现多次时需设置为 True",
+                        "description": "替换全部匹配(默认False)。oldString重复时设True",
                         "default": False,
                     },
                 },
@@ -321,14 +321,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "multi_edit",
-            "description": "批量编辑同一文件，支持多次 oldString/newString 替换。所有替换完成后生成 unified diff 用于审查。",
+            "description": "批量编辑同文件。多次替换后生成 unified diff 审查。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "文件路径"},
                     "edits": {
                         "type": "array",
-                        "description": '编辑操作列表，每项为 {"oldString": "...", "newString": "..."}，按顺序逐条执行替换（仅替换第一个匹配项）',
+                        "description": "编辑列表。每项{oldString,newString}，按序替换首个匹配",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -353,7 +353,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "在指定目录下递归搜索匹配正则表达式的内容。",
+            "description": "递归搜索正则匹配内容。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -376,7 +376,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list",
-            "description": "列出目录下的文件和文件夹。",
+            "description": "列目录。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -393,13 +393,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "通过通配符模式递归查找文件，支持 **, *, ? 等glob语法。",
+            "description": "通配符递归查找。支持 **, *, ? 等glob。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "文件匹配模式 (如 '*.py', '**/*.json', 'src/**/*.ts')",
+                        "description": "匹配模式：如 *.py, **/*.json, src/**/*.ts",
                     },
                     "path": {
                         "type": "string",
@@ -415,7 +415,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "执行 shell 命令。仅用于内置工具无法完成的场景：项目构建/测试（pytest / ruff / python build.py）、git 操作（status / diff / log / add / commit）、进程与服务管理（ps / kill / lsof / netstat）、多命令管道组合（cat | grep | awk）、环境探测（python --version / which / env）。严禁用 bash 替代任何内置工具——读文件用 read、写文件用 write/edit/multi_edit、列目录用 list、按通配符找文件用 glob、搜文件内容用 grep、语法/类型检查用 get_diagnostics 或 lsp、跳定义/查引用用 lsp 的 goToDefinition/findReferences、启后台服务用 bg_start/bg_stop/bg_logs/bg_list、截屏/UI 自动化用 screenshot/mouse/keyboard、网络搜索用 websearch、抓取网页用 webfetch。每次调用前自检：有专用工具能完成这件事吗？有则改用专用工具。",
+            "description": "执行shell命令。仅内置工具不够用时用：构建(pytest/ruff/build)、git(status/diff/log/add/commit)、进程(ps/kill/lsof)、管道(cat|grep|awk)、环境探测(which/env)。禁止替代: read/write/edit/multi_edit/list/glob/grep/get_diagnostics/lsp/bg_*/screenshot/mouse/keyboard/websearch/webfetch。调用前自检：有专用工具？有则用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -431,11 +431,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bg_start",
-            "description": "启动后台命令，不阻塞当前对话。用于启动需要持续运行的服务（如开发服务器）。",
+            "description": "后台启动命令，不阻塞对话。用于持续服务(如开发服务器)。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "要执行的 shell 命令"},
+                    "command": {"type": "string", "description": "要执行的命令"},
                     "cwd": {
                         "type": "string",
                         "description": "工作目录（可选，默认为项目根目录）",
@@ -449,13 +449,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bg_stop",
-            "description": "停止指定的后台任务",
+            "description": "停止后台任务",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "任务 ID，格式为 bg_xxxxxxxx",
+                        "description": "任务ID，格式bg_xxxxxxxx",
                     },
                 },
                 "required": ["task_id"],
@@ -466,14 +466,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bg_logs",
-            "description": "获取后台任务的输出日志",
+            "description": "获取后台任务日志",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string", "description": "任务 ID"},
                     "lines": {
                         "type": "integer",
-                        "description": "返回最近 N 行（默认 100）",
+                        "description": "返回最近N行(默认100)",
                     },
                 },
                 "required": ["task_id"],
@@ -484,7 +484,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bg_list",
-            "description": "列出所有后台任务的状态",
+            "description": "列出所有后台任务状态",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -495,14 +495,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_diagnostics",
-            "description": "获取文件的语法检查结果（错误、警告、提示）。支持 Python (pyright/mypy/flake8)、JavaScript/TypeScript (tsc/eslint)、Shell (shellcheck)。",
+            "description": "获取文件语法检查结果(错误/警告/提示)。支持 Python(pyright/mypy/flake8)、JS/TS(tsc/eslint)、Shell(shellcheck)。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "文件路径"},
                     "language": {
                         "type": "string",
-                        "description": "语言类型，可选: python, javascript, typescript, shellscript",
+                        "description": "语言: python/javascript/typescript/shellscript",
                     },
                 },
                 "required": ["path"],
@@ -513,17 +513,17 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "screenshot",
-            "description": "截取屏幕并保存为 PNG 文件。支持全屏截图或指定区域截图。",
+            "description": "截屏并保存PNG。支持全屏或区域截图。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "输出 PNG 文件路径（可选，为空时自动生成到 .drifox/screenshots/ 目录）",
+                        "description": "输出PNG路径(可选，空则自动生成到.drifox/screenshots/)",
                     },
                     "region": {
                         "type": "array",
-                        "description": "截取区域 (left, top, width, height)，如 [100, 200, 800, 600]；为空时截取主显示器全屏",
+                        "description": "区域(left,top,width,height)如[100,200,800,600]；空=全屏",
                         "items": {"type": "integer"},
                         "minItems": 4,
                         "maxItems": 4,
@@ -536,31 +536,31 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "mouse",
-            "description": "桌面鼠标操作。支持移动、单击、双击、右键、滚动、拖拽、查询当前位置。",
+            "description": "桌面鼠标操作。支持移动/单击/双击/右键/滚动/拖拽/查位置。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["move", "click", "double_click", "right_click", "scroll", "drag", "position"],
-                        "description": "操作类型: move=移动, click=单击, double_click=双击, right_click=右键, scroll=滚动, drag=拖拽(从当前位置拖到 x,y), position=返回当前鼠标坐标及屏幕尺寸(无需 x,y; content 为 {x,y,screen_width,screen_height})",
+                        "description": "move=移动,click=单击,double_click=双击,right_click=右键,scroll=滚动,drag=拖到(x,y),position=查坐标+屏幕尺寸",
                     },
                     "x": {"type": "integer", "description": "目标屏幕 X 坐标（像素）"},
                     "y": {"type": "integer", "description": "目标屏幕 Y 坐标（像素）"},
                     "button": {
                         "type": "string",
                         "enum": ["left", "right", "middle"],
-                        "description": "鼠标按钮（默认 left）",
+                        "description": "鼠标按钮(默认left)",
                     },
                     "clicks": {
                         "type": "integer",
-                        "description": "点击次数（默认 1），double_click 固定为 2 次",
+                        "description": "点击次数(默认1),double_click固定2次",
                     },
-                    "dx": {"type": "integer", "description": "scroll 水平滚动量"},
-                    "dy": {"type": "integer", "description": "scroll 垂直滚动量（负值向上，正值向下）"},
+                    "dx": {"type": "integer", "description": "scroll水平滚动"},
+                    "dy": {"type": "integer", "description": "scroll垂直滚动(负上正下)"},
                     "duration": {
                         "type": "number",
-                        "description": "move/drag 过渡时长（秒）；move 默认 0 瞬移，drag 默认 0.3",
+                        "description": "move/drag过渡秒数；move默认0瞬移，drag默认0.3",
                     },
                 },
                 "required": ["action"],
@@ -571,14 +571,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "keyboard",
-            "description": "桌面键盘操作。支持打字、按单键、组合热键。需先在设置中开启桌面自动化。",
+            "description": "桌面键盘操作。支持打字/按单键/组合热键。需先开启桌面自动化。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["type", "press", "hotkey"],
-                        "description": "操作类型: type=输入文本, press=按单键, hotkey=组合热键",
+                        "description": "type=输入文本,press=按单键,hotkey=组合热键",
                     },
                     "text": {
                         "type": "string",
@@ -586,11 +586,11 @@ TOOL_SCHEMAS = [
                     },
                     "key": {
                         "type": "string",
-                        "description": "press 操作的单键名，如 enter, f5, ctrl_l, esc, tab",
+                        "description": "单键名: enter/f5/ctrl_l/esc/tab",
                     },
                     "keys": {
                         "type": "string",
-                        "description": "hotkey 操作的组合键，用 + 连接，如 ctrl+c, ctrl+shift+n",
+                        "description": "组合键用+连接: ctrl+c,ctrl+shift+n",
                     },
                 },
                 "required": ["action"],
@@ -608,7 +608,7 @@ TOOL_SCHEMAS = [
                     "url": {"type": "string", "description": "网页URL"},
                     "format": {
                         "type": "string",
-                        "description": "返回格式, 支持:html, text, markdown",
+                        "description": "返回格式: html/text/markdown",
                     },
                 },
                 "required": ["url"],
@@ -623,7 +623,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "搜索关键词"},
+                    "query": {"type": "string", "description": "关键词"},
                     "num_results": {"type": "integer", "description": "结果数量"},
                 },
                 "required": ["query"],
@@ -634,7 +634,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "scan_repo",
-            "description": "扫描仓库目录并返回结构化摘要，适合编码任务前快速建模上下文",
+            "description": "扫描仓库，返回结构化摘要。编码前快速建模上下文。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -648,7 +648,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "stage_files",
-            "description": "标记当前任务相关文件，帮助后续聚焦编辑和验证",
+            "description": "标记任务相关文件，聚焦后续编辑/验证。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -666,7 +666,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "todowrite",
-            "description": "创建和更新待办事项列表",
+            "description": "创建/更新待办事项",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -677,18 +677,9 @@ TOOL_SCHEMAS = [
                             "type": "object",
                             "properties": {
                                 "id": {"type": "string", "description": "序号"},
-                                "content": {
-                                    "type": "string",
-                                    "description": "待办事项内容",
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "description": "状态: pending/in_progress/completed",
-                                },
-                                "priority": {
-                                    "type": "string",
-                                    "description": "优先级: high/medium/low",
-                                },
+                                "content": {"type": "string", "description": "内容"},
+                                "status": {"type": "string", "description": "状态: pending/in_progress/completed"},
+                                "priority": {"type": "string", "description": "优先级: high/medium/low"},
                             },
                             "required": ["content"],
                         },
@@ -730,7 +721,7 @@ TOOL_SCHEMAS = [
                                 },
                                 "context": {
                                     "type": "string",
-                                    "description": "详细上下文信息（可选）",
+                                    "description": "上下文(可选)",
                                 },
                             },
                             "required": ["agent", "description"],
@@ -738,7 +729,7 @@ TOOL_SCHEMAS = [
                     },
                     "share_context": {
                         "type": "boolean",
-                        "description": "是否共享主智能体上下文给子智能体（默认 True）。启用后子智能体将获得主智能体的完整上下文信息。",
+                        "description": "共享主智能体上下文给子智能体(默认True)",
                         "default": True,
                     },
                 },
@@ -751,26 +742,24 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "subagent_status",
             "description": (
-                "查询子智能体任务状态。task_ids 不传时只能查一次刚完成的任务；指定 task_id 始终能查到。\n\n"
-                "**重要**：如果任务还在运行中（返回的 status 为 running/finishing 并附带 _hint），"
-                "**请勿重复调用本工具等待结果**——任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
-                "届时再调用本工具获取详细结果。轮询会导致 LLM 主流程卡死。"
+                "查询子智能体任务状态。task_ids 不传只能查一次刚完成的；指定task_id始终能查。\n\n"
+                "**重要**：运行中任务勿重复查——完成后自动发[后台任务状态]通知，届时再查。轮询卡死。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_ids": {
                         "type": "array",
-                        "description": "任务ID列表（不传则查刚完成的任务，只能查一次）",
+                        "description": "任务ID列表(不传则查刚完成的，仅一次)",
                         "items": {"type": "string"},
                     },
                     "with_log": {
                         "type": "boolean",
-                        "description": "是否包含执行日志（默认 False）",
+                        "description": "含执行日志(默认False)",
                     },
                     "with_result": {
                         "type": "boolean",
-                        "description": "是否包含执行结果（默认 True）",
+                        "description": "含执行结果(默认True)",
                     },
                 },
             },
@@ -786,7 +775,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "技能名称，如 brainstorming, tdd, find-skills, git-commit 等",
+                        "description": "技能名：brainstorming/tdd/find-skills/git-commit等",
                     },
                 },
                 "required": ["name"],
@@ -797,7 +786,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_skills",
-            "description": "列出所有可用的本地技能，包括内置技能和用户安装的技能。当需要了解有哪些技能可用时可调用此工具。",
+            "description": "列出所有可用技能(内置+用户安装)。",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -805,7 +794,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "subagent_dag",
-            "description": "批量分发子智能体任务组成 DAG 工作流（有向无环图）。支持节点间依赖关系定义，系统自动按拓扑排序分批并行执行，下游节点自动获取上游节点结果。\n\n【同步执行】调用本工具后会等待所有节点执行完成再返回结果，不需要额外查询。\n\n【依赖解析】系统根据 edges 计算拓扑排序，入度为0的节点并行执行，完成后自动将结果注入下游节点的 context。\n\n【失败处理】如果某个节点执行失败，依赖它的下游节点自动标记为 skipped，不会执行。",
+            "description": "子智能体DAG工作流。按拓扑排序分批并行执行，下游自动取上游结果。【同步执行】等全部完成再返回。【失败处理】失败节点→下游自动skipped。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -817,7 +806,7 @@ TOOL_SCHEMAS = [
                             "properties": {
                                 "id": {
                                     "type": "string",
-                                    "description": "节点唯一标识（如 'step1', 'analyze', 'build'），供 edges 引用",
+                                    "description": "节点ID(如step1/analyze/build)，供edges引用",
                                 },
                                 "agent": {
                                     "type": "string",
@@ -829,7 +818,7 @@ TOOL_SCHEMAS = [
                                 },
                                 "context": {
                                     "type": "string",
-                                    "description": "额外上下文信息（可选），将追加到自动注入的上游结果之后",
+                                    "description": "额外上下文(可选)，追加到上游结果之后",
                                 },
                             },
                             "required": ["id", "agent", "description"],
@@ -837,7 +826,7 @@ TOOL_SCHEMAS = [
                     },
                     "edges": {
                         "type": "array",
-                        "description": '节点间的依赖关系。例如 [{"from": "step1", "to": "step2"}] 表示 step2 依赖 step1',
+                        "description": "依赖关系。如[{from:step1,to:step2}]表示step2依赖step1",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -862,13 +851,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "question",
-            "description": "向用户提问并获取回答。当需要了解用户偏好、需求或让用户做选择时，**必须**使用此工具。\n\n支持一次性提多个问题，每个问题可以有自己的选项列表。\n\n## 参数说明\n- questions: 问题列表（**必填**），列表里每个元素是一个独立的问题对象\n  - question: 问题内容（字符串，必填）\n  - options: 选项列表（数组，可选）。每个选项是一个对象：\n    - label: 选项标题（字符串，必填）\n    - description: 选项描述（字符串，可选，小字显示在标题下方）\n  - multiple: 是否允许多选（布尔值，可选，默认 false）",
+            "description": "向用户提问。了解偏好/需求/选择时**必用**。支持多问题，每问题可带选项列表。参数：questions(必填,数组)，每项含question(string)+options(array,每项label+description)+multiple(bool)。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "questions": {
                         "type": "array",
-                        "description": "问题列表。列表里每个元素是一个独立的问题对象，包含 question（问题内容）、options（选项列表，每个选项有 label+description）、multiple（是否多选）",
+                        "description": "问题列表。每项含question+options(含label+description)+multiple",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -878,7 +867,7 @@ TOOL_SCHEMAS = [
                                 },
                                 "options": {
                                     "type": "array",
-                                    "description": "选项列表（可选）。每个选项包含 label（标题）和 description（描述）,一个问题最多提出4个选项",
+                                    "description": "选项列表(可选)。每项含label+description，最多4个",
                                     "items": {
                                         "type": "object",
                                         "properties": {
@@ -888,7 +877,7 @@ TOOL_SCHEMAS = [
                                             },
                                             "description": {
                                                 "type": "string",
-                                                "description": "选项描述，小字显示在标题下方",
+                                                "description": "选项描述(小字显示在标题下)",
                                             },
                                         },
                                         "required": ["label"],
@@ -911,7 +900,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "mcp_list_servers",
-            "description": "列出所有 MCP 服务器的连接状态和可用工具。当需要了解当前有哪些 MCP 服务器可用时可调用此工具。**返回的 tools 字段为完整工具名（含 ``mcp__{server}__`` 前缀），调用时必须原样使用完整名**，不得自行去掉前缀。",
+            "description": "列出MCP服务器连接状态和可用工具。tools字段含``mcp__{server}__``前缀，调用时用完整名，勿去前缀。",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -919,13 +908,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "upload_file",
-            "description": "将本地文件上传至 Gitee 仓库，返回公开下载链接。适用于需要 LLM 访问本地文件但又无法直接读取的场景（如 gateway 远程调用场景）。**请勿滥用**，仅在确实需要时使用，并注意保护敏感信息，避免上传包含敏感数据的文件。",
+            "description": "上传文件到Gitee仓库，返回下载链接。用于gateway远程调用场景。**勿滥用**，注意敏感信息。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "local_path": {
                         "type": "string",
-                        "description": "本地文件路径（绝对路径或相对 workdir 的路径）",
+                        "description": "文件路径(绝对/相对workdir)",
                     },
                 },
                 "required": ["local_path"],
@@ -937,17 +926,17 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "lsp",
             "description": (
-                "通过 LSP 语言服务器（Language Server Protocol）执行代码智能操作。\n"
+                "通过LSP执行代码智能操作。\n"
                 "\n"
-                "支持的操作类型（operation 参数）：\n"
-                "- diagnostics: 获取文件诊断（错误/警告/提示）\n"
-                "- documentSymbols: 获取文件符号列表（类/函数/变量）\n"
-                "- goToDefinition: 跳转到符号定义位置\n"
-                "- findReferences: 查找符号的所有引用\n"
-                "- hover: 获取光标位置符号的文档/类型信息\n"
-                "- listServers: 列出已注册的 LSP 服务器及其状态\n"
+                "操作类型：\n"
+                "- diagnostics: 文件诊断(错误/警告/提示)\n"
+                "- documentSymbols: 符号列表(类/函数/变量)\n"
+                "- goToDefinition: 跳定义\n"
+                "- findReferences: 找引用\n"
+                "- hover: 光标位置文档/类型\n"
+                "- listServers: 列出LSP服务器状态\n"
                 "\n"
-                "line/column 从 1 开始计数。diagnostics 和 listServers 不需要 line/column。"
+                "line/column从1开始。diagnostics/listServers无需line/column。"
             ),
             "parameters": {
                 "type": "object",
@@ -1003,15 +992,9 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     schemas = [s.copy() for s in TOOL_SCHEMAS]
 
     # 动态生成 subagent_para 工具描述
-    subagent_para_desc = (
-        "批量分发多个子智能体任务（并行执行）。**调用本工具后绝对不能主动停下来等待结果**——子智能体在后台异步运行，任务完成后系统会自动发送 `[后台任务状态]` 消息通知，届时再使用 subagent_status 获取结果。\n\n"
-        "【强制行为】调用 subagent_para 返回后，你必须二选一：\n"
-        "1. 继续调用其他工具执行下一步工作（例如启动其他并行子任务、处理剩余工作）；\n"
-        "2. 如果所有任务已派发完毕、不再有工具可调，直接停止调用工具并输出总结，结束本轮循环。\n\n"
-        "【禁止】只调用一次 subagent_para 后便输出文本结束对话并等待——这是错误行为，会让主流程卡死。**绝对不要**为了让用户「先看到任务派发」而主动停下。"
-    )
+    subagent_para_desc = "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。完成后系统发[后台任务状态]，届时用subagent_status查。"
     if subagent_names:
-        subagent_para_desc += "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
+        subagent_para_desc += "\n\n可用子智能体见系统提示 ## Available Subagents。"
 
     # Update the subagent_para schema
     for schema in schemas:
@@ -1023,9 +1006,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     for schema in schemas:
         if schema["function"]["name"] == "subagent_dag":
             if subagent_names:
-                schema["function"]["description"] += (
-                    "\n\n【可用子智能体】参见系统提示词中的 `## Available Subagents` 节，含完整描述。"
-                )
+                schema["function"]["description"] += "\n\n可用子智能体见系统提示 ## Available Subagents。"
             break
 
     # 动态注入 MCP 工具 schema
@@ -1043,7 +1024,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         clients = lsp_mgr._clients
         if clients:
             running = [n for n, c in clients.items() if c.is_running]
-            status_text = f"当前已启动的 LSP 服务器: {', '.join(running) if running else '(无)'}。"
+            status_text = f"已启动LSP: {', '.join(running) if running else '(无)'}。"
             for schema in schemas:
                 if schema["function"]["name"] == "lsp":
                     schema["function"]["description"] += f"\n\n{status_text}"
