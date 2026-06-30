@@ -5,7 +5,10 @@
 插件通过 register_ui(registry) 在加载时注册组件。
 """
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from app.core.command_manager import CommandType  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,86 @@ class UIPluginRegistry:
             factory_func=factory_func,
             priority=priority,
         ))
+
+    def register_floating_card(
+        self,
+        plugin_name: str,
+        card_id: str,
+        widget_class: type,
+        container: str,
+        title: str = "",
+        default_visible: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册浮动卡片
+
+        Args:
+            plugin_name: 所属插件名
+            card_id: 卡片唯一 ID
+            widget_class: QWidget 子类
+            container: "top" | "bottom"
+            title: 卡片标题
+            default_visible: 默认是否可见
+            metadata: 附加元数据
+
+        Side Effects:
+            自动注册对应命令 /{card_id}（用户插件带命名空间前缀）
+        """
+        if container not in ("top", "bottom"):
+            raise ValueError(f"container must be 'top' or 'bottom', got {container!r}")
+        if metadata is None:
+            metadata = {}
+        info = FloatingCardInfo(
+            plugin_name=plugin_name,
+            card_id=card_id,
+            widget_class=widget_class,
+            container=container,
+            title=title,
+            default_visible=default_visible,
+            metadata=metadata,
+        )
+        self._floating_cards[card_id] = info
+        # 联动注册命令
+        self._register_command_for_card(info)
+
+    def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
+        """为浮动卡片自动注册对应 FUNCTION 命令"""
+        from app.core.command_manager import CommandManager, CommandType
+        from app.core.builtin_commands import FunctionCommandHandlers
+
+        # 命名空间：system 插件用短名，user 插件带前缀
+        if card_info.plugin_name == "system":
+            cmd_name = card_info.card_id
+        else:
+            # card_id 已包含 plugin_name 前缀（如 "plug-a:mycard"）则不再加
+            if ":" in card_info.card_id:
+                cmd_name = card_info.card_id
+            else:
+                cmd_name = f"{card_info.plugin_name}:{card_info.card_id}"
+
+        cmd_mgr = CommandManager.get_instance()
+        if cmd_mgr.has_command(cmd_name):
+            return  # 命令已存在则不重复注册
+
+        cmd_mgr.register(
+            name=cmd_name,
+            command_type=CommandType.FUNCTION,
+            description=card_info.title or f"打开 {card_info.card_id}",
+            argument_hint="",
+        )
+        # 注册处理器：延迟到执行时获取 main_widget
+        def _handler(args: str, cid=card_info.card_id):
+            self._show_floating_card(cid)
+        FunctionCommandHandlers.register(cmd_name, _handler)
+
+    def _show_floating_card(self, card_id: str) -> None:
+        """显示浮动卡片（由 main_widget 注入后可用）"""
+        if self._main_widget is None:
+            return
+        card_manager = getattr(self._main_widget, "_card_manager", None)
+        window_id = getattr(self._main_widget, "_window_id", None)
+        if card_manager is not None:
+            card_manager.show_card(card_id, window_id)
 
     def get_message_factories(self) -> List[MessageFactoryInfo]:
         """按 priority 降序返回"""

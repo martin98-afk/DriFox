@@ -110,3 +110,82 @@ def test_message_factories_sorted_by_priority():
     factories = reg.get_message_factories()
     assert [f.name for f in factories] == ["f2", "f3", "f1"]
     reg.reset()
+
+
+def test_register_floating_card():
+    """注册浮动卡片"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    class FakeCard:
+        def __init__(self):
+            pass
+
+    reg.register_floating_card(
+        plugin_name="plug-a",
+        card_id="plug-a:mycard",
+        widget_class=FakeCard,
+        container="top",
+        title="我的卡片",
+    )
+    cards = reg.get_floating_cards()
+    assert "plug-a:mycard" in cards
+    assert cards["plug-a:mycard"].container == "top"
+    assert cards["plug-a:mycard"].title == "我的卡片"
+    reg.reset()
+
+
+def test_floating_card_auto_registers_command():
+    """注册浮动卡片自动注册对应命令"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.set_main_widget(_FakeMainWidget())
+
+    class FakeCard:
+        def __init__(self):
+            pass
+
+    reg.register_floating_card(
+        plugin_name="system",
+        card_id="mycard",
+        widget_class=FakeCard,
+        container="top",
+        title="My Card",
+    )
+    # 检查命令已注册
+    from app.core.command_manager import CommandManager
+    cmd_mgr = CommandManager.get_instance()
+    # 命令应使用短名（system 插件）
+    assert cmd_mgr.has_command("mycard") is True
+    cmd_mgr.unregister("mycard")
+    reg.reset()
+
+
+def test_floating_card_user_plugin_namespaced_command():
+    """用户插件的命令带命名空间前缀"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.set_main_widget(_FakeMainWidget())
+
+    class FakeCard:
+        pass
+
+    reg.register_floating_card(
+        plugin_name="user-plugin",
+        card_id="mycard",
+        widget_class=FakeCard,
+        container="top",
+    )
+    from app.core.command_manager import CommandManager
+    cmd_mgr = CommandManager.get_instance()
+    # 用户插件：card_id 不含前缀时，命令名前缀
+    assert cmd_mgr.has_command("user-plugin:mycard") is True
+    cmd_mgr.unregister("user-plugin:mycard")
+    reg.reset()
+
+
+class _FakeMainWidget:
+    """测试用 main_widget stub"""
+    _window_id = "test"
+    def _card_manager(self):
+        return None
