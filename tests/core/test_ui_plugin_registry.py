@@ -189,3 +189,62 @@ class _FakeMainWidget:
     _window_id = "test"
     def _card_manager(self):
         return None
+
+
+def test_load_plugin_invokes_register_ui(tmp_path, monkeypatch):
+    """load_plugin 调用插件 ui/__init__.py 中的 register_ui"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    # 创建临时插件目录
+    plugin_dir = tmp_path / "plug-x"
+    ui_dir = plugin_dir / "ui"
+    ui_dir.mkdir(parents=True)
+    (ui_dir / "__init__.py").write_text("""
+from app.core.ui_plugin_registry import UIPluginRegistry
+
+def register_ui(registry: UIPluginRegistry):
+    registry.register_content_renderer(
+        plugin_name='plug-x', type_name='t1',
+        render_func=lambda d, c: 'ok', priority=0
+    )
+""", encoding="utf-8")
+
+    ok = reg.load_plugin("plug-x", plugin_dir)
+    assert ok is True
+    assert reg.is_loaded("plug-x") is True
+    assert reg.get_content_renderer("t1") is not None
+    reg.reset()
+
+
+def test_unload_plugin_clears_registrations():
+    """unload_plugin 清理该插件的所有注册"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.set_main_widget(_FakeMainWidget())
+
+    class FakeCard:
+        pass
+
+    reg.register_content_renderer("plug-y", "t1", lambda d, c: "x", priority=1)
+    reg.register_floating_card("plug-y", "card1", FakeCard, "top", title="Card 1")
+    reg._loaded_plugins.add("plug-y")
+
+    reg.unload_plugin("plug-y")
+    assert reg.get_content_renderer("t1") is None
+    assert "card1" not in reg.get_floating_cards()
+    assert "plug-y" not in reg._loaded_plugins
+
+    from app.core.command_manager import CommandManager
+    cmd_mgr = CommandManager.get_instance()
+    assert cmd_mgr.has_command("card1") is False
+    reg.reset()
+
+
+def test_load_plugin_raises_for_missing_init():
+    """ui/__init__.py 不存在时加载失败"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    ok = reg.load_plugin("nonexistent", None)
+    assert ok is False
+    reg.reset()

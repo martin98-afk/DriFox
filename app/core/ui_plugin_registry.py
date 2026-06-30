@@ -229,6 +229,109 @@ class UIPluginRegistry:
         if card_manager is not None:
             card_manager.show_card(card_id, window_id)
 
+    def load_plugin(self, plugin_name: str, plugin_path) -> bool:
+        """加载插件的 ui 组件
+
+        Args:
+            plugin_name: 插件名
+            plugin_path: 插件根目录 Path
+
+        Returns:
+            True 加载成功；False 失败（不影响其他插件）
+        """
+        from loguru import logger
+        if plugin_path is None:
+            return False
+        ui_init = plugin_path / "ui" / "__init__.py"
+        if not ui_init.exists():
+            return False
+
+        # 先卸载旧版本
+        if self.is_loaded(plugin_name):
+            self.unload_plugin(plugin_name)
+
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                f"ui_plugin_{plugin_name}", ui_init
+            )
+            if spec is None or spec.loader is None:
+                logger.error(f"[UIPluginRegistry] Failed to load spec for {plugin_name}")
+                return False
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            register_func = getattr(module, "register_ui", None)
+            if register_func is None:
+                logger.error(
+                    f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py "
+                    "missing register_ui(registry) function"
+                )
+                return False
+            register_func(self)
+            self._loaded_plugins.add(plugin_name)
+            logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
+            return True
+        except Exception as e:
+            logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
+            return False
+
+    def reload_plugin(self, plugin_name: str, plugin_path) -> bool:
+        """重新加载插件 UI（先卸载后加载）"""
+        return self.load_plugin(plugin_name, plugin_path)
+
+    def unload_plugin(self, plugin_name: str) -> bool:
+        """卸载插件 UI，清理所有该插件的注册"""
+        from loguru import logger
+        if plugin_name not in self._loaded_plugins:
+            return False
+        # 清理 content renderers
+        self._content_renderers = {
+            k: v for k, v in self._content_renderers.items()
+            if v.plugin_name != plugin_name
+        }
+        # 清理 message factories
+        self._message_factories = [
+            f for f in self._message_factories
+            if f.plugin_name != plugin_name
+        ]
+        # 清理 floating cards + 对应命令
+        cards_to_remove = [
+            cid for cid, info in self._floating_cards.items()
+            if info.plugin_name == plugin_name
+        ]
+        for cid in cards_to_remove:
+            self._unregister_command_for_card(cid)
+            self._floating_cards.pop(cid, None)
+        self._loaded_plugins.discard(plugin_name)
+        logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
+        return True
+
+    def _unregister_command_for_card(self, card_id: str) -> None:
+        """卸载浮动卡片对应的命令"""
+        from app.core.command_manager import CommandManager
+        from app.core.builtin_commands import FunctionCommandHandlers
+
+        cmd_mgr = CommandManager.get_instance()
+        # card_id 可能是 "plug-a:mycard" 或 "mycard"
+        cmd_name = card_id
+        cmd_mgr.unregister(cmd_name)
+        FunctionCommandHandlers._handlers.pop(cmd_name, None)
+
+    def load_all_enabled_plugins(self, plugin_dirs) -> int:
+        """批量加载所有已启用的 UI 插件
+
+        Args:
+            plugin_dirs: List[Tuple[plugin_name, plugin_path]]
+
+        Returns:
+            成功加载的数量
+        """
+        count = 0
+        for name, path in plugin_dirs:
+            if self.load_plugin(name, path):
+                count += 1
+        return count
+
     def get_message_factories(self) -> List[MessageFactoryInfo]:
         """按 priority 降序返回"""
         return sorted(self._message_factories, key=lambda f: -f.priority)
