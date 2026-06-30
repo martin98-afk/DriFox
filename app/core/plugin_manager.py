@@ -425,6 +425,9 @@ class PluginManager:
                     components["mcp"] = True
                 if (item / ".lsp.json").exists():
                     components["lsp"] = True
+                # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
+                if (item / "ui").exists() and (item / "ui" / "__init__.py").exists():
+                    components["ui"] = True
                 if "components" not in manifest or not manifest["components"]:
                     manifest["components"] = components
                 elif isinstance(manifest["components"], dict):
@@ -483,6 +486,9 @@ class PluginManager:
                 detected_components["mcp"] = True
             if (plugin_dir / ".lsp.json").exists():
                 detected_components["lsp"] = True
+            # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
+            if (plugin_dir / "ui").exists() and (plugin_dir / "ui" / "__init__.py").exists():
+                detected_components["ui"] = True
 
             if "components" not in manifest or not manifest["components"]:
                 manifest["components"] = detected_components
