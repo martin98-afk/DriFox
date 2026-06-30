@@ -2903,38 +2903,13 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_auto_compact_requested(self, ratio: float):
         """自动上下文压缩请求处理
 
-        当 PostToolUse hook 检测到上下文使用比例超过阈值时，
+        当 PreAssistantMessage hook 检测到上下文使用比例超过阈值时，
         由 backend.auto_compact_requested 信号触发。
 
-        静默执行 /compact --clear，不弹出 InfoBar（避免打扰用户）。
-        仅当会话有消息且子智能体就绪时触发。
-
-        Args:
-            ratio: 触发时的上下文使用比例 (0.0 ~ 1.0)
+        直接复用 /compact --clear 命令路径，保证行为完全一致。
         """
         logger.info(f"[MainWidget] 自动上下文压缩触发 (ratio={ratio:.1%})")
-        session = self.session_manager.get_current_session()
-        if not session or not session.messages:
-            return
-
-        sub_agent_mgr = self.backend.sub_agent_manager
-        if not sub_agent_mgr:
-            return
-
-        # 静默执行 compact --clear
-        base_task = "请压缩当前对话上下文，生成详细的工作摘要。完成后清空所有历史消息。"
-        on_finished_cb = lambda tid, result, _sid=session.session_id: self._on_compact_clear_finished(tid, result, _sid)
-
-        sub_agent_mgr.execute_task(
-            task_id=f"compact_{uuid.uuid4().hex[:8]}",
-            agent_name="compaction",
-            task_description=base_task,
-            parent_context="",
-            share_context=True,
-            on_finished=on_finished_cb,
-            on_error=None,
-            session_id=session.session_id,
-        )
+        QTimer.singleShot(0, lambda: self._trigger_context_compaction(clear_after=True))
 
     def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
         """--clear 模式下，compaction 子智能体完成后的清空回调
@@ -2990,8 +2965,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 仅在用户仍停留在原 session 时才同步更新 UI
         if self._current_session_id == session_id:
-            self._clear_chat_area()
-            self.node_preview.clear_nodes()
+            self._display_current_session()
 
     def _on_compact_finished(self, task_id: str, result: str, session_id: str):
         """普通 compact 完成后触发 SessionStart state='compact'
