@@ -799,8 +799,16 @@ class ChatBackend(QObject):
                     relevant_changes = []
                     for change_type, change_path in changes:
                         p = change_path.lower()
+                        # 跳过 git/__pycache__/pyc 等无关文件
                         if ".git" in p or "__pycache__" in p or p.endswith(".pyc"):
                             continue
+                        # 跳过用户自定义目录中的内部数据文件（避免自我触发）
+                        # 这些是 HookOverrideManager / HookPresetManager 写入的数据文件，
+                        # 不是插件源码，修改它们不需要触发插件热更新
+                        if "user-custom" in p:
+                            pname = change_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+                            if pname in ("hooks_overrides.json", "hook_presets.json", "hooks.json"):
+                                continue
                         relevant_changes.append((change_type, change_path))
 
                     if not relevant_changes:
@@ -816,26 +824,39 @@ class ChatBackend(QObject):
                         # 不提前 _rebuild_prefixes()，改在 _on_hot_reload_requested 重载完成后重建
                         self._hot_reload_requested.emit("", "")
                     elif plugin_name:
-                        # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/空=根目录）
-                        component = self._identify_component_from_changes(
+                        # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/lsp/ui）
+                        # 多组件批处理：一次 watchfiles batch 中可能同时修改多个组件目录
+                        # 原代码用 _identify_component_from_changes 只返回第一个组件，导致
+                        # 多组件变更时只有第一个被处理，其他被静默忽略 → UI 不更新。
+                        # 现改为识别所有涉及的组件，按优先级顺序逐个 emit。
+                        all_components = self._identify_all_components_from_changes(
                             relevant_changes, current_prefixes, plugin_name
                         )
-                        if component:
-                            detail = f" ({component})"
+                        if all_components:
+                            # 按优先级排序（agents 先于 commands 先于 skills 等）
+                            ordered = sorted(all_components, key=lambda c: self._COMPONENT_ORDER.get(c, 99))
+                            for component in ordered:
+                                detail = f" ({component})"
+                                # 去重：同一插件+组件短时间内重复触发则跳过
+                                if _is_duplicate(plugin_name, component):
+                                    logger.debug(f"[ChatBackend] 插件 [{plugin_name}]{detail} 文件变更，去重跳过...")
+                                    continue
+                                logger.info(
+                                    f"[ChatBackend] 插件 [{plugin_name}]{detail} "
+                                    f"文件变更 ({len(relevant_changes)} 处)，请求主线程增量重载..."
+                                )
+                                self._hot_reload_requested.emit(plugin_name, component)
                         else:
+                            # 没有匹配到任何已知组件（如根目录文件变更）
                             detail = " (根目录)"
-                        # 去重：同一插件+组件短时间内重复触发则跳过
-                        if _is_duplicate(plugin_name, component):
-                            logger.debug(
+                            if _is_duplicate(plugin_name, ""):
+                                logger.debug(f"[ChatBackend] 插件 [{plugin_name}]{detail} 文件变更，去重跳过...")
+                                continue
+                            logger.info(
                                 f"[ChatBackend] 插件 [{plugin_name}]{detail} "
-                                f"文件变更 ({len(relevant_changes)} 处)，去重跳过..."
+                                f"文件变更 ({len(relevant_changes)} 处)，请求主线程增量重载..."
                             )
-                            continue
-                        logger.info(
-                            f"[ChatBackend] 插件 [{plugin_name}]{detail} "
-                            f"文件变更 ({len(relevant_changes)} 处)，请求主线程增量重载..."
-                        )
-                        self._hot_reload_requested.emit(plugin_name, component)
+                            self._hot_reload_requested.emit(plugin_name, "")
                     else:
                         # 无法通过路径索引识别：尝试直接从文件系统检测新插件
                         new_name = _try_identify_new_plugin(relevant_changes)
@@ -916,7 +937,50 @@ class ChatBackend(QObject):
             plugin_name: 已识别出的插件名
 
         Returns:
-            "agents" | "hooks" | "commands" | "themes" | "skills" | "mcp" | "" (根目录/无法确定)
+            "agents" | "hooks" | "commands" | "themes" | "skills" | "mcp" | "lsp" | "ui"
+            | "" (根目录/无法确定)
+
+        注意：watchfiles 的 2 秒防抖会把同一批变更聚合。一次 batch 中可能同时
+        修改多个组件目录下的文件（如同时编辑 commands/ 和 skills/）。
+        本方法只返回第一个匹配的组件，多组件场景请使用
+        `_identify_all_components_from_changes()` 并配合 watch_loop 多次 emit。
+        """
+        components = self._identify_all_components_from_changes(changes, plugin_prefixes, plugin_name)
+        if not components:
+            return ""
+        # 优先返回优先级最高的组件（与原行为兼容：先匹配的先返回）
+        return sorted(components, key=lambda c: self._COMPONENT_ORDER.get(c, 99))[0]
+
+    # 组件优先级（用于在多组件批处理中决定先后顺序）
+    # agents 最先：它会影响 commands 和 hooks 同步
+    _COMPONENT_ORDER = {
+        "agents": 0,
+        "hooks": 1,
+        "commands": 2,
+        "themes": 3,
+        "skills": 4,
+        "mcp": 5,
+        "lsp": 6,
+        "ui": 7,
+    }
+
+    def _identify_all_components_from_changes(
+        self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str
+    ) -> set:
+        """从变更文件路径识别所有涉及的组件子目录（多组件批处理）
+
+        一次 watchfiles batch 中可能同时修改多个组件目录下的文件。
+        原 _identify_component_from_changes 只返回第一个组件，导致多组件
+        同时变更时只有一个被处理，其他被静默忽略，UI 不刷新。
+        本方法返回所有涉及的组件，让 watch_loop 拆分多次 emit。
+
+        Args:
+            changes: [(Change, path_str), ...]
+            plugin_prefixes: 插件路径 → 插件名 映射
+            plugin_name: 已识别出的插件名
+
+        Returns:
+            set[str]: 涉及的所有组件名；空 set 表示根目录/无法识别
         """
         # 找到该插件的路径前缀
         plugin_path = None
@@ -925,7 +989,7 @@ class ChatBackend(QObject):
                 plugin_path = path
                 break
         if not plugin_path:
-            return ""
+            return set()
 
         KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp", "ui"}
         # 插件根目录的关键文件 → 映射到对应组件
@@ -934,19 +998,21 @@ class ChatBackend(QObject):
             ".lsp.json": "lsp",
         }
 
+        components: set = set()
         for _, change_path in changes:
             cp = change_path.lower()
             if cp == plugin_path:
-                continue  # 插件根目录本身变更，全量
+                continue  # 插件根目录本身变更，留给后续逻辑判断
             if cp.startswith(plugin_path + os.sep):
                 rel = cp[len(plugin_path) + 1 :]  # 去掉 "plugin_path\"
                 first_seg = rel.split(os.sep)[0] if os.sep in rel else rel
                 if first_seg in KNOWN_COMPONENTS:
-                    return first_seg
+                    components.add(first_seg)
+                    continue
                 # 根目录的关键文件（如 .mcp.json）映射到对应组件
                 if first_seg in ROOT_FILE_COMPONENTS:
-                    return ROOT_FILE_COMPONENTS[first_seg]
-        return ""
+                    components.add(ROOT_FILE_COMPONENTS[first_seg])
+        return components
 
     def _on_hot_reload_requested(self, plugin_name: str, component: str):
         """主线程中执行的插件热更新

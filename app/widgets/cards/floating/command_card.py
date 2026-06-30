@@ -10,6 +10,7 @@
 import html
 from typing import Any, Dict, List, Optional
 
+from loguru import logger
 from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
@@ -1636,7 +1637,16 @@ class CommandCard(QWidget):
 
         type_set = set()
         clean_tokens = []
-        type_map = {"cmd": "command", "skill": "skill", "技能": "skill", "agent": "agent", "智能体": "agent", "prompt": "prompt", "提示词": "prompt", "ui": "ui"}
+        type_map = {
+            "cmd": "command",
+            "skill": "skill",
+            "技能": "skill",
+            "agent": "agent",
+            "智能体": "agent",
+            "prompt": "prompt",
+            "提示词": "prompt",
+            "ui": "ui",
+        }
 
         for token in query.split():
             if token.startswith("type:"):
@@ -1699,7 +1709,9 @@ class CommandCard(QWidget):
         if not text_query:
             # 纯类别过滤（无文本搜索）
             if type_filter:
-                self._filtered_items = [item for item in self._all_items if self._matches_type_filter(item, type_filter)]
+                self._filtered_items = [
+                    item for item in self._all_items if self._matches_type_filter(item, type_filter)
+                ]
             else:
                 self._filtered_items = list(self._all_items)
             self._last_query = ""
@@ -1710,7 +1722,9 @@ class CommandCard(QWidget):
             self._filtered_items = [item for item in source if self._matches_multi(item, text_query)]
             # 文本匹配后再按类别过滤
             if type_filter:
-                self._filtered_items = [item for item in self._filtered_items if self._matches_type_filter(item, type_filter)]
+                self._filtered_items = [
+                    item for item in self._filtered_items if self._matches_type_filter(item, type_filter)
+                ]
 
         # 排序：内置命令→UI 插件命令→技能→智能体，同类型按名称
         sort_order = {"command": 0, "skill": 2, "agent": 3}
@@ -2043,6 +2057,58 @@ class CommandCard(QWidget):
         由外部（如 main_widget）在插件热重载后调用。
         """
         self._cache_dirty = True
+
+    def refresh_if_visible(self):
+        """热重载后调用：仅在卡片可见时重建数据并刷新 UI
+
+        修复：原代码在插件热重载后强制调用 show_card(query)，会触发
+        _reset_detail_mode()，导致用户正在查看的 detail 模式参数提示突然
+        消失。本方法改为：
+        - 卡片不可见：仅标记 dirty，下次 show_card 自动重建
+        - 卡片可见且处于列表模式：重建数据 + load_items 保留当前过滤
+        - 卡片可见且处于 detail 模式：重建数据 + 刷新 detail 视图
+          （保留参数提示，仅更新命令元数据）
+
+        此外用 _current_query 而非 input_area.toPlainText()，避免
+        破坏当前过滤上下文。
+        """
+        if not self._visible:
+            # 卡片不可见：仅标记脏，下次 show_card 重建
+            self._cache_dirty = True
+            return
+        # 卡片可见：重建数据
+        self._refresh_data()
+        if self._detail_mode:
+            # detail 模式：重建 detail 视图（参数描述、参数列表）以反映命令变更
+            try:
+                self._refresh_detail_view()
+            except Exception:
+                # 重建失败时不破坏当前 detail 视图（避免参数提示消失）
+                logger.warning("[CommandCard] detail 视图重建失败，保持当前状态")
+            return
+        # 列表模式：用当前 query 重新加载（非增量以保证排序/分组准确）
+        self.load_items(self._current_query, incremental=False)
+
+    def _refresh_detail_view(self):
+        """重建 detail 模式的参数视图（命令元数据变更后调用）
+
+        与 show_command_detail 不同：本方法强制重新渲染（即使 cmd_name 未变），
+        以反映热重载后的命令/参数描述变更。
+        保留 _current_query 和输入框上下文。
+        """
+        cmd_name = self._detail_cmd_name
+        if not cmd_name:
+            return
+        selected_type = self._detail_selected_type or ""
+        # 临时退出 detail 模式，绕过 show_command_detail 的"已在此命令则跳过"逻辑
+        # 然后立即重新进入，触发完整重建
+        # 注意：_reset_detail_mode 会清空 _detail_cmd_name，需要先备份
+        saved_cmd_name = self._detail_cmd_name
+        saved_selected_type = self._detail_selected_type
+        self._reset_detail_mode()
+        # 恢复 _detail_mode=False 已被 _reset_detail_mode 设置，
+        # show_command_detail 会重新设置 _detail_mode=True
+        self.show_command_detail(saved_cmd_name, saved_selected_type)
 
     @property
     def is_card_visible(self) -> bool:

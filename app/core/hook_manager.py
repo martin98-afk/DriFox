@@ -393,12 +393,20 @@ class HookOverrideManager:
             self._overrides = {}
 
     def _save(self):
-        """保存覆写配置到文件"""
+        """保存覆写配置到文件（内容未变时跳过写盘，避免触发文件监视器）"""
         if not self._storage_path:
             return
         try:
+            # 序列化当前数据，与磁盘内容比较
+            payload = json.dumps(self._overrides, indent=2, ensure_ascii=False)
+            try:
+                with open(self._storage_path, "r", encoding="utf-8") as f:
+                    if f.read() == payload:
+                        return  # 内容未变，跳过写盘
+            except FileNotFoundError, OSError:
+                pass  # 文件不存在或读失败，继续写入
             with open(self._storage_path, "w", encoding="utf-8") as f:
-                json.dump(self._overrides, f, indent=2, ensure_ascii=False)
+                f.write(payload)
             logger.debug(f"[HookOverrideManager] Saved {len(self._overrides)} overrides")
         except Exception as e:
             logger.error(f"[HookOverrideManager] Failed to save overrides: {e}")
@@ -2298,12 +2306,20 @@ class HookPresetManager:
             self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
 
     def _save(self):
-        """保存预设配置到文件"""
+        """保存预设配置到文件（内容未变时跳过写盘，避免触发文件监视器）"""
         if not self._storage_path:
             return
         try:
+            # 序列化当前数据，与磁盘内容比较
+            payload = json.dumps(self._data, indent=2, ensure_ascii=False)
+            try:
+                with open(self._storage_path, "r", encoding="utf-8") as f:
+                    if f.read() == payload:
+                        return  # 内容未变，跳过写盘
+            except FileNotFoundError, OSError:
+                pass  # 文件不存在或读失败，继续写入
             with open(self._storage_path, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2, ensure_ascii=False)
+                f.write(payload)
             logger.debug(f"[HookPresetManager] Saved {len(self._data.get('presets', {}))} presets")
         except Exception as e:
             logger.error(f"[HookPresetManager] Failed to save presets: {e}")

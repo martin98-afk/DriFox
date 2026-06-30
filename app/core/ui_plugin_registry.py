@@ -83,8 +83,8 @@ class UIPluginRegistry:
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._loaded_plugins: set = set()
-        self._main_widget: Optional[Any] = None  # 注入的主窗口引用
-        self._card_widget_instances: Dict[str, Any] = {}  # card_id -> widget 实例缓存
+        self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
+        self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
         self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
 
     @classmethod
@@ -233,15 +233,21 @@ class UIPluginRegistry:
 
         FunctionCommandHandlers.register(cmd_name, _handler)
 
-    def _show_floating_card(self, card_id: str) -> None:
-        """显示浮动卡片（由 main_widget 注入后可用）
+    def _show_floating_card(self, card_id: str, main_widget=None) -> None:
+        """显示浮动卡片
 
         首次调用时自动创建 widget 实例、加入容器布局并注册到 CardManager。
+
+        Args:
+            card_id: 卡片唯一 ID
+            main_widget: 目标主窗口实例（多窗口隔离用）。
+                         不传则使用 self._main_widget（单例模式，多窗口会被覆盖）。
         """
-        if self._main_widget is None:
+        mw = main_widget or self._main_widget
+        if mw is None:
             return
-        card_manager = getattr(self._main_widget, "_card_manager", None)
-        window_id = getattr(self._main_widget, "_window_id", None)
+        card_manager = getattr(mw, "_card_manager", None)
+        window_id = getattr(mw, "_window_id", None)
         if card_manager is None or window_id is None:
             return
 
@@ -249,8 +255,9 @@ class UIPluginRegistry:
         if card_info is None:
             return
 
-        # 获取或创建 widget 实例（延迟创建 + 缓存）
-        widget = self._card_widget_instances.get(card_id)
+        # 获取或创建 widget 实例（per-window 隔离缓存）
+        win_instances = self._card_widget_instances.setdefault(window_id, {})
+        widget = win_instances.get(card_id)
         if widget is None:
             from app.widgets.cards.card_manager import ContainerType
 
@@ -258,12 +265,12 @@ class UIPluginRegistry:
             container_type = ContainerType.TOP if card_info.container == "top" else ContainerType.BOTTOM
             # 获取正确的容器控件（TopCardContainer / BottomCardContainer）
             container_attr = "_top_card_container" if card_info.container == "top" else "_bottom_card_container"
-            container = getattr(self._main_widget, container_attr, None)
+            container = getattr(mw, container_attr, None)
             if container is None:
                 return
             # 以容器为父级创建卡片 widget
             widget = card_info.widget_class(parent=container)
-            self._card_widget_instances[card_id] = widget
+            win_instances[card_id] = widget
             # 加入容器布局并注册到 CardManager
             container.add_card(card_id, widget)
             card_manager.register_card(window_id, container_type, card_id, widget)
@@ -272,6 +279,12 @@ class UIPluginRegistry:
             # 避免再次 toggle 时 visible_cards 状态过时导致无法显示
             if hasattr(widget, "closed"):
                 widget.closed.connect(lambda c=card_id, w=window_id: card_manager.hide_card(c, w))
+
+            # 注册为系统卡片：显示时自动隐藏输入区域（与系统配置卡片行为一致）。
+            # 仅当 main_widget 暴露该 API 时调用（旧版本/测试 stub 可安全降级）。
+            # 幂等：register_system_card 内部用 set 去重，重复注册不会重复绑定回调。
+            if hasattr(mw, "register_system_card"):
+                mw.register_system_card(card_id)
 
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
@@ -351,8 +364,9 @@ class UIPluginRegistry:
         for cid in cards_to_remove:
             self._unregister_command_for_card(cid)
             self._floating_cards.pop(cid, None)
-            # 清理缓存的 widget 实例
-            self._card_widget_instances.pop(cid, None)
+            # 清理所有窗口中该 card_id 的 widget 实例
+            for win_instances in self._card_widget_instances.values():
+                win_instances.pop(cid, None)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         return True
