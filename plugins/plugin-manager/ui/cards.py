@@ -424,7 +424,6 @@ class PluginManagerCard(QWidget):
     # ── 界面 ──
 
     def _setup_ui(self):
-        self.setMinimumWidth(520)
         self.setMinimumHeight(400)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("PluginManagerCard { background: transparent; }")
@@ -529,7 +528,7 @@ class PluginManagerCard(QWidget):
         self._set_loading(False)
         total = len(self._plugins)
         sc = sum(1 for p in self._plugins if p.is_system)
-        self._count_lb.setText(f"共 {total} 个（系统 {sc} / 用户 {total - sc}）")
+        self._count_lb.setText(f"共 {total} 个")
         self._render_plugins(self._plugins)
 
     def _on_refresh_error(self, err: str):
@@ -611,7 +610,7 @@ class PluginManagerCard(QWidget):
     def _restore_count(self):
         total = len(self._plugins)
         sc = sum(1 for p in self._plugins if p.is_system)
-        self._count_lb.setText(f"共 {total} 个（系统 {sc} / 用户 {total - sc}）")
+        self._count_lb.setText(f"共 {total} 个")
         self._count_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
 
     # ── 清理 ──

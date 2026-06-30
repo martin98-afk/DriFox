@@ -8,6 +8,7 @@
 - 损坏隔离
 - 增量更新
 """
+
 import os
 import re
 import threading
@@ -22,6 +23,7 @@ from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from app.core.message_content import consolidate_messages, content_to_text
 from app.core.store import SessionStore
+from app.core.token_estimator import count_messages_tokens
 from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
@@ -36,17 +38,12 @@ def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
     """
     # 收集所有有效的 tool_call_id（来自 tool 消息）
     valid_ids = {
-        msg.get("tool_call_id", "")
-        for msg in messages
-        if msg.get("role") == "tool" and msg.get("tool_call_id")
+        msg.get("tool_call_id", "") for msg in messages if msg.get("role") == "tool" and msg.get("tool_call_id")
     }
 
     if not valid_ids:
         # 没有任何 tool 消息时，检查是否存在带 tool_calls 的 assistant 消息
-        has_orphan = any(
-            msg.get("role") == "assistant" and msg.get("tool_calls")
-            for msg in messages
-        )
+        has_orphan = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in messages)
         if has_orphan:
             cleaned = []
             for msg in messages:
@@ -104,6 +101,7 @@ def extract_message_preview(messages: List[Dict], max_len: int = 50) -> str:
         if role == "user" and content:
             if isinstance(content, list):
                 from app.core.message_content import content_to_text
+
                 content = content_to_text(content)
             return content[:max_len].strip() + ("..." if len(content) > max_len else "")
     return ""
@@ -139,9 +137,7 @@ def _build_archive_preview(messages: List[Dict], max_len: int = 50) -> str:
         if not content:
             continue
         if isinstance(content, list):
-            content = " ".join(
-                c.get("text", "") if isinstance(c, dict) else str(c) for c in content
-            )
+            content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
         return content[:max_len].strip() + ("..." if len(content) > max_len else "")
     return ""
 
@@ -244,9 +240,7 @@ class _ArchiveScanTask(QRunnable):
             self._signals.finished.emit(self._request_id, [])
 
     @staticmethod
-    def _enrich_from_info(
-        fp_str: str, fp_path: Path, mtime: float, info: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def _enrich_from_info(fp_str: str, fp_path: Path, mtime: float, info: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "path": fp_str,
             "name": fp_path.name,
@@ -406,11 +400,7 @@ class HistoryManager:
                 continue
             if sid:
                 seen_ids.add(sid)
-            fallback_ts = (
-                item.get("last_time")
-                or item.get("saved_at")
-                or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            )
+            fallback_ts = item.get("last_time") or item.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             item["messages"] = self._ensure_message_timestamps(
                 merge_session_messages(item.get("messages", [])),
                 fallback_ts,
@@ -418,9 +408,7 @@ class HistoryManager:
             if "title" not in item:
                 item["title"] = item.get("topic_summary", "新对话")
             if "last_time" not in item:
-                item["last_time"] = self._extract_last_message_time(
-                    item.get("messages", [])
-                )
+                item["last_time"] = self._extract_last_message_time(item.get("messages", []))
             if "message_count" not in item:
                 item["message_count"] = len(item.get("messages", []))
             if "session_id" not in item:
@@ -526,6 +514,7 @@ class HistoryManager:
             "system_prompt": system_prompt or "",
             "user_edited_title": False,
             "worktree_path": worktree_path or "",
+            "context_usage": count_messages_tokens(merged_messages),
         }
 
     def get_current_title(self, index: int) -> str:
@@ -617,17 +606,19 @@ class HistoryManager:
                 preview = s.get("preview")
                 if not preview:
                     preview = extract_message_preview(s.get("messages", []), 50)
-                result.append({
-                    "session_id": s.get("session_id", ""),
-                    "saved_at": s.get("saved_at", ""),
-                    "title": s.get("title", ""),
-                    "project": s.get("project", "默认项目"),
-                    "last_time": s.get("last_time", ""),
-                    "message_count": s.get("message_count", 0),
-                    "preview": preview,
-                    "user_edited_title": s.get("user_edited_title", False),
-                    "worktree_path": s.get("worktree_path", "") or "",
-                })
+                result.append(
+                    {
+                        "session_id": s.get("session_id", ""),
+                        "saved_at": s.get("saved_at", ""),
+                        "title": s.get("title", ""),
+                        "project": s.get("project", "默认项目"),
+                        "last_time": s.get("last_time", ""),
+                        "message_count": s.get("message_count", 0),
+                        "preview": preview,
+                        "user_edited_title": s.get("user_edited_title", False),
+                        "worktree_path": s.get("worktree_path", "") or "",
+                    }
+                )
             return result
 
         return sessions
@@ -651,9 +642,7 @@ class HistoryManager:
             self._history_sessions[index]["project"] = project
             session = self._history_sessions[index]
             if self._use_sqlite and self._session_store:
-                self._session_store.update_session_project(
-                    session.get("session_id"), project
-                )
+                self._session_store.update_session_project(session.get("session_id"), project)
             self._persist_session(session)
             return True
         return False
@@ -663,10 +652,7 @@ class HistoryManager:
         if self._use_sqlite and self._session_store:
             count = self._session_store.archive_sessions_by_project(project)
             # 同步内存缓存
-            self._history_sessions = [
-                s for s in self._history_sessions
-                if s.get("project", "默认项目") != project
-            ]
+            self._history_sessions = [s for s in self._history_sessions if s.get("project", "默认项目") != project]
             return count
         return 0
 
@@ -731,9 +717,7 @@ class HistoryManager:
             session_id = session.get("session_id", "unknown")
 
             safe_title = sanitize_filename(title[:50])
-            date_str = (
-                last_time[:10] if last_time else datetime.now().strftime("%Y-%m-%d")
-            )
+            date_str = last_time[:10] if last_time else datetime.now().strftime("%Y-%m-%d")
             filename = f"{date_str}_{safe_title}_{session_id}.json"
 
             archive_file = self.archive_dir / filename
@@ -819,11 +803,7 @@ class HistoryManager:
 
     def _normalize_single_session(self, data: Dict) -> Dict:
         """规范化单个会话数据"""
-        fallback_ts = (
-            data.get("last_time")
-            or data.get("saved_at")
-            or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
+        fallback_ts = data.get("last_time") or data.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # 规范化消息
         messages = data.get("messages", [])
@@ -847,6 +827,7 @@ class HistoryManager:
             "compaction_cache": dict(data.get("compaction_cache") or {}),
             "system_prompt": data.get("system_prompt") or "",
             "project": data.get("project", "默认项目"),
+            "context_usage": count_messages_tokens(messages),
         }
 
         return session
@@ -867,9 +848,7 @@ class HistoryManager:
         except Exception:
             return 0
 
-    def scan_archives_async(
-        self, callback: Callable[[List[Dict]], None]
-    ) -> int:
+    def scan_archives_async(self, callback: Callable[[List[Dict]], None]) -> int:
         """异步扫描归档目录，结果通过 callback 在主线程交付。
 
         - 全部 I/O + JSON 解析在后台 QRunnable 线程完成
@@ -900,17 +879,13 @@ class HistoryManager:
         QThreadPool.globalInstance().start(task)
         return request_id
 
-    def _on_archive_scan_finished(
-        self, request_id: int, enriched: List[Dict]
-    ) -> None:
+    def _on_archive_scan_finished(self, request_id: int, enriched: List[Dict]) -> None:
         """后台扫描完成的主线程回调（Qt signal handler）。"""
         with self._archive_cache_lock:
             current_id = self._current_scan_request_id
         if request_id != current_id:
             # 过期结果：用户已切换 tab 或重新触发扫描
-            logger.debug(
-                f"[HistoryManager] 丢弃过期归档扫描结果: req={request_id} current={current_id}"
-            )
+            logger.debug(f"[HistoryManager] 丢弃过期归档扫描结果: req={request_id} current={current_id}")
             return
         callback = self._pending_archive_callback
         self._pending_archive_callback = None
@@ -948,12 +923,14 @@ class HistoryManager:
                 try:
                     with open(json_file, "r", encoding="utf-8") as f:
                         data = json.loads(f.read())
-                    archived_files.append({
-                        "path": str(json_file),
-                        "name": json_file.name,
-                        "session_id": data.get("session_id", ""),
-                        "title": data.get("title", json_file.stem[:50]),
-                    })
+                    archived_files.append(
+                        {
+                            "path": str(json_file),
+                            "name": json_file.name,
+                            "session_id": data.get("session_id", ""),
+                            "title": data.get("title", json_file.stem[:50]),
+                        }
+                    )
                 except Exception:
                     logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
                     continue
@@ -977,9 +954,7 @@ class HistoryManager:
                     if full_session:
                         session = full_session
             fallback_ts = (
-                session.get("last_time")
-                or session.get("saved_at")
-                or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                session.get("last_time") or session.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             )
             return self._ensure_message_timestamps(
                 merge_session_messages(session.get("messages", [])),
@@ -1056,20 +1031,12 @@ class HistoryManager:
                 title=existing.get("title"),
                 session_id=existing.get("session_id"),
                 compaction_state=(
-                    compaction_state
-                    if compaction_state is not None
-                    else existing.get("compaction_state", {})
+                    compaction_state if compaction_state is not None else existing.get("compaction_state", {})
                 ),
                 compaction_cache=(
-                    compaction_cache
-                    if compaction_cache is not None
-                    else existing.get("compaction_cache", {})
+                    compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
                 ),
-                system_prompt=(
-                    system_prompt
-                    if system_prompt is not None
-                    else existing.get("system_prompt", "")
-                ),
+                system_prompt=(system_prompt if system_prompt is not None else existing.get("system_prompt", "")),
                 project=project if project is not None else existing.get("project", "默认项目"),
                 worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
             )
@@ -1109,7 +1076,7 @@ class HistoryManager:
             self._pending_save_session_id = None
             return
 
-        pending_id = getattr(self, '_pending_save_session_id', None)
+        pending_id = getattr(self, "_pending_save_session_id", None)
         if not pending_id:
             logger.debug("[HistoryManager] 无待保存会话，跳过")
             self._pending_save_session_id = None
@@ -1138,9 +1105,7 @@ class HistoryManager:
                 return timestamp
         return "未知"
 
-    def _ensure_message_timestamps(
-        self, messages: List[Dict], fallback_ts: str
-    ) -> List[Dict]:
+    def _ensure_message_timestamps(self, messages: List[Dict], fallback_ts: str) -> List[Dict]:
         normalized: List[Dict] = []
         last_seen_ts = fallback_ts
         for msg in messages or []:
@@ -1162,9 +1127,7 @@ class HistoryManager:
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         content = content_to_text(content)
-                    return content[:max_len].strip() + (
-                        "..." if len(content) > max_len else ""
-                    )
+                    return content[:max_len].strip() + ("..." if len(content) > max_len else "")
         return ""
 
     def get_total_storage_size(self) -> int:
@@ -1172,6 +1135,7 @@ class HistoryManager:
         if self._use_sqlite and self._session_store:
             # 估算 SQLite 数据库大小
             from app.utils.utils import get_app_data_dir
+
             db_path = get_app_data_dir() / "sessions.db"
             if db_path.exists():
                 return db_path.stat().st_size

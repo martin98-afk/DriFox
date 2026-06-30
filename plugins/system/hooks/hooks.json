@@ -123,12 +123,12 @@
         ]
       }
     ],
-    "PreAssistantMessage": [
+    "PostToolUse": [
       {
         "hooks": [
           {
             "type": "python",
-            "function": ".context_auto_compact:hook?threshold=0.80",
+            "function": ".context_auto_compact:hook?threshold=0.60",
             "add_output_to_context": false,
             "statusMessage": "上下文监控:",
             "id": "builtin_auto_compact"

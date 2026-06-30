@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """UIPluginRegistry 单元测试"""
+
 import pytest
 from app.core.ui_plugin_registry import (
     UIPluginRegistry,
@@ -154,6 +155,7 @@ def test_floating_card_auto_registers_command():
     )
     # 检查命令已注册
     from app.core.command_manager import CommandManager
+
     cmd_mgr = CommandManager.get_instance()
     # 命令应使用短名（system 插件）
     assert cmd_mgr.has_command("mycard") is True
@@ -177,6 +179,7 @@ def test_floating_card_user_plugin_namespaced_command():
         container="top",
     )
     from app.core.command_manager import CommandManager
+
     cmd_mgr = CommandManager.get_instance()
     # 用户插件：card_id 不含前缀时，命令名前缀
     assert cmd_mgr.has_command("user-plugin:mycard") is True
@@ -186,7 +189,9 @@ def test_floating_card_user_plugin_namespaced_command():
 
 class _FakeMainWidget:
     """测试用 main_widget stub"""
+
     _window_id = "test"
+
     def _card_manager(self):
         return None
 
@@ -200,7 +205,8 @@ def test_load_plugin_invokes_register_ui(tmp_path, monkeypatch):
     plugin_dir = tmp_path / "plug-x"
     ui_dir = plugin_dir / "ui"
     ui_dir.mkdir(parents=True)
-    (ui_dir / "__init__.py").write_text("""
+    (ui_dir / "__init__.py").write_text(
+        """
 from app.core.ui_plugin_registry import UIPluginRegistry
 
 def register_ui(registry: UIPluginRegistry):
@@ -208,7 +214,9 @@ def register_ui(registry: UIPluginRegistry):
         plugin_name='plug-x', type_name='t1',
         render_func=lambda d, c: 'ok', priority=0
     )
-""", encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
 
     ok = reg.load_plugin("plug-x", plugin_dir)
     assert ok is True
@@ -236,6 +244,7 @@ def test_unload_plugin_clears_registrations():
     assert "plug-y" not in reg._loaded_plugins
 
     from app.core.command_manager import CommandManager
+
     cmd_mgr = CommandManager.get_instance()
     assert cmd_mgr.has_command("card1") is False
     reg.reset()
@@ -247,4 +256,153 @@ def test_load_plugin_raises_for_missing_init():
     reg.reset()
     ok = reg.load_plugin("nonexistent", None)
     assert ok is False
+    reg.reset()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 插件卡片 → 系统卡片注册（隐藏输入区）
+# ═══════════════════════════════════════════════════════════════
+
+
+class _FakeContainer:
+    """模拟 BottomCardContainer / TopCardContainer 的最小接口"""
+
+    def __init__(self):
+        self.added: list = []  # 记录 add_card(card_id, widget)
+
+    def add_card(self, card_id, widget):
+        self.added.append((card_id, widget))
+
+
+class _FakeCardManager:
+    """模拟 CardManager 的最小接口"""
+
+    def __init__(self):
+        self.registered: list = []  # (window_id, container_type, card_id, widget)
+        self.shown_callbacks: dict = {}  # card_id -> [callback]
+        self.hidden_callbacks: dict = {}  # card_id -> [callback]
+
+    def register_card(self, window_id, container_type, card_id, widget):
+        self.registered.append((window_id, container_type, card_id, widget))
+
+    def toggle_card(self, card_id, window_id):
+        pass
+
+    def on_card_shown(self, window_id, card_id, callback):
+        self.shown_callbacks.setdefault(card_id, []).append(callback)
+
+    def on_card_hidden(self, window_id, card_id, callback):
+        self.hidden_callbacks.setdefault(card_id, []).append(callback)
+
+    def hide_card(self, card_id, window_id):
+        pass
+
+
+class _FakeMainWidgetWithSystemCard:
+    """带 register_system_card 跟踪的 main_widget stub
+
+    模拟真实 MainWidget 暴露的接口：_window_id / _card_manager /
+    _top_card_container / _bottom_card_container / register_system_card。
+    """
+
+    def __init__(self):
+        self._window_id = "test"
+        self._card_manager = _FakeCardManager()
+        self._top_card_container = _FakeContainer()
+        self._bottom_card_container = _FakeContainer()
+        # 记录 register_system_card 调用
+        self.system_card_registered: list = []
+
+    def register_system_card(self, card_id: str) -> None:
+        self.system_card_registered.append(card_id)
+
+
+def test_show_floating_card_registers_as_system_card():
+    """_show_floating_card 首次显示时应调用 register_system_card，让插件卡片像系统配置卡片一样隐藏输入区
+
+    容器选择：plugin-marketplace 和 plugin-manager 已迁移为 container="bottom"，
+    因此 widget 应被加入 _bottom_card_container，并触发 register_system_card。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    main_widget = _FakeMainWidgetWithSystemCard()
+    reg.set_main_widget(main_widget)
+
+    class FakeCard:
+        def __init__(self, parent=None):
+            self.parent = parent
+
+    reg.register_floating_card(
+        plugin_name="plug-bot",
+        card_id="plug-bot",
+        widget_class=FakeCard,
+        container="bottom",
+        title="底部插件卡片",
+    )
+
+    # 首次调用 _show_floating_card：应创建 widget、加入容器、注册为系统卡片
+    reg._show_floating_card("plug-bot")
+
+    # 1) widget 已加入 _bottom_card_container
+    assert len(main_widget._bottom_card_container.added) == 1
+    assert main_widget._bottom_card_container.added[0][0] == "plug-bot"
+    # 2) CardManager 已注册该卡片
+    assert len(main_widget._card_manager.registered) == 1
+    assert main_widget._card_manager.registered[0][2] == "plug-bot"
+    # 3) 已调用 register_system_card（隐藏输入区）
+    assert "plug-bot" in main_widget.system_card_registered
+
+    # 二次调用：widget 已缓存，不应重复调用 register_system_card
+    reg._show_floating_card("plug-bot")
+    assert main_widget.system_card_registered.count("plug-bot") == 1
+
+    # 清理
+    from app.core.command_manager import CommandManager
+
+    cmd_mgr = CommandManager.get_instance()
+    cmd_mgr.unregister("plug-bot:plug-bot")
+    reg.reset()
+
+
+def test_show_floating_card_works_without_register_system_card_api():
+    """_show_floating_card 在旧版 main_widget（无 register_system_card API）下应安全降级，不抛异常
+
+    向前兼容：旧版本/测试 stub 可能不暴露 register_system_card。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    class _LegacyFakeMainWidget:
+        # 故意不暴露 register_system_card，模拟旧版/简化 stub
+        _window_id = "legacy"
+
+        def __init__(self):
+            self._card_manager = _FakeCardManager()
+            self._bottom_card_container = _FakeContainer()
+
+    legacy = _LegacyFakeMainWidget()
+    reg.set_main_widget(legacy)
+
+    class FakeCard:
+        def __init__(self, parent=None):
+            pass
+
+    reg.register_floating_card(
+        plugin_name="plug-old",
+        card_id="plug-old",
+        widget_class=FakeCard,
+        container="bottom",
+    )
+
+    # 不应抛 AttributeError
+    reg._show_floating_card("plug-old")
+
+    # 仍然成功添加了卡片
+    assert len(legacy._bottom_card_container.added) == 1
+
+    # 清理
+    from app.core.command_manager import CommandManager
+
+    cmd_mgr = CommandManager.get_instance()
+    cmd_mgr.unregister("plug-old:plug-old")
     reg.reset()

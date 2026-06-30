@@ -215,6 +215,25 @@ class OpenAIChatToolWindow(ToolWindow):
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
+
+    # 系统配置卡片 ID 列表 — 这些卡片打开时自动隐藏输入区域。
+    # 列表可由 register_system_card() 动态扩展（UI 插件注册浮动卡片时调用）。
+    # 单一真相源：_on_system_card_opened/_on_system_card_closed 通过 instance 属性访问，
+    # 避免两处硬编码列表漂移。
+    _BASE_SYSTEM_CARD_IDS = (
+        "model_selector",
+        "model_config",
+        "memory",
+        "history",
+        "auto_loop_config",
+        "auto_loop_running",
+        "settings",
+        "provider_edit",
+        "mcp_edit",
+        "hook_edit",
+        "project_selector",
+        "tool_control",
+    )
     # AutoLoop 状态
     _is_auto_loop_running: bool = False
     _auto_loop_config_card: Optional[AutoLoopConfigCard] = None
@@ -254,6 +273,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
         self._window_id = str(uuid.uuid4())[:8]
+
+        # 系统卡片 ID 集合 — 显示时自动隐藏输入区。
+        # 初始化为类常量 _BASE_SYSTEM_CARD_IDS，运行时由 register_system_card()
+        # 动态扩展（UI 插件注册浮动卡片时调用）。instance 属性而非类属性，
+        # 保证多窗口之间互不影响。
+        self._system_card_ids: set = set(self._BASE_SYSTEM_CARD_IDS)
 
         # 🛡️ 工具权限控制器（per-window 多窗口隔离）
         # 必须在 backend.initialize 之前创建并注入,engine 启动时会读取
@@ -1878,20 +1903,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._register_cards_to_manager()
 
         # 系统卡片打开时隐藏文本输入框（保留按钮栏），关闭时恢复
-        for _cid in (
-            "model_selector",
-            "model_config",
-            "memory",
-            "history",
-            "auto_loop_config",
-            "auto_loop_running",
-            "settings",
-            "provider_edit",
-            "mcp_edit",
-            "hook_edit",
-            "project_selector",
-            "tool_control",
-        ):
+        # _system_card_ids 在 __init__ 顶部初始化为 _BASE_SYSTEM_CARD_IDS，
+        # UI 插件注册浮动卡片后通过 register_system_card() 扩展该集合。
+        for _cid in self._system_card_ids:
             self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
@@ -1908,6 +1922,24 @@ class OpenAIChatToolWindow(ToolWindow):
             self._load_all_ui_plugins()
             # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
             ui_registry.re_register_all_commands()
+            # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
+            # 这样在旧窗口触发命令时，卡片在旧窗口显示，而不是被新窗口覆盖
+            for card_id, card_info in ui_registry.get_floating_cards().items():
+                # 计算命令名（与 UIPluginRegistry._register_command_for_card 一致的逻辑）
+                if ":" in card_id:
+                    cmd_name = card_id
+                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
+                    cmd_name = card_id
+                else:
+                    cmd_name = f"{card_info.plugin_name}:{card_id}"
+                # 跳过已注册的（如内置 subagents 等）
+                if cmd_name in self._function_command_handlers:
+                    continue
+                # 注册当前窗口的处理器：传入 main_widget=self 确保卡片显示在本窗口
+                def _make_handler(cid=card_id, mw=self):
+                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
+
+                self._function_command_handlers[cmd_name] = _make_handler()
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin init failed: {e}")
 
@@ -2871,38 +2903,13 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_auto_compact_requested(self, ratio: float):
         """自动上下文压缩请求处理
 
-        当 PostToolUse hook 检测到上下文使用比例超过阈值时，
+        当 PreAssistantMessage hook 检测到上下文使用比例超过阈值时，
         由 backend.auto_compact_requested 信号触发。
 
-        静默执行 /compact --clear，不弹出 InfoBar（避免打扰用户）。
-        仅当会话有消息且子智能体就绪时触发。
-
-        Args:
-            ratio: 触发时的上下文使用比例 (0.0 ~ 1.0)
+        直接复用 /compact --clear 命令路径，保证行为完全一致。
         """
         logger.info(f"[MainWidget] 自动上下文压缩触发 (ratio={ratio:.1%})")
-        session = self.session_manager.get_current_session()
-        if not session or not session.messages:
-            return
-
-        sub_agent_mgr = self.backend.sub_agent_manager
-        if not sub_agent_mgr:
-            return
-
-        # 静默执行 compact --clear
-        base_task = "请压缩当前对话上下文，生成详细的工作摘要。完成后清空所有历史消息。"
-        on_finished_cb = lambda tid, result, _sid=session.session_id: self._on_compact_clear_finished(tid, result, _sid)
-
-        sub_agent_mgr.execute_task(
-            task_id=f"compact_{uuid.uuid4().hex[:8]}",
-            agent_name="compaction",
-            task_description=base_task,
-            parent_context="",
-            share_context=True,
-            on_finished=on_finished_cb,
-            on_error=None,
-            session_id=session.session_id,
-        )
+        QTimer.singleShot(0, lambda: self._trigger_context_compaction(clear_after=True))
 
     def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
         """--clear 模式下，compaction 子智能体完成后的清空回调
@@ -2958,8 +2965,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 仅在用户仍停留在原 session 时才同步更新 UI
         if self._current_session_id == session_id:
-            self._clear_chat_area()
-            self.node_preview.clear_nodes()
+            self._display_current_session()
 
     def _on_compact_finished(self, task_id: str, result: str, session_id: str):
         """普通 compact 完成后触发 SessionStart state='compact'
@@ -4102,6 +4108,29 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._is_auto_loop_running:
             self._card_manager.hide_card("auto_loop_running", self._window_id)
 
+    def register_system_card(self, card_id: str) -> None:
+        """将一个卡片 ID 注册为"系统卡片" — 显示时自动隐藏输入区域
+
+        用于 UI 插件的浮动卡片（plugin-marketplace / plugin-manager 等）。
+        首次调用时同时绑定 on_card_shown/on_card_hidden 回调。
+
+        Args:
+            card_id: 卡片唯一 ID（与 CardManager / FloatingCardInfo.card_id 一致）
+
+        Side Effects:
+            - 幂等：重复注册不会重复绑定回调
+            - 须在 _card_manager 已初始化后调用（即 MainWidget.__init__ 后期）
+        """
+        # 确保 instance 属性已初始化（防御性：极端情况下 __init__ 未跑完）
+        if not hasattr(self, "_system_card_ids"):
+            self._system_card_ids = set(self._BASE_SYSTEM_CARD_IDS)
+        if card_id in self._system_card_ids:
+            return  # 幂等保护
+        self._system_card_ids.add(card_id)
+        # 注册 CardManager 回调，触发输入区域隐藏/恢复
+        self._card_manager.on_card_shown(self._window_id, card_id, lambda cid: self._on_system_card_opened(cid))
+        self._card_manager.on_card_hidden(self._window_id, card_id, lambda cid: self._on_system_card_closed(cid))
+
     def _on_system_card_opened(self, card_id: str):
         """系统卡片打开时隐藏文本输入框（保留按钮栏），腾出空间
 
@@ -4152,18 +4181,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if ToolPopupDialog._any_window_dragging:
             return
-        for cid in (
-            "model_selector",
-            "model_config",
-            "memory",
-            "history",
-            "auto_loop_config",
-            "auto_loop_running",
-            "settings",
-            "provider_edit",
-            "mcp_edit",
-            "hook_edit",
-        ):
+        # 检查所有系统卡片是否都已关闭（含 UI 插件注册的卡片）。
+        # 单一真相源：使用 self._system_card_ids，与 _on_system_card_opened
+        # 的注册集合保持一致，确保开/关语义对称。
+        for cid in self._system_card_ids:
             if self._card_manager.is_card_visible(cid, self._window_id):
                 return
         # 所有系统卡片已关闭，清除打开标记
@@ -4901,21 +4922,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
 
             if needs_invalidation:
-                win._command_card.invalidate_cache()
-                # 如果命令卡片当前可见，立即重建内容
-                if win._command_card.is_card_visible:
-                    try:
-                        text = win.input_area.toPlainText()
-                        if text.startswith("/"):
-                            # 只取第一个词（命令名）作为搜索查询，忽略参数部分
-                            raw = text[1:].strip()
-                            query = raw.split()[0] if raw else ""
-                            win._command_card.show_card(query)
-                        else:
-                            win._command_card.show_card("")
-                    except RuntimeError, AttributeError:
-                        # 多窗口竞态：窗口已被销毁
-                        pass
+                # 使用 refresh_if_visible 替代原先的 invalidate_cache + show_card
+                # 修复点：
+                # 1. 原代码强制调用 show_card(query) 会触发 _reset_detail_mode()，
+                #    导致用户正在查看的 detail 模式参数提示突然消失
+                # 2. 原代码从 input_area.toPlainText() 提取 query 会覆盖当前的过滤上下文
+                # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
+                try:
+                    win._command_card.refresh_if_visible()
+                except RuntimeError, AttributeError:
+                    # 多窗口竞态：窗口已被销毁
+                    pass
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
@@ -4928,14 +4945,23 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
-        # 技能变更：全量重建列表（插件增减后需 rediscover）
-        if result.get("skills") and hasattr(self, "_settings_popup") and self._settings_popup:
-            try:
-                if hasattr(self._settings_popup, "llmSkillsCard"):
-                    self._settings_popup.llmSkillsCard._refresh_skills()
-                    logger.debug("[HotReload] skills list re-discovered")
-            except Exception as e:
-                logger.warning(f"[HotReload] 刷新技能列表失败: {e}")
+        # 技能变更：广播刷新所有窗口的技能列表（settings popup + 卡片 token 估算）
+        # 修复：原代码仅刷新当前窗口 (self._settings_popup)，导致其他窗口看不到新技能，
+        # 必须重建窗口才能看到。改为遍历所有窗口，与 hooks 分支保持一致。
+        if result.get("skills"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    if not hasattr(win, "_settings_popup") or not win._settings_popup:
+                        continue
+                    if not hasattr(win._settings_popup, "llmSkillsCard"):
+                        continue
+                    win._settings_popup.llmSkillsCard._refresh_skills()
+                except RuntimeError, AttributeError:
+                    # 多窗口竞态：窗口已被销毁
+                    pass
+            logger.debug("[HotReload] skills list re-discovered (all windows)")
 
         # Hooks 变更：广播刷新所有窗口的 hook 设置卡片
         if result.get("hooks"):
@@ -4956,27 +4982,60 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] hooks card refreshed (all windows)")
 
-        # 主题变更：主动刷新设置面板中的主题下拉列表
-        if result.get("themes") and hasattr(self, "_settings_popup") and self._settings_popup:
-            try:
-                self._settings_popup.refresh_theme_options()
-                logger.debug("[HotReload] settings theme dropdown refreshed")
-            except Exception as e:
-                logger.warning(f"[HotReload] 刷新主题下拉失败: {e}")
+        # 主题变更：广播刷新所有窗口的主题下拉列表
+        # 修复：原代码仅刷新当前窗口，新主题在其他窗口下拉中不出现，必须重建窗口。
+        if result.get("themes"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    if not hasattr(win, "_settings_popup") or not win._settings_popup:
+                        continue
+                    win._settings_popup.refresh_theme_options()
+                except RuntimeError, AttributeError:
+                    pass
+            logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
-        # MCP 配置变更：刷新设置面板中的 MCP 服务器列表并重新连接
-        if result.get("mcp") and hasattr(self, "_settings_popup") and self._settings_popup:
-            try:
-                if hasattr(self._settings_popup, "mcpListCard"):
-                    card = self._settings_popup.mcpListCard
+        # MCP 配置变更：广播刷新所有窗口的 MCP 服务器列表
+        # 修复：原代码仅刷新当前窗口，其他窗口仍显示旧的 MCP 列表。
+        if result.get("mcp"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    if not hasattr(win, "_settings_popup") or not win._settings_popup:
+                        continue
+                    if not hasattr(win._settings_popup, "mcpListCard"):
+                        continue
+                    card = win._settings_popup.mcpListCard
                     # 如果当前是自触发的（开关操作），跳过全量刷新
                     if not card.consume_hot_reload():
                         card._refresh()
                         logger.debug("[HotReload] MCP server list refreshed")
                     else:
                         logger.debug("[HotReload] MCP server list: suppress self-triggered refresh")
-            except Exception as e:
-                logger.warning(f"[HotReload] 刷新 MCP 列表失败: {e}")
+                except (RuntimeError, AttributeError) as e:
+                    # 多窗口竞态：窗口已被销毁
+                    pass
+
+        # LSP 配置变更：广播刷新所有窗口的 LSP 状态列表
+        # 修复：原代码未处理 lsp 字段，导致 LSP 热重载后 settings popup 中
+        # 的 LSP 列表保持旧状态，必须重建窗口才能看到新服务器。
+        if result.get("lsp"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    if not hasattr(win, "_settings_popup") or not win._settings_popup:
+                        continue
+                    if not hasattr(win._settings_popup, "lspListCard"):
+                        continue
+                    card = win._settings_popup.lspListCard
+                    if hasattr(card, "_rebuild"):
+                        card._rebuild()
+                except RuntimeError, AttributeError:
+                    pass
+            logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
@@ -5117,9 +5176,17 @@ class OpenAIChatToolWindow(ToolWindow):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
         # 刷新卡片容器主题（浮动卡片的背景 + 边框随主题变化）
-        if hasattr(self, "_top_card_container") and self._top_card_container and hasattr(self._top_card_container, "refresh_style"):
+        if (
+            hasattr(self, "_top_card_container")
+            and self._top_card_container
+            and hasattr(self._top_card_container, "refresh_style")
+        ):
             self._top_card_container.refresh_style()
-        if hasattr(self, "_bottom_card_container") and self._bottom_card_container and hasattr(self._bottom_card_container, "refresh_style"):
+        if (
+            hasattr(self, "_bottom_card_container")
+            and self._bottom_card_container
+            and hasattr(self._bottom_card_container, "refresh_style")
+        ):
             self._bottom_card_container.refresh_style()
         # 刷新命令卡片主题（detail 模式参数列表 / 值选择列表的字体颜色需随主题变化）
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
