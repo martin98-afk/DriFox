@@ -11765,14 +11765,31 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
+            # 🛡️ 强制关窗路径独立计算并持久化累计运行时长（elapsed）
+            #
+            # 关键：_on_stop_clicked 第一阶段才会计算 self._stop_elapsed（从
+            # _response_start_time），但强制关闭窗口不走 _on_stop_clicked，
+            # 所以 _stop_elapsed 永远是 None。原来 _persist_stop_elapsed 早退，
+            # 最新一条 assistant 消息的 elapsed 字段永远不存 → 重启/重载后
+            # 看不到运行时长 = 用户报告的"累计运行时长无法保存"。
+            #
+            # 修复：手动从 _response_start_time 计算 elapsed → 写进 session.messages
+            # → save + flush。必须先于 _persist_stop_elapsed 之前设好 _stop_elapsed，
+            # 否则 _persist_stop_elapsed 早退毫无作用。
+            if self._response_start_time is not None:
+                self._stop_elapsed = time.time() - self._response_start_time
+                self._response_start_time = None
+
             if interrupted_messages:
                 try:
                     self._apply_interrupted_messages_to_session(interrupted_messages)
-                    if self.history_manager:
-                        self._save_current_session_to_history()
-                        self.history_manager.flush()
                 except Exception as e:
                     logger.warning(f"[ChatWindow] closeEvent 应用中断消息失败: {e}")
+
+            # elapsed 由 _persist_stop_elapsed 写入（不保存）；
+            # 统一一次 save+flush（由 _auto_save_current_session 在 closeEvent 末尾兜底）。
+            # ⚠️ 必须在 _persist_stop_elapsed 之前先应用 partial，否则 elapsed 写到旧 session。
+            self._persist_stop_elapsed()
 
         # 标记初始化已完成（防止窗口在初始化期间关闭导致竞态条件）
         self._initialization_in_progress = False
@@ -11899,7 +11916,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._update_node_preview()
 
     def _persist_stop_elapsed(self):
-        """将手动停止时暂存的耗时写入 session.messages 并持久化"""
+        """将手动停止时暂存的耗时写入 session.messages（不保存，不 flush）。
+
+        仅写入 elapsed 字段，不触发 save/flush。
+        由调用者统一 save+flush，避免多次保存同一会话。
+        """
         if self._stop_elapsed is None:
             return
         session = self.session_manager.get_current_session()
@@ -11909,9 +11930,6 @@ class OpenAIChatToolWindow(ToolWindow):
             if msg.get("role") == "assistant" and "elapsed" not in msg:
                 msg["elapsed"] = round(self._stop_elapsed, 1)
                 break
-        if self.history_manager:
-            self._save_current_session_to_history()
-            self.history_manager.flush()
 
     def _apply_interrupted_messages_to_session(self, interrupted_messages: List[Dict[str, Any]]) -> bool:
         """将 worker 中断时的快照应用到当前 session（同步）。
@@ -11977,16 +11995,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"current_len={len(current_session.messages)}, "
                 f"session_id={current_session.session_id[:8]}"
             )
-            self._persist_stop_elapsed()
+            self._persist_stop_elapsed()  # 只写 elapsed，不 save
             return
 
         if interrupted_messages:
             self._apply_interrupted_messages_to_session(interrupted_messages)
-            # 兜底：_apply_interrupted_messages_to_session 不写入 elapsed
-            self._persist_stop_elapsed()
-            if self.history_manager:
-                self._save_current_session_to_history()
-                self.history_manager.flush()
+            # _apply_interrupted_messages_to_session 不写入 elapsed
+            self._persist_stop_elapsed()  # 只写 elapsed，不 save
         else:
             # interrupted_messages 为空（如：closeEvent 路径已同步获取、
             # 或 daemon finalize 过程中并发被另一线程释放）。
@@ -11995,10 +12010,13 @@ class OpenAIChatToolWindow(ToolWindow):
             # 但 _on_messages_updated 不触发 _save_current_session_to_history。
             # 所以这里补一次持久化，避免 partial 丢失。
             if current_session and current_session.messages:
-                self._persist_stop_elapsed()
-                if self.history_manager:
-                    self._save_current_session_to_history()
-                    self.history_manager.flush()
+                self._persist_stop_elapsed()  # 只写 elapsed，不 save
+
+        # 🔧 统一一次 save+flush：不拆分到 _persist_stop_elapsed 内部 + 外部各一次。
+        # 修复前：_persist_stop_elapsed 内部 save，外面又 save → 同 pending_id 跳 3 次。
+        if self.history_manager:
+            self._save_current_session_to_history()
+            self.history_manager.flush()
 
         # 清理计时相关状态
         self._response_start_time = None

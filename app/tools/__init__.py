@@ -1031,5 +1031,5 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
                     break
     except Exception:
         pass
-    print(schemas)
+
     return schemas
