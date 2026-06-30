@@ -12,6 +12,7 @@ ChatSession & SessionManager - 会话管理模块
 - 持久化：会话通过 SQLite 数据库长期存储，加载时采用懒加载策略
 - 压缩合并：支持多轮对话的历史压缩合并（保留摘要或固定尾部）
 """
+
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
+from app.core.token_estimator import count_messages_tokens
 
 # 内存泄漏修复：会话消息数软限制
 MAX_SESSION_MESSAGES = 500
@@ -43,6 +45,7 @@ class ChatSession:
         self.system_prompt: str = ""
         self._system_prompt_agent: str = ""  # 缓存 system prompt 对应的 agent 名
         self.metadata: Dict[str, Any] = {}  # 扩展元数据（如模型/Agent 覆盖）
+        self.context_usage: int = 0  # 消息列表估算 token 总数，保存时计算
 
     @staticmethod
     def _default_compaction_state() -> Dict:
@@ -108,11 +111,7 @@ class ChatSession:
 
     def add_user_message(self, content, **kwargs):
         """添加用户消息，支持 str 和 list（multimodal content）"""
-        msg = {
-            "role": "user",
-            "content": content,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+        msg = {"role": "user", "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if kwargs.get("params"):
             msg["params"] = kwargs["params"]
         self.messages.append(msg)
@@ -122,6 +121,7 @@ class ChatSession:
     def _update_timestamp(self):
         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.message_count = len(self.messages)
+        self.context_usage = count_messages_tokens(self.messages)
 
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
@@ -174,6 +174,7 @@ class ChatSession:
             "system_prompt": self.system_prompt,
             "user_edited_title": self.user_edited_title,
             "metadata": self.metadata,
+            "context_usage": self.context_usage,
         }
 
     @classmethod
@@ -186,9 +187,7 @@ class ChatSession:
         summary = data.get("topic_summary", "")
         if summary:
             session.set_topic_summary(summary)
-        session.created_at = data.get(
-            "created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
+        session.created_at = data.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         session.last_updated = data.get("last_updated", session.created_at)
         session.message_count = len(session.messages)
         session.set_compaction_state(data.get("compaction_state"))
@@ -196,6 +195,7 @@ class ChatSession:
         session.system_prompt = data.get("system_prompt", "") or ""
         session.metadata = data.get("metadata", {}) or {}
         session.user_edited_title = data.get("user_edited_title", False)
+        session.context_usage = data.get("context_usage", 0)
         return session
 
     def set_user_edited_title(self, edited: bool = True):
@@ -230,6 +230,7 @@ class SessionManager(QObject):
     def _touch_session(self, session_id: str):
         """更新会话最后访问时间"""
         import time
+
         self._last_access[session_id] = time.time()
 
     def _evict_if_needed(self):
@@ -243,9 +244,9 @@ class SessionManager(QObject):
 
         # 找出所有非当前会话，按访问时间排序（最久未访问在前）
         candidates = [
-            (sid, t) for sid, t in self._last_access.items()
-            if sid != current_id
-            and any(s.session_id == sid for s in self.sessions)
+            (sid, t)
+            for sid, t in self._last_access.items()
+            if sid != current_id and any(s.session_id == sid for s in self.sessions)
         ]
         if not candidates:
             return

@@ -84,6 +84,7 @@ class SessionStore:
         """
         try:
             from app.utils.utils import get_app_data_dir
+
             flag_path = Path(get_app_data_dir()) / cls._CLEAN_SHUTDOWN_FLAG
             flag_path.write_text("1", encoding="utf-8")
         except Exception:
@@ -98,17 +99,17 @@ class SessionStore:
 
     def _check_and_repair_database(self):
         """检查并修复损坏的 SQLite 数据库
-        
+
         PyInstaller 打包后运行时可能遇到数据库损坏问题：
         1. WAL 文件与主数据库文件不同步
         2. 数据库文件被不完整地复制或更新
         3. 并发写入导致文件锁定冲突
-        
+
         修复策略：
         1. 先尝试执行 PRAGMA wal_checkpoint(TRUNCATE) 同步 WAL
         2. 删除不匹配的 WAL/SHM 文件（如果存在）
         3. 执行 VACUUM 重建数据库
-        
+
         优化：如果上次正常关闭，跳过耗时较长的 PRAGMA integrity_check
         """
         if not self._db or not self._db.is_connected:
@@ -129,20 +130,20 @@ class SessionStore:
 
         try:
             # 检查 WAL 模式
-            success, result = self._db.execute_sql('PRAGMA journal_mode')
+            success, result = self._db.execute_sql("PRAGMA journal_mode")
             if not success:
                 logger.warning("[SessionStore] 无法读取 journal_mode")
                 return
-            journal_mode = list(result[0].values())[0] if result else 'unknown'
+            journal_mode = list(result[0].values())[0] if result else "unknown"
 
             # 获取数据库路径信息
-            wal_path = db_path.with_suffix('.db-wal')
-            shm_path = db_path.with_suffix('.db-shm')
+            wal_path = db_path.with_suffix(".db-wal")
+            shm_path = db_path.with_suffix(".db-shm")
 
-            if journal_mode == 'wal':
+            if journal_mode == "wal":
                 # WAL 模式下检查是否需要同步
                 try:
-                    self._db.execute_sql('PRAGMA wal_checkpoint(TRUNCATE)')
+                    self._db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
                     logger.debug("[SessionStore] WAL 检查点执行完成")
                 except Exception as e:
                     logger.warning(f"[SessionStore] WAL 检查点失败: {e}")
@@ -163,10 +164,10 @@ class SessionStore:
 
             # 尝试执行完整性检查
             try:
-                success, result = self._db.execute_sql('PRAGMA integrity_check')
+                success, result = self._db.execute_sql("PRAGMA integrity_check")
                 if success and result:
                     check_result = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
-                    if check_result != 'ok':
+                    if check_result != "ok":
                         logger.warning(f"[SessionStore] 数据库完整性检查失败: {check_result}")
                         self._repair_database()
                     else:
@@ -181,8 +182,8 @@ class SessionStore:
         """尝试修复损坏的数据库"""
         try:
             # 切换为 DELETE 模式并执行 VACUUM
-            self._db.execute_sql('PRAGMA journal_mode=DELETE')
-            self._db.execute_sql('VACUUM')
+            self._db.execute_sql("PRAGMA journal_mode=DELETE")
+            self._db.execute_sql("VACUUM")
             logger.info("[SessionStore] 数据库修复成功")
         except Exception as e:
             logger.error(f"[SessionStore] 数据库修复失败: {e}")
@@ -197,19 +198,19 @@ class SessionStore:
         if not self._db or not self._db.is_connected:
             return
         try:
-            success, result = self._db.execute_sql('PRAGMA auto_vacuum')
+            success, result = self._db.execute_sql("PRAGMA auto_vacuum")
             if not success or not result:
                 return
             current = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
             # SQLite PRAGMA auto_vacuum 返回整数: 0=NONE, 1=FULL, 2=INCREMENTAL
             # Python sqlite3 driver 可能返回 int 2 而非字符串 'incremental'
-            if str(current).lower() == 'incremental' or current == 2:
+            if str(current).lower() == "incremental" or current == 2:
                 # 检查 freelist 是否还有很多 (> 50MB 提示用户首次 VACUUM)
-                success2, result2 = self._db.execute_sql('PRAGMA freelist_count')
+                success2, result2 = self._db.execute_sql("PRAGMA freelist_count")
                 if success2 and result2:
                     freelist = list(result2[0].values())[0] if isinstance(result2[0], dict) else 0
                     page_size = 4096
-                    success3, result3 = self._db.execute_sql('PRAGMA page_size')
+                    success3, result3 = self._db.execute_sql("PRAGMA page_size")
                     if success3 and result3:
                         page_size = list(result3[0].values())[0] or 4096
                     freelist_mb = freelist * page_size / 1024 / 1024
@@ -242,22 +243,22 @@ class SessionStore:
             return False
         try:
             # 先检查 auto_vacuum 模式
-            success, result = self._db.execute_sql('PRAGMA auto_vacuum')
+            success, result = self._db.execute_sql("PRAGMA auto_vacuum")
             if not success or not result:
                 return False
-            current = list(result[0].values())[0] if isinstance(result[0], dict) else 'none'
-            if current != 'incremental':
+            current = list(result[0].values())[0] if isinstance(result[0], dict) else "none"
+            if current != "incremental":
                 logger.debug(f"[SessionStore] auto_vacuum={current}, 跳过 incremental_vacuum")
                 return False
 
-            self._db.execute_sql(f'PRAGMA incremental_vacuum({max_pages})')
+            self._db.execute_sql(f"PRAGMA incremental_vacuum({max_pages})")
             # 回收后查询实际归还了多少
-            success2, result2 = self._db.execute_sql('PRAGMA freelist_count')
+            success2, result2 = self._db.execute_sql("PRAGMA freelist_count")
             if success2 and result2:
                 remaining = list(result2[0].values())[0] if isinstance(result2[0], dict) else 0
                 logger.info(
                     f"[SessionStore] 增量回收完成 (本批 {max_pages} 页), "
-                    f"剩余 freelist={remaining} 页 (≈{remaining*4/1024:.1f}MB)"
+                    f"剩余 freelist={remaining} 页 (≈{remaining * 4 / 1024:.1f}MB)"
                 )
             return True
         except Exception as e:
@@ -289,7 +290,7 @@ class SessionStore:
                 # 必须在设置任何 PRAGMA 之前读取，否则读到的是当前连接的值而非文件头
                 _file_auto_vacuum = None
                 try:
-                    _ok, _rows = self._db.execute_sql('PRAGMA auto_vacuum')
+                    _ok, _rows = self._db.execute_sql("PRAGMA auto_vacuum")
                     if _ok and _rows:
                         _file_auto_vacuum = str(list(_rows[0].values())[0]).lower()
                 except Exception:
@@ -297,82 +298,94 @@ class SessionStore:
                 # ======================================================
 
                 # ========== WAL 模式优化：提升并发读写性能 ==========
-                self._db.execute_sql('PRAGMA journal_mode=WAL')
-                self._db.execute_sql('PRAGMA synchronous=NORMAL')
-                self._db.execute_sql('PRAGMA cache_size=-64000')
-                self._db.execute_sql('PRAGMA temp_store=MEMORY')
+                self._db.execute_sql("PRAGMA journal_mode=WAL")
+                self._db.execute_sql("PRAGMA synchronous=NORMAL")
+                self._db.execute_sql("PRAGMA cache_size=-64000")
+                self._db.execute_sql("PRAGMA temp_store=MEMORY")
                 # 先设连接级 INCREMENTAL（若文件头已是 INCREMENTAL 则直接生效；
                 # 若文件头是 NONE，后续 _activate_incremental_auto_vacuum 执行 VACUUM 后永久写入）
-                self._db.execute_sql('PRAGMA auto_vacuum=INCREMENTAL')
+                self._db.execute_sql("PRAGMA auto_vacuum=INCREMENTAL")
                 # ======================================================
 
                 # 创建会话表
-                self._db.create_table(self.TABLE_NAME, [
-                    {"name": "session_id", "type": "TEXT", "primary_key": True},
-                    {"name": "title", "type": "TEXT"},
-                    {"name": "messages", "type": "TEXT"},
-                    {"name": "system_prompt", "type": "TEXT"},
-                    {"name": "compaction_state", "type": "TEXT"},
-                    {"name": "compaction_cache", "type": "TEXT"},
-                    {"name": "message_count", "type": "INTEGER", "default": 0},
-                    {"name": "project", "type": "TEXT", "default": "默认项目"},
-                    {"name": "created_at", "type": "TEXT"},
-                    {"name": "updated_at", "type": "TEXT"},
-                    {"name": "worktree_path", "type": "TEXT", "default": ""},
-                ])
+                self._db.create_table(
+                    self.TABLE_NAME,
+                    [
+                        {"name": "session_id", "type": "TEXT", "primary_key": True},
+                        {"name": "title", "type": "TEXT"},
+                        {"name": "messages", "type": "TEXT"},
+                        {"name": "system_prompt", "type": "TEXT"},
+                        {"name": "compaction_state", "type": "TEXT"},
+                        {"name": "compaction_cache", "type": "TEXT"},
+                        {"name": "message_count", "type": "INTEGER", "default": 0},
+                        {"name": "project", "type": "TEXT", "default": "默认项目"},
+                        {"name": "created_at", "type": "TEXT"},
+                        {"name": "updated_at", "type": "TEXT"},
+                        {"name": "worktree_path", "type": "TEXT", "default": ""},
+                        {"name": "context_usage", "type": "INTEGER", "default": 0},
+                    ],
+                )
 
                 # 创建记忆表
-                self._db.create_table(self.MEMORIES_TABLE, [
-                    {"name": "memory_id", "type": "TEXT", "primary_key": True},
-                    {"name": "content", "type": "TEXT"},
-                    {"name": "enabled", "type": "INTEGER", "default": 1},
-                    {"name": "confidence", "type": "REAL", "default": 0.8},
-                    {"name": "category", "type": "TEXT"},
-                    {"name": "source", "type": "TEXT"},
-                    {"name": "last_accessed", "type": "TEXT"},
-                    {"name": "created_at", "type": "TEXT"},
-                    {"name": "updated_at", "type": "TEXT"},
-                ])
+                self._db.create_table(
+                    self.MEMORIES_TABLE,
+                    [
+                        {"name": "memory_id", "type": "TEXT", "primary_key": True},
+                        {"name": "content", "type": "TEXT"},
+                        {"name": "enabled", "type": "INTEGER", "default": 1},
+                        {"name": "confidence", "type": "REAL", "default": 0.8},
+                        {"name": "category", "type": "TEXT"},
+                        {"name": "source", "type": "TEXT"},
+                        {"name": "last_accessed", "type": "TEXT"},
+                        {"name": "created_at", "type": "TEXT"},
+                        {"name": "updated_at", "type": "TEXT"},
+                    ],
+                )
 
                 # 创建文件操作记录表
-                self._db.create_table("file_operations", [
-                    {"name": "id", "type": "INTEGER", "primary_key": True, "auto_increment": True},
-                    {"name": "session_id", "type": "TEXT"},
-                    {"name": "call_id", "type": "TEXT"},
-                    {"name": "tool_name", "type": "TEXT"},
-                    {"name": "file_path", "type": "TEXT"},
-                    {"name": "backup_path", "type": "TEXT"},
-                    {"name": "created_at", "type": "TEXT"},
-                ])
+                self._db.create_table(
+                    "file_operations",
+                    [
+                        {"name": "id", "type": "INTEGER", "primary_key": True, "auto_increment": True},
+                        {"name": "session_id", "type": "TEXT"},
+                        {"name": "call_id", "type": "TEXT"},
+                        {"name": "tool_name", "type": "TEXT"},
+                        {"name": "file_path", "type": "TEXT"},
+                        {"name": "backup_path", "type": "TEXT"},
+                        {"name": "created_at", "type": "TEXT"},
+                    ],
+                )
 
                 # 创建子智能体日志表
-                self._db.create_table("sub_agent_logs", [
-                    {"name": "task_id", "type": "TEXT", "primary_key": True},
-                    {"name": "agent_name", "type": "TEXT"},
-                    {"name": "task_description", "type": "TEXT"},
-                    {"name": "status", "type": "TEXT"},
-                    {"name": "result", "type": "TEXT"},
-                    {"name": "error", "type": "TEXT"},
-                    {"name": "logs", "type": "TEXT"},
-                    {"name": "summary", "type": "TEXT"},
-                    {"name": "created_at", "type": "TEXT"},
-                    {"name": "updated_at", "type": "TEXT"},
-                ])
+                self._db.create_table(
+                    "sub_agent_logs",
+                    [
+                        {"name": "task_id", "type": "TEXT", "primary_key": True},
+                        {"name": "agent_name", "type": "TEXT"},
+                        {"name": "task_description", "type": "TEXT"},
+                        {"name": "status", "type": "TEXT"},
+                        {"name": "result", "type": "TEXT"},
+                        {"name": "error", "type": "TEXT"},
+                        {"name": "logs", "type": "TEXT"},
+                        {"name": "summary", "type": "TEXT"},
+                        {"name": "created_at", "type": "TEXT"},
+                        {"name": "updated_at", "type": "TEXT"},
+                    ],
+                )
 
                 # 创建输入历史表
-                self._db.create_table("input_history", [
-                    {"name": "id", "type": "INTEGER", "primary_key": True, "auto_increment": True},
-                    {"name": "content", "type": "TEXT", "not_null": True},
-                    {"name": "created_at", "type": "TEXT"},
-                ])
+                self._db.create_table(
+                    "input_history",
+                    [
+                        {"name": "id", "type": "INTEGER", "primary_key": True, "auto_increment": True},
+                        {"name": "content", "type": "TEXT", "not_null": True},
+                        {"name": "created_at", "type": "TEXT"},
+                    ],
+                )
 
                 # 创建索引
-                self._db.execute_sql(
-                    f'CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)'
-                )
-                self._db.execute_sql(
-                    f'CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)'
-                )
+                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
+                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
 
                 # 迁移逻辑
                 self._migrate_add_project_column()
@@ -380,6 +393,7 @@ class SessionStore:
                 self._migrate_add_user_edited_title_column()
                 self._migrate_add_worktree_path_column()
                 self._migrate_add_preview_column()
+                self._migrate_add_context_usage_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -391,14 +405,14 @@ class SessionStore:
 
                 # 一次性激活：若文件头 auto_vacuum 不是 INCREMENTAL，执行 VACUUM 永久写入
                 # (必须在所有建表/迁移完成后执行，确保 VACUUM 基于完整 schema 重建)
-                if _file_auto_vacuum and _file_auto_vacuum != 'incremental':
+                if _file_auto_vacuum and _file_auto_vacuum != "incremental":
                     logger.info(
                         f"[SessionStore] 文件头 auto_vacuum={_file_auto_vacuum}, "
                         f"执行一次性 VACUUM 永久激活 INCREMENTAL..."
                     )
                     try:
-                        self._db.execute_sql('PRAGMA auto_vacuum=INCREMENTAL')
-                        self._db.execute_sql('VACUUM')
+                        self._db.execute_sql("PRAGMA auto_vacuum=INCREMENTAL")
+                        self._db.execute_sql("VACUUM")
                         logger.info("[SessionStore] INCREMENTAL 模式已永久激活")
                     except Exception as _e:
                         logger.warning(f"[SessionStore] 首次激活 INCREMENTAL 失败: {_e}")
@@ -422,12 +436,8 @@ class SessionStore:
             col_names = [c.get("name", "") for c in columns]
             if "project" not in col_names:
                 logger.info("[SessionStore] 迁移：添加 project 列")
-                self._db.execute_sql(
-                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN project TEXT DEFAULT '默认项目'"
-                )
-                self._db.execute_sql(
-                    f"UPDATE {self.TABLE_NAME} SET project = '默认项目' WHERE project IS NULL"
-                )
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN project TEXT DEFAULT '默认项目'")
+                self._db.execute_sql(f"UPDATE {self.TABLE_NAME} SET project = '默认项目' WHERE project IS NULL")
                 logger.info("[SessionStore] project 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] project 列迁移失败(可能已存在): {e}")
@@ -441,32 +451,34 @@ class SessionStore:
             col_names = [c.get("name", "") for c in columns]
             if "canvas_id" in col_names:
                 logger.info("[SessionStore] 迁移：删除 sessions 表的 canvas_id 列")
-                self._db.execute_sql(f'''
+                self._db.execute_sql(f"""
                     CREATE TABLE {self.TABLE_NAME}_temp AS
                     SELECT session_id, title, messages, system_prompt,
                            compaction_state, compaction_cache, message_count,
                            project, created_at, updated_at
                     FROM {self.TABLE_NAME}
-                ''')
-                self._db.execute_sql(f'DROP TABLE {self.TABLE_NAME}')
-                self._db.execute_sql(f'ALTER TABLE {self.TABLE_NAME}_temp RENAME TO {self.TABLE_NAME}')
-                self._db.execute_sql(f'CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)')
-                self._db.execute_sql(f'CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)')
+                """)
+                self._db.execute_sql(f"DROP TABLE {self.TABLE_NAME}")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME}_temp RENAME TO {self.TABLE_NAME}")
+                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
+                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
                 logger.info("[SessionStore] sessions 表 canvas_id 列迁移完成")
 
             mem_columns = self._db.get_table_info(self.MEMORIES_TABLE)
             mem_col_names = [c.get("name", "") for c in mem_columns]
             if "canvas_id" in mem_col_names:
                 logger.info("[SessionStore] 迁移：删除 memories 表的 canvas_id 列")
-                self._db.execute_sql(f'''
+                self._db.execute_sql(f"""
                     CREATE TABLE {self.MEMORIES_TABLE}_temp AS
                     SELECT memory_id, content, enabled, confidence, category, source,
                            last_accessed, created_at, updated_at
                     FROM {self.MEMORIES_TABLE}
-                ''')
-                self._db.execute_sql(f'DROP TABLE {self.MEMORIES_TABLE}')
-                self._db.execute_sql(f'ALTER TABLE {self.MEMORIES_TABLE}_temp RENAME TO {self.MEMORIES_TABLE}')
-                self._db.execute_sql(f'CREATE INDEX IF NOT EXISTS idx_memories_canvas ON {self.MEMORIES_TABLE}(memory_id)')
+                """)
+                self._db.execute_sql(f"DROP TABLE {self.MEMORIES_TABLE}")
+                self._db.execute_sql(f"ALTER TABLE {self.MEMORIES_TABLE}_temp RENAME TO {self.MEMORIES_TABLE}")
+                self._db.execute_sql(
+                    f"CREATE INDEX IF NOT EXISTS idx_memories_canvas ON {self.MEMORIES_TABLE}(memory_id)"
+                )
                 logger.info("[SessionStore] memories 表 canvas_id 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] canvas_id 列迁移失败(可能已不存在): {e}")
@@ -480,9 +492,7 @@ class SessionStore:
             col_names = [c.get("name", "") for c in columns]
             if "user_edited_title" not in col_names:
                 logger.info("[SessionStore] 迁移：添加 user_edited_title 列")
-                self._db.execute_sql(
-                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN user_edited_title INTEGER DEFAULT 0"
-                )
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN user_edited_title INTEGER DEFAULT 0")
                 logger.info("[SessionStore] user_edited_title 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] user_edited_title 列迁移失败(可能已存在): {e}")
@@ -496,9 +506,7 @@ class SessionStore:
             col_names = [c.get("name", "") for c in columns]
             if "worktree_path" not in col_names:
                 logger.info("[SessionStore] 迁移：添加 worktree_path 列")
-                self._db.execute_sql(
-                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN worktree_path TEXT DEFAULT ''"
-                )
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN worktree_path TEXT DEFAULT ''")
                 logger.info("[SessionStore] worktree_path 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] worktree_path 列迁移失败(可能已存在): {e}")
@@ -516,16 +524,30 @@ class SessionStore:
             col_names = [c.get("name", "") for c in columns]
             if "preview" not in col_names:
                 logger.info("[SessionStore] 迁移：添加 preview 列")
-                self._db.execute_sql(
-                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN preview TEXT DEFAULT ''"
-                )
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN preview TEXT DEFAULT ''")
                 # 迁移后回填现有会话的 preview（从 messages 中提取）
-                self._db.execute_sql(
-                    f"UPDATE {self.TABLE_NAME} SET preview = '' WHERE preview IS NULL"
-                )
+                self._db.execute_sql(f"UPDATE {self.TABLE_NAME} SET preview = '' WHERE preview IS NULL")
                 logger.info("[SessionStore] preview 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] preview 列迁移失败(可能已存在): {e}")
+
+    def _migrate_add_context_usage_column(self):
+        """迁移：添加 context_usage 列（如果不存在）
+
+        context_usage 存储会话消息的估算 token 总数，
+        使图表插件可直接读取聚合值，无需反序列化 messages JSON 再估算。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "context_usage" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 context_usage 列")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN context_usage INTEGER DEFAULT 0")
+                logger.info("[SessionStore] context_usage 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] context_usage 列迁移失败(可能已存在): {e}")
 
     @property
     def is_initialized(self) -> bool:
@@ -598,15 +620,9 @@ class SessionStore:
             return False
         try:
             # 删除会话（直接 SQL，不经过 repo 层）
-            self._execute(
-                'DELETE FROM sessions WHERE project = ?',
-                (project_name,)
-            )
+            self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除关键文档
-            self._execute(
-                'DELETE FROM key_documents WHERE project = ?',
-                (project_name,)
-            )
+            self._execute("DELETE FROM key_documents WHERE project = ?", (project_name,))
             logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")
             return True
         except Exception as e:
@@ -636,7 +652,7 @@ class SessionStore:
         if not self._db or not self._db.is_connected:
             return 0
         try:
-            success, result = self._db.execute_sql(f'SELECT COUNT(*) FROM {self.TABLE_NAME}')
+            success, result = self._db.execute_sql(f"SELECT COUNT(*) FROM {self.TABLE_NAME}")
             if success and result:
                 return result[0][0] if isinstance(result[0], tuple) else result[0].get("count", 0)
             return 0
@@ -734,10 +750,18 @@ class SessionStore:
 
     # ==================== 子智能体日志操作（委托给 SubAgentLogRepository）====================
 
-    def save_subagent_task(self, task_id: str, agent_name: str, task_description: str,
-                           status: str = "running", result: str = None, error: str = None,
-                           logs: List[Dict] = None, summary: Dict = None,
-                           session_id: str = "") -> bool:
+    def save_subagent_task(
+        self,
+        task_id: str,
+        agent_name: str,
+        task_description: str,
+        status: str = "running",
+        result: str = None,
+        error: str = None,
+        logs: List[Dict] = None,
+        summary: Dict = None,
+        session_id: str = "",
+    ) -> bool:
         """保存子智能体任务"""
         if self._subagent_log_repo:
             return self._subagent_log_repo.save_task(
@@ -745,9 +769,15 @@ class SessionStore:
             )
         return False
 
-    def update_subagent_task_status(self, task_id: str, status: str, result: str = None,
-                                     error: str = None, logs: List[Dict] = None,
-                                     summary: Dict = None) -> bool:
+    def update_subagent_task_status(
+        self,
+        task_id: str,
+        status: str,
+        result: str = None,
+        error: str = None,
+        logs: List[Dict] = None,
+        summary: Dict = None,
+    ) -> bool:
         """更新子智能体任务状态"""
         if self._subagent_log_repo:
             return self._subagent_log_repo.update_status(task_id, status, result, error, logs, summary)
@@ -785,9 +815,9 @@ class SessionStore:
 
     # ==================== 文件操作记录（委托给 FileOperationRepository）====================
 
-    def record_file_operation(self, session_id: str, call_id: str,
-                              tool_name: str, file_path: str,
-                              backup_path: str) -> bool:
+    def record_file_operation(
+        self, session_id: str, call_id: str, tool_name: str, file_path: str, backup_path: str
+    ) -> bool:
         """记录文件操作"""
         if self._file_op_repo:
             return self._file_op_repo.record(session_id, call_id, tool_name, file_path, backup_path)

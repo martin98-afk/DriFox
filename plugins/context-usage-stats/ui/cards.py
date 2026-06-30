@@ -244,12 +244,33 @@ def _fetch_session_stats() -> dict:
             except ValueError, TypeError:
                 pass
 
-        # 5. ═══ 估算 Token 用量（按 created_at 日期汇总各会话的完整消息 JSON） ═══
+        # 5. ═══ Token 用量 ═══
+        # 优先从 context_usage 列读取（精确），对 context_usage=0 的旧会话回退到 messages 估算
+        cursor.execute(
+            "SELECT DATE(created_at) as day, COALESCE(SUM(context_usage), 0) as total_tokens "
+            "FROM sessions "
+            "WHERE created_at >= date('now', '-14 days') "
+            "AND project NOT LIKE '__archived__%' "
+            "AND context_usage > 0 "
+            "GROUP BY DATE(created_at) ORDER BY day"
+        )
+        for row in cursor.fetchall():
+            day_str = row["day"]
+            if not day_str:
+                continue
+            try:
+                label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
+                daily_tokens_map[label] = row["total_tokens"]
+            except ValueError, TypeError:
+                pass
+
+        # 回退：对 context_usage=0 的旧会话，从 messages 估算 token（兼容旧数据）
         cursor.execute(
             "SELECT DATE(created_at) as day, messages "
             "FROM sessions "
             "WHERE created_at >= date('now', '-14 days') "
             "AND project NOT LIKE '__archived__%' "
+            "AND (context_usage IS NULL OR context_usage = 0) "
             "AND messages IS NOT NULL AND messages != '' "
             "ORDER BY created_at DESC"
         )

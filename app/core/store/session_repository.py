@@ -41,7 +41,7 @@ class SessionRepository:
         if not row:
             return {}
 
-        if hasattr(row, 'keys'):
+        if hasattr(row, "keys"):
             d = {k: row[k] for k in row.keys()}
         elif isinstance(row, dict):
             d = dict(row)
@@ -84,8 +84,8 @@ class SessionRepository:
         raw_title = d.get("title", "") or ""
         return {
             "session_id": d.get("session_id", ""),
-            "name": raw_title,       # ChatSession.name
-            "title": raw_title,      # HistoryManager 兼容
+            "name": raw_title,  # ChatSession.name
+            "title": raw_title,  # HistoryManager 兼容
             "topic_summary": raw_title,  # ChatSession.topic_summary
             "project": d.get("project", "默认项目"),
             "messages": messages,
@@ -96,11 +96,12 @@ class SessionRepository:
             "created_at": d.get("created_at", ""),
             "updated_at": d.get("updated_at", ""),
             "worktree_path": d.get("worktree_path", "") or "",
+            "context_usage": d.get("context_usage", 0),
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
-            "last_time": d.get("last_time") or (
-                messages[-1].get("timestamp") if messages else None
-            ) or d.get("updated_at", ""),
+            "last_time": d.get("last_time")
+            or (messages[-1].get("timestamp") if messages else None)
+            or d.get("updated_at", ""),
             "saved_at": d.get("saved_at") or d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
         }
@@ -141,33 +142,38 @@ class SessionRepository:
                 "user_edited_title": user_edited,
                 "worktree_path": session.get("worktree_path", "") or "",
                 "preview": session.get("preview", "") or "",
+                "context_usage": session.get("context_usage", 0),
             }
 
-            success, result = self._execute(f'''
+            success, result = self._execute(
+                f"""
                 INSERT OR REPLACE INTO {self.TABLE_NAME}
                 (session_id, title, project, messages, system_prompt,
                  compaction_state, compaction_cache, message_count, user_edited_title,
-                 worktree_path, preview, created_at, updated_at)
+                 worktree_path, preview, context_usage, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, 
+                    ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
-            ''', (
-                session_data["session_id"],
-                session_data["title"],
-                session_data["project"],
-                session_data["messages"],
-                session_data["system_prompt"],
-                session_data["compaction_state"],
-                session_data["compaction_cache"],
-                session_data["message_count"],
-                session_data["user_edited_title"],
-                session_data["worktree_path"],
-                session_data["preview"],
-                session_id,  # for coalesce
-                now,  # created_at default
-                now,  # updated_at
-            ))
+            """,
+                (
+                    session_data["session_id"],
+                    session_data["title"],
+                    session_data["project"],
+                    session_data["messages"],
+                    session_data["system_prompt"],
+                    session_data["compaction_state"],
+                    session_data["compaction_cache"],
+                    session_data["message_count"],
+                    session_data["user_edited_title"],
+                    session_data["worktree_path"],
+                    session_data["preview"],
+                    session_data["context_usage"],
+                    session_id,  # for coalesce
+                    now,  # created_at default
+                    now,  # updated_at
+                ),
+            )
 
             if success:
                 # INSERT OR REPLACE = DELETE 旧行 + INSERT 新行，旧页全部进 freelist
@@ -183,8 +189,7 @@ class SessionRepository:
             logger.error(f"[SessionRepository] save_session 异常: {e}")
             return False
 
-    def _reclaim_freelist_if_needed(self, threshold_pages: int = 5000,
-                                     reclaim_pages: int = 500):
+    def _reclaim_freelist_if_needed(self, threshold_pages: int = 5000, reclaim_pages: int = 500):
         """
         空闲页超过阈值时增量回收，防止 freelist 滚雪球
 
@@ -202,13 +207,13 @@ class SessionRepository:
             reclaim_pages:  单次回收最多页数（默认 500 页 ≈ 2MB）
         """
         try:
-            ok, rows = self._execute('PRAGMA freelist_count')
+            ok, rows = self._execute("PRAGMA freelist_count")
             if not ok or not rows:
                 return
             freelist = list(rows[0].values())[0] if isinstance(rows[0], dict) else rows[0]
             if freelist < threshold_pages:
                 return
-            self._execute(f'PRAGMA incremental_vacuum({reclaim_pages})')
+            self._execute(f"PRAGMA incremental_vacuum({reclaim_pages})")
         except Exception:
             pass  # auto_vacuum 未启用时静默跳过，不阻塞保存流程
 
@@ -218,10 +223,7 @@ class SessionRepository:
             return None
 
         try:
-            success, rows = self._execute(
-                f'SELECT * FROM {self.TABLE_NAME} WHERE session_id = ?',
-                (session_id,)
-            )
+            success, rows = self._execute(f"SELECT * FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success and rows and len(rows) > 0:
                 return self._row_to_session(rows[0])
             return None
@@ -236,8 +238,7 @@ class SessionRepository:
 
         try:
             success, rows = self._execute(
-                f'SELECT * FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?',
-                (limit, offset)
+                f"SELECT * FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit, offset)
             )
             if success:
                 return [self._row_to_session(row) for row in rows]
@@ -257,12 +258,12 @@ class SessionRepository:
 
         try:
             success, rows = self._execute(
-                f'SELECT session_id, title, project, system_prompt, '
-                f'compaction_state, compaction_cache, message_count, '
-                f'user_edited_title, worktree_path, preview, '
-                f'created_at, updated_at '
-                f'FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?',
-                (limit, offset)
+                f"SELECT session_id, title, project, system_prompt, "
+                f"compaction_state, compaction_cache, message_count, "
+                f"user_edited_title, worktree_path, preview, "
+                f"context_usage, created_at, updated_at "
+                f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             )
             if success:
                 return [self._row_to_session_lightweight(row) for row in rows]
@@ -276,7 +277,7 @@ class SessionRepository:
         if not row:
             return {}
 
-        if hasattr(row, 'keys'):
+        if hasattr(row, "keys"):
             d = {k: row[k] for k in row.keys()}
         elif isinstance(row, dict):
             d = dict(row)
@@ -320,6 +321,7 @@ class SessionRepository:
             "created_at": d.get("created_at", ""),
             "updated_at": d.get("updated_at", ""),
             "worktree_path": d.get("worktree_path", "") or "",
+            "context_usage": d.get("context_usage", 0),
             "last_time": d.get("updated_at", ""),
             "saved_at": d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
@@ -332,8 +334,7 @@ class SessionRepository:
 
         try:
             success, rows = self._execute(
-                f'SELECT * FROM {self.TABLE_NAME} WHERE project = ? ORDER BY updated_at DESC LIMIT ?',
-                (project, limit)
+                f"SELECT * FROM {self.TABLE_NAME} WHERE project = ? ORDER BY updated_at DESC LIMIT ?", (project, limit)
             )
             if success:
                 return [self._row_to_session(row) for row in rows]
@@ -380,10 +381,7 @@ class SessionRepository:
             return False
 
         try:
-            success, _ = self._execute(
-                f'DELETE FROM {self.TABLE_NAME} WHERE session_id = ?',
-                (session_id,)
-            )
+            success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             return success
         except Exception as e:
             logger.error(f"[SessionRepository] delete_session 异常: {e}")
@@ -396,8 +394,8 @@ class SessionRepository:
 
         try:
             success, _ = self._execute(
-                f'UPDATE {self.TABLE_NAME} SET title = ?, updated_at = ? WHERE session_id = ?',
-                (title, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), session_id)
+                f"UPDATE {self.TABLE_NAME} SET title = ?, updated_at = ? WHERE session_id = ?",
+                (title, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), session_id),
             )
             return success
         except Exception as e:
@@ -411,8 +409,8 @@ class SessionRepository:
 
         try:
             success, _ = self._execute(
-                f'UPDATE {self.TABLE_NAME} SET project = ?, updated_at = ? WHERE session_id = ?',
-                (project, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), session_id)
+                f"UPDATE {self.TABLE_NAME} SET project = ?, updated_at = ? WHERE session_id = ?",
+                (project, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), session_id),
             )
             return success
         except Exception as e:
@@ -431,8 +429,8 @@ class SessionRepository:
                 sid = s.get("session_id")
                 if sid:
                     success, _ = self._execute(
-                        f'UPDATE {self.TABLE_NAME} SET project = ? WHERE session_id = ?',
-                        (f"__archived__/{project}", sid)
+                        f"UPDATE {self.TABLE_NAME} SET project = ? WHERE session_id = ?",
+                        (f"__archived__/{project}", sid),
                     )
                     if success:
                         count += 1
