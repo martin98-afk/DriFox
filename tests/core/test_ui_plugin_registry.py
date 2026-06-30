@@ -75,3 +75,38 @@ def test_register_content_renderer_same_priority_warns():
     reg.register_content_renderer("p2", "shared", lambda d, c: "B", priority=1)
     assert reg.get_content_renderer("shared").plugin_name == "p2"
     reg.reset()
+
+
+def test_register_message_factory():
+    """注册消息工厂"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    class FakeWidget:
+        pass
+
+    reg.register_message_factory(
+        plugin_name="plug-a",
+        name="custom_widget_factory",
+        condition_func=lambda m: m.get("role") == "system",
+        factory_func=lambda m, parent: FakeWidget(),
+        priority=10,
+    )
+    factories = reg.get_message_factories()
+    assert len(factories) == 1
+    assert factories[0].plugin_name == "plug-a"
+    assert factories[0].condition_func({"role": "system"}) is True
+    assert factories[0].condition_func({"role": "user"}) is False
+    reg.reset()
+
+
+def test_message_factories_sorted_by_priority():
+    """工厂按 priority 降序排列"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_message_factory("p1", "f1", lambda m: True, lambda m, p: None, priority=1)
+    reg.register_message_factory("p2", "f2", lambda m: True, lambda m, p: None, priority=10)
+    reg.register_message_factory("p3", "f3", lambda m: True, lambda m, p: None, priority=5)
+    factories = reg.get_message_factories()
+    assert [f.name for f in factories] == ["f2", "f3", "f1"]
+    reg.reset()

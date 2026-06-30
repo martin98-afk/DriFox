@@ -121,6 +121,31 @@ class UIPluginRegistry:
             return
         self._content_renderers[type_name] = info
 
+    def register_message_factory(
+        self,
+        plugin_name: str,
+        name: str,
+        condition_func: Callable[[Dict[str, Any]], bool],
+        factory_func: Callable[[Dict[str, Any], Any], Any],
+        priority: int = 0,
+    ) -> None:
+        """注册消息元素工厂
+
+        Args:
+            plugin_name: 所属插件名
+            name: 工厂名（用于调试）
+            condition_func: 判断消息是否由此工厂处理
+            factory_func: 创建 widget  (message, parent) -> QWidget
+            priority: 优先级（高者优先尝试）
+        """
+        self._message_factories.append(MessageFactoryInfo(
+            plugin_name=plugin_name,
+            name=name,
+            condition_func=condition_func,
+            factory_func=factory_func,
+            priority=priority,
+        ))
+
     def get_message_factories(self) -> List[MessageFactoryInfo]:
         """按 priority 降序返回"""
         return sorted(self._message_factories, key=lambda f: -f.priority)
