@@ -62,6 +62,7 @@ class FloatingCardInfo:
         title: 卡片标题（用于命令列表显示）
         default_visible: 默认是否可见
         metadata: 附加元数据
+        context_provider: 可选，卡片专属上下文提供者。不传则使用全局 context_provider。
     """
 
     plugin_name: str
@@ -71,6 +72,7 @@ class FloatingCardInfo:
     title: str = ""
     default_visible: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    context_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
 class UIPluginRegistry:
@@ -86,6 +88,7 @@ class UIPluginRegistry:
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
         self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
+        self._context_provider: Optional[Callable[[], Dict[str, Any]]] = None  # 全局上下文提供者
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -166,6 +169,7 @@ class UIPluginRegistry:
         title: str = "",
         default_visible: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
+        context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         """注册浮动卡片
 
@@ -177,6 +181,8 @@ class UIPluginRegistry:
             title: 卡片标题
             default_visible: 默认是否可见
             metadata: 附加元数据
+            context_provider: 可选，卡片专属上下文提供者。
+                             不传则在显示时使用全局 context_provider。
 
         Side Effects:
             自动注册对应命令 /{card_id}（用户插件带命名空间前缀）
@@ -193,6 +199,7 @@ class UIPluginRegistry:
             title=title,
             default_visible=default_visible,
             metadata=metadata,
+            context_provider=context_provider,
         )
         self._floating_cards[card_id] = info
         # 联动注册命令
@@ -270,6 +277,17 @@ class UIPluginRegistry:
                 return
             # 以容器为父级创建卡片 widget
             widget = card_info.widget_class(parent=container)
+
+            # ===== 上下文注入：把 project_root / session_id 等喂进卡片 =====
+            context = self._build_card_context(card_info)
+            if context:
+                if hasattr(widget, "set_context") and callable(widget.set_context):
+                    widget.set_context(context)
+                else:
+                    # 兜底：通过属性注入（方便旧卡片兼容）
+                    widget._card_context = context
+            # ===== 注入结束 =====
+
             win_instances[card_id] = widget
             # 加入容器布局并注册到 CardManager
             container.add_card(card_id, widget)
@@ -418,6 +436,40 @@ class UIPluginRegistry:
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
 
+    def set_context_provider(self, provider: Callable[[], Dict[str, Any]]) -> None:
+        """设置全局上下文提供者
+
+        UI 浮动卡片首次显示时，会调用此 provider 获取上下文 dict，
+        然后通过 ``widget.set_context(context)`` 传递给卡片。
+
+        Args:
+            provider: 无参可调用对象，返回包含上下文键值对的 dict。
+                      建议至少提供：project_root, project_name, session_id, window_id。
+        """
+        self._context_provider = provider
+
+    def _build_card_context(self, card_info: FloatingCardInfo) -> Dict[str, Any]:
+        """构建卡片上下文 dict
+
+        优先级：卡片专属 context_provider > 全局 context_provider。
+        最后叠加卡片元信息（plugin_name, card_id），不会被覆盖。
+
+        Returns:
+            上下文 dict（可能为空）
+        """
+        ctx: Dict[str, Any] = {}
+        try:
+            if card_info.context_provider is not None:
+                ctx.update(card_info.context_provider())
+            elif self._context_provider is not None:
+                ctx.update(self._context_provider())
+        except Exception:
+            pass
+        # 卡片元信息始终注入
+        ctx.setdefault("plugin_name", card_info.plugin_name)
+        ctx.setdefault("card_id", card_info.card_id)
+        return ctx
+
     def re_register_all_commands(self) -> None:
         """重新注册所有浮动卡片命令到 CommandManager
 
@@ -436,3 +488,4 @@ class UIPluginRegistry:
         self._main_widget = None
         self._ui_command_names.clear()
         self._card_widget_instances.clear()
+        self._context_provider = None

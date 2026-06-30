@@ -1918,6 +1918,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
             ui_registry = UIPluginRegistry.get_instance()
             ui_registry.set_main_widget(self)
+            # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
+            ui_registry.set_context_provider(self._build_ui_context)
             # 加载所有已启用的 UI 插件
             self._load_all_ui_plugins()
             # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
@@ -2531,6 +2533,34 @@ class OpenAIChatToolWindow(ToolWindow):
         count = registry.load_all_enabled_plugins(plugin_dirs)
         if count > 0:
             logger.info(f"[MainWidget] Loaded {count} UI plugins")
+
+    def _build_ui_context(self) -> Dict[str, str]:
+        """构建 UI 插件的上下文 dict
+
+        UIPluginRegistry 在首次显示浮动卡片时调用此方法，
+        将结果通过 ``widget.set_context(context)`` 注入卡片。
+
+        Returns:
+            dict 包含以下字段：
+            - project_root: 当前工作目录（git 工作树根）
+            - project_name: 当前项目名
+            - session_id:   当前会话 ID
+            - window_id:    当前窗口 ID
+        """
+        workdir = ""
+        try:
+            if self.backend and self.backend.tool_executor:
+                workdir = self.backend.tool_executor.get_workdir() or ""
+        except Exception:
+            pass
+        if not workdir:
+            workdir = os.getcwd()
+        return {
+            "project_root": workdir,
+            "project_name": getattr(self, "_current_project", ""),
+            "session_id": getattr(self, "_current_session_id", ""),
+            "window_id": getattr(self, "_window_id", ""),
+        }
 
     def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
         """统一的创建消息 widget 入口：先让插件工厂尝试处理
