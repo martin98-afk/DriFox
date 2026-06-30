@@ -3,6 +3,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.14] - 2026-06-30
+
+自上一版本以来的变更 | 提交数：46 · 文件变更：163 · +13890/-4915 | 贡献者：dingma, mading
+
+---
+
+### ✨ 新功能 (New Features)
+
+- **UI 插件注册系统**: 新增完整的 UI 插件注册表（UIPluginRegistry），支持插件加载/卸载/重载生命周期管理、浮动卡片自动命令注册、消息工厂与内容渲染器注册 API
+- **插件市场系统插件**: 新增 Plugin Marketplace 系统插件，集成市场插件浏览与管理能力
+- **插件管理器 UI 集成**: 插件管理器自动检测 `ui/` 目录注册 UI 组件；启用/禁用插件自动加载/卸载 UI；重新扫描自动加载
+- **主窗口插件集成**: 主窗口注入 UI 插件注册表并集成消息工厂 Hook，支持插件自定义消息内容块
+- **卡片管理器外部注册**: 支持从 UI 插件外部注册卡片到主卡片管理器
+- **Hook 预设系统**: 实现多窗口隔离的 Hook 预设管理与一键切换功能（HookPresetManager + UI）
+- **自动上下文压缩**: 在 PostToolUse Hook 中实现自动上下文压缩，优化长对话场景的 Token 消耗
+- **Agent 身份注入 Hook**: 新增 `inject_agent_identity` Hook，支持在系统提示中动态注入 Agent 身份配置
+- **Token 用量与模型展示**: SubAgent 任务行增加 Token 用量和模型名称实时显示
+- **流式子代理结果注入优化**: 优化流式场景中的子代理结果注入策略，提升用户体验
+- **单任务完成状态提示**: 单任务完成时添加 `subagent_status` 提示
+- **UI 样式与布局增强**: AgentTaskRow 和详情面板样式布局优化；命令和文件提及卡片查询渲染优化；LLM 设置卡片新增手风琴效果与样式刷新
+- **图标自适应缩放**: 图标尺寸随系统字体大小自动缩放适配
+- **编码规范与开发文档**: 新增编码规范、开发流程、状态管理和构建测试文档
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **UI 插件注册表修复**: 支持带连字符的插件名称，优化命令命名空间处理逻辑
+- **Hook 预设系统修复**: 编辑/新增 hook 后自动保存预设 agent_identity；预设切换同步 agent 到 hook 覆写；默认预设不可删除；弹窗主题和布局修正
+- **合并冲突修复**: engine.py 改用 `approx_messages` 解决工具/模型 Token 计数冲突
+- **冗余信号移除**: 移除 subagent 流注入中多余的 `_hook_messages_updated` 信号发射
+- **Debug 打印清理**: 移除 OpenAIChatWorker 类中残留的 debug print 语句
+- **角色标识更新**: 更新角色标识并增强 UI 插件的命令过滤
+
+### ♻️ 代码重构 (Refactoring)
+
+- **UI 插件注册表重构**: 重构 UI 插件注册表与市场插件的架构设计
+- **render_helpers 可读性改进**: 规范字符串格式化，提升代码可读性
+- **Token 跟踪重构**: 重构 OpenAIChatToolWindow 的 Token 用量跟踪与压缩状态处理
+
 ## [v0.2.13] - 2026-06-29
 
 自上一版本以来的变更 | 提交数：24 · 文件变更：57 · +4001/-2094 | 贡献者：dingma, martin98-afk
