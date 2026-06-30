@@ -14,8 +14,6 @@ from typing import Optional
 
 from loguru import logger
 
-from app.utils.utils import get_app_data_dir
-
 
 class PluginInstaller:
     """插件安装器
@@ -24,8 +22,8 @@ class PluginInstaller:
     """
 
     def __init__(self):
-        self._plugins_dir = get_app_data_dir() / "plugins"
-        self._cache_dir = get_app_data_dir() / "cache" / "install_tmp"
+        self._plugins_dir = Path.home() / '.drifox' / "plugins"
+        self._cache_dir = Path.home() / '.drifox' / "cache" / "install_tmp"
 
     def install(self, plugin_meta: dict) -> bool:
         """安装插件

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """市场数据源 — 远程拉取 + 本地缓存"""
 import json
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional
 
@@ -19,8 +20,7 @@ class MarketplaceData:
     """市场数据获取 + 缓存"""
 
     def __init__(self):
-        from app.utils.utils import get_app_data_dir
-        self._cache_file = get_app_data_dir() / "cache" / "marketplace.json"
+        self._cache_file = Path.home() / '.drifox' / "cache" / "marketplace.json"
         self._cache_file.parent.mkdir(parents=True, exist_ok=True)
         self._data: Optional[Dict[str, Any]] = None
         self._fetched_at: float = 0

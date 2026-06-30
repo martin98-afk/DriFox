@@ -16,8 +16,6 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -28,7 +26,6 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     StrongBodyLabel,
-    Theme,
     ToolButton,
     TransparentToolButton,
     isDarkTheme,

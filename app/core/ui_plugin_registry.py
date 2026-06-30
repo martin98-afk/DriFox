@@ -266,6 +266,13 @@ class UIPluginRegistry:
             container.add_card(card_id, widget)
             card_manager.register_card(window_id, container_type, card_id, widget)
 
+            # 连接 closed 信号：手动关闭时同步 CardManager 状态
+            # 避免再次 toggle 时 visible_cards 状态过时导致无法显示
+            if hasattr(widget, 'closed'):
+                widget.closed.connect(
+                    lambda c=card_id, w=window_id: card_manager.hide_card(c, w)
+                )
+
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
 

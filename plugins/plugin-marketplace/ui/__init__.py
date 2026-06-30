@@ -2,10 +2,8 @@
 """plugin-marketplace UI 组件入口"""
 from loguru import logger
 
-from app.core.ui_plugin_registry import UIPluginRegistry
 
-
-def register_ui(registry: UIPluginRegistry):
+def register_ui(registry):
     """注册 plugin-marketplace 的 UI 组件"""
     from .renderers import render_plugin_grid, render_plugin_card
     from .cards import MarketplaceCard
