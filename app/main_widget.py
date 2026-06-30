@@ -4884,10 +4884,14 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.debug(
             f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
             f"commands={result.get('commands')}, themes={result.get('themes')}, "
-            f"skills={result.get('skills')}, mcp={result.get('mcp')}"
+            f"skills={result.get('skills')}, mcp={result.get('mcp')}, "
+            f"ui={result.get('ui')}"
         )
 
-        needs_invalidation = result.get("commands") or result.get("skills") or result.get("agents", 0) > 0
+        # UI 插件可能注册了浮动卡片命令，需要一并失效命令缓存
+        needs_invalidation = (
+            result.get("commands") or result.get("skills") or result.get("agents", 0) > 0 or result.get("ui")
+        )
 
         # 广播给所有窗口实例
         for win in OpenAIChatToolWindow._instances:
@@ -9713,9 +9717,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         # 更新紧凑卡片的上下文用量行
         if hasattr(self, "_sub_agent_compact_widget"):
-            # 显示累计 token 总数
-            executor = self.backend.sub_agent_manager._running_tasks.get(task_id)
-            acc_total = getattr(executor, "_total_tokens", total_tokens) if executor else total_tokens
+            # 显示单次 API 调用的 token 数（不累加，避免随多次工具调用无限膨胀）
+            acc_total = total_tokens
             if acc_total >= 1000:
                 display = f"{acc_total / 1000:.1f}K tokens"
             else:

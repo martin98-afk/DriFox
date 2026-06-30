@@ -37,6 +37,16 @@ from qfluentwidgets import (
 from .data import get_marketplace
 from .installer import get_installer
 
+# ── 主题色辅助 ──────────────────────────────────────────────
+
+
+def _text_color(secondary: bool = False) -> str:
+    """返回当前主题下的文字颜色"""
+    if isDarkTheme():
+        return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
+    return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
+
+
 # ── 异步工作器 ──────────────────────────────────────────────
 
 
@@ -98,14 +108,14 @@ class _PluginRow(QFrame):
         name = self._meta.get("name", "未知")
         ver = self._meta.get("version", "")
         title = StrongBodyLabel(f"{name}  v{ver}" if ver else name, self)
-        title.setStyleSheet("background: transparent;")
+        title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         info_layout.addWidget(title)
 
         desc = self._meta.get("description", "")
         if desc:
             desc_label = QLabel(desc[:120], self)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: rgba(128,128,128,0.7); font-size: 12px; background: transparent;")
+            desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
             info_layout.addWidget(desc_label)
 
         layout.addLayout(info_layout, 1)
@@ -192,7 +202,7 @@ class MarketplaceCard(QWidget):
         header_layout.addWidget(icon)
 
         title = StrongBodyLabel("插件市场", header)
-        title.setStyleSheet("background: transparent;")
+        title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         header_layout.addWidget(title)
 
         header_layout.addStretch(1)
@@ -202,7 +212,9 @@ class MarketplaceCard(QWidget):
         self._search_edit.setPlaceholderText("搜索插件…")
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.setFixedWidth(160)
-        self._search_edit.setStyleSheet("background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px;")
+        self._search_edit.setStyleSheet(
+            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
+        )
         self._search_edit.textChanged.connect(self._filter_plugins)
         header_layout.addWidget(self._search_edit)
 
@@ -221,7 +233,9 @@ class MarketplaceCard(QWidget):
 
         # 状态标签
         self._status_label = QLabel("", header)
-        self._status_label.setStyleSheet("color: rgba(128,128,128,0.6); font-size: 12px; background: transparent;")
+        self._status_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+        )
         header_layout.addWidget(self._status_label)
 
         root.addWidget(header)
@@ -251,7 +265,7 @@ class MarketplaceCard(QWidget):
         # ── 空状态提示 ──
         self._empty_label = StrongBodyLabel("暂无可用插件", self)
         self._empty_label.setAlignment(Qt.AlignCenter)
-        self._empty_label.setStyleSheet("color: rgba(128,128,128,0.4); background: transparent;")
+        self._empty_label.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         self._empty_label.setVisible(False)
         root.addWidget(self._empty_label)
 
@@ -293,7 +307,9 @@ class MarketplaceCard(QWidget):
         """设置加载状态"""
         if loading:
             self._status_label.setText("加载中…")
-            self._status_label.setStyleSheet("color: rgba(128,128,128,0.6); font-size: 12px; background: transparent;")
+            self._status_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            )
             self._refresh_btn.setEnabled(False)
         else:
             self._status_label.setText("")
@@ -339,7 +355,9 @@ class MarketplaceCard(QWidget):
     def _async_install(self, plugin_meta: dict):
         """在后台线程安装插件"""
         self._status_label.setText("安装中…")
-        self._status_label.setStyleSheet("color: rgba(128,128,128,0.6); font-size: 12px; background: transparent;")
+        self._status_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+        )
         name = plugin_meta.get("name", "")
 
         self._cleanup_worker()
