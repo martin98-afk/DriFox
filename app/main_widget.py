@@ -2496,6 +2496,34 @@ class OpenAIChatToolWindow(ToolWindow):
         if count > 0:
             logger.info(f"[MainWidget] Loaded {count} UI plugins")
 
+    def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
+        """统一的创建消息 widget 入口：先让插件工厂尝试处理
+
+        Returns:
+            QWidget 实例（可能是 MessageCard 或插件自定义 widget），
+            无工厂处理时返回 None（调用方应使用默认逻辑）
+        """
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        message_data = {
+            "role": role,
+            "content": content,
+            "timestamp": timestamp,
+            **kwargs,
+        }
+        registry = UIPluginRegistry.get_instance()
+        for factory in registry.get_message_factories():
+            try:
+                if factory.condition_func(message_data):
+                    widget = factory.factory_func(message_data, self)
+                    if widget is not None:
+                        return widget
+            except Exception as e:
+                logger.error(
+                    f"[MainWidget] Message factory {factory.name} failed: {e}"
+                )
+        return None
+
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
         self._clear_command_shortcuts()
@@ -7027,6 +7055,22 @@ class OpenAIChatToolWindow(ToolWindow):
         def on_context_action(action, context):
             self.handle_recommended_question(action, context)
             self.contextActionRequested.emit(action, context)
+
+        # ===== UI 插件消息工厂钩子 =====
+        # 让插件工厂先尝试处理这条消息（高优先级先尝试）
+        custom_widget = self._create_message_widget(
+            role="assistant",
+            content=None,
+            timestamp=timestamp,
+            round_index=(round_index if round_index is not None else self._current_assistant_round_index),
+            model_name=model_name,
+            provider_name=provider_name,
+        )
+        if custom_widget is not None:
+            self._add_chat_widget(custom_widget, insert_index=insert_index)
+            if scroll and not self._suspend_auto_scroll:
+                self._scroll_to_bottom()
+            return custom_widget
 
         card = create_assistant_card_widget(
             parent=self,
