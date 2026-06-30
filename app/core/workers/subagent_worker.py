@@ -71,6 +71,7 @@ class SubAgentExecutor(QThread):
     progress_updated = pyqtSignal(str, str)  # task_id, message
     tool_call_started = pyqtSignal(str, str, dict)  # task_id, tool_name, args
     tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
+    token_usage_updated = pyqtSignal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
 
     def __init__(
         self,
@@ -105,6 +106,15 @@ class SubAgentExecutor(QThread):
         self._tool_call_count = 0
         self._log_store_callback = None  # 日志存储回调
         self._get_history_messages = None  # 获取主智能体历史消息的回调
+        # Token 用量追踪（每次 API 调用累加）
+        self._total_prompt_tokens: int = 0
+        self._total_completion_tokens: int = 0
+        self._total_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        """获取累计 token 总数（供 UI 显示）"""
+        return self._total_tokens
 
     @property
     def start_time(self) -> Optional[float]:
@@ -794,6 +804,20 @@ class SubAgentExecutor(QThread):
                         },
                     }
                 )
+
+        # 追踪 token 用量
+        try:
+            usage = response.usage
+            if usage:
+                pt = getattr(usage, "prompt_tokens", 0) or 0
+                ct = getattr(usage, "completion_tokens", 0) or 0
+                tt = getattr(usage, "total_tokens", 0) or 0
+                self._total_prompt_tokens += pt
+                self._total_completion_tokens += ct
+                self._total_tokens += tt
+                self.token_usage_updated.emit(self.task_id, pt, ct, tt)
+        except Exception:
+            pass
 
         return response_content, tool_calls_found, reasoning_content
 

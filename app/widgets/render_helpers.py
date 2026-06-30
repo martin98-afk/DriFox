@@ -22,9 +22,9 @@ _HTML_CODE_BLOCK_PATTERN = re.compile(r"<(pre|code)[^>]*>.*?</\1>", re.DOTALL | 
 # HTML 标签清理正则（避免每次调用 re.sub）
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 # UUID 模式（用于提取 task_id）
-_UUID_PATTERN = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
+_UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 # Null 字符清理（编译一次，多次使用）
-_NULL_CHAR = '\x00'  # 避免 str.replace 被重复调用
+_NULL_CHAR = "\x00"  # 避免 str.replace 被重复调用
 
 
 def format_tool_block(
@@ -34,13 +34,10 @@ def format_tool_block(
     success: bool = True,
 ) -> str:
     """格式化工具块为纯文本标记，用于存储"""
-    args_json = json.dumps(tool_args).decode('utf-8')
+    args_json = json.dumps(tool_args).decode("utf-8")
     result_str = str(result) if result else ""
 
-    return (
-        f"<tool>\nname: {tool_name}\nargs: {args_json}\n"
-        f"result: {result_str}\nsuccess: {success}\n</tool>"
-    )
+    return f"<tool>\nname: {tool_name}\nargs: {args_json}\nresult: {result_str}\nsuccess: {success}\n</tool>"
 
 
 def _escape_text_for_plain(text: str) -> str:
@@ -77,10 +74,10 @@ def _escape_text_for_plain(text: str) -> str:
 def _truncate_value(v, max_len: int = 80) -> str:
     """截断单个参数值"""
     if isinstance(v, dict):
-        s = json.dumps(v).decode('utf-8')
+        s = json.dumps(v).decode("utf-8")
         return s[:max_len] + "..." if len(s) > max_len else s
     elif isinstance(v, list):
-        s = json.dumps(v).decode('utf-8')
+        s = json.dumps(v).decode("utf-8")
         return s[:max_len] + "..." if len(s) > max_len else s
     elif isinstance(v, str):
         return v[:max_len] + "..." if len(v) > max_len else v
@@ -93,7 +90,7 @@ def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
     """
     格式化参数预览为 '参数1=值1; 参数2=值2' 格式。
     限制总字数，超过则截断并添加 '...'。
-    
+
     优化：优先显示简短的参数值，长内容进行截断。
     """
     if not tool_args:
@@ -143,7 +140,9 @@ def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
     return result
 
 
-def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task: bool = False, success: bool = None) -> str:
+def _format_unified_table(
+    tool_args: dict, result: str = None, is_sub_agent_task: bool = False, success: bool = None
+) -> str:
     """
     将参数字典和结果合并为一个表格。
     前几行是参数（key=value 形式），最后一行是结果。
@@ -165,9 +164,9 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
     if tool_args:
         for key, value in tool_args.items():
             if isinstance(value, dict):
-                value_str = json.dumps(value).decode('utf-8')
+                value_str = json.dumps(value).decode("utf-8")
             elif isinstance(value, list):
-                value_str = json.dumps(value).decode('utf-8')
+                value_str = json.dumps(value).decode("utf-8")
             else:
                 value_str = str(value)
 
@@ -181,10 +180,12 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
             escaped_key = escape(key)
             escaped_value = escape(value_str)
 
-            rows.append(f'<div class="args-row">'
-                        f'<span class="args-key">{escaped_key}</span>'
-                        f'<span class="args-value">{escaped_value}</span>'
-                        f'</div>')
+            rows.append(
+                f'<div class="args-row">'
+                f'<span class="args-key">{escaped_key}</span>'
+                f'<span class="args-value">{escaped_value}</span>'
+                f"</div>"
+            )
     else:
         rows.append('<div class="args-row empty">无参数</div>')
 
@@ -195,15 +196,19 @@ def _format_unified_table(tool_args: dict, result: str = None, is_sub_agent_task
         max_result_len = 500
         if len(result_text) > max_result_len:
             result_text = result_text[:max_result_len] + "..."
-        rows.append(f'<div class="{row_class}">'
-                    f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
-                    f'<span class="args-value">{escape(result_text)}</span>'
-                    f'</div>')
+        rows.append(
+            f'<div class="{row_class}">'
+            f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
+            f'<span class="args-value">{escape(result_text)}</span>'
+            f"</div>"
+        )
     else:
-        rows.append(f'<div class="{row_class}">'
-                    f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
-                    f'<span class="args-value" style="color: #666; font-style: italic;">无结果</span>'
-                    f'</div>')
+        rows.append(
+            f'<div class="{row_class}">'
+            f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
+            f'<span class="args-value" style="color: #666; font-style: italic;">无结果</span>'
+            f"</div>"
+        )
 
     return f'<div class="args-table">{"".join(rows)}</div>'
 
@@ -224,7 +229,7 @@ def _parse_subagent_task_ids(result: str) -> str:
                 return ",".join(task_ids)
         elif isinstance(data, list):
             return ",".join(data)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         pass
 
     # 尝试从文本中提取 task_id（UUID 格式）
@@ -236,7 +241,7 @@ def _parse_subagent_task_ids(result: str) -> str:
     return ""
 
 
-_WORD_RE = re.compile(r'(\w+|\W+)')
+_WORD_RE = re.compile(r"(\w+|\W+)")
 
 
 def _word_diff_html(old_text: str, new_text: str) -> tuple:
@@ -249,20 +254,20 @@ def _word_diff_html(old_text: str, new_text: str) -> tuple:
     old_parts = []
     new_parts = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'equal':
-            old_parts.append(escape(''.join(old_tokens[i1:i2])))
-            new_parts.append(escape(''.join(new_tokens[j1:j2])))
-        elif tag == 'delete':
+        if tag == "equal":
+            old_parts.append(escape("".join(old_tokens[i1:i2])))
+            new_parts.append(escape("".join(new_tokens[j1:j2])))
+        elif tag == "delete":
             old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
-        elif tag == 'insert':
+        elif tag == "insert":
             new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
-        elif tag == 'replace':
+        elif tag == "replace":
             old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
             new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
-    return ''.join(old_parts), ''.join(new_parts)
+    return "".join(old_parts), "".join(new_parts)
 
 
-_HUNK_HEADER_RE = re.compile(r'^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)')
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)")
 
 
 def _summarize_diff(diff_text: str) -> dict:
@@ -322,7 +327,7 @@ def _render_diff_preview(diff_text: str) -> str:
 
     def _clean_path(p: str) -> str:
         p = p.strip()
-        if p.startswith('a/') or p.startswith('b/'):
+        if p.startswith("a/") or p.startswith("b/"):
             p = p[2:]
         return p
 
@@ -393,11 +398,15 @@ def _render_diff_preview(diff_text: str) -> str:
         # 删除行-新增行配对处理（做 word diff）
         elif line.startswith("-") and not line.startswith("---"):
             del_lines = []
-            while i < len(lines) and lines[i] is not None and lines[i].startswith("-") and not lines[i].startswith("---"):
+            while (
+                i < len(lines) and lines[i] is not None and lines[i].startswith("-") and not lines[i].startswith("---")
+            ):
                 del_lines.append(lines[i][1:])  # 去掉前缀 -
                 i += 1
             add_lines = []
-            while i < len(lines) and lines[i] is not None and lines[i].startswith("+") and not lines[i].startswith("+++"):
+            while (
+                i < len(lines) and lines[i] is not None and lines[i].startswith("+") and not lines[i].startswith("+++")
+            ):
                 add_lines.append(lines[i][1:])  # 去掉前缀 +
                 i += 1
 
@@ -518,12 +527,12 @@ _TOOL_ICON_MAP = {
 # 让 lsp 工具折叠框在调用 diagnostics / goToDefinition / hover 等操作时显示对应的语义图标，
 # 与 get_diagnostics / read 等独立工具的渲染风格一致。
 _LSP_OPERATION_ICON_MAP = {
-    "diagnostics":      "🩺",  # 诊断（与 get_diagnostics 一致）
-    "documentSymbols":  "🔣",  # 符号列表
-    "goToDefinition":   "➡️",  # 跳转定义
-    "findReferences":   "🔗",  # 引用
-    "hover":            "💬",  # 悬浮文档
-    "listServers":      "📋",  # 服务器列表
+    "diagnostics": "🩺",  # 诊断（与 get_diagnostics 一致）
+    "documentSymbols": "🔣",  # 符号列表
+    "goToDefinition": "➡️",  # 跳转定义
+    "findReferences": "🔗",  # 引用
+    "hover": "💬",  # 悬浮文档
+    "listServers": "📋",  # 服务器列表
 }
 
 
@@ -552,12 +561,13 @@ def _extract_screenshot_image_path(result: str) -> str:
     # 策略1: ast.literal_eval 解析 Python dict 字面量
     try:
         import ast
+
         data = ast.literal_eval(result)
         if isinstance(data, dict):
             path = data.get("absolute_path") or data.get("path") or ""
             if path and os.path.isfile(path):
                 return path
-    except (ValueError, SyntaxError, MemoryError):
+    except ValueError, SyntaxError, MemoryError:
         pass
 
     # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
@@ -577,12 +587,20 @@ def _extract_screenshot_image_path(result: str) -> str:
 
     return ""
 
+
 # 参数展示型工具 — 渲染为紧凑单行卡片（无折叠、无 body、无工具结果）
-_INLINE_TOOLS = frozenset({
-    "read", "todoread",
-    "grep", "glob", "list", "scan_repo", "stage_files",
-    "get_diagnostics",
-})
+_INLINE_TOOLS = frozenset(
+    {
+        "read",
+        "todoread",
+        "grep",
+        "glob",
+        "list",
+        "scan_repo",
+        "stage_files",
+        "get_diagnostics",
+    }
+)
 
 
 def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
@@ -620,15 +638,14 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             desc = f'读取 "{os.path.basename(path.rstrip("/").rstrip("\\\\"))}"'
         else:
             desc = "读取文件"
-        offset = tool_args.get("offset")
-        limit = tool_args.get("limit")
-        # offset 为 0 或 1 表示从头开始，仅显示 limit
-        if offset is not None and limit is not None and offset > 1:
-            desc += f" (第 {offset}-{offset + limit - 1} 行)"
-        elif offset is not None and offset > 1:
-            desc += f" (从第 {offset} 行)"
-        elif limit is not None:
-            desc += f" (前 {limit} 行)"
+        startline = tool_args.get("startline")
+        endline = tool_args.get("endline")
+        if startline is not None and endline is not None:
+            desc += f" (第 {startline}-{endline} 行)"
+        elif startline is not None and startline > 1:
+            desc += f" (从第 {startline} 行)"
+        elif endline is not None:
+            desc += f" (前 {endline} 行)"
     elif tool_name == "grep":
         pattern = tool_args.get("pattern", "")
         path = tool_args.get("path", "")
@@ -669,7 +686,7 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
     elif tool_name == "get_diagnostics":
         path = tool_args.get("path", "")
         language = tool_args.get("language", "")
-        desc = f'诊断 {path}' if path else "代码诊断"
+        desc = f"诊断 {path}" if path else "代码诊断"
         if language:
             desc += f" ({language})"
     # ── 折叠工具的自然预览 ──
@@ -695,9 +712,12 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         operation = tool_args.get("operation", "")
         path = tool_args.get("path", "")
         op_labels = {
-            "diagnostics": "诊断", "documentSymbols": "符号列表",
-            "goToDefinition": "跳转定义", "findReferences": "查找引用",
-            "hover": "悬浮文档", "listServers": "服务器列表",
+            "diagnostics": "诊断",
+            "documentSymbols": "符号列表",
+            "goToDefinition": "跳转定义",
+            "findReferences": "查找引用",
+            "hover": "悬浮文档",
+            "listServers": "服务器列表",
         }
         op_label = op_labels.get(operation, operation or "LSP")
         fname = os.path.basename(path) if path else ""
@@ -737,8 +757,12 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         x = tool_args.get("x", "")
         y = tool_args.get("y", "")
         action_labels = {
-            "move": "移动", "click": "点击", "double_click": "双击",
-            "right_click": "右键", "scroll": "滚动", "drag": "拖拽",
+            "move": "移动",
+            "click": "点击",
+            "double_click": "双击",
+            "right_click": "右键",
+            "scroll": "滚动",
+            "drag": "拖拽",
             "position": "查询位置",
         }
         action_label = action_labels.get(action, action or "操作")
@@ -776,10 +800,7 @@ def _render_inline_tool(
     if success is not None:
         status_color = "#4CAF50" if success else "#F44336"
         status_text = "✓" if success else "✗"
-        status_html = (
-            f'<span style="color: {status_color}; font-weight: bold; '
-            f'margin-left: 6px;">{status_text}</span>'
-        )
+        status_html = f'<span style="color: {status_color}; font-weight: bold; margin-left: 6px;">{status_text}</span>'
     icon = _get_tool_icon(tool_name, tool_args)
     natural_preview = _format_natural_preview(tool_name, tool_args)
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
@@ -963,7 +984,7 @@ def _parse_questions_field(questions_raw) -> list:
                 return [_normalize_question_item(q) for q in parsed]
             elif isinstance(parsed, dict):
                 return [_normalize_question_item(parsed)]
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
         # JSON 解析失败（可能被截断），作为单个问题展示原始文本
         return [{"question": questions_raw, "options": [], "multiple": False}]
@@ -972,9 +993,9 @@ def _parse_questions_field(questions_raw) -> list:
 
 
 # 预编译：匹配 "问题「xxx」的回答：" 格式
-_QRESULT_SECTION_RE = re.compile(r'问题「(.+?)」的回答：\n?(.*)', re.DOTALL)
+_QRESULT_SECTION_RE = re.compile(r"问题「(.+?)」的回答：\n?(.*)", re.DOTALL)
 # 预编译：匹配 【label】 格式的选中项
-_QRESULT_SELECTED_RE = re.compile(r'【(.+?)】')
+_QRESULT_SELECTED_RE = re.compile(r"【(.+?)】")
 
 
 def _parse_question_result(result: str) -> dict:
@@ -995,7 +1016,7 @@ def _parse_question_result(result: str) -> dict:
     text = _unescape_newlines(result)
     answers = {}
 
-    for section in re.split(r'\n---\n', text):
+    for section in re.split(r"\n---\n", text):
         m = _QRESULT_SECTION_RE.match(section.strip())
         if not m:
             continue
@@ -1006,11 +1027,11 @@ def _parse_question_result(result: str) -> dict:
         selected = _QRESULT_SELECTED_RE.findall(answer_text)
 
         # 自定义文本 = 移除 【label】 和分隔符后的剩余文本
-        custom_text = _QRESULT_SELECTED_RE.sub('', answer_text)
+        custom_text = _QRESULT_SELECTED_RE.sub("", answer_text)
         # 移除中英文分号分隔符
-        custom_text = custom_text.replace('；', '').replace(';', '').strip()
+        custom_text = custom_text.replace("；", "").replace(";", "").strip()
         # 过滤掉仅含省略号或空白的假自定义文本
-        if custom_text and custom_text != '...':
+        if custom_text and custom_text != "...":
             custom = custom_text
         else:
             custom = None
@@ -1036,11 +1057,13 @@ def _render_question_block(tool_args: dict, result: str = None) -> str:
     # 获取问题列表（兼容新旧格式 + 字符串类型）
     questions_raw = tool_args.get("questions", [])
     if not questions_raw and "question" in tool_args:
-        questions_raw = [{
-            "question": str(tool_args.get("question", "")),
-            "options": tool_args.get("options", []),
-            "multiple": tool_args.get("multiple", False),
-        }]
+        questions_raw = [
+            {
+                "question": str(tool_args.get("question", "")),
+                "options": tool_args.get("options", []),
+                "multiple": tool_args.get("multiple", False),
+            }
+        ]
     normalized = _parse_questions_field(questions_raw)
     if not normalized:
         return ""
@@ -1126,10 +1149,7 @@ def render_tool_block(
     if success is not None:
         status_color = "#4CAF50" if success else "#F44336"
         status_text = "✓" if success else "✗"
-        status_html = (
-            f'<span style="color: {status_color}; font-weight: bold; '
-            f'margin-left: 6px;">{status_text}</span>'
-        )
+        status_html = f'<span style="color: {status_color}; font-weight: bold; margin-left: 6px;">{status_text}</span>'
 
     # 图标与颜色按类型区分
     if is_mcp_tool:
@@ -1172,12 +1192,12 @@ def render_tool_block(
         added = diff_summary["added"]
         deleted = diff_summary["deleted"]
         if added or deleted:
-            diff_stats_html = f'''
+            diff_stats_html = f"""
             <span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px; {get_font_family_css()}">
                 <span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{added}</span>
                 <span class="tool-diff-stats__sep" style="color: rgba(255,255,255,0.3);">/</span>
                 <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
-            </span>'''
+            </span>"""
 
     # 差异对比按钮
     diff_icon_html = ""
@@ -1256,6 +1276,7 @@ def render_tool_block(
     if echarts:
         try:
             import base64 as _b64
+
             b64_json = _b64.b64encode(echarts.encode("utf-8")).decode("ascii")
             chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
             echarts_html = f'''
@@ -1274,14 +1295,26 @@ def render_tool_block(
             </div>'''
 
     # ── 通用文本输出工具：bash/read/grep/webfetch/websearch/diagnostics 等 ──
-    _RAW_OUTPUT_TOOLS = frozenset({
-        "bash", "bg_start", "bg_logs", "bg_stop",
-        "read", "todoread",
-        "grep", "glob", "list", "scan_repo", "stage_files",
-        "webfetch", "websearch",
-        "get_diagnostics",
-        "mouse", "keyboard",
-    })
+    _RAW_OUTPUT_TOOLS = frozenset(
+        {
+            "bash",
+            "bg_start",
+            "bg_logs",
+            "bg_stop",
+            "read",
+            "todoread",
+            "grep",
+            "glob",
+            "list",
+            "scan_repo",
+            "stage_files",
+            "webfetch",
+            "websearch",
+            "get_diagnostics",
+            "mouse",
+            "keyboard",
+        }
+    )
     raw_output_html = ""
     if tool_name in _RAW_OUTPUT_TOOLS and success is not False:
         raw_output_html = _render_text_output(result, tool_name, tool_args)
@@ -1332,17 +1365,19 @@ def render_tool_block(
         </div>"""
 
     # 生成哈希 key
-    block_seed = "|".join([
-        str(tool_name or ""),
-        json.dumps(tool_args or {}, option=json.OPT_SORT_KEYS).decode('utf-8'),
-        str(result or ""),
-        str(success),
-    ])
+    block_seed = "|".join(
+        [
+            str(tool_name or ""),
+            json.dumps(tool_args or {}, option=json.OPT_SORT_KEYS).decode("utf-8"),
+            str(result or ""),
+            str(success),
+        ]
+    )
     block_key = "tool-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
 
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-call-id="{escape(tool_call_id or '')}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 80px; flex: 0 0 auto;">
             <span class="cm-collapsible__chevron" aria-hidden="true"></span>

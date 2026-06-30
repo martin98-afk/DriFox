@@ -52,6 +52,14 @@ def scale_font_size(size: int) -> int:
     return max(8, int(size) + FONT_SIZE_OPTIONS[get_ui_font_size_key()]["delta"])
 
 
+def scale_icon_size(size: int) -> int:
+    """图标大小随系统字体缩放
+
+    使用与字体相同的 delta 缩放量，保证图标与文字比例协调。
+    """
+    return max(8, int(size) + FONT_SIZE_OPTIONS[get_ui_font_size_key()]["delta"])
+
+
 def font_size_css(size: int) -> str:
     return f"font-size: {scale_font_size(size)}px;"
 

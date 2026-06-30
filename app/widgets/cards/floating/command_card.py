@@ -6,6 +6,7 @@
 数据来源：CommandManager 内置命令 + get_local_skills()
 交互方式：↑/↓ 导航，Enter 选中，Esc 关闭
 """
+
 import html
 from typing import Dict, List
 
@@ -26,7 +27,7 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.widgets.elided_label import _ElidedLabel
 
-ITEM_HEIGHT = 36       # 每个 item 高度
+ITEM_HEIGHT = 36  # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
 
 
@@ -102,7 +103,7 @@ class CommandItemWidget(QWidget):
         # 注意：_name_label 和 _desc_label 的样式在 _apply_style 中动态更新
         self._shortcut_label.setStyleSheet(f"""
             QLabel {{
-                color: {Colors.TEXT_MUTED};
+                color: {Colors.TEXT_SECONDARY};
                 {get_font_family_css()} {font_size_css(10)};
                 background: rgba(128,128,128,0.1);
                 border-radius: 3px;
@@ -190,7 +191,7 @@ class CommandItemWidget(QWidget):
         # 快捷键标签样式：类键盘键帽风格，加粗
         shortcut = self._data.get("shortcut", "")
         if item_type == "command" and shortcut:
-            shortcut_fg = Colors.TEXT_MUTED
+            shortcut_fg = Colors.TEXT_SECONDARY
             self._shortcut_label.setStyleSheet(f"""
                 QLabel {{
                     color: {shortcut_fg};
@@ -211,11 +212,11 @@ class CommandItemWidget(QWidget):
         if query.lower() in text_lower:
             return [query]
         found = []
-        for or_term in query.split('|'):
+        for or_term in query.split("|"):
             or_term = or_term.strip()
             if not or_term:
                 continue
-            for and_part in or_term.split('&'):
+            for and_part in or_term.split("&"):
                 and_part = and_part.strip()
                 if and_part and and_part.lower() in text_lower and and_part not in found:
                     found.append(and_part)
@@ -264,12 +265,12 @@ class CommandItemWidget(QWidget):
                             parts.append(safe_text[pos:start])
                         parts.append(
                             f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">'
-                            f'{safe_text[start:end]}</span>'
+                            f"{safe_text[start:end]}</span>"
                         )
                         pos = end
                     if pos < len(safe_text):
                         parts.append(safe_text[pos:])
-                    self._name_label.setText(''.join(parts))
+                    self._name_label.setText("".join(parts))
                 else:
                     self._name_label.setText(safe_text)
             else:
@@ -346,6 +347,7 @@ class ParameterItemWidget(QWidget):
         self._param = param
         self._hovered = False
         self._selected = False
+        self._active = False
         self.setFixedHeight(ITEM_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
@@ -357,49 +359,74 @@ class ParameterItemWidget(QWidget):
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(8)
 
-        # 必填/选填标签（放在最前面）
-        if self._param.param_type != "positional":
-            req_tag = QLabel("必填" if self._param.required else "可选")
-            req_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            req_color = Colors.TEXT_ACCENT if self._param.required else Colors.TEXT_MUTED
-            req_tag.setStyleSheet(f"""
-                color: {req_color};
-                background: rgba(128,128,128,0.06);
-                border-radius: 3px;
-                padding: 1px 6px;
-                font-weight: bold;
-            """)
-            layout.addWidget(req_tag)
-
-        # 参数名（加粗）
-        self._name_label = QLabel(self._param.name)
+        # 参数名（必填：前缀红色 ERROR 星号；可选：纯参数名）
+        # 使用 HTML 让 QLabel 自动按 span 着色；color 不走 stylesheet，
+        # 而由 _update_name_label_text 内的 HTML <span> 控制
+        self._name_label = QLabel()
         self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        self._name_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; background: transparent; font-weight: bold;")
         layout.addWidget(self._name_label)
 
-        # 参数说明
+        # 参数说明（占据 stretch 1，最大化利用空间）
+        self._desc_label = None
         if self._param.description:
-            desc_label = _ElidedLabel(self._param.description)
-            desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            desc_label.setMinimumWidth(0)
-            desc_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent;")
-            layout.addWidget(desc_label, 1)
+            self._desc_label = _ElidedLabel(self._param.description)
+            self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._desc_label.setMinimumWidth(0)
+            layout.addWidget(self._desc_label, 1)
 
-        # 类型标签
-        type_map = {"flag": "标志", "value": "值", "positional": "参数"}
-        type_tag = QLabel(type_map.get(self._param.param_type, ""))
-        type_tag.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        type_tag.setStyleSheet(f"""
-            color: {Colors.TEXT_MUTED};
-            background: rgba(128,128,128,0.1);
-            border-radius: 3px;
-            padding: 1px 6px;
-        """)
-        layout.addWidget(type_tag)
+        # 集中应用一次静态样式（颜色 / 字体 / 背景由主题 token 驱动）
+        self._apply_subwidget_styles()
 
+    def _apply_subwidget_styles(self):
+        """刷新 ParameterItemWidget 的子标签样式（颜色、字体、背景）
 
+        颜色 / 字体 / 背景全部由主题 token 驱动；切主题后通过 refresh_style 再次调用即可。
+        字体大小/族使用 font_size_css + get_font_family_css 与全局 UI 字号联动。
+
+        视觉规范：
+        - 参数名：font-size 12、bold；默认色 SEND_BTN_START，必填时 HTML <span> 覆盖星号为 ERROR 红色
+        - 参数说明：font-size 11、TEXT_SECONDARY、stretch 撑满
+        """
+        Colors.refresh()
+        font_css = get_font_family_css()
+        # 参数名（12px + bold；默认色 SEND_BTN_START，必填时 HTML <span> 覆盖星号色为 ERROR）
+        if hasattr(self, "_name_label") and self._name_label is not None:
+            self._name_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.SEND_BTN_START};
+                    background: transparent;
+                    font-weight: bold;
+                    {font_css} {font_size_css(12)};
+                }}
+            """)
+            self._update_name_label_text()
+        # 参数说明（次要：11px + TEXT_SECONDARY，stretch 撑满剩余空间）
+        if getattr(self, "_desc_label", None) is not None:
+            self._desc_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_SECONDARY};
+                    background: transparent;
+                    {font_css} {font_size_css(11)};
+                }}
+            """)
+
+    def _update_name_label_text(self):
+        """根据必填/可选和激活状态更新参数名
+
+        必填时前缀红色 ERROR 星号；已激活参数显示 ✓ 前缀 + 次要色。
+        QLabel 在 RichText 模式下，未包裹在带 color 的 span 内的文本
+        会用默认调色板色（通常为黑），不会继承 stylesheet color。
+        因此把参数名也用 <span> 显式包裹，统一走 SEND_BTN_START（或 TEXT_SECONDARY 当已激活）。
+        """
+        if not hasattr(self, "_name_label") or self._name_label is None:
+            return
+        escaped = html.escape(self._param.name)
+        star = f'<span style="color: {Colors.ERROR};">*</span>' if self._param.required else ""
+        check = f'<span style="color: {Colors.REALTIME_SUCCESS};">✓ </span>' if self._active else ""
+        color = Colors.TEXT_SECONDARY if self._active else Colors.SEND_BTN_START
+        self._name_label.setText(f'{check}{star}<span style="color: {color};">{escaped}</span>')
 
     @property
     def param_name(self) -> str:
@@ -413,9 +440,30 @@ class ParameterItemWidget(QWidget):
         self._selected = selected
         self._apply_style()
 
+    def set_active(self, active: bool):
+        """设置激活状态：参数已在输入文本中出现时标记为已激活
+
+        激活的参数保持可见（不隐藏），但视觉上降级为次要色 + 绿色 ✓ 前缀，
+        用户仍可阅读参数说明，点击则无操作。
+        """
+        self._active = active
+        self._apply_subwidget_styles()
+        self._apply_style()
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    def refresh_style(self):
+        """响应主题切换：刷新子标签样式 + 自身 hover/selected 背景"""
+        self._apply_subwidget_styles()
+        self._apply_style()
+
     def _apply_style(self):
         Colors.refresh()
-        if self._selected:
+        if self._active:
+            bg = "rgba(52, 211, 153, 0.12)"  # 绿色微底纹：指示已激活/已选中
+        elif self._selected:
             bg = Colors.REALTIME_TAG_BG
         elif self._hovered:
             bg = Colors.HOVER_BG
@@ -447,7 +495,7 @@ class CommandCard(QWidget):
     """斜杠命令卡片"""
 
     commandSelected = pyqtSignal(str, str)  # name, display_type（"command"/"prompt"/"agent"/"skill"/""）
-    dismissed = pyqtSignal()                # 卡片被关闭
+    dismissed = pyqtSignal()  # 卡片被关闭
     parameterSelected = pyqtSignal(str, str)  # param_name, param_type — 参数项被点击
     parameterValueSelected = pyqtSignal(str)  # value — --model= 的值被选中
 
@@ -455,7 +503,7 @@ class CommandCard(QWidget):
         super().__init__(parent)
         self._all_items: List[Dict[str, str]] = []
         self._all_items_cache: List[Dict[str, str]] = []  # 缓存，避免每次敲击都读磁盘
-        self._cache_dirty: bool = True                     # 缓存脏标记，热重载后置 True
+        self._cache_dirty: bool = True  # 缓存脏标记，热重载后置 True
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
         self._last_selected_index = -1  # 上次选中索引，用于增量更新
@@ -473,13 +521,13 @@ class CommandCard(QWidget):
         self._detail_selected_type: str = ""  # detail 模式下的选中类型
         self._detail_has_params: bool = False  # 当前命令是否有可交互参数列表
         self._param_widgets: List["ParameterItemWidget"] = []  # 参数列表项
-        self._selected_param_index: int = -1   # 参数列表选中索引
+        self._selected_param_index: int = -1  # 参数列表选中索引
         self._value_selection_mode: bool = False  # 是否处于值选择模式
-        self._value_selection_param: str = ""     # 值选择对应的参数名（如 "--model="）
-        self._value_widgets: List[QWidget] = []   # 值选择列表项
-        self._selected_value_index: int = -1      # 值列表选中索引
+        self._value_selection_param: str = ""  # 值选择对应的参数名（如 "--model="）
+        self._value_widgets: List[QWidget] = []  # 值选择列表项
+        self._selected_value_index: int = -1  # 值列表选中索引
         self._last_selected_value_index: int = -1  # 上次值列表选中索引，用于增量更新
-        self._data_provider: dict = {}            # 外部数据源（如 model_options）
+        self._data_provider: dict = {}  # 外部数据源（如 model_options）
         self.setVisible(False)
         self._setup_ui()
         self._setup_detail_widget()
@@ -490,18 +538,7 @@ class CommandCard(QWidget):
 
         # 自身样式：使用系统实时卡片背景色，底部直角与输入框融合
         Colors.refresh()
-        self.setStyleSheet(f"""
-            CommandCard {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }}
-        """)
+        self._apply_self_style()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -563,6 +600,89 @@ class CommandCard(QWidget):
         self._detail_container.setStyleSheet("background: transparent; border: none;")
         layout.addWidget(self._detail_container)
 
+    def _apply_self_style(self):
+        """应用 CommandCard 自身的样式（背景/边框/圆角）。
+
+        抽出为独立方法以便主题切换时重新调用。
+        """
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            CommandCard {{
+                background-color: {Colors.REALTIME_BG};
+                border: 1px solid {Colors.REALTIME_BORDER};
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }}
+        """)
+
+    def _apply_scroll_area_styles(self, scroll_area: "QScrollArea"):
+        """应用列表/参数/值三个滚动区的统一样式（滚动条 + viewport）
+
+        Args:
+            scroll_area: 目标 QScrollArea（_detail_params_scroll / _detail_value_scroll）
+        """
+        Colors.refresh()
+        scroll_area.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
+            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
+            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """)
+        scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
+
+    def refresh_style(self):
+        """响应主题切换：刷新 CommandCard 内所有主题相关的样式
+
+        覆盖范围：
+        - CommandCard 自身（背景 / 边框 / 圆角）
+        - detail 容器内的静态 widget（描述 / 位置参数提示 / 静态 hint）
+        - detail 滚动区（参数列表 + 值选择列表）
+        - 命令列表 widget（CommandItemWidget._apply_style）
+        - 参数列表 widget（ParameterItemWidget.refresh_style）
+        - 值选择列表项（按当前选中状态）
+        - 分隔线（如有，刷新颜色）
+        """
+        Colors.refresh()
+        # 1. CommandCard 自身
+        self._apply_self_style()
+        # 2. detail 容器内的静态 widget
+        self._apply_detail_desc_style()
+        self._apply_detail_positional_hint_style()
+        self._apply_detail_hint_style()
+        # 3. detail 滚动区
+        if hasattr(self, "_detail_params_scroll") and self._detail_params_scroll is not None:
+            self._apply_scroll_area_styles(self._detail_params_scroll)
+        if hasattr(self, "_detail_value_scroll") and self._detail_value_scroll is not None:
+            self._apply_scroll_area_styles(self._detail_value_scroll)
+        # 4. 命令列表 widget（hover/selected 背景）
+        for w in list(self._item_widgets):
+            try:
+                w._apply_style()
+            except RuntimeError:
+                continue
+        # 5. 参数列表 widget（背景 + 子标签）
+        for w in list(self._param_widgets):
+            try:
+                w.refresh_style()
+            except RuntimeError:
+                continue
+        # 6. 值选择列表项（按当前选中状态）
+        for i, w in enumerate(self._value_widgets):
+            try:
+                self._apply_value_widget_style(w, selected=(i == self._selected_value_index))
+            except RuntimeError:
+                continue
+        # 7. 分隔线（如有）
+        if self._divider is not None:
+            try:
+                self._divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+            except RuntimeError:
+                pass
+
     def _setup_detail_widget(self):
         """构建 detail 模式下的交互式参数 UI"""
         detail_layout = QVBoxLayout(self._detail_container)
@@ -571,44 +691,25 @@ class CommandCard(QWidget):
 
         # 第一行：命令说明（始终显示）
         self._detail_desc_label = QLabel()
-        self._detail_desc_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
-        """)
         self._detail_desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._detail_desc_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_desc_label)
+        self._apply_detail_desc_style()
 
         # 位置参数提示（交互式参数列表上方显示，如 "<query> — 研究主题"）
         self._detail_positional_hint = QLabel()
-        self._detail_positional_hint.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_ACCENT};
-                {get_font_family_css()} {font_size_css(11)};
-                background: rgba(128,128,128,0.06);
-                border-radius: 4px;
-                padding: 2px 8px;
-                margin: 0;
-            }}
-        """)
         self._detail_positional_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._detail_positional_hint.setWordWrap(True)
         self._detail_positional_hint.setVisible(False)
         detail_layout.addWidget(self._detail_positional_hint)
+        self._apply_detail_positional_hint_style()
 
         # 参数列表滚动区（有 parameters 时显示）
         self._detail_params_scroll = QScrollArea()
         self._detail_params_scroll.setWidgetResizable(True)
         self._detail_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._detail_params_scroll.setStyleSheet(f"""
-            QScrollArea {{ background: transparent; border: none; }}
-            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
-            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
-            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        """)
-        self._detail_params_scroll.viewport().setStyleSheet("background: transparent; border: none;")
+        self._apply_scroll_area_styles(self._detail_params_scroll)
         self._detail_params_scroll.setVisible(False)
 
         self._detail_params_content = QWidget()
@@ -624,15 +725,7 @@ class CommandCard(QWidget):
         self._detail_value_scroll.setWidgetResizable(True)
         self._detail_value_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_value_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._detail_value_scroll.setStyleSheet(f"""
-            QScrollArea {{ background: transparent; border: none; }}
-            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
-            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
-            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        """)
-        self._detail_value_scroll.viewport().setStyleSheet("background: transparent; border: none;")
+        self._apply_scroll_area_styles(self._detail_value_scroll)
         self._detail_value_scroll.setVisible(False)
 
         self._detail_value_content = QWidget()
@@ -645,15 +738,63 @@ class CommandCard(QWidget):
 
         # 回退：静态参数提示（命令无 parameters 时显示）
         self._detail_hint_label = QLabel()
-        self._detail_hint_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
-        """)
         self._detail_hint_label.setWordWrap(True)
         detail_layout.addWidget(self._detail_hint_label)
+        self._apply_detail_hint_style()
 
         # 点击整块等同于选中当前命令并发送
         self._detail_container.setCursor(Qt.PointingHandCursor)
         self._detail_container.mousePressEvent = self._on_detail_clicked
+
+    def _apply_detail_desc_style(self):
+        """刷新 detail 模式命令说明标签的样式"""
+        Colors.refresh()
+        if not hasattr(self, "_detail_desc_label") or self._detail_desc_label is None:
+            return
+        self._detail_desc_label.setStyleSheet(f"""
+            QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+        """)
+
+    def _apply_detail_positional_hint_style(self):
+        """刷新 detail 模式位置参数提示标签的样式"""
+        Colors.refresh()
+        if not hasattr(self, "_detail_positional_hint") or self._detail_positional_hint is None:
+            return
+        self._detail_positional_hint.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_ACCENT};
+                {get_font_family_css()} {font_size_css(11)};
+                background: {Colors.DIVIDER_COLOR};
+                border-radius: 4px;
+                padding: 2px 8px;
+                margin: 0;
+            }}
+        """)
+
+    def _apply_detail_hint_style(self):
+        """刷新 detail 模式静态参数提示标签的样式"""
+        Colors.refresh()
+        if not hasattr(self, "_detail_hint_label") or self._detail_hint_label is None:
+            return
+        self._detail_hint_label.setStyleSheet(f"""
+            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+        """)
+
+    def _apply_value_widget_style(self, widget: "QLabel", selected: bool = False):
+        """设置值选择列表项的样式（统一入口，供创建/刷新/选中切换调用）
+
+        Args:
+            widget: 值列表 QLabel
+            selected: 是否处于选中状态（高亮背景）
+        """
+        Colors.refresh()
+        bg = Colors.REALTIME_TAG_BG if selected else "transparent"
+        widget.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY}; background: {bg};
+                padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
+            }}
+        """)
 
     # ---- Detail 模式 ----
 
@@ -667,8 +808,14 @@ class CommandCard(QWidget):
         """detail 模式匹配的命令名"""
         return self._detail_cmd_name
 
-    def show_command_detail(self, cmd_name: str, selected_type: str = "",
-                            data_provider: dict = None):
+    def show_command_detail(
+        self,
+        cmd_name: str,
+        selected_type: str = "",
+        data_provider: dict = None,
+        full_text: str = "",
+        cursor_pos: int = -1,
+    ):
         """切换到 detail 模式：显示指定命令/技能的参数提示
 
         Args:
@@ -676,6 +823,9 @@ class CommandCard(QWidget):
             selected_type: 选中项的 display_type（"command"/"prompt"/"agent"）
                           为空时使用当前选中项类型（通过 _current_selected_type）
             data_provider: 外部数据源，如 {"model_options": ["OpenAI:gpt-4o", ...]}
+            full_text: 输入框完整文本（用于在重建 widgets 后立即标记 active 状态，
+                      解决失焦→重新聚焦时 active 状态丢失的问题）
+            cursor_pos: 光标位置（供自动检测 --model= 值选择模式用）
         """
         cmd_mgr = CommandManager.get_instance()
         self._data_provider = data_provider or {}
@@ -724,6 +874,7 @@ class CommandCard(QWidget):
         skill_params = None
         if skill:
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
             enabled_skills = cfg.llm_enabled_skills.value or []
             is_enabled = skill.get("name") in enabled_skills
@@ -775,6 +926,15 @@ class CommandCard(QWidget):
         self._detail_container.setVisible(True)
         self._visible = True
         self.setVisible(True)
+
+        # 重建 widgets 后立即应用输入文本中已存在的 active 参数
+        # 解决失焦→重新聚焦后 active 状态丢失的 UX 问题：
+        #   失焦 → _reset_detail_mode 销毁了所有 ParameterItemWidget（_active=False）
+        #   重聚焦 → 重新进入 detail 模式时新建了 widgets，但 _active 默认 False
+        # 调用 update_active_params 让输入框里已有的 --model=foo 立刻显示为激活态
+        if has_params and self._param_widgets and full_text:
+            active = CommandManager.parse_active_params(full_text) if full_text else set()
+            self.update_active_params(active, full_text=full_text, cursor_pos=cursor_pos)
 
         # 动态计算高度
         self._adjust_detail_height()
@@ -893,6 +1053,9 @@ class CommandCard(QWidget):
         """参数项被点击"""
         sender = self.sender()
         if sender in self._param_widgets:
+            # 已激活参数不支持再次点击（仅作展示用）
+            if sender.is_active:
+                return
             idx = self._param_widgets.index(sender)
             self._selected_param_index = idx
             self._update_param_selection()
@@ -951,12 +1114,7 @@ class CommandCard(QWidget):
             item = QLabel(val)
             item.setFixedHeight(ITEM_HEIGHT)
             item.setCursor(Qt.PointingHandCursor)
-            item.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_PRIMARY}; background: transparent;
-                    padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
-                }}
-            """)
+            self._apply_value_widget_style(item, selected=False)
             # 用 lambda 捕获值
             item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
             self._detail_value_layout.addWidget(item)
@@ -1011,7 +1169,7 @@ class CommandCard(QWidget):
 
         for w in candidate_params:
             param_clean = w.param_name.rstrip("=")
-            m = re.search(re.escape(param_clean) + r'=', text)
+            m = re.search(re.escape(param_clean) + r"=", text)
             if m and (best_match is None or m.end() > best_match[0]):
                 token_end = m.end()
                 query = self._extract_value_query(text, token_end, cursor_pos)
@@ -1080,21 +1238,14 @@ class CommandCard(QWidget):
             item = QLabel(val)
             item.setFixedHeight(ITEM_HEIGHT)
             item.setCursor(Qt.PointingHandCursor)
-            item.setStyleSheet(f"""
-                QLabel {{
-                    color: {Colors.TEXT_PRIMARY}; background: transparent;
-                    padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
-                }}
-            """)
+            self._apply_value_widget_style(item, selected=False)
             item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
             self._detail_value_layout.addWidget(item)
             self._value_widgets.append(item)
 
         # 保持选中索引在有效范围
         if self._value_widgets:
-            self._selected_value_index = min(
-                max(self._selected_value_index, 0), len(self._value_widgets) - 1
-            )
+            self._selected_value_index = min(max(self._selected_value_index, 0), len(self._value_widgets) - 1)
         else:
             self._selected_value_index = -1
         self._update_value_selection()
@@ -1138,7 +1289,7 @@ class CommandCard(QWidget):
         if idx < 0:
             return ""
 
-        after_cmd = full_text[idx + len(cmd_prefix):]
+        after_cmd = full_text[idx + len(cmd_prefix) :]
 
         # 包含 = → 在输入值列表，不过滤参数列表
         if "=" in after_cmd:
@@ -1150,7 +1301,8 @@ class CommandCard(QWidget):
 
         # 取最后一个 --xxx 单词
         import re
-        tokens = re.findall(r'(?<!\S)(--[\w-]+)', after_cmd)
+
+        tokens = re.findall(r"(?<!\S)(--[\w-]+)", after_cmd)
         if not tokens:
             return ""
 
@@ -1194,10 +1346,7 @@ class CommandCard(QWidget):
         if self._value_selection_mode and self._value_selection_param:
             param_clean = self._value_selection_param.rstrip("=")
             # value 参数必须有 = 才算激活（防止 --xxx 裸名也被算作激活）
-            still_active = any(
-                "=" in a and a.rstrip("=") == param_clean
-                for a in active
-            )
+            still_active = any("=" in a and a.rstrip("=") == param_clean for a in active)
             if not still_active:
                 # 参数已被删掉 → 退出值选择模式，回到参数列表
                 self._exit_value_selection()
@@ -1208,7 +1357,7 @@ class CommandCard(QWidget):
         # ---- 第一遍：检测互斥组激活状态 ----
         mutex_active_groups: set = set()  # 已有激活参数的互斥组名
         for w in self._param_widgets:
-            mg = getattr(w._param, 'mutex_group', '')
+            mg = getattr(w._param, "mutex_group", "")
             if not mg:
                 continue
             param_clean = w.param_name.rstrip("=")
@@ -1229,24 +1378,26 @@ class CommandCard(QWidget):
             else:
                 is_active = any(a.rstrip("=") == param_clean for a in active)
 
-            # 标准去重：已激活的参数隐藏
-            visible = not is_active
+            # 激活态：保持可见但标记为已激活（让用户能读到参数说明）
+            # 不再隐藏已选中的参数
+            w.set_active(is_active)
 
             # 互斥规则：如果此参数属于某个已被激活的互斥组，
-            # 则同组所有参数全部隐藏（包括未被激活的兄弟参数）
-            mg = getattr(w._param, 'mutex_group', '')
-            if mg and mg in mutex_active_groups:
-                visible = False
+            # 则同组非激活参数全部隐藏（防止冲突）
+            mg = getattr(w._param, "mutex_group", "")
+            if mg and mg in mutex_active_groups and not is_active:
+                w.setVisible(False)
+                continue
 
             # 输入前缀过滤：正在输入参数名部分时，只显示以此前缀开头的参数
-            # 只在参数可见且有不空前缀时才应用
-            if visible and param_filter:
+            # 已激活的参数不受前缀过滤影响（始终可见，方便读描述）
+            if not is_active and param_filter:
                 if not param_clean.startswith(param_filter):
-                    visible = False
+                    w.setVisible(False)
+                    continue
 
-            w.setVisible(visible)
-            if w.isVisible():
-                any_visible = True
+            w.setVisible(True)
+            any_visible = True
 
         # 显示/隐藏参数滚动区
         self._detail_params_scroll.setVisible(any_visible)
@@ -1259,9 +1410,11 @@ class CommandCard(QWidget):
         # 调整选中索引：如果当前选中的参数已被隐藏，跳到第一个可见参数
         if not any_visible:
             self._selected_param_index = -1
-        elif (self._selected_param_index < 0
-              or self._selected_param_index >= len(self._param_widgets)
-              or not self._param_widgets[self._selected_param_index].isVisible()):
+        elif (
+            self._selected_param_index < 0
+            or self._selected_param_index >= len(self._param_widgets)
+            or not self._param_widgets[self._selected_param_index].isVisible()
+        ):
             new_idx = -1
             for i, w in enumerate(self._param_widgets):
                 if w.isVisible():
@@ -1295,40 +1448,26 @@ class CommandCard(QWidget):
             w.set_selected(i == self._selected_param_index)
         # 滚动到可见
         if 0 <= self._selected_param_index < len(self._param_widgets):
-            self._detail_params_scroll.ensureWidgetVisible(
-                self._param_widgets[self._selected_param_index], 0, 0
-            )
+            self._detail_params_scroll.ensureWidgetVisible(self._param_widgets[self._selected_param_index], 0, 0)
 
     def _update_value_selection(self):
         """更新值列表选中高亮，滚动到可见"""
-        # Colors.refresh() 不在导航路径中调用——颜色在 show_card 时刷新一次即可
-        old_idx = self._last_selected_value_index if hasattr(self, '_last_selected_value_index') else -1
+        old_idx = self._last_selected_value_index if hasattr(self, "_last_selected_value_index") else -1
         new_idx = self._selected_value_index
         self._last_selected_value_index = new_idx
 
         # 只更新变化的项
         if old_idx != new_idx:
             if 0 <= old_idx < len(self._value_widgets):
-                self._value_widgets[old_idx].setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
+                self._apply_value_widget_style(self._value_widgets[old_idx], selected=False)
             if 0 <= new_idx < len(self._value_widgets):
-                self._value_widgets[new_idx].setStyleSheet(f"""
-                    QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
-                             padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-                """)
+                self._apply_value_widget_style(self._value_widgets[new_idx], selected=True)
         elif 0 <= new_idx < len(self._value_widgets):
-            self._value_widgets[new_idx].setStyleSheet(f"""
-                QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.REALTIME_TAG_BG};
-                         padding: 0 12px; {get_font_family_css()} {font_size_css(12)}; }}
-            """)
+            self._apply_value_widget_style(self._value_widgets[new_idx], selected=True)
 
         # 滚动到可见
         if 0 <= self._selected_value_index < len(self._value_widgets):
-            self._detail_value_scroll.ensureWidgetVisible(
-                self._value_widgets[self._selected_value_index], 0, 0
-            )
+            self._detail_value_scroll.ensureWidgetVisible(self._value_widgets[self._selected_value_index], 0, 0)
 
     def _reset_detail_mode(self) -> bool:
         """退出 detail 模式，回到列表模式
@@ -1375,8 +1514,7 @@ class CommandCard(QWidget):
         cmd_mgr = CommandManager.get_instance()
         commands = cmd_mgr.get_all_commands()
         skills = [
-            {"name": s["name"], "description": s.get("description", ""), "type": "skill"}
-            for s in get_local_skills()
+            {"name": s["name"], "description": s.get("description", ""), "type": "skill"} for s in get_local_skills()
         ]
         self._all_items = commands + skills
 
@@ -1413,18 +1551,14 @@ class CommandCard(QWidget):
         """
         if not query:
             return True
-        text = (
-            item["name"] + " "
-            + item.get("display_name", item["name"]) + " "
-            + item["description"]
-        ).lower()
+        text = (item["name"] + " " + item.get("display_name", item["name"]) + " " + item["description"]).lower()
 
-        for or_term in query.split('|'):
+        for or_term in query.split("|"):
             or_term = or_term.strip()
             if not or_term:
                 continue
             # 过滤空 AND 部分：让 "find&" 等价于 "find"（用户还在打字中）
-            and_parts = [p.strip() for p in or_term.split('&') if p.strip()]
+            and_parts = [p.strip() for p in or_term.split("&") if p.strip()]
             if not and_parts:
                 continue
             if all(part in text for part in and_parts):
@@ -1450,21 +1584,21 @@ class CommandCard(QWidget):
 
         type_set = set()
         clean_tokens = []
-        type_map = {'cmd': 'command', 'skill': 'skill', 'agent': 'agent', 'prompt': 'prompt'}
+        type_map = {"cmd": "command", "skill": "skill", "agent": "agent", "prompt": "prompt"}
 
         for token in query.split():
-            if token.startswith('type:'):
+            if token.startswith("type:"):
                 tf = token[5:].strip()
-                for t in tf.split('|'):
+                for t in tf.split("|"):
                     t = t.strip()
                     if t in type_map:
                         type_set.add(type_map[t])
-            elif token.startswith('#'):
+            elif token.startswith("#"):
                 # #skill, #agent, #prompt, #cmd 简写
                 # 支持 #agent|search、#agent&search 等无空格分隔的写法：
                 # 按 | 和 & 拆分，第一部分识别为类型过滤器，其余为搜索关键字
                 rest = token[1:]
-                parts = [p.strip() for p in rest.replace('&', '|').split('|') if p.strip()]
+                parts = [p.strip() for p in rest.replace("&", "|").split("|") if p.strip()]
                 if parts and parts[0] in type_map:
                     type_set.add(type_map[parts[0]])
                     # 剩余部分是搜索关键字（如 #agent|search → "search"）
@@ -1476,7 +1610,7 @@ class CommandCard(QWidget):
             else:
                 clean_tokens.append(token)
 
-        return type_set if type_set else None, ' '.join(clean_tokens)
+        return type_set if type_set else None, " ".join(clean_tokens)
 
     def load_items(self, query: str = "", incremental: bool = False):
         """根据 query 筛选并渲染列表（多关键字 + 类别过滤 + 增量剪枝）
@@ -1515,16 +1649,9 @@ class CommandCard(QWidget):
             self._last_query = ""
         else:
             # 增量剪枝：仅当新 query 是上次的扩展且不含 |
-            can_prune = (
-                self._last_query
-                and query.startswith(self._last_query)
-                and '|' not in query
-            )
+            can_prune = self._last_query and query.startswith(self._last_query) and "|" not in query
             source = self._filtered_items if can_prune else self._all_items
-            self._filtered_items = [
-                item for item in source
-                if self._matches_multi(item, text_query)
-            ]
+            self._filtered_items = [item for item in source if self._matches_multi(item, text_query)]
             # 文本匹配后再按类别过滤
             if type_filter:
                 self._filtered_items = [item for item in self._filtered_items if item["type"] in type_filter]
@@ -1552,9 +1679,24 @@ class CommandCard(QWidget):
 
         Args:
             incremental: 是否增量更新（保留匹配项，重用已有 widget）
+
+        快速路径：新旧 items 完全相同（names+types 一致）时跳过全量重建，
+        仅刷新 widget 高亮，避免快速敲键时反复重排布局。
         """
         new_items = self._filtered_items
         old_widgets = list(self._item_widgets)  # 复制一份
+
+        # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
+        if len(old_widgets) == len(new_items):
+            same = all(
+                old_widgets[i].item_data.get("name") == new_items[i]["name"]
+                and old_widgets[i].item_data.get("type") == new_items[i]["type"]
+                for i in range(len(new_items))
+            )
+            if same:
+                for w, item in zip(old_widgets, new_items):
+                    w.reuse(item, self._current_text_query)
+                return
 
         # 构建旧 widget 的 key 映射
         old_by_key = {}
@@ -1715,9 +1857,7 @@ class CommandCard(QWidget):
 
         # 滚动到可见区域
         if 0 <= self._selected_index < len(self._item_widgets):
-            self._scroll_area.ensureWidgetVisible(
-                self._item_widgets[self._selected_index], 0, 0
-            )
+            self._scroll_area.ensureWidgetVisible(self._item_widgets[self._selected_index], 0, 0)
 
     def select_next(self) -> bool:
         """选择下一项。返回 True 表示已处理，False 表示未处理（让按键透传）。"""
@@ -1781,7 +1921,7 @@ class CommandCard(QWidget):
             # 值选择模式：选中当前高亮的值
             if 0 <= self._selected_value_index < len(self._value_widgets):
                 widget = self._value_widgets[self._selected_value_index]
-                text = widget.text() if hasattr(widget, 'text') else ""
+                text = widget.text() if hasattr(widget, "text") else ""
                 if text:
                     self.parameterValueSelected.emit(text)
                     self._exit_value_selection()

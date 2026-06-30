@@ -24,7 +24,7 @@ from qfluentwidgets import (
 from app.constants import (
     PROVIDER_ICONS,
 )
-from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css
+from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -38,15 +38,42 @@ def _is_text_chat_model(model_id: str) -> bool:
     # 非文本模型关键词黑名单
     non_text_keywords = [
         # 图片生成/视觉模型
-        'dall-e', 'dalle', 'stable-diffusion', 'sd-', 'imagen', 'flux',
-        'image', 'diffusion', 'kandinsky', 'midjourney', 'wan', 'vision',
-        'vl', 'llava', 'seance', 'cogview', 'cogvideo', 'pixart', 'visual',
+        "dall-e",
+        "dalle",
+        "stable-diffusion",
+        "sd-",
+        "imagen",
+        "flux",
+        "image",
+        "diffusion",
+        "kandinsky",
+        "midjourney",
+        "wan",
+        "vision",
+        "vl",
+        "llava",
+        "seance",
+        "cogview",
+        "cogvideo",
+        "pixart",
+        "visual",
         # 音频模型
-        'whisper', 'tts', 'speech', 'audio', 'piper', 'voice',
+        "whisper",
+        "tts",
+        "speech",
+        "audio",
+        "piper",
+        "voice",
         # 词嵌入模型
-        'embedding', 'embed', 'text-embedding', 'bge',
+        "embedding",
+        "embed",
+        "text-embedding",
+        "bge",
         # 其他非聊天模型
-        'moderation', 'rerank', 'search', 'retrieval',
+        "moderation",
+        "rerank",
+        "search",
+        "retrieval",
     ]
 
     # 检查是否包含非文本模型关键词
@@ -57,9 +84,7 @@ def _is_text_chat_model(model_id: str) -> bool:
     return True
 
 
-def fetch_provider_models(
-    api_url: str, api_key: str, provider_name: str, auth_type: str = "bearer"
-) -> list:
+def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_type: str = "bearer") -> list:
     """Fetch model list from provider API. Returns text chat models only."""
     headers = {"Authorization": f"Bearer {api_key}"} if auth_type == "bearer" else {}
 
@@ -92,32 +117,19 @@ def fetch_provider_models(
                         # 过滤只保留文本聊天模型
                         return [m for m in all_models if _is_text_chat_model(m)]
                     elif "models" in data:
-                        all_models = [
-                            m.get("id") or m.get("name", "")
-                            for m in data["models"]
-                            if isinstance(m, dict)
-                        ]
+                        all_models = [m.get("id") or m.get("name", "") for m in data["models"] if isinstance(m, dict)]
                         return [m for m in all_models if _is_text_chat_model(m)]
                     elif "object" in data and isinstance(data["object"], list):
-                        all_models = [
-                            m.get("id", "")
-                            for m in data["object"]
-                            if isinstance(m, dict)
-                        ]
+                        all_models = [m.get("id", "") for m in data["object"] if isinstance(m, dict)]
                         return [m for m in all_models if _is_text_chat_model(m)]
                     for key in ["items", "result"]:
                         if key in data and isinstance(data[key], list):
                             all_models = [
-                                m.get("id")
-                                or m.get("name", "")
-                                or (m if isinstance(m, str) else "")
-                                for m in data[key]
+                                m.get("id") or m.get("name", "") or (m if isinstance(m, str) else "") for m in data[key]
                             ]
                             return [m for m in all_models if _is_text_chat_model(m)]
                 elif isinstance(data, list):
-                    all_models = [
-                        m.get("id", "") if isinstance(m, dict) else str(m) for m in data
-                    ]
+                    all_models = [m.get("id", "") if isinstance(m, dict) else str(m) for m in data]
                     return [m for m in all_models if _is_text_chat_model(m)]
             else:
                 last_error = f"HTTP {response.status_code}"
@@ -138,7 +150,8 @@ class ProviderIconWidget(IconWidget):
     def __init__(self, provider_name: str, size: int = 32, parent=None):
         super().__init__(parent)
         self.provider_name = provider_name
-        self.setFixedSize(size, size)
+        self._base_size = size
+        self.setFixedSize(scale_icon_size(size), scale_icon_size(size))
         self._init_icon()
 
     def _init_icon(self):
@@ -156,6 +169,12 @@ class ProviderIconWidget(IconWidget):
             letters = letters[:2]
         self._text = letters
 
+    def refresh_style(self):
+        """随系统字号缩放图标大小"""
+        s = scale_icon_size(self._base_size)
+        self.setFixedSize(s, s)
+        self.update()
+
     def paintEvent(self, event):
         if not hasattr(self, "_text") or not self._text:
             super().paintEvent(event)
@@ -168,9 +187,7 @@ class ProviderIconWidget(IconWidget):
         painter.drawRoundedRect(self.rect(), 6, 6)
         painter.setPen(QColor(255, 255, 255))
         painter.setFont(QFont(get_unified_font().family(), self.width() // 3, QFont.Bold))
-        painter.drawText(
-            QRect(0, 0, self.width(), self.height()), Qt.AlignCenter, self._text
-        )
+        painter.drawText(QRect(0, 0, self.width(), self.height()), Qt.AlignCenter, self._text)
 
     def _get_color(self):
         colors = [
@@ -191,9 +208,7 @@ class ProviderItem(QWidget):
     selected = pyqtSignal(QWidget)
     editRequested = pyqtSignal(str, dict)  # config_id, provider_info
 
-    def __init__(
-        self, config_id: str, provider_info: dict, is_default: bool, parent=None
-    ):
+    def __init__(self, config_id: str, provider_info: dict, is_default: bool, parent=None):
         super().__init__(parent=parent)
         self.config_id = config_id
         # 从 provider_info 中获取服务商名称，如果没有则使用 config_id
@@ -202,6 +217,7 @@ class ProviderItem(QWidget):
         self.is_default = is_default
         # 同名分组的后缀索引：0=不显示，1+=显示 "#2"、"#3"...
         self.suffix_index = provider_info.get("_suffix_index", 0)
+        self._is_selected = is_default  # 选中态标记，供 refresh_style 恢复高亮
         self._setup_ui()
         # 保存默认样式用于 highlight/恢复切换
         self._default_style = self.styleSheet()
@@ -224,8 +240,6 @@ class ProviderItem(QWidget):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(12, 8, 12, 8)
         main_layout.setSpacing(12)
-
-
 
         self.iconWidget = ProviderIconWidget(self.provider_name, 32)
 
@@ -279,6 +293,39 @@ class ProviderItem(QWidget):
     def _on_edit(self):
         self.editRequested.emit(self.config_id, self.provider_info)
 
+    def refresh_style(self):
+        """主题/字体变更时刷新服务商名称、模型名称的字体与颜色"""
+        Colors.refresh()
+        self.nameLabel.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(14)} font-weight: 500; {get_font_family_css()}"
+        )
+        self.modelLabel.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; {get_font_family_css()}")
+        self.setStyleSheet(f"""
+            ProviderItem {{
+                background-color: transparent;
+                border-radius: 8px;
+            }}
+            ProviderItem:hover {{
+                background-color: {Colors.HOVER_BG};
+            }}
+        """)
+        # 如果是选中态，重新应用高亮样式
+        if getattr(self, "_is_selected", False):
+            indicator_style = f"""
+                ProviderItem {{
+                    background-color: transparent;
+                    border-radius: 8px;
+                    border-left: 3px solid {Colors.SYSTEM_ACCENT};
+                }}
+                ProviderItem:hover {{
+                    background-color: {Colors.HOVER_BG};
+                }}
+            """
+            self.setStyleSheet(indicator_style)
+        # 同步刷新服务商图标大小
+        if hasattr(self.iconWidget, "refresh_style"):
+            self.iconWidget.refresh_style()
+
     def update_info(self, name: str, info: dict):
         self.provider_name = name
         self.provider_info = info
@@ -321,11 +368,7 @@ class ProviderListSettingCard(ExpandSettingCard):
         self.configItem = configItem
         self.defaultProviderItem = defaultProviderItem
         self.addProviderButton = PushButton("添加", self, FluentIcon.ADD)
-        self.providers = (
-            qconfig.get(configItem).copy()
-            if isinstance(qconfig.get(configItem), dict)
-            else {}
-        )
+        self.providers = qconfig.get(configItem).copy() if isinstance(qconfig.get(configItem), dict) else {}
         self.default_provider = qconfig.get(defaultProviderItem) or ""
         self.__initWidget()
 
@@ -346,7 +389,7 @@ class ProviderListSettingCard(ExpandSettingCard):
         """将添加按钮移到关闭按钮旁边"""
         # 展开卡片的 card 是 HeaderSettingCard，包含 hBoxLayout
         card = self.card
-        if hasattr(card, 'hBoxLayout'):
+        if hasattr(card, "hBoxLayout"):
             # 从布局中移除按钮
             self.card.hBoxLayout.removeWidget(self.addProviderButton)
             # 在关闭按钮之前插入按钮
@@ -368,11 +411,7 @@ class ProviderListSettingCard(ExpandSettingCard):
         # 真正的刷新由 _remove_provider 的 finally 块在 _is_deleting 恢复后调度
         if self._is_deleting:
             return
-        self.providers = (
-            qconfig.get(self.configItem).copy()
-            if isinstance(qconfig.get(self.configItem), dict)
-            else {}
-        )
+        self.providers = qconfig.get(self.configItem).copy() if isinstance(qconfig.get(self.configItem), dict) else {}
         self.default_provider = qconfig.get(self.defaultProviderItem) or ""
         # 按 provider_name 分组计算后缀索引：
         # - 唯一配置：suffix_index = 0（不显示后缀）
@@ -395,9 +434,7 @@ class ProviderListSettingCard(ExpandSettingCard):
         # 遍历配置字典，键为配置 ID，值为配置信息
         for config_id, info in self.providers.items():
             # 判断是否为默认服务商：比较配置 ID 或服务商名称
-            is_default = (config_id == self.default_provider) or (
-                info.get("provider_name") == self.default_provider
-            )
+            is_default = (config_id == self.default_provider) or (info.get("provider_name") == self.default_provider)
             # 附加后缀索引到 info（供 ProviderItem 显示使用，不持久化到配置）
             display_info = dict(info)
             display_info["_suffix_index"] = suffix_map.get(config_id, 0)
@@ -410,7 +447,7 @@ class ProviderListSettingCard(ExpandSettingCard):
         # editRequested 信号传递 config_id 和 provider_info
         item.editRequested.connect(lambda n, i: self._show_edit_dialog(n, i, item))
         # 如果是默认服务商，立即应用选中样式
-        if is_default and hasattr(item, '_default_style'):
+        if is_default and hasattr(item, "_default_style"):
             indicator_style = f"""
                 ProviderItem {{
                     background-color: transparent;
@@ -436,9 +473,7 @@ class ProviderListSettingCard(ExpandSettingCard):
 
     def _show_confirm_dialog(self, item: ProviderItem):
         title = self.tr("确定要删除这个服务商吗?")
-        content = (
-            self.tr('删除 "') + item.provider_name + self.tr('" 后将不再出现在列表中。')
-        )
+        content = self.tr('删除 "') + item.provider_name + self.tr('" 后将不再出现在列表中。')
         w = Dialog(title, content, self.window())
         w.yesSignal.connect(lambda: self._remove_provider(item))
         w.exec_()
@@ -474,10 +509,15 @@ class ProviderListSettingCard(ExpandSettingCard):
         # 取消旧选中项的样式标记
         for i in range(self.viewLayout.count()):
             w = self.viewLayout.itemAt(i).widget()
-            if isinstance(w, ProviderItem) and w != item and hasattr(w, '_default_style'):
-                w.setStyleSheet(w._default_style)
+            if isinstance(w, ProviderItem) and w != item:
+                if hasattr(w, "_is_selected"):
+                    w._is_selected = False
+                if hasattr(w, "_default_style"):
+                    w.setStyleSheet(w._default_style)
+        # 标记新选中项
+        item._is_selected = True
         # 为新选中项添加标记样式（左边框高亮）
-        if not hasattr(item, '_default_style'):
+        if not hasattr(item, "_default_style"):
             item._default_style = item.styleSheet()
         indicator_style = f"""
             ProviderItem {{
@@ -494,3 +534,30 @@ class ProviderListSettingCard(ExpandSettingCard):
         self.default_provider = item.config_id
         qconfig.set(self.defaultProviderItem, self.default_provider, save=True)
         self.defaultProviderChanged.emit(self.default_provider)
+
+    def refresh_style(self):
+        """主题/字体变更时刷新所有服务商行的字体与颜色"""
+        Colors.refresh()
+        for i in range(self.viewLayout.count()):
+            w = self.viewLayout.itemAt(i).widget()
+            if isinstance(w, ProviderItem) and hasattr(w, "refresh_style"):
+                try:
+                    w.refresh_style()
+                except RuntimeError:
+                    pass
+
+    def _get_focus_item(self):
+        """展开卡片时滚到当前默认 provider 的 item（找不到默认则回退到第一个 item）
+
+        被 LLMSettingsCard._scroll_focus_item_to_top 通过约定接口调用。
+        """
+        first_item = None
+        for i in range(self.viewLayout.count()):
+            w = self.viewLayout.itemAt(i).widget()
+            if not isinstance(w, ProviderItem):
+                continue
+            if first_item is None:
+                first_item = w
+            if getattr(w, "is_default", False):
+                return w
+        return first_item

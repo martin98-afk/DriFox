@@ -50,11 +50,9 @@ class Agent:
             # "Read, Glob, Grep, Bash" → ["Read", "Glob", "Grep", "Bash"]
             tools = [t.strip() for t in tools.split(",") if t.strip()]
         if isinstance(tools, list):
-            tools = {ToolNameMapper.to_native(t): True for t in tools
-                     if ToolNameMapper.is_known(t)}
+            tools = {ToolNameMapper.to_native(t): True for t in tools if ToolNameMapper.is_known(t)}
         elif isinstance(tools, dict):
-            tools = {ToolNameMapper.to_native(k): v for k, v in tools.items()
-                     if ToolNameMapper.is_known(k)}
+            tools = {ToolNameMapper.to_native(k): v for k, v in tools.items() if ToolNameMapper.is_known(k)}
         elif tools is None:
             tools = {}
         return cls(
@@ -175,21 +173,21 @@ class PermissionResolver:
     }
 
     def __init__(
-            self,
-            permission_config: Dict[str, Any],
-            global_config: Optional[Dict[str, Any]] = None,
-            tools_config: Optional[Union[Dict[str, bool], List[str]]] = None,
+        self,
+        permission_config: Dict[str, Any],
+        global_config: Optional[Dict[str, Any]] = None,
+        tools_config: Optional[Union[Dict[str, bool], List[str]]] = None,
     ) -> None:
         self._config = permission_config
         self._global = global_config or {}
         if tools_config is None:
             self._tools_config: Dict[str, bool] = {}
         elif isinstance(tools_config, list):
-            self._tools_config = {ToolNameMapper.to_native(t): True for t in tools_config
-                                  if ToolNameMapper.is_known(t)}
+            self._tools_config = {ToolNameMapper.to_native(t): True for t in tools_config if ToolNameMapper.is_known(t)}
         else:
-            self._tools_config = {ToolNameMapper.to_native(k): v for k, v in tools_config.items()
-                                  if ToolNameMapper.is_known(k)}
+            self._tools_config = {
+                ToolNameMapper.to_native(k): v for k, v in tools_config.items() if ToolNameMapper.is_known(k)
+            }
         self._cache: Dict[tuple, str] = {}
         self._task_cache: Dict[str, str] = {}
 
@@ -302,8 +300,9 @@ class AgentManager:
     _instance = None
 
     @classmethod
-    def get_instance(cls, agents_dir: Optional[str] = None,
-                     hook_manager: Optional[HookManager] = None) -> "AgentManager":
+    def get_instance(
+        cls, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None
+    ) -> "AgentManager":
         """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
         if cls._instance is None:
             cls._instance = cls(agents_dir, hook_manager)
@@ -341,20 +340,20 @@ class AgentManager:
             # 3a. 插件 hooks 目录（顶层 hooks/）
             self._load_plugin_hooks()
 
-            # 3b. 技能中的 hooks（skills/{name}/hooks/hooks.json）
-            self._load_skills_hooks(force=force)
+            # 3b. [已移除] 旧技能 hooks 加载路径，hooks 全部来自插件 hooks/
 
     def _load_agents_from_plugins(self):
         """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）"""
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
                     agent_dir = plugin.path / "agents"
                     if agent_dir.exists():
                         self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def reload_agents(self):
@@ -367,8 +366,7 @@ class AgentManager:
             self._unload_plugin_hooks()
 
         self._load_agents(force=True)
-        logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, "
-                    f"{len(self._hidden_agents)} hidden")
+        logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, {len(self._hidden_agents)} hidden")
 
     def reload_plugin_agents(self, plugin_name: str) -> int:
         """只重载指定插件的智能体和 hooks（增量重载，不清除其他插件）
@@ -380,6 +378,7 @@ class AgentManager:
             加载的智能体数量（0 表示插件无 agents 目录或不存在）
         """
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
 
         # 跳过未启用的插件
@@ -407,8 +406,10 @@ class AgentManager:
             self._load_agents_from_dir(agent_dir, source_plugin=plugin_name)
 
         count = len(self._plugin_agents.get(plugin_name, set()))
-        logger.info(f"[AgentManager] Reloaded plugin agents: plugin={plugin_name}, "
-                    f"count={count}, total_visible={len(self._agents)}")
+        logger.info(
+            f"[AgentManager] Reloaded plugin agents: plugin={plugin_name}, "
+            f"count={count}, total_visible={len(self._agents)}"
+        )
         return count
 
     def reload_plugin_hooks(self, plugin_name: str) -> bool:
@@ -423,6 +424,7 @@ class AgentManager:
         if self._hook_manager is None:
             return False
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
         if not pm.is_enabled(plugin_name):
             return False
@@ -462,6 +464,7 @@ class AgentManager:
         """注销所有插件级 hooks（reload 时调用）"""
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
@@ -470,7 +473,7 @@ class AgentManager:
                     if hooks_dir.exists() and hooks_dir.is_dir():
                         self._hook_manager._clear_config_watcher(str(hooks_file))
                         self._hook_manager.unregister_skill_hooks(plugin.name)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def cleanup_plugin_artifacts(self, plugin_name: str):
@@ -491,25 +494,11 @@ class AgentManager:
 
         logger.info(f"[AgentManager] Cleaned up artifacts for removed plugin: {plugin_name}")
 
-    def _load_skills_hooks(self, force: bool = False):
-        """加载 skills 目录中的 hooks
-
-        Args:
-            force: 为 True 时强制重新加载（reload_agents 时调用）
-        """
-        try:
-            from app.core.plugin_manager import PluginManager
-            pm = PluginManager.get_instance()
-            if pm.is_initialized():
-                for skill_path in pm.get_skill_paths():
-                    self._hook_manager.load_hooks_from_skills(skill_path, force=force)
-        except (ImportError, Exception):
-            pass
-
     def _load_plugin_hooks(self):
         """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）"""
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
@@ -521,7 +510,7 @@ class AgentManager:
                     self._hook_manager.load_hooks_from_directory_flat(
                         hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
                     )
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def _load_agents_from_dir(self, agents_dir: Path, source_plugin: str = None):
@@ -542,16 +531,13 @@ class AgentManager:
                     target_dict = self._hidden_agents if agent.is_hidden() else self._agents
                     if agent.name in target_dict:
                         logger.debug(
-                            f"[AgentManager] Skip duplicate agent: {agent.name} "
-                            f"(already loaded, source={md_file})"
+                            f"[AgentManager] Skip duplicate agent: {agent.name} (already loaded, source={md_file})"
                         )
                         continue
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
                     target_dict[agent.name] = agent
-                    logger.info(
-                        f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})"
-                    )
+                    logger.info(f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})")
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {md_file}: {e}")
 
@@ -562,8 +548,7 @@ class AgentManager:
                     target_dict = self._hidden_agents if agent.is_hidden() else self._agents
                     if agent.name in target_dict:
                         logger.debug(
-                            f"[AgentManager] Skip duplicate agent: {agent.name} "
-                            f"(already loaded, source={yaml_file})"
+                            f"[AgentManager] Skip duplicate agent: {agent.name} (already loaded, source={yaml_file})"
                         )
                         continue
                     if source_plugin:
@@ -671,7 +656,7 @@ class AgentManager:
         logger.info(f"[AgentManager] Unloaded skill: {skill_name}")
 
     def get_agent_tools_schema(
-            self, agent_name: str, global_permission: Optional[Dict[str, Any]] = None, is_subagent_call: bool = False
+        self, agent_name: str, global_permission: Optional[Dict[str, Any]] = None, is_subagent_call: bool = False
     ) -> List[Dict]:
         agent = self.get_agent(agent_name)
         if not agent:
@@ -685,9 +670,7 @@ class AgentManager:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
 
-        perm_resolver = PermissionResolver(
-            agent.permission, global_permission or {}, agent.tools
-        )
+        perm_resolver = PermissionResolver(agent.permission, global_permission or {}, agent.tools)
 
         filtered_tools = []
         for tool in all_tools:
@@ -699,11 +682,11 @@ class AgentManager:
         return filtered_tools
 
     def get_agent_system_prompt(
-            self,
-            agent_name: str,
-            base_prompt: str = "",
-            is_subagent_call: bool = False,
-            extra_context: Optional[Dict[str, Any]] = None,
+        self,
+        agent_name: str,
+        base_prompt: str = "",
+        is_subagent_call: bool = False,
+        extra_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         获取智能体的系统提示词。
@@ -716,34 +699,63 @@ class AgentManager:
                 - False: 主智能体自身运行，或子智能体独立运行
             extra_context: 额外上下文（如 project_root/project_name），传递给 BuildSystemPrompt hook
         """
+        # ── 主智能体身份覆盖：优先使用用户在 inject_agent_identity hook 中选择的智能体 ──
+        # 钩子的下拉框选择会写入 Settings.llm_primary_agent，
+        # 覆盖 chat engine 传入的默认 agent_name（通常为 "build"），
+        # 使 BuildSystemPrompt 钩子注入的身份定义与用户选择保持一致。
+        if not is_subagent_call:
+            try:
+                from app.utils.config import Settings
+                primary_agent = Settings.get_instance().llm_primary_agent.value
+                if primary_agent and primary_agent != agent_name:
+                    if self.get_agent(primary_agent):
+                        agent_name = primary_agent
+                    else:
+                        from loguru import logger as _logger
+                        _logger.warning(
+                            f"[AgentManager] Settings.llm_primary_agent='{primary_agent}' "
+                            f"对应的智能体不存在，回退到 '{agent_name}'"
+                        )
+            except Exception:
+                pass
+
         agent = self.get_agent(agent_name)
 
-        if agent and agent.prompt:
-            base = agent.prompt
-        else:
-            # Fallback 提示词
-            if agent:
-                base = f"""# {agent.name}
+        # ── 构建 agent identity 内容，通过 context 传递给 BuildSystemPrompt hook ──
+        # 主智能体：hook (inject_agent_identity) 负责注入；子智能体：直接作为 base
+        if agent:
+            if agent.prompt:
+                agent_identity = agent.prompt
+            else:
+                agent_identity = f"""# {agent.name}
 {agent.description}
 
 ## Available Tools
 Use the tools available to you based on your permissions."""
-            else:
-                base = base_prompt or ""
+        else:
+            agent_identity = base_prompt or ""
 
-        if base_prompt and base:
-            base = base + "\n\n" + base_prompt
-        elif base_prompt:
-            base = base_prompt
+        # ── 构建 base prompt ──
+        # 子智能体：agent 身份作为 base + 任务描述（base_prompt）附加
+        # 主智能体：agent 身份由 hook 注入，base 仅为 base_prompt（通常为空）
+        if is_subagent_call:
+            base = agent_identity
+            if base_prompt and base:
+                base = base + "\n\n" + base_prompt
+            elif base_prompt:
+                base = base_prompt
+        else:
+            base = base_prompt or ""
 
         # Collect BuildSystemPrompt hook contributions
         if self._hook_manager:
-            # 预取技能内容和子智能体列表，通过 context 传递给 hooks
+            # 预取智能体身份/技能内容/子智能体列表，通过 context 传递给 hooks
             # （hooks 不能直接 import app 内部模块，所有数据必须从 context 读取）
             hook_ctx: Dict[str, Any] = {
                 "agent_name": agent_name,
                 "is_subagent_call": is_subagent_call,
                 "current_role": "subagent" if is_subagent_call else "primary",
+                "agent_identity_content": agent_identity,
             }
             # 合并外部上下文（由 context_builder 传入 project_root/project_name）
             if extra_context:
@@ -751,6 +763,7 @@ Use the tools available to you based on your permissions."""
             # 技能内容
             try:
                 from app.utils.config import Settings
+
                 enabled_skills = Settings.get_instance().llm_enabled_skills.value
                 if enabled_skills:
                     sk_content = self.get_enabled_skills_content(enabled_skills)
@@ -811,25 +824,24 @@ Use the tools available to you based on your permissions."""
         }
 
     def check_permission(
-            self,
-            agent_name: str,
-            tool: str,
-            pattern: str = "*",
-            global_permission: Optional[Dict[str, Any]] = None,
+        self,
+        agent_name: str,
+        tool: str,
+        pattern: str = "*",
+        global_permission: Optional[Dict[str, Any]] = None,
     ) -> str:
         agent = self.get_agent(agent_name)
         if not agent:
             return "allow"
 
-        perm_resolver = PermissionResolver(
-            agent.permission, global_permission or {}, agent.tools
-        )
+        perm_resolver = PermissionResolver(agent.permission, global_permission or {}, agent.tools)
         return perm_resolver.resolve(tool, pattern)
 
 
 def get_available_skills() -> List[Dict]:
     """获取内置 skills 列表"""
     from app.utils.utils import get_local_skills
+
     return get_local_skills()
 
 

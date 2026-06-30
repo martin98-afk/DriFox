@@ -199,7 +199,7 @@ class SendableTextEdit(TextEdit):
         self._slash_throttle_timer = QTimer(self)
         self._slash_throttle_timer.setSingleShot(True)
         self._slash_throttle_timer.timeout.connect(self._on_slash_throttle_timeout)
-        self._pending_slash_query = ""
+        self._pending_slash_query = None  # None 表示无待发射 query
         self._last_slash_trigger_time = 0  # 上次触发时间（毫秒）
         self._slash_trigger_count = 0  # 快速触发计数
 
@@ -207,9 +207,9 @@ class SendableTextEdit(TextEdit):
         self._at_throttle_timer = QTimer(self)
         self._at_throttle_timer.setSingleShot(True)
         self._at_throttle_timer.timeout.connect(self._on_at_throttle_timeout)
-        self._pending_at_query = ""
+        self._pending_at_query = None  # None 表示无待发射 query（空字符串也是合法 query）
         self._last_at_trigger_time = 0  # 上次 @ 触发时间（毫秒）
-        self._at_trigger_count = 0  # @ 快速触发计数
+        self._at_trigger_count = 0  # @ 快速触发计数（保留用于兼容）
 
         # 输入历史浏览
         self._history_list: list = []  # 最近输入历史（最新在前）
@@ -391,34 +391,17 @@ class SendableTextEdit(TextEdit):
             pass
 
     def _apply_slash_throttle(self, query: str):
-        """应用节流逻辑：快速输入时降低触发频率"""
-        import time
+        """/ 触发节流：统一防抖合并快速敲键，减少过滤+渲染次数
 
-        # 计算时间间隔（毫秒）
-        current_ms = int(time.time() * 1000)
-        time_delta = (
-            current_ms - self._last_slash_trigger_time
-            if self._last_slash_trigger_time > 0
-            else 1000
-        )
-        self._last_slash_trigger_time = current_ms
-
-        # 判断输入速度：小于 150ms 认为快速输入
-        is_fast_input = time_delta < 150 and self._slash_trigger_count > 0
-
-        if is_fast_input:
-            self._slash_trigger_count += 1
-            # 快速输入模式：更新待发送的 query，延长计时器
-            self._pending_slash_query = query
-            # 节流延迟：20ms（数据缓存后渲染仅需 ~1ms，可以降延迟提升响应速度）
-            throttle_delay = 20
-            self._slash_throttle_timer.stop()
-            self._slash_throttle_timer.start(throttle_delay)
-        else:
-            self._slash_trigger_count = 0
-            # 正常速度：直接发射信号
-            self._cancel_slash_throttle()
-            self.slashTriggered.emit(query)
+        与 _apply_at_throttle 实现一致：始终走 100ms 防抖，
+        去除旧版「正常速度立即发射」路径，避免每次敲键触发完整命令卡片渲染。
+        """
+        # 连续输入相同 query → 跳过
+        if self._pending_slash_query is not None and query == self._pending_slash_query:
+            return
+        self._pending_slash_query = query
+        self._slash_throttle_timer.stop()
+        self._slash_throttle_timer.start(100)
 
     def _on_slash_throttle_timeout(self):
         """节流定时器超时：发射最终的 query"""
@@ -428,37 +411,27 @@ class SendableTextEdit(TextEdit):
     def _cancel_slash_throttle(self):
         """取消节流定时器"""
         self._slash_throttle_timer.stop()
-        self._pending_slash_query = ""
+        self._pending_slash_query = None
         self._slash_trigger_count = 0
 
     # ==================== @ 文件提及节流 ====================
 
     def _apply_at_throttle(self, query: str):
-        """@ 触发节流：快速输入时降低 / 命令卡片触发频率"""
-        import time
+        """@ 触发节流：统一防抖合并快速敲键，减少过滤+渲染次数
 
-        current_ms = int(time.time() * 1000)
-        time_delta = (
-            current_ms - self._last_at_trigger_time
-            if self._last_at_trigger_time > 0
-            else 1000
-        )
-        self._last_at_trigger_time = current_ms
+        关键优化：无论键入多快都不立即发射，始终走防抖。
+        去除了旧的「正常速度立即发射」路径——即使 ~200ms 的普通打字速度，
+        每次键盘事件 emit → show_card → 2000 项评分 → widget 重建的链路
+        依然昂贵。统一 100ms 防抖让快速打字期间只执行最后一次过滤/渲染。
+        """
+        # 连续输入相同 query（如按方向键/退格到原位置）→ 跳过
+        # 注意：初始 _pending_at_query = None，此时空字符串 query = "" 是合法首次触发
+        if self._pending_at_query is not None and query == self._pending_at_query:
+            return
 
-        # 判断输入速度：小于 150ms 认为快速输入
-        is_fast_input = time_delta < 150 and self._at_trigger_count > 0
-
-        if is_fast_input:
-            self._at_trigger_count += 1
-            self._pending_at_query = query
-            # 文件缓存已就绪时，渲染约 1-2ms → 低延迟节流
-            throttle_delay = 20
-            self._at_throttle_timer.stop()
-            self._at_throttle_timer.start(throttle_delay)
-        else:
-            self._at_trigger_count = 0
-            # 正常速度：直接发射
-            self.atTriggered.emit(query)
+        self._pending_at_query = query
+        self._at_throttle_timer.stop()
+        self._at_throttle_timer.start(100)
 
     def _on_at_throttle_timeout(self):
         """@ 节流定时器超时：发射最终的 query"""
@@ -468,8 +441,7 @@ class SendableTextEdit(TextEdit):
     def _cancel_at_throttle(self):
         """取消 @ 节流定时器"""
         self._at_throttle_timer.stop()
-        self._pending_at_query = ""
-        self._at_trigger_count = 0
+        self._pending_at_query = None
 
     # ==================== @ 文件提及触发检测 ====================
 

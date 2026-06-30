@@ -1,205 +1,173 @@
-# drifox-dev（有状态技能）
+# drifox-dev（有状态技能 · 渐进式披露）
 
-DriFox 项目开发技能——**升级为有状态版本**，跨会话记忆项目状态、用户偏好、决策、坑点。
+DriFox 项目开发技能——**升级为有状态 + 渐进式披露版本**。
+
+- **有状态**：跨会话记忆项目状态、用户偏好、决策、坑点、自动快照、GitHub open issues。
+- **渐进式披露**：`SKILL.md` 仅保留入口 + 任务分派决策树（< 200 行），
+  按用户任务分派到 `references/` 下对应文件，避免一次性塞 480+ 行进上下文。
 
 ## 与无状态技能的区别
 
 | 维度 | 无状态技能 | 本技能（drifox-dev） |
 |------|-----------|---------------------|
-| 加载内容 | 静态 SKILL.md | 静态骨架 + 持久化 state.json |
-| 跨会话 | 全部丢失 | 记住：焦点/决策/偏好/坑点/项目快照 |
-| 项目状态感知 | 需 Agent 现场扫描 | 自动缓存（`snapshot_project.py`） |
+| 加载内容 | 静态 SKILL.md | 静态骨架（决策树 + 索引）+ 持久化 state.json |
+| references/ | 无 | 按任务类型按需加载（节省首屏 token） |
+| 跨会话 | 全部丢失 | 记住：焦点 / 决策 / 偏好 / 坑点 / 项目快照 / GitHub issues |
+| 项目状态感知 | 现场扫描 | 自动缓存（`snapshot_project.py`） |
 | 文件行数 | 手抄会过期 | 每次刷新都准确 |
 | 用户偏好 | 每次重提 | 一次设置永久生效 |
+
+## 任务分派决策树（节选自 SKILL.md）
+
+| 用户说 | 第一步 | 必读 references |
+|--------|-------|-----------------|
+| 加功能 / 做新东西 | `brainstorming` | `scenarios.md` § 一 |
+| 改架构 / 拆分模块 | `brainstorming` | `scenarios.md` § 五 |
+| 不工作 / 报错 / 回归 / 性能 | `diagnose` | `scenarios.md` § 二 |
+| 加 UI / 卡片 / 主题 | 直读 `dev-ui.md` | UI 流程 |
+| 加 Agent / 改 Skill / 写插件 | 直读 `dev-agent-skill.md` | 组件流程 |
+| 加工具 / 调权限 / 改 Hook | 直读 `dev-tools-hooks.md` | 工具流程 |
+| 跑测试 / 打包 / 提 PR | 直读 `testing-build.md` | 工程流程 |
+| 查 state / 改偏好 / 录决策 | 直读 `state-reference.md` | 元操作 |
+| 命名 / 格式 / 提交规范 | 直读 `conventions.md` | 编码规范 |
+| 模式 / 多窗口 / 信号槽 | 直读 `patterns.md` | 模式 |
+| 定位要改的文件 | 直读 `architecture.md` | 全局 |
 
 ## 目录结构
 
 ```
 drifox-dev/
-├── SKILL.md                    # 静态骨架（AI 加载时必读）
-├── README.md                   # 本文件
+├── SKILL.md                       # 入口（任务分派决策树 + 加载流程）
+├── README.md                      # 本文件
+├── references/                    # 按需加载的详细参考
+│   ├── architecture.md            # 四层架构 + 目录 + 信号
+│   ├── patterns.md                # 设计模式 + 多窗口 + 信号槽
+│   ├── conventions.md             # 命名 / 风格 / 提交 / AGENTS 铁律
+│   ├── dev-ui.md                  # UI 组件开发要点
+│   ├── dev-agent-skill.md         # Agent / Skill / 插件开发
+│   ├── dev-tools-hooks.md         # 工具 / Hook / 权限
+│   ├── scenarios.md               # 常见开发场景流程
+│   ├── testing-build.md           # 测试 / 构建 / 提 PR
+│   └── state-reference.md         # state.json 字段 + CLI 详解
 ├── state/
-│   ├── state.json              # 持久化状态（运行时生成）
-│   └── state.template.json     # 初始模板
+│   ├── state.json                 # 持久化状态（运行时生成）
+│   └── state.template.json        # 初始模板
 ├── scripts/
 │   ├── __init__.py
-│   ├── state_manager.py        # 状态读写（CLI + API）
-│   └── snapshot_project.py     # 自动扫描项目
-└── evals/                      # 评估数据（保留）
+│   ├── state_manager.py           # 状态读写（CLI + API）
+│   └── snapshot_project.py        # 自动扫描项目 + GitHub issues
+└── evals/                         # 评估数据（保留）
 ```
 
 ## 快速开始
 
-### 1. 初始化（首次）
-
 ```bash
-cd D:/work/DriFoxx
+cd D:/work/DriFox
+
+# 1. 初始化（首次）
 python plugins/system/skills/drifox-dev/scripts/state_manager.py init
-```
 
-### 2. 采集项目快照
-
-```bash
+# 2. 采集项目快照（含 GitHub open issues — 公开仓库免 token）
 python plugins/system/skills/drifox-dev/scripts/snapshot_project.py
-```
 
-### 3. 查看当前状态
+# 离线 / CI 环境跳过 GitHub 拉取：
+python plugins/system/skills/drifox-dev/scripts/snapshot_project.py --no-network
 
-```bash
-# 完整 JSON
-python plugins/system/skills/drifox-dev/scripts/state_manager.py show
-
-# 给 AI 看的精简摘要
+# 3. 查看当前状态摘要
 python plugins/system/skills/drifox-dev/scripts/state_manager.py show --summary
+
+# 4. 记录工作进展
+python scripts/state_manager.py focus --task "重构 drifox-dev 技能"
+python scripts/state_manager.py decision --scope "drifox-dev" \
+    --decision "SKILL.md 拆分为 references/ 子文件" \
+    --rationale "渐进式披露，节省首屏 token"
+python scripts/state_manager.py pitfall --module <name> \
+    --symptom "..." --cause "..." --fix "..."
+python scripts/state_manager.py question --question "..." --context "..."      # non-blocking
+python scripts/state_manager.py question --question "..." --context "..." --blocking  # 阻塞任务
+python scripts/state_manager.py preference --key <name> --value <value>
 ```
 
-### 4. 记录工作进展
-
-```bash
-# 设置当前焦点
-python scripts/state_manager.py focus --task "实现状态管理" --module state_manager
-
-# 记录决策
-python scripts/state_manager.py decision \
-    --scope "drifox-dev" \
-    --decision "采用 JSON 状态 + auto-snapshot 方案" \
-    --rationale "轻量、可读、易于版本迁移"
-
-# 记录坑点
-python scripts/state_manager.py pitfall \
-    --module tool_control_card \
-    --symptom "用户开关点击后不更新" \
-    --cause "_on_active_toggles_changed 缺少完整 rebuild 链路" \
-    --fix "补全实现 + 删除重复定义 + 改为直接调 rebuild()"
-
-# 记录待澄清问题
-python scripts/state_manager.py question \
-    --question "状态文件存技能目录还是用户数据目录？" \
-    --context "技能目录迁移时会丢，用户数据目录跨项目不隔离"
-
-# 修改用户偏好
-python scripts/state_manager.py preference --key log_language --value zh
-```
-
-## state.json 结构
+## state.json 关键字段
 
 ```json
 {
   "version": "1.0.0",
-  "current_focus": {
-    "task": "当前任务名",
-    "module": "相关模块",
-    "branch": "git 分支",
-    "started_at": "ISO 时间",
-    "last_touched": "ISO 时间"
-  },
-  "recent_decisions": [
-    {"id": "D001", "date": "...", "scope": "...",
-     "decision": "...", "rationale": "..."}
-  ],
-  "user_preferences": {
-    "log_language": "zh",
-    "comment_language": "zh",
-    "naming_style": "snake_case",
-    "no_unrelated_refactor": true,
-    "auto_sync_docs": true
-  },
-  "known_pitfalls": [
-    {"id": "P001", "module": "...",
-     "symptom": "...", "cause": "...", "fix": "...",
-     "discovered_at": "..."}
-  ],
+  "current_focus": { "task": "...", "module": "...", "branch": "..." },
+  "recent_decisions":   [...],
+  "user_preferences":  { ... },
+  "known_pitfalls":    [...],
   "open_questions": [
-    {"id": "Q001", "question": "...", "context": "..."}
+    { "id": "Q001", "question": "...",
+      "blocking": true,            // ← 拆开阻塞/非阻塞，避免摘要噪音
+      "context": "...", "created_at": "..." }
   ],
   "auto_snapshot": {
     "last_updated": "...",
-    "key_files_lines": {"app/main_widget.py": 12265},
-    "recent_commits": [{"hash": "abc1234", "date": "...", "message": "..."}],
-    "uncommitted_changes": {"dirty": false, "files": []}
+    "key_files_lines": { ... },
+    "recent_commits": [ ... ],
+    "uncommitted_changes": { "dirty": false, "files": [] },
+    "github_issues": {            // ← 新增
+      "ok": true,
+      "issues": [ { "number": 180, "title": "[Bug] ...", "labels": [...] } ],
+      "repo": "martin98-afk/DriFox",
+      "count": 10,
+      "fetched_at": "..."
+    }
   }
 }
 ```
 
-## 最佳实践
+加载技能时（`show --summary`）会按「焦点 → 偏好 → 决策 → 坑点 → 阻塞问题 → 非阻塞问题 → 快照（含 GitHub issues）」顺序渲染。
 
-### 何时刷新快照
+完整字段说明见 `references/state-reference.md`。
 
-- 任务开始时（建立基线）
-- 重要 commit 后
-- 关键文件大改后
-- state.json 中行数明显对不上时
+## GitHub issues 集成
 
-### 何时记录决策
+`snapshot_project.py` 在每次跑自动从 https://github.com/martin98-afk/DriFox/issues
+拉取最近 10 条 open issue，存到 `state.json.auto_snapshot.github_issues`。
 
-- 涉及模块边界划分
-- 选择了某种技术方案（SQLite vs JSON、信号 vs 回调）
-- 确定了命名/目录/接口约定
-- 排除了某种方案（写出排除原因）
-
-### 何时记录坑点
-
-- 调试超过 30 分钟才解决的问题
-- 涉及项目特有的隐式约定
-- 修复方式不够直观、未来容易重新踩的
-
-### 何时记录开放问题
-
-- 任务进行中遇到但不阻塞当前步骤的问题
-- 模糊需求需要后续澄清
-- 设计上的二选一/三选一尚未决定
+- 公开仓库**免 token**；私有仓库设置环境变量 `GITHUB_TOKEN`
+- 失败优雅降级（超时 / 断网 / 403 rate limit）→ `ok=False, error="..."`
+- 过滤掉 PR（GitHub `/issues` 接口同时返回 PR）
+- 加 `--no-network` 跳过
 
 ## 设计原则
 
-参考 [eliteai.tools/state-management-patterns](https://eliteai.tools/agent-skills/state-management-patterns) 和
-[Anthropic Agent Skills](https://github.com/anthropics/skills)：
+参考 eliteai.tools / Anthropic Agent Skills：
 
-1. **原子写入**：`tempfile + os.replace` 防崩溃
-2. **跨平台文件锁**：Windows `msvcrt`、Linux `fcntl`
-3. **版本迁移**：schema 升级自动迁移
-4. **去重/限额**：坑点 50、决策 50、问题 20
-5. **动态事实由脚本采集**：AI 不手抄会过期的事实
-6. **优雅降级**：任何环节失败不阻塞主流程
+1. **渐进式披露**：SKILL.md 只放骨架，详细内容按需从 references/ 加载
+2. **任务分派优先**：bug 走 diagnose、新功能走 brainstorming，二者不混
+3. **原子写入**：`tempfile + os.replace` 防崩溃损坏
+4. **跨平台文件锁**：Windows `msvcrt`、Linux/Mac `fcntl`
+5. **版本迁移 + backfill**：schema 升级自动迁移，缺字段自动补齐
+6. **去重 / 限额**：坑点 50 / 决策 50 / 问题 20
+7. **动态事实由脚本采集**：行数 / commit / issues，AI 不手抄
+8. **优雅降级**：模板 / 锁 / 迁移 / 网络任何环节失败不阻塞主流程
 
-## API 用法（Python）
-
-除了 CLI，也可以作为 Python 模块使用：
+## API 用法（Python 模块）
 
 ```python
 import sys
 sys.path.insert(0, "plugins/system/skills/drifox-dev/scripts")
 from state_manager import (
     load_state, save_state, set_focus, add_decision,
-    add_pitfall, add_question, render_state_summary,
+    add_pitfall, add_question, set_preference,
+    render_state_summary,
 )
 from snapshot_project import take_snapshot, update_snapshot
 
-# 加载状态
-state = load_state()
-
-# 设置焦点
-set_focus("重构 ChatBackend", module="backend", branch="dev")
-
-# 记录决策
-add_decision("agent", "用 JSON 而非 SQLite", "单技能数据量小，JSON 更直观")
-
-# 记录坑点
-add_pitfall(
-    module="chat_worker",
-    symptom="消息顺序错乱",
-    cause="信号跨线程未加锁",
-    fix="在 emit 前加 _stop_lock 保护",
-)
-
-# 刷新快照
-update_snapshot(take_snapshot())
+set_focus("...", module="...", branch="dev")
+add_decision("scope", "decision", "rationale")
+add_pitfall("module", "symptom", "cause", "fix")
+add_question("q", "ctx", blocking=True)
+update_snapshot(take_snapshot())  # 含 GitHub issues
 ```
 
-## 迁移说明
+## 迁移说明（旧版 → 当前版）
 
-如果是从旧版（无状态）升级：
+如果是从旧版（无 references/ 单 SKILL.md）升级：
 
-1. 旧 SKILL.md 已自动备份到 `state/state.template.json` 同目录或通过 git 历史找回
-2. 运行 `init` 初始化新 state.json
-3. 把之前对话中重要的决策/坑点/偏好手动录入
-4. 加载技能时从 `state_manager.py show --summary` 开始
+1. `state.json` 加载时自动 backfill 新增字段（`open_questions[].blocking`、`auto_snapshot.github_issues`）——无需手动操作
+2. 想看 GitHub issues 只需再跑一次 `snapshot_project.py`
+3. 旧决策 / 坑点不动，新版 `show --summary` 会自动按新格式渲染

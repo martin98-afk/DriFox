@@ -32,6 +32,41 @@ from app.tools.tool_name_mapper import ToolNameMapper
 _SCRIPT_EXTENSIONS = r"cmd|bat|ps1|sh|bash|py"
 
 
+def _parse_function_params(function_path: str) -> tuple:
+    """从 Python hook 的函数路径中分离查询参数
+
+    支持 URL 风格的参数内联写法：
+        ".module:func?key1=val1&key2=val2" → (".module:func", {"key1": "val1", "key2": "val2"})
+        ".module:func" → (".module:func", {})
+
+    数值类参数自动转为 int/float，保持直观。
+
+    Args:
+        function_path: 原始函数路径（可能含 ? 参数）
+
+    Returns:
+        (clean_path: str, params: dict) — 清理后的路径和参数字典
+    """
+    if "?" not in function_path:
+        return function_path, {}
+
+    base_path, query = function_path.split("?", 1)
+    params = {}
+    if query:
+        for pair in query.split("&"):
+            if "=" in pair:
+                key, val = pair.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                # 自动类型转换：int → float → str
+                try:
+                    val = int(val) if "." not in val else float(val)
+                except ValueError:
+                    pass  # 保留字符串
+                params[key] = val
+    return base_path, params
+
+
 class HookType(Enum):
     """Hook 类型"""
 
@@ -654,8 +689,11 @@ class HookWorker(QRunnable):
             if not self.hook.function:
                 return "No function specified", False
 
+            # 解析函数路径中的内联参数（?key=val 语法）
+            clean_function, inline_params = _parse_function_params(self.hook.function)
+
             # 解析函数路径 (module.path:function_name)
-            parts = self.hook.function.rsplit(":", 1)
+            parts = clean_function.rsplit(":", 1)
             if len(parts) != 2:
                 return f"Invalid function path: {self.hook.function}", False
 
@@ -664,7 +702,7 @@ class HookWorker(QRunnable):
             # 相对路径：基于 hooks.json 目录解析
             func = None
             if module_path.startswith(".") and self.hook.config_file:
-                func = HookWorker._import_relative_function(self.hook.function, self.hook.config_file)
+                func = HookWorker._import_relative_function(clean_function, self.hook.config_file)
 
             # 标准路径：importlib.import_module
             if func is None:
@@ -676,8 +714,9 @@ class HookWorker(QRunnable):
             if not callable(func):
                 return f"Function not found: {self.hook.function}", False
 
-            # 执行函数
-            args = self.hook.function_args or {}
+            # 执行函数（合并：内联参数 > function_args > event/context 标准参数）
+            args = dict(inline_params)
+            args.update(self.hook.function_args or {})
             args["event"] = self.event_name
             args["context"] = self.context
 
@@ -716,13 +755,16 @@ class HookManager:
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
 
-    def __init__(self, thread_pool: Optional[QThreadPool] = None):
+    def __init__(self, thread_pool: Optional[QThreadPool] = None, window_id: str = ""):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
         self._hooks: Dict[str, List[HookMatchRule]] = HookManager._shared_hooks
         self._skill_to_hooks: Dict[str, List[tuple[str, int]]] = HookManager._shared_skill_to_hooks
 
         # 线程池
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
+
+        # 窗口标识（用于 per-window 预设隔离）
+        self._window_id: str = window_id
 
         # 完成回调（每个窗口独立）(event_name, output, success, status_message)
         self._on_finished_callback: Optional[Callable[[str, str, bool, str], None]] = None
@@ -747,6 +789,9 @@ class HookManager:
         # 覆写层管理器
         self._override_manager = HookOverrideManager()
 
+        # 预设管理器（每个窗口独立实例，按 window_id 隔离）
+        self._preset_manager = HookPresetManager(window_id=window_id)
+
     def _is_user_custom_hook(self, hook: Hook) -> bool:
         """判断 hook 是否为用户自定义（非 plugin/skill）"""
         return "user-custom" in (hook.config_file or "") or not hook.config_file
@@ -763,6 +808,48 @@ class HookManager:
                     continue  # matcher 属于 Rule 层，不在 Hook dict 中
                 d[key] = val
         return d
+
+    # ── 预设管理 ──
+
+    def get_hook_preset_manager(self) -> "HookPresetManager":
+        """获取预设管理器实例"""
+        return self._preset_manager
+
+    def has_preset(self, name: str) -> bool:
+        """检查预设是否存在"""
+        return self._preset_manager.has_preset(name)
+
+    def get_preset_names(self) -> List[str]:
+        """获取所有预设名称列表"""
+        return self._preset_manager.list_presets()
+
+    def get_current_preset_name(self) -> str:
+        """获取当前预设名称"""
+        return self._preset_manager.get_current_preset_name()
+
+    def create_preset(self, name: str) -> bool:
+        """将当前 hook 状态保存为新预设"""
+        hook_states = HookPresetManager.collect_hook_states(self)
+        agent_identity = HookPresetManager.collect_agent_identity()
+        return self._preset_manager.create_preset(name, hook_states, agent_identity)
+
+    def save_preset(self, name: str) -> bool:
+        """以当前状态覆盖更新已有预设"""
+        hook_states = HookPresetManager.collect_hook_states(self)
+        agent_identity = HookPresetManager.collect_agent_identity()
+        return self._preset_manager.save_current_state_as_preset(name, self, agent_identity)
+
+    def rename_preset(self, old_name: str, new_name: str) -> bool:
+        """重命名预设"""
+        return self._preset_manager.rename_preset(old_name, new_name)
+
+    def delete_preset(self, name: str) -> bool:
+        """删除预设"""
+        return self._preset_manager.delete_preset(name)
+
+    def apply_preset(self, name: str) -> bool:
+        """应用指定预设"""
+        return self._preset_manager.apply_preset(name, self)
 
     def set_on_finished_callback(self, callback: Callable[[str, str, bool, str], None]):
         """设置 Hook 执行完成回调 (event_name, output, success, status_message)"""
@@ -1318,48 +1405,59 @@ class HookManager:
                     if not hook.function:
                         output = "No function specified"
                         success = False
-                    elif hook.function in self._registered_functions:
-                        func = self._registered_functions[hook.function]
-                        args = hook.function_args or {}
-                        args.update({"event": context.get("event_name"), "context": context})
-                        result = func(**args)
-                        output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                        success = True
                     else:
-                        # 尝试解析 Python 函数
-                        try:
-                            parts = hook.function.rsplit(":", 1)
-                            if len(parts) != 2:
-                                output = f"Function not registered (invalid path): {hook.function}"
-                                success = False
-                            else:
-                                module_path, func_name = parts
-                                func = None
+                        # 解析函数路径中的内联参数（?key=val 语法）
+                        clean_function, inline_params = _parse_function_params(hook.function)
 
-                                # 相对路径：基于 hooks.json 目录解析
-                                if module_path.startswith(".") and hook.config_file:
-                                    func = HookWorker._import_relative_function(hook.function, hook.config_file)
-
-                                # 标准路径：importlib.import_module
-                                if func is None:
-                                    import importlib
-
-                                    module = importlib.import_module(module_path)
-                                    func = getattr(module, func_name, None)
-
-                                if not callable(func):
-                                    output = f"Function not found: {hook.function}"
+                        # 注册函数表也用清理后的路径查找
+                        if clean_function in self._registered_functions:
+                            func = self._registered_functions[clean_function]
+                            args = dict(inline_params)
+                            args.update(hook.function_args or {})
+                            args.update({"event": context.get("event_name"), "context": context})
+                            result = func(**args)
+                            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                            success = True
+                        else:
+                            # 尝试解析 Python 函数
+                            try:
+                                parts = clean_function.rsplit(":", 1)
+                                if len(parts) != 2:
+                                    output = f"Function not registered (invalid path): {hook.function}"
                                     success = False
                                 else:
-                                    args = hook.function_args or {}
-                                    args["event"] = context.get("event_name")
-                                    args["context"] = context
-                                    result = func(**args)
-                                    output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                                    success = True
-                        except Exception as e:
-                            output = f"Python hook failed: {str(e)}"
-                            success = False
+                                    module_path, func_name = parts
+                                    func = None
+
+                                    # 相对路径：基于 hooks.json 目录解析
+                                    if module_path.startswith(".") and hook.config_file:
+                                        func = HookWorker._import_relative_function(clean_function, hook.config_file)
+
+                                    # 标准路径：importlib.import_module
+                                    if func is None:
+                                        import importlib
+
+                                        module = importlib.import_module(module_path)
+                                        func = getattr(module, func_name, None)
+
+                                    if not callable(func):
+                                        output = f"Function not found: {hook.function}"
+                                        success = False
+                                    else:
+                                        args = dict(inline_params)
+                                        args.update(hook.function_args or {})
+                                        args["event"] = context.get("event_name")
+                                        args["context"] = context
+                                        result = func(**args)
+                                        output = (
+                                            result
+                                            if isinstance(result, str)
+                                            else json.dumps(result, ensure_ascii=False)
+                                        )
+                                        success = True
+                            except Exception as e:
+                                output = f"Python hook failed: {str(e)}"
+                                success = False
 
                 # 检查决策（支持 JSON decision 和 exit code 2 两种方式）
                 decision = HookDecision.CONTINUE
@@ -1604,8 +1702,6 @@ class HookManager:
         for skill_name, entries in self._skill_to_hooks.items():
             if skill_name == "user-custom":
                 source_type, display_name = "user", "自定义"
-            elif skill_name.startswith("__skill__"):
-                source_type, display_name = "skill", skill_name.replace("__skill__", "")
             else:
                 source_type, display_name = "plugin", skill_name
 
@@ -2115,130 +2211,378 @@ class HookManager:
 
         return count
 
-    def load_hooks_from_skills(self, skills_dir: Path, force: bool = False) -> int:
-        """从 skills_dir 加载 hooks.json 和 SKILL.md
+    # [已移除] 旧技能 hooks 加载路径（load_hooks_from_skills / _load_skill_hooks_from_markdown / _parse_inline_hooks）
+    # 所有 hooks 现在只从插件 hooks/ 目录加载
+
+
+class HookPresetManager:
+    """
+    Hook 预设管理器
+
+    管理不同场景下的 Hook 配置预设（preset）。
+    每个预设只存储 Hook 的开关状态（enabled/disabled）和智能体身份（agent_identity）。
+    不存储 Hook 的内容（command/prompt/function 等），这些由 hooks.json 定义。
+
+    存储位置: ~/.drifox/plugins/user-custom/hooks/hook_presets.json
+
+    格式:
+    {
+        "current": "coding",           # 全局默认预设（新窗口使用）
+        "per_window": {                # 各窗口独立选择的预设（窗口ID → 预设名）
+            "a1b2c3d4": "coding",
+            "e5f6g7h8": "writing"
+        },
+        "presets": {
+            "coding": {
+                "name": "编码模式",
+                "hook_states": {
+                    "builtin_global_contract": true,
+                    "builtin_inject_skills": false,
+                    ...
+                },
+                "agent_identity": "build"
+            }
+        }
+    }
+    """
+
+    PRESETS_FILE = "hook_presets.json"
+
+    # 预留的默认预设名称
+    DEFAULT_PRESET = "default"
+
+    def __init__(self, window_id: str = ""):
+        self._storage_path: Optional[str] = None
+        self._data: Dict[str, Any] = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
+        self._window_id: str = window_id
+        self._init_storage_path()
+
+    def _init_storage_path(self):
+        """初始化存储路径（与 HookOverrideManager 保持一致）"""
+        from app.utils.utils import get_app_data_dir
+
+        storage_dir = get_app_data_dir() / "plugins" / "user-custom" / "hooks"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        self._storage_path = str(storage_dir / self.PRESETS_FILE)
+        self._load()
+
+    def _load(self):
+        """从文件加载预设配置"""
+        if not self._storage_path or not os.path.exists(self._storage_path):
+            # 文件不存在时初始化默认预设
+            self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
+            return
+        try:
+            with open(self._storage_path, "r", encoding="utf-8") as f:
+                self._data = json.load(f)
+            # 兼容旧格式：若缺少 per_window 字段，自动补全
+            if "per_window" not in self._data:
+                self._data["per_window"] = {}
+            logger.debug(f"[HookPresetManager] Loaded {len(self._data.get('presets', {}))} presets")
+        except Exception as e:
+            logger.error(f"[HookPresetManager] Failed to load presets: {e}")
+            self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
+
+    def _save(self):
+        """保存预设配置到文件"""
+        if not self._storage_path:
+            return
+        try:
+            with open(self._storage_path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2, ensure_ascii=False)
+            logger.debug(f"[HookPresetManager] Saved {len(self._data.get('presets', {}))} presets")
+        except Exception as e:
+            logger.error(f"[HookPresetManager] Failed to save presets: {e}")
+
+    def reload(self):
+        """从文件重新加载（用于多窗口同步）"""
+        self._load()
+
+    # ── 查询方法 ──
+
+    def list_presets(self) -> List[str]:
+        """返回所有预设名称列表"""
+        return list(self._data.get("presets", {}).keys())
+
+    def get_current_preset_name(self) -> str:
+        """获取当前窗口激活的预设名称
+
+        优先返回 per_window 中当前窗口的记录，
+        若无窗口级记录则返回全局默认 current。
+        """
+        if self._window_id:
+            per_window = self._data.get("per_window", {})
+            win_preset = per_window.get(self._window_id)
+            if win_preset and win_preset in self._data.get("presets", {}):
+                return win_preset
+        return self._data.get("current", self.DEFAULT_PRESET)
+
+    def get_preset(self, name: str) -> Optional[dict]:
+        """获取指定预设的数据"""
+        return self._data.get("presets", {}).get(name)
+
+    def has_preset(self, name: str) -> bool:
+        """检查预设是否存在"""
+        return name in self._data.get("presets", {})
+
+    # ── 预设管理 ──
+
+    def create_preset(self, name: str, hook_states: Dict[str, bool], agent_identity: str = "") -> bool:
+        """
+        创建新预设
 
         Args:
-            skills_dir: skills 根目录
-            force: 为 True 时强制重新加载（reload_agents 时调用）
+            name: 预设名称（用于 UI 显示和标识）
+            hook_states: hook_id -> enabled 的映射
+            agent_identity: 智能体身份（用于 inject_agent_identity hook）
+
+        Returns:
+            是否成功
         """
-        count = 0
-        if not skills_dir.exists():
-            return count
+        presets = self._data.setdefault("presets", {})
+        if name in presets:
+            logger.warning(f"[HookPresetManager] Preset '{name}' already exists")
+            return False
+        if not name.strip():
+            return False
 
-        # reload_agents 时 force=True，全量重新加载
-        if force:
-            # 先注销该 skills 目录下的所有 hooks
-            for skill_dir in skills_dir.iterdir():
-                if not skill_dir.is_dir():
-                    continue
-                # 使用 __skill__ 前缀命名空间，避免与同名的插件 hooks 冲突
-                # 例如插件 evolver 注册 skill_name="evolver"
-                # 而技能 evolver 注册 skill_name="__skill__evolver"
-                self.unregister_skill_hooks(f"__skill__{skill_dir.name}")
+        presets[name] = {
+            "name": name,
+            "hook_states": dict(hook_states),
+            "agent_identity": agent_identity or "",
+        }
 
-        for skill_dir in skills_dir.iterdir():
-            if not skill_dir.is_dir():
+        # 如果还没有当前预设，设置为这个
+        if not self._data.get("current"):
+            self._data["current"] = name
+
+        self._save()
+        logger.info(f"[HookPresetManager] Created preset '{name}' with {len(hook_states)} hook states")
+        return True
+
+    def rename_preset(self, old_name: str, new_name: str) -> bool:
+        """重命名预设"""
+        presets = self._data.get("presets", {})
+        if old_name not in presets:
+            return False
+        if new_name in presets:
+            return False
+        if not new_name.strip():
+            return False
+
+        presets[new_name] = presets.pop(old_name)
+        presets[new_name]["name"] = new_name
+
+        # 如果重命名的是当前预设，同步更新
+        if self._data.get("current") == old_name:
+            self._data["current"] = new_name
+        # 同步更新 per_window 中的引用（所有窗口）
+        per_window = self._data.get("per_window", {})
+        for wid, preset_name in list(per_window.items()):
+            if preset_name == old_name:
+                per_window[wid] = new_name
+
+        self._save()
+        return True
+
+    def delete_preset(self, name: str) -> bool:
+        """删除预设"""
+        presets = self._data.get("presets", {})
+        if name not in presets:
+            return False
+
+        del presets[name]
+
+        # 如果删除了当前预设，切换到第一个可用的
+        if self._data.get("current") == name:
+            available = list(presets.keys())
+            self._data["current"] = available[0] if available else self.DEFAULT_PRESET
+        # 清理 per_window 中对已删除预设的引用（所有窗口）
+        per_window = self._data.get("per_window", {})
+        for wid, preset_name in list(per_window.items()):
+            if preset_name == name or preset_name not in presets:
+                del per_window[wid]
+
+        self._save()
+        return True
+
+    def set_current_preset(self, name: str) -> bool:
+        """设置当前窗口激活的预设（不实际应用，只记录）
+
+        如果有 window_id，记录到 per_window；
+        同时更新全局 current 作为新窗口的默认值。
+        """
+        presets = self._data.get("presets", {})
+        if name not in presets:
+            return False
+        # 始终更新全局 current（新窗口以此为默认值）
+        self._data["current"] = name
+        # 如果有 window_id，记录到 per_window
+        if self._window_id:
+            per_window = self._data.setdefault("per_window", {})
+            per_window[self._window_id] = name
+        self._save()
+        return True
+
+    # ── 状态采集与应用 ──
+
+    @staticmethod
+    def collect_hook_states(hook_manager: "HookManager") -> Dict[str, bool]:
+        """
+        从 HookManager 收集所有 hook 的当前开关状态
+
+        Args:
+            hook_manager: HookManager 实例
+
+        Returns:
+            {hook_id: enabled, ...}
+        """
+        states: Dict[str, bool] = {}
+        for event_name, rules in hook_manager._hooks.items():
+            for rule in rules:
+                for hook in rule.hooks:
+                    hook_id = hook.id
+                    if not hook_id:
+                        continue
+                    # 使用覆写层判断有效 enabled 状态
+                    if hook_manager._is_user_custom_hook(hook):
+                        states[hook_id] = hook.enabled
+                    else:
+                        effective = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
+                        states[hook_id] = effective
+        return states
+
+    @staticmethod
+    def collect_agent_identity() -> str:
+        """收集当前设置的 agent_identity（从 Settings 读取）"""
+        try:
+            from app.utils.config import Settings
+
+            return Settings.get_instance().llm_primary_agent.value or ""
+        except Exception:
+            return ""
+
+    def save_current_state_as_preset(self, name: str, hook_manager: "HookManager", agent_identity: str = None) -> bool:
+        """
+        将当前状态保存为预设（如果已存在则覆盖）
+
+        Args:
+            name: 预设名称
+            hook_manager: HookManager 实例
+            agent_identity: 智能体身份，None 则从 Settings 自动读取
+
+        Returns:
+            是否成功
+        """
+        hook_states = self.collect_hook_states(hook_manager)
+        if agent_identity is None:
+            agent_identity = self.collect_agent_identity()
+
+        presets = self._data.setdefault("presets", {})
+        presets[name] = {
+            "name": name,
+            "hook_states": hook_states,
+            "agent_identity": agent_identity or "",
+        }
+
+        # 如果是覆盖保存且当前没有预设指向它，自动设为当前
+        self._data["current"] = name
+        if self._window_id:
+            per_window = self._data.setdefault("per_window", {})
+            per_window[self._window_id] = name
+        self._save()
+        logger.info(f"[HookPresetManager] Saved current state as preset '{name}' ({len(hook_states)} hooks)")
+        return True
+
+    def apply_preset(self, name: str, hook_manager: "HookManager") -> bool:
+        """
+        应用指定预设到 HookManager
+
+        遍历 preset 中的 hook_states，对每个 hook_id 调用 toggle_hook_by_id。
+        如果 preset 中有 agent_identity，更新 Settings.llm_primary_agent。
+
+        Args:
+            name: 预设名称
+            hook_manager: HookManager 实例
+
+        Returns:
+            是否成功
+        """
+        presets = self._data.get("presets", {})
+        if name not in presets:
+            logger.warning(f"[HookPresetManager] Preset '{name}' not found")
+            return False
+
+        preset = presets[name]
+        hook_states = preset.get("hook_states", {})
+        agent_identity = preset.get("agent_identity", "")
+
+        # 1. 先快速统计需要变更的 hook 数量
+        to_toggle = 0
+        for hook_id, target_enabled in hook_states.items():
+            result = hook_manager._find_hook_by_id(hook_id)
+            if result is None:
                 continue
-            # 使用 __skill__ 前缀，避免与插件 hooks 共享同一 skill_name
-            skill_name = f"__skill__{skill_dir.name}"
-
-            # 加载 hooks.json
-            hooks_file = skill_dir / "hooks" / "hooks.json"
-            if hooks_file.exists():
-                try:
-                    with open(hooks_file, "r", encoding="utf-8") as f:
-                        config = json.load(f)
-                    n = self.register_hooks_from_json(skill_name, str(skill_dir.absolute()), config, str(hooks_file))
-                    count += n
-                    if n > 0:
-                        logger.info(f"[HookManager] Loaded {n} hooks from skill {skill_name}")
-                except Exception as e:
-                    logger.error(f"[HookManager] Failed to load hooks from skill {hooks_file}: {e}")
-
-            # 加载 SKILL.md 中的 frontmatter hooks
-            skill_md = skill_dir / "SKILL.md"
-            if skill_md.exists():
-                try:
-                    n = self._load_skill_hooks_from_markdown(skill_dir, skill_md)
-                    count += n
-                except Exception as e:
-                    logger.error(f"[HookManager] Failed to load hooks from SKILL.md {skill_md}: {e}")
-
-        return count
-
-    def _load_skill_hooks_from_markdown(self, skill_dir: Path, md_file: Path) -> int:
-        """从 SKILL.md frontmatter 加载 hooks 配置"""
-        import re
-
-        content = md_file.read_text(encoding="utf-8")
-
-        # 解析 frontmatter
-        if not content.startswith("---"):
-            return 0
-
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return 0
-
-        body = parts[2]
-        # 使用 __skill__ 前缀，与 load_hooks_from_skills 保持一致
-        skill_name = f"__skill__{skill_dir.name}"
-
-        # 查找 <hooks> 块
-        hooks_pattern = r"<hooks>(.*?)</hooks>"
-        hooks_match = re.search(hooks_pattern, body, re.DOTALL)
-
-        if not hooks_match:
-            return 0
-
-        hooks_text = hooks_match.group(1).strip()
-        config = self._parse_inline_hooks(hooks_text)
-
-        if config.get("hooks"):
-            n = self.register_hooks_from_json(skill_name, str(skill_dir.absolute()), config, str(md_file))
-            if n > 0:
-                logger.info(f"[HookManager] Loaded {n} hooks from SKILL.md of {skill_name}")
-            return n
-        return 0
-
-    def _parse_inline_hooks(self, hooks_text: str) -> dict:
-        """解析内联 hooks 文本格式"""
-
-        config = {"hooks": {}}
-        current_event = None
-        current_rules = []
-
-        for line in hooks_text.split("\n"):
-            line = line.rstrip()
-            if not line:
-                continue
-
-            # 检查是否是事件名行（不以空格开头）
-            if line and not line[0].isspace():
-                # 保存上一个事件的 hooks
-                if current_event:
-                    config["hooks"][current_event] = current_rules
-
-                current_event = line.strip()
-                current_rules = []
+            _, _, _, hook = result
+            if hook_manager._is_user_custom_hook(hook):
+                current = hook.enabled
             else:
-                # 是 hook 规则行
-                if current_event is None:
-                    continue
+                current = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
+            if current != target_enabled:
+                to_toggle += 1
 
-                # 解析简化的 hook 格式
-                hook_data = {}
-                parts = line.strip().lstrip("- ")
-                if ":" in parts:
-                    key, value = parts.split(":", 1)
-                    hook_data[key.strip()] = value.strip()
+        logger.info(
+            f"[HookPresetManager] Applying preset '{name}': {to_toggle} hooks to change out of {len(hook_states)}"
+        )
 
-                if hook_data:
-                    current_rules.append(hook_data)
+        # 2. 逐个切换 hook 状态
+        changed_count = 0
+        for hook_id, target_enabled in hook_states.items():
+            result = hook_manager._find_hook_by_id(hook_id)
+            if result is None:
+                continue
+            _, _, _, hook = result
+            if hook_manager._is_user_custom_hook(hook):
+                current = hook.enabled
+            else:
+                current = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
+            if current != target_enabled:
+                hook_manager.toggle_hook_by_id(hook_id, target_enabled)
+                changed_count += 1
 
-        # 保存最后一个事件
-        if current_event:
-            config["hooks"][current_event] = current_rules
+        # 3. 应用 agent_identity（如果预设中有设置）
+        if agent_identity:
+            try:
+                from app.utils.config import Settings
 
-        return config
+                current_agent = Settings.get_instance().llm_primary_agent.value
+                if current_agent != agent_identity:
+                    Settings.get_instance().llm_primary_agent.value = agent_identity
+                    logger.info(f"[HookPresetManager] Switched agent identity to '{agent_identity}'")
+
+                # 同时更新 inject_agent_identity hook 的 agent 字段（覆写层）
+                # 让 hook 数据中也持有正确的 agent 值，编辑卡片打开时能正确显示
+                hook_result = hook_manager._find_hook_by_id("builtin_inject_agent_identity")
+                if hook_result:
+                    _, _, _, hook_obj = hook_result
+                    if not hook_manager._is_user_custom_hook(hook_obj):
+                        hook_manager._override_manager.set_hook_overrides(
+                            "builtin_inject_agent_identity", {"agent": agent_identity}
+                        )
+            except Exception as e:
+                logger.warning(f"[HookPresetManager] Failed to set agent identity: {e}")
+
+        # 4. 更新当前预设记录（per-window + 全局默认）
+        self._data["current"] = name
+        if self._window_id:
+            per_window = self._data.setdefault("per_window", {})
+            per_window[self._window_id] = name
+        self._save()
+
+        logger.info(f"[HookPresetManager] Applied preset '{name}': toggled {changed_count} hooks")
+        return True
+
+    def get_current_preset_data(self) -> Optional[dict]:
+        """获取当前预设的完整数据"""
+        current = self.get_current_preset_name()
+        return self.get_preset(current)

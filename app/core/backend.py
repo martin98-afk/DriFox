@@ -15,6 +15,9 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
+# Auto-compact 防重复触发冷却（秒）
+_AUTO_COMPACT_COOLDOWN = 30.0
+
 from app.core.agent import AgentManager
 from app.core.chat_session import ChatSession, SessionManager
 from app.core.engines.ui import ChatEngine
@@ -83,7 +86,7 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     外层: <system-reminder>...</system-reminder>
     内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
 
-    当传入 status_message 时，在 <system-reminder> 和 <xxx-hook> 之间插入 <status> 标签。
+    当传入 status_message 时，在 <system-reminder> 和 <xxx-hook> 之间以纯文本形式插入状态描述。
 
     与 Claude Code 实际格式对齐：
     - <system-reminder> 是 Claude Code 通用系统注入容器
@@ -93,7 +96,7 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     tag = _event_to_tag(event_name)
     parts = ["<system-reminder>"]
     if status_message:
-        parts.append(f"<status>{status_message}</status>")
+        parts.append(status_message)
     parts.append(f"<{tag}-hook>")
     parts.append(output)
     parts.append(f"</{tag}-hook>")
@@ -190,6 +193,9 @@ class ChatBackend(QObject):
     # 上下文
     context_updated = pyqtSignal(int, int)  # token_count, limit
 
+    # Auto-compact 请求（由 tool_executor 在 PostToolUse hook 中检测阈值触发）
+    auto_compact_requested = pyqtSignal(float)  # ratio
+
     # Gateway 状态
     gateway_status_changed = pyqtSignal(dict)  # status dict
 
@@ -208,8 +214,11 @@ class ChatBackend(QObject):
     # _watch_loop 检测到新插件时，用此 sentinel 作为 plugin_name 标记走增量加载路径
     _NEW_PLUGIN_SENTINEL = "__NEW__"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, window_id: str = ""):
         super().__init__(parent)
+
+        # 窗口标识（用于 per-window 隔离，如 hook 预设）
+        self._window_id: str = window_id
 
         # 核心组件（后端自己创建）
         self._session_manager: Optional[SessionManager] = None
@@ -240,6 +249,9 @@ class ChatBackend(QObject):
         self._gateway_engine: Optional[GatewayEngine] = None
         self._gateway_initialized = False
 
+        # Auto-compact 防重复触发时间戳
+        self._last_auto_compact_time = 0.0
+
     # ========== 属性访问 ==========
 
     @property
@@ -258,6 +270,28 @@ class ChatBackend(QObject):
     def set_tool_permission_controller(self, controller):
         """注入 per-window 工具权限控制器(必须在 initialize 之前调用)"""
         self._tool_permission_controller = controller
+
+    def request_auto_compact(self, ratio: float):
+        """请求自动上下文压缩（带冷却防抖）
+
+        tool_executor 的 PostToolUse hook 检测到上下文使用比例超过阈值时，
+        调用此方法发射 auto_compact_requested 信号。
+        主窗口收到信号后触发 /compact --clear。
+
+        Args:
+            ratio: 当前 token 使用比例 (0.0 ~ 1.0)
+        """
+        now = time.time()
+        if now - self._last_auto_compact_time < _AUTO_COMPACT_COOLDOWN:
+            logger.info(
+                f"[ChatBackend] Auto-compact 触发被冷却抑制 "
+                f"(ratio={ratio:.1%}, 距上次={now - self._last_auto_compact_time:.0f}s)"
+            )
+            return
+        self._last_auto_compact_time = now
+
+        logger.info(f"[ChatBackend] Auto-compact 触发 (ratio={ratio:.1%})")
+        self.auto_compact_requested.emit(ratio)
 
     @property
     def chat_engine(self) -> ChatEngine:
@@ -324,7 +358,7 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] MemoryManager 创建完成")
 
         # 3. 创建 HookManager（必须在 create_session 之前）
-        self._hook_manager = HookManager(self._thread_pool)
+        self._hook_manager = HookManager(self._thread_pool, window_id=self._window_id)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 

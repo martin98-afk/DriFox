@@ -75,10 +75,10 @@ def _make_row(label_text: str, widget: QWidget, label_width: int = 70) -> QHBoxL
     return row, label
 
 
-
 # ═══════════════════════════════════════════════════════════
 # MCPEditCard — 添加/编辑 MCP Server 的表单卡片
 # ═══════════════════════════════════════════════════════════
+
 
 class MCPEditCard(QWidget):
     """MCP Server 编辑卡片 — 承载在 BaseSettingsCard 中
@@ -124,11 +124,7 @@ class MCPEditCard(QWidget):
         if server_type != "stdio":
             data["type"] = server_type
         # 组装 mcpServers 格式
-        result = {
-            "mcpServers": {
-                name: data
-            }
-        }
+        result = {"mcpServers": {name: data}}
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     # 模式切换信号（通知外层更新头部按钮）
@@ -223,24 +219,24 @@ class MCPEditCard(QWidget):
         self.jsonEdit = QPlainTextEdit()
         self.jsonEdit.setStyleSheet(EDIT_CARD_STYLE)
         self.jsonEdit.setPlaceholderText(
-            '粘贴标准 MCP 配置（支持两种格式）:\n\n'
-            '【格式一】Claude Desktop / Cursor 标准格式:\n'
-            '{\n'
+            "粘贴标准 MCP 配置（支持两种格式）:\n\n"
+            "【格式一】Claude Desktop / Cursor 标准格式:\n"
+            "{\n"
             '  "mcpServers": {\n'
             '    "brave-search": {\n'
             '      "command": "npx",\n'
             '      "args": ["-y", "@brave/brave-search-mcp-server"],\n'
             '      "env": {"BRAVE_API_KEY": "xxx"}\n'
-            '    }\n'
-            '  }\n'
-            '}\n\n'
-            '【格式二】简化单服务器格式:\n'
-            '{\n'
+            "    }\n"
+            "  }\n"
+            "}\n\n"
+            "【格式二】简化单服务器格式:\n"
+            "{\n"
             '  "name": "my-server",\n'
             '  "command": "npx",\n'
             '  "args": ["-y", "some-package"],\n'
             '  "env": {"KEY": "value"}\n'
-            '}\n\n'
+            "}\n\n"
             '💡 提示: args 含 "--transport http/sse" 时，系统会自动设置连接类型为 http'
         )
         json_data = self._build_json_from_data() if self._server_data else ""
@@ -273,9 +269,13 @@ class MCPEditCard(QWidget):
                     parsed = self._parse_mcp_json(parsed)
                     self._apply_json_to_form(parsed)
                 except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
-                    InfoBar.warning("提示", f"JSON 解析失败: {e}，无法切换回表单模式",
-                                    parent=self.window(), duration=3000,
-                                    position=InfoBarPosition.BOTTOM)
+                    InfoBar.warning(
+                        "提示",
+                        f"JSON 解析失败: {e}，无法切换回表单模式",
+                        parent=self.window(),
+                        duration=3000,
+                        position=InfoBarPosition.BOTTOM,
+                    )
                     self._json_mode = True  # 保持 JSON 模式
                     self._stack.setCurrentIndex(1)
                     return
@@ -360,8 +360,7 @@ class MCPEditCard(QWidget):
         if "type" not in data:
             args = data.get("args", [])
             has_http_transport = any(
-                isinstance(a, str) and "--transport" in a and
-                i + 1 < len(args) and args[i + 1] in ("http", "sse")
+                isinstance(a, str) and "--transport" in a and i + 1 < len(args) and args[i + 1] in ("http", "sse")
                 for i, a in enumerate(args)
             )
             if has_http_transport:
@@ -418,14 +417,16 @@ class MCPEditCard(QWidget):
             # JSON 模式：支持标准 mcpServers 格式和简化格式
             json_text = self.jsonEdit.toPlainText().strip()
             if not json_text:
-                InfoBar.warning("提示", "请输入 JSON 配置", parent=self.window(),
-                                duration=2000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "提示", "请输入 JSON 配置", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+                )
                 return
             try:
                 parsed = json.loads(json_text)
             except json.JSONDecodeError as e:
-                InfoBar.warning("提示", f"JSON 格式错误: {e}", parent=self.window(),
-                                duration=3000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "提示", f"JSON 格式错误: {e}", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+                )
                 return
             try:
                 server_data = self._parse_mcp_json(parsed)
@@ -433,8 +434,9 @@ class MCPEditCard(QWidget):
                 if self._original_name:
                     server_data["_source"] = self._original_name
             except (ValueError, KeyError, TypeError) as e:
-                InfoBar.warning("提示", f"配置解析失败: {e}", parent=self.window(),
-                                duration=3000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "提示", f"配置解析失败: {e}", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+                )
                 return
             self.saved.emit(server_data)
             return
@@ -442,8 +444,9 @@ class MCPEditCard(QWidget):
         # 表单模式
         name = self.nameEdit.text().strip()
         if not name:
-            InfoBar.warning("提示", "请输入服务器名称", parent=self.window(),
-                            duration=2000, position=InfoBarPosition.BOTTOM)
+            InfoBar.warning(
+                "提示", "请输入服务器名称", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+            )
             return
 
         server_type = self.typeCombo.currentText()
@@ -456,8 +459,9 @@ class MCPEditCard(QWidget):
         if server_type == "stdio":
             cmd = self.commandEdit.text().strip()
             if not cmd:
-                InfoBar.warning("提示", "请输入 Command", parent=self.window(),
-                                duration=2000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "提示", "请输入 Command", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+                )
                 return
             server_data["command"] = cmd
             args_text = self.argsEdit.text().strip()
@@ -468,14 +472,20 @@ class MCPEditCard(QWidget):
                 try:
                     server_data["env"] = json.loads(env_text)
                 except json.JSONDecodeError as e:
-                    InfoBar.warning("提示", f"环境变量 JSON 格式错误: {e}", parent=self.window(),
-                                    duration=3000, position=InfoBarPosition.BOTTOM)
+                    InfoBar.warning(
+                        "提示",
+                        f"环境变量 JSON 格式错误: {e}",
+                        parent=self.window(),
+                        duration=3000,
+                        position=InfoBarPosition.BOTTOM,
+                    )
                     return
         else:
             url = self.urlEdit.text().strip()
             if not url:
-                InfoBar.warning("提示", "请输入 URL", parent=self.window(),
-                                duration=2000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "提示", "请输入 URL", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+                )
                 return
             server_data["url"] = url
             headers_text = self.headersEdit.toPlainText().strip()
@@ -483,8 +493,13 @@ class MCPEditCard(QWidget):
                 try:
                     server_data["headers"] = json.loads(headers_text)
                 except json.JSONDecodeError as e:
-                    InfoBar.warning("提示", f"Headers JSON 格式错误: {e}", parent=self.window(),
-                                    duration=3000, position=InfoBarPosition.BOTTOM)
+                    InfoBar.warning(
+                        "提示",
+                        f"Headers JSON 格式错误: {e}",
+                        parent=self.window(),
+                        duration=3000,
+                        position=InfoBarPosition.BOTTOM,
+                    )
                     return
             else:
                 server_data["headers"] = {}
@@ -499,6 +514,7 @@ class MCPEditCard(QWidget):
 # ═══════════════════════════════════════════════════════════
 # MCPServerRow — 列表中的单行
 # ═══════════════════════════════════════════════════════════
+
 
 class MCPServerRow(CardWidget):
     """单行 MCP Server 显示"""
@@ -528,24 +544,28 @@ class MCPServerRow(CardWidget):
         if busy:
             self._status_dot.setText("●")
             self._status_dot.setStyleSheet(
-                f"color: #f59e0b; font-size: {scale_font_size(16)}px; "
-                f"background: transparent; padding: 0;"
+                f"color: #f59e0b; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("正在连接/断开中...")
         elif connected:
             self._status_dot.setText("●")
             self._status_dot.setStyleSheet(
-                f"color: #22c55e; font-size: {scale_font_size(16)}px; "
-                f"background: transparent; padding: 0;"
+                f"color: #22c55e; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("已连接")
         else:
             self._status_dot.setText("●")
             self._status_dot.setStyleSheet(
-                f"color: #6b7280; font-size: {scale_font_size(16)}px; "
-                f"background: transparent; padding: 0;"
+                f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
             )
             self._status_dot.setToolTip("未连接")
+
+    def refresh_style(self):
+        """主题变更时刷新命令描述文字颜色"""
+        Colors.refresh()
+        self._desc_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+        )
 
     def _setup_ui(self, data: dict):
         layout = QHBoxLayout(self)
@@ -558,8 +578,7 @@ class MCPServerRow(CardWidget):
         self._status_dot.setAlignment(Qt.AlignCenter)
         self._status_dot.setToolTip("未连接")
         self._status_dot.setStyleSheet(
-            f"color: #6b7280; font-size: {scale_font_size(16)}px; "
-            f"background: transparent; padding: 0;"
+            f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
         )
         layout.addWidget(self._status_dot)
 
@@ -571,10 +590,12 @@ class MCPServerRow(CardWidget):
             desc = f"{data.get('command', '')} {' '.join(data.get('args', []))}".strip()
         else:
             desc = data.get("url", "")
-        desc_label = _ElidedLabel(desc)
-        desc_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;")
-        desc_label.setMinimumWidth(40)
-        layout.addWidget(desc_label, 1)
+        self._desc_label = _ElidedLabel(desc)
+        self._desc_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+        )
+        self._desc_label.setMinimumWidth(40)
+        layout.addWidget(self._desc_label, 1)
 
         self.switch = SwitchButton()
         SwitchStyles.configure(self.switch)
@@ -598,6 +619,7 @@ class MCPServerRow(CardWidget):
 # ═══════════════════════════════════════════════════════════
 # MCPListSettingCard — MCP Server 列表设置卡片
 # ═══════════════════════════════════════════════════════════
+
 
 class MCPListSettingCard(ExpandSettingCard):
     """MCP Server 管理设置卡片"""
@@ -643,6 +665,7 @@ class MCPListSettingCard(ExpandSettingCard):
     def _get_pm(self):
         """获取 PluginManager 实例"""
         from app.core.plugin_manager import PluginManager
+
         return PluginManager.get_instance()
 
     def _get_servers(self) -> list:
@@ -654,6 +677,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _get_mcp_manager(self):
         from app.tools.mcp_tools import MCPClientManager
+
         return MCPClientManager.get_instance()
 
     def _setup_ui(self):
@@ -677,7 +701,7 @@ class MCPListSettingCard(ExpandSettingCard):
     def _update_button_position(self):
         """将 addButton + globalSwitch 移到卡片头部 expandButton 左侧"""
         card = self.card
-        if not hasattr(card, 'hBoxLayout'):
+        if not hasattr(card, "hBoxLayout"):
             return
         # 先从原始位置移除
         card.hBoxLayout.removeWidget(self.addButton)
@@ -856,7 +880,9 @@ class MCPListSettingCard(ExpandSettingCard):
         servers = self._get_servers()
         if not servers:
             empty_label = QLabel("暂无 MCP 服务器，点击「添加服务器」创建", self.view)
-            empty_label.setStyleSheet(f"color: #888; padding: 16px; {get_font_family_css()} font-size: {scale_font_size(12)}px;")
+            empty_label.setStyleSheet(
+                f"color: #888; padding: 16px; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+            )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
         else:
@@ -870,6 +896,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
         # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确
         from PyQt5.QtCore import QCoreApplication
+
         QCoreApplication.processEvents()
         self.viewLayout.activate()
         self.view.updateGeometry()
@@ -894,9 +921,19 @@ class MCPListSettingCard(ExpandSettingCard):
         # 否则会回退到 qfluentwidgets 默认的 14px 硬编码字体
         apply_font_size_to_widget(self, 14)
 
+    def refresh_style(self):
+        """主题变更时刷新所有行的命令描述颜色"""
+        Colors.refresh()
+        for row in self._server_rows.values():
+            if row is not None and hasattr(row, "refresh_style"):
+                try:
+                    row.refresh_style()
+                except RuntimeError:
+                    pass
+
     def setCount(self, text: str):
         card = self.card
-        if hasattr(card, 'contentLabel'):
+        if hasattr(card, "contentLabel"):
             card.contentLabel.setText(text)
 
     def _save_servers(self, servers: list):
@@ -908,6 +945,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_remove_server(self, name: str):
         from qfluentwidgets import Dialog
+
         w = Dialog("确定要删除这个 MCP 服务器吗?", f'删除 "{name}" 后将不再出现在列表中。', self.window())
         w.yesSignal.connect(lambda: self._do_remove(name))
         w.exec_()
@@ -1019,12 +1057,18 @@ class MCPListSettingCard(ExpandSettingCard):
     def add_server(self, server_data: dict):
         """添加 MCP 服务器（保留兼容，实际由 PluginManager 管理）"""
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
         name = server_data.get("name", "")
         servers = self._get_servers()
         if any(s.get("name") == name for s in servers):
-            InfoBar.warning(title="名称重复", content=f"MCP Server '{name}' 已存在",
-                            position=InfoBarPosition.BOTTOM, duration=3000, parent=self.window())
+            InfoBar.warning(
+                title="名称重复",
+                content=f"MCP Server '{name}' 已存在",
+                position=InfoBarPosition.BOTTOM,
+                duration=3000,
+                parent=self.window(),
+            )
             return False
         pm.add_mcp_server(name, server_data)
         self._refresh()
@@ -1036,6 +1080,7 @@ class MCPListSettingCard(ExpandSettingCard):
     def update_server(self, name: str, server_data: dict):
         """更新 MCP 服务器配置（实际由 PluginManager 管理）"""
         from app.core.plugin_manager import PluginManager
+
         pm = PluginManager.get_instance()
         pm.update_mcp_server(name, server_data)
         self._refresh()

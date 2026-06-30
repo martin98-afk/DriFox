@@ -10,14 +10,15 @@
 
 使用方式：
     compactor = HistoryCompactor(get_model_config, agent_manager)
-    
+
     # 判断是否需要压缩
     if compactor.should_compact(messages, budget):
         compressed, state, cache = compactor.compact(messages, budget)
-        
+
     # 获取当前使用情况
     usage = compactor.get_usage(messages, budget)
 """
+
 import hashlib
 import re
 from datetime import datetime
@@ -78,12 +79,13 @@ _IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
 # 完整移植了工具预剪枝、去重、图片处理逻辑
 # ----------------------------------------------------------------------------
 
+
 def _content_length_for_budget(raw_content: Any) -> int:
     """
     Return the effective char-length of a message's content for token budgeting.
     完整复刻自 Hermes Agent
-    
-    Plain strings: ``len(content)``. Multimodal lists: sum of text-part ``len(text)`` 
+
+    Plain strings: ``len(content)``. Multimodal lists: sum of text-part ``len(text)``
     plus a flat ``_IMAGE_CHAR_EQUIVALENT`` per image part.
     """
     if isinstance(raw_content, str):
@@ -135,10 +137,12 @@ def _strip_images_from_content(content: Any) -> Any:
     new_parts: List[Any] = []
     for p in content:
         if _is_image_part(p):
-            new_parts.append({
-                "type": "text",
-                "text": "[Attached image — stripped after compression]",
-            })
+            new_parts.append(
+                {
+                    "type": "text",
+                    "text": "[Attached image — stripped after compression]",
+                }
+            )
         else:
             new_parts.append(p)
     return new_parts
@@ -148,7 +152,7 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
     """
     Replace image parts in older messages with placeholder text.
     完整复刻自 Hermes Agent
-    
+
     The anchor is the *last* user message that has any image content.
     Every message before that anchor gets its image parts replaced with a short placeholder
     so the outgoing request stops re-shipping the same multi-MB base-64 image blobs on every turn.
@@ -189,12 +193,12 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
 
 def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     """
-    Shrink long string values inside a tool-call arguments JSON blob 
+    Shrink long string values inside a tool-call arguments JSON blob
     while preserving JSON validity.
     完整复刻自 Hermes Agent
-    
-    This helper parses the arguments, shrinks long string leaves inside 
-    the parsed structure, and re-serialises. If the arguments are not valid 
+
+    This helper parses the arguments, shrinks long string leaves inside
+    the parsed structure, and re-serialises. If the arguments are not valid
     JSON to begin with, the original string is returned unchanged.
     """
     try:
@@ -215,16 +219,16 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
 
     shrunken = _shrink(parsed)
     # ensure_ascii=False preserves CJK/emoji instead of bloating with \uXXXX
-    return json.dumps(shrunken).decode('utf-8')
+    return json.dumps(shrunken).decode("utf-8")
 
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """
     Create an informative 1-line summary of a tool call + result.
     完整复刻自 Hermes Agent
-    
-    Used during the pre-compression pruning pass to replace large tool outputs 
-    with a short but useful description of what the tool did, rather than 
+
+    Used during the pre-compression pruning pass to replace large tool outputs
+    with a short but useful description of what the tool did, rather than
     a generic placeholder that carries zero information.
     """
     try:
@@ -247,8 +251,8 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
 
     if tool_name in ("read", "read_file", "Read"):
         path = args.get("path", "?")
-        offset = args.get("offset", 1)
-        return f"[{tool_name}] read {path} from line {offset} ({content_len:,} chars)"
+        startline = args.get("startline", 1)
+        return f"[{tool_name}] read {path} from line {startline} ({content_len:,} chars)"
 
     if tool_name in ("write", "write_file", "Write", "edit"):
         path = args.get("path", "?")
@@ -263,8 +267,15 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         count = match_count.group(1) if match_count else "?"
         return f"[{tool_name}] {target} search for '{pattern}' in {path} -> {count} matches"
 
-    if tool_name in ("browser_navigate", "browser_click", "browser_snapshot",
-                     "browser_type", "browser_scroll", "browser_vision", "web"):
+    if tool_name in (
+        "browser_navigate",
+        "browser_click",
+        "browser_snapshot",
+        "browser_type",
+        "browser_scroll",
+        "browser_vision",
+        "web",
+    ):
         url = args.get("url", "")
         ref = args.get("ref", "")
         detail = f" {url}" if url else (f" ref={ref}" if ref else "")
@@ -334,7 +345,7 @@ def _safe_token_count(
 ) -> int:
     """
     安全的 token 计数（返回非负值）
-    
+
     Hermes Agent 风格：
     - 返回 0 而不是负数
     - 对异常进行防御性处理
@@ -349,7 +360,7 @@ def _safe_token_count(
 def _safe_subtract(a: int, b: int, fallback: int = 0) -> int:
     """
     安全的减法（返回非负值）
-    
+
     Args:
         a: 被减数
         b: 减数
@@ -368,19 +379,19 @@ def _prune_old_tool_results(
     """
     Replace old tool result contents with informative 1-line summaries.
     完整复刻自 Hermes Agent
-    
+
     Instead of a generic placeholder, generates a summary like::
     [terminal] ran `npm test` -> exit 0, 47 lines output
     [read_file] read config.py from line 1 (3,400 chars)
-    
-    Also deduplicates identical tool results (e.g. reading the same file 5x 
-    keeps only the newest full copy) and truncates large tool_call arguments 
+
+    Also deduplicates identical tool results (e.g. reading the same file 5x
+    keeps only the newest full copy) and truncates large tool_call arguments
     in assistant messages outside the protected tail.
-    
-    Walks backward from the end, protecting the most recent messages that fall 
-    within ``protect_tail_tokens`` (when provided) OR the last 
+
+    Walks backward from the end, protecting the most recent messages that fall
+    within ``protect_tail_tokens`` (when provided) OR the last
     ``protect_tail_count`` messages (backward-compatible default).
-    
+
     Returns (pruned_messages, pruned_count).
     """
     if not messages:
@@ -531,12 +542,12 @@ def _prune_old_tool_results(
 class HistoryCompactor:
     """
     历史消息压缩器
-    
+
     职责：
     1. 判断是否需要压缩
     2. 执行压缩（尾保留 + 摘要）
     3. 提供使用情况统计
-    
+
     特点：
     - 独立于 ChatEngine，可在任意时机调用
     - 统一处理普通消息和工具调用（不拆分 tool 配对）
@@ -580,19 +591,19 @@ class HistoryCompactor:
     ) -> tuple[List[Dict], int]:
         """
         预压缩剪枝：替换大型工具输出为摘要（无需 LLM）
-        
+
         完整复刻 Hermes Agent 算法：
         1. 为每个 tool_call 建立索引
         2. 去重：相同内容的工具输出只保留最新一份完整拷贝
         3. 修剪：旧的大工具输出替换为信息丰富的 1-line 摘要
         4. 截断：过大的 tool_call 参数，保持 JSON 有效性
         5. 图片处理：移除旧的图片（只保留最新用户消息中的图片）
-        
+
         Args:
             messages: 原始消息列表
             protect_tail_count: 最少保护尾部消息数
             protect_tail_tokens: 保护尾部的 token 预算（优先于此）
-        
+
         Returns:
             (pruned_messages, pruned_count)
         """
@@ -612,14 +623,14 @@ class HistoryCompactor:
     def should_compact(self, messages: List[Dict], budget: int) -> bool:
         """
         判断是否需要压缩
-        
+
         包含 Hermes Agent 的反抖动保护：
         如果最后两次压缩每次节省都小于 10%，跳过压缩避免无限循环。
-        
+
         Args:
             messages: 消息列表
             budget: 可用 token 预算
-            
+
         Returns:
             bool: 是否需要压缩
         """
@@ -634,7 +645,7 @@ class HistoryCompactor:
 
         # ========== 反抖动保护（Hermes Agent） ==========
         # 如果最近两次压缩效果都不好（每次节省 < 10%），跳过压缩
-        if hasattr(self, '_ineffective_compression_count') and self._ineffective_compression_count >= 2:
+        if hasattr(self, "_ineffective_compression_count") and self._ineffective_compression_count >= 2:
             logger.warning(
                 f"[Compactor] 压缩跳过 — 最近 {self._ineffective_compression_count} 次压缩每次节省 < 10%。"
                 f"建议 /new 开始新会话，或手动 /compress。"
@@ -652,13 +663,13 @@ class HistoryCompactor:
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
         """
         执行压缩
-        
+
         Args:
             messages: 原始消息列表
             budget: 可用 token 预算
             existing_cache: 已有的压缩缓存（用于复用）
             allow_llm_summary: 是否允许 LLM 摘要（False 则只用启发式截断）
-            
+
         Returns:
             tuple:
                 - 压缩后的消息列表
@@ -701,11 +712,11 @@ class HistoryCompactor:
     ) -> Dict[str, Any]:
         """
         获取当前使用情况
-        
+
         Args:
             messages: 消息列表
             budget: 可用预算
-            
+
         Returns:
             dict: { used_tokens, budget_tokens, percent, compaction_state }
         """
@@ -921,7 +932,13 @@ class HistoryCompactor:
                     # 如果是 tool 角色，限制更严格
                     max_chars = MAX_TOOL_CONTENT_CHARS if role == "tool" else MAX_HISTORY_SNIPPET_CHARS * 3
                     if len(content) > max_chars:
-                        msg["content"] = content[:head_len] + "\n\n... [内容已截断，省略 " + str(len(content) - head_len - tail_len) + " 字符] ...\n\n" + content[-tail_len:]
+                        msg["content"] = (
+                            content[:head_len]
+                            + "\n\n... [内容已截断，省略 "
+                            + str(len(content) - head_len - tail_len)
+                            + " 字符] ...\n\n"
+                            + content[-tail_len:]
+                        )
                         msg["_truncated"] = True
                 elif isinstance(content, list):
                     # 多段 content（如文本+图片url），截断超大文本段
@@ -931,7 +948,11 @@ class HistoryCompactor:
                             text = block.get("text", "")
                             if len(text) > MAX_TOOL_CONTENT_CHARS:
                                 block = dict(block)
-                                block["text"] = text[:MAX_TOOL_CONTENT_CHARS // 2] + "\n\n... [内容截断] ...\n\n" + text[-MAX_TOOL_CONTENT_CHARS // 2:]
+                                block["text"] = (
+                                    text[: MAX_TOOL_CONTENT_CHARS // 2]
+                                    + "\n\n... [内容截断] ...\n\n"
+                                    + text[-MAX_TOOL_CONTENT_CHARS // 2 :]
+                                )
                                 msg["_truncated"] = True
                         truncated_blocks.append(block)
                     msg["content"] = truncated_blocks
@@ -1039,8 +1060,12 @@ class HistoryCompactor:
                 f"执行紧急缩减 (tail={kept_count}, summary={len(compacted)})"
             )
             result_messages, kept_count, summary_note = self._ensure_budget(
-                result_messages, recent_messages, summary_message, budget,
-                normalized_len=len(normalized), compacted_len=len(compacted)
+                result_messages,
+                recent_messages,
+                summary_message,
+                budget,
+                normalized_len=len(normalized),
+                compacted_len=len(compacted),
             )
             # 重新计数
             current_tokens = count_messages_tokens(result_messages)
@@ -1135,9 +1160,9 @@ class HistoryCompactor:
                 if len(summary_content) > target_chars:
                     summary_message = dict(summary_message)
                     summary_message["content"] = (
-                        summary_content[:target_chars // 2]
+                        summary_content[: target_chars // 2]
                         + "\n\n[摘要因预算限制截断]\n\n"
-                        + summary_content[-target_chars // 2:]
+                        + summary_content[-target_chars // 2 :]
                     )
                     result_messages = [summary_message] + recent_messages
                     result_tokens = count_messages_tokens(result_messages)
@@ -1166,7 +1191,11 @@ class HistoryCompactor:
                     tool_name = msg.get("name", "")
                     if isinstance(content, str) and len(content) > MAX_TOOL_CONTENT_CHARS:
                         new_msg = dict(msg)
-                        new_msg["content"] = content[:MAX_TOOL_CONTENT_CHARS // 2] + "\n\n...[工具结果截断]...\n\n" + content[-MAX_TOOL_CONTENT_CHARS // 2:]
+                        new_msg["content"] = (
+                            content[: MAX_TOOL_CONTENT_CHARS // 2]
+                            + "\n\n...[工具结果截断]...\n\n"
+                            + content[-MAX_TOOL_CONTENT_CHARS // 2 :]
+                        )
                         result_messages[idx] = new_msg
                         # 只更新当前消息的 token
                         tail_token_cache[id(new_msg)] = count_messages_tokens([new_msg])
@@ -1180,7 +1209,7 @@ class HistoryCompactor:
         """根据压缩消息数动态计算摘要字符上限"""
         return min(
             MAX_HEURISTIC_SUMMARY_CHARS_ABS,
-            MAX_HEURISTIC_SUMMARY_CHARS + compacted_count * MAX_HEURISTIC_SUMMARY_CHARS_PER_MSG
+            MAX_HEURISTIC_SUMMARY_CHARS + compacted_count * MAX_HEURISTIC_SUMMARY_CHARS_PER_MSG,
         )
 
     def _summarize(
@@ -1219,15 +1248,14 @@ class HistoryCompactor:
             if compacted_count > 0:
                 max_chars = min(
                     MAX_HEURISTIC_SUMMARY_CHARS_ABS,
-                    MAX_HEURISTIC_SUMMARY_CHARS + compacted_count * MAX_HEURISTIC_SUMMARY_CHARS_PER_MSG
+                    MAX_HEURISTIC_SUMMARY_CHARS + compacted_count * MAX_HEURISTIC_SUMMARY_CHARS_PER_MSG,
                 )
         if len(heuristic) > max_chars:
             logger.warning(
-                f"[Compactor] 启发式摘要超长: {len(heuristic)} > {max_chars} "
-                f"(compacted={compacted_count})，强制截断"
+                f"[Compactor] 启发式摘要超长: {len(heuristic)} > {max_chars} (compacted={compacted_count})，强制截断"
             )
-            head = heuristic[:max_chars // 2]
-            tail = heuristic[-max_chars // 2:]
+            head = heuristic[: max_chars // 2]
+            tail = heuristic[-max_chars // 2 :]
             heuristic = head + "\n\n[摘要因长度限制截断]\n\n" + tail
 
         return heuristic
@@ -1269,6 +1297,7 @@ class HistoryCompactor:
             req_kwargs["top_p"] = top_p
 
         try:
+
             def create_task():
                 return client.chat.completions.create(**req_kwargs)
 
@@ -1302,8 +1331,7 @@ class HistoryCompactor:
         """获取或创建 HTTP 客户端（复用）"""
         config_key = f"{auth_type}:{api_key[:8] if api_key else 'none'}:{base_url or 'default'}"
 
-        if (self._compaction_http_client is not None and
-            self._compaction_cache_config == config_key):
+        if self._compaction_http_client is not None and self._compaction_cache_config == config_key:
             return self._compaction_http_client
 
         self._compaction_http_client = OpenAI(
@@ -1370,7 +1398,7 @@ class HistoryCompactor:
     ) -> str:
         """
         启发式摘要：遗忘曲线自适应截断
-        
+
         越旧的消息，保留越少
         """
         if "content" in messages[0] and messages[0]["content"].startswith("## Earlier Conversation Summary"):
@@ -1393,8 +1421,7 @@ class HistoryCompactor:
 
         total_content_length = sum(len(c) for c in contents)
         content_ratios = [
-            len(c) / total_content_length if total_content_length > 0 else 1 / total_messages
-            for c in contents
+            len(c) / total_content_length if total_content_length > 0 else 1 / total_messages for c in contents
         ]
 
         # 目标总长度
@@ -1407,11 +1434,11 @@ class HistoryCompactor:
         for idx, msg in enumerate(messages):
             raw_content = contents[idx] if idx < len(contents) else ""
             # 移除 <hook> 标签
-            raw_content = re.sub(r'<hook[^>]*>.*?</hook>', '', raw_content, flags=re.DOTALL)
+            raw_content = re.sub(r"<hook[^>]*>.*?</hook>", "", raw_content, flags=re.DOTALL)
             # 移除 <think> 标签
-            raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
+            raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL)
             # 移除 Tool args 内容
-            raw_content = re.sub(r'Tool args:\s*\{[^}]*\}', '', raw_content)
+            raw_content = re.sub(r"Tool args:\s*\{[^}]*\}", "", raw_content)
             cleaned_contents.append(raw_content)
 
         for idx, msg in enumerate(messages):
@@ -1466,7 +1493,7 @@ class HistoryCompactor:
                     arguments,
                     position=idx,
                     total=total_messages,
-                    target_total=int(budget *  content_ratios[idx]),
+                    target_total=int(budget * content_ratios[idx]),
                     ratios=content_ratios if total_content_length > 1000 else None,
                 )
                 # 标记受保护的工具
@@ -1485,7 +1512,7 @@ class HistoryCompactor:
     ) -> str:
         """
         自适应截断：基于遗忘曲线
-        
+
         公式：keep_ratio = 0.2 + 0.5 * (position / total) ** 0.5
         - 最早的消息：约 20%
         - 最新的消息：约 70%
@@ -1496,7 +1523,7 @@ class HistoryCompactor:
         position_ratio = position / max(1, total - 1)
         min_keep = 0.2
         max_keep = 0.7
-        keep_ratio = min_keep + (max_keep - min_keep) * (position_ratio ** 0.5)
+        keep_ratio = min_keep + (max_keep - min_keep) * (position_ratio**0.5)
 
         # 动态目标长度
         if target_total is not None and target_total > 0:
