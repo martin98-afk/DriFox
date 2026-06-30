@@ -52,3 +52,51 @@ def tmp_path_fixture():
     d = tempfile.mkdtemp(prefix="_plug_no_ui_")
     from pathlib import Path
     return Path(d)
+
+
+def test_enable_plugin_loads_ui(tmp_path):
+    """启用插件时触发 UI 加载"""
+    from app.core.plugin_manager import PluginManager
+    from app.core.ui_plugin_registry import UIPluginRegistry
+
+    pm = PluginManager.get_instance()
+    pm.reset()
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    # 准备插件目录
+    plugin_dir = tmp_path / "plug-ui-load"
+    plugin_dir.mkdir()
+    (plugin_dir / ".drifox-plugin").mkdir()
+    (plugin_dir / ".drifox-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "plug-ui-load", "version": "1.0.0", "components": {"ui": True}
+    }), encoding="utf-8")
+    (plugin_dir / "ui").mkdir()
+    (plugin_dir / "ui" / "__init__.py").write_text("""
+from app.core.ui_plugin_registry import UIPluginRegistry
+def register_ui(r: UIPluginRegistry):
+    r.register_content_renderer('plug-ui-load', 'hello', lambda d, c: 'world', priority=0)
+""", encoding="utf-8")
+
+    # 准备 PluginManager 数据目录
+    app_data = tmp_path / "_app"
+    app_data.mkdir()
+    user_dir = app_data / "plugins"
+    user_dir.mkdir()
+    import shutil
+    target = user_dir / "plug-ui-load"
+    shutil.copytree(plugin_dir, target)
+
+    pm._app_data_dir = app_data
+    # 模拟 _discover_user_plugins：直接注册到 _plugins
+    info = pm._scan_one_plugin_dir(target, "user")
+    assert info is not None
+    pm._plugins[info.name] = info
+
+    # 启用插件
+    pm.enable_plugin("plug-ui-load")
+    # UI 应已加载
+    assert reg.is_loaded("plug-ui-load") is True
+    assert reg.get_content_renderer("hello") is not None
+    reg.reset()
+    pm.reset()
