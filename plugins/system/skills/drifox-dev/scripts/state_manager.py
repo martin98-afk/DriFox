@@ -157,12 +157,12 @@ def load_state() -> dict:
 
     # 迁移
     try:
-        migrated = migrate_state(data)
+        migrated, dirty = migrate_state(data)
     except Exception as e:
         print(f"[state_manager] 警告: 迁移失败: {e}，回退到模板", file=sys.stderr)
         return init_state()
 
-    if migrated.get("version") != data.get("version"):
+    if dirty or migrated.get("version") != data.get("version"):
         save_state(migrated)
     return migrated
 
@@ -197,6 +197,7 @@ def init_state() -> dict:
                 "key_files_lines": {},
                 "recent_commits": [],
                 "uncommitted_changes": {"dirty": False, "files": []},
+                "github_issues": {"ok": False, "issues": [], "error": "not fetched yet"},
             },
         }
         save_state(minimal)
@@ -226,10 +227,22 @@ def _strip_meta(obj: Any) -> Any:
 
 
 def migrate_state(state: dict) -> dict:
-    """根据 version 字段按顺序应用迁移。"""
+    """根据 version 字段按顺序应用迁移。
+
+    当前已应用：
+    - 任何版本 → 1.0.0（兼容层）：为旧 state 补 open_questions[].blocking /
+      auto_snapshot.github_issues 字段，保证渲染与 snapshot 不报 KeyError。
+
+    返回 (migrated_state, dirty: bool)：dirty 表示迁移过程中是否给 state 增补了
+    新字段，外部据此决定是否落盘。
+    """
     version = state.get("version", "0.0.0")
+    dirty = False
+    if _compatibility_backfill(state):
+        dirty = True
+
     if version == CURRENT_VERSION:
-        return state
+        return state, dirty
 
     # 未来扩展示例（保留注释演示迁移链模式）：
     # if version == "0.9.0":
@@ -240,8 +253,41 @@ def migrate_state(state: dict) -> dict:
     #     state = _migrate_1_0_to_1_1(state)
     #     version = "1.1.0"
 
-    state["version"] = CURRENT_VERSION
-    return state
+    if state.get("version") != CURRENT_VERSION:
+        state["version"] = CURRENT_VERSION
+        dirty = True
+    return state, dirty
+
+
+def _compatibility_backfill(state: dict) -> bool:
+    """给旧 state 数据补齐新增字段，避免渲染 / 摘要抛 KeyError。
+
+    设计原则：只新增缺失字段；不修改已有数据；不重建数组顺序。
+
+    返回 True 表示确实新增了字段（state 已 in-place 修改）。
+    """
+    dirty = False
+    # open_questions[].blocking — 老数据默认 non-blocking
+    questions = state.get("open_questions")
+    if isinstance(questions, list):
+        for q in questions:
+            if isinstance(q, dict) and "blocking" not in q:
+                q["blocking"] = False
+                dirty = True
+
+    # auto_snapshot.github_issues — 老 snapshot 没有这个字段
+    snap = state.get("auto_snapshot")
+    if isinstance(snap, dict) and "github_issues" not in snap:
+        snap["github_issues"] = {
+            "ok": False,
+            "issues": [],
+            "error": "backfilled by migrate (no historical data)",
+            "fetched_at": None,
+            "repo": "martin98-afk/DriFox",
+            "count": 0,
+        }
+        dirty = True
+    return dirty
 
 
 # ---------- 业务操作（带去重/容量限制）----------
@@ -330,12 +376,18 @@ def add_pitfall(module: str, symptom: str, cause: str, fix: str) -> dict:
     return entry
 
 
-def add_question(question: str, context: str = "") -> dict:
+def add_question(question: str, context: str = "", *, blocking: bool = False) -> dict:
+    """记录一条开放问题。
+
+    blocking=True 表示缺这个回答任务就推不动——会在状态摘要里置顶展示。
+    blocking=False 表示已经记录但不阻塞当前任务——摘要里仅显示数量。
+    """
     state = load_state()
     entry = {
         "id": _gen_id(state.get("open_questions", []), "Q"),
         "question": question,
         "context": context,
+        "blocking": blocking,
         "created_at": _now_iso(),
     }
     questions = state.get("open_questions", [])
@@ -419,12 +471,23 @@ def render_state_summary(state: dict) -> str:
 
     questions = state.get("open_questions", [])
     if questions:
-        lines.append(f"## ❓ 开放问题（{len(questions)}）")
-        for q in questions[:3]:
-            lines.append(f"- **{q.get('id')}** {q.get('question')}")
-        if len(questions) > 3:
-            lines.append(f"- ... 另 {len(questions) - 3} 条")
-        lines.append("")
+        # 区分阻塞型 / 非阻塞型，避免非阻塞噪音淹没阻塞项
+        blocking = [q for q in questions if q.get("blocking")]
+        non_blocking = [q for q in questions if not q.get("blocking")]
+        if blocking:
+            lines.append(f"## 🚧 阻塞当前任务的问题（{len(blocking)}）")
+            for q in blocking[:5]:
+                lines.append(f"- **{q.get('id')}** {q.get('question')}")
+            lines.append("")
+        if non_blocking:
+            lines.append(
+                f"## 📝 待澄清问题（{len(non_blocking)}，不阻塞）"
+            )
+            for q in non_blocking[:3]:
+                lines.append(f"- **{q.get('id')}** {q.get('question')}")
+            if len(non_blocking) > 3:
+                lines.append(f"- ... 另 {len(non_blocking) - 3} 条")
+            lines.append("")
 
     snap = state.get("auto_snapshot") or {}
     if snap.get("last_updated"):
@@ -445,6 +508,20 @@ def render_state_summary(state: dict) -> str:
         uc = snap.get("uncommitted_changes") or {}
         if uc.get("dirty"):
             lines.append(f"- ⚠️ 有 {len(uc.get('files', []))} 个未提交变更")
+        gh = snap.get("github_issues") or {}
+        if gh.get("ok"):
+            issues = gh.get("issues") or []
+            lines.append(f"- GitHub open issues（{gh.get('repo')}，共 {gh.get('count', 0)}）:")
+            for it in issues[:5]:
+                labels = ",".join((it.get("labels") or [])[:3])
+                label_str = f" [{labels}]" if labels else ""
+                lines.append(
+                    f"  - #{it.get('number')} {it.get('title', '')[:60]}{label_str}"
+                )
+            if len(issues) > 5:
+                lines.append(f"  - ... 另 {len(issues) - 5} 条")
+        elif gh.get("error"):
+            lines.append(f"- GitHub issues: 拉取失败 — {gh['error'][:80]}")
         lines.append("")
 
     lines.append("---")
@@ -502,8 +579,9 @@ def cmd_question(args) -> int:
         resolve_question(args.resolve)
         print(f"[state_manager] 已解决/移除问题 {args.resolve}")
         return 0
-    entry = add_question(args.question, args.context or "")
-    print(f"[state_manager] 已记录开放问题 {entry['id']}: {entry['question']}")
+    entry = add_question(args.question, args.context or "", blocking=args.blocking)
+    label = "🚧 blocking" if args.blocking else "📝 non-blocking"
+    print(f"[state_manager] 已记录 {label} 问题 {entry['id']}: {entry['question']}")
     return 0
 
 
@@ -559,6 +637,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("question", help="记录或解决一个开放问题")
     sp.add_argument("--question", help="问题内容（不传则视为解决）")
     sp.add_argument("--context", help="问题背景")
+    sp.add_argument(
+        "--blocking",
+        action="store_true",
+        help="标记为阻塞当前任务的问题（会在状态摘要置顶展示）",
+    )
     sp.add_argument("--resolve", help="用 --resolve Q001 解决问题")
     sp.set_defaults(func=cmd_question)
 

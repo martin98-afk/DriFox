@@ -808,7 +808,14 @@ class CommandCard(QWidget):
         """detail 模式匹配的命令名"""
         return self._detail_cmd_name
 
-    def show_command_detail(self, cmd_name: str, selected_type: str = "", data_provider: dict = None):
+    def show_command_detail(
+        self,
+        cmd_name: str,
+        selected_type: str = "",
+        data_provider: dict = None,
+        full_text: str = "",
+        cursor_pos: int = -1,
+    ):
         """切换到 detail 模式：显示指定命令/技能的参数提示
 
         Args:
@@ -816,6 +823,9 @@ class CommandCard(QWidget):
             selected_type: 选中项的 display_type（"command"/"prompt"/"agent"）
                           为空时使用当前选中项类型（通过 _current_selected_type）
             data_provider: 外部数据源，如 {"model_options": ["OpenAI:gpt-4o", ...]}
+            full_text: 输入框完整文本（用于在重建 widgets 后立即标记 active 状态，
+                      解决失焦→重新聚焦时 active 状态丢失的问题）
+            cursor_pos: 光标位置（供自动检测 --model= 值选择模式用）
         """
         cmd_mgr = CommandManager.get_instance()
         self._data_provider = data_provider or {}
@@ -916,6 +926,15 @@ class CommandCard(QWidget):
         self._detail_container.setVisible(True)
         self._visible = True
         self.setVisible(True)
+
+        # 重建 widgets 后立即应用输入文本中已存在的 active 参数
+        # 解决失焦→重新聚焦后 active 状态丢失的 UX 问题：
+        #   失焦 → _reset_detail_mode 销毁了所有 ParameterItemWidget（_active=False）
+        #   重聚焦 → 重新进入 detail 模式时新建了 widgets，但 _active 默认 False
+        # 调用 update_active_params 让输入框里已有的 --model=foo 立刻显示为激活态
+        if has_params and self._param_widgets and full_text:
+            active = CommandManager.parse_active_params(full_text) if full_text else set()
+            self.update_active_params(active, full_text=full_text, cursor_pos=cursor_pos)
 
         # 动态计算高度
         self._adjust_detail_height()
