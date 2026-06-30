@@ -89,6 +89,38 @@ class UIPluginRegistry:
     def get_content_renderer(self, type_name: str) -> Optional[ContentRendererInfo]:
         return self._content_renderers.get(type_name)
 
+    def register_content_renderer(
+        self,
+        plugin_name: str,
+        type_name: str,
+        render_func: Callable[[Dict[str, Any], Optional[Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册自定义内容块渲染器
+
+        Args:
+            plugin_name: 所属插件名
+            type_name: 内容块类型名
+            render_func: 渲染函数
+            priority: 优先级（同 type_name 时高者覆盖低者）
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        info = ContentRendererInfo(
+            plugin_name=plugin_name,
+            type_name=type_name,
+            render_func=render_func,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._content_renderers.get(type_name)
+        if existing is not None and existing.priority > priority:
+            # 低优先级注册被忽略
+            return
+        self._content_renderers[type_name] = info
+
     def get_message_factories(self) -> List[MessageFactoryInfo]:
         """按 priority 降序返回"""
         return sorted(self._message_factories, key=lambda f: -f.priority)

@@ -37,3 +37,41 @@ def test_dataclass_construction():
     )
     assert r.plugin_name == "test"
     assert r.priority == 10
+
+
+def test_register_content_renderer():
+    """注册内容块渲染器"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_content_renderer(
+        plugin_name="plug-a",
+        type_name="my_chart",
+        render_func=lambda d, ctx: f"<div>{d}</div>",
+        priority=5,
+    )
+    info = reg.get_content_renderer("my_chart")
+    assert info is not None
+    assert info.plugin_name == "plug-a"
+    assert info.priority == 5
+    assert info.render_func({"x": 1}, None) == "<div>{'x': 1}</div>"
+    reg.reset()
+
+
+def test_register_content_renderer_overrides_on_higher_priority():
+    """高优先级覆盖低优先级"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_content_renderer("p1", "shared", lambda d, c: "A", priority=1)
+    reg.register_content_renderer("p2", "shared", lambda d, c: "B", priority=10)
+    assert reg.get_content_renderer("shared").plugin_name == "p2"
+    reg.reset()
+
+
+def test_register_content_renderer_same_priority_warns():
+    """同优先级时后注册覆盖前注册（保持稳定）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_content_renderer("p1", "shared", lambda d, c: "A", priority=1)
+    reg.register_content_renderer("p2", "shared", lambda d, c: "B", priority=1)
+    assert reg.get_content_renderer("shared").plugin_name == "p2"
+    reg.reset()
