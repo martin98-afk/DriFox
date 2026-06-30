@@ -234,9 +234,12 @@ class PluginManager:
             result["added"].append(new_plugins[name])
             self._plugins[name] = new_plugins[name]
             logger.info(f"[PluginManager] Rescan: new plugin '{name}' detected")
+            # 自动加载新插件的 UI 组件
+            self._load_plugin_ui(name)
 
         for name in removed_names:
             result["removed"].append(self._plugins[name])
+            self._unload_plugin_ui(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Rescan: plugin '{name}' removed")
 

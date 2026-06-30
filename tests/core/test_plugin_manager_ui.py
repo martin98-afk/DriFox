@@ -100,3 +100,44 @@ def register_ui(r: UIPluginRegistry):
     assert reg.get_content_renderer("hello") is not None
     reg.reset()
     pm.reset()
+
+
+def test_rescan_new_plugin_loads_ui(tmp_path):
+    """rescan 发现新插件时自动加载 UI"""
+    from app.core.plugin_manager import PluginManager
+    from app.core.ui_plugin_registry import UIPluginRegistry
+
+    pm = PluginManager.get_instance()
+    pm.reset()
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    # 初始化（空环境）
+    app_data = tmp_path / "_app"
+    app_data.mkdir()
+    pm.initialize(app_data)
+
+    # 后续添加新插件到用户目录
+    user_plugins = app_data / "plugins"
+    user_plugins.mkdir(exist_ok=True)
+    target = user_plugins / "new-plug"
+    target.mkdir()
+    (target / ".drifox-plugin").mkdir()
+    (target / ".drifox-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "new-plug", "version": "1.0.0", "components": {"ui": True}
+    }), encoding="utf-8")
+    (target / "ui").mkdir()
+    (target / "ui" / "__init__.py").write_text("""
+from app.core.ui_plugin_registry import UIPluginRegistry
+def register_ui(r: UIPluginRegistry):
+    r.register_content_renderer('new-plug', 'x', lambda d, c: '1', priority=0)
+""", encoding="utf-8")
+
+    # 默认新插件是启用的 → rescan 应自动加载 UI
+    result = pm.rescan()
+    assert "new-plug" in [p.name for p in result["added"]]
+    # UI 已加载
+    assert reg.is_loaded("new-plug") is True
+    assert reg.get_content_renderer("x") is not None
+    reg.reset()
+    pm.reset()
