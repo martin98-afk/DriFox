@@ -195,15 +195,17 @@ class UIPluginRegistry:
         from app.core.command_manager import CommandManager, CommandType
         from app.core.builtin_commands import FunctionCommandHandlers
 
-        # 命名空间：system 插件用短名，user 插件带前缀
-        if card_info.plugin_name == "system":
+        # 命名空间规则：
+        # - card_id 已含 ":"（如 "plug-a:mycard"）→ 直接使用
+        # - card_id 是简单名且 plugin_name == "system" → 使用短名
+        # - card_id 是简单名且不等于 plugin_name → 使用 plugin_name:card_id 形式
+        # - card_id == plugin_name（如 "plugin-marketplace" 插件的 card_id 也是这个名字）→ 短名
+        if ":" in card_info.card_id:
+            cmd_name = card_info.card_id
+        elif card_info.plugin_name == "system" or card_info.card_id == card_info.plugin_name:
             cmd_name = card_info.card_id
         else:
-            # card_id 已包含 plugin_name 前缀（如 "plug-a:mycard"）则不再加
-            if ":" in card_info.card_id:
-                cmd_name = card_info.card_id
-            else:
-                cmd_name = f"{card_info.plugin_name}:{card_info.card_id}"
+            cmd_name = f"{card_info.plugin_name}:{card_info.card_id}"
 
         cmd_mgr = CommandManager.get_instance()
         if cmd_mgr.has_command(cmd_name):
@@ -252,13 +254,24 @@ class UIPluginRegistry:
 
         try:
             import importlib.util
+            import sys
+            # 将连字符替换为下划线（Python 模块名不允许连字符）
+            safe_name = plugin_name.replace("-", "_").replace(":", "_")
+            ui_path = str(plugin_path / "ui")
+            # 添加 ui 目录到 sys.path 以支持 from .renderers 等相对导入
+            if ui_path not in sys.path:
+                sys.path.insert(0, ui_path)
+            module_name = f"ui_plugin_{safe_name}"
+            if module_name in sys.modules:
+                del sys.modules[module_name]
             spec = importlib.util.spec_from_file_location(
-                f"ui_plugin_{plugin_name}", ui_init
+                module_name, ui_init
             )
             if spec is None or spec.loader is None:
                 logger.error(f"[UIPluginRegistry] Failed to load spec for {plugin_name}")
                 return False
             module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
             spec.loader.exec_module(module)
             register_func = getattr(module, "register_ui", None)
             if register_func is None:
