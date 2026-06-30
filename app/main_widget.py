@@ -5116,6 +5116,11 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 刷新卡片容器主题（浮动卡片的背景 + 边框随主题变化）
+        if hasattr(self, "_top_card_container") and self._top_card_container and hasattr(self._top_card_container, "refresh_style"):
+            self._top_card_container.refresh_style()
+        if hasattr(self, "_bottom_card_container") and self._bottom_card_container and hasattr(self._bottom_card_container, "refresh_style"):
+            self._bottom_card_container.refresh_style()
         # 刷新命令卡片主题（detail 模式参数列表 / 值选择列表的字体颜色需随主题变化）
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()

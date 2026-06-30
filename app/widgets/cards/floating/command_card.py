@@ -8,7 +8,7 @@
 """
 
 import html
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
@@ -1600,6 +1600,22 @@ class CommandCard(QWidget):
         return False
 
     @staticmethod
+    def _matches_type_filter(item: Dict[str, Any], type_filter: Optional[set]) -> bool:
+        """判断 item 是否匹配类别过滤器集合
+
+        type_filter 为 None 或空时不过滤。
+        "ui" 不是 item.type 的字面值，而是映射到 type="command" 且 subtype="ui_plugin" 的 UI 插件命令。
+        """
+        if not type_filter:
+            return True
+        if item["type"] in type_filter:
+            return True
+        # 特殊处理：#ui 过滤 → 匹配 UI 插件命令
+        if "ui" in type_filter and item["type"] == "command" and item.get("subtype") == "ui_plugin":
+            return True
+        return False
+
+    @staticmethod
     def _parse_type_filter(query: str):
         """从 query 中提取 type:xxx 或 #xxx 过滤器
 
@@ -1607,24 +1623,29 @@ class CommandCard(QWidget):
           "type:skill tdd"      → ({"skill"}, "tdd")
           "#agent"               → ({"agent"}, "")
           "#cmd find"            → ({"command"}, "find")
-          "type:skill|type:agent" → ({"skill","agent"}, "")
+          "#ui"                  → ({"ui"}, "")
+          "type:skill|type:ui"  → ({"skill","ui"}, "")
           "find"                 → (None, "find")
 
         支持简写：cmd→command
         支持 OR：type:skill|type:agent → {"skill","agent"}
+        注："ui" 类别不是 item.type 的字面值，匹配 type="command" 且 subtype="ui_plugin" 的项
         """
         if not query:
             return None, query
 
         type_set = set()
         clean_tokens = []
-        type_map = {"cmd": "command", "skill": "skill", "agent": "agent", "prompt": "prompt"}
+        type_map = {"cmd": "command", "skill": "skill", "技能": "skill", "agent": "agent", "智能体": "agent", "prompt": "prompt", "提示词": "prompt", "ui": "ui"}
 
         for token in query.split():
             if token.startswith("type:"):
                 tf = token[5:].strip()
                 for t in tf.split("|"):
                     t = t.strip()
+                    # 兼容 "type:skill|type:agent" 写法：第二段可能仍带 type: 前缀
+                    if t.startswith("type:"):
+                        t = t[5:].strip()
                     if t in type_map:
                         type_set.add(type_map[t])
             elif token.startswith("#"):
@@ -1659,6 +1680,7 @@ class CommandCard(QWidget):
           #agent                → 只显示智能体
           #prompt               → 只显示提示词
           #cmd                  → 只显示命令
+          #ui                   → 只显示 UI 插件命令
           #skill tdd            → 只显示名/描述含 "tdd" 的技能
           type:skill|type:agent → 显示技能或智能体
 
@@ -1677,7 +1699,7 @@ class CommandCard(QWidget):
         if not text_query:
             # 纯类别过滤（无文本搜索）
             if type_filter:
-                self._filtered_items = [item for item in self._all_items if item["type"] in type_filter]
+                self._filtered_items = [item for item in self._all_items if self._matches_type_filter(item, type_filter)]
             else:
                 self._filtered_items = list(self._all_items)
             self._last_query = ""
@@ -1688,7 +1710,7 @@ class CommandCard(QWidget):
             self._filtered_items = [item for item in source if self._matches_multi(item, text_query)]
             # 文本匹配后再按类别过滤
             if type_filter:
-                self._filtered_items = [item for item in self._filtered_items if item["type"] in type_filter]
+                self._filtered_items = [item for item in self._filtered_items if self._matches_type_filter(item, type_filter)]
 
         # 排序：内置命令→UI 插件命令→技能→智能体，同类型按名称
         sort_order = {"command": 0, "skill": 2, "agent": 3}

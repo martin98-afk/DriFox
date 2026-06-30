@@ -5,6 +5,7 @@ from loguru import logger
 from PyQt5.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QTimer
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
+from app.utils.design_tokens import Colors
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
 
@@ -47,6 +48,35 @@ class CardContainer(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
+
+        # 应用主题背景
+        self._apply_background_style()
+
+    def _apply_background_style(self):
+        """应用主题背景 + 边框
+
+        使用主题的 card_bg 作为容器背景色，border 作为边框色。
+        顶部 8px 圆角，底部直角（与下方输入框/页面边缘融合）。
+        覆写此方法可定制子类的背景样式。
+        """
+        Colors.refresh()
+        bg = Colors.CARD_BG.format(alpha=232)
+        self.setStyleSheet(f"""
+            CardContainer {{
+                background: {bg};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+            }}
+        """)
+
+    def refresh_style(self):
+        """响应主题切换：刷新容器背景 + 边框
+
+        主题切换时由 main_widget 的全局 refresh 链调用。
+        """
+        self._apply_background_style()
 
     @property
     def container_type(self) -> ContainerType:
@@ -279,11 +309,20 @@ class BottomCardContainer(CardContainer):
 
     def __init__(self):
         super().__init__(ContainerType.BOTTOM)
-        self.setStyleSheet("""
-            BottomCardContainer {
-                background: transparent;
-                border: none;
-            }
+
+    def _apply_background_style(self):
+        """底部容器背景：8px 上圆角 + 底部直角，与输入框视觉拼接"""
+        Colors.refresh()
+        bg = Colors.CARD_BG.format(alpha=232)
+        self.setStyleSheet(f"""
+            BottomCardContainer {{
+                background: {bg};
+                border: 1px solid {Colors.BORDER};
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+            }}
         """)
 
     def add_card(self, card_id: str, card_widget: QWidget):

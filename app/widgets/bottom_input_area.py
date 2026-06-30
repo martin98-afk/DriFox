@@ -102,7 +102,7 @@ PLACEHOLDER_TIPS = [
     "/new 新建会话 /branch 创建分支",
     "/init 笔记 /review 审查 /theme 主题色",
     "/compact 手动触发上下文压缩",
-    "/ 命令支持 #skill 和 #agent 过滤",
+    "/ 命令支持 #skill #agent #ui 类别过滤",
     "/ 搜索支持 | 和 & 组合关键字",
 
     # ════ 文件提及 ════
@@ -340,9 +340,9 @@ class SendableTextEdit(TextEdit):
             if " " in query:
                 self._cancel_slash_throttle()
                 cmd_name = query.split(" ", 1)[0]
-                # 检测类别过滤器（#agent, #skill, #prompt, #cmd 等）
+                # 检测类别过滤器（#agent, #skill, #prompt, #cmd, #ui 等）
                 # 如果是类别过滤器 + 空格 + 搜索文本 → 保持列表模式，不尝试进入 detail 模式
-                _type_tag_map = {'cmd': 'command', 'skill': 'skill', 'agent': 'agent', 'prompt': 'prompt'}
+                _type_tag_map = {'cmd': 'command', 'skill': 'skill', 'agent': 'agent', 'prompt': 'prompt', 'ui': 'ui'}
                 if cmd_name.startswith('#') and cmd_name[1:] in _type_tag_map:
                     self._slash_trigger_pos = 0
                     self._apply_slash_throttle(query)
