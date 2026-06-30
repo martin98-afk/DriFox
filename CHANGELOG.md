@@ -3,14 +3,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.2.14] - 2026-06-30
+## [v0.2.14] - 2026-07-01
 
-自上一版本以来的变更 | 提交数：53 · 文件变更：172 · +14183/-5052 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：60 · 文件变更：59 · +16715/-6109 | 贡献者：dingma, mading
 
 ---
 
 ### ✨ 新功能 (New Features)
 
+- **对话上下文用量统计插件**: 新增 Context Usage Stats 插件，基于 `.drifox/sessions.db` 实时展示最近对话的 Token 用量、消息数量趋势、会话活跃度图表
+- **会话管理与上下文跟踪增强**: 优化会话管理逻辑，增强上下文使用追踪与数据持久化能力
 - **UI 插件注册系统**: 新增完整的 UI 插件注册表（UIPluginRegistry），支持插件加载/卸载/重载生命周期管理、浮动卡片自动命令注册、消息工厂与内容渲染器注册 API
 - **插件管理与市场增强**: 新增插件管理和插件市场功能，完善插件浏览、安装与管理流程
 - **插件市场系统插件**: 新增 Plugin Marketplace 系统插件，集成市场插件浏览与管理能力
@@ -18,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - **主窗口插件集成**: 主窗口注入 UI 插件注册表并集成消息工厂 Hook，支持插件自定义消息内容块
 - **卡片管理器外部注册**: 支持从 UI 插件外部注册卡片到主卡片管理器
 - **Hook 预设系统**: 实现多窗口隔离的 Hook 预设管理与一键切换功能（HookPresetManager + UI）
-- **自动上下文压缩**: 在 PostToolUse Hook 中实现自动上下文压缩，优化长对话场景的 Token 消耗
+- **自动上下文压缩**: 在 PostToolUse Hook 中实现自动上下文压缩，优化长对话场景的 Token 消耗，并调整触发策略与 Hook 映射
 - **Agent 身份注入 Hook**: 新增 `inject_agent_identity` Hook，支持在系统提示中动态注入 Agent 身份配置
 - **Token 用量与模型展示**: SubAgent 任务行增加 Token 用量和模型名称实时显示
 - **流式子代理结果注入优化**: 优化流式场景中的子代理结果注入策略，提升用户体验
@@ -42,6 +44,7 @@ All notable changes to this project will be documented in this file.
 
 ### ♻️ 代码重构 (Refactoring)
 
+- **上下文处理与数据库交互重构**: 重构上下文处理流程和数据库交互层，提升数据访问效率与稳定性
 - **UI 插件注册表重构**: 重构 UI 插件注册表与市场插件的架构设计
 - **render_helpers 可读性改进**: 规范字符串格式化，提升代码可读性
 - **Token 跟踪重构**: 重构 OpenAIChatToolWindow 的 Token 用量跟踪与压缩状态处理
