@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.2.14] - 2026-06-30
 
-自上一版本以来的变更 | 提交数：46 · 文件变更：163 · +13890/-4915 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：51 · 文件变更：169 · +14150/-5051 | 贡献者：dingma, mading
 
 ---
 
@@ -34,6 +34,10 @@ All notable changes to this project will be documented in this file.
 - **冗余信号移除**: 移除 subagent 流注入中多余的 `_hook_messages_updated` 信号发射
 - **Debug 打印清理**: 移除 OpenAIChatWorker 类中残留的 debug print 语句
 - **角色标识更新**: 更新角色标识并增强 UI 插件的命令过滤
+- **强制关窗运行时持久化修复**: 强制关闭窗口时正确计算并保存累计运行时长（`elapsed`），避免重启后看不到运行时长
+- **会话关闭消息丢失修复**: 处理会话关闭时被中断的消息，防止数据丢失
+- **子代理组件 F541 lint 修复**: 移除 `sub_agent_compact_widget` 中多余的 f-string 前缀
+- **工具 schema 描述精简**: 精简工具 schema 描述文案，提升清晰度与简洁性
 
 ### ♻️ 代码重构 (Refactoring)
 
