@@ -60,9 +60,14 @@ class MarketplaceData:
             # 降级：返回空数据
             return {"name": "drifox-official", "description": "", "plugins": []}
 
-    def list_plugins(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
-        """列出插件（可选按 category 过滤）"""
-        data = self.fetch()
+    def list_plugins(self, category: Optional[str] = None, force: bool = False) -> List[Dict[str, Any]]:
+        """列出插件（可选按 category 过滤）
+
+        Args:
+            category: 分类过滤
+            force: 是否强制拉取远程（跳过缓存）
+        """
+        data = self.fetch(force=force)
         plugins = data.get("plugins", [])
         if category:
             plugins = [p for p in plugins if category in (p.get("categories") or [])]

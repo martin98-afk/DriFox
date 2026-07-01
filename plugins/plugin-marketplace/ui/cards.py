@@ -26,7 +26,6 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     StrongBodyLabel,
-    ToolButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -267,6 +266,13 @@ class MarketplaceCard(QWidget):
 
         header_layout.addStretch(1)
 
+        # 状态标签（加载中/安装中标记）
+        self._status_label = QLabel("", header)
+        self._status_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+        )
+        header_layout.addWidget(self._status_label)
+
         # 搜索框
         self._search_edit = LineEdit(header)
         self._search_edit.setPlaceholderText("搜索插件…")
@@ -278,11 +284,7 @@ class MarketplaceCard(QWidget):
         self._search_edit.textChanged.connect(self._filter_plugins)
         header_layout.addWidget(self._search_edit)
 
-        # 刷新按钮
-        self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
-        self._refresh_btn.setToolTip("刷新")
-        self._refresh_btn.clicked.connect(self._async_refresh)
-        header_layout.addWidget(self._refresh_btn)
+        # 注意：没有刷新按钮，每次 show_card 自动强制拉取最新数据
 
         # 关闭按钮
         self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
@@ -290,13 +292,6 @@ class MarketplaceCard(QWidget):
         self._close_btn.setToolTip("关闭")
         self._close_btn.clicked.connect(self._on_close)
         header_layout.addWidget(self._close_btn)
-
-        # 状态标签
-        self._status_label = QLabel("", header)
-        self._status_label.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
-        )
-        header_layout.addWidget(self._status_label)
 
         root.addWidget(header)
 
@@ -306,7 +301,13 @@ class MarketplaceCard(QWidget):
         sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
         root.addWidget(sep)
 
-        # ── 滚动内容区 ──
+        # ── 内容区（滚动列表 + 居中空状态用 QStackedWidget）──
+        from PyQt5.QtWidgets import QStackedWidget
+
+        self._content_stack = QStackedWidget(self)
+        self._content_stack.setStyleSheet("background: transparent;")
+
+        # 页面 0：滚动列表
         self._scroll = ScrollArea(self)
         self._scroll.setWidgetResizable(True)
         self._scroll.setStyleSheet(
@@ -320,14 +321,16 @@ class MarketplaceCard(QWidget):
         self._content_layout.setSpacing(6)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
-        root.addWidget(self._scroll, 1)
+        self._content_stack.addWidget(self._scroll)
 
-        # ── 空状态提示 ──
-        self._empty_label = StrongBodyLabel("暂无可用插件", self)
+        # 页面 1：居中空状态
+        self._empty_label = StrongBodyLabel("暂无可用插件", self._content_stack)
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
-        self._empty_label.setVisible(False)
-        root.addWidget(self._empty_label)
+        self._content_stack.addWidget(self._empty_label)
+
+        self._content_stack.setCurrentIndex(0)  # 默认显示滚动列表
+        root.addWidget(self._content_stack, 1)
 
     # ── 高度模式 ──
 
@@ -361,7 +364,7 @@ class MarketplaceCard(QWidget):
         """在后台线程拉取市场数据"""
         self._set_loading(True)
         self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins())
+        self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins(force=True))
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
@@ -387,7 +390,7 @@ class MarketplaceCard(QWidget):
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._clear_plugin_list()
         self._empty_label.setText(f"无法加载市场数据：{err[:60]}")
-        self._empty_label.setVisible(True)
+        self._content_stack.setCurrentIndex(1)
 
     def _set_loading(self, loading: bool):
         """设置加载状态"""
@@ -396,10 +399,8 @@ class MarketplaceCard(QWidget):
             self._status_label.setStyleSheet(
                 f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
             )
-            self._refresh_btn.setEnabled(False)
         else:
             self._status_label.setText("")
-            self._refresh_btn.setEnabled(True)
 
     # ── 渲染 ──
 
@@ -421,9 +422,9 @@ class MarketplaceCard(QWidget):
 
         if count == 0:
             self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
-            self._empty_label.setVisible(True)
+            self._content_stack.setCurrentIndex(1)
         else:
-            self._empty_label.setVisible(False)
+            self._content_stack.setCurrentIndex(0)
 
     def _clear_plugin_list(self):
         """清空插件列表"""

@@ -1,6 +1,6 @@
 ---
 name: ui-plugin-creator
-description: "DriFox UI 插件开发技能。用于创建、修改、调试UI插件（浮动卡片 / 内容块渲染器 / 消息元素工厂）。当用户说"做个插件卡片""加个UI插件""开发个UI组件""写个浮动卡片""做个插件市场界面""搞个统计卡片""注册新命令卡片""自定义消息渲染"时，必须加载本技能。即使看起来简单的UI改动（如"加个设置界面""显示个图表"）也应加载本技能——UI插件架构涉及的约定（注册模式、热重载、上下文注入、比例高度、闭包约束）容易遗漏，不加载容易写出不合规的代码。"
+description: DriFox UI 插件开发技能。用于创建、修改、调试UI插件（浮动卡片 / 内容块渲染器 / 消息元素工厂）。
 ---
 
 # ui-plugin-creator —— DriFox UI 插件开发技能
@@ -31,6 +31,7 @@ Step 5  验证：ruff check + 实际加载测试
 | "在聊天里显示HTML""渲染自定义内容""做个消息卡片样式" | **内容块渲染器**（ContentRenderer） | `templates.md` §二 |
 | "替换消息气泡""自定义消息控件""做个消息widget" | **消息元素工厂**（MessageFactory） | `templates.md` §三 |
 | "做个插件市场""安装插件""插件管理" | **完整插件**（全组件） | `templates.md` §四 + `architecture.md` |
+| "插件需要 requests/PIL/... 等第三方包""打包后再加依赖" | **外部依赖（_vendor/）** | `templates.md` §五 |
 | "改现有插件""加个按钮""调样式" | **修改现有插件** | 先读目标插件的代码 |
 
 > ⚠️ **新插件优先走浮动卡片**——这是最常见的UI插件形态。
@@ -58,7 +59,9 @@ plugins/<plugin-name>/
 └── ui/
     ├── __init__.py           # register_ui 入口
     ├── cards.py              # 浮动卡片 widget（可选）
-    └── renderers.py          # 内容块渲染器（可选）
+    ├── renderers.py          # 内容块渲染器（可选）
+    └── _vendor/              # 可选：第三方纯 Python 依赖（见 §4.7）
+        └── <package>/        # 整个包目录
 ```
 
 ### 2.3 按 §3 模板生成代码
@@ -229,6 +232,183 @@ class MyCard(QWidget):
         self.closed.emit()
 ```
 
+### 4.7 外部依赖管理（_vendor/ 模式）
+
+**场景**：UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox/plugins/` 使用，**不能再次打包**。
+
+**核心约束**：
+- PyInstaller `--onedir` 打包后，`_internal/` 只包含构建时检测到的包
+- 用户从市场下载的插件无法重新打包
+- 含 C 扩展的包（`.pyd`/`.so`）不能跨版本/架构复制，必须在主程序构建期声明
+
+**解决方案**：将**纯 Python**依赖放在 `plugins/<plugin>/ui/_vendor/`，在 `register_ui` 开头加入 `sys.path`。
+
+#### 4.7.1 目录约定
+
+```
+plugins/<plugin-name>/
+└── ui/
+    ├── __init__.py           # register_ui 中 sys.path.insert(0, vendor_dir)
+    ├── cards.py
+    ├── renderers.py
+    └── _vendor/              # 第三方纯 Python 包（完整复制）
+        ├── requests/
+        └── markdown/
+```
+
+#### 4.7.2 register_ui 标准模板（含 _vendor/）
+
+```python
+# -*- coding: utf-8 -*-
+"""<plugin-name> UI 组件入口"""
+
+import sys
+from pathlib import Path
+
+from loguru import logger
+
+
+def register_ui(registry):
+    """注册 <plugin-name> 的 UI 组件
+
+    外部依赖（打包到 ui/_vendor/）：
+        - <package-a>: <用途>
+        - <package-b>: <用途>
+
+    _vendor/ 机制：
+        把第三方纯 Python 包放在 ui/_vendor/，本函数开头将其加入 sys.path。
+        打包后即便 PyInstaller 未声明该包，import 也能成功。
+        仅限纯 Python 包；含 C 扩展的包不支持（需主程序构建期声明）。
+
+    ⚠️ sys.modules 缓存陷阱（dev 环境必看）：
+        Python 的 import 机制：如果模块已在 sys.modules 中，直接返回缓存，**忽略**
+        sys.path 顺序。如果 DriFox 启动时已 import 了同名的 vendored 包，
+        `sys.path.insert` 不会生效，必须显式删缓存。详见 §4.7.6。
+    """
+    # ── 1. 清理可能已缓存的 vendored 包（关键！见 §4.7.6） ──
+    vendor_packages = ["<package-a>", "<package-b>"]
+    cleaned = []
+    for pkg_name in vendor_packages:
+        for mod_name in list(sys.modules.keys()):
+            if mod_name == pkg_name or mod_name.startswith(f"{pkg_name}."):
+                mod_obj = sys.modules[mod_name]
+                mod_file = getattr(mod_obj, "__file__", "") or ""
+                if "_vendor" not in mod_file:
+                    del sys.modules[mod_name]
+                    cleaned.append(mod_name)
+    if cleaned:
+        logger.info(f"[<plugin-name>] 已清理 vendored 包缓存: {cleaned}")
+
+    # ── 2. 加载 _vendor/ ──
+    vendor_dir = Path(__file__).parent / "_vendor"
+    if vendor_dir.exists() and str(vendor_dir) not in sys.path:
+        sys.path.insert(0, str(vendor_dir))
+        logger.info(f"[<plugin-name>] _vendor/ 已加入 sys.path: {vendor_dir}")
+    else:
+        logger.warning(
+            f"[<plugin-name>] _vendor/ 不存在或已加入: {vendor_dir} "
+            f"(exists={vendor_dir.exists()})"
+        )
+
+    # ── 3. 验证 _vendor/ 中的包真的可用 ──
+    try:
+        import <package-a>
+
+        if "_vendor" in <package-a>.__file__:
+            logger.info(f"[<plugin-name>] ✓ <package-a> 已从 _vendor/ 加载")
+        else:
+            logger.error(f"[<plugin-name>] ✗ <package-a> 仍从非 _vendor/ 加载: {<package-a>.__file__}")
+    except ImportError as e:
+        logger.error(f"[<plugin-name>] ✗ <package-a> 加载失败: {e}")
+
+    # ── 4. 清理旧子模块缓存（热重载兼容） ──
+    safe_name = "<plugin-name>".replace("-", "_").replace(":", "_")
+    prefix = f"ui_plugin_{safe_name}."
+    stale = [k for k in sys.modules if k.startswith(prefix)]
+    for k in stale:
+        del sys.modules[k]
+
+    from .cards import MyCard
+
+    registry.register_floating_card(
+        plugin_name="<plugin-name>",
+        card_id="<card-id>",
+        widget_class=MyCard,
+        container="bottom",
+        title="<卡片标题>",
+        default_visible=False,
+    )
+    logger.info("[<plugin-name>] UI components registered")
+```
+
+#### 4.7.3 ⚠️ sys.modules 缓存陷阱（dev 环境最常见的坑）
+
+**症状**：在 dev 环境下运行插件，`register_ui` 里把 `_vendor/` 加到了 `sys.path[0]`，但 `cards.py` 中 `import xxx` 仍然从 site-packages 加载，路径显示是 venv 不是 `_vendor/`。
+
+**原因**：
+```python
+# 假设 DriFox 启动时已 import 了 darkdetect（用于主题检测）
+import darkdetect  # ← 现在 darkdetect 缓存在 sys.modules
+
+# 你的 register_ui 执行
+sys.path.insert(0, vendor_dir)  # sys.path 顺序已对
+import darkdetect  # ← 但 sys.modules 已有缓存，直接返回，**不查 sys.path**
+```
+
+**修复**：必须在 `sys.path.insert` 之前清理缓存，详见 §4.7.2 模板步骤 1。
+
+**判断是否真的从 `_vendor/` 加载**：
+```python
+import darkdetect
+assert "_vendor" in darkdetect.__file__, f"应从 _vendor/ 加载，实际: {darkdetect.__file__}"
+```
+
+**打包环境 vs dev 环境差异**：
+- **PyInstaller 打包后**：vendored 包根本不在 `_internal/` 中，第一次 import 必从 `_vendor/` 加载，没有此陷阱
+- **dev 环境**：如果任何代码（包括主程序、其他插件）提前 import 了同名包，必须手动清理缓存
+
+**调试技巧**：在 `register_ui` 末尾加诊断日志，确认加载路径：
+```python
+import darkdetect
+logger.info(f"[my-plugin] darkdetect loaded from: {darkdetect.__file__}")
+if "_vendor" not in darkdetect.__file__:
+    logger.error("[my-plugin] ⚠️ darkdetect 未从 _vendor/ 加载！")
+```
+
+#### 4.7.4 复制依赖到 _vendor/
+
+```bash
+# 从 dev 环境复制完整包
+python -c "import requests, os; src=os.path.dirname(requests.__file__); \
+  import shutil; shutil.copytree(src, 'plugins/my-plugin/ui/_vendor/requests')"
+```
+
+**关键点**：
+- 必须复制**完整包目录**（含 `__init__.py`、所有子模块）
+- `__pycache__/` 可省略（运行时会自动生成）
+- 包内自带的 `.so`/`.dll`（非 Python 标准库依赖）也可复制，但**必须**匹配目标平台的 Python 版本和架构
+
+#### 4.7.5 何时用 _vendor/，何时不用
+
+| 场景 | 推荐做法 |
+|------|---------|
+| 纯 Python 包（`requests`, `markdown`, `jsonschema`） | ✅ **用 _vendor/** |
+| 含 C 扩展但 PyInstaller 已声明（如 `numpy`, `PIL`） | ❌ 直接 `import` 即可 |
+| 含 C 扩展但 PyInstaller 未声明 | ⚠️ **不要用 _vendor/**，跨平台/版本会崩溃；改为主程序构建期声明（`build.py` 加 `--hidden-import`） |
+| 巨型包（`numpy`, `torch`, `pandas`） | ❌ 不适合 _vendor/（体积太大），应要求用户安装主程序依赖 |
+| 动态下载（用户运行插件时拉取） | ⚠️ 可以但要管理下载目录和清理逻辑，更复杂 |
+
+#### 4.7.6 验证 _vendor/ 是否真的可用
+
+由于 PyInstaller 打包后不能直接 `python -c "import my_plugin"`，需要**打一个测试 exe** 验证：
+
+```bash
+# 最小测试：在 plugins/ 目录下放你的插件，跑一个 test_main.py 用 importlib 加载
+# 打包 → 把 plugins/ 复制到 dist/<exe>/ 旁 → 运行 exe 验证
+```
+
+参考 `references/testing-vendor.md` 的完整测试脚本与打包流程。
+
 ---
 
 ## 5. 修改现有插件
@@ -252,6 +432,16 @@ class MyCard(QWidget):
 - [ ] 浮动卡片实现了 `set_context_provider` + `show_card` + `_apply_latest_theme`
 - [ ] 没有导入 `app.core` 或 `app.widgets`
 - [ ] 异步操作正确管理 worker 生命周期（`_cleanup_worker` + `deleteLater`）
+
+### 6.1 外部依赖（_vendor/）额外检查
+
+- [ ] `ui/_vendor/<package>/` 下每个包都有 `__init__.py`
+- [ ] `register_ui` 开头将 `vendor_dir` 加入 `sys.path`，并用 `Path(__file__).parent` 而非硬编码路径
+- [ ] **dev 环境下**：register_ui 开头**先清理 sys.modules 中已缓存的 vendored 包**（避免被提前 import 的同名包绕过 _vendor/）
+- [ ] **register_ui 末尾**：加 `assert "_vendor" in <pkg>.__file__` 或日志，确认实际加载来源
+- [ ] 热重载后 `vendor_dir` 仍生效（`Path(__file__)` 在热重载时指向新位置，`sys.path.insert` 重复执行是安全的）
+- [ ] 不在 `_vendor/` 放含 C 扩展但跨平台的包（`numpy`、`Pillow` 等），除非能保证目标环境完全匹配
+- [ ] 用 PyInstaller 打包测试：把整个 `plugins/<plugin-name>/` 复制到 `dist/<exe>/`，运行后能 `import` 第三方包并调用 API
 
 ---
 
