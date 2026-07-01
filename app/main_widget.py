@@ -197,6 +197,7 @@ class OpenAIChatToolWindow(ToolWindow):
     history_manager = None
     _current_agent: str = "build"
     _current_session_id: Optional[str] = None
+    _topic_summary_generated_for_session: Optional[str] = None  # 跟踪已生成标题的会话ID，避免重复生成
     _settings_popup = None
     _is_welcome = False
     _is_searching: bool = False
@@ -408,6 +409,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._undo_delete_stack: List[Dict[str, Any]] = []  # 每个元素包含 deleted_messages, round_index, widgets
 
         self._current_session_id = self.session_manager.get_current_session().session_id
+        self._topic_summary_generated_for_session = None  # 跟踪已生成标题的会话ID
 
         # 初始化卡片管理器（注册当前窗口）
         self._card_manager = CardManager.get_instance()
@@ -11051,6 +11053,20 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info("[Topic Summary] User edited title, skipping auto generation")
             return
 
+        # 🛡️ 只在新会话首次对话时生成标题，后续不触发
+        if self._topic_summary_generated_for_session == session.session_id:
+            logger.info("[Topic Summary] 当前会话已生成过标题，跳过")
+            return
+
+        # 🛡️ 如果会话已在历史记录中（已保存过的会话），不触发标题生成
+        # 只有全新的、从未保存过的会话才允许生成
+        if self.history_manager:
+            existing_idx = self.history_manager.find_index_by_session_id(session.session_id)
+            if existing_idx is not None:
+                self._topic_summary_generated_for_session = session.session_id
+                logger.info("[Topic Summary] 历史会话已有记录，跳过标题生成")
+                return
+
         user_messages = [m for m in session.messages if m.get("role") == "user"]
         if not user_messages:
             logger.warning("[Topic Summary] No user messages found, skipping")
@@ -11060,6 +11076,9 @@ class OpenAIChatToolWindow(ToolWindow):
             idx = self.history_manager.find_index_by_session_id(self._current_session_id)
             if idx is not None:
                 previous_summary = self.history_manager.get_topic_summary(idx)
+
+        # 🛡️ 记录此会话已触发标题生成（在异步任务开始前设置，防止并发消息重复触发）
+        self._topic_summary_generated_for_session = session.session_id
 
         # 线程安全包装：QRunnable 在后台线程直接调用 callback，
         # 通过 pyqtSignal emit 桥接到主线程，避免 GUI 操作崩溃
