@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -425,6 +426,8 @@ class _BarChartWidget(QWidget):
         self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+        self._hovered_index = -1
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
@@ -434,6 +437,61 @@ class _BarChartWidget(QWidget):
         """注入外部配色（来自 context），覆盖默认 _chart_colors()"""
         self._colors = colors
         self.update()
+
+    def mouseMoveEvent(self, event):
+        """鼠标悬停检测：高亮对应柱体并显示 tooltip"""
+        if not self._data:
+            self._hovered_index = -1
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+
+        w = self.width()
+        margin_left = 52 if w >= 420 else 44
+        chart_w = w - margin_left - (12 if w >= 400 else 8)
+
+        if chart_w < 10:
+            self._hovered_index = -1
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+
+        n = len(self._data)
+        bar_spacing = chart_w / n
+        pos = event.pos()
+
+        i = int((pos.x() - margin_left) / bar_spacing)
+        i = max(0, min(i, n - 1))
+
+        bar_x = margin_left + i * bar_spacing
+        if bar_x <= pos.x() <= bar_x + bar_spacing:
+            self._hovered_index = i
+        else:
+            self._hovered_index = -1
+
+        self.update()
+
+        if self._hovered_index >= 0:
+            label, value = self._data[self._hovered_index]
+            try:
+                parts = label.split("-")
+                if len(parts) == 2:
+                    dt = datetime.strptime(f"2025-{parts[0]}-{parts[1]}", "%Y-%m-%d")
+                    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                    date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
+                else:
+                    date_str = label
+            except (ValueError, IndexError):
+                date_str = label
+            QToolTip.showText(event.globalPos(), f"📊 {date_str}\n会话数: {value}", self)
+
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标离开时清除悬停状态"""
+        self._hovered_index = -1
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event):
         if not self._data:
@@ -517,8 +575,13 @@ class _BarChartWidget(QWidget):
             rect = QRectF(x, y, bar_width, max(bar_h, 0))
             path = QPainterPath()
             path.addRoundedRect(rect, 3, 3)
-            painter.fillPath(path, bar_color)
-            painter.setPen(QPen(border_color, 1))
+            if i == self._hovered_index:
+                hover_color = QColor(bar_color).lighter(130)
+                painter.fillPath(path, hover_color)
+                painter.setPen(QPen(QColor(border_color).lighter(150), 2))
+            else:
+                painter.fillPath(path, bar_color)
+                painter.setPen(QPen(border_color, 1))
             painter.drawPath(path)
 
             # X 轴标签
@@ -577,6 +640,8 @@ class _LineChartWidget(QWidget):
         self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+        self._hovered_index = -1
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
@@ -586,6 +651,63 @@ class _LineChartWidget(QWidget):
         """注入外部配色（来自 context），覆盖默认 _chart_colors()"""
         self._colors = colors
         self.update()
+
+    def mouseMoveEvent(self, event):
+        """鼠标悬停检测：高亮最近的数据点并显示 tooltip"""
+        if not self._data or len(self._data) < 1:
+            self._hovered_index = -1
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+
+        w = self.width()
+        margin_left = 52 if w >= 420 else 44
+        margin_right = 12 if w >= 400 else 8
+        chart_w = w - margin_left - margin_right
+
+        if chart_w < 10:
+            self._hovered_index = -1
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+
+        n = len(self._data)
+        pos = event.pos()
+
+        ratio = (pos.x() - margin_left) / chart_w
+        i = int(round(ratio * (n - 1)))
+        i = max(0, min(i, n - 1))
+
+        pt_x = margin_left + chart_w * i / (n - 1) if n > 1 else margin_left + chart_w / 2
+
+        if abs(pos.x() - pt_x) <= 30:
+            self._hovered_index = i
+        else:
+            self._hovered_index = -1
+
+        self.update()
+
+        if self._hovered_index >= 0:
+            label, value = self._data[self._hovered_index]
+            try:
+                parts = label.split("-")
+                if len(parts) == 2:
+                    dt = datetime.strptime(f"2025-{parts[0]}-{parts[1]}", "%Y-%m-%d")
+                    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                    date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
+                else:
+                    date_str = label
+            except (ValueError, IndexError):
+                date_str = label
+            QToolTip.showText(event.globalPos(), f"📈 {date_str}\n{_format_number(value)}", self)
+
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标离开时清除悬停状态"""
+        self._hovered_index = -1
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event):
         if not self._data:
@@ -693,8 +815,15 @@ class _LineChartWidget(QWidget):
             pt = points[i]
             # 圆点
             painter.setPen(Qt.NoPen)
-            painter.setBrush(point_color)
-            painter.drawEllipse(pt, 3, 3)
+            if i == self._hovered_index:
+                painter.setBrush(point_color.lighter(150))
+                painter.drawEllipse(pt, 6, 6)
+                # 绘制垂直参考线
+                painter.setPen(QPen(colors["text_secondary"], 1, Qt.DashLine))
+                painter.drawLine(QPointF(pt.x(), margin_top), QPointF(pt.x(), h - margin_bottom))
+            else:
+                painter.setBrush(point_color)
+                painter.drawEllipse(pt, 3, 3)
             painter.setBrush(Qt.NoBrush)
 
             # 值标签：先尝试放在数据点上方
@@ -888,6 +1017,8 @@ class _ProjectBarWidget(QWidget):
         self.setMinimumHeight(160)
         self.setMaximumHeight(260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+        self._hovered_index = -1
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
@@ -897,6 +1028,52 @@ class _ProjectBarWidget(QWidget):
         """注入外部配色（来自 context）"""
         self._colors = colors
         self.update()
+
+    def mouseMoveEvent(self, event):
+        """鼠标悬停检测：高亮对应项目柱体并显示 tooltip"""
+        if not self._data:
+            self._hovered_index = -1
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+
+        h = self.height()
+        margin_top = 28  # title_h(24) + 4
+        margin_bottom = 8
+        chart_h = h - margin_top - margin_bottom
+
+        if chart_h < 10:
+            self._hovered_index = -1
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+
+        n = len(self._data)
+        pos = event.pos()
+        row_h = chart_h / n
+
+        i = int((pos.y() - margin_top) / row_h)
+        i = max(0, min(i, n - 1))
+
+        row_y = margin_top + i * row_h
+        if row_y <= pos.y() <= row_y + row_h:
+            self._hovered_index = i
+        else:
+            self._hovered_index = -1
+
+        self.update()
+
+        if self._hovered_index >= 0:
+            label, value = self._data[self._hovered_index]
+            QToolTip.showText(event.globalPos(), f"📁 {label}\n会话数: {value}", self)
+
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标离开时清除悬停状态"""
+        self._hovered_index = -1
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event):
         if not self._data:
@@ -970,8 +1147,13 @@ class _ProjectBarWidget(QWidget):
             bar_color.setAlpha(180)
             path = QPainterPath()
             path.addRoundedRect(QRectF(bar_x, y + 2, max(bar_w, 2), bar_h - 4), 4, 4)
-            painter.fillPath(path, bar_color)
-            painter.setPen(QPen(colors["accent"], 1))
+            if i == self._hovered_index:
+                hover_color = QColor(bar_color).lighter(140)
+                painter.fillPath(path, hover_color)
+                painter.setPen(QPen(QColor(colors["accent"]).lighter(150), 2))
+            else:
+                painter.fillPath(path, bar_color)
+                painter.setPen(QPen(colors["accent"], 1))
             painter.drawPath(path)
 
             # 数值
