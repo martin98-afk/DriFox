@@ -498,6 +498,59 @@ DriFox 的 **插件系统（Plugin System）** 是其能力扩展的核心基石
 | **hooks/** | 事件钩子脚本 | SessionStart、PreToolUse 等 6 种事件 |
 | **.mcp.json** | MCP 服务器配置 | GitHub、Playwright、数据库等 |
 
+#### UI 插件（浮动卡片 / 内容渲染器）
+
+UI 插件是插件系统的高级扩展形态 —— 插件不仅能扩展 AI 能力，还能直接在 DriFox 界面中**渲染自定义 UI 组件**。通过 `UIPluginRegistry`（单例注册表），插件可在加载时注册以下三种 UI 组件类型：
+
+| 组件类型 | 说明 | 特点 |
+|---------|------|------|
+| 🃏 **浮动卡片 (Floating Card)** | 悬浮在聊天区域上方/下方的独立面板 | 支持 toggle 显示/隐藏、多窗口隔离、上下文注入、自动注册 `/命令` |
+| 🧩 **内容渲染器 (Content Renderer)** | 自定义消息内容块渲染（`custom` 类型） | 插件可定义 `custom_type` 对应 HTML 渲染函数，消息渲染时自动匹配 |
+| 🏭 **消息元素工厂 (Message Factory)** | 自定义消息级 QWidget 创建器 | 根据消息条件判断，返回自定义 Widget 替代默认渲染 |
+
+**浮动卡片** 是最常用且功能最丰富的 UI 插件形态。每个浮动卡片是一个独立的 QWidget 子类，具有以下特征：
+
+- **注册即命令**：插件调用 `registry.register_floating_card()` 后，自动注册 `/卡片ID` 命令，用户输入命令即可 toggle 显示/隐藏
+- **双容器位置**：`top`（上部，与配置卡片同级）或 `bottom`（下部，覆盖聊天区域），`bottom` 容器卡片显示时自动隐藏输入区
+- **上下文注入**：卡片可通过 `set_context_provider()` 拉取最新的项目根目录、会话 ID、主题色等上下文信息，实时响应变更
+- **多窗口隔离**：每个窗口独立缓存卡片实例，项目/会话切换时自动重建
+- **热插拔支持**：插件启用/禁用时即时创建/销毁卡片，无需重启应用
+
+**UI 插件的典型生命周期：**
+
+```
+插件启用 → PluginManager 检测 ui/__init__.py 存在
+  → 标记 components["ui"] = True
+  → backend._load_plugin_ui() 调用 UIPluginRegistry.load_plugin()
+    → 导入 ui/__init__.py → 执行 register_ui(registry)
+      → 注册浮动卡片、内容渲染器、消息工厂
+        → 浮动卡片自动注册 /命令
+        → 首次执行命令时创建 widget 实例，加入容器布局
+```
+
+**已安装的 UI 插件一览：**
+
+| 插件 | 类型 | 说明 | 命令 |
+|------|------|------|------|
+| **上下文用量统计** | 浮动卡片 | 基于 SQLite 的用量看板：14 天 Token 趋势折线图、每日消息量趋势、会话活跃度柱状图、项目分布统计、KPI 摘要卡片（总会话/总消息/总 Token） | `/context-usage-stats` |
+| **项目文件树** | 浮动卡片 | 以树形结构浏览项目文件，智能过滤忽略目录（`.git`/`__pycache__`/`node_modules` 等），右键菜单支持复制路径、打开位置，顶栏搜索框实时过滤，已展开目录自动监听文件变更 | `/file-tree` |
+| **Git 仪表盘** | 浮动卡片 | Git 仓库状态总览：分支切换、变更文件清单、提交历史速览，无需离开 DriFox 即可掌握代码库全貌 | `/git-dashboard` |
+| **_vendor/ 依赖演示** | 浮动卡片 | 演示插件的 `_vendor/` 机制：在 `ui/_vendor/` 中打包第三方纯 Python 包（如 `darkdetect`、`packaging`），无需在 `pyproject.toml` 声明依赖 | `/vendor-demo` |
+
+> 所有 UI 插件均遵守**闭包设计约束**：不导入 `app.core` 或 `app.widgets` 内部模块，所有文件操作只通过 stdlib 完成，确保与主程序解耦、热重载安全。
+
+**UI 插件开发：**
+只需三步即可创建一个 UI 浮动卡片插件：
+```
+1. 在插件目录创建 ui/__init__.py，提供 register_ui(registry) 函数
+2. 在 ui/cards.py 中实现 QWidget 子类（浮动卡片内容）
+3. 在 register_ui 中调用 registry.register_floating_card() 注册
+```
+
+![上下文用量统计 — UI 插件样例，展示 Token 趋势、消息量、会话活跃度三张图表](images/ui插件样例.png)
+
+![UI 插件效果示意 — KPI 卡片与数据图表展示](images/ui插件其一.png)
+
 #### 已安装插件精选（33+）
 
 **语言服务器类：**
