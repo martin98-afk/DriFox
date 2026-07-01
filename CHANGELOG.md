@@ -3,6 +3,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-07-02
+
+自上一版本以来的变更 | 提交数：15 · 文件变更：34 · +6977/-350 | 贡献者：dingma, mading
+
+---
+
+### ✨ 新功能 (New Features)
+
+- **UI 插件上下文注入体系**: 实现拉模型（Pull Model）上下文注入，浮动卡片通过 `set_context_provider()` 按需获取最新项目根目录、会话 ID、主题色；上下文主题色自动映射为图表配色（QColor），告别硬编码 fallback
+- **图表悬停交互增强**: 折线图（`_LineChartWidget`）和柱状图（`_BarChartWidget`）实现鼠标悬停高亮 + Tooltip 数据点实时显示，支持跨系列邻接高亮
+- **插件热重载增量机制**: 支持增量重载受影响的相邻插件，仅重载变更插件而非全量扫描；目录变更过滤改进，过滤无关事件减少不必要重载触发
+- **卡片自适应尺寸**: 卡片最小高度归零，支持内容自适应动态扩展，避免固定高度导致内容截断
+- **插件市场版本检查**: 市场插件支持版本比较与更新提示，`plugin-marketplace` 新增版本号校验和更新下载功能
+- **输入区恢复兜底逻辑**: 卡片关闭时强制恢复输入区，防止因回调链断裂导致输入区永久隐藏
+- **UI 插件开发指南文档**: 新增 `SKILL.md` 和 `architecture.md`，提供详细的 UI 插件开发指引、组件设计模式、构建流程说明
+
+### 🐛 问题修复 (Bug Fixes)
+
+- 移除 `context-usage-stats` Token 消耗显示中重复的标签文本
+- 修复关闭第三方插件后 `command_card` 固定高度未重置导致卡片高度异常
+- 改进文件系统目录变更过滤逻辑，防止无关事件触发跨插件重载
+
+### ♻️ 代码重构 (Refactoring)
+
+- 优化工具调用结果顺序修复逻辑，移除已废弃的 Hook 块渲染功能
+
+### 📚 文档 (Documentation)
+
+- 新增 UI 插件完整说明到 README：浮动卡片、内容渲染器、消息工厂三种组件类型、生命周期、现有插件一览表、开发指南
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号更新至 v0.3.0，同步更新 pyproject.toml / config.py / installer.iss 三处版本文件
+
 ## [v0.2.14] - 2026-07-01
 
 自上一版本以来的变更 | 提交数：60 · 文件变更：59 · +16715/-6109 | 贡献者：dingma, mading
