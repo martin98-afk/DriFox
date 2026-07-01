@@ -241,7 +241,7 @@ class MarketplaceCard(QWidget):
     # ── 界面搭建 ──
 
     def _setup_ui(self):
-        self.setMinimumHeight(400)
+        self.setMinimumHeight(0)
         # 半透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("MarketplaceCard { background: transparent; }")
@@ -328,6 +328,32 @@ class MarketplaceCard(QWidget):
         self._empty_label.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         self._empty_label.setVisible(False)
         root.addWidget(self._empty_label)
+
+    # ── 高度模式 ──
+
+    def sizeHint(self):
+        """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
+        from PyQt5.QtCore import QSize
+        base = super().sizeHint()
+        win = self.window()
+        if win and win.height() > 0:
+            return QSize(max(base.width(), 200), int(win.height() * 0.85))
+        return base
+
+    def showEvent(self, event):
+        """显示时安装窗口 resize 事件过滤器，窗口缩放时通知容器重新展开"""
+        super().showEvent(event)
+        win = self.window()
+        if win:
+            win.installEventFilter(self)
+            self.updateGeometry()
+
+    def eventFilter(self, obj, event):
+        """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
+        from PyQt5.QtCore import QEvent
+        if obj is self.window() and event.type() == QEvent.Resize:
+            self.updateGeometry()
+        return super().eventFilter(obj, event)
 
     # ── 异步刷新 ──
 
