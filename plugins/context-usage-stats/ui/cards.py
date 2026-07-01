@@ -18,7 +18,7 @@ import sqlite3
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QPointF, QRectF, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
@@ -34,7 +34,6 @@ from qfluentwidgets import (
     FluentIcon,
     IconWidget,
     ScrollArea,
-    StrongBodyLabel,
     ToolButton,
     TransparentToolButton,
     isDarkTheme,
@@ -61,41 +60,77 @@ def _find_db() -> Optional[Path]:
 
 
 def _text_color(secondary: bool = False) -> str:
+    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色"""
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
 
 
 def _chart_colors() -> dict:
-    """返回图表颜色方案（跟随主题）"""
-    if isDarkTheme():
-        return {
-            "bar_fill": QColor(98, 160, 234, 200),
-            "bar_border": QColor(98, 160, 234),
-            "line": QColor(80, 227, 194),
-            "line_fill": QColor(80, 227, 194, 60),
-            "point": QColor(80, 227, 194),
-            "grid": QColor(255, 255, 255, 30),
-            "text": QColor(255, 255, 255, 180),
-            "text_secondary": QColor(255, 255, 255, 100),
-            "card_bg": QColor(255, 255, 255, 20),
-            "accent": QColor(98, 160, 234),
-            "warning": QColor(255, 193, 7, 200),
-            "success": QColor(80, 227, 194, 200),
-        }
+    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色
+
+    注意：浮动卡片背景偏暗，fallback 统一使用浅色文字，
+    不依赖 isDarkTheme()，避免 qfluentwidgets 主题状态不同步导致黑色字。
+    """
     return {
-        "bar_fill": QColor(40, 120, 220, 180),
-        "bar_border": QColor(40, 120, 220),
-        "line": QColor(0, 168, 136),
-        "line_fill": QColor(0, 168, 136, 40),
-        "point": QColor(0, 168, 136),
-        "grid": QColor(0, 0, 0, 20),
-        "text": QColor(0, 0, 0, 180),
-        "text_secondary": QColor(0, 0, 0, 100),
-        "card_bg": QColor(0, 0, 0, 8),
-        "accent": QColor(40, 120, 220),
-        "warning": QColor(245, 158, 11, 200),
-        "success": QColor(16, 185, 129, 200),
+        "bar_fill": QColor(98, 160, 234, 200),
+        "bar_border": QColor(98, 160, 234),
+        "line": QColor(80, 227, 194),
+        "line_fill": QColor(80, 227, 194, 60),
+        "point": QColor(80, 227, 194),
+        "grid": QColor(255, 255, 255, 30),
+        "text": QColor(255, 255, 255, 200),
+        "text_secondary": QColor(255, 255, 255, 150),
+        "card_bg": QColor(255, 255, 255, 20),
+        "accent": QColor(98, 160, 234),
+        "accent_fill": QColor(98, 160, 234, 60),
+        "warning": QColor(255, 193, 7, 200),
+        "success": QColor(80, 227, 194, 200),
+        "font_family": "Microsoft YaHei",
+        "font_size": 14,
+    }
+
+
+# ── 上下文主题色 → 图表色转换 ────────────────────────────
+
+
+def _make_chart_colors_from_context(ctx: dict) -> dict:
+    """将 context 中的主题 colors 映射为图表组件可用的 QColor 字典
+
+    Args:
+        ctx: UIPluginRegistry 注入的上下文（含 colors / is_dark 等字段）
+
+    Returns:
+        带 QColor 值的图表配色字典，与 _chart_colors() 输出格式一致
+    """
+    raw = ctx.get("colors", {})
+    is_dark = ctx.get("is_dark", True)
+
+    def _qcolor(key: str, fallback_light: str, fallback_dark: str) -> QColor:
+        val = raw.get(key, "")
+        if val:
+            return QColor(val)
+        return QColor(fallback_dark if is_dark else fallback_light)
+
+    accent = _qcolor("accent", "#2878dc", "#62a0ea")
+    success = _qcolor("success", "#00a888", "#50e3c2")
+    # 注意：浮动卡片容器背景偏暗，text 颜色固定用白色，不依赖 is_dark / 主题色
+    return {
+        "bar_fill": accent.lighter(110),
+        "bar_border": accent,
+        "line": success,
+        "line_fill": QColor(success.red(), success.green(), success.blue(), 60),
+        "point": success,
+        "grid": _qcolor("border", "#cccccc80", "#ffffff1e"),
+        "text": QColor(255, 255, 255, 200),
+        "text_secondary": QColor(255, 255, 255, 150),
+        "card_bg": _qcolor("card_bg", "#00000014", "#ffffff14"),
+        "accent": accent,
+        "accent_fill": QColor(accent.red(), accent.green(), accent.blue(), 60),
+        "warning": _qcolor("accent_warm", "#f59e0b", "#ffc107"),
+        "success": success,
+        "font_family": ctx.get("font_family", "Microsoft YaHei"),
+        "font_size": ctx.get("font_size", 14),
     }
 
 
@@ -365,11 +400,17 @@ class _BarChartWidget(QWidget):
         self._title = title
         self._data = data  # [(label, value), ...]
         self._color_key = color_key
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
+        self.update()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context），覆盖默认 _chart_colors()"""
+        self._colors = colors
         self.update()
 
     def paintEvent(self, event):
@@ -379,15 +420,17 @@ class _BarChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        colors = _chart_colors()
+        colors = self._colors
+        font_family = colors.get("font_family", "Microsoft YaHei")
+        base_font_size = colors.get("font_size", 14)
         w = self.width()
         h = self.height()
 
         # 自适应边距：窄宽度时缩小边距
-        margin_left = 32 if w >= 400 else 24
+        margin_left = 52 if w >= 420 else 44
         margin_right = 12 if w >= 400 else 8
-        margin_top = 28
-        margin_bottom = 44 if w >= 400 else 36
+        margin_top = 34
+        margin_bottom = 48 if w >= 400 else 40
 
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
@@ -397,9 +440,9 @@ class _BarChartWidget(QWidget):
             return
 
         # ── 标题 ──
-        title_size = 10 if w >= 400 else 9
+        title_size = max(round(base_font_size * 10 / 14), 8)
         painter.setPen(colors["text"])
-        title_font = QFont("Microsoft YaHei", title_size, QFont.Bold)
+        title_font = QFont(font_family, title_size, QFont.Bold)
         painter.setFont(title_font)
         painter.drawText(QRectF(margin_left, 4, chart_w, 22), Qt.AlignLeft | Qt.AlignVCenter, self._title)
 
@@ -412,17 +455,17 @@ class _BarChartWidget(QWidget):
         # ── Y 轴 ──
         painter.setPen(colors["grid"])
         y_ticks = 4
-        tick_font_size = 7 if w >= 400 else 6
+        tick_font_size = max(round(base_font_size * 8 / 14), 7)
         for i in range(y_ticks + 1):
             y = margin_top + chart_h * (1 - i / y_ticks)
             painter.drawLine(QPointF(margin_left, y), QPointF(w - margin_right, y))
 
             val = int(max_val * i / y_ticks)
             painter.setPen(colors["text_secondary"])
-            tick_font = QFont("Microsoft YaHei", tick_font_size)
+            tick_font = QFont(font_family, tick_font_size)
             painter.setFont(tick_font)
             painter.drawText(
-                QRectF(0, y - 10, margin_left - 4, 20),
+                QRectF(2, y - 12, margin_left - 8, 24),
                 Qt.AlignRight | Qt.AlignVCenter,
                 str(val),
             )
@@ -440,6 +483,9 @@ class _BarChartWidget(QWidget):
         bar_color = colors.get(self._color_key, colors["bar_fill"])
         border_color = colors.get(self._color_key.replace("fill", "border"), colors["bar_border"])
 
+        x_tick_size = max(round(base_font_size * 7 / 14), 6)
+        val_font_size = max(round(base_font_size * 9 / 14), 7)
+
         for i, (label, value) in enumerate(self._data):
             x = margin_left + i * bar_spacing + (bar_spacing - bar_width) / 2
             bar_h = (value / max_val) * chart_h if max_val > 0 else 0
@@ -455,8 +501,7 @@ class _BarChartWidget(QWidget):
 
             # X 轴标签
             painter.setPen(colors["text_secondary"])
-            x_tick_size = 7 if w >= 400 else 6
-            tick_font = QFont("Microsoft YaHei", x_tick_size)
+            tick_font = QFont(font_family, x_tick_size)
             painter.setFont(tick_font)
             # 显示 "01-15\n周一" 格式（仅周末/周一标注星期）
             try:
@@ -480,13 +525,18 @@ class _BarChartWidget(QWidget):
                 display_label,
             )
 
-            # 值标签（柱顶，窄宽度时隐藏小值）
+            # 值标签（柱顶/柱内，靠近顶部时自动调整）
             if value > 0 and (w >= 350 or value >= max_val * 0.3):
                 painter.setPen(colors["text"])
-                val_font = QFont("Microsoft YaHei", 8 if w >= 400 else 7, QFont.Bold)
+                val_font = QFont(font_family, val_font_size, QFont.Bold)
                 painter.setFont(val_font)
+                label_y = y - 20
+                if label_y < margin_top:
+                    label_y = y + 4
+                if label_y + 16 > h - margin_bottom:
+                    label_y = y - 12
                 painter.drawText(
-                    QRectF(x, y - 18, bar_width, 16),
+                    QRectF(x, label_y, bar_width, 16),
                     Qt.AlignCenter,
                     str(value),
                 )
@@ -502,11 +552,17 @@ class _LineChartWidget(QWidget):
         self._title = title
         self._data = data
         self._color_key = color_key
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
+        self.update()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context），覆盖默认 _chart_colors()"""
+        self._colors = colors
         self.update()
 
     def paintEvent(self, event):
@@ -516,15 +572,17 @@ class _LineChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        colors = _chart_colors()
+        colors = self._colors
+        font_family = colors.get("font_family", "Microsoft YaHei")
+        base_font_size = colors.get("font_size", 14)
         w = self.width()
         h = self.height()
 
         # 自适应边距：窄宽度时缩小边距
-        margin_left = 32 if w >= 400 else 24
+        margin_left = 52 if w >= 420 else 44
         margin_right = 12 if w >= 400 else 8
-        margin_top = 28
-        margin_bottom = 44 if w >= 400 else 36
+        margin_top = 34
+        margin_bottom = 48 if w >= 400 else 40
 
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
@@ -534,9 +592,9 @@ class _LineChartWidget(QWidget):
             return
 
         # ── 标题 ──
-        title_size = 10 if w >= 400 else 9
+        title_size = max(round(base_font_size * 10 / 14), 8)
         painter.setPen(colors["text"])
-        title_font = QFont("Microsoft YaHei", title_size, QFont.Bold)
+        title_font = QFont(font_family, title_size, QFont.Bold)
         painter.setFont(title_font)
         painter.drawText(QRectF(margin_left, 4, chart_w, 22), Qt.AlignLeft | Qt.AlignVCenter, self._title)
 
@@ -547,9 +605,8 @@ class _LineChartWidget(QWidget):
         if max_val == min_val:
             max_val = max_val + 1 or 2
             min_val = 0
-        # 给顶部留 20% 空间
-        range_val = max_val - min_val
-        top_margin = max_val * 0.2
+        # 给顶部留 30% 空间，避免数据点标签被裁剪
+        top_margin = max_val * 0.3
         adjusted_max = max_val + top_margin
 
         # ── 网格 + Y 轴 ──
@@ -561,11 +618,11 @@ class _LineChartWidget(QWidget):
 
             val = int(min_val + (adjusted_max - min_val) * i / y_ticks)
             painter.setPen(colors["text_secondary"])
-            tick_font_size = 7 if w >= 400 else 6
-            tick_font = QFont("Microsoft YaHei", tick_font_size)
+            tick_font_size = max(round(base_font_size * 8 / 14), 7)
+            tick_font = QFont(font_family, tick_font_size)
             painter.setFont(tick_font)
             painter.drawText(
-                QRectF(0, y - 10, margin_left - 4, 20),
+                QRectF(2, y - 12, margin_left - 8, 24),
                 Qt.AlignRight | Qt.AlignVCenter,
                 _format_number(val),
             )
@@ -607,29 +664,45 @@ class _LineChartWidget(QWidget):
             painter.drawLine(points[i], points[i + 1])
 
         # ── 数据点 + 标签 ──
+        val_font_size = max(round(base_font_size * 9 / 14), 7)
+        label_w = 60
+        label_h = 20
         for i, (_, value) in enumerate(self._data):
             pt = points[i]
             # 圆点
             painter.setPen(Qt.NoPen)
             painter.setBrush(point_color)
-            painter.drawEllipse(pt, 4, 4)
+            painter.drawEllipse(pt, 3, 3)
             painter.setBrush(Qt.NoBrush)
 
-            # 值标签
+            # 值标签：先尝试放在数据点上方
+            label_y = pt.y() - label_h - 4
+            if label_y < margin_top:
+                # 上方不够则放下方
+                label_y = pt.y() + 6
+                if label_y + label_h > h - margin_bottom + 6:
+                    # 上下都不够则在数据点正中央对齐
+                    label_y = pt.y() - label_h // 2
+            # 计算标签 x 位置，确保在 widget 边界内
+            label_x = pt.x() - label_w / 2
+            if label_x < 2:
+                label_x = 2
+            elif label_x + label_w > w - 2:
+                label_x = w - 2 - label_w
             if value > 0:
                 painter.setPen(colors["text"])
-                val_font = QFont("Microsoft YaHei", 8, QFont.Bold)
+                val_font = QFont(font_family, val_font_size, QFont.Bold)
                 painter.setFont(val_font)
                 painter.drawText(
-                    QRectF(pt.x() - 20, pt.y() - 22, 40, 18),
+                    QRectF(label_x, label_y, label_w, label_h),
                     Qt.AlignCenter,
                     _format_number(value),
                 )
 
         # ── X 轴标签 ──
-        x_tick_size = 7 if w >= 400 else 6
+        x_tick_size = max(round(base_font_size * 7 / 14), 6)
         painter.setPen(colors["text_secondary"])
-        tick_font = QFont("Microsoft YaHei", x_tick_size)
+        tick_font = QFont(font_family, x_tick_size)
         painter.setFont(tick_font)
         for i, (label, _) in enumerate(self._data):
             x = margin_left + chart_w * i / (n - 1) if n > 1 else margin_left + chart_w / 2
@@ -670,7 +743,41 @@ class _StatCard(QFrame):
         self._title = title
         self._value = value
         self._subtitle = subtitle
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setup_ui()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context），覆盖默认 _text_color()"""
+        self._colors = colors
+        self._apply_card_style()
+
+    def _apply_card_style(self):
+        """根据当前 colors 刷新样式（含 font_family / font_size）"""
+        tc = self._colors.get("text", QColor(255, 255, 255, 180))
+        tcs = self._colors.get("text_secondary", QColor(255, 255, 255, 100))
+        font_family = self._colors.get("font_family", "Microsoft YaHei")
+        base_font_size = self._colors.get("font_size", 14)
+        text_color = f"rgba({tc.red()},{tc.green()},{tc.blue()},{tc.alpha()})"
+        text_sec = f"rgba({tcs.red()},{tcs.green()},{tcs.blue()},{tcs.alpha()})"
+        val_size = max(round(base_font_size * 22 / 14), 16)
+        sub_size = max(round(base_font_size * 11 / 14), 9)
+        for child in self.findChildren(QLabel):
+            obj_name = child.objectName()
+            if obj_name == "statValue":
+                child.setStyleSheet(
+                    f"color: {text_color}; font-size: {val_size}px; font-weight: bold; "
+                    f"font-family: '{font_family}'; background: transparent;"
+                )
+            elif obj_name == "statSub":
+                child.setStyleSheet(
+                    f"color: {text_sec}; font-size: {sub_size}px; "
+                    f"font-family: '{font_family}'; background: transparent;"
+                )
+            else:
+                child.setStyleSheet(
+                    f"color: {text_sec}; font-size: {sub_size}px; "
+                    f"font-family: '{font_family}'; background: transparent;"
+                )
 
     def setup_ui(self):
         self.setObjectName("statCard")
@@ -682,6 +789,18 @@ class _StatCard(QFrame):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(4)
 
+        # 用当前 colors（默认 fallback）确定字号
+        font_family = self._colors.get("font_family", "Microsoft YaHei")
+        base_font_size = self._colors.get("font_size", 14)
+        val_size = max(round(base_font_size * 22 / 14), 16)
+        sub_size = max(round(base_font_size * 11 / 14), 9)
+
+        # 从 colors 取色，fallback 到 _text_color()
+        tc = self._colors.get("text", QColor(255, 255, 255, 180))
+        tcs = self._colors.get("text_secondary", QColor(255, 255, 255, 100))
+        text_color = f"rgba({tc.red()},{tc.green()},{tc.blue()},{tc.alpha()})"
+        text_sec = f"rgba({tcs.red()},{tcs.green()},{tcs.blue()},{tcs.alpha()})"
+
         # 图标 + 标题行
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
@@ -691,20 +810,30 @@ class _StatCard(QFrame):
         top_row.addWidget(icon_w)
 
         title_lb = QLabel(self._title, self)
-        title_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
+        title_lb.setObjectName("statTitle")
+        title_lb.setStyleSheet(
+            f"color: {text_sec}; font-size: {sub_size}px; font-family: '{font_family}'; background: transparent;"
+        )
         top_row.addWidget(title_lb)
         top_row.addStretch(1)
         layout.addLayout(top_row)
 
         # 值
         val_lb = QLabel(self._value, self)
-        val_lb.setStyleSheet(f"color: {_text_color()}; font-size: 22px; font-weight: bold; background: transparent;")
+        val_lb.setObjectName("statValue")
+        val_lb.setStyleSheet(
+            f"color: {text_color}; font-size: {val_size}px; font-weight: bold; "
+            f"font-family: '{font_family}'; background: transparent;"
+        )
         layout.addWidget(val_lb)
 
         # 副标题
         if self._subtitle:
             sub_lb = QLabel(self._subtitle, self)
-            sub_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
+            sub_lb.setObjectName("statSub")
+            sub_lb.setStyleSheet(
+                f"color: {text_sec}; font-size: {sub_size}px; font-family: '{font_family}'; background: transparent;"
+            )
             layout.addWidget(sub_lb)
 
 
@@ -715,12 +844,18 @@ class _ProjectBarWidget(QWidget):
         super().__init__(parent)
         self._data = data
         self._title = title
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(160)
         self.setMaximumHeight(260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
+        self.update()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context）"""
+        self._colors = colors
         self.update()
 
     def paintEvent(self, event):
@@ -730,7 +865,9 @@ class _ProjectBarWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        colors = _chart_colors()
+        colors = self._colors
+        font_family = colors.get("font_family", "Microsoft YaHei")
+        base_font_size = colors.get("font_size", 14)
         w = self.width()
         h = self.height()
 
@@ -749,9 +886,9 @@ class _ProjectBarWidget(QWidget):
             return
 
         # ── 标题 ──
-        title_size = 10 if w >= 400 else 9
+        title_size = max(round(base_font_size * 10 / 14), 8)
         painter.setPen(colors["text"])
-        title_font = QFont("Microsoft YaHei", title_size, QFont.Bold)
+        title_font = QFont(font_family, title_size, QFont.Bold)
         painter.setFont(title_font)
         painter.drawText(QRectF(margin_left, 2, chart_w, title_h), Qt.AlignLeft | Qt.AlignVCenter, self._title)
 
@@ -768,14 +905,15 @@ class _ProjectBarWidget(QWidget):
         bar_h = max(row_h * 0.6, 14)
         bar_h = min(bar_h, 28)
 
-        label_font = QFont("Microsoft YaHei", 10)
-        val_font = QFont("Microsoft YaHei", 9, QFont.Bold)
+        label_font_size = max(round(base_font_size * 10 / 14), 8)
+        val_font_size = max(round(base_font_size * 9 / 14), 8)
 
         for i, (label, value) in enumerate(self._data):
             y = margin_top + i * row_h + (row_h - bar_h) / 2
 
             # 标签
             painter.setPen(colors["text"])
+            label_font = QFont(font_family, label_font_size)
             painter.setFont(label_font)
             display_label = label if len(label) <= 12 else label[:11] + "…"
             painter.drawText(
@@ -798,6 +936,7 @@ class _ProjectBarWidget(QWidget):
 
             # 数值
             painter.setPen(colors["text"])
+            val_font = QFont(font_family, val_font_size, QFont.Bold)
             painter.setFont(val_font)
             painter.drawText(
                 QRectF(bar_x + max(bar_w, 2) + 6, y, 50, bar_h),
@@ -820,27 +959,85 @@ class ContextUsageStatsCard(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._context_provider: Optional[Callable[[], dict]] = None
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_DataWorker] = None
         self._stats_data: Optional[dict] = None
+        self._chart_style: Optional[dict] = None
         self._setup_ui()
 
-        # 自动加载数据
-        from PyQt5.QtCore import QTimer
+        # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
 
-        QTimer.singleShot(150, self._async_load_data)
+    # ── 拉模型上下文注入 ──
+
+    def set_context_provider(self, provider: Callable[[], dict]):
+        """注入上下文提供函数（由 UIPluginRegistry 调用）
+
+        卡片在 show_card / 需要刷新主题时自行调用 provider 获取最新上下文，
+        不再依赖外部推送。
+        """
+        self._context_provider = provider
+
+    def show_card(self):
+        """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
+        self._apply_latest_theme()
+        self._async_load_data()
+        self.setVisible(True)
+
+    def _apply_latest_theme(self):
+        """从上下文提供函数拉取最新主题色并应用到所有子组件"""
+        if self._context_provider is None:
+            return
+        try:
+            ctx = self._context_provider()
+            self._chart_style = _make_chart_colors_from_context(ctx)
+        except Exception:
+            self._chart_style = _chart_colors()
+
+        cs = self._chart_style
+        # 刷新头部标题颜色
+        font_family = cs.get("font_family", "Microsoft YaHei")
+        font_size = cs.get("font_size", 14)
+        tc = cs.get("text", QColor(255, 255, 255, 180))
+        tcs = cs.get("text_secondary", QColor(255, 255, 255, 100))
+        text_color = f"rgba({tc.red()},{tc.green()},{tc.blue()},{tc.alpha()})"
+        text_sec = f"rgba({tcs.red()},{tcs.green()},{tcs.blue()},{tcs.alpha()})"
+
+        # 更新所有 QLabel 子控件的样式
+        for child in self.findChildren(QLabel):
+            try:
+                obj_name = child.objectName()
+                current = child.styleSheet()
+                # 保留独立的 font-weight 设定（如 statValue 的 bold）
+                weight_part = ""
+                if "font-weight" in current:
+                    weight_part = "font-weight: bold;"
+                child.setStyleSheet(
+                    f"color: {text_color}; font-size: {font_size}px; "
+                    f"font-family: '{font_family}'; {weight_part}"
+                    "background: transparent;"
+                )
+            except RuntimeError:
+                pass
 
     # ── 界面搭建 ──
 
     def _setup_ui(self):
         self.setMinimumWidth(300)
-        self.setMinimumHeight(400)
+        self.setMinimumHeight(0)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("ContextUsageStatsCard { background: transparent; }")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        # 初始配色（后续 _apply_latest_theme 覆盖）
+        # 浮动卡片背景偏暗，强制初始文字用白色
+        ff = "Microsoft YaHei"
+        fs = 14
+        text_color_default = "rgba(255,255,255,200)"
+        text_sec_default = "rgba(255,255,255,150)"
 
         # ── 头部 ──
         header = QWidget(self)
@@ -853,13 +1050,16 @@ class ContextUsageStatsCard(QWidget):
         icon.setFixedSize(22, 22)
         hly.addWidget(icon)
 
-        title = StrongBodyLabel("上下文用量统计", header)
-        title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
+        title = QLabel("上下文用量统计", header)
+        title.setStyleSheet(
+            f"color: {text_color_default}; font-size: {fs}px; font-weight: bold; "
+            f"font-family: '{ff}'; background: transparent;"
+        )
         hly.addWidget(title)
 
         self._status_lb = QLabel("", header)
         self._status_lb.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            f"color: {text_sec_default}; font-size: {fs}px; font-family: '{ff}'; background: transparent;"
         )
         hly.addWidget(self._status_lb)
         hly.addStretch(1)
@@ -900,11 +1100,37 @@ class ContextUsageStatsCard(QWidget):
         root.addWidget(self._scroll, 1)
 
         # ── 加载中占位 ──
-        self._empty_lb = StrongBodyLabel("正在加载统计数据…", self)
+        self._empty_lb = QLabel("正在加载统计数据…", self)
         self._empty_lb.setAlignment(Qt.AlignCenter)
-        self._empty_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
+        self._empty_lb.setStyleSheet(f"color: {text_sec_default}; font-family: '{ff}'; background: transparent;")
         self._empty_lb.setVisible(True)
         root.addWidget(self._empty_lb)
+
+    # ── 高度模式 ──
+
+    def sizeHint(self):
+        """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
+        from PyQt5.QtCore import QSize
+        base = super().sizeHint()
+        win = self.window()
+        if win and win.height() > 0:
+            return QSize(max(base.width(), 200), int(win.height() * 0.85))
+        return base
+
+    def showEvent(self, event):
+        """显示时安装窗口 resize 事件过滤器，窗口缩放时通知容器重新展开"""
+        super().showEvent(event)
+        win = self.window()
+        if win:
+            win.installEventFilter(self)
+            self.updateGeometry()
+
+    def eventFilter(self, obj, event):
+        """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
+        from PyQt5.QtCore import QEvent
+        if obj is self.window() and event.type() == QEvent.Resize:
+            self.updateGeometry()
+        return super().eventFilter(obj, event)
 
     # ── 数据加载 ──
 
@@ -969,18 +1195,25 @@ class ContextUsageStatsCard(QWidget):
         total_sessions = data.get("total_sessions", 0)
         total_messages = data.get("total_messages", 0)
         avg_msgs = data.get("avg_messages_per_session", 0.0)
+        project_count = len(data.get("sessions_per_project", {}))
+
+        # 计算平均值
+        avg_daily = round(total_sessions / 14, 1) if total_sessions > 0 else 0.0
+        avg_per_project = round(total_sessions / project_count, 1) if project_count > 0 else 0.0
 
         stats_row = QHBoxLayout()
         stats_row.setSpacing(8)
 
         stat_cards = [
-            (FluentIcon.CHAT, "总会话数", str(total_sessions), ""),
+            (FluentIcon.CHAT, "总会话数", str(total_sessions), f"平均 {avg_daily} 次/天"),
             (FluentIcon.MESSAGE, "总消息数", _format_number(total_messages), f"平均 {avg_msgs} 条/会话"),
-            (FluentIcon.PEOPLE, "项目数", str(len(data.get("sessions_per_project", {}))), ""),
+            (FluentIcon.PEOPLE, "项目数", str(project_count), f"平均 {avg_per_project} 次/项目"),
         ]
 
         for ic, title, val, sub in stat_cards:
             card = _StatCard(ic, title, val, sub)
+            if self._chart_style:
+                card.set_colors(self._chart_style)
             stats_row.addWidget(card)
 
         stats_widget = QWidget()
@@ -988,22 +1221,31 @@ class ContextUsageStatsCard(QWidget):
         stats_widget.setStyleSheet("background: transparent;")
         self._content_layout.addWidget(stats_widget)
 
+        # 注入配色到子图表
+        cs = self._chart_style
+
         # ── 估算 Token 用量折线图 ──
         daily_tokens = data.get("daily_tokens", [])
         if daily_tokens and any(v for _, v in daily_tokens):
             token_widget = _LineChartWidget("🔤 估算 Token 用量趋势", daily_tokens, color_key="accent")
+            if cs:
+                token_widget.set_colors(cs)
             self._content_layout.addWidget(token_widget)
 
         # ── 消息量趋势折线图 ──
         daily_messages = data.get("daily_messages", [])
         if daily_messages and any(v for _, v in daily_messages):
-            line_widget = _LineChartWidget("📈 每日消息量趋势", daily_messages, color_key="line")
+            line_widget = _LineChartWidget("📈 每日消息量趋势", daily_messages, color_key="accent")
+            if cs:
+                line_widget.set_colors(cs)
             self._content_layout.addWidget(line_widget)
 
         # ── 会话活跃度柱状图 ──
         daily_sessions = data.get("daily_sessions", [])
         if daily_sessions and any(v for _, v in daily_sessions):
             bar_widget = _BarChartWidget("📊 每日会话活跃度", daily_sessions)
+            if cs:
+                bar_widget.set_colors(cs)
             self._content_layout.addWidget(bar_widget)
 
         # ── 项目分布柱状图（水平） ──
@@ -1011,14 +1253,20 @@ class ContextUsageStatsCard(QWidget):
         if sessions_per_project:
             sorted_projects = sorted(sessions_per_project.items(), key=lambda x: -x[1])[:8]
             proj_bar = _ProjectBarWidget(sorted_projects)
+            if cs:
+                proj_bar.set_colors(cs)
             self._content_layout.addWidget(proj_bar)
 
         # ── 无数据提示 ──
         if not daily_sessions or not any(v for _, v in daily_sessions):
             empty_hint = QLabel("暂无会话数据，开始对话后将自动生成统计。", self._content)
             empty_hint.setAlignment(Qt.AlignCenter)
+            font_family = cs.get("font_family", "Microsoft YaHei") if cs else "Microsoft YaHei"
+            tcs2 = cs.get("text_secondary", QColor(255, 255, 255, 100)) if cs else QColor(255, 255, 255, 100)
+            empty_color = f"rgba({tcs2.red()},{tcs2.green()},{tcs2.blue()},{tcs2.alpha()})"
             empty_hint.setStyleSheet(
-                f"color: {_text_color(secondary=True)}; font-size: 13px; background: transparent; padding: 40px;"
+                f"color: {empty_color}; font-family: '{font_family}'; font-size: 13px; "
+                "background: transparent; padding: 40px;"
             )
             self._content_layout.addWidget(empty_hint)
 

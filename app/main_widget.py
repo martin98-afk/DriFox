@@ -1918,6 +1918,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
             ui_registry = UIPluginRegistry.get_instance()
             ui_registry.set_main_widget(self)
+            # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
+            ui_registry.set_context_provider(self._build_ui_context)
             # 加载所有已启用的 UI 插件
             self._load_all_ui_plugins()
             # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
@@ -2531,6 +2533,69 @@ class OpenAIChatToolWindow(ToolWindow):
         count = registry.load_all_enabled_plugins(plugin_dirs)
         if count > 0:
             logger.info(f"[MainWidget] Loaded {count} UI plugins")
+
+    def _build_ui_context(self) -> Dict[str, str]:
+        """构建 UI 插件的上下文 dict
+
+        UIPluginRegistry 在首次显示浮动卡片时调用此方法，
+        将结果通过 ``widget.set_context(context)`` 注入卡片。
+
+        Returns:
+            dict 包含以下字段：
+            - project_root: 当前工作目录（git 工作树根）
+            - project_name: 当前项目名
+            - session_id:   当前会话 ID
+            - window_id:    当前窗口 ID
+            - theme_id:     当前主题 ID
+            - theme_name:   当前主题名称
+            - is_dark:      当前是否为深色模式
+            - font_family:  全局字体
+            - font_size:    UI 基础字号（px）
+            - colors:       主题色字典，可直接用: colors["card_bg"]、colors["accent"]、colors["text_primary"] 等
+        """
+        workdir = ""
+        try:
+            if self.backend and self.backend.tool_executor:
+                workdir = self.backend.tool_executor.get_workdir() or ""
+        except Exception:
+            pass
+        if not workdir:
+            workdir = os.getcwd()
+
+        # 主题信息
+        theme_id = ""
+        theme_name = ""
+        is_dark = True
+        font_family = "Segoe UI"
+        font_size = 14
+        theme_colors = {}
+        try:
+            from app.utils.theme_manager import theme_manager
+            from app.utils.design_tokens import get_ui_font_size, _get_global_font
+            from qfluentwidgets import isDarkTheme
+
+            theme_id = theme_manager.get_current_theme_id()
+            theme_data = theme_manager.get_current_theme()
+            theme_name = theme_data.get("name", "") if theme_data else ""
+            is_dark = isDarkTheme()
+            font_family = _get_global_font()
+            font_size = get_ui_font_size()
+            theme_colors = theme_manager.get_current_colors()
+        except Exception:
+            pass
+
+        return {
+            "project_root": workdir,
+            "project_name": getattr(self, "_current_project", ""),
+            "session_id": getattr(self, "_current_session_id", ""),
+            "window_id": getattr(self, "_window_id", ""),
+            "theme_id": theme_id,
+            "theme_name": theme_name,
+            "is_dark": is_dark,
+            "font_family": font_family,
+            "font_size": font_size,
+            "colors": theme_colors,
+        }
 
     def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
         """统一的创建消息 widget 入口：先让插件工厂尝试处理
@@ -7059,6 +7124,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新历史会话卡片
         if self._history_card.isVisible():
             self._refresh_history_toggle_panel()
+
+        # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
+        try:
+            from app.core.command_manager import CommandManager
+            from app.core.ui_plugin_registry import UIPluginRegistry
+            CommandManager.get_instance().reload_all_commands()
+            UIPluginRegistry.get_instance().re_register_all_commands()
+        except Exception:
+            pass
 
     def _append_user_message(
         self,

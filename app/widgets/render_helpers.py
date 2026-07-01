@@ -1401,52 +1401,6 @@ def render_tool_block(
 </div>"""
 
 
-def render_hook_block(event_name: str, content: str, collapsed: bool = True) -> str:
-    """渲染 Hook 输出块（折叠样式）"""
-    icon = "⚡"
-    title_color = "#00BCD4"
-
-    # 事件名称格式化
-    event_display = event_name.replace("Pre", "Pre ").replace("Post", "Post ")
-
-    # 预览文本
-    max_preview = 50
-    if len(content) > max_preview:
-        content_preview = content[:max_preview].replace("\n", " ") + "..."
-    else:
-        content_preview = content.replace("\n", " ")
-
-    # 生成唯一 block_key
-    block_key = "hook-" + hashlib.md5(f"{event_name}:{content[:50]}".encode()).hexdigest()[:8]
-
-    expanded_attr = "false" if collapsed else "true"
-    body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
-
-    expanded_content = f"""
-    <div class="hook-content" style="padding: 10px 12px; font-family: {_get_global_font()}, Consolas, monospace; font-size: {scale_font_size(12)}px; color: #e0e0e0; white-space: pre-wrap; word-break: break-word; line-height: 1.5; {get_font_family_css()}">
-        {escape(content)}
-    </div>
-    """
-
-    return f"""<div class="cm-collapsible hook-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-hook-event="{escape(event_name)}" style="margin: 4px 0; background: transparent; border: 1px solid rgba(0, 188, 212, 0.2); border-left: 3px solid {title_color}; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary hook-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 5px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 100px; flex: 0 0 auto;">
-            <span class="cm-collapsible__chevron" aria-hidden="true"></span>
-            <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(event_display)}</span>
-        </span>
-        <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(content_preview)}
-            </span>
-        </span>
-    </button>
-    <div class="cm-collapsible__body"{body_style}>
-        {expanded_content}
-    </div>
-</div>"""
-
-
 def format_timestamp(ts: str) -> str:
     """格式化时间戳"""
     if not ts:

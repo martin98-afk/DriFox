@@ -62,6 +62,7 @@ class FloatingCardInfo:
         title: 卡片标题（用于命令列表显示）
         default_visible: 默认是否可见
         metadata: 附加元数据
+        context_provider: 可选，卡片专属上下文提供者。不传则使用全局 context_provider。
     """
 
     plugin_name: str
@@ -71,6 +72,7 @@ class FloatingCardInfo:
     title: str = ""
     default_visible: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    context_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
 class UIPluginRegistry:
@@ -86,6 +88,9 @@ class UIPluginRegistry:
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
         self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
+        self._context_provider: Optional[Callable[[], Dict[str, Any]]] = None  # 全局上下文提供者
+        # 多窗口隔离：window_id → main_widget 映射，用于 unload 时正确清理容器
+        self._window_main_widgets: Dict[str, Any] = {}
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -166,6 +171,7 @@ class UIPluginRegistry:
         title: str = "",
         default_visible: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
+        context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         """注册浮动卡片
 
@@ -177,6 +183,8 @@ class UIPluginRegistry:
             title: 卡片标题
             default_visible: 默认是否可见
             metadata: 附加元数据
+            context_provider: 可选，卡片专属上下文提供者。
+                             不传则在显示时使用全局 context_provider。
 
         Side Effects:
             自动注册对应命令 /{card_id}（用户插件带命名空间前缀）
@@ -193,6 +201,7 @@ class UIPluginRegistry:
             title=title,
             default_visible=default_visible,
             metadata=metadata,
+            context_provider=context_provider,
         )
         self._floating_cards[card_id] = info
         # 联动注册命令
@@ -251,6 +260,9 @@ class UIPluginRegistry:
         if card_manager is None or window_id is None:
             return
 
+        # 记录 window_id → main_widget 映射，供 unload 时清理容器使用
+        self._window_main_widgets[window_id] = mw
+
         card_info = self._floating_cards.get(card_id)
         if card_info is None:
             return
@@ -270,6 +282,25 @@ class UIPluginRegistry:
                 return
             # 以容器为父级创建卡片 widget
             widget = card_info.widget_class(parent=container)
+
+            # ==== 注入上下文提供函数（拉模型）====
+            # 让卡片自己能在需要时（如 showEvent）调用此函数获取最新上下文，
+            # 不再由 registry 在外部手动推数据。
+            # 优先级：
+            #   1. set_context_provider(provider) — 拉模型，卡片自行按需调用
+            #   2. set_context(context)          — 推模型，向后兼容旧卡片
+            #   3. widget._card_context           — 兜底属性
+            ctx_provider = self._make_context_provider(card_info)
+            if hasattr(widget, "set_context_provider") and callable(widget.set_context_provider):
+                widget.set_context_provider(ctx_provider)
+            elif hasattr(widget, "set_context") and callable(widget.set_context):
+                # 旧卡片：首次创建时推一次初始上下文
+                widget.set_context(ctx_provider())
+            else:
+                widget._card_context = ctx_provider()
+                widget._card_context_provider = ctx_provider  # 也保留 provider 供有需要的卡片自行调用
+            # ==== 注入结束 ====
+
             win_instances[card_id] = widget
             # 加入容器布局并注册到 CardManager
             container.add_card(card_id, widget)
@@ -322,8 +353,28 @@ class UIPluginRegistry:
             if ui_path not in sys.path:
                 sys.path.insert(0, ui_path)
             module_name = f"ui_plugin_{safe_name}"
-            if module_name in sys.modules:
-                del sys.modules[module_name]
+
+            # 清理字节码缓存（__pycache__），确保修改后的 .py 文件被重新编译，
+            # 而不是使用旧的 .pyc 缓存（Python 的 mtime 检查在同一秒内可能失效）
+            # 注意：此操作会导致父目录（如 ui/）产生 Change.modified 事件，
+            # 加在 _watch_loop 中已通过过滤目录 modified 事件来防止误触发跨插件重载。
+            from pathlib import Path as _Path
+
+            ui_pycache = _Path(ui_path) / "__pycache__"
+            if ui_pycache.exists():
+                import shutil as _shutil
+
+                _shutil.rmtree(str(ui_pycache))
+
+            # 通知 import 系统所有缓存已失效
+            importlib.invalidate_caches()
+
+            # 清理所有子模块缓存（如 ui_plugin_xxx.cards），确保热重载时
+            # cards.py 等被修改的文件能被重新导入，而不是命中 sys.modules 旧缓存
+            prefix = f"{module_name}."
+            for mod_name in list(sys.modules.keys()):
+                if mod_name == module_name or mod_name.startswith(prefix):
+                    del sys.modules[mod_name]
             spec = importlib.util.spec_from_file_location(module_name, ui_init)
             if spec is None or spec.loader is None:
                 logger.error(f"[UIPluginRegistry] Failed to load spec for {plugin_name}")
@@ -364,12 +415,54 @@ class UIPluginRegistry:
         for cid in cards_to_remove:
             self._unregister_command_for_card(cid)
             self._floating_cards.pop(cid, None)
-            # 清理所有窗口中该 card_id 的 widget 实例
-            for win_instances in self._card_widget_instances.values():
-                win_instances.pop(cid, None)
+            # 清理所有窗口中该 card_id 的 widget 实例（含容器布局移除 + CardManager 注销）
+            for win_id, win_instances in list(self._card_widget_instances.items()):
+                widget = win_instances.pop(cid, None)
+                if widget is not None:
+                    self._remove_widget_from_container(win_id, cid, widget)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         return True
+
+    def _remove_widget_from_container(self, window_id: str, card_id: str, widget) -> None:
+        """从容器布局和 CardManager 中移除指定 widget（不触发删除，仅 UI 清理）
+
+        Args:
+            window_id: 窗口 ID
+            card_id: 卡片 ID
+            widget: 要移除的 widget 控件
+        """
+        try:
+            # 1. 从 CardManager 隐藏并解除注册
+            mw = self._window_main_widgets.get(window_id)
+            if mw is not None:
+                card_manager = getattr(mw, "_card_manager", None)
+                if card_manager is not None:
+                    # 如果卡片当前可见，先隐藏
+                    if card_manager.is_card_visible(card_id, window_id):
+                        card_manager.hide_card(card_id, window_id)
+                    # 从 CardManager 注册表中移除（不保留引用）
+                    if hasattr(card_manager, "_window_data") and window_id in card_manager._window_data:
+                        win_data = card_manager._window_data[window_id]
+                        container_type = win_data.get("containers", {}).get(card_id)
+                        if container_type:
+                            win_data["cards"].get(container_type, {}).pop(card_id, None)
+                            win_data["containers"].pop(card_id, None)
+
+            # 2. 从容器布局移除
+            parent_container = widget.parent()
+            if parent_container is not None and hasattr(parent_container, "remove_card"):
+                try:
+                    parent_container.remove_card(card_id)
+                except Exception:
+                    pass
+
+            # 3. 标记为待删除
+            widget.setParent(None)
+            widget.deleteLater()
+        except RuntimeError:
+            # widget 已被销毁，忽略
+            pass
 
     def _unregister_command_for_card(self, card_id: str) -> None:
         """卸载浮动卡片对应的命令"""
@@ -418,6 +511,55 @@ class UIPluginRegistry:
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
 
+    def set_context_provider(self, provider: Callable[[], Dict[str, Any]]) -> None:
+        """设置全局上下文提供者
+
+        UI 浮动卡片首次显示时，会调用此 provider 获取上下文 dict，
+        然后通过 ``widget.set_context(context)`` 传递给卡片。
+
+        Args:
+            provider: 无参可调用对象，返回包含上下文键值对的 dict。
+                      建议至少提供：project_root, project_name, session_id, window_id。
+        """
+        self._context_provider = provider
+
+    def _build_card_context(self, card_info: FloatingCardInfo) -> Dict[str, Any]:
+        """构建卡片上下文 dict
+
+        优先级：卡片专属 context_provider > 全局 context_provider。
+        最后叠加卡片元信息（plugin_name, card_id），不会被覆盖。
+
+        Returns:
+            上下文 dict（可能为空）
+        """
+        ctx: Dict[str, Any] = {}
+        try:
+            if card_info.context_provider is not None:
+                ctx.update(card_info.context_provider())
+            elif self._context_provider is not None:
+                ctx.update(self._context_provider())
+        except Exception:
+            pass
+        # 卡片元信息始终注入
+        ctx.setdefault("plugin_name", card_info.plugin_name)
+        ctx.setdefault("card_id", card_info.card_id)
+        return ctx
+
+    def _make_context_provider(self, card_info: FloatingCardInfo) -> Callable[[], Dict[str, Any]]:
+        """创建一个上下文提供函数（闭包），供卡片按需拉取最新上下文
+
+        返回的无参函数每次调用都会通过 _build_card_context 重新构建上下文，
+        反映当前最新的 project_root / session_id / theme 等状态。
+
+        新卡片应实现 ``set_context_provider(provider)`` 接口，
+        在 showEvent / show_card 等时机自行调用 provider 获取最新上下文。
+        """
+
+        def _provider() -> Dict[str, Any]:
+            return self._build_card_context(card_info)
+
+        return _provider
+
     def re_register_all_commands(self) -> None:
         """重新注册所有浮动卡片命令到 CommandManager
 
@@ -426,6 +568,20 @@ class UIPluginRegistry:
         """
         for card_info in self._floating_cards.values():
             self._register_command_for_card(card_info)
+
+    def clear_window_cards(self, window_id: str) -> None:
+        """清空指定窗口的缓存卡片实例，下次显示时重新创建
+
+        用于项目/会话切换等场景，确保卡片用最新的上下文重建。
+
+        Args:
+            window_id: 窗口 ID
+        """
+        win_instances = self._card_widget_instances.get(window_id, {})
+        for card_id in list(win_instances.keys()):
+            widget = win_instances.pop(card_id, None)
+            if widget is not None:
+                self._remove_widget_from_container(window_id, card_id, widget)
 
     def reset(self) -> None:
         """清空所有状态（仅供测试使用）"""
@@ -436,3 +592,5 @@ class UIPluginRegistry:
         self._main_widget = None
         self._ui_command_names.clear()
         self._card_widget_instances.clear()
+        self._context_provider = None
+        self._window_main_widgets.clear()

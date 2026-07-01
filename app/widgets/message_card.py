@@ -1464,61 +1464,75 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
     return "".join(parts)
 
 
-def _tag_to_event_name(tag: str) -> str:
-    """Claude Code 风格的 kebab-case-hook 标签 → PascalCase 事件名
-
-    例:
-        user-prompt-submit-hook  → UserPromptSubmit
-        pre-user-message-hook    → PreUserMessage
-        pre-tool-use-hook        → PreToolUse
-        session-start-hook       → SessionStart
-    """
-    name = tag
-    if name.endswith("-hook"):
-        name = name[: -len("-hook")]
-    parts = name.split("-")
-    return "".join(p[:1].upper() + p[1:] for p in parts if p)
-
-
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
-    """注入 Hook 块 HTML，类似 think 块
+    """彻底丢弃所有 hook 输出（不再渲染折叠框）。
 
-    支持两种格式（从最优先到兼容）：
-    1. Claude Code 格式: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
-    2. 旧格式（向后兼容）: <hook event="EventName">...</hook>
+    历史背景：早期版本会把 hook 输出渲染成 UI 折叠框，但这种内容是 LLM 上下文
+    注入，不应暴露给用户。该函数现在不再渲染任何 hook 块，只做"剥壳清空"：
+
+    1. <system-reminder>...</system-reminder> 整段丢
+    2. 半截 <system-reminder>...</末尾> 也要丢（流式中间态防线）
+    3. <xxx-hook>...</xxx-hook> 兜底丢
+    4. 半截 <xxx-hook>...</末尾> 也要丢
+    5. <hook event="Xxx">...</hook> 旧格式丢
+    6. 半截 <hook event=...>...</末尾> 也要丢
+
+    Args:
+        md_text: 原始 markdown 文本
+        completed: 已废弃参数，保留仅为兼容旧调用方
+
+    Returns:
+        不含任何 hook/system-reminder 内容的 markdown 文本
     """
     if not md_text:
         return md_text
 
-    from app.widgets.render_helpers import render_hook_block
-
-    # 合并两种格式的标签正则，按出现顺序处理
-    # 1. Claude Code: <xxx-hook>...</xxx-hook>
-    # 2. 旧: <hook event="Xxx">...</hook>
-    pattern = re.compile(
-        r'<([a-z0-9-]+-hook)>(.*?)</\1>'
-        r'|<hook\s+event="([^"]+)">(.*?)</hook>',
-        re.DOTALL,
+    # 1) 完整 <system-reminder>...</system-reminder> 整段丢
+    md_text = re.sub(
+        r'<system-reminder>.*?</system-reminder>',
+        '',
+        md_text,
+        flags=re.DOTALL,
+    )
+    # 2) 半截 <system-reminder>...</字符串末尾> 也要丢（流式中间态）
+    md_text = re.sub(
+        r'<system-reminder>.*',
+        '',
+        md_text,
+        flags=re.DOTALL,
     )
 
-    parts = []
-    last_end = 0
-    for m in pattern.finditer(md_text):
-        parts.append(md_text[last_end:m.start()])
+    # 3) 完整 <xxx-hook>...</xxx-hook> 整段丢（兼容早期无 system-reminder 包裹的消息）
+    md_text = re.sub(
+        r'<([a-z0-9-]+-hook)>.*?</\1>',
+        '',
+        md_text,
+        flags=re.DOTALL,
+    )
+    # 4) 半截 <xxx-hook>...</末尾> 也要丢
+    md_text = re.sub(
+        r'<[a-z0-9-]+-hook>.*',
+        '',
+        md_text,
+        flags=re.DOTALL,
+    )
 
-        if m.group(1):  # Claude Code 格式
-            tag = m.group(1)
-            event_name = _tag_to_event_name(tag)
-            hook_content = m.group(2).strip()
-        else:  # 旧 <hook event="..."> 格式
-            event_name = m.group(3)
-            hook_content = m.group(4).strip()
+    # 5) 完整 <hook event="Xxx">...</hook> 整段丢（兼容最早旧格式）
+    md_text = re.sub(
+        r'<hook\s+event="[^"]+">.*?</hook>',
+        '',
+        md_text,
+        flags=re.DOTALL,
+    )
+    # 6) 半截 <hook event=...>...</末尾> 也要丢
+    md_text = re.sub(
+        r'<hook\s+event="[^"]+">.*',
+        '',
+        md_text,
+        flags=re.DOTALL,
+    )
 
-        parts.append(render_hook_block(event_name, hook_content, collapsed=not completed))
-        last_end = m.end()
-
-    parts.append(md_text[last_end:])
-    return "".join(parts)
+    return md_text
 
 
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀

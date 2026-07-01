@@ -802,6 +802,13 @@ class ChatBackend(QObject):
                         # 跳过 git/__pycache__/pyc 等无关文件
                         if ".git" in p or "__pycache__" in p or p.endswith(".pyc"):
                             continue
+                        # 目录的 Change.modified 是子项变更的副作用（如 __pycache__ 创建/删除导致
+                        # 父目录 ui/ 被标记为 modified），实际变更已被子项事件或 DefaultFilter 捕获，
+                        # 过滤掉避免误触发跨插件重载。
+                        if change_type == 2:  # Change.modified
+                            # 以分隔符结尾 or 不含扩展名 → 疑似目录
+                            if p.endswith(("\\", "/")) or "." not in p.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]:
+                                continue
                         # 跳过用户自定义目录中的内部数据文件（避免自我触发）
                         # 这些是 HookOverrideManager / HookPresetManager 写入的数据文件，
                         # 不是插件源码，修改它们不需要触发插件热更新
@@ -820,9 +827,37 @@ class ChatBackend(QObject):
                     plugin_name = self._identify_plugin_from_changes(relevant_changes, current_prefixes)
 
                     if plugin_name == "__ALL__":
-                        logger.info(f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处)，请求主线程全量重载...")
-                        # 不提前 _rebuild_prefixes()，改在 _on_hot_reload_requested 重载完成后重建
-                        self._hot_reload_requested.emit("", "")
+                        # 跨插件变更：逐一识别受影响的插件，各自走增量重载路径
+                        affected_plugins = self._identify_all_affected_plugins(relevant_changes, current_prefixes)
+                        logger.info(
+                            f"[ChatBackend] 跨插件文件变更 ({len(relevant_changes)} 处，"
+                            f"涉及 {len(affected_plugins)} 个插件: {', '.join(sorted(affected_plugins))})，"
+                            f"逐一增量重载..."
+                        )
+                        for pname in affected_plugins:
+                            all_components = self._identify_all_components_from_changes(
+                                relevant_changes, current_prefixes, pname
+                            )
+                            if all_components:
+                                ordered = sorted(
+                                    all_components,
+                                    key=lambda c: self._COMPONENT_ORDER.get(c, 99),
+                                )
+                                for component in ordered:
+                                    if _is_duplicate(pname, component):
+                                        continue
+                                    logger.info(
+                                        f"[ChatBackend] 插件 [{pname}] ({component}) "
+                                        f"跨插件文件变更，请求主线程增量重载..."
+                                    )
+                                    self._hot_reload_requested.emit(pname, component)
+                            else:
+                                if _is_duplicate(pname, ""):
+                                    continue
+                                logger.info(
+                                    f"[ChatBackend] 插件 [{pname}] (根目录) 跨插件文件变更，请求主线程增量重载..."
+                                )
+                                self._hot_reload_requested.emit(pname, "")
                     elif plugin_name:
                         # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/lsp/ui）
                         # 多组件批处理：一次 watchfiles batch 中可能同时修改多个组件目录
@@ -927,6 +962,30 @@ class ChatBackend(QObject):
         # 跨插件变更，需要全量重载
         logger.debug(f"[ChatBackend] 跨插件变更: {found}，触发全量重载")
         return "__ALL__"
+
+    def _identify_all_affected_plugins(self, changes: list, plugin_prefixes: Dict[str, str]) -> set:
+        """从变更文件路径识别所有涉及的插件名集合
+
+        与 _identify_plugin_from_changes 共享路径匹配逻辑，但返回完整集合
+        而非在跨插件时返回 __ALL__。用于 watch_loop 在跨插件变更时
+        逐个插件增量重载。
+
+        Args:
+            changes: [(Change, path_str), ...]
+            plugin_prefixes: 插件路径 → 插件名 映射
+
+        Returns:
+            set[str]: 受影响的所有插件名集合
+        """
+        sorted_prefixes = sorted(plugin_prefixes.keys(), key=len, reverse=True)
+        found: set = set()
+        for _, change_path in changes:
+            cp = change_path.lower()
+            for prefix in sorted_prefixes:
+                if cp == prefix or cp.startswith(prefix + os.sep):
+                    found.add(plugin_prefixes[prefix])
+                    break
+        return found
 
     def _identify_component_from_changes(self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str) -> str:
         """从变更文件路径识别所属组件子目录

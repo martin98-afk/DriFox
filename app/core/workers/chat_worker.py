@@ -2307,6 +2307,8 @@ class OpenAIChatWorker(QThread):
                 if is_tool_call_order_error and attempt < max_retries - 1:
                     # 自动修复 tool result 顺序问题
                     logger.warning("[API] 检测到 tool call result 顺序错误 (2013)，尝试自动修复...")
+                    # 🛡️ 仅调用一次修复：req_kwargs["messages"] 与 messages 的 tool_call_id 集合等价
+                    # （messages_to_api 是保结构转换），结果直接复用，杜绝重复扫描同一份数据
                     fixed_messages, was_fixed = self._fix_tool_result_order(req_kwargs["messages"])
 
                     if was_fixed:
@@ -2315,11 +2317,10 @@ class OpenAIChatWorker(QThread):
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
                             self._api_messages_cache = fixed_sanitized
-                        # 🛡️ 同步修复源头 current_messages（in-place），彻底固化修复结果
-                        # _fix_tool_result_order 只读 role/tool_call_id/tool_calls，内外格式兼容
-                        fixed_source, _ = self._fix_tool_result_order(messages)
-                        if fixed_source is not messages:
-                            messages[:] = fixed_source
+                        # 同步修复源头 current_messages：fixed_messages 与 messages 同型（都是内部格式），
+                        # 直接 slice 赋值即可固化源头，避免再次调用 _fix_tool_result_order
+                        if fixed_messages is not messages:
+                            messages[:] = fixed_messages
                         logger.warning(f"[API] 已修复消息顺序，已同步源头，重试 (attempt {attempt + 1}/{max_retries})")
                         continue
                     else:

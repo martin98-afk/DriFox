@@ -19,7 +19,7 @@ import json
 import shutil
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -60,9 +60,25 @@ def _plugins_root() -> Path:
 
 
 def _text_color(secondary: bool = False) -> str:
+    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色"""
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
+
+
+def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
+    """从上下文 colors 中获取文字颜色，无上下文则回退到 _text_color()"""
+    colors = ctx.get("colors", {})
+    key = "text_secondary" if secondary else "text_primary"
+    val = colors.get(key, "")
+    if val:
+        return val
+    return _text_color(secondary)
+
+
+def _ctx_border_color(ctx: dict) -> str:
+    """从上下文 colors 中获取边框颜色"""
+    return ctx.get("colors", {}).get("border", "rgba(128,128,128,0.15)")
 
 
 # ── 插件发现 ──────────────────────────────────────────────
@@ -412,19 +428,69 @@ class PluginManagerCard(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._context_provider: Optional[Callable[[], dict]] = None
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_Worker] = None
         self._plugins: list[PluginInfo] = []
         self._setup_ui()
+        # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
 
-        from PyQt5.QtCore import QTimer
+    # ── 拉模型上下文注入 ──
 
-        QTimer.singleShot(100, self._async_refresh)
+    def set_context_provider(self, provider: Callable[[], dict]):
+        """注入上下文提供函数（由 UIPluginRegistry 调用）"""
+        self._context_provider = provider
+
+    def show_card(self):
+        """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
+        self._apply_latest_theme()
+        self._async_refresh()
+        self.setVisible(True)
+
+    def _apply_latest_theme(self):
+        """从上下文拉取最新主题色并刷新全部子控件样式"""
+        if self._context_provider is None:
+            return
+        try:
+            ctx = self._context_provider()
+        except Exception:
+            return
+
+        tc = _ctx_text_color(ctx)
+        tcs = _ctx_text_color(ctx, secondary=True)
+        border_c = _ctx_border_color(ctx)
+
+        # 更新所有 label 颜色
+        for child in self.findChildren(QLabel):
+            try:
+                if "font-size" in child.styleSheet() or "color" in child.styleSheet():
+                    child.setStyleSheet(
+                        f"color: {tc}; background: transparent;"
+                    )
+            except RuntimeError:
+                pass
+
+        # 更新搜索框
+        try:
+            self._search.setStyleSheet(
+                f"background: rgba(128,128,128,0.1); border-radius: 8px; "
+                f"padding: 4px 8px; color: {tc};"
+            )
+        except RuntimeError:
+            pass
+
+        # 更新分隔线
+        try:
+            for sep in self.findChildren(QFrame):
+                if sep.frameShape() == QFrame.HLine:
+                    sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
+        except RuntimeError:
+            pass
 
     # ── 界面 ──
 
     def _setup_ui(self):
-        self.setMinimumHeight(400)
+        self.setMinimumHeight(0)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("PluginManagerCard { background: transparent; }")
 
@@ -503,6 +569,32 @@ class PluginManagerCard(QWidget):
         self._empty.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         self._empty.setVisible(False)
         root.addWidget(self._empty)
+
+    # ── 高度模式 ──
+
+    def sizeHint(self):
+        """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
+        from PyQt5.QtCore import QSize
+        base = super().sizeHint()
+        win = self.window()
+        if win and win.height() > 0:
+            return QSize(max(base.width(), 200), int(win.height() * 0.85))
+        return base
+
+    def showEvent(self, event):
+        """显示时安装窗口 resize 事件过滤器，窗口缩放时通知容器重新展开"""
+        super().showEvent(event)
+        win = self.window()
+        if win:
+            win.installEventFilter(self)
+            self.updateGeometry()
+
+    def eventFilter(self, obj, event):
+        """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
+        from PyQt5.QtCore import QEvent
+        if obj is self.window() and event.type() == QEvent.Resize:
+            self.updateGeometry()
+        return super().eventFilter(obj, event)
 
     # ── 异步刷新 ──
 

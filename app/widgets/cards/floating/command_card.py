@@ -1774,6 +1774,19 @@ class CommandCard(QWidget):
             if same:
                 for w, item in zip(old_widgets, new_items):
                     w.reuse(item, self._current_text_query)
+                # 快速路径仍需重新设置固定高度：
+                # _reset_detail_mode() 会清除卡片的 minH/maxH 约束，
+                # 如果不重新 setFixedHeight，layout 会算出很小的 natural_h
+                # 导致容器无法展开到正常高度（见插件卡片关闭后命令卡片高度异常 bug）
+                item_count = len(new_items)
+                divider_count = len(self._dividers)
+                total_items = item_count + divider_count
+                if total_items == 0:
+                    self.setFixedHeight(0)
+                else:
+                    visible = min(total_items, MAX_VISIBLE_ITEMS)
+                    height = visible * ITEM_HEIGHT + divider_count * 1
+                    self.setFixedHeight(height)
                 return
 
         # 构建旧 widget 的 key 映射
