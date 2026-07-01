@@ -1431,8 +1431,7 @@ class ContextUsageStatsCard(QWidget):
             (
                 FluentIcon.FONT, "总 token 数",
                 _format_number(total_tokens),
-                "累计消耗",
-                f"日均 {_format_number(avg_daily_tokens)}（近 14 天）",
+                f"日均 {_format_number(avg_daily_tokens)}（近 14 天）", ""
             ),
             (FluentIcon.CHAT, "总会话数", str(total_sessions), f"平均 {avg_daily} 次/天", ""),
             (FluentIcon.MESSAGE, "总消息数", _format_number(total_messages), f"平均 {avg_msgs} 条/会话", ""),
