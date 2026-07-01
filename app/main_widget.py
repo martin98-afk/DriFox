@@ -4240,18 +4240,25 @@ class OpenAIChatToolWindow(ToolWindow):
         再 setVisible(True) input_area。理由与 _on_system_card_opened 对称：
         避免 setVisible(True) 时 _input_card 仍 39px，input_area 加入
         layout 后 toolbar 几何被推到 53-87（容器外）造成视觉跳变。
+
+        Args:
+            card_id: 卡片 ID。特殊值 "hot_reload_restore" 表示强制恢复，
+                     跳过系统卡片可见性检查（用于热重载/卡片强制删除后的兜底恢复）。
         """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
         from app.tool_popup import ToolPopupDialog
 
         if ToolPopupDialog._any_window_dragging:
             return
-        # 检查所有系统卡片是否都已关闭（含 UI 插件注册的卡片）。
-        # 单一真相源：使用 self._system_card_ids，与 _on_system_card_opened
-        # 的注册集合保持一致，确保开/关语义对称。
-        for cid in self._system_card_ids:
-            if self._card_manager.is_card_visible(cid, self._window_id):
-                return
+        # 强制恢复模式：跳过系统卡片可见性检查，直接恢复输入区
+        # 用于热重载后卡片已被强制删除，回调链可能断裂的场景
+        if card_id != "hot_reload_restore":
+            # 检查所有系统卡片是否都已关闭（含 UI 插件注册的卡片）。
+            # 单一真相源：使用 self._system_card_ids，与 _on_system_card_opened
+            # 的注册集合保持一致，确保开/关语义对称。
+            for cid in self._system_card_ids:
+                if self._card_manager.is_card_visible(cid, self._window_id):
+                    return
         # 所有系统卡片已关闭，清除打开标记
         self._system_cards_open = False
 
@@ -5101,6 +5108,33 @@ class OpenAIChatToolWindow(ToolWindow):
                 except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
+
+        # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
+        # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
+        if result.get("ui"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    if not getattr(win, "_system_cards_open", False):
+                        # 系统卡片未处于打开状态，无需恢复
+                        continue
+                    if not hasattr(win, "_card_manager") or not hasattr(win, "_window_id"):
+                        continue
+                    cm = win._card_manager
+                    wid = win._window_id
+                    # 检查是否所有系统卡片都已关闭
+                    all_closed = True
+                    for cid in list(getattr(win, "_system_card_ids", set())):
+                        if cm.is_card_visible(cid, wid):
+                            all_closed = False
+                            break
+                    if all_closed:
+                        win._on_system_card_closed("hot_reload_restore")
+                        logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
+                except (RuntimeError, AttributeError):
+                    pass
+            logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
     def _apply_runtime_ui_settings(self):
         Colors.refresh()

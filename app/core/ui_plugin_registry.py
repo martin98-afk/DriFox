@@ -460,6 +460,35 @@ class UIPluginRegistry:
             # 3. 标记为待删除
             widget.setParent(None)
             widget.deleteLater()
+
+            # ── 兜底恢复：强制检查并恢复输入区 ──
+            # 场景：上述 hide_card 可能因 RuntimeError（widget 已被销毁）提前返回
+            # 而未触发 hidden_callbacks（_on_system_card_closed），导致输入区永久隐藏。
+            # 此处主动调用恢复逻辑，确保无论回调链是否断裂，输入区都能正确恢复。
+            try:
+                from loguru import logger
+                if mw is not None and hasattr(mw, '_on_system_card_closed'):
+                    # 先检查是否还有其他系统卡片可见
+                    card_manager = getattr(mw, "_card_manager", None)
+                    wnd_id = window_id
+                    if card_manager is not None and wnd_id is not None:
+                        all_closed = True
+                        # 通过 mw._system_card_ids 获取系统卡片 ID 集合
+                        sys_card_ids = getattr(mw, "_system_card_ids", None)
+                        if sys_card_ids is not None:
+                            for cid in sys_card_ids:
+                                if card_manager.is_card_visible(cid, wnd_id):
+                                    all_closed = False
+                                    break
+                        else:
+                            all_closed = not card_manager.is_card_visible(card_id, wnd_id)
+                        if all_closed and getattr(mw, "_system_cards_open", False):
+                            mw._on_system_card_closed(card_id)
+                            logger.debug(
+                                f"[UIPluginRegistry] 兜底恢复输入区（card={card_id}, window={window_id}）"
+                            )
+            except Exception:
+                pass
         except RuntimeError:
             # widget 已被销毁，忽略
             pass

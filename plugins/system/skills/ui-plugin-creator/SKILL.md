@@ -1,265 +1,175 @@
 ---
 name: ui-plugin-creator
-description: "DriFox UI 插件开发技能。用于创建、修改、调试UI插件（浮动卡片 / 内容块渲染器 / 消息元素工厂）。当用户说"做个插件卡片""加个UI插件""开发个UI组件""写个浮动卡片""做个插件市场界面""搞个统计卡片""注册新命令卡片""自定义消息渲染"时，必须加载本技能。即使看起来简单的UI改动（如"加个设置界面""显示个图表"）也应加载本技能——UI插件架构涉及的约定（注册模式、热重载、上下文注入、比例高度、闭包约束）容易遗漏，不加载容易写出不合规的代码。"
+description: DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂）。
 ---
 
 # ui-plugin-creator —— DriFox UI 插件开发技能
 
-> 快速、规范地从用户意图转化为可工作的UI插件代码。
+> 快速、规范地从用户意图转化为可工作的 UI 插件代码。
+> **本文件是 TOC（总目录）**，详细内容按主题拆分到 `references/` 子文件，按需加载。
+
+---
+
+## ⚠️ 重要：新建 UI 插件必走的两个前置技能
+
+**开发任何新的 UI 插件之前，必须先调用：**
+
+| 技能 | 何时调用 | 产出 |
+|------|---------|------|
+| **`brainstorming`** | 收到"做个新插件"请求时**第一时间**调用 | 用户意图、需求边界、功能清单、设计方案 |
+| **`frontend-design`** | brainstorming 完成后、**动手写代码前**调用 | UI 视觉稿、组件布局、交互流程、配色方案 |
+
+> 🛑 **不要跳过这两个技能直接进入编码**。
+> 即使是"很简单的卡片"，也可能因为需求理解偏差导致反复返工。
+>
+> ✅ **正确的顺序**：
+> 1. `brainstorming` → 搞清楚"做什么 / 不做什么"
+> 2. `frontend-design` → 设计出"长什么样 / 怎么交互"
+> 3. `ui-plugin-creator`（本技能）→ 落地代码实现
+
+### 例外：修改现有插件
+
+> 改现有插件的样式、加按钮、调参数等小修改**不需要** brainstorming / frontend-design。
+> 直接读 `references/modifying.md` 即可。
 
 ---
 
 ## 0. 加载流程
 
 ```
-Step 1  理解意图 → 按 §1 决策树分派组件类型
-Step 2  读 references/ 对应文件
-Step 3  按 §2 工作流推进
-Step 4  按 §3-4 模板生成代码
-Step 5  验证：ruff check + 实际加载测试
+Step 1  收到"做个新 UI 插件"请求
+        ├─ 🟡 立即调用 brainstorming → 产出需求文档
+        └─ 🟡 立即调用 frontend-design → 产出 UI 设计稿
+Step 2  理解意图 → 按 §1 决策树分派组件类型
+Step 3  读 references/ 对应文件（按需加载）
+        ├─ 开发流程 → references/workflow.md
+        ├─ 核心模式 → references/patterns.md
+        ├─ 代码模板 → references/templates.md
+        ├─ 可复用控件库 → references/widgets.md (索引)
+        │   ├─ 统计卡片 → widgets-statcard.md
+        │   ├─ 图表 → widgets-charts.md
+        │   ├─ 工具函数 → widgets-utils.md
+        │   ├─ SQLite 模式 → widgets-sqlite.md
+        │   └─ 主题色 → widgets-theme.md
+        ├─ 修改现有插件 → references/modifying.md
+        ├─ 验证清单 → references/checklist.md
+        └─ _vendor/ 外部依赖 → references/templates.md §五
+Step 4  按 workflow.md 工作流推进
+Step 5  按 templates.md + widgets-*.md 生成代码
+Step 6  按 checklist.md 验证
 ```
 
 ---
 
 ## 1. 组件类型决策树
 
-根据用户意图选择要创建的UI组件类型：
-
 | 用户说 | 组件类型 | 必读 references |
 |--------|---------|-----------------|
 | "加个卡片""做个设置界面""显示统计面板""搞个管理界面" | **浮动卡片**（FloatingCard） | `templates.md` §一 |
+| "加个图表""画个柱状图""折线图""水平条形图" | **图表控件**（Chart Widget） | `widgets-charts.md` |
+| "加个统计卡片""显示数字指标""做个 KPI 卡" | **统计卡片**（StatCard） | `widgets-statcard.md` |
+| "读 SQLite""查 14 天数据""新字段 fallback" | **SQLite 读取** | `widgets-sqlite.md` |
+| "主题色跟着变""跟随系统颜色""深浅色适配" | **主题色映射** | `widgets-theme.md` |
 | "在聊天里显示HTML""渲染自定义内容""做个消息卡片样式" | **内容块渲染器**（ContentRenderer） | `templates.md` §二 |
 | "替换消息气泡""自定义消息控件""做个消息widget" | **消息元素工厂**（MessageFactory） | `templates.md` §三 |
 | "做个插件市场""安装插件""插件管理" | **完整插件**（全组件） | `templates.md` §四 + `architecture.md` |
-| "改现有插件""加个按钮""调样式" | **修改现有插件** | 先读目标插件的代码 |
+| "插件需要 requests/PIL/... 等第三方包""打包后再加依赖" | **外部依赖（_vendor/）** | `templates.md` §五 |
+| "改现有插件""加个按钮""调样式" | **修改现有插件** | `modifying.md` |
 
-> ⚠️ **新插件优先走浮动卡片**——这是最常见的UI插件形态。
+> ⚠️ **新插件优先走浮动卡片**——这是最常见的 UI 插件形态。
+> ⚠️ **图表/统计控件是浮动卡片内的常用组件**，从 `widgets-*.md` 直接复用即可。
 > ⚠️ **内容渲染器只做"展示"，交互按钮用 data 属性桥接。**
 > ⚠️ **消息工厂是高级用法——99% 场景用浮动卡片就够。**
 
 ---
 
-## 2. 开发工作流（新建插件）
-
-### 2.1 澄清需求（必走，即使看起来简单）
-
-用 1-2 问搞清楚：
-- 这组件放在**底部**（`container="bottom"`，与系统配置卡片一致，显示在聊天下方并隐藏输入区）还是**顶部**（`container="top"`，独立浮动）？
-- 数据来源是**本地**（SQLite / 文件扫描）还是**远程**（HTTP API）？
-- 需要**异步操作**吗（列表加载、安装/卸载等）？→ 用 QThread + pyqtSignal
-- 需要**上下文注入**吗（跟随主题色/字体变化）？→ 用 set_context_provider + 拉模型
-
-### 2.2 创建插件目录结构
+## 2. references/ 文件结构
 
 ```
-plugins/<plugin-name>/
-├── .drifox-plugin/
-│   └── plugin.json          # 插件清单，声明 "ui": true
-└── ui/
-    ├── __init__.py           # register_ui 入口
-    ├── cards.py              # 浮动卡片 widget（可选）
-    └── renderers.py          # 内容块渲染器（可选）
-```
-
-### 2.3 按 §3 模板生成代码
-
-### 2.4 验证
-
-```bash
-ruff check plugins/<plugin-name>/ui/
-# 然后重启 DriFox 或触发插件热重载
+plugins/system/skills/ui-plugin-creator/
+├─ SKILL.md                ← 本文件（TOC，~6KB）
+└─ references/
+   ├─ workflow.md          开发工作流（澄清需求 → 创建结构 → 验证 → 发布）
+   ├─ patterns.md          核心模式（上下文注入/比例高度/异步/热重载/信号链/_vendor/）
+   ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/register_ui）
+   ├─ widgets.md           可复用控件库索引（设计原则 + 整合示例 + 陷阱速查）
+   ├─ widgets-statcard.md  _StatCard（多层级统计卡片）
+   ├─ widgets-charts.md    _BarChartWidget / _LineChartWidget / _ProjectBarWidget
+   ├─ widgets-utils.md     工具函数（format / token 估算 / 日期）
+   ├─ widgets-sqlite.md    SQLite 读取模式（路径兜底 / N 天窗口 / fallback）
+   ├─ widgets-theme.md     主题色映射（ctx → QColor 字典）
+   ├─ modifying.md         修改现有插件的步骤与调试
+   ├─ checklist.md         UI 插件验证清单（11 大类）
+   ├─ architecture.md      UI 插件架构总览
+   └─ testing-vendor.md    _vendor/ 打包测试脚本
 ```
 
 ---
 
-## 3. 代码模板
+## 3. 推荐学习路径
 
-### 3.1 浮动卡片（最常用）
+### 3.1 第一次做 UI 插件
 
-参考 `references/templates.md` §一，包含：
-- 完整 QWidget 子类骨架
-- `set_context_provider` + `show_card` + `_apply_latest_theme`（主题注入）
-- 异步工作器（QThread + pyqtSignal）
-- `sizeHint` + `showEvent` + `eventFilter`（比例高度 + 窗口resize响应）
-- 头部（图标 + 标题 + 刷新 + 关闭）
-- ScrollArea 内容区 + 分隔线
-- 空状态 / 加载中占位
+> 🟡 **第一步：调用 `brainstorming` 技能**（不是本技能！）
+> 🟡 **第二步：调用 `frontend-design` 技能**
+> ✅ **第三步**：才进入本技能的工作流
 
-**设计约束（插件闭包）**：
-- ❌ 不导入 `app.core` 或 `app.widgets` 内部的任何模块
-- ✅ 用 `pathlib` + `shutil` + `sqlite3` 等stdlib操作
-- ✅ 用 `qfluentwidgets.isDarkTheme()` 做主题检测（但优先用上下文注入的colors）
-- ✅ 用 `loguru` 做日志
+```
+brainstorming → frontend-design → ui-plugin-creator
+  需求边界        UI 设计稿         代码实现
+```
 
-### 3.2 内容块渲染器
+详细步骤见 `references/workflow.md §1`。
 
-参考 `references/templates.md` §二。
+### 3.2 想加图表/统计卡片
 
-### 3.3 完整插件注册入口
+1. 读 `widgets.md` 索引
+2. 复制 `widgets-statcard.md` 或 `widgets-charts.md`
+3. 配合 `widgets-theme.md` 适配主题色
 
-参考 `references/templates.md` §四，包含：
-- `register_ui(registry)` 函数
-- 热重载兼容的 `sys.modules` 清理
-- 同时注册多种组件
+### 3.3 想读 SQLite
+
+1. 读 `widgets-sqlite.md §一/§二`
+2. 用 `widgets-theme.md` 处理颜色
+
+### 3.4 想加外部依赖（如 `requests`）
+
+1. 读 `templates.md §五`（含完整 register_ui 模板）
+2. 读 `patterns.md §7`（_vendor/ 模式）
+3. 用 `testing-vendor.md` 验证打包
+
+### 3.5 改现有插件
+
+1. 读 `modifying.md`（步骤 + 调试技巧）
+2. 用 `checklist.md §3` 验证修改
 
 ---
 
-## 4. 核心模式与约定
-
-### 4.1 上下文注入（拉模型）
-
-**不要直接推数据**。卡片通过 `set_context_provider(provider)` 注入一个**无参函数**，在需要时自行调用获取最新上下文（主题色、字体、项目信息等）。
-
-```python
-def set_context_provider(self, provider):
-    self._context_provider = provider
-
-def show_card(self):
-    self._apply_latest_theme()  # 显示时拉取最新主题
-    self._load_data()
-    self.setVisible(True)
-
-def _apply_latest_theme(self):
-    ctx = self._context_provider()
-    colors = ctx.get("colors", {})
-    # 用 colors 中的 text_primary / text_secondary / border / accent 等刷新样式
-```
-
-### 4.2 比例高度（与系统卡片一致）
-
-所有浮动卡片必须移除固定 `setMinimumHeight(400)`，改用 `sizeHint()` + 窗口 resize 响应：
-
-```python
-def sizeHint(self):
-    from PyQt5.QtCore import QSize
-    base = super().sizeHint()
-    win = self.window()
-    if win and win.height() > 0:
-        return QSize(max(base.width(), 200), int(win.height() * 0.85))
-    return base
-
-def showEvent(self, event):
-    super().showEvent(event)
-    win = self.window()
-    if win:
-        win.installEventFilter(self)
-        self.updateGeometry()
-
-def eventFilter(self, obj, event):
-    from PyQt5.QtCore import QEvent
-    if obj is self.window() and event.type() == QEvent.Resize:
-        self.updateGeometry()
-    return super().eventFilter(obj, event)
-```
-
-### 4.3 异步操作
-
-```python
-class _Worker(QObject):
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-
-    def __init__(self, fn, *args, **kwargs):
-        super().__init__()
-        self._fn = fn
-        self._args = args
-        self._kwargs = kwargs
-
-    def run(self):
-        try:
-            result = self._fn(*self._args, **self._kwargs)
-            self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}")
-
-# 使用：
-def _async_refresh(self):
-    self._cleanup_worker()
-    w = _Worker(_fetch_data)
-    t = QThread(self)
-    w.moveToThread(t)
-    t.started.connect(w.run)
-    w.finished.connect(self._on_done)
-    w.error.connect(self._on_error)
-    w.finished.connect(t.quit)
-    w.error.connect(t.quit)
-    w.finished.connect(w.deleteLater)
-    w.error.connect(w.deleteLater)
-    t.finished.connect(t.deleteLater)
-    self._worker, self._worker_thread = w, t
-    t.start()
-```
-
-### 4.4 热重载兼容
-
-在 `ui/__init__.py` 中必须清理旧模块缓存：
-
-```python
-import sys
-prefix = "ui_plugin_{safe_name}."
-stale = [k for k in sys.modules if k.startswith(prefix)]
-for k in stale:
-    del sys.modules[k]
-```
-
-### 4.5 主题色获取
-
-从上下文 colors 中取，有 fallback：
-
-```python
-def _ctx_text_color(ctx, secondary=False):
-    colors = ctx.get("colors", {})
-    key = "text_secondary" if secondary else "text_primary"
-    val = colors.get(key, "")
-    if val:
-        return val
-    return _text_color(secondary)  # fallback
-```
-
-### 4.6 信号链（卡片关闭）
-
-卡片必须发射 `closed` 信号，让 `UIPluginRegistry` 同步 `CardManager` 状态：
-
-```python
-class MyCard(QWidget):
-    closed = pyqtSignal()
-
-    def _on_close(self):
-        self.setVisible(False)
-        self.closed.emit()
-```
-
----
-
-## 5. 修改现有插件
-
-1. 先读目标插件的 `ui/__init__.py` 了解已注册的组件
-2. 找到对应 `cards.py` / `renderers.py` 中的类和方法
-3. 修改后运行 `ruff check plugins/<plugin-name>/ui/`
-4. 触发热重载验证
-
----
-
-## 6. 验证清单
-
-- [ ] `ruff check` 通过
-- [ ] `plugin.json` 声明了 `"ui": true`
-- [ ] `ui/__init__.py` 有 `register_ui(registry)` 函数
-- [ ] 热重载兼容（清理 `sys.modules`）
-- [ ] 浮动卡片实现了 `closed` 信号
-- [ ] 浮动卡片没有 `setMinimumHeight(400)` 固定高度
-- [ ] 浮动卡片实现了 `sizeHint()` + `showEvent/eventFilter` 比例高度
-- [ ] 浮动卡片实现了 `set_context_provider` + `show_card` + `_apply_latest_theme`
-- [ ] 没有导入 `app.core` 或 `app.widgets`
-- [ ] 异步操作正确管理 worker 生命周期（`_cleanup_worker` + `deleteLater`）
-
----
-
-## 7. 与其它技能的衔接
+## 4. 与其他技能的衔接
 
 ```
-ui-plugin-creator (本技能)
-  ├─ 需要 brainstorm 功能设计 → 先 brainstorming
-  ├─ 遵循 drifox-dev 的编码规范 → 按需读 drifox-dev/references/conventions.md
-  └─ 复杂功能拆多步 → subagent-driven-development
+ui-plugin-creator（本技能）
+├─ 🟡 新建插件 → 先 brainstorming，再 frontend-design，本技能负责代码落地
+├─ 遵循 drifox-dev 编码规范 → drifox-dev/references/conventions.md
+├─ 复杂功能拆多步 → subagent-driven-development
+└─ 调试 bug → diagnose
 ```
+
+### 4.1 与 brainstorming 的边界
+
+| 阶段 | 技能 | 产出 |
+|------|------|------|
+| 用户说"我想要..." | **brainstorming** | 搞清楚意图、列出功能点、确定边界 |
+| brainstorming 结束 | → **frontend-design** | 视觉稿、组件清单、交互流程 |
+| frontend-design 结束 | → **ui-plugin-creator**（本技能） | 代码实现、模式选择、验证发布 |
+
+> 本技能**不**做需求探索和 UI 设计——这两步必须由前置技能完成。
+
+### 4.2 与 frontend-design 的边界
+
+| 阶段 | 技能 | 产出 |
+|------|------|------|
+| "这个卡片应该长什么样" | **frontend-design** | 视觉稿、配色、布局图、组件规格 |
+| "这个视觉稿怎么落地成代码" | **ui-plugin-creator** | 选控件、复制模板、实现交互逻辑 |
+
+> 本技能**不**做视觉设计——视觉稿由 frontend-design 完成，本技能负责把视觉稿翻译成 PyQt5 代码。
