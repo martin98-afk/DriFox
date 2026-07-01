@@ -1486,9 +1486,28 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
     支持两种格式（从最优先到兼容）：
     1. Claude Code 格式: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
     2. 旧格式（向后兼容）: <hook event="EventName">...</hook>
+
+    ⚠️ 最后一道防线：先移除所有被 <system-reminder> 包裹的 hook 内容。
+    即使上层消息过滤失效，hook 信息也绝不在卡片中渲染。
     """
     if not md_text:
         return md_text
+
+    # ── 预过滤：移除所有被 <system-reminder>...</system-reminder> 包裹的 hook 块 ──
+    # 这是渲染管线的最后一道防线。hook 消息格式为：
+    #   <system-reminder>
+    #     [status_message（可选）]
+    #     <{tag}-hook>...</{tag}-hook>
+    #   </system-reminder>
+    # 只要外部容器存在，就整块移除，让任何 hook 注入内容在 UI 层面完全不可见。
+    # 注意：只移除容器内真正包含 <xxx-hook> 标签的块，避免误伤巧合出现的
+    # <system-reminder> 文本（概率极低，但做防御）。
+    md_text = re.sub(
+        r'<system-reminder>.*?<([a-z0-9-]+-hook)>.*?</\1>.*?</system-reminder>',
+        '',
+        md_text,
+        flags=re.DOTALL,
+    )
 
     from app.widgets.render_helpers import render_hook_block
 

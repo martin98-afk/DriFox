@@ -18,7 +18,7 @@ import sqlite3
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QPointF, QRectF, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
@@ -61,13 +61,14 @@ def _find_db() -> Optional[Path]:
 
 
 def _text_color(secondary: bool = False) -> str:
+    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色"""
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
 
 
 def _chart_colors() -> dict:
-    """返回图表颜色方案（跟随主题）"""
+    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色"""
     if isDarkTheme():
         return {
             "bar_fill": QColor(98, 160, 234, 200),
@@ -96,6 +97,45 @@ def _chart_colors() -> dict:
         "accent": QColor(40, 120, 220),
         "warning": QColor(245, 158, 11, 200),
         "success": QColor(16, 185, 129, 200),
+    }
+
+
+# ── 上下文主题色 → 图表色转换 ────────────────────────────
+
+
+def _make_chart_colors_from_context(ctx: dict) -> dict:
+    """将 context 中的主题 colors 映射为图表组件可用的 QColor 字典
+
+    Args:
+        ctx: UIPluginRegistry 注入的上下文（含 colors / is_dark 等字段）
+
+    Returns:
+        带 QColor 值的图表配色字典，与 _chart_colors() 输出格式一致
+    """
+    raw = ctx.get("colors", {})
+    is_dark = ctx.get("is_dark", True)
+
+    def _qcolor(key: str, fallback_light: str, fallback_dark: str) -> QColor:
+        val = raw.get(key, "")
+        if val:
+            return QColor(val)
+        return QColor(fallback_dark if is_dark else fallback_light)
+
+    return {
+        "bar_fill": _qcolor("accent", "#2878dc", "#62a0ea").lighter(110),
+        "bar_border": _qcolor("accent", "#2878dc", "#62a0ea"),
+        "line": _qcolor("success", "#00a888", "#50e3c2"),
+        "line_fill": QColor(_qcolor("success", "#00a888", "#50e3c2")).lighter(180),
+        "point": _qcolor("success", "#00a888", "#50e3c2"),
+        "grid": _qcolor("border", "#cccccc80", "#ffffff1e"),
+        "text": _qcolor("text_primary", "#000000b4", "#ffffffb4"),
+        "text_secondary": _qcolor("text_secondary", "#00000064", "#ffffff64"),
+        "card_bg": _qcolor("card_bg", "#00000014", "#ffffff14"),
+        "accent": _qcolor("accent", "#2878dc", "#62a0ea"),
+        "warning": _qcolor("accent_warm", "#f59e0b", "#ffc107"),
+        "success": _qcolor("success", "#10b981", "#50e3c2"),
+        "font_family": ctx.get("font_family", "Microsoft YaHei"),
+        "font_size": ctx.get("font_size", 14),
     }
 
 
@@ -365,11 +405,17 @@ class _BarChartWidget(QWidget):
         self._title = title
         self._data = data  # [(label, value), ...]
         self._color_key = color_key
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
+        self.update()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context），覆盖默认 _chart_colors()"""
+        self._colors = colors
         self.update()
 
     def paintEvent(self, event):
@@ -379,7 +425,7 @@ class _BarChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        colors = _chart_colors()
+        colors = self._colors
         w = self.width()
         h = self.height()
 
@@ -502,11 +548,17 @@ class _LineChartWidget(QWidget):
         self._title = title
         self._data = data
         self._color_key = color_key
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
+        self.update()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context），覆盖默认 _chart_colors()"""
+        self._colors = colors
         self.update()
 
     def paintEvent(self, event):
@@ -516,7 +568,7 @@ class _LineChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        colors = _chart_colors()
+        colors = self._colors
         w = self.width()
         h = self.height()
 
@@ -670,7 +722,28 @@ class _StatCard(QFrame):
         self._title = title
         self._value = value
         self._subtitle = subtitle
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setup_ui()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context），覆盖默认 _text_color()"""
+        self._colors = colors
+        self._apply_card_style()
+
+    def _apply_card_style(self):
+        """根据当前 colors 刷新样式"""
+        tc = self._colors.get("text", QColor(255, 255, 255, 180))
+        tcs = self._colors.get("text_secondary", QColor(255, 255, 255, 100))
+        text_color = f"rgba({tc.red()},{tc.green()},{tc.blue()},{tc.alpha()})"
+        text_sec = f"rgba({tcs.red()},{tcs.green()},{tcs.blue()},{tcs.alpha()})"
+        for child in self.findChildren(QLabel):
+            obj_name = child.objectName()
+            if obj_name == "statValue":
+                child.setStyleSheet(f"color: {text_color}; font-size: 22px; font-weight: bold; background: transparent;")
+            elif obj_name == "statSub":
+                child.setStyleSheet(f"color: {text_sec}; font-size: 11px; background: transparent;")
+            else:
+                child.setStyleSheet(f"color: {text_sec}; font-size: 11px; background: transparent;")
 
     def setup_ui(self):
         self.setObjectName("statCard")
@@ -691,6 +764,7 @@ class _StatCard(QFrame):
         top_row.addWidget(icon_w)
 
         title_lb = QLabel(self._title, self)
+        title_lb.setObjectName("statTitle")
         title_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
         top_row.addWidget(title_lb)
         top_row.addStretch(1)
@@ -698,12 +772,14 @@ class _StatCard(QFrame):
 
         # 值
         val_lb = QLabel(self._value, self)
+        val_lb.setObjectName("statValue")
         val_lb.setStyleSheet(f"color: {_text_color()}; font-size: 22px; font-weight: bold; background: transparent;")
         layout.addWidget(val_lb)
 
         # 副标题
         if self._subtitle:
             sub_lb = QLabel(self._subtitle, self)
+            sub_lb.setObjectName("statSub")
             sub_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
             layout.addWidget(sub_lb)
 
@@ -715,12 +791,18 @@ class _ProjectBarWidget(QWidget):
         super().__init__(parent)
         self._data = data
         self._title = title
+        self._colors = _chart_colors()  # 默认 fallback 配色
         self.setMinimumHeight(160)
         self.setMaximumHeight(260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
+        self.update()
+
+    def set_colors(self, colors: dict):
+        """注入外部配色（来自 context）"""
+        self._colors = colors
         self.update()
 
     def paintEvent(self, event):
@@ -730,7 +812,7 @@ class _ProjectBarWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        colors = _chart_colors()
+        colors = self._colors
         w = self.width()
         h = self.height()
 
@@ -820,15 +902,62 @@ class ContextUsageStatsCard(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._context_provider: Optional[Callable[[], dict]] = None
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_DataWorker] = None
         self._stats_data: Optional[dict] = None
+        self._chart_style: Optional[dict] = None
         self._setup_ui()
 
-        # 自动加载数据
-        from PyQt5.QtCore import QTimer
+        # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
 
-        QTimer.singleShot(150, self._async_load_data)
+    # ── 拉模型上下文注入 ──
+
+    def set_context_provider(self, provider: Callable[[], dict]):
+        """注入上下文提供函数（由 UIPluginRegistry 调用）
+
+        卡片在 show_card / 需要刷新主题时自行调用 provider 获取最新上下文，
+        不再依赖外部推送。
+        """
+        self._context_provider = provider
+
+    def show_card(self):
+        """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
+        self._apply_latest_theme()
+        self._async_load_data()
+        self.setVisible(True)
+
+    def _apply_latest_theme(self):
+        """从上下文提供函数拉取最新主题色并应用到所有子组件"""
+        if self._context_provider is None:
+            return
+        try:
+            ctx = self._context_provider()
+            self._chart_style = _make_chart_colors_from_context(ctx)
+        except Exception:
+            self._chart_style = _chart_colors()
+            return
+
+        cs = self._chart_style
+        # 刷新头部标题颜色
+        font_family = cs.get("font_family", "Microsoft YaHei")
+        font_size = cs.get("font_size", 14)
+        tc = cs.get("text", QColor(255, 255, 255, 180))
+        tcs = cs.get("text_secondary", QColor(255, 255, 255, 100))
+        text_color = f"rgba({tc.red()},{tc.green()},{tc.blue()},{tc.alpha()})"
+        text_sec = f"rgba({tcs.red()},{tcs.green()},{tcs.blue()},{tcs.alpha()})"
+
+        # 更新已存在的子控件样式
+        for child in self.findChildren(QLabel):
+            try:
+                current = child.styleSheet()
+                if "font-size" in current or "color" in current:
+                    child.setStyleSheet(
+                        f"color: {text_color}; font-size: {font_size}px; "
+                        f"font-family: '{font_family}'; background: transparent;"
+                    )
+            except RuntimeError:
+                pass
 
     # ── 界面搭建 ──
 
@@ -981,6 +1110,8 @@ class ContextUsageStatsCard(QWidget):
 
         for ic, title, val, sub in stat_cards:
             card = _StatCard(ic, title, val, sub)
+            if self._chart_style:
+                card.set_colors(self._chart_style)
             stats_row.addWidget(card)
 
         stats_widget = QWidget()
@@ -988,22 +1119,31 @@ class ContextUsageStatsCard(QWidget):
         stats_widget.setStyleSheet("background: transparent;")
         self._content_layout.addWidget(stats_widget)
 
+        # 注入配色到子图表
+        cs = self._chart_style
+
         # ── 估算 Token 用量折线图 ──
         daily_tokens = data.get("daily_tokens", [])
         if daily_tokens and any(v for _, v in daily_tokens):
             token_widget = _LineChartWidget("🔤 估算 Token 用量趋势", daily_tokens, color_key="accent")
+            if cs:
+                token_widget.set_colors(cs)
             self._content_layout.addWidget(token_widget)
 
         # ── 消息量趋势折线图 ──
         daily_messages = data.get("daily_messages", [])
         if daily_messages and any(v for _, v in daily_messages):
             line_widget = _LineChartWidget("📈 每日消息量趋势", daily_messages, color_key="line")
+            if cs:
+                line_widget.set_colors(cs)
             self._content_layout.addWidget(line_widget)
 
         # ── 会话活跃度柱状图 ──
         daily_sessions = data.get("daily_sessions", [])
         if daily_sessions and any(v for _, v in daily_sessions):
             bar_widget = _BarChartWidget("📊 每日会话活跃度", daily_sessions)
+            if cs:
+                bar_widget.set_colors(cs)
             self._content_layout.addWidget(bar_widget)
 
         # ── 项目分布柱状图（水平） ──
@@ -1011,6 +1151,8 @@ class ContextUsageStatsCard(QWidget):
         if sessions_per_project:
             sorted_projects = sorted(sessions_per_project.items(), key=lambda x: -x[1])[:8]
             proj_bar = _ProjectBarWidget(sorted_projects)
+            if cs:
+                proj_bar.set_colors(cs)
             self._content_layout.addWidget(proj_bar)
 
         # ── 无数据提示 ──
