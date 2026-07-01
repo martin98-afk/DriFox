@@ -196,6 +196,8 @@ def _fetch_session_stats() -> dict:
     result = {
         "total_sessions": 0,
         "total_messages": 0,
+        "total_tokens": 0,
+        "avg_daily_tokens": 0,
         "total_compacted": 0,
         "daily_sessions": [],
         "daily_messages": [],
@@ -216,14 +218,30 @@ def _fetch_session_stats() -> dict:
 
         # 1. ═══ 基础统计 ═══
         cursor.execute(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(message_count), 0) as msgs "
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(message_count), 0) as msgs, "
+            "COALESCE(SUM(context_usage), 0) as tokens "
             "FROM sessions WHERE project NOT LIKE '__archived__%'"
         )
         row = cursor.fetchone()
         total_sessions = row["cnt"] if row else 0
         total_messages = row["msgs"] if row else 0
+        total_tokens_known = row["tokens"] if row else 0
         result["total_sessions"] = total_sessions
         result["total_messages"] = total_messages
+
+        # 1b. ═══ Token 总量（全部会话，context_usage=0 的旧会话用 messages 估算） ═══
+        total_tokens_estimated = 0
+        cursor.execute(
+            "SELECT messages FROM sessions "
+            "WHERE project NOT LIKE '__archived__%' "
+            "AND (context_usage IS NULL OR context_usage = 0) "
+            "AND messages IS NOT NULL AND messages != ''"
+        )
+        for row in cursor.fetchall():
+            msg_data = row["messages"]
+            if isinstance(msg_data, (str, bytes)):
+                total_tokens_estimated += _fast_estimate_tokens(str(msg_data)[:100000])
+        result["total_tokens"] = total_tokens_known + total_tokens_estimated
 
         # 2. ═══ 压缩统计（精确检查 compaction_state 中 active:true） ═══
         cursor.execute(
@@ -324,8 +342,12 @@ def _fetch_session_stats() -> dict:
             result["daily_messages"].append((dl, daily_messages_map[dl]))
             result["daily_tokens"].append((dl, daily_tokens_map[dl]))
 
-        # 6. ═══ 平均消息数 ═══
+        # 6. ═══ 平均消息数 / 日均 token ═══
         result["avg_messages_per_session"] = round(total_messages / total_sessions, 1) if total_sessions > 0 else 0.0
+
+        # 日均 token 基于 14 天窗口（与图表口径一致）
+        total_in_window = sum(v for _, v in result["daily_tokens"])
+        result["avg_daily_tokens"] = int(round(total_in_window / 14)) if total_in_window > 0 else 0
 
         conn.close()
     except Exception as e:
@@ -737,12 +759,13 @@ class _LineChartWidget(QWidget):
 class _StatCard(QFrame):
     """单个统计信息卡片"""
 
-    def __init__(self, icon, title: str, value: str, subtitle: str = "", parent=None):
+    def __init__(self, icon, title: str, value: str, subtitle: str = "", extra_info: str = "", parent=None):
         super().__init__(parent)
         self._icon = icon
         self._title = title
         self._value = value
         self._subtitle = subtitle
+        self._extra_info = extra_info  # 副标题下的额外小字（用于 "日均 X" 等补充信息）
         self._colors = _chart_colors()  # 默认 fallback 配色
         self.setup_ui()
 
@@ -761,6 +784,7 @@ class _StatCard(QFrame):
         text_sec = f"rgba({tcs.red()},{tcs.green()},{tcs.blue()},{tcs.alpha()})"
         val_size = max(round(base_font_size * 22 / 14), 16)
         sub_size = max(round(base_font_size * 11 / 14), 9)
+        extra_size = max(round(base_font_size * 10 / 14), 8)
         for child in self.findChildren(QLabel):
             obj_name = child.objectName()
             if obj_name == "statValue":
@@ -771,6 +795,11 @@ class _StatCard(QFrame):
             elif obj_name == "statSub":
                 child.setStyleSheet(
                     f"color: {text_sec}; font-size: {sub_size}px; "
+                    f"font-family: '{font_family}'; background: transparent;"
+                )
+            elif obj_name == "statExtra":
+                child.setStyleSheet(
+                    f"color: {text_sec}; font-size: {extra_size}px; opacity: 0.85; "
                     f"font-family: '{font_family}'; background: transparent;"
                 )
             else:
@@ -835,6 +864,17 @@ class _StatCard(QFrame):
                 f"color: {text_sec}; font-size: {sub_size}px; font-family: '{font_family}'; background: transparent;"
             )
             layout.addWidget(sub_lb)
+
+        # 额外小字（副标题之下，比副标题更小的字号，用于补充信息如"日均 token"）
+        if self._extra_info:
+            extra_size = max(round(base_font_size * 10 / 14), 8)
+            extra_lb = QLabel(self._extra_info, self)
+            extra_lb.setObjectName("statExtra")
+            extra_lb.setStyleSheet(
+                f"color: {text_sec}; font-size: {extra_size}px; opacity: 0.85; "
+                f"font-family: '{font_family}'; background: transparent;"
+            )
+            layout.addWidget(extra_lb)
 
 
 class _ProjectBarWidget(QWidget):
@@ -1194,24 +1234,30 @@ class ContextUsageStatsCard(QWidget):
         # ── 概要统计卡片（紧凑单行） ──
         total_sessions = data.get("total_sessions", 0)
         total_messages = data.get("total_messages", 0)
+        total_tokens = data.get("total_tokens", 0)
+        avg_daily_tokens = data.get("avg_daily_tokens", 0)
         avg_msgs = data.get("avg_messages_per_session", 0.0)
-        project_count = len(data.get("sessions_per_project", {}))
 
         # 计算平均值
         avg_daily = round(total_sessions / 14, 1) if total_sessions > 0 else 0.0
-        avg_per_project = round(total_sessions / project_count, 1) if project_count > 0 else 0.0
 
         stats_row = QHBoxLayout()
         stats_row.setSpacing(8)
 
         stat_cards = [
-            (FluentIcon.CHAT, "总会话数", str(total_sessions), f"平均 {avg_daily} 次/天"),
-            (FluentIcon.MESSAGE, "总消息数", _format_number(total_messages), f"平均 {avg_msgs} 条/会话"),
-            (FluentIcon.PEOPLE, "项目数", str(project_count), f"平均 {avg_per_project} 次/项目"),
+            # 总 token 数放在第一位（最重要），日均 token 作为额外小字显示在副标题之下
+            (
+                FluentIcon.FONT, "总 token 数",
+                _format_number(total_tokens),
+                "累计消耗",
+                f"日均 {_format_number(avg_daily_tokens)}（近 14 天）",
+            ),
+            (FluentIcon.CHAT, "总会话数", str(total_sessions), f"平均 {avg_daily} 次/天", ""),
+            (FluentIcon.MESSAGE, "总消息数", _format_number(total_messages), f"平均 {avg_msgs} 条/会话", ""),
         ]
 
-        for ic, title, val, sub in stat_cards:
-            card = _StatCard(ic, title, val, sub)
+        for ic, title, val, sub, extra in stat_cards:
+            card = _StatCard(ic, title, val, sub, extra_info=extra)
             if self._chart_style:
                 card.set_colors(self._chart_style)
             stats_row.addWidget(card)
