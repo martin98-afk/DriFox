@@ -356,10 +356,14 @@ class UIPluginRegistry:
 
             # 清理字节码缓存（__pycache__），确保修改后的 .py 文件被重新编译，
             # 而不是使用旧的 .pyc 缓存（Python 的 mtime 检查在同一秒内可能失效）
+            # 注意：此操作会导致父目录（如 ui/）产生 Change.modified 事件，
+            # 加在 _watch_loop 中已通过过滤目录 modified 事件来防止误触发跨插件重载。
             from pathlib import Path as _Path
+
             ui_pycache = _Path(ui_path) / "__pycache__"
             if ui_pycache.exists():
                 import shutil as _shutil
+
                 _shutil.rmtree(str(ui_pycache))
 
             # 通知 import 系统所有缓存已失效
@@ -550,8 +554,10 @@ class UIPluginRegistry:
         新卡片应实现 ``set_context_provider(provider)`` 接口，
         在 showEvent / show_card 等时机自行调用 provider 获取最新上下文。
         """
+
         def _provider() -> Dict[str, Any]:
             return self._build_card_context(card_info)
+
         return _provider
 
     def re_register_all_commands(self) -> None:

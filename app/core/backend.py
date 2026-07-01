@@ -802,6 +802,13 @@ class ChatBackend(QObject):
                         # 跳过 git/__pycache__/pyc 等无关文件
                         if ".git" in p or "__pycache__" in p or p.endswith(".pyc"):
                             continue
+                        # 目录的 Change.modified 是子项变更的副作用（如 __pycache__ 创建/删除导致
+                        # 父目录 ui/ 被标记为 modified），实际变更已被子项事件或 DefaultFilter 捕获，
+                        # 过滤掉避免误触发跨插件重载。
+                        if change_type == 2:  # Change.modified
+                            # 以分隔符结尾 or 不含扩展名 → 疑似目录
+                            if p.endswith(("\\", "/")) or "." not in p.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]:
+                                continue
                         # 跳过用户自定义目录中的内部数据文件（避免自我触发）
                         # 这些是 HookOverrideManager / HookPresetManager 写入的数据文件，
                         # 不是插件源码，修改它们不需要触发插件热更新
