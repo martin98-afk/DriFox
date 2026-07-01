@@ -85,6 +85,38 @@ class MarketplaceData:
 _instance: Optional[MarketplaceData] = None
 
 
+def compare_versions(v1: str, v2: str) -> int:
+    """比较两个语义化版本号
+
+    Args:
+        v1: 版本号 A（如 "1.2.3"）
+        v2: 版本号 B
+
+    Returns:
+        -1: v1 < v2
+         0: v1 == v2
+         1: v1 > v2
+    """
+    def parse(v: str):
+        parts = v.strip().lstrip("v").split(".")
+        return [int(p) if p.isdigit() else 0 for p in parts]
+
+    parts1 = parse(v1)
+    parts2 = parse(v2)
+
+    # 补齐到相同长度
+    max_len = max(len(parts1), len(parts2))
+    parts1.extend([0] * (max_len - len(parts1)))
+    parts2.extend([0] * (max_len - len(parts2)))
+
+    for a, b in zip(parts1, parts2):
+        if a < b:
+            return -1
+        elif a > b:
+            return 1
+    return 0
+
+
 def get_marketplace() -> MarketplaceData:
     global _instance
     if _instance is None:

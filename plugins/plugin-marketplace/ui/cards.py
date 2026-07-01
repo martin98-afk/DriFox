@@ -3,9 +3,10 @@
 
 功能：
 - 异步拉取市场列表（不阻塞 UI）
-- 异步安装/卸载插件
+- 异步安装/卸载/更新插件
 - 插件搜索过滤
-- 安装状态实时反馈
+- 版本检测：已安装插件有新版时显示「更新」按钮
+- 安装/更新状态实时反馈
 """
 
 import traceback
@@ -85,15 +86,27 @@ class _MarketplaceWorker(QObject):
 
 
 class _PluginRow(QFrame):
-    """单个插件的展示行（简约卡片风格）"""
+    """单个插件的展示行（简约卡片风格）
+
+    状态说明：
+    - 未安装：显示「安装」按钮
+    - 已安装 & 最新版：显示「已安装」按钮（禁用）
+    - 已安装 & 有新版：显示「更新」按钮（橙色）
+    - 操作中：显示「处理中…」按钮（禁用）
+    """
 
     installRequested = pyqtSignal(dict)  # plugin_meta
+    updateRequested = pyqtSignal(dict)   # plugin_meta（有新版时触发）
 
-    def __init__(self, plugin_meta: dict, installed: bool, parent=None):
+    def __init__(self, plugin_meta: dict, installed: bool, has_update: bool = False,
+                 local_version: Optional[str] = None, parent=None):
         super().__init__(parent)
         self._meta = plugin_meta
         self._installed = installed
+        self._has_update = has_update
+        self._local_version = local_version
         self._busy = False
+        self._original_btn_style: str = ""  # 在 _setup_ui 中保存 FluentUI 默认样式
         self._setup_ui()
 
     def _setup_ui(self):
@@ -117,16 +130,36 @@ class _PluginRow(QFrame):
         info_layout.setSpacing(2)
 
         name = self._meta.get("name", "未知")
-        ver = self._meta.get("version", "")
-        title = StrongBodyLabel(f"{name}  v{ver}" if ver else name, self)
+        remote_ver = self._meta.get("version", "")
+
+        # 标题行：显示名称 + 版本信息
+        if self._has_update and self._local_version and remote_ver:
+            # 有新版：显示 v旧版 → v新版
+            title = StrongBodyLabel(
+                f"{name}  v{self._local_version} → v{remote_ver}", self
+            )
+        elif remote_ver:
+            title = StrongBodyLabel(f"{name}  v{remote_ver}", self)
+        else:
+            title = StrongBodyLabel(name, self)
         title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         info_layout.addWidget(title)
+
+        # 版本更新提示小标签（仅在有更新时显示）
+        if self._has_update:
+            update_tag = QLabel("🔄 有新版本", self)
+            update_tag.setStyleSheet(
+                "color: #FFA726; font-size: 11px; background: transparent;"
+            )
+            info_layout.addWidget(update_tag)
 
         desc = self._meta.get("description", "")
         if desc:
             desc_label = QLabel(desc[:120], self)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
+            desc_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            )
             info_layout.addWidget(desc_label)
 
         layout.addLayout(info_layout, 1)
@@ -134,6 +167,8 @@ class _PluginRow(QFrame):
         # 操作按钮
         self._btn = PushButton(self)
         self._btn.setFixedWidth(100)
+        # 保存 FluentUI 默认样式，切换状态时恢复（仅「更新」状态使用自定义橙色样式）
+        self._original_btn_style = self._btn.styleSheet()
         self._update_btn_text()
         self._btn.clicked.connect(self._on_click)
         layout.addWidget(self._btn)
@@ -142,31 +177,56 @@ class _PluginRow(QFrame):
         if self._busy:
             self._btn.setText("处理中…")
             self._btn.setEnabled(False)
+            self._btn.setStyleSheet(self._original_btn_style)
+        elif self._has_update:
+            self._btn.setText("更新")
+            self._btn.setEnabled(True)
+            # 橙色按钮风格 — 提示有新版本可更新
+            self._btn.setStyleSheet(
+                "PushButton { background: rgba(255, 167, 38, 0.2); "
+                "color: #FFA726; border: 1px solid rgba(255, 167, 38, 0.3); "
+                "border-radius: 4px; }"
+                "PushButton:hover { background: rgba(255, 167, 38, 0.35); }"
+            )
         elif self._installed:
             self._btn.setText("已安装")
             self._btn.setEnabled(False)
+            self._btn.setStyleSheet(self._original_btn_style)
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
+            self._btn.setStyleSheet(self._original_btn_style)
 
     def _on_click(self):
-        if self._busy or self._installed:
+        if self._busy:
             return
-        self._busy = True
-        self._update_btn_text()
-        self.installRequested.emit(self._meta)
+        if not self._installed:
+            # 未安装 → 安装
+            self._busy = True
+            self._update_btn_text()
+            self.installRequested.emit(self._meta)
+        elif self._has_update:
+            # 已安装且有新版 → 更新
+            self._busy = True
+            self._update_btn_text()
+            self.updateRequested.emit(self._meta)
 
     def set_installed(self, installed: bool):
-        """安装完成后刷新状态"""
+        """安装/更新完成后刷新状态"""
         self._installed = installed
+        self._has_update = False
         self._busy = False
+        self._update_btn_text()
+
+    def set_has_update(self, has_update: bool):
+        """设置是否有可用更新"""
+        self._has_update = has_update
         self._update_btn_text()
 
     def set_error(self):
-        """安装失败后恢复按钮"""
+        """安装/更新失败后恢复按钮"""
         self._busy = False
-        self._btn.setText("安装失败，重试")
-        self._btn.setEnabled(True)
+        self._update_btn_text()
 
 
 # ── 市场主卡片 ──────────────────────────────────────────────
@@ -405,7 +465,7 @@ class MarketplaceCard(QWidget):
     # ── 渲染 ──
 
     def _render_plugins(self, plugins: list):
-        """渲染插件列表"""
+        """渲染插件列表（含版本检测）"""
         self._clear_plugin_list()
         query = self._search_edit.text().strip().lower()
         installer = get_installer()
@@ -415,8 +475,15 @@ class MarketplaceCard(QWidget):
             if query and query not in name.lower() and query not in (p.get("description", "")).lower():
                 continue
             installed = installer.is_installed(name)
-            row = _PluginRow(p, installed, self._content)
+            # 检查是否有版本更新
+            has_update = False
+            local_ver = None
+            if installed:
+                has_update, local_ver, _ = installer.check_update(p)
+            row = _PluginRow(p, installed, has_update=has_update,
+                             local_version=local_ver, parent=self._content)
             row.installRequested.connect(self._async_install)
+            row.updateRequested.connect(self._async_update)
             self._content_layout.addWidget(row)
             count += 1
 
@@ -475,15 +542,68 @@ class MarketplaceCard(QWidget):
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=False, error=True)
 
-    def _update_row_state(self, name: str, installed: bool, error: bool = False):
-        """更新某插件行的状态"""
+    # ── 异步更新 ────────────────────────────────────────
+
+    def _async_update(self, plugin_meta: dict):
+        """在后台线程更新插件"""
+        name = plugin_meta.get("name", "")
+        self._status_label.setText("更新中…")
+        self._status_label.setStyleSheet(
+            "color: #FFA726; font-size: 12px; background: transparent;"
+        )
+
+        self._cleanup_worker()
+        self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().update(m))
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.finished.connect(lambda ok: self._on_update_done(name, bool(ok)))
+        self._worker.error.connect(lambda e: self._on_update_error(name, e))
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.error.connect(self._worker_thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.error.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.start()
+
+    def _on_update_done(self, name: str, success: bool):
+        """更新完成 — 刷新列表确保版本信息正确"""
+        self._status_label.setText("")
+        if success:
+            # 重新渲染整个列表以刷新版本显示（v旧版→v新版 → 变为已安装）
+            self._render_plugins(self._plugin_data)
+        else:
+            self._update_row_state(name, installed=True, error=True)
+
+    def _on_update_error(self, name: str, err: str):
+        """更新出错"""
+        self._status_label.setText("更新失败")
+        self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
+        self._update_row_state(name, installed=True, error=True)
+
+    def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
+        """更新某插件行的状态
+
+        Args:
+            name: 插件名称
+            installed: 是否已安装
+            error: 操作是否出错
+            updated: 是否刚完成更新（需刷新版本显示）
+        """
         for i in range(self._content_layout.count()):
             item = self._content_layout.itemAt(i)
             if item and item.widget() and isinstance(item.widget(), _PluginRow):
                 row: _PluginRow = item.widget()
                 if row._meta.get("name") == name:
-                    if error and not installed:
+                    if updated:
+                        # 更新成功后：设为已安装，清除更新标记
+                        row.set_installed(True)
+                    elif error and not installed:
                         row.set_error()
+                    elif error and installed:
+                        # 更新失败：恢复按钮（保留更新标记）
+                        row._busy = False
+                        row._update_btn_text()
                     else:
                         row.set_installed(installed)
                     break
