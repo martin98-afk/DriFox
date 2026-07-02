@@ -67,7 +67,7 @@ class PythonFinder:
                 timeout=5
             )
             return result.returncode == 0
-        except:
+        except Exception:
             return False
     
     @classmethod
@@ -125,7 +125,7 @@ class APIKeyFinder:
                     content = config_path.read_text().strip()
                     if content:
                         return content
-            except:
+            except Exception:
                 pass
         return None
     
@@ -273,7 +273,7 @@ $bmp.Dispose()
             print(f"截图异常: {e}")
             try:
                 os.remove(temp_file)
-            except:
+            except Exception:
                 pass
             return False
 

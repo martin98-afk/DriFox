@@ -111,7 +111,7 @@ def analyze_image(image_path, prompt=None, api_key=None):
         try:
             error_json = json.loads(error_body)
             error_msg = error_json.get('error', {}).get('message', error_body)
-        except:
+        except Exception:
             error_msg = error_body
         return {"success": False, "error": f"HTTP {e.code}", "details": error_msg}
     except Exception as e:
@@ -187,7 +187,7 @@ def main():
 
     # 1. 截图 (除非指定跳过)
     if not args.no_screenshot:
-        print(f"[1/2] 截图阶段")
+        print("[1/2] 截图阶段")
         if not Screenshot.take(screenshot_path):
             sys.exit(1)
         print()
@@ -199,7 +199,7 @@ def main():
         print()
 
     # 2. 分析
-    print(f"[2/2] 分析阶段")
+    print("[2/2] 分析阶段")
     result = analyze_image(screenshot_path, args.prompt)
     print_result(result)
 

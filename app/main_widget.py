@@ -1399,24 +1399,24 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_branch_container = QFrame(self)
         self._project_branch_container.setObjectName("projectBranchContainer")
         pb_layout = QHBoxLayout(self._project_branch_container)
-        pb_layout.setContentsMargins(0, 0, 0, 0)
-        pb_layout.setSpacing(0)
+        pb_layout.setContentsMargins(8, 0, 8, 0)  # 左侧留出 padding，与标题编辑区保持间距
+        pb_layout.setSpacing(2)
 
         # 项目方形 icon（缩写字母，flat design squircle 风格）
         self._project_avatar = _SquareAvatar(
-            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=22
+            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=24
         )
         self._project_avatar.setCursor(Qt.PointingHandCursor)
         self._project_avatar.mousePressEvent = self._on_project_label_clicked
-        self._project_avatar.setToolTip("点击切换项目")
+        self._project_avatar.setToolTip("点击切换项目")  # tooltip 在 _update_branch() 中动态更新（含项目名/路径/分支）
         pb_layout.addWidget(self._project_avatar)
 
-        # 项目选择标签
+        # 项目选择标签（隐藏，仅通过 avatar icon 展示项目缩写）
         self._project_label = QLabel(self._current_project, self)
         self._project_label.setCursor(Qt.PointingHandCursor)
         self._project_label.mousePressEvent = self._on_project_label_clicked
         self._project_label.setToolTip("点击切换项目")
-        pb_layout.addWidget(self._project_label)
+        self._project_label.setVisible(False)
 
         # 分支分隔符（三角箭头，面包屑风格）
         self._pb_separator = QLabel("▸", self)
@@ -1607,6 +1607,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
             "subagents": self._handle_subagents_command,
+            "title_gen": self._handle_title_gen_command,
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
             "hook-preset": self._handle_hook_preset_command,
@@ -1937,6 +1938,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 跳过已注册的（如内置 subagents 等）
                 if cmd_name in self._function_command_handlers:
                     continue
+
                 # 注册当前窗口的处理器：传入 main_widget=self 确保卡片显示在本窗口
                 def _make_handler(cid=card_id, mw=self):
                     return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
@@ -2074,8 +2076,9 @@ class OpenAIChatToolWindow(ToolWindow):
         #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
         self._truncation_sentinel = None
 
-        # （内置命令已在上方注册）更新 /subagents --model= 参数描述
+        # （内置命令已在上方注册）更新命令 --model= 参数描述
         self._update_subagents_param_description()
+        self._update_title_gen_param_description()
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
@@ -5132,7 +5135,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7163,6 +7166,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from app.core.command_manager import CommandManager
             from app.core.ui_plugin_registry import UIPluginRegistry
+
             CommandManager.get_instance().reload_all_commands()
             UIPluginRegistry.get_instance().re_register_all_commands()
         except Exception:
@@ -9117,9 +9121,52 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
             self._tool_control_card.refresh()
 
+    @staticmethod
+    def _encode_image_attachments_to_multimodal(user_text: str, image_paths: list, model_name: str) -> list | None:
+        """把图片附件编码为 OpenAI multimodal 格式的 user content
+
+        同步执行，但只在 _on_send_clicked 的 QTimer 推迟闭包内调用，
+        此时 UI 已渲染、用户看到"等待 AI"状态，不会感知主线程短暂阻塞。
+
+        Returns:
+            multimodal content 列表（[text, image_url, image_url, ...]），
+            或 None（编码失败/无图片）。
+        """
+        import base64
+
+        _MIME_MAP = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
+        }
+        image_blocks = []
+        for img_path in image_paths:
+            try:
+                with open(img_path, "rb") as f:
+                    img_bytes = f.read()
+                img_b64 = base64.b64encode(img_bytes).decode()
+                ext = os.path.splitext(img_path)[1].lower()
+                mime = _MIME_MAP.get(ext, "image/png")
+                data_uri = f"data:{mime};base64,{img_b64}"
+                image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
+            except Exception as e:
+                logger.warning(f"处理图片附件失败 {img_path}: {e}")
+        if not image_blocks:
+            return None
+        logger.info(
+            f"[ImageAttach] 模型 {model_name} 支持视觉，已将 {len(image_blocks)} 张图片注入 multimodal user content"
+        )
+        return [{"type": "text", "text": user_text}] + image_blocks
+
     def _on_send_clicked(self, user_text: str = ""):
         if getattr(self, "_is_destroyed", False):
             return
+
+        from PyQt5.QtCore import QTimer  # 推迟 send_message 用
+
         if self._is_auto_loop_running:
             InfoBar.warning(
                 "AutoLoop",
@@ -9249,45 +9296,20 @@ class OpenAIChatToolWindow(ToolWindow):
         _supports_vision = bool(_model_caps.get("supports_vision"))
 
         # ---- 拼接附件路径到用户文本 + 图片附件处理 ----
-        _user_content = None  # multimodal content (含图片)
+        # 性能优化：图片 base64 编码是同步 IO + CPU 重活（1MB≈6ms, 5MB≈30ms），
+        # 主线程做会让用户在发截图时感知到卡顿。改为只收集路径，编码推迟到
+        # _do_deferred_send 闭包内执行（紧挨在 send_message 之前），那时
+        # UI 已渲染完成，STOP 按钮已可见，AI 等待状态已显示给用户。
+        _image_paths: list[str] = []  # 仅收集图片路径，编码推迟
         if self._attachments:
-            # 先统一处理附件文本替换（含图片 [[basename]] → 路径）
+            # 先统一处理附件文本替换（含图片 [[basename]] → 路径）— UI 显示和
+            # LLM 看到的文本必须一致，所以这一步仍在主线程做（轻量字符串操作）。
             user_text = self._build_user_text_with_attachments(user_text)
 
             if _supports_vision:
-                # 视觉模型：图片附件 → base64 image_url blocks
+                # 视觉模型：收集图片路径到 _image_paths，编码推迟
                 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-                image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
-
-                if image_paths:
-                    import base64
-
-                    image_blocks = []
-                    for img_path in image_paths:
-                        try:
-                            with open(img_path, "rb") as f:
-                                img_bytes = f.read()
-                            img_b64 = base64.b64encode(img_bytes).decode()
-                            ext = os.path.splitext(img_path)[1].lower()
-                            mime_map = {
-                                ".png": "image/png",
-                                ".jpg": "image/jpeg",
-                                ".jpeg": "image/jpeg",
-                                ".gif": "image/gif",
-                                ".webp": "image/webp",
-                                ".bmp": "image/bmp",
-                            }
-                            mime = mime_map.get(ext, "image/png")
-                            data_uri = f"data:{mime};base64,{img_b64}"
-                            image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
-                        except Exception as e:
-                            logger.warning(f"处理图片附件失败 {img_path}: {e}")
-                    if image_blocks:
-                        _user_content = [{"type": "text", "text": user_text}] + image_blocks
-                        logger.info(
-                            f"[ImageAttach] 模型 {_model_name} 支持视觉，"
-                            f"已将 {len(image_blocks)} 张图片注入 multimodal user content"
-                        )
+                _image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
             else:
                 # 非视觉模型 → 图片路径已作为文本拼入 user_text
                 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -9323,29 +9345,53 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = True
         self._toggle_send_stop(True)
 
-        # 关键修复：确保 ToolExecutor 使用正确的 session_id
+        # 捕获 session 引用（推迟到下一 tick 时仍能取到当前会话）
         session = self.session_manager.get_current_session()
-        if session and self.backend.tool_executor:
-            self.backend.set_session_context(session.session_id)
 
-        # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
-        engine_kwargs = {}
-        if _user_content is not None:
-            engine_kwargs["_user_content"] = _user_content
-        if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
-            self._is_streaming = False
-            self._toggle_send_stop(False)
-            assistant_card.deleteLater()
-            return
+        # 推迟 send_message 到下一 event loop tick：
+        # 让 Qt 先把刚刚创建的 user/assistant 卡片 + STOP 按钮绘制到屏幕，
+        # 再开始执行 hook 注入 + LLM 消息构建（这两步会同步阻塞主线程）。
+        # 用户立即看到"等待 AI"状态，AI 响应在下一 tick 启动 → 消除"卡一下"的感知。
+        def _do_deferred_send():
+            if getattr(self, "_is_destroyed", False):
+                return
+            # 关键修复：确保 ToolExecutor 使用正确的 session_id
+            if session and self.backend.tool_executor:
+                self.backend.set_session_context(session.session_id)
 
-        # 同步 batch 结构：_message_batch 已包含新 user batch
-        self._sync_batch_structures()
-        # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
-        self._fix_new_card_message_index(user_text=user_text)
-        # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片
-        self._visible_batch_end = len(self._message_batch)
+            # 图片附件 base64 编码（在 UI 已渲染后执行，用户感知不到）
+            _user_content = None
+            if _image_paths:
+                _user_content = self._encode_image_attachments_to_multimodal(
+                    user_text=user_text,
+                    image_paths=_image_paths,
+                    model_name=_model_name,
+                )
 
-        self._maybe_generate_topic_summary()
+            # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
+            engine_kwargs = {}
+            if _user_content is not None:
+                engine_kwargs["_user_content"] = _user_content
+            if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                assistant_card.deleteLater()
+                return
+
+            # 同步 batch 结构：_message_batch 已包含新 user batch
+            self._sync_batch_structures()
+            # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
+            self._fix_new_card_message_index(user_text=user_text)
+            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片
+            self._visible_batch_end = len(self._message_batch)
+
+            # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
+            if session:
+                user_msg_count = sum(1 for m in session.messages if m.get("role") == "user")
+                if user_msg_count == 1:
+                    self._maybe_generate_topic_summary()
+
+        QTimer.singleShot(0, _do_deferred_send)
 
     def _on_stream_started(self):
         if getattr(self, "_is_destroyed", False):
@@ -9675,6 +9721,95 @@ class OpenAIChatToolWindow(ToolWindow):
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
 
+    def _handle_title_gen_command(self, args: str):
+        """/title_gen 命令：切换标题生成使用的默认模型
+
+        参数：
+          --model=X  → 设置标题生成默认模型
+          --reset    → 清空标题生成默认模型设置
+        """
+        import re
+
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        from app.utils.config import Settings
+
+        args = (args or "").strip()
+
+        # ---- --reset：清空默认模型设置 ----
+        if args == "--reset":
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_title_gen_default_model, "", save=True)
+            InfoBar.success(
+                title="已重置",
+                content="标题生成默认模型已清空，将使用主模型",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            self._update_title_gen_param_description()
+            return
+
+        # ---- --model=xxx：设置默认模型 ----
+        model_match = re.match(r"^--model=(.+)$", args)
+        if model_match:
+            model_value = model_match.group(1).strip()
+            if not model_value:
+                InfoBar.warning(
+                    title="参数错误",
+                    content="--model= 后需要指定模型名或服务商:模型名",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            llm_config = self._resolve_subagent_model_config(model_value)
+            if llm_config is None:
+                return
+
+            provider_display = llm_config.get("provider_name", "")
+            model_display = llm_config.get("模型名称", model_value)
+            display_value = f"{provider_display}:{model_display}" if provider_display else model_display
+
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_title_gen_default_model, display_value, save=True)
+
+            if provider_display:
+                info_text = f"{provider_display} - {model_display}"
+            else:
+                info_text = model_display
+
+            InfoBar.success(
+                title="标题生成模型设置",
+                content=f"{info_text}",
+                parent=self,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            self._update_title_gen_param_description()
+            return
+
+        # ---- 无参数：显示当前设置 ----
+        cfg = Settings.get_instance()
+        saved = cfg.llm_title_gen_default_model.value or ""
+        if saved:
+            InfoBar.info(
+                title="当前标题生成模型",
+                content=saved,
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.info(
+                title="当前标题生成模型",
+                content="未设置，将使用主模型",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
     def _get_next_hook_preset(self, presets: list) -> str:
         """获取下一个预设名称（循环）"""
         try:
@@ -9803,6 +9938,25 @@ class OpenAIChatToolWindow(ToolWindow):
                         param.description = f"当前子智能体默认模型: {saved}"
                     else:
                         param.description = "设置子智能体默认模型"
+                    break
+
+    def _update_title_gen_param_description(self):
+        """更新 /title_gen 命令的 --model= 参数描述，反映当前默认值"""
+        from app.core.command_manager import CommandManager
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = cfg.llm_title_gen_default_model.value or ""
+
+        cmd_mgr = CommandManager.get_instance()
+        entries = cmd_mgr._commands.get("title_gen", {})
+        for cmd_type, cmd_def in entries.items():
+            for param in cmd_def.parameters:
+                if param.name == "--model=":
+                    if saved:
+                        param.description = f"当前标题生成默认模型: {saved}"
+                    else:
+                        param.description = "设置标题生成默认模型"
                     break
 
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
@@ -10021,7 +10175,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
         self.backend._hook_message_queue.put(
             {
-                "role": "system",
+                "role": "assistant",
                 "content": hook_content,
                 "_hook_event": "SubAgentFinished",
             }
@@ -11036,8 +11190,24 @@ class OpenAIChatToolWindow(ToolWindow):
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
         self._topic_summary_cancelled = False
-        selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
-        llm_config = self._valid_configs.get(selected_name)
+
+        # 检查是否有标题生成专用模型配置
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = cfg.llm_title_gen_default_model.value
+        if saved:
+            resolved = self._resolve_subagent_model_config(saved)
+            if resolved:
+                llm_config = resolved
+            else:
+                # 解析失败，回退到主模型
+                selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
+                llm_config = self._valid_configs.get(selected_name)
+        else:
+            selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
+            llm_config = self._valid_configs.get(selected_name)
+
         if not llm_config:
             logger.warning("[Topic Summary] No LLM config found, skipping")
             return
@@ -11245,6 +11415,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         branch = r.stdout.strip()
         except Exception:
             pass
+
+        # 更新项目 avatar tooltip（完整项目名、项目路径、当前分支）
+        tooltip = self._current_project
+        if workdir:
+            tooltip += f"\n{workdir}"
+        if branch:
+            tooltip += f"\n🌿 {branch}"
+        self._project_avatar.setToolTip(tooltip)
 
         if branch:
             # 分支名过长时截断显示，悬浮显示全名

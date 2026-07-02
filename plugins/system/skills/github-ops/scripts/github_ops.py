@@ -93,7 +93,7 @@ def status(path: str = '.') -> bool:
     returncode, stdout, stderr = run_git('git status --porcelain', cwd=path)
     
     if returncode != 0:
-        print(f"[Error] Not a git repository or git not found")
+        print("[Error] Not a git repository or git not found")
         return False
     
     lines = stdout.strip().split('\n') if stdout.strip() else []
@@ -180,7 +180,7 @@ def commit(path: str, message: str, files: str = None) -> bool:
         print(f"✓ Committed to {branch} ({commit_hash})")
         print(f"  Message: {message}")
     else:
-        print(f"✓ Commit successful")
+        print("✓ Commit successful")
         print(f"  {stdout.strip()}")
     
     return True
@@ -261,7 +261,7 @@ def get_issue(owner: str, repo: str, issue_num: str) -> bool:
         print(f"Labels: {[l['name'] for l in issue.get('labels', [])]}")
         print(f"Comments: {issue['comments']}")
         print(f"URL: {issue['html_url']}")
-        print(f"\n--- Body ---")
+        print("\n--- Body ---")
         print(issue.get('body', '(empty)')[:1000])
         return True
     else:
@@ -292,7 +292,7 @@ def create_issue(owner: str, repo: str, title: str, body: str, labels: list = No
     
     if resp.status_code == 201:
         issue = resp.json()
-        print(f"✓ Issue created successfully")
+        print("✓ Issue created successfully")
         print(f"Number: #{issue['number']}")
         print(f"URL: {issue['html_url']}")
         return True
@@ -341,7 +341,7 @@ def reply_issue(owner: str, repo: str, issue_num: str, body_file: str) -> bool:
     
     if resp.status_code == 201:
         comment = resp.json()
-        print(f"✓ Comment posted successfully")
+        print("✓ Comment posted successfully")
         print(f"URL: {comment['html_url']}")
         return True
     else:
@@ -380,7 +380,7 @@ def create_pr(owner: str, repo: str, title_file: str, body_file: str, head: str,
     
     if resp.status_code == 201:
         pr = resp.json()
-        print(f"✓ PR created successfully")
+        print("✓ PR created successfully")
         print(f"Number: #{pr['number']}")
         print(f"URL: {pr['html_url']}")
         return True

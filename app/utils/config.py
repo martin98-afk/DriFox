@@ -9,6 +9,7 @@
 
 配置持久化到 JSON 文件。
 """
+
 import atexit
 from copy import deepcopy
 from enum import Enum
@@ -77,6 +78,7 @@ class Settings(QConfig):
             cls._instance = cls()
             # 配置文件路径：使用数据目录
             from app.utils.utils import get_app_data_dir
+
             app_data_dir = get_app_data_dir()
             cls._instance.file = app_data_dir / "app.config"
             try:
@@ -98,6 +100,7 @@ class Settings(QConfig):
             # 替换后，qconfig.set / save / toDict 都走 Settings 单例，写入真正的 app.config。
             try:
                 from qfluentwidgets import qconfig
+
                 qconfig._cfg = cls._instance
             except Exception:
                 pass
@@ -129,15 +132,12 @@ class Settings(QConfig):
             #   1) 计算新 hash；2) 合并同 apikey 重复条目；3) 写入 config_id 字段
             tmp_info = dict(info)
             tmp_info.pop("config_id", None)  # 强制按 hash 重算
-            new_key = apply_provider_save(
-                new_saved_providers, tmp_info, info.get("provider_name", old_key)
-            )
+            new_key = apply_provider_save(new_saved_providers, tmp_info, info.get("provider_name", old_key))
             old_to_new[old_key] = new_key
 
         # 没变化就别动磁盘
         if new_saved_providers.keys() == saved_providers.keys() and all(
-            isinstance(v, dict) and v.get("config_id") == k
-            for k, v in new_saved_providers.items()
+            isinstance(v, dict) and v.get("config_id") == k for k, v in new_saved_providers.items()
         ):
             return
 
@@ -148,8 +148,7 @@ class Settings(QConfig):
             instance.llm_selected_model.value = old_to_new[selected]
         instance.save()
         logger.info(
-            f"已迁移 {len(saved_providers)} 个服务商配置到 apikey hash 格式 "
-            f"（合并后 {len(new_saved_providers)} 条）"
+            f"已迁移 {len(saved_providers)} 个服务商配置到 apikey hash 格式 （合并后 {len(new_saved_providers)} 条）"
         )
 
     @classmethod
@@ -162,6 +161,7 @@ class Settings(QConfig):
         """
         try:
             from app.utils.theme_manager import theme_manager
+
             # 获取当前已加载的主题（可能只有系统主题）
             themes = list(theme_manager.list_themes().keys())
             if not themes:
@@ -172,6 +172,7 @@ class Settings(QConfig):
                 try:
                     raw = cls._instance.file.read_text(encoding="utf-8")
                     import orjson as json
+
                     data = json.loads(raw)
                     saved_theme = data.get("UI", {}).get("ThemeStyle")
                     if saved_theme and saved_theme not in themes:
@@ -182,6 +183,7 @@ class Settings(QConfig):
             cls._instance.ui_theme_style.validator.__init__(themes)
         except Exception as e:
             import logging
+
             logging.warning(f"[_extend_theme_validator_before_load] failed: {e}")
 
     @classmethod
@@ -231,10 +233,11 @@ class Settings(QConfig):
         # 三层防护：类级别关闭标志 | 实例级别关闭标志 | app 正在退出
         if Settings._closing_down:
             return
-        if getattr(self, '_closing', False):
+        if getattr(self, "_closing", False):
             return
         try:
             from PyQt5.QtWidgets import QApplication
+
             if QApplication.closingDown():
                 return
         except Exception:
@@ -249,7 +252,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.3.0"
+    current_version = "v0.3.1"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -272,25 +275,28 @@ class Settings(QConfig):
     llm_max_tokens = ConfigItem("LLM", "MaxTokens", 2048, RangeValidator(1024, 400960))
     llm_temperature = ConfigItem("LLM", "Temperature", 0.7, RangeValidator(0, 1))
     # 保存的免费/自定义服务商配置
-    llm_saved_providers = ConfigItem("LLM", "SavedProviders",{})
+    llm_saved_providers = ConfigItem("LLM", "SavedProviders", {})
     # 按模型名覆盖的参数（最大Token、温度、思考相关等），key=模型名
     llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
     llm_selected_model = ConfigItem("LLM", "SelectedModel", "")
     # 子智能体默认模型（用于 subagent_para / subagent_dag，空字符串表示使用主模型）
     llm_subagent_default_model = ConfigItem("LLM", "SubagentDefaultModel", "")
+    # 标题生成默认模型（用于 topic_summary，空字符串表示使用主模型）
+    llm_title_gen_default_model = ConfigItem("LLM", "TitleGenDefaultModel", "")
     # 启用的技能列表
-    llm_enabled_skills = ConfigItem("LLM", "EnabledSkills", [
-        "brainstorming", "writing-plans", "find-skills", "skill-creator", "git-commit", "minimax-image-understanding"])
+    llm_enabled_skills = ConfigItem(
+        "LLM",
+        "EnabledSkills",
+        ["brainstorming", "writing-plans", "find-skills", "skill-creator", "git-commit", "minimax-image-understanding"],
+    )
     # 主智能体选择（单选，通过 inject_agent_identity hook 注入系统提示词）
     llm_primary_agent = ConfigItem("LLM", "PrimaryAgent", "")
     # 智能体完成通知
     llm_notify_enabled = ConfigItem("LLM", "NotifyEnabled", True, BoolValidator())
     # 桌面自动化总开关 (mouse/keyboard/screenshot 3 工具)
     # 默认禁用, 需用户在设置卡显式开启后才能被 LLM 调用
-    llm_desktop_automation_enabled = ConfigItem(
-        "LLM", "DesktopAutomationEnabled", True, BoolValidator()
-    )
+    llm_desktop_automation_enabled = ConfigItem("LLM", "DesktopAutomationEnabled", True, BoolValidator())
     # 通知提示音类型
     llm_notify_sound = OptionsConfigItem(
         "LLM",
@@ -324,9 +330,7 @@ class Settings(QConfig):
 
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
-    llm_api_port = RangeConfigItem(
-        "LLM", "APIPort", 8765, RangeValidator(1024, 65535)
-    )
+    llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))
 
     # ========== MCP 服务器配置 ==========
     mcp_servers = ConfigItem("MCP", "Servers", [], ListDictValidator())
@@ -397,11 +401,11 @@ class Settings(QConfig):
     tool_off_behavior = ConfigItem("Tools", "OffBehavior", "deny")
 
 
-
 def update_theme_options():
     """从 ThemeManager 动态更新主题选项验证器"""
     try:
         from app.utils.theme_manager import theme_manager
+
         themes = list(theme_manager.list_themes().keys())
         if themes:
             settings = Settings.get_instance()
@@ -410,6 +414,9 @@ def update_theme_options():
                 settings.ui_theme_style.value = themes[0]
     except Exception as e:
         import logging
+
         logging.warning(f"[update_theme_options] failed: {e}")
+
+
 # 注册解释器退出时关闭配置写入保护
 atexit.register(Settings._set_closing_down)

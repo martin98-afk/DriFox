@@ -88,6 +88,8 @@ class ConversationExecutor:
         # 清理旧 Worker
         self.cleanup()
 
+        session_id = session.session_id if session else ""
+
         # 创建 Worker（通过 factory 注入，支持替换为 MockWorker 等）
         worker_kwargs = {
             "messages": messages,
@@ -100,6 +102,7 @@ class ConversationExecutor:
             "permission_cache": self._core.permission_cache,
             "compactor": self._core.compactor,
             "initial_compaction_cache": getattr(session, "compaction_cache", None),
+            "session_id": session_id,
         }
         self._current_worker = self._worker_factory(**worker_kwargs)
 

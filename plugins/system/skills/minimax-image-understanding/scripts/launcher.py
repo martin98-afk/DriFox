@@ -78,7 +78,7 @@ def check_environment():
     if script and script.exists():
         print(f"  ✓ 找到: {script.name}")
     else:
-        print(f"  ✗ 未找到: capture_and_analyze.py")
+        print("  ✗ 未找到: capture_and_analyze.py")
         errors.append("脚本")
 
     print()
