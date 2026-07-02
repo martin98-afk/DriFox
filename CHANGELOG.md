@@ -5,12 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.1] - 2026-07-02
 
-自上一版本以来的变更 | 提交数：6 · 文件变更：20 · +2180/-209 | 贡献者：mading
-
-### 🐛 问题修复 (Bug Fixes)
-
-- **子智能体缓存失效修复**: 修复 SubAgentFinished 事件中消息角色从 'system' 误设为 'assistant' 导致缓存异常的严重 bug，确保子智能体任务完成时消息队列状态一致
-- **技能缓存机制优化**: 重构 `/skill` 命令执行时的技能缓存策略，显著提升技能加载性能，减少重复缓存失效
+自上一版本以来的变更 | 提交数：22 · 文件变更：57 · +16292/-260 | 贡献者：mading, dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -18,6 +13,25 @@ All notable changes to this project will be documented in this file.
 - **标题生成命令**: 新增 `/title_gen` 命令，支持切换标题生成的默认模型，提升对话管理灵活性
 - **会话追踪支持**: 为 ChatWorker 和 SubAgentExecutor 添加 session_id 支持，实现跨会话的精确追踪与状态隔离
 - **UI 插件文档增强**: 扩充 UI 插件创建器参考文档，新增字体注入、按钮样式、工具函数等实用指南
+- **file-tree 拖拽移动与删除**: 新增节点拖拽移动与 Delete 键删除功能，操作体验大幅提升
+- **插件清单文件**: 为 file-tree 与 system-cleaner 插件新增 `plugin.json` 元数据描述
+- **SquircleAvatar 插件**: 新增 SquircleAvatar 组件用于插件图标展示
+- **QThread 全局安全守卫**: 新增全局 QThread 安全守卫并优化插件加载逻辑，提升多线程稳定性
+- **通用工具函数库**: 新增尺寸格式化与颜色调整等实用工具函数
+- **话题摘要追踪**: OpenAIChatToolWindow 实现话题摘要生成追踪，避免重复生成
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **子智能体缓存失效修复**: 修复 SubAgentFinished 事件中消息角色从 'system' 误设为 'assistant' 导致缓存异常的严重 bug，确保子智能体任务完成时消息队列状态一致
+- **技能缓存机制优化**: 重构 `/skill` 命令执行时的技能缓存策略，显著提升技能加载性能，减少重复缓存失效
+- **file-tree 对话框重构**: 用自定义 QDialog 替代 QMessageBox，背景样式通过 `#id` 选择器覆盖全局样式，按钮通过 `findChildren` 直接设置样式
+- **file-tree 拖拽支持**: 为树节点添加 `ItemIsDragEnabled` / `ItemIsDropEnabled` flags，新增拖拽 hover 高亮与暗色主题对话框适配
+- **QPushButton 导入修复**: 修复因缺少 `QPushButton` import 导致的 NameError
+- **多插件综合修复**: 修复多处跨插件 bug 与 UI 改进
+
+### ♻️ 代码重构 (Refactoring)
+
+- **代码结构优化**: 重构代码结构提升可读性与可维护性
 
 ## [v0.3.0] - 2026-07-02
 
