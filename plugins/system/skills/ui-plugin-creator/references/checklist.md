@@ -66,16 +66,35 @@
 - [ ] 主题色变化时调 `show_card` 能刷新（重新拉 ctx）
 - [ ] 子 widget（`_StatCard` / 图表）都实现 `set_colors(colors)`
 
-### 2.3 字体注入（重要 — 容易被忘）
+### 2.3 字体注入（重要 — 最容易出 bug 的地方 ⚠️）
 
-- [ ] `_apply_latest_theme()` 从 ctx 提取 `font_family` / `font_size`
-- [ ] 所有 QLabel 通过 `_make_style()` 应用字体
-- [ ] 自定义 widget（如 `_CacheItemRow`）实现 `set_font_ctx(font_family, font_size)`
-- [ ] 按钮用专门的 `_xxx_btn_style(accent)` 工厂方法（不混用 `_make_style`）
+#### 三层策略验证
 
-> 字体注入是"插件字体和主程序不一致"最常见的 bug。
-> 生成卡片后启动程序看一眼——如果字体和主界面不一样，就是漏了 `_apply_latest_theme` 的字体处理。
-> 详见 `patterns.md §1.4`。
+- [ ] **第 1 层（QFont 级联）**：`self.setFont(QFont(family, size))` — 参数用 `font_size if font_size else 14`，**不是** `0 if font_size else 0`
+- [ ] **第 2 层（QSS 替换）**：`_retheme()` 中用 `re.sub` 替换 QSS 中的 `font-size` 为 `{fs}px`，因为 QSS 优先级高于 QFont
+- [ ] **第 3 层（FluentLabelBase 覆盖）**：对 `StrongBodyLabel` 等，`isinstance(child, FluentLabelBase)` 时直接 `setFont(QFont(ff, fs))`
+
+> 三层缺一不可！只做第 1 层 → QSS 的 `font-size: 11px` 保持极小；
+> 只做第 1+2 层 → StrongBodyLabel 内部 `setFont()` 覆盖父级；
+> 只做第 1+3 层 → 普通 QLabel 的 QSS 覆盖 QFont 级联。
+
+#### 常见陷阱
+
+- [ ] ❌ `QFont(family, 0)` — 字号极小，必须用真实值
+- [ ] ❌ 动态创建 `_PluginRow` 等子控件后忘调 `_retheme()`
+- [ ] ❌ `_make_style` 的 `font-family` 宏尾号（末尾需要分号 `;`）
+- [ ] ❌ `_retheme()` 只替换 `color` 不替换 `font-size` — 文字颜色对了但字号还是 11px
+
+#### 验证方法
+
+```
+启动程序 → 打开插件卡片
+1. 插件名（StrongBodyLabel）和主界面标题字体大小一致？  → 检查第 3 层
+2. 说明文字（QLabel）字号和主界面正文一致？              → 检查第 2 层
+3. 动态刷新/搜索后新出来的行字号也正确？                  → 检查 _retheme() 是否调用了
+```
+
+> 详见 `patterns.md §1.4`（三层字体策略）。
 
 ### 2.4 按钮样式工厂模式
 

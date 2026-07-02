@@ -62,28 +62,68 @@ ctx = {
 
 > 永远不要假设某个键一定存在——用 `.get()` + fallback。
 
-### 1.4 字体注入（重要）
+### 1.4 字体注入（重要 — 易踩坑⚠️）
 
 ctx 中的 `font_family` 和 `font_size` 必须应用到所有子控件，否则插件字体和主程序不一致。
 
-**推荐做法：** 在 `_apply_latest_theme()` 中用 `_make_style()` 生成带字体的 QSS：
+#### 三层字体策略
+
+单靠 `self.setFont(QFont(family, size))` 是**不够的**，原因有三：
+
+| 层 | 策略 | 解决什么问题 |
+|----|------|-------------|
+| **第 1 层** | `self.setFont(QFont(family, size))` | 没有显式 QSS 字体的子控件获得级联 |
+| **第 2 层** | `re.sub` 替换 QSS 中 `font-size` | QSS 的 `font-size` 优先级高于 QFont 级联，会覆盖第 1 层 |
+| **第 3 层** | `FluentLabelBase.setFont()` 直接覆盖 | StrongBodyLabel 等内部有 `self.setFont(self.getFont())`，父级 QFont 无法级联 |
+
+**标准实现（放在 `_apply_latest_theme` 中）：**
 
 ```python
 def _apply_latest_theme(self):
     ctx = self._context_provider()
 
-    # 1. 提取字体
+    # ── 缓存上下文 ──
     font_family, font_size = _ctx_font(ctx)
+    tc = _ctx_text_color(ctx)
+    self._cached_tc = tc
+    self._cached_font_family = font_family
+    self._cached_font_size = font_size
 
-    # 2. 应用到所有 QLabel
+    # ── 第 1 层：QFont 级联 ──
+    if font_family:
+        self.setFont(QFont(font_family, font_size if font_size else 14))
+        # ⚠️ QFont(family, 0) 会使字体极小！必须用真实 font_size
+
+    # ── 第 2 + 3 层 ──
+    self._retheme()
+
+def _retheme(self):
+    """替换所有 QLabel 的 color + font-size + 覆盖 FluentLabelBase"""
+    tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
+    ff = getattr(self, "_cached_font_family", "")
+    fs = getattr(self, "_cached_font_size", 14)
+
     for child in self.findChildren(QLabel):
-        child.setStyleSheet(
-            _make_style(_ctx_text_color(ctx), font_family, font_size)
-        )
+        try:
+            # 第 3 层：StrongBodyLabel 等强制覆盖
+            if isinstance(child, FluentLabelBase) and ff:
+                child.setFont(QFont(ff, fs))
 
-    # 3. 对自定义 widget，暴露 set_font_ctx(font_family, font_size) 方法
-    for row in self._cache_rows.values():
-        row.set_font_ctx(font_family, font_size)
+            # 第 2 层：替换 QSS 中的 color + font-size
+            ss = child.styleSheet()
+            if not ss:
+                continue
+            import re
+            new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
+            if fs:
+                new_ss = re.sub(
+                    r"font-size:\s*[^;]+;", f"font-size: {fs}px;", new_ss
+                )
+            if ff and f"font-family: '{ff}'" not in new_ss:
+                new_ss += f" font-family: '{ff}';"
+            child.setStyleSheet(new_ss)
+        except RuntimeError:
+            pass
 ```
 
 **辅助函数模板（放在 cards.py 文件顶部）：**
@@ -100,7 +140,7 @@ def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: st
     """生成带字体的 QSS 样式串"""
     parts = [f"color: {color};"]
     if font_family:
-        parts.append(f"font-family: '{font_family}'")
+        parts.append(f"font-family: '{font_family}';")  # ← 注意分号！
     if font_size:
         parts.append(f"font-size: {font_size}px;")
     if extra:
@@ -108,9 +148,12 @@ def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: st
     return " ".join(parts)
 ```
 
-> **陷阱：** 按钮的 QSS 通常包含 background/border，不能简单地用 `_make_style` 覆盖。
-> 应该用专门的 `_xxx_btn_style(accent)` 工厂方法，在 `_apply_latest_theme` 中调用。
-> 详见 `templates.md §一` 的按钮样式工厂模式。
+> **陷阱：**
+> 1. ❌ `QFont(family, 0)` → 字号极小； ✅ 必须用 `font_size if font_size else 14`
+> 2. ❌ 只改 QFont 不改 QSS → QSS 的 `font-size: 11px` 优先； ✅ 必须 `_retheme()` 也替换
+> 3. ❌ 漏掉 FluentLabelBase → StrongBodyLabel 内部 `setFont()` 覆盖父级； ✅ 必须第 3 层直接覆盖
+> 4. ❌ 动态创建子控件后不刷新 → 新加的 QLabel 还是旧字号； ✅ 创建完调 `_retheme()`
+> 5. ❌ 按钮用 `_make_style` 覆盖 → 按钮的 background/border 丢失； ✅ 用专门的 `_xxx_btn_style(accent)`
 
 详细的主题色映射和卡片背景适配见 `widgets-theme.md`。
 

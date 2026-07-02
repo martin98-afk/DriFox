@@ -445,7 +445,7 @@ class SystemCleanerCard(QWidget):
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = colors.get("border", "rgba(128,128,128,0.12)")
 
-        font_qss = f"font-family: '{ff}';" if ff else ""
+        font_qss = f"font-family: '{ff}'; font-size: {fs}px;" if ff else (f"font-size: {fs}px;" if fs else "")
 
         # ── 标题栏 ──
         try:
