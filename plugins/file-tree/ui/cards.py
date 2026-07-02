@@ -535,8 +535,10 @@ class FileTreeWidget(QTreeWidget):
         accent = self._theme_accent_color()
 
         is_dark = bg.lightness() < 128
-        btn_bg = "#3a3a3a" if is_dark else "#e0e0e0"
-        btn_border = "#555555" if is_dark else "#bbbbbb"
+        # 按钮背景使用明显区别于对话框背景的颜色
+        btn_bg = "#5a5a5a" if is_dark else "#d4d4d4"
+        btn_border = "#7a7a7a" if is_dark else "#aaaaaa"
+        btn_text = "#ffffff" if is_dark else "#1a1a1a"
 
         msg_box.setStyleSheet(f"""
             QMessageBox {{
@@ -544,25 +546,28 @@ class FileTreeWidget(QTreeWidget):
                 color: {tc.name()};
                 font-size: 14px;
             }}
-            QLabel {{
+            QMessageBox QLabel {{
                 color: {tc.name()};
                 font-size: 14px;
                 padding: 12px 8px;
             }}
-            QPushButton {{
+            QMessageBox QPushButton {{
                 background-color: {btn_bg};
-                color: {tc.name()};
+                color: {btn_text};
                 border: 1px solid {btn_border};
-                border-radius: 4px;
+                border-radius: 5px;
                 padding: 6px 24px;
                 min-width: 80px;
-                min-height: 28px;
+                min-height: 30px;
                 font-size: 13px;
             }}
-            QPushButton:hover {{
+            QMessageBox QPushButton:hover {{
                 background-color: {accent.name()};
                 color: #ffffff;
                 border: 1px solid {accent.name()};
+            }}
+            QMessageBox QPushButton:pressed {{
+                background-color: {accent.name()}aa;
             }}
         """)
         return msg_box.exec_()
