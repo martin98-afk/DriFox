@@ -25,8 +25,7 @@ import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QThread, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -37,7 +36,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     FluentIcon,
-    FluentLabelBase,
     IconWidget,
     ScrollArea,
     StrongBodyLabel,
@@ -58,13 +56,6 @@ def _text_color(secondary: bool = False) -> str:
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
 
 
-def _ctx_font(ctx: dict) -> tuple:
-    """从上下文提取 font_family 和 font_size，无则返回 fallback"""
-    ff = ctx.get("font_family", "Microsoft YaHei")
-    fs = ctx.get("font_size", 14)
-    return ff, fs
-
-
 def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
     """从上下文 colors 中获取文字颜色，无上下文则回退到 _text_color()"""
     colors = ctx.get("colors", {})
@@ -78,50 +69,6 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 def _ctx_border_color(ctx: dict) -> str:
     """从上下文 colors 中获取边框颜色"""
     return ctx.get("colors", {}).get("border", "rgba(128,128,128,0.15)")
-
-
-def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: str = "") -> str:
-    """生成带字体的 QSS 样式串
-
-    在 _apply_latest_theme 中调用，确保所有 QLabel/按钮的
-    颜色和字体都跟随上下文变化。
-
-    Args:
-        color: 文字颜色值
-        font_family: font-family（可为空，为空时不输出）
-        font_size: font-size（0 时不输出）
-        extra: 额外的 QSS 片段（如 "font-weight: 600;"）
-    """
-    parts = [f"color: {color};"]
-    if font_family:
-        parts.append(f"font-family: '{font_family}'")
-    if font_size:
-        parts.append(f"font-size: {font_size}px;")
-    if extra:
-        parts.append(extra)
-    return " ".join(parts)
-
-
-def _adjust_color(hex_color: str, amount: int) -> str:
-    """简单调亮/调暗一个 hex 颜色，用于按钮渐变
-
-    Args:
-        hex_color: 如 "#62a0ea"
-        amount: 调整量，正值调亮，负值调暗
-    """
-    hex_color = hex_color.lstrip("#")
-    if len(hex_color) != 6:
-        return hex_color
-    try:
-        r = int(hex_color[0:2], 16)
-        g = int(hex_color[2:4], 16)
-        b = int(hex_color[4:6], 16)
-        r = max(0, min(255, r + amount))
-        g = max(0, min(255, g + amount))
-        b = max(0, min(255, b + amount))
-        return f"#{r:02x}{g:02x}{b:02x}"
-    except ValueError:
-        return hex_color
 
 
 # ── 异步工作器 ──────────────────────────────────────────
@@ -176,19 +123,7 @@ class MyCardWidget(QWidget):
         self.setVisible(True)
 
     def _apply_latest_theme(self):
-        """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
-
-        三层字体策略（重要！）：
-        1. self.setFont(QFont(family, size)) — 级联到无显式 font 的子控件
-        2. _retheme() 替换 QSS 中的 color + font-size — 覆盖已有 font-size: 11px 的标签
-        3. FluentLabelBase（如 StrongBodyLabel）直接 setFont — 覆盖其内部自带的字体
-
-        ⚠️ 常见陷阱：
-        - QFont(family, 0) 的 size=0 会使字体极小，必须用真实 font_size
-        - QSS 的 font-size 优先级高于 QFont 级联，两者必须同步更新
-        - StrongBodyLabel 内部有 self.setFont(self.getFont()) 覆盖父级 QFont
-        - 动态创建的子控件创建完必须调 _retheme() 刷新
-        """
+        """从上下文拉取最新主题色并刷新全部子控件样式"""
         if self._context_provider is None:
             return
         try:
@@ -196,38 +131,26 @@ class MyCardWidget(QWidget):
         except Exception:
             return
 
-        # ── 缓存上下文值（供动态创建的子控件使用） ──
-        font_family, font_size = _ctx_font(ctx)
         tc = _ctx_text_color(ctx)
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
-        self._cached_tc = tc
-        self._cached_tcs = tcs
-        self._cached_font_family = font_family
-        self._cached_font_size = font_size
 
-        # ── 第 1 层：QFont 级联（size 用真实值，不传 0） ──
-        if font_family:
-            self.setFont(QFont(font_family, font_size if font_size else 14))
-
-        # ── 第 2+3 层：替换 QSS 颜色/字号 + 覆盖 FluentLabelBase ──
-        self._retheme()
-
-        # 更新按钮（如果有）
-        # 注意：按钮样式通常有固定 background/border，不能简单地 _make_style
-        # 建议在 _build_* 方法中存储按钮引用（如 self._my_btn），
-        # 然后在 _apply_latest_theme 中用专门的方法更新它的 QSS。
-        # 示例：
-        # if hasattr(self, '_my_btn'):
-        #     self._my_btn.setStyleSheet(self._my_btn_style(accent))
+        # 更新所有 label 颜色
+        for child in self.findChildren(QLabel):
+            try:
+                if "font-size" in child.styleSheet() or "color" in child.styleSheet():
+                    child.setStyleSheet(
+                        f"color: {tc}; background: transparent;"
+                    )
+            except RuntimeError:
+                pass
 
         # 更新搜索框（如果有）
         if hasattr(self, '_search') and self._search is not None:
             try:
                 self._search.setStyleSheet(
                     f"background: rgba(128,128,128,0.1); border-radius: 8px; "
-                    f"padding: 4px 8px; "
-                    + _make_style(tc, font_family, font_size)
+                    f"padding: 4px 8px; color: {tc};"
                 )
             except RuntimeError:
                 pass
@@ -239,43 +162,6 @@ class MyCardWidget(QWidget):
                     sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
         except RuntimeError:
             pass
-
-    def _retheme(self):
-        """刷新所有子控件的颜色 + 字号（第 2+3 层字体策略）
-
-        必须在动态创建子控件（如 _render_plugins 创建行）后调用。
-
-        第 2 层：对 QLabel，用 re.sub 替换 QSS 中的 color 和 font-size。
-                 保留 font-weight 等其他原有属性。
-        第 3 层：对 StrongBodyLabel 等 FluentLabelBase，直接 setFont 覆盖
-                 其内部自带的 hardcoded 字体。
-        """
-        tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
-        ff = getattr(self, "_cached_font_family", "")
-        fs = getattr(self, "_cached_font_size", 14)
-
-        for child in self.findChildren(QLabel):
-            try:
-                # 第 3 层：FluentLabelBase 内部有 self.setFont()，必须直接覆盖
-                from qfluentwidgets import FluentLabelBase
-                if isinstance(child, FluentLabelBase) and ff:
-                    child.setFont(QFont(ff, fs))
-
-                # 第 2 层：替换 QSS 中的 color + font-size
-                ss = child.styleSheet()
-                if not ss:
-                    continue
-                import re
-                new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
-                if fs:
-                    new_ss = re.sub(
-                        r"font-size:\s*[^;]+;", f"font-size: {fs}px;", new_ss
-                    )
-                if ff and f"font-family: '{ff}'" not in new_ss:
-                    new_ss += f" font-family: '{ff}';"
-                child.setStyleSheet(new_ss)
-            except RuntimeError:
-                pass
 
     # ── 界面 ──
 
@@ -338,16 +224,6 @@ class MyCardWidget(QWidget):
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"
-            "QScrollBar:vertical {"
-            "    width: 6px; background: transparent;"
-            "}"
-            "QScrollBar::handle:vertical {"
-            "    background: rgba(255,255,255,0.12);"
-            "    border-radius: 3px; min-height: 30px;"
-            "}"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-            "    height: 0;"
-            "}"
         )
         self._content = QWidget(self._scroll)
         self._content.setStyleSheet("background: transparent;")

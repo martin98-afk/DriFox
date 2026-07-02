@@ -354,7 +354,7 @@ if __name__ == '__main__':
     print(f"📄 配置路径: {CONFIG_PATH}")
     print(f"📁 备份路径: {BACKUP_PATH}")
     print(f"📁 静态目录: {DIST_DIR}")
-    print(f"🔧 使用 --config <路径> 指定自定义配置文件")
+    print("🔧 使用 --config <路径> 指定自定义配置文件")
     print("🔒 智能保存：拖拽移动不保存，参数修改才保存")
     print("🛡️  自动备份：写入前备份旧配置到 .bak")
     print("✓ 校验 API: GET /api/validate 和 POST /api/validate")

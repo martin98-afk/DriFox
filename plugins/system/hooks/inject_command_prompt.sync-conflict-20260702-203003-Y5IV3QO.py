@@ -86,7 +86,7 @@ def _format_skill_output(pending: dict) -> str:
 
     parts.append(f"\n--- 技能：{name} ---")
     parts.append(content)
-    parts.append("--- 技能结束 ---")
+    parts.append(f"--- 技能结束 ---")
 
     if remainder:
         parts.append(f"\n$ARGUMENTS：{remainder}")

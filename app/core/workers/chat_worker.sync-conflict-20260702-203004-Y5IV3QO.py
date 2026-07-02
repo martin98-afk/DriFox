@@ -90,7 +90,6 @@ class OpenAIChatWorker(QThread):
         permission_cache: PermissionCache = None,
         compactor=None,
         initial_compaction_cache: Dict = None,
-        session_id: str = "",
     ):
         super().__init__()
         self.messages = messages
@@ -103,11 +102,6 @@ class OpenAIChatWorker(QThread):
         self.get_stage_prompt = get_stage_prompt
         self.stage_changed_callback = stage_changed_callback
         self.permission_check_callback = permission_check_callback
-        self.session_id = session_id
-        if self.session_id:
-            logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
-        else:
-            logger.debug("[ChatWorker] session_id=EMPTY")
 
         # ========== 使用 ChatWorkerState 统一管理所有可变状态 ==========
         self._state = ChatWorkerState.from_constructor_args(
@@ -639,7 +633,7 @@ class OpenAIChatWorker(QThread):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (_json.JSONDecodeError, ValueError, TypeError):
+            except _json.JSONDecodeError, ValueError, TypeError:
                 pass
 
     @staticmethod
@@ -674,7 +668,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except (orjson.JSONDecodeError, TypeError, ValueError):
+        except orjson.JSONDecodeError, TypeError, ValueError:
             pass
 
         # 优先级 4: raw output 兜底
@@ -873,23 +867,6 @@ class OpenAIChatWorker(QThread):
         # 使用 ChatWorkerState 清理
         self._state.reset_pending_response_state()
         self._sync_state_from_state()
-
-    def _restore_partial_content_backup(self):
-        """
-        恢复协议错误重试时备份的流式内容。
-
-        当 is_retryable_protocol 清空了 _response_content_blocks 但重试全部失败后，
-        恢复备份让 run() 的 except 块能构建包含已接收内容的 partial 消息，避免内容丢失。
-        """
-        backup = getattr(self, "_partial_content_backup", None)
-        if not backup:
-            return
-        # 只有在当前 _response_content_blocks 为空时才恢复（避免覆盖重试成功后的新内容）
-        if not self._response_content_blocks:
-            self._response_content_blocks = backup.get("content_blocks", []) or []
-        if not self._response_chunks:
-            self._response_chunks = list(backup.get("response_chunks", []) or [])
-        self._partial_content_backup = None
 
     @staticmethod
     def _detect_repetitive_tool_loop(messages: List[Dict]) -> Optional[Dict]:
@@ -1410,7 +1387,7 @@ class OpenAIChatWorker(QThread):
                     try:
                         model_name = str(self.llm_config.get("model", "") or "gpt-4")
                         ctx_count = count_messages_tokens(current_messages, model=model_name)
-                    except (ValueError, TypeError, RuntimeError):
+                    except ValueError, TypeError, RuntimeError:
                         ctx_count = 0
                 if ctx_count > 0 and budget > 0:
                     self.context_updated.emit(ctx_count, budget)
@@ -1720,10 +1697,6 @@ class OpenAIChatWorker(QThread):
                 )
                 # 异常路径：重置状态，不强制续命
                 self._stop_hook_active = False
-
-                # 🛡️ 兜底恢复协议错误重试的备份内容（如果 _make_api_call 的 raise 前恢复未生效）
-                # 确保 _build_response_message_sequence 能使用已接收的流式内容构建 partial 消息
-                self._restore_partial_content_backup()
 
                 partial_sequence = self._build_response_message_sequence()
                 if partial_sequence:
@@ -2048,7 +2021,7 @@ class OpenAIChatWorker(QThread):
                                 d = ast.literal_eval(content)
                                 if isinstance(d, dict):
                                     img_path = d.get("absolute_path") or d.get("path")
-                            except (ValueError, SyntaxError):
+                            except ValueError, SyntaxError:
                                 pass
                         if not img_path:
                             m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -2265,11 +2238,6 @@ class OpenAIChatWorker(QThread):
         # 🛡️ 清除旧响应引用，确保 cancel() 不关闭过期连接
         self._current_response = None
 
-        # 在重试前保存部分接收到的内容备份，用于协议错误重试失败后恢复
-        # 协议错误（如 RemoteProtocolError）重试前会清空 _response_chunks 等中间状态，
-        # 但如果所有重试都失败，这些内容需要用于异常路径的 _build_response_message_sequence 构建 partial 消息。
-        self._partial_content_backup = None
-
         # 性能优化：使用缓存的 API 消息
         if use_cache and self._api_messages_cache is not None:
             sanitized = self._api_messages_cache
@@ -2288,10 +2256,6 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
-        # 添加会话标识（帮助服务商区分不同会话的缓存 key / 用量监控）
-        if self.session_id:
-            req_kwargs["user"] = self.session_id
-
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]
@@ -2328,7 +2292,7 @@ class OpenAIChatWorker(QThread):
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
                     return self._process_response(response)
-                except (httpx.ReadError, httpcore.ReadError):
+                except httpx.ReadError, httpcore.ReadError:
                     # 用户取消（cancel()关闭HTTP连接），不是真正的错误
                     return False, False
             except BadRequestError as e:
@@ -2427,12 +2391,6 @@ class OpenAIChatWorker(QThread):
 
                     # 🛡️ 流式协议错误重试：清除已接收的部分响应状态
                     if is_retryable_protocol:
-                        # ⚠️ 备份已接收的流式内容，防止重试全部失败后内容丢失
-                        # 见 _make_api_call 方法顶部的说明
-                        self._partial_content_backup = {
-                            "content_blocks": list(getattr(self, "_response_content_blocks", []) or []),
-                            "response_chunks": list(getattr(self, "_response_chunks", []) or []),
-                        }
                         self._clear_pending_response_state()
 
                     wait_time = retry_delay * (attempt + 1)
@@ -2460,11 +2418,6 @@ class OpenAIChatWorker(QThread):
                     while elapsed < wait_time:
                         if self._is_cancelled:
                             logger.info("[API] 重试等待被用户取消")
-                            # 🛡️ 恢复备份：协议错误重试清空了 _response_content_blocks，
-                            # 取消路径后续会通过 _cancel_with_stop_hook 调用
-                            # _build_response_message_sequence 构建 partial 消息，
-                            # 必须在此恢复备份让内容能被保存到会话。
-                            self._restore_partial_content_backup()
                             return None, None
                         time.sleep(min(step, wait_time - elapsed))
                         elapsed += step
@@ -2473,10 +2426,6 @@ class OpenAIChatWorker(QThread):
                 if hasattr(e, "response") and e.response is not None:
                     resp_body = getattr(e.response, "text", "") or ""
                     logger.error(f"[API] Error response body: {resp_body[:500]}")
-                # 🛡️ 恢复备份：协议错误重试清空了 _response_content_blocks 但重试失败，
-                # 在 raise 前恢复备份，让 run() 的 except 块能通过 _build_response_message_sequence
-                # 构建包含已接收内容的 partial 消息，避免内容丢失。
-                self._restore_partial_content_backup()
                 raise
 
     def _cap_max_output_tokens(self, model: str, requested: int) -> int:

@@ -84,6 +84,17 @@ class ChatSession:
             self.reset_compaction_state()
         self._update_timestamp()
 
+    def add_system_message(self, content: str):
+        self.messages.append(
+            {
+                "role": "system",
+                "content": content,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        self.messages = consolidate_messages(self.messages)
+        self._update_timestamp()
+
     def add_assistant_message(self, content: str, model_name: str = None, provider_name: str = None):
         msg = {
             "role": "assistant",

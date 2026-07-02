@@ -3,9 +3,7 @@
 项目选择卡片内容 - 卡片形式展示所有项目，支持选择、新建、归档
 替代原来的 ProjectSelectorPopup 弹窗
 """
-
 import colorsys
-import re
 import zlib
 from typing import Dict
 
@@ -31,8 +29,8 @@ def extract_project_initials(name: str) -> str:
 
     优先级：
     1. 中文 → 首个汉字
-    2. 分隔符（_/-/空格）→ 首段首字母 + 末段首字母
-    3. 驼峰/帕斯卡 → 首个词首字母 + 末个词首字母
+    2. 下划线分隔 → 每段首字母大写（最多 2 段）
+    3. 驼峰/帕斯卡 → 大写字母（最多 2 个）
     4. 其他 → 前 2 个字母大写
 
     Args:
@@ -45,33 +43,30 @@ def extract_project_initials(name: str) -> str:
         return "??"
 
     # ── 中文：首个汉字 ──
-    has_cjk = any("\u4e00" <= c <= "\u9fff" for c in name)
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in name)
     if has_cjk:
         for c in name:
-            if "\u4e00" <= c <= "\u9fff":
+            if '\u4e00' <= c <= '\u9fff':
                 return c
         return name[0]
 
-    # ── 分隔符拆分（下划线/中划线/空格）──
-    # 取第一个段的第一个字母 + 最后一个段的第一个字母
-    for delim in ("_", "-", " "):
-        if delim in name:
-            parts = [p for p in name.split(delim) if p]
-            if len(parts) >= 2:
-                return (parts[0][0] + parts[-1][0]).upper()
-            # 只有一个段，退化到后续逻辑
-            name = parts[0]
-            break
+    # ── 下划线分隔：每段首字母 ──
+    if '_' in name:
+        parts = [p for p in name.split('_') if p]
+        initials = ''.join(p[0].upper() for p in parts[:2])
+        if initials:
+            return initials
 
-    # ── 驼峰/帕斯卡：拆分为词 ──
-    # 处理连写缩写：OpenAIChat → Open|AI|Chat
-    s = re.sub(r"([a-z0-9])([A-Z])", r"\1|\2", name)
-    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1|\2", s)
-    words = [w for w in s.split("|") if w]
+    if '-' in name:
+        parts = [p for p in name.split('-') if p]
+        initials = ''.join(p[0].upper() for p in parts[:2])
+        if initials:
+            return initials
 
-    if len(words) >= 2:
-        # 取首词首字母 + 末词首字母
-        return (words[0][0] + words[-1][0]).upper()
+    # ── 驼峰/帕斯卡：提取大写字母 ──
+    uppers = [c for c in name if c.isupper()]
+    if uppers:
+        return ''.join(uppers[:2])
 
     # ── 普通单词：前 2 字母大写 ──
     if len(name) >= 2:
@@ -105,9 +100,9 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     """
     crc = zlib.crc32(name.encode("utf-8"))
     # 三个分量取自 CRC32 不同 bit 段，相关性低
-    h = crc % 360  # 0-359°  色相
-    s = 55 + ((crc >> 8) % 31)  # 55-85%  饱和度
-    l = 50 + ((crc >> 16) % 16)  # 50-65%  亮度
+    h = crc % 360                  # 0-359°  色相
+    s = 55 + ((crc >> 8)  % 31)    # 55-85%  饱和度
+    l = 50 + ((crc >> 16) % 16)    # 50-65%  亮度
 
     r, g, b = colorsys.hls_to_rgb(h / 360.0, l / 100.0, s / 100.0)
     return f"rgba({int(round(r * 255))}, {int(round(g * 255))}, {int(round(b * 255))}, {alpha})"
@@ -137,8 +132,7 @@ class _SquareAvatar(QWidget):
             return QColor(rgba_str)
         try:
             import re
-
-            m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
+            m = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)', rgba_str)
             if m:
                 r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 a = int(m.group(4)) if m.group(4) else 255
@@ -182,7 +176,6 @@ class _SquareAvatar(QWidget):
 
 class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
-
     clicked = pyqtSignal(str)
     archiveClicked = pyqtSignal(str)
     openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
@@ -212,7 +205,9 @@ class ProjectItem(QWidget):
         # 当前项目指示（放在最前，icon 之前）
         if self._is_current:
             self._check_label = QLabel("✓", self)
-            self._check_label.setStyleSheet(f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;")
+            self._check_label.setStyleSheet(
+                f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;"
+            )
             self._check_label.setAlignment(Qt.AlignVCenter)
             layout.addWidget(self._check_label)
 
@@ -236,7 +231,9 @@ class ProjectItem(QWidget):
         # 项目根目录（默认隐藏：未设置时由 set_root_dir 保持隐藏）
         # 使用 _ElidedLabel 根据可用宽度自动省略长路径
         self._root_dir_label = _ElidedLabel("", self)
-        self._root_dir_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._root_dir_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
         self._root_dir_label.hide()
         text_vbox.addWidget(self._root_dir_label)
 
@@ -244,7 +241,9 @@ class ProjectItem(QWidget):
 
         # 元数据（会话数 · 工作目录数），灰色小字
         self._meta_label = QLabel("", self)
-        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
@@ -294,7 +293,9 @@ class ProjectItem(QWidget):
         else:
             # 非当前项目用半透明版本
             semi_color = get_project_color(self._name, alpha=160)
-            self._name_label.setStyleSheet(f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};")
+            self._name_label.setStyleSheet(
+                f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};"
+            )
 
     def _emit_archive(self):
         self.archiveClicked.emit(self._name)
@@ -318,7 +319,9 @@ class ProjectItem(QWidget):
             parts.append(f"{worktree_count}工作目录")
         Colors.refresh()
         self._meta_label.setText(" · ".join(parts) if parts else "")
-        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
 
     def set_root_dir(self, root_dir: str):
         """设置项目根目录路径（空字符串/None 则隐藏根目录行）"""
@@ -330,7 +333,9 @@ class ProjectItem(QWidget):
             return
         Colors.refresh()
         self._root_dir_label.setText(root_dir)
-        self._root_dir_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._root_dir_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
         self._root_dir_label.setToolTip(root_dir)  # tooltip 展示完整路径
         self._root_dir_label.show()
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
@@ -349,7 +354,9 @@ class ProjectItem(QWidget):
         self._name_label.setStyleSheet(
             f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
-        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
+        self._meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};"
+        )
         self._archive_btn.show()
         if self._root_dir:
             self._open_folder_btn.show()
@@ -359,7 +366,9 @@ class ProjectItem(QWidget):
         self.setStyleSheet("")
         self._apply_name_style()
         Colors.refresh()
-        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+        )
         self._archive_btn.hide()
         self._open_folder_btn.hide()
         super().leaveEvent(event)
@@ -439,13 +448,9 @@ class ProjectSelectorCardContent(QWidget):
 
     # ── 公有方法 ──────────────────────────────────────
 
-    def set_projects_data(
-        self,
-        projects: list,
-        current_project: str,
-        meta_map: Dict[str, Dict[str, int]] = None,
-        root_dir_map: Dict[str, str] = None,
-    ):
+    def set_projects_data(self, projects: list, current_project: str,
+                          meta_map: Dict[str, Dict[str, int]] = None,
+                          root_dir_map: Dict[str, str] = None):
         """设置项目列表数据
 
         Args:
@@ -571,3 +576,5 @@ class ProjectSelectorCardContent(QWidget):
         reply = msg_box.exec_()
         if reply == QMessageBox.Yes:
             self.archiveProject.emit(project_name)
+
+
