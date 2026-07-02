@@ -10,6 +10,7 @@
 import json
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -135,13 +136,18 @@ class PluginInstaller:
 
     def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path):
         """克隆仓库指定子目录到 cache_dir"""
+        # Windows 上避免 git 弹出控制台黑框
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
         subprocess.run(
             ["git", "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
-            check=True, capture_output=True, text=True,
+            check=True, capture_output=True, text=True, **kwargs,
         )
         subprocess.run(
             ["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath],
-            check=True, capture_output=True, text=True,
+            check=True, capture_output=True, text=True, **kwargs,
         )
 
     # ── 卸载 ─────────────────────────────────────────────

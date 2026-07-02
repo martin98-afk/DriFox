@@ -70,7 +70,7 @@ CACHE_DEFS: List[Tuple[str, str, str, str, bool]] = [
     ("logs", "📝", "日志文件", "logs", False),
     ("cache", "🗃️", "应用缓存", "cache", True),
     ("screenshots", "📸", "截图文件", "screenshots", False),
-    ("archived", "📦", "归档会话", "archived", True),
+    ("archived", "📦", "归档会话", "archived", False),
 ]
 
 
@@ -267,6 +267,7 @@ class _CacheItemRow(QWidget):
         self._checked = True
         self._font_family = ""
         self._font_size = 0
+        self._accent_color = "#62a0ea"
         self._setup_ui()
         self.setFixedHeight(42)
 
@@ -275,6 +276,11 @@ class _CacheItemRow(QWidget):
         self._font_family = font_family
         self._font_size = font_size
         self._update_styles()
+
+    def set_accent_color(self, color: str):
+        """设置主题色并刷新勾选框样式"""
+        self._accent_color = color
+        self._update_checkbox_style()
 
     def _setup_ui(self):
         self.setStyleSheet("background: transparent;")
@@ -287,6 +293,7 @@ class _CacheItemRow(QWidget):
         self._checkbox.setChecked(True)
         self._checkbox.setFixedSize(18, 18)
         self._checkbox.stateChanged.connect(self._on_toggled)
+        self._update_checkbox_style()
         layout.addWidget(self._checkbox)
 
         # 图标
@@ -327,6 +334,26 @@ class _CacheItemRow(QWidget):
         self._size_label.setStyleSheet(
             f"color: {tcs}; background: transparent; font-size: {max(13, fs - 1)}px; font-weight: 500; {font_qss}"
         )
+
+    def _update_checkbox_style(self):
+        """用主题色渲染勾选框 indicator"""
+        c = self._accent_color
+        self._checkbox.setStyleSheet(f"""
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border: 1px solid rgba(128,128,128,0.25);
+                background: transparent;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {c};
+                border: 1px solid {c};
+            }}
+            QCheckBox::indicator:hover {{
+                border: 1px solid rgba(128,128,128,0.45);
+            }}
+        """)
 
     def mousePressEvent(self, event):
         self._checkbox.setChecked(not self._checkbox.isChecked())
@@ -473,9 +500,10 @@ class SystemCleanerCard(QWidget):
         except RuntimeError:
             pass
 
-        # ── 缓存行字体 ──
+        # ── 缓存行字体 + 主题色 ──
         for row in self._cache_rows.values():
             row.set_font_ctx(ff, fs)
+            row.set_accent_color(accent)
 
         # ── 清理缓存按钮 ──
         try:
@@ -814,11 +842,26 @@ class SystemCleanerCard(QWidget):
         # 先记下释放前的内存
         mem_before = _get_process_memory()
 
-        # 清理内部缓存
+        # 清理内部缓存（QPixmapCache / importlib 缓存）
         self._release_internal_caches()
 
-        # 强制 Python 垃圾回收
-        collected = gc.collect()
+        # 多轮 GC 收集（标准推荐：3 轮，带 __del__ 的循环引用需多轮才能释放）
+        collected = 0
+        for _ in range(3):
+            collected += gc.collect()
+
+        # 处理 Qt 延期删除事件（deleteLater 的对象此时才真正析构）
+        try:
+            from PyQt5.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app:
+                app.sendPostedEvents()
+        except Exception:
+            pass
+
+        # 最后一次 GC：收集因 Qt 对象析构而产生的新垃圾
+        collected += gc.collect()
 
         # 再读取释放后的内存
         mem_after = _get_process_memory()
@@ -852,7 +895,7 @@ class SystemCleanerCard(QWidget):
             self._mem_release_btn.setText("⚡ 释放内存")
 
     def _release_internal_caches(self):
-        """尝试清理程序内部缓存（通过可访问的模块方法）"""
+        """清理程序内部缓存（安全版本，不破坏应用功能）"""
         # 清空 Qt 图像缓存
         try:
             from PyQt5.QtGui import QPixmapCache
@@ -861,14 +904,11 @@ class SystemCleanerCard(QWidget):
         except Exception:
             pass
 
-        # 如果有 loguru 缓存
+        # 清理 Python 导入缓存（安全，仅清除 finder 的内部缓存，不影响已加载模块）
         try:
-            from loguru import logger
+            import importlib
 
-            logger.remove()  # 移除所有 sink
-            from loguru import logger as _new_logger
-
-            _new_logger.add  # 引用避免未使用警告
+            importlib.invalidate_caches()
         except Exception:
             pass
 
