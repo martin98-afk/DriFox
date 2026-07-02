@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -79,6 +80,13 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 def _ctx_border_color(ctx: dict) -> str:
     """从上下文 colors 中获取边框颜色"""
     return ctx.get("colors", {}).get("border", "rgba(128,128,128,0.15)")
+
+
+def _ctx_font(ctx: dict) -> tuple:
+    """从上下文提取 font_family 和 font_size"""
+    ff = ctx.get("font_family", "")
+    fs = ctx.get("font_size", 0)
+    return ff, fs
 
 
 # ── 插件发现 ──────────────────────────────────────────────
@@ -448,7 +456,12 @@ class PluginManagerCard(QWidget):
         self.setVisible(True)
 
     def _apply_latest_theme(self):
-        """从上下文拉取最新主题色并刷新全部子控件样式"""
+        """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
+
+        注意：
+        - 字体通过 self.setFont() 级联所有子控件，比 stylesheet font-family 更可靠
+        - 颜色只更新有颜色样式的标签，避免覆盖原本有强调色的控件
+        """
         if self._context_provider is None:
             return
         try:
@@ -456,25 +469,27 @@ class PluginManagerCard(QWidget):
         except Exception:
             return
 
+        # ── 字体（通过 QFont 级联所有子控件） ──
+        font_family, font_size = _ctx_font(ctx)
+        if font_family:
+            self.setFont(QFont(font_family, font_size))
+
         tc = _ctx_text_color(ctx)
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
 
-        # 更新所有 label 颜色
+        # ── 颜色（仅更新已设定颜色的标签，不碰原本有强调色的控件） ──
         for child in self.findChildren(QLabel):
             try:
                 if "font-size" in child.styleSheet() or "color" in child.styleSheet():
-                    child.setStyleSheet(
-                        f"color: {tc}; background: transparent;"
-                    )
+                    child.setStyleSheet(f"color: {tc}; background: transparent;")
             except RuntimeError:
                 pass
 
         # 更新搜索框
         try:
             self._search.setStyleSheet(
-                f"background: rgba(128,128,128,0.1); border-radius: 8px; "
-                f"padding: 4px 8px; color: {tc};"
+                f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {tc};"
             )
         except RuntimeError:
             pass
@@ -575,6 +590,7 @@ class PluginManagerCard(QWidget):
     def sizeHint(self):
         """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
         from PyQt5.QtCore import QSize
+
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
@@ -592,6 +608,7 @@ class PluginManagerCard(QWidget):
     def eventFilter(self, obj, event):
         """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
         from PyQt5.QtCore import QEvent
+
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
         return super().eventFilter(obj, event)

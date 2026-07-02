@@ -1399,24 +1399,24 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_branch_container = QFrame(self)
         self._project_branch_container.setObjectName("projectBranchContainer")
         pb_layout = QHBoxLayout(self._project_branch_container)
-        pb_layout.setContentsMargins(0, 0, 0, 0)
-        pb_layout.setSpacing(0)
+        pb_layout.setContentsMargins(8, 0, 8, 0)  # 左侧留出 padding，与标题编辑区保持间距
+        pb_layout.setSpacing(2)
 
         # 项目方形 icon（缩写字母，flat design squircle 风格）
         self._project_avatar = _SquareAvatar(
-            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=22
+            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=24
         )
         self._project_avatar.setCursor(Qt.PointingHandCursor)
         self._project_avatar.mousePressEvent = self._on_project_label_clicked
-        self._project_avatar.setToolTip("点击切换项目")
+        self._project_avatar.setToolTip("点击切换项目")  # tooltip 在 _update_branch() 中动态更新（含项目名/路径/分支）
         pb_layout.addWidget(self._project_avatar)
 
-        # 项目选择标签
+        # 项目选择标签（隐藏，仅通过 avatar icon 展示项目缩写）
         self._project_label = QLabel(self._current_project, self)
         self._project_label.setCursor(Qt.PointingHandCursor)
         self._project_label.mousePressEvent = self._on_project_label_clicked
         self._project_label.setToolTip("点击切换项目")
-        pb_layout.addWidget(self._project_label)
+        self._project_label.setVisible(False)
 
         # 分支分隔符（三角箭头，面包屑风格）
         self._pb_separator = QLabel("▸", self)
@@ -1607,6 +1607,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
             "subagents": self._handle_subagents_command,
+            "title_gen": self._handle_title_gen_command,
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
             "hook-preset": self._handle_hook_preset_command,
@@ -1937,6 +1938,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 跳过已注册的（如内置 subagents 等）
                 if cmd_name in self._function_command_handlers:
                     continue
+
                 # 注册当前窗口的处理器：传入 main_widget=self 确保卡片显示在本窗口
                 def _make_handler(cid=card_id, mw=self):
                     return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
@@ -2074,8 +2076,9 @@ class OpenAIChatToolWindow(ToolWindow):
         #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
         self._truncation_sentinel = None
 
-        # （内置命令已在上方注册）更新 /subagents --model= 参数描述
+        # （内置命令已在上方注册）更新命令 --model= 参数描述
         self._update_subagents_param_description()
+        self._update_title_gen_param_description()
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
@@ -5132,7 +5135,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7163,6 +7166,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from app.core.command_manager import CommandManager
             from app.core.ui_plugin_registry import UIPluginRegistry
+
             CommandManager.get_instance().reload_all_commands()
             UIPluginRegistry.get_instance().re_register_all_commands()
         except Exception:
@@ -9152,7 +9156,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.warning(f"处理图片附件失败 {img_path}: {e}")
         if not image_blocks:
             return None
-        logger.info(f"[ImageAttach] 模型 {model_name} 支持视觉，已将 {len(image_blocks)} 张图片注入 multimodal user content")
+        logger.info(
+            f"[ImageAttach] 模型 {model_name} 支持视觉，已将 {len(image_blocks)} 张图片注入 multimodal user content"
+        )
         return [{"type": "text", "text": user_text}] + image_blocks
 
     def _on_send_clicked(self, user_text: str = ""):
@@ -9715,6 +9721,95 @@ class OpenAIChatToolWindow(ToolWindow):
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
 
+    def _handle_title_gen_command(self, args: str):
+        """/title_gen 命令：切换标题生成使用的默认模型
+
+        参数：
+          --model=X  → 设置标题生成默认模型
+          --reset    → 清空标题生成默认模型设置
+        """
+        import re
+
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        from app.utils.config import Settings
+
+        args = (args or "").strip()
+
+        # ---- --reset：清空默认模型设置 ----
+        if args == "--reset":
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_title_gen_default_model, "", save=True)
+            InfoBar.success(
+                title="已重置",
+                content="标题生成默认模型已清空，将使用主模型",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            self._update_title_gen_param_description()
+            return
+
+        # ---- --model=xxx：设置默认模型 ----
+        model_match = re.match(r"^--model=(.+)$", args)
+        if model_match:
+            model_value = model_match.group(1).strip()
+            if not model_value:
+                InfoBar.warning(
+                    title="参数错误",
+                    content="--model= 后需要指定模型名或服务商:模型名",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
+            llm_config = self._resolve_subagent_model_config(model_value)
+            if llm_config is None:
+                return
+
+            provider_display = llm_config.get("provider_name", "")
+            model_display = llm_config.get("模型名称", model_value)
+            display_value = f"{provider_display}:{model_display}" if provider_display else model_display
+
+            cfg = Settings.get_instance()
+            cfg.set(cfg.llm_title_gen_default_model, display_value, save=True)
+
+            if provider_display:
+                info_text = f"{provider_display} - {model_display}"
+            else:
+                info_text = model_display
+
+            InfoBar.success(
+                title="标题生成模型设置",
+                content=f"{info_text}",
+                parent=self,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            self._update_title_gen_param_description()
+            return
+
+        # ---- 无参数：显示当前设置 ----
+        cfg = Settings.get_instance()
+        saved = cfg.llm_title_gen_default_model.value or ""
+        if saved:
+            InfoBar.info(
+                title="当前标题生成模型",
+                content=saved,
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.info(
+                title="当前标题生成模型",
+                content="未设置，将使用主模型",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
     def _get_next_hook_preset(self, presets: list) -> str:
         """获取下一个预设名称（循环）"""
         try:
@@ -9843,6 +9938,25 @@ class OpenAIChatToolWindow(ToolWindow):
                         param.description = f"当前子智能体默认模型: {saved}"
                     else:
                         param.description = "设置子智能体默认模型"
+                    break
+
+    def _update_title_gen_param_description(self):
+        """更新 /title_gen 命令的 --model= 参数描述，反映当前默认值"""
+        from app.core.command_manager import CommandManager
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = cfg.llm_title_gen_default_model.value or ""
+
+        cmd_mgr = CommandManager.get_instance()
+        entries = cmd_mgr._commands.get("title_gen", {})
+        for cmd_type, cmd_def in entries.items():
+            for param in cmd_def.parameters:
+                if param.name == "--model=":
+                    if saved:
+                        param.description = f"当前标题生成默认模型: {saved}"
+                    else:
+                        param.description = "设置标题生成默认模型"
                     break
 
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
@@ -11076,8 +11190,24 @@ class OpenAIChatToolWindow(ToolWindow):
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
         self._topic_summary_cancelled = False
-        selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
-        llm_config = self._valid_configs.get(selected_name)
+
+        # 检查是否有标题生成专用模型配置
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = cfg.llm_title_gen_default_model.value
+        if saved:
+            resolved = self._resolve_subagent_model_config(saved)
+            if resolved:
+                llm_config = resolved
+            else:
+                # 解析失败，回退到主模型
+                selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
+                llm_config = self._valid_configs.get(selected_name)
+        else:
+            selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
+            llm_config = self._valid_configs.get(selected_name)
+
         if not llm_config:
             logger.warning("[Topic Summary] No LLM config found, skipping")
             return
@@ -11285,6 +11415,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         branch = r.stdout.strip()
         except Exception:
             pass
+
+        # 更新项目 avatar tooltip（完整项目名、项目路径、当前分支）
+        tooltip = self._current_project
+        if workdir:
+            tooltip += f"\n{workdir}"
+        if branch:
+            tooltip += f"\n🌿 {branch}"
+        self._project_avatar.setToolTip(tooltip)
 
         if branch:
             # 分支名过长时截断显示，悬浮显示全名

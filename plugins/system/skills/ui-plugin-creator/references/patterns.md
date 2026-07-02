@@ -50,6 +50,8 @@ ctx = {
         "accent": "#2878dc",
         "success": "#00a888",
         "border": "#ffffff1e",
+        "text_primary": "rgba(255,255,255,0.9)",
+        "text_secondary": "rgba(255,255,255,0.55)",
         # ... 更多键
     },
     "is_dark": True,
@@ -59,6 +61,56 @@ ctx = {
 ```
 
 > 永远不要假设某个键一定存在——用 `.get()` + fallback。
+
+### 1.4 字体注入（重要）
+
+ctx 中的 `font_family` 和 `font_size` 必须应用到所有子控件，否则插件字体和主程序不一致。
+
+**推荐做法：** 在 `_apply_latest_theme()` 中用 `_make_style()` 生成带字体的 QSS：
+
+```python
+def _apply_latest_theme(self):
+    ctx = self._context_provider()
+
+    # 1. 提取字体
+    font_family, font_size = _ctx_font(ctx)
+
+    # 2. 应用到所有 QLabel
+    for child in self.findChildren(QLabel):
+        child.setStyleSheet(
+            _make_style(_ctx_text_color(ctx), font_family, font_size)
+        )
+
+    # 3. 对自定义 widget，暴露 set_font_ctx(font_family, font_size) 方法
+    for row in self._cache_rows.values():
+        row.set_font_ctx(font_family, font_size)
+```
+
+**辅助函数模板（放在 cards.py 文件顶部）：**
+
+```python
+def _ctx_font(ctx: dict) -> tuple:
+    """从上下文提取 font_family 和 font_size"""
+    ff = ctx.get("font_family", "Microsoft YaHei")
+    fs = ctx.get("font_size", 14)
+    return ff, fs
+
+
+def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: str = "") -> str:
+    """生成带字体的 QSS 样式串"""
+    parts = [f"color: {color};"]
+    if font_family:
+        parts.append(f"font-family: '{font_family}'")
+    if font_size:
+        parts.append(f"font-size: {font_size}px;")
+    if extra:
+        parts.append(extra)
+    return " ".join(parts)
+```
+
+> **陷阱：** 按钮的 QSS 通常包含 background/border，不能简单地用 `_make_style` 覆盖。
+> 应该用专门的 `_xxx_btn_style(accent)` 工厂方法，在 `_apply_latest_theme` 中调用。
+> 详见 `templates.md §一` 的按钮样式工厂模式。
 
 详细的主题色映射和卡片背景适配见 `widgets-theme.md`。
 

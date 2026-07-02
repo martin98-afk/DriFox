@@ -25,7 +25,7 @@ import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -56,6 +56,13 @@ def _text_color(secondary: bool = False) -> str:
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
 
 
+def _ctx_font(ctx: dict) -> tuple:
+    """从上下文提取 font_family 和 font_size，无则返回 fallback"""
+    ff = ctx.get("font_family", "Microsoft YaHei")
+    fs = ctx.get("font_size", 14)
+    return ff, fs
+
+
 def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
     """从上下文 colors 中获取文字颜色，无上下文则回退到 _text_color()"""
     colors = ctx.get("colors", {})
@@ -69,6 +76,50 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 def _ctx_border_color(ctx: dict) -> str:
     """从上下文 colors 中获取边框颜色"""
     return ctx.get("colors", {}).get("border", "rgba(128,128,128,0.15)")
+
+
+def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: str = "") -> str:
+    """生成带字体的 QSS 样式串
+
+    在 _apply_latest_theme 中调用，确保所有 QLabel/按钮的
+    颜色和字体都跟随上下文变化。
+
+    Args:
+        color: 文字颜色值
+        font_family: font-family（可为空，为空时不输出）
+        font_size: font-size（0 时不输出）
+        extra: 额外的 QSS 片段（如 "font-weight: 600;"）
+    """
+    parts = [f"color: {color};"]
+    if font_family:
+        parts.append(f"font-family: '{font_family}'")
+    if font_size:
+        parts.append(f"font-size: {font_size}px;")
+    if extra:
+        parts.append(extra)
+    return " ".join(parts)
+
+
+def _adjust_color(hex_color: str, amount: int) -> str:
+    """简单调亮/调暗一个 hex 颜色，用于按钮渐变
+
+    Args:
+        hex_color: 如 "#62a0ea"
+        amount: 调整量，正值调亮，负值调暗
+    """
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) != 6:
+        return hex_color
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        r = max(0, min(255, r + amount))
+        g = max(0, min(255, g + amount))
+        b = max(0, min(255, b + amount))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except ValueError:
+        return hex_color
 
 
 # ── 异步工作器 ──────────────────────────────────────────
@@ -123,7 +174,14 @@ class MyCardWidget(QWidget):
         self.setVisible(True)
 
     def _apply_latest_theme(self):
-        """从上下文拉取最新主题色并刷新全部子控件样式"""
+        """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
+
+        关键要点：
+        - 优先从 ctx 的 font_family/font_size 获取字体
+        - 用 _make_style() 生成带字体的 QSS
+        - 按钮等特殊控件用独立的 setStyleSheet 更新
+        - 用 try/except 包裹每个 setStyleSheet，防止已销毁控件报错
+        """
         if self._context_provider is None:
             return
         try:
@@ -131,26 +189,37 @@ class MyCardWidget(QWidget):
         except Exception:
             return
 
+        # 获取字体
+        font_family, font_size = _ctx_font(ctx)
+
         tc = _ctx_text_color(ctx)
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
 
-        # 更新所有 label 颜色
+        # 更新所有 label 颜色 + 字体
         for child in self.findChildren(QLabel):
             try:
-                if "font-size" in child.styleSheet() or "color" in child.styleSheet():
-                    child.setStyleSheet(
-                        f"color: {tc}; background: transparent;"
-                    )
+                child.setStyleSheet(
+                    _make_style(tc, font_family, font_size)
+                )
             except RuntimeError:
                 pass
+
+        # 更新按钮（如果有）
+        # 注意：按钮样式通常有固定 background/border，不能简单地 _make_style
+        # 建议在 _build_* 方法中存储按钮引用（如 self._my_btn），
+        # 然后在 _apply_latest_theme 中用专门的方法更新它的 QSS。
+        # 示例：
+        # if hasattr(self, '_my_btn'):
+        #     self._my_btn.setStyleSheet(self._my_btn_style(accent))
 
         # 更新搜索框（如果有）
         if hasattr(self, '_search') and self._search is not None:
             try:
                 self._search.setStyleSheet(
                     f"background: rgba(128,128,128,0.1); border-radius: 8px; "
-                    f"padding: 4px 8px; color: {tc};"
+                    f"padding: 4px 8px; "
+                    + _make_style(tc, font_family, font_size)
                 )
             except RuntimeError:
                 pass
@@ -224,6 +293,16 @@ class MyCardWidget(QWidget):
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"
+            "QScrollBar:vertical {"
+            "    width: 6px; background: transparent;"
+            "}"
+            "QScrollBar::handle:vertical {"
+            "    background: rgba(255,255,255,0.12);"
+            "    border-radius: 3px; min-height: 30px;"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "    height: 0;"
+            "}"
         )
         self._content = QWidget(self._scroll)
         self._content.setStyleSheet("background: transparent;")

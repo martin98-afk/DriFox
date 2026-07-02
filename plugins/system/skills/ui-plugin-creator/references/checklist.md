@@ -66,7 +66,27 @@
 - [ ] 主题色变化时调 `show_card` 能刷新（重新拉 ctx）
 - [ ] 子 widget（`_StatCard` / 图表）都实现 `set_colors(colors)`
 
-### 2.3 常见场景
+### 2.3 字体注入（重要 — 容易被忘）
+
+- [ ] `_apply_latest_theme()` 从 ctx 提取 `font_family` / `font_size`
+- [ ] 所有 QLabel 通过 `_make_style()` 应用字体
+- [ ] 自定义 widget（如 `_CacheItemRow`）实现 `set_font_ctx(font_family, font_size)`
+- [ ] 按钮用专门的 `_xxx_btn_style(accent)` 工厂方法（不混用 `_make_style`）
+
+> 字体注入是"插件字体和主程序不一致"最常见的 bug。
+> 生成卡片后启动程序看一眼——如果字体和主界面不一样，就是漏了 `_apply_latest_theme` 的字体处理。
+> 详见 `patterns.md §1.4`。
+
+### 2.4 按钮样式工厂模式
+
+- [ ] 每个按钮类型有独立的 `_xxx_btn_style(accent)` 方法
+- [ ] 按钮样式用 `_adjust_color()` 生成渐变/悬停色
+- [ ] `_apply_latest_theme` 中通过 `_xxx_btn_style()` 更新按钮颜色
+- [ ] 紧凑按钮（`fixedSize` < 40px 高度）用 `padding: 0 Xpx` 而非 `padding: 16px 0`
+  > ❌ `padding: 16px 0` + `setFixedHeight(32)` → 文字不可见（32-16-16=0）
+  > ✅ `padding: 0 10px` + `setFixedHeight(32)` → 正确
+
+### 2.5 常见场景
 
 | 场景 | 应该 |
 |------|------|
@@ -74,8 +94,9 @@
 | 浅色主题 + 浮动卡片 | ✅ 文字清晰可见（白色，因为卡片背景仍偏暗） |
 | 主程序主题切换 | ✅ 重新进入卡片后颜色更新 |
 | ctx 缺少某 key | ✅ fallback 到默认色 |
+| 插件字体和主程序不一致 | ✅ 字体由 _apply_latest_theme 注入 |
 
-详见 `widgets-theme.md`。
+详见 `widgets-theme.md` 和 `patterns.md §1.4`。
 
 ---
 
