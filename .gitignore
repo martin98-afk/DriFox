@@ -39,6 +39,8 @@ check_format.py
 debug_*.py
 /test_*.py
 *.json
+!plugins/**/.drifox-plugin/
+!plugins/**/.drifox-plugin/**
 fixed_extractor.py
 various_test.py
 app.config
