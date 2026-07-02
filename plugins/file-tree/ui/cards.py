@@ -39,6 +39,7 @@ from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
     QFileIconProvider,
     QFrame,
     QHBoxLayout,
@@ -536,20 +537,63 @@ class FileTreeWidget(QTreeWidget):
             accent = QColor(102, 198, 255)
             border = QColor(61, 61, 61)
 
-        # 对话框整体样式（#id 选择器覆盖全局样式）
-        msg_box.setObjectName("file-tree-dialog")
-        msg_box.setStyleSheet(
-            f"#file-tree-dialog {{  background-color: {bg.name()};  color: {tc.name()};  font-size: 14px;}}"
-        )
+        # QMessageBox 在 Windows 上使用原生渲染，QSS 背景色无效
+        # → 改用自定义 QDialog 完全控制样式
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setFixedSize(420, 200)
+        dlg.setObjectName("file-tree-dialog")
 
-        # 文字标签
-        label = msg_box.findChild(QLabel)
-        if label is not None:
-            label.setStyleSheet(f"color: {tc.name()}; font-size: 14px; padding: 12px 8px; background: transparent;")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
 
-        # 按钮 - 直接设置样式，不依赖 QSS 选择器优先级
-        # 使用 #file-tree-dialog QPushButton 确保覆盖全局样式
-        btn_style = (
+        # 消息文字
+        msg_label = QLabel(text, dlg)
+        msg_label.setWordWrap(True)
+
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        btn_layout.addStretch()
+
+        # 确定按钮
+        yes_btn = QPushButton("确定", dlg)
+        no_btn = QPushButton("取消", dlg)
+
+        # 根据 buttons 参数决定显示哪些按钮
+        btn_map = {
+            QMessageBox.Ok: ("确定", QMessageBox.Ok),
+            QMessageBox.Yes: ("是", QMessageBox.Yes),
+            QMessageBox.No: ("否", QMessageBox.No),
+            QMessageBox.Cancel: ("取消", QMessageBox.Cancel),
+        }
+        shown_btns: List[QPushButton] = []
+        result_code = [QMessageBox.No]  # 闭包捕获
+
+        for std_btn, (label_text, code) in btn_map.items():
+            if buttons & std_btn:
+                btn = QPushButton(label_text, dlg)
+                btn.clicked.connect(lambda checked, c=code: [result_code.__setitem__(0, c), dlg.accept()])
+                if std_btn == default_button:
+                    btn.setDefault(True)
+                    btn.setFocus()
+                shown_btns.append(btn)
+                btn_layout.addWidget(btn)
+
+        layout.addWidget(msg_label)
+        layout.addLayout(btn_layout)
+
+        # ── 应用主题色 ──
+        dlg.setStyleSheet(
+            f"#file-tree-dialog {{"
+            f"  background-color: {bg.name()};"
+            f"  color: {tc.name()};"
+            f"}}"
+            f"#file-tree-dialog QLabel {{"
+            f"  color: {tc.name()};"
+            f"  font-size: 14px;"
+            f"}}"
             f"#file-tree-dialog QPushButton {{"
             f"  background-color: #3a3a3a;"
             f"  color: {tc.name()};"
@@ -566,8 +610,9 @@ class FileTreeWidget(QTreeWidget):
             f"  border: 1px solid {accent.name()};"
             f"}}"
         )
-        for btn in msg_box.findChildren(QPushButton):
-            btn.setStyleSheet(btn_style)
+
+        dlg.exec_()
+        return result_code[0]
 
         return msg_box.exec_()
 
