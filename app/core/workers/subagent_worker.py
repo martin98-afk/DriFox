@@ -710,6 +710,10 @@ class SubAgentExecutor(QThread):
             "messages": messages,
             "stream": False,
         }
+        # 添加会话标识（帮助服务商区分不同会话的缓存 key / 用量监控）
+        task_session_id = getattr(self, "_task_session_id", None)
+        if task_session_id:
+            req_kwargs["user"] = task_session_id
 
         extra_body = {}
 

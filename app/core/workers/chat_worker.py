@@ -90,6 +90,7 @@ class OpenAIChatWorker(QThread):
         permission_cache: PermissionCache = None,
         compactor=None,
         initial_compaction_cache: Dict = None,
+        session_id: str = "",
     ):
         super().__init__()
         self.messages = messages
@@ -102,6 +103,11 @@ class OpenAIChatWorker(QThread):
         self.get_stage_prompt = get_stage_prompt
         self.stage_changed_callback = stage_changed_callback
         self.permission_check_callback = permission_check_callback
+        self.session_id = session_id
+        if self.session_id:
+            logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
+        else:
+            logger.debug(f"[ChatWorker] session_id=EMPTY")
 
         # ========== 使用 ChatWorkerState 统一管理所有可变状态 ==========
         self._state = ChatWorkerState.from_constructor_args(
@@ -2256,6 +2262,10 @@ class OpenAIChatWorker(QThread):
             "stream": cached_config["stream"],
             # parallel_tool_calls 不传：OpenAI 默认 True，非 OpenAI 提供商可能不支持（422 报错）
         }
+        # 添加会话标识（帮助服务商区分不同会话的缓存 key / 用量监控）
+        if self.session_id:
+            req_kwargs["user"] = self.session_id
+
         # 添加 extra_body
         if cached_config.get("extra_body"):
             req_kwargs["extra_body"] = cached_config["extra_body"]

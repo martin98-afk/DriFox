@@ -9345,7 +9345,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片
         self._visible_batch_end = len(self._message_batch)
 
-        self._maybe_generate_topic_summary()
+        # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
+        if session:
+            user_msg_count = sum(1 for m in session.messages if m.get("role") == "user")
+            if user_msg_count == 1:
+                self._maybe_generate_topic_summary()
 
     def _on_stream_started(self):
         if getattr(self, "_is_destroyed", False):
