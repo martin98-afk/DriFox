@@ -1,0 +1,14 @@
+{
+    "name": "file-tree",
+    "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持右键菜单与实时文件监听",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "user",
+    "components": {
+        "ui": true
+    }
+}

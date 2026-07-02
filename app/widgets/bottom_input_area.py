@@ -264,6 +264,7 @@ class SendableTextEdit(TextEdit):
         self._command_card_ref = card
         card.commandSelected.connect(self._on_command_selected)
         card.parameterSelected.connect(self._on_parameter_selected)
+        card.parameterDeselected.connect(self._on_parameter_deselected)
         card.parameterValueSelected.connect(self._on_param_value_selected)
         card.dismissed.connect(self._on_card_dismissed)
 
@@ -604,6 +605,13 @@ class SendableTextEdit(TextEdit):
         # 插入文本后显式同步参数显隐，确保互斥规则立即生效
         self._sync_detail_params()
 
+    def _on_parameter_deselected(self, param_name: str, param_type: str):
+        """已激活参数被再次点击（来自 CommandCard.parameterDeselected）
+
+        从输入框中移除该参数并同步卡片激活态。
+        """
+        self.remove_parameter_text(param_name, param_type)
+
     def _on_param_value_selected(self, value: str):
         """值选择完成（来自 CommandCard.parameterValueSelected）
 
@@ -723,6 +731,73 @@ class SendableTextEdit(TextEdit):
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
         # 参数插入后立即同步卡片显隐（含互斥逻辑）
+        self._sync_detail_params()
+
+    def remove_parameter_text(self, param_name: str, param_type: str):
+        """从输入框文本中移除指定参数（点击已固化参数时调用）
+
+        与 insert_parameter_text 对称：点击已激活参数时反向删除。
+        - flag: 匹配 `--param-name` 整段并删除
+        - value: 匹配 `--param-name=value` 或 `--param-name="value"` 整段并删除
+          （值含空格时会被引号包裹，按需识别）
+        - positional: 无操作
+
+        删除范围包含该参数段前的一个空格（若有），保留参数位置；
+        光标位置按其在删除段前/中/后智能调整。
+        删除后调用 _sync_detail_params 触发卡片激活态同步。
+        """
+        import re
+
+        if param_type == "positional":
+            return
+
+        text = self.toPlainText()
+        if not text:
+            return
+
+        clean_name = param_name.rstrip("=")
+        # value 类型：参数名 + = + 值（带引号整段 OR 无空格的非引号值）
+        # flag 类型：仅参数名
+        # 末尾用 (?=\s|$) 防止误吞 --with-contexts 这类更长前缀
+        if param_type == "value":
+            pattern = r"\s*" + re.escape(clean_name) + r"""=(?:"[^"]*"|[^\s"]*)(?=\s|$)"""
+        else:
+            pattern = r"\s*" + re.escape(clean_name) + r"(?=\s|$)"
+
+        m = re.search(pattern, text)
+        if not m:
+            return
+
+        start, end = m.start(), m.end()
+        new_text = text[:start] + text[end:]
+
+        # 保留参数后一个空格，避免删除参数后重新进入命令补全列表状态
+        # 如 "/cmd --model=xxx" → "/cmd "（而非 "/cmd"）
+        if new_text and not new_text.endswith(" "):
+            new_text += " "
+
+        # 光标位置智能调整：前/中/后 三段
+        old_pos = self.textCursor().position()
+        if old_pos <= start:
+            new_pos = old_pos
+        elif old_pos >= end:
+            new_pos = old_pos - (end - start)
+        else:
+            new_pos = start
+
+        self.setPlainText(new_text)
+        # setPlainText 重置光标到位置 0，导致 textChanged→_on_slash_trigger_check
+        # 误判为"无空格→列表模式"并启动节流定时器，100ms 后发射 slashTriggered("")
+        # 进而 show_card 调用 _reset_detail_mode 破坏 detail 模式。
+        # 需要立即取消这个过期的节流。
+        self._cancel_slash_throttle()
+        cursor = self.textCursor()
+        cursor.setPosition(max(0, new_pos))
+        self.setTextCursor(cursor)
+        self.setFocus(Qt.OtherFocusReason)
+        # 用正确的光标位置重新评估 / 状态
+        self._on_slash_trigger_check()
+        # 删除后同步卡片显隐（set_active(False) 即取消固化打勾）
         self._sync_detail_params()
 
     def _sync_detail_params(self):

@@ -9,12 +9,10 @@
 - 安装/更新状态实时反馈
 """
 
-import re
 import traceback
 from typing import Callable, Optional
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -24,7 +22,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     FluentIcon,
-    FluentLabelBase,
     IconWidget,
     LineEdit,
     PushButton,
@@ -36,7 +33,6 @@ from qfluentwidgets import (
 
 from .data import get_marketplace
 from .installer import get_installer
-from ._squircle_avatar import SquircleAvatar, extract_initials, name_color
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -61,13 +57,6 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 def _ctx_border_color(ctx: dict) -> str:
     """从上下文 colors 中获取边框颜色"""
     return ctx.get("colors", {}).get("border", "rgba(128,128,128,0.15)")
-
-
-def _ctx_font(ctx: dict) -> tuple:
-    """从上下文提取 font_family 和 font_size"""
-    ff = ctx.get("font_family", "")
-    fs = ctx.get("font_size", 0)
-    return ff, fs or 14
 
 
 # ── 异步工作器 ──────────────────────────────────────────────
@@ -107,17 +96,10 @@ class _PluginRow(QFrame):
     """
 
     installRequested = pyqtSignal(dict)  # plugin_meta
-    updateRequested = pyqtSignal(dict)  # plugin_meta（有新版时触发）
+    updateRequested = pyqtSignal(dict)   # plugin_meta（有新版时触发）
 
-    def __init__(
-        self,
-        plugin_meta: dict,
-        installed: bool,
-        has_update: bool = False,
-        local_version: Optional[str] = None,
-        parent=None,
-        font_size: int = 0,
-    ):
+    def __init__(self, plugin_meta: dict, installed: bool, has_update: bool = False,
+                 local_version: Optional[str] = None, parent=None):
         super().__init__(parent)
         self._meta = plugin_meta
         self._installed = installed
@@ -125,8 +107,6 @@ class _PluginRow(QFrame):
         self._local_version = local_version
         self._busy = False
         self._original_btn_style: str = ""  # 在 _setup_ui 中保存 FluentUI 默认样式
-        self._font_size = font_size  # 上下文字体大小（用于头像自适应）
-        self._avatar = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -140,15 +120,10 @@ class _PluginRow(QFrame):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
-        # 插件头像：椭方块形 + 名称缩写 + 哈希色（智能提取关键字）
-        plugin_name = self._meta.get("name", "?")
-        self._avatar = SquircleAvatar(
-            extract_initials(plugin_name),
-            name_color(plugin_name),
-            self,
-            font_size=self._font_size,
-        )
-        layout.addWidget(self._avatar)
+        # 图标
+        icon = IconWidget(FluentIcon.APPLICATION, self)
+        icon.setFixedSize(20, 20)
+        layout.addWidget(icon)
 
         # 信息区
         info_layout = QVBoxLayout()
@@ -157,31 +132,34 @@ class _PluginRow(QFrame):
         name = self._meta.get("name", "未知")
         remote_ver = self._meta.get("version", "")
 
-        # 标题行：显示名称 + 版本信息（字号 = font_size - 2，由 _retheme 通过 objectName 识别）
+        # 标题行：显示名称 + 版本信息
         if self._has_update and self._local_version and remote_ver:
             # 有新版：显示 v旧版 → v新版
-            title = StrongBodyLabel(f"{name}  v{self._local_version} → v{remote_ver}", self)
+            title = StrongBodyLabel(
+                f"{name}  v{self._local_version} → v{remote_ver}", self
+            )
         elif remote_ver:
             title = StrongBodyLabel(f"{name}  v{remote_ver}", self)
         else:
             title = StrongBodyLabel(name, self)
-        title.setObjectName("pluginRowTitle")
         title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         info_layout.addWidget(title)
 
         # 版本更新提示小标签（仅在有更新时显示）
         if self._has_update:
             update_tag = QLabel("🔄 有新版本", self)
-            update_tag.setStyleSheet("color: #FFA726; font-size: 11px; background: transparent;")
+            update_tag.setStyleSheet(
+                "color: #FFA726; font-size: 11px; background: transparent;"
+            )
             info_layout.addWidget(update_tag)
 
         desc = self._meta.get("description", "")
         if desc:
             desc_label = QLabel(desc[:120], self)
             desc_label.setWordWrap(True)
-            # objectName "pluginRowDesc" → _retheme 强制使用 font_size - 4
-            desc_label.setObjectName("pluginRowDesc")
-            desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
+            desc_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            )
             info_layout.addWidget(desc_label)
 
         layout.addLayout(info_layout, 1)
@@ -250,12 +228,6 @@ class _PluginRow(QFrame):
         self._busy = False
         self._update_btn_text()
 
-    def set_font_size(self, font_size: int):
-        """根据上下文字体大小动态调整头像尺寸"""
-        self._font_size = font_size
-        if self._avatar is not None:
-            self._avatar.set_font_size(font_size)
-
 
 # ── 市场主卡片 ──────────────────────────────────────────────
 
@@ -287,13 +259,7 @@ class MarketplaceCard(QWidget):
         self.setVisible(True)
 
     def _apply_latest_theme(self):
-        """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
-
-        策略：
-        - font-family 通过 self.setFont(QFont(family, 0)) 级联（size=0 不覆盖原有字号）
-        - 颜色：只替换 stylesheet 中的 color 值，保留 font-size/font-weight 等原有属性
-        - 动态创建的子控件创建后应调用 _retheme() 刷新
-        """
+        """从上下文拉取最新主题色并刷新全部子控件样式"""
         if self._context_provider is None:
             return
         try:
@@ -301,31 +267,24 @@ class MarketplaceCard(QWidget):
         except Exception:
             return
 
-        # ── 缓存上下文值（供动态创建的子控件使用） ──
-        font_family, font_size = _ctx_font(ctx)
         tc = _ctx_text_color(ctx)
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
-        self._cached_tc = tc
-        self._cached_tcs = tcs
-        self._cached_font_family = font_family
-        self._cached_font_size = font_size
 
-        # ── 把 font_size 传播到已存在的行（动态调整头像大小） ──
-        for row in self.findChildren(_PluginRow):
-            row.set_font_size(font_size)
-
-        # ── 字体（通过 QFont 级联，使用系统字体大小） ──
-        if font_family:
-            self.setFont(QFont(font_family, font_size if font_size else 14))
-
-        # ── 颜色：替换现有 labels 的 color 值，保留其他属性 ──
-        self._retheme()
+        # 更新所有 label 颜色
+        for child in self.findChildren(QLabel):
+            try:
+                child.setStyleSheet(
+                    f"color: {tc}; background: transparent;"
+                )
+            except RuntimeError:
+                pass
 
         # 更新搜索框
         try:
             self._search_edit.setStyleSheet(
-                f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {tc};"
+                f"background: rgba(128,128,128,0.1); border-radius: 8px; "
+                f"padding: 4px 8px; color: {tc};"
             )
         except RuntimeError:
             pass
@@ -335,56 +294,6 @@ class MarketplaceCard(QWidget):
             try:
                 if sep.frameShape() == QFrame.HLine:
                     sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
-            except RuntimeError:
-                pass
-
-    # objectName → font-size 偏移（用于插件行的标题/描述）
-    # pluginRowTitle: 标题用 font_size - 2（让标题比上下文默认小 2 号）
-    # pluginRowDesc:  描述用 font_size - 4（再小 2 号，作为辅助文字）
-    _PLUGIN_ROW_SIZE_OFFSETS = {
-        "pluginRowTitle": -2,
-        "pluginRowDesc": -4,
-    }
-
-    def _retheme(self):
-        """刷新所有已有子控件的颜色 + 字号 + 字体（对动态创建的内容也要调）
-
-        关键：同时替换 QSS 中的 color 和 font-size，因为 QSS 的 font-size
-        优先级高于 QFont 级联。如果不替换，原来写了 font-size: 11px 的
-        标签会始终保持 11px，而不是跟随系统字体大小。
-
-        插件行标题/描述：通过 objectName 识别，按 _PLUGIN_ROW_SIZE_OFFSETS
-        应用 font_size 偏移。其它标签使用 font_size 本身。
-        """
-        tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
-        tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
-        ff = getattr(self, "_cached_font_family", "")
-        fs = getattr(self, "_cached_font_size", 14)
-
-        for child in self.findChildren(QLabel):
-            try:
-                # 标题/描述应用 font_size 偏移
-                offset = self._PLUGIN_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
-                target_fs = max(8, fs + offset) if fs > 0 else 14 + offset
-
-                # StrongBodyLabel 等 FluentLabelBase 内部 self.setFont() 覆盖了
-                # 父级 QFont 级联，需要直接 setFont 覆盖
-                if isinstance(child, FluentLabelBase) and ff:
-                    child.setFont(QFont(ff, target_fs))
-
-                ss = child.styleSheet()
-                if not ss:
-                    continue
-                import re
-
-                new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
-                # 替换 font-size（QSS 优先级高于 QFont，必须替换）
-                if target_fs:
-                    new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
-                # 追加 font-family（如果原样式没有）
-                if ff and f"font-family: '{ff}'" not in new_ss:
-                    new_ss += f" font-family: '{ff}';"
-                child.setStyleSheet(new_ss)
             except RuntimeError:
                 pass
 
@@ -488,7 +397,6 @@ class MarketplaceCard(QWidget):
     def sizeHint(self):
         """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
         from PyQt5.QtCore import QSize
-
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
@@ -506,7 +414,6 @@ class MarketplaceCard(QWidget):
     def eventFilter(self, obj, event):
         """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
         from PyQt5.QtCore import QEvent
-
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
         return super().eventFilter(obj, event)
@@ -573,14 +480,8 @@ class MarketplaceCard(QWidget):
             local_ver = None
             if installed:
                 has_update, local_ver, _ = installer.check_update(p)
-            row = _PluginRow(
-                p,
-                installed,
-                has_update=has_update,
-                local_version=local_ver,
-                parent=self._content,
-                font_size=self._cached_font_size,
-            )
+            row = _PluginRow(p, installed, has_update=has_update,
+                             local_version=local_ver, parent=self._content)
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             self._content_layout.addWidget(row)
@@ -591,9 +492,6 @@ class MarketplaceCard(QWidget):
             self._content_stack.setCurrentIndex(1)
         else:
             self._content_stack.setCurrentIndex(0)
-
-        # 对动态创建的子控件应用主题
-        self._retheme()
 
     def _clear_plugin_list(self):
         """清空插件列表"""
@@ -650,7 +548,9 @@ class MarketplaceCard(QWidget):
         """在后台线程更新插件"""
         name = plugin_meta.get("name", "")
         self._status_label.setText("更新中…")
-        self._status_label.setStyleSheet("color: #FFA726; font-size: 12px; background: transparent;")
+        self._status_label.setStyleSheet(
+            "color: #FFA726; font-size: 12px; background: transparent;"
+        )
 
         self._cleanup_worker()
         self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().update(m))

@@ -279,7 +279,7 @@ def _fetch_session_stats() -> dict:
             "SELECT DATE(created_at) as day, COUNT(*) as cnt, "
             "COALESCE(SUM(message_count), 0) as msgs "
             "FROM sessions "
-            "WHERE created_at >= date('now', '-14 days') "
+            "WHERE created_at >= date('now', '-13 days') "
             "AND project NOT LIKE '__archived__%' "
             "GROUP BY DATE(created_at) ORDER BY day"
         )
@@ -291,7 +291,7 @@ def _fetch_session_stats() -> dict:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
                 daily_sessions_map[label] = row["cnt"]
                 daily_messages_map[label] = row["msgs"]
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 pass
 
         # 5. ═══ Token 用量 ═══
@@ -299,7 +299,7 @@ def _fetch_session_stats() -> dict:
         cursor.execute(
             "SELECT DATE(created_at) as day, COALESCE(SUM(context_usage), 0) as total_tokens "
             "FROM sessions "
-            "WHERE created_at >= date('now', '-14 days') "
+            "WHERE created_at >= date('now', '-13 days') "
             "AND project NOT LIKE '__archived__%' "
             "AND context_usage > 0 "
             "GROUP BY DATE(created_at) ORDER BY day"
@@ -311,14 +311,14 @@ def _fetch_session_stats() -> dict:
             try:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
                 daily_tokens_map[label] = row["total_tokens"]
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 pass
 
         # 回退：对 context_usage=0 的旧会话，从 messages 估算 token（兼容旧数据）
         cursor.execute(
             "SELECT DATE(created_at) as day, messages "
             "FROM sessions "
-            "WHERE created_at >= date('now', '-14 days') "
+            "WHERE created_at >= date('now', '-13 days') "
             "AND project NOT LIKE '__archived__%' "
             "AND (context_usage IS NULL OR context_usage = 0) "
             "AND messages IS NOT NULL AND messages != '' "
@@ -333,8 +333,9 @@ def _fetch_session_stats() -> dict:
                 msg_data = row["messages"]
                 if isinstance(msg_data, (str, bytes)):
                     tokens = _fast_estimate_tokens(str(msg_data)[:100000])
-                    daily_tokens_map[label] += tokens
-            except ValueError, TypeError:
+                    daily_tokens_map[label] = daily_tokens_map.get(label, 0) + tokens
+            except Exception:
+                # 兼容旧数据：日期格式异常或 messages 类型异常时跳过该行
                 pass
 
         # 转换为有序列表
@@ -601,7 +602,7 @@ class _BarChartWidget(QWidget):
                         display_label = f"{parts[0]}-{parts[1]}"
                 else:
                     display_label = label
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 display_label = label
 
             painter.drawText(
@@ -872,7 +873,7 @@ class _LineChartWidget(QWidget):
                         display = label
                 else:
                     display = label
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 display = label
 
             x_spacing = chart_w / n if n > 0 else chart_w

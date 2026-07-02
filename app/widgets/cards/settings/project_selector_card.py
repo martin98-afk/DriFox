@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QScrollArea,
     QSizePolicy,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -178,6 +179,20 @@ class _SquareAvatar(QWidget):
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignCenter, self._text)
+
+    # ── 立即显示 tooltip ─────────────────────────────────────
+    # 默认 Qt tooltip 延迟约 700ms，用户体验偏慢。
+    # 这里重写 enter/leave，直接调用 QToolTip.showText 立即显示，
+    # 鼠标移出立即隐藏，体感与按钮 hover 行为一致。
+    def enterEvent(self, event):
+        tip = self.toolTip()
+        if tip:
+            QToolTip.showText(self.mapToGlobal(self.rect().center()), tip, self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class ProjectItem(QWidget):

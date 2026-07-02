@@ -2529,6 +2529,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if not pm.is_initialized():
             return
         registry = UIPluginRegistry.get_instance()
+
+        # 🛡️ 多窗口隔离：如果注册表中已有插件（被其他窗口加载），跳过重复加载。
+        # UIPluginRegistry 是单例，所有窗口共享同一注册表。第一个窗口已加载的
+        # 插件在后续窗口无需重新 load_plugin —— 调用 load_plugin 会触发
+        # "先卸载旧版本"逻辑（if self.is_loaded: unload_plugin），导致所有窗口
+        # 的浮动卡片 widget 被 deleteLater()，造成界面闪烁 / 状态丢失。
+        # 窗口实例级的命令注册由 setup_ui 中后续的 for 循环处理，不受此影响。
+        if registry.list_loaded_plugins():
+            return
+
         plugin_dirs = []
         for plugin in pm.get_enabled_plugins():
             if plugin.has_component("ui"):
@@ -4940,7 +4950,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -10111,14 +10121,31 @@ class OpenAIChatToolWindow(ToolWindow):
                 "session_id": task_session_id,
             }
 
+        # 批次完成检查：先检查当前计数，用于精确诊断
+        _batch_before = sub_agent_mgr._batch_completed
+        _batch_total = sub_agent_mgr._batch_total
+
         # ====== 流式注入：单个子智能体完成时，立即注入到流中（不中断） ======
-        is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
+        engine = self.backend.chat_engine
+        is_currently_streaming = engine and engine.is_streaming
         if is_currently_streaming:
+            logger.info(
+                "[SubAgent-Callback] task_finished during streaming: "
+                f"task_id={task_id[:8]}, result_len={len(result) if result else 0}, "
+                f"batch_completed={_batch_before}/{_batch_total}"
+            )
             self._inject_subagent_completion_into_stream(task_id, result, success, agent_name, task_description)
             # 流式场景下仍继续累加批次计数器，以便所有完成时通过 _do_trigger_callback 发送汇总
 
         # 批次完成检查：只有当所有任务都完成时才触发回调
         sub_agent_mgr._batch_completed += 1
+        logger.info(
+            "[SubAgent-Callback] task_finished counting: "
+            f"task_id={task_id[:8]}, "
+            f"before={_batch_before}, total={_batch_total}, "
+            f"after={sub_agent_mgr._batch_completed}, "
+            f"is_streaming={is_currently_streaming}"
+        )
         if sub_agent_mgr._batch_completed >= sub_agent_mgr._batch_total and sub_agent_mgr._batch_total > 0:
             # 全部任务完成，发送回调通知
             self._do_trigger_callback(sub_agent_mgr)
@@ -10233,7 +10260,14 @@ class OpenAIChatToolWindow(ToolWindow):
             f"可使用 subagent_status 查询详细结果。"
         )
 
-        is_currently_streaming = self.backend.chat_engine and self.backend.chat_engine.is_streaming
+        engine = self.backend.chat_engine
+        is_currently_streaming = engine and engine.is_streaming
+        logger.info(
+            "[SubAgent-Callback] _do_trigger_callback: "
+            f"engine_exists={engine is not None}, "
+            f"is_streaming={is_currently_streaming}, "
+            f"total={total}, failed={failed}"
+        )
 
         # ====== 流式路径：注入汇总到流中，不中断 ======
         if is_currently_streaming:
@@ -10248,7 +10282,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # ====== 非流式路径：强制中断并创建新对话轮次 ======
-        logger.info("[ChatEngine] Sub-agent callback: forcing interrupt current streaming (non-streaming path)")
+        logger.info(
+            "[SubAgent-Callback] _do_trigger_callback: 非流式路径，创建新对话轮次 "
+            f"total={total}, failed={failed}"
+        )
 
         # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
         self._prepare_ui_for_callback_message(callback_content)
@@ -12071,7 +12108,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 多窗口隔离：注销窗口及其卡片数据
@@ -12092,7 +12129,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

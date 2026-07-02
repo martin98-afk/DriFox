@@ -525,6 +525,7 @@ class CommandCard(QWidget):
     commandSelected = pyqtSignal(str, str)  # name, display_type（"command"/"prompt"/"agent"/"skill"/""）
     dismissed = pyqtSignal()  # 卡片被关闭
     parameterSelected = pyqtSignal(str, str)  # param_name, param_type — 参数项被点击
+    parameterDeselected = pyqtSignal(str, str)  # param_name, param_type — 已激活参数被再次点击（取消选中）
     parameterValueSelected = pyqtSignal(str)  # value — --model= 的值被选中
 
     def __init__(self, parent=None):
@@ -1081,8 +1082,9 @@ class CommandCard(QWidget):
         """参数项被点击"""
         sender = self.sender()
         if sender in self._param_widgets:
-            # 已激活参数不支持再次点击（仅作展示用）
+            # 已激活参数再次点击 = 取消该参数（从输入框移除）
             if sender.is_active:
+                self.parameterDeselected.emit(sender.param_name, sender.param_type)
                 return
             idx = self._param_widgets.index(sender)
             self._selected_param_index = idx
@@ -2020,6 +2022,10 @@ class CommandCard(QWidget):
             if 0 <= self._selected_param_index < len(self._param_widgets):
                 widget = self._param_widgets[self._selected_param_index]
                 if widget.isVisible():
+                    # 已激活参数再次按 Tab/Enter → 取消该参数，而非重复补全
+                    if widget.is_active:
+                        self.parameterDeselected.emit(widget.param_name, widget.param_type)
+                        return
                     self._execute_param_selection(widget)
             return
         if self._detail_mode:
