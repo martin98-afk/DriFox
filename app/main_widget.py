@@ -2529,6 +2529,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if not pm.is_initialized():
             return
         registry = UIPluginRegistry.get_instance()
+
+        # 🛡️ 多窗口隔离：如果注册表中已有插件（被其他窗口加载），跳过重复加载。
+        # UIPluginRegistry 是单例，所有窗口共享同一注册表。第一个窗口已加载的
+        # 插件在后续窗口无需重新 load_plugin —— 调用 load_plugin 会触发
+        # "先卸载旧版本"逻辑（if self.is_loaded: unload_plugin），导致所有窗口
+        # 的浮动卡片 widget 被 deleteLater()，造成界面闪烁 / 状态丢失。
+        # 窗口实例级的命令注册由 setup_ui 中后续的 for 循环处理，不受此影响。
+        if registry.list_loaded_plugins():
+            return
+
         plugin_dirs = []
         for plugin in pm.get_enabled_plugins():
             if plugin.has_component("ui"):
