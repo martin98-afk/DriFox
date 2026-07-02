@@ -407,6 +407,7 @@ class FileTreeWidget(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self._tree_card: Optional["FileTreeCard"] = None
+        self._drag_hover_item: Optional[QTreeWidgetItem] = None
         logger.debug("[FileTreeWidget] 已创建，拖拽模式=DragDrop，ItemIsDragEnabled 已启用")
 
     def set_tree_card(self, card: "FileTreeCard"):
@@ -449,22 +450,121 @@ class FileTreeWidget(QTreeWidget):
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        """拖放移动中：仅高亮可放置的目录节点"""
+        """拖放移动中：高亮可放置的目录节点"""
         if event.source() is not self:
             event.ignore()
             return
+
+        # 清除之前的高亮
+        self._clear_drag_highlight()
+
         target_item = self.itemAt(event.pos())
         if target_item is None:
             event.ignore()
             return
+
         target_is_dir = target_item.data(0, Qt.UserRole + 1)
         if target_is_dir:
+            # 高亮目标目录
+            accent = self._theme_accent_color()
+            accent.setAlpha(50)
+            target_item.setBackground(0, accent)
+            self._drag_hover_item = target_item
             event.acceptProposedAction()
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        """拖拽离开树控件时清除高亮"""
+        self._clear_drag_highlight()
+        super().dragLeaveEvent(event)
+
+    def _clear_drag_highlight(self):
+        """清除拖拽高亮"""
+        if self._drag_hover_item is not None:
+            try:
+                self._drag_hover_item.setBackground(0, QColor())
+            except RuntimeError:
+                pass  # item 已被销毁
+            self._drag_hover_item = None
+
+    def _theme_accent_color(self) -> QColor:
+        """获取当前主题的 accent 色"""
+        if self._tree_card is not None:
+            colors = self._tree_card._colors
+            if colors:
+                return colors.get("accent", QColor("#62a0ea"))
+        return QColor("#62a0ea" if isDarkTheme() else "#2878dc")
+
+    def _theme_bg_color(self) -> QColor:
+        """获取对话框背景色"""
+        if self._tree_card is not None:
+            colors = self._tree_card._colors
+            if colors:
+                bg = colors.get("card_bg", QColor())
+                if bg.isValid() and bg.alpha() > 0:
+                    return bg
+        return QColor(32, 32, 32) if isDarkTheme() else QColor(240, 240, 240)
+
+    def _theme_text_color(self) -> QColor:
+        """获取主文字色"""
+        if self._tree_card is not None:
+            colors = self._tree_card._colors
+            if colors:
+                return colors.get("text", QColor(255, 255, 255))
+        return QColor(255, 255, 255) if isDarkTheme() else QColor(0, 0, 0)
+
+    def _styled_message_box(
+        self,
+        icon: QMessageBox.Icon,
+        title: str,
+        text: str,
+        buttons: QMessageBox.StandardButtons = QMessageBox.Yes | QMessageBox.No,
+        default_button: QMessageBox.StandardButton = QMessageBox.No,
+    ) -> int:
+        """创建适配主题色的消息框（解决暗色主题全黑问题）"""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(icon)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(text)
+        msg_box.setStandardButtons(buttons)
+        msg_box.setDefaultButton(default_button)
+
+        bg = self._theme_bg_color()
+        tc = self._theme_text_color()
+        accent = self._theme_accent_color()
+
+        msg_box.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {bg.name()};
+                color: {tc.name()};
+            }}
+            QLabel {{
+                color: {tc.name()};
+                font-size: 14px;
+                padding: 8px;
+            }}
+            QPushButton {{
+                background-color: {bg.name()};
+                color: {tc.name()};
+                border: 1px solid {accent.name()};
+                border-radius: 4px;
+                padding: 6px 24px;
+                min-width: 80px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {accent.name()};
+                color: #ffffff;
+            }}
+        """)
+        return msg_box.exec_()
+
     def dropEvent(self, event):
         """处理拖放事件：内部拖放执行文件移动，外部拖放忽略"""
+        # 清除拖拽高亮
+        self._clear_drag_highlight()
+
         if event.source() is not self:
             # 来自外部（如文件管理器）→ 不处理
             event.ignore()
@@ -517,12 +617,10 @@ class FileTreeWidget(QTreeWidget):
         # 弹窗确认
         names = "\n".join(os.path.basename(p) for p in source_paths)
         target_name = os.path.basename(target_path) or target_path
-        reply = QMessageBox.question(
-            self,
+        reply = self._styled_message_box(
+            QMessageBox.Question,
             "确认移动",
             f"确定要将以下项目移动到「{target_name}」？\n\n{names}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             event.ignore()
@@ -546,10 +644,12 @@ class FileTreeWidget(QTreeWidget):
                 logger.info(f"[FileTree] 已移动: {src} → {dest}")
             except Exception as e:
                 logger.error(f"[FileTree] 移动失败: {src} → {dest}: {e}")
-                QMessageBox.critical(
-                    self,
+                self._styled_message_box(
+                    QMessageBox.Critical,
                     "移动失败",
                     f"无法移动「{os.path.basename(src)}」:\n{e}",
+                    QMessageBox.Ok,
+                    QMessageBox.Ok,
                 )
 
         if moved_count > 0 and self._tree_card is not None:
@@ -585,7 +685,13 @@ class FileTreeWidget(QTreeWidget):
             deletable.append(item)
 
         if not deletable:
-            QMessageBox.information(self, "提示", "不能删除项目根目录")
+            self._styled_message_box(
+                QMessageBox.Information,
+                "提示",
+                "不能删除项目根目录",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
+            )
             return
 
         # 构造确认消息
@@ -597,12 +703,10 @@ class FileTreeWidget(QTreeWidget):
             names = "\n".join(f"• {item.text(0)}" for item in deletable)
             msg = f"确定要永久删除以下 {len(deletable)} 个项目？\n\n{names}\n\n⚠️ 此操作不可撤销！"
 
-        reply = QMessageBox.warning(
-            self,
+        reply = self._styled_message_box(
+            QMessageBox.Warning,
             "确认永久删除",
             msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -622,10 +726,12 @@ class FileTreeWidget(QTreeWidget):
                 logger.info(f"[FileTree] 已删除: {path}")
             except Exception as e:
                 logger.error(f"[FileTree] 删除失败: {path}: {e}")
-                QMessageBox.critical(
-                    self,
+                self._styled_message_box(
+                    QMessageBox.Critical,
                     "删除失败",
                     f"无法删除「{item.text(0)}」:\n{e}",
+                    QMessageBox.Ok,
+                    QMessageBox.Ok,
                 )
 
         if deleted_count > 0 and self._tree_card is not None:
