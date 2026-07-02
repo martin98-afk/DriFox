@@ -16,6 +16,7 @@
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -25,15 +26,18 @@ from typing import Callable, Dict, List, Optional, Set
 from PyQt5.QtCore import (
     QEvent,
     QFileInfo,
+    QMimeData,
     QObject,
     QSize,
     QThread,
     Qt,
     QTimer,
+    QUrl,
     pyqtSignal,
 )
 from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileIconProvider,
     QFrame,
@@ -384,6 +388,228 @@ class _DirWatcher(QObject):
 
 
 # ══════════════════════════════════════════════════════════
+# 可拖拽文件树控件
+# ══════════════════════════════════════════════════════════
+
+
+class FileTreeWidget(QTreeWidget):
+    """支持拖拽和删除的文件树控件
+
+    功能：
+    - 拖拽文件/目录到外部输入框时释放为路径文本（多选用 \\n 拼接）
+    - 内部拖拽移动文件/目录到其他目录（弹窗确认后执行）
+    - Delete 键删除文件/目录（带永久删除确认框）
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self._tree_card: Optional["FileTreeCard"] = None
+
+    def set_tree_card(self, card: "FileTreeCard"):
+        """设置所属的 FileTreeCard 引用，用于操作后刷新树"""
+        self._tree_card = card
+
+    # ── 拖拽数据（拖到外部） ─────────────────────────────
+
+    def mimeData(self, items: List[QTreeWidgetItem]) -> QMimeData:
+        """构建拖拽数据：保留内部格式 + 添加 text/uri-list + text/plain"""
+        mime_data = super().mimeData(items)
+
+        # 收集选中文件/目录的真实路径
+        paths: List[str] = []
+        for item in items:
+            path = item.data(0, Qt.UserRole)
+            if path:
+                paths.append(path)
+
+        if not paths:
+            return mime_data
+
+        # text/uri-list：标准文件拖拽协议（拖到外部文件管理器/编辑器用）
+        urls = [QUrl.fromLocalFile(p) for p in paths]
+        mime_data.setUrls(urls)
+
+        # text/plain：拖到 QLineEdit 等输入框时显示为路径文本
+        # 多选时用换行拼接，方便粘贴到聊天区或路径输入框
+        mime_data.setText("\n".join(paths))
+
+        return mime_data
+
+    # ── 内部拖放移动 ─────────────────────────────────────
+
+    def dropEvent(self, event):
+        """处理拖放事件：内部拖放执行文件移动，外部拖放忽略"""
+        if event.source() is not self:
+            # 来自外部（如文件管理器）→ 不处理
+            event.ignore()
+            return
+
+        # 确定目标目录
+        target_item = self.itemAt(event.pos())
+        if target_item is None:
+            event.ignore()
+            return
+
+        target_path = target_item.data(0, Qt.UserRole)
+        target_is_dir = target_item.data(0, Qt.UserRole + 1)
+
+        if not target_path:
+            event.ignore()
+            return
+
+        # 非目录节点 → 取其父目录作为目标
+        if not target_is_dir:
+            target_path = os.path.dirname(target_path)
+            if not target_path:
+                event.ignore()
+                return
+
+        # 收集源路径
+        source_items = self.selectedItems()
+        if not source_items:
+            event.ignore()
+            return
+
+        source_paths: List[str] = []
+        for item in source_items:
+            path = item.data(0, Qt.UserRole)
+            if not path:
+                continue
+            norm_src = os.path.normpath(path)
+            norm_dst = os.path.normpath(target_path)
+            if norm_src == norm_dst:
+                continue  # 拖到自己身上
+            if norm_dst.startswith(norm_src + os.sep):
+                logger.warning(f"[FileTree] 循环移动被阻止: {path} → {target_path}")
+                continue  # 父目录拖入子目录
+            source_paths.append(path)
+
+        if not source_paths:
+            event.ignore()
+            return
+
+        # 弹窗确认
+        names = "\n".join(os.path.basename(p) for p in source_paths)
+        target_name = os.path.basename(target_path) or target_path
+        reply = QMessageBox.question(
+            self,
+            "确认移动",
+            f"确定要将以下项目移动到「{target_name}」？\n\n{names}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            event.ignore()
+            return
+
+        # 执行文件系统移动
+        self._move_files(source_paths, target_path)
+        event.acceptProposedAction()
+
+    def _move_files(self, source_paths: List[str], target_dir: str):
+        """批量移动文件/目录到目标目录"""
+        moved_count = 0
+        for src in source_paths:
+            dest = os.path.join(target_dir, os.path.basename(src))
+            if os.path.exists(dest):
+                logger.warning(f"[FileTree] 目标已存在，跳过: {dest}")
+                continue
+            try:
+                shutil.move(src, dest)
+                moved_count += 1
+                logger.info(f"[FileTree] 已移动: {src} → {dest}")
+            except Exception as e:
+                logger.error(f"[FileTree] 移动失败: {src} → {dest}: {e}")
+                QMessageBox.critical(
+                    self,
+                    "移动失败",
+                    f"无法移动「{os.path.basename(src)}」:\n{e}",
+                )
+
+        if moved_count > 0 and self._tree_card is not None:
+            self._tree_card._on_refresh()
+
+    # ── Delete 键删除 ────────────────────────────────────
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete:
+            self._delete_selected()
+        else:
+            super().keyPressEvent(event)
+
+    def _delete_selected(self):
+        """删除选中的文件/目录（带永久删除确认框）"""
+        items = self.selectedItems()
+        if not items:
+            return
+
+        # 过滤出可删除项（排除项目根目录）
+        deletable: List[QTreeWidgetItem] = []
+        for item in items:
+            path = item.data(0, Qt.UserRole)
+            if not path:
+                continue
+            # 禁止删除项目根目录
+            if (
+                self._tree_card is not None
+                and self._tree_card._project_root
+                and os.path.normpath(path) == os.path.normpath(self._tree_card._project_root)
+            ):
+                continue
+            deletable.append(item)
+
+        if not deletable:
+            QMessageBox.information(self, "提示", "不能删除项目根目录")
+            return
+
+        # 构造确认消息
+        if len(deletable) == 1:
+            name = deletable[0].text(0)
+            path = deletable[0].data(0, Qt.UserRole)
+            msg = f"确定要永久删除「{name}」？\n\n路径: {path}\n\n⚠️ 此操作不可撤销！"
+        else:
+            names = "\n".join(f"• {item.text(0)}" for item in deletable)
+            msg = f"确定要永久删除以下 {len(deletable)} 个项目？\n\n{names}\n\n⚠️ 此操作不可撤销！"
+
+        reply = QMessageBox.warning(
+            self,
+            "确认永久删除",
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 执行删除
+        deleted_count = 0
+        for item in deletable:
+            path = item.data(0, Qt.UserRole)
+            if not path:
+                continue
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+                deleted_count += 1
+                logger.info(f"[FileTree] 已删除: {path}")
+            except Exception as e:
+                logger.error(f"[FileTree] 删除失败: {path}: {e}")
+                QMessageBox.critical(
+                    self,
+                    "删除失败",
+                    f"无法删除「{item.text(0)}」:\n{e}",
+                )
+
+        if deleted_count > 0 and self._tree_card is not None:
+            self._tree_card._on_refresh()
+
+
+# ══════════════════════════════════════════════════════════
 # 主卡片
 # ══════════════════════════════════════════════════════════
 
@@ -470,7 +696,8 @@ class FileTreeCard(QWidget):
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        self._tree_widget = QTreeWidget(self._scroll_area)
+        self._tree_widget = FileTreeWidget(self._scroll_area)
+        self._tree_widget.set_tree_card(self)
         self._tree_widget.setObjectName("file-tree-widget")
         self._tree_widget.setHeaderHidden(True)
         self._tree_widget.setAnimated(True)
@@ -598,12 +825,7 @@ class FileTreeCard(QWidget):
         )
 
         # ScrollArea 背景透明
-        self._scroll_area.setStyleSheet(
-            "#file-tree-scroll {"
-            "  background: transparent;"
-            "  border: none;"
-            "}"
-        )
+        self._scroll_area.setStyleSheet("#file-tree-scroll {  background: transparent;  border: none;}")
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
 
         # 刷新字体设置
