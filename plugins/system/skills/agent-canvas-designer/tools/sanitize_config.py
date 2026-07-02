@@ -202,7 +202,7 @@ def cmd_fix(filepath):
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         # 尝试修复：中文引号清洗后重新解析
-        print(f'❌ JSON 语法错误，尝试自动修复...')
+        print('❌ JSON 语法错误，尝试自动修复...')
         new_raw = sanitize_prompt_text(raw)
         try:
             data = json.loads(new_raw)
@@ -210,7 +210,7 @@ def cmd_fix(filepath):
             raw = new_raw  # 用修复后的文本继续
         except json.JSONDecodeError as e2:
             print(f'❌ 自动修复无效: {e2}')
-            print(f'💡 请检查 system_prompt/user_prompt 中的引号是否成对')
+            print('💡 请检查 system_prompt/user_prompt 中的引号是否成对')
             return 2
 
     # Step 2: 结构检查

@@ -107,7 +107,7 @@ class OpenAIChatWorker(QThread):
         if self.session_id:
             logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
         else:
-            logger.debug(f"[ChatWorker] session_id=EMPTY")
+            logger.debug("[ChatWorker] session_id=EMPTY")
 
         # ========== 使用 ChatWorkerState 统一管理所有可变状态 ==========
         self._state = ChatWorkerState.from_constructor_args(

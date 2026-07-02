@@ -124,7 +124,7 @@ def analyze_image(image_path, prompt=None, api_key=None):
         try:
             error_json = json.loads(error_body)
             error_msg = error_json.get('error', {}).get('message', error_body)
-        except:
+        except Exception:
             error_msg = error_body
         return {"success": False, "error": f"HTTP {e.code}", "details": error_msg}
     except Exception as e:
