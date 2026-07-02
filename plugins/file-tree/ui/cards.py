@@ -46,6 +46,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSizePolicy,
     QStyle,
     QTreeWidget,
