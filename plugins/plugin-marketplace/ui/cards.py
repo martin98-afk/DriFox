@@ -36,6 +36,7 @@ from qfluentwidgets import (
 
 from .data import get_marketplace
 from .installer import get_installer
+from ._squircle_avatar import SquircleAvatar, extract_initials, name_color
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ class _PluginRow(QFrame):
         has_update: bool = False,
         local_version: Optional[str] = None,
         parent=None,
+        font_size: int = 0,
     ):
         super().__init__(parent)
         self._meta = plugin_meta
@@ -123,6 +125,8 @@ class _PluginRow(QFrame):
         self._local_version = local_version
         self._busy = False
         self._original_btn_style: str = ""  # 在 _setup_ui 中保存 FluentUI 默认样式
+        self._font_size = font_size  # 上下文字体大小（用于头像自适应）
+        self._avatar = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -136,10 +140,15 @@ class _PluginRow(QFrame):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
-        # 图标
-        icon = IconWidget(FluentIcon.APPLICATION, self)
-        icon.setFixedSize(20, 20)
-        layout.addWidget(icon)
+        # 插件头像：椭方块形 + 名称缩写 + 哈希色（智能提取关键字）
+        plugin_name = self._meta.get("name", "?")
+        self._avatar = SquircleAvatar(
+            extract_initials(plugin_name),
+            name_color(plugin_name),
+            self,
+            font_size=self._font_size,
+        )
+        layout.addWidget(self._avatar)
 
         # 信息区
         info_layout = QVBoxLayout()
@@ -148,7 +157,7 @@ class _PluginRow(QFrame):
         name = self._meta.get("name", "未知")
         remote_ver = self._meta.get("version", "")
 
-        # 标题行：显示名称 + 版本信息
+        # 标题行：显示名称 + 版本信息（字号 = font_size - 2，由 _retheme 通过 objectName 识别）
         if self._has_update and self._local_version and remote_ver:
             # 有新版：显示 v旧版 → v新版
             title = StrongBodyLabel(f"{name}  v{self._local_version} → v{remote_ver}", self)
@@ -156,6 +165,7 @@ class _PluginRow(QFrame):
             title = StrongBodyLabel(f"{name}  v{remote_ver}", self)
         else:
             title = StrongBodyLabel(name, self)
+        title.setObjectName("pluginRowTitle")
         title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         info_layout.addWidget(title)
 
@@ -169,6 +179,8 @@ class _PluginRow(QFrame):
         if desc:
             desc_label = QLabel(desc[:120], self)
             desc_label.setWordWrap(True)
+            # objectName "pluginRowDesc" → _retheme 强制使用 font_size - 4
+            desc_label.setObjectName("pluginRowDesc")
             desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
             info_layout.addWidget(desc_label)
 
@@ -238,6 +250,12 @@ class _PluginRow(QFrame):
         self._busy = False
         self._update_btn_text()
 
+    def set_font_size(self, font_size: int):
+        """根据上下文字体大小动态调整头像尺寸"""
+        self._font_size = font_size
+        if self._avatar is not None:
+            self._avatar.set_font_size(font_size)
+
 
 # ── 市场主卡片 ──────────────────────────────────────────────
 
@@ -293,6 +311,10 @@ class MarketplaceCard(QWidget):
         self._cached_font_family = font_family
         self._cached_font_size = font_size
 
+        # ── 把 font_size 传播到已存在的行（动态调整头像大小） ──
+        for row in self.findChildren(_PluginRow):
+            row.set_font_size(font_size)
+
         # ── 字体（通过 QFont 级联，使用系统字体大小） ──
         if font_family:
             self.setFont(QFont(font_family, font_size if font_size else 14))
@@ -316,12 +338,23 @@ class MarketplaceCard(QWidget):
             except RuntimeError:
                 pass
 
+    # objectName → font-size 偏移（用于插件行的标题/描述）
+    # pluginRowTitle: 标题用 font_size - 2（让标题比上下文默认小 2 号）
+    # pluginRowDesc:  描述用 font_size - 4（再小 2 号，作为辅助文字）
+    _PLUGIN_ROW_SIZE_OFFSETS = {
+        "pluginRowTitle": -2,
+        "pluginRowDesc": -4,
+    }
+
     def _retheme(self):
         """刷新所有已有子控件的颜色 + 字号 + 字体（对动态创建的内容也要调）
 
         关键：同时替换 QSS 中的 color 和 font-size，因为 QSS 的 font-size
         优先级高于 QFont 级联。如果不替换，原来写了 font-size: 11px 的
         标签会始终保持 11px，而不是跟随系统字体大小。
+
+        插件行标题/描述：通过 objectName 识别，按 _PLUGIN_ROW_SIZE_OFFSETS
+        应用 font_size 偏移。其它标签使用 font_size 本身。
         """
         tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
         tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
@@ -330,10 +363,14 @@ class MarketplaceCard(QWidget):
 
         for child in self.findChildren(QLabel):
             try:
+                # 标题/描述应用 font_size 偏移
+                offset = self._PLUGIN_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
+                target_fs = max(8, fs + offset) if fs > 0 else 14 + offset
+
                 # StrongBodyLabel 等 FluentLabelBase 内部 self.setFont() 覆盖了
                 # 父级 QFont 级联，需要直接 setFont 覆盖
                 if isinstance(child, FluentLabelBase) and ff:
-                    child.setFont(QFont(ff, fs))
+                    child.setFont(QFont(ff, target_fs))
 
                 ss = child.styleSheet()
                 if not ss:
@@ -342,8 +379,8 @@ class MarketplaceCard(QWidget):
 
                 new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
                 # 替换 font-size（QSS 优先级高于 QFont，必须替换）
-                if fs:
-                    new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {fs}px;", new_ss)
+                if target_fs:
+                    new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
                 # 追加 font-family（如果原样式没有）
                 if ff and f"font-family: '{ff}'" not in new_ss:
                     new_ss += f" font-family: '{ff}';"
@@ -536,7 +573,14 @@ class MarketplaceCard(QWidget):
             local_ver = None
             if installed:
                 has_update, local_ver, _ = installer.check_update(p)
-            row = _PluginRow(p, installed, has_update=has_update, local_version=local_ver, parent=self._content)
+            row = _PluginRow(
+                p,
+                installed,
+                has_update=has_update,
+                local_version=local_ver,
+                parent=self._content,
+                font_size=self._cached_font_size,
+            )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             self._content_layout.addWidget(row)
