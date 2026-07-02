@@ -586,7 +586,7 @@ class SubAgentExecutor(QThread):
 
         与 chat_worker._trigger_worker_hook 行为一致：
         - 使用 trigger_event(sync) 同步执行 hook
-        - 用 _make_hook_message 包装成 system 消息
+        - 用 _make_hook_message 包装成 assistant 消息（role=assistant，避免破坏 prompt cache prefix）
         - 直接 append 到 current_messages，下次 API 调用时 LLM 即可看到
         """
         try:
