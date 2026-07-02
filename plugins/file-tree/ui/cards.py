@@ -443,8 +443,9 @@ class FileTreeWidget(QTreeWidget):
     # ── 内部拖放移动 ─────────────────────────────────────
 
     def dragEnterEvent(self, event):
-        """进入拖放区域：仅接受内部拖放（自身拖出的项）"""
+        """进入拖放区域：先调基类初始化内部状态，再接受"""
         if event.source() is self:
+            super().dragEnterEvent(event)
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
@@ -458,21 +459,20 @@ class FileTreeWidget(QTreeWidget):
         # 清除之前的高亮
         self._clear_drag_highlight()
 
+        # 让基类处理 drop indicator 线
+        super().dragMoveEvent(event)
+
         target_item = self.itemAt(event.pos())
         if target_item is None:
-            event.ignore()
             return
 
         target_is_dir = target_item.data(0, Qt.UserRole + 1)
         if target_is_dir:
-            # 高亮目标目录
+            # 高亮目标目录（accent 色半透明背景 + 左边框）
             accent = self._theme_accent_color()
-            accent.setAlpha(50)
+            accent.setAlpha(40)
             target_item.setBackground(0, accent)
             self._drag_hover_item = target_item
-            event.acceptProposedAction()
-        else:
-            event.ignore()
 
     def dragLeaveEvent(self, event):
         """拖拽离开树控件时清除高亮"""
@@ -534,28 +534,35 @@ class FileTreeWidget(QTreeWidget):
         tc = self._theme_text_color()
         accent = self._theme_accent_color()
 
+        is_dark = bg.lightness() < 128
+        btn_bg = "#3a3a3a" if is_dark else "#e0e0e0"
+        btn_border = "#555555" if is_dark else "#bbbbbb"
+
         msg_box.setStyleSheet(f"""
             QMessageBox {{
                 background-color: {bg.name()};
                 color: {tc.name()};
+                font-size: 14px;
             }}
             QLabel {{
                 color: {tc.name()};
                 font-size: 14px;
-                padding: 8px;
+                padding: 12px 8px;
             }}
             QPushButton {{
-                background-color: {bg.name()};
+                background-color: {btn_bg};
                 color: {tc.name()};
-                border: 1px solid {accent.name()};
+                border: 1px solid {btn_border};
                 border-radius: 4px;
                 padding: 6px 24px;
                 min-width: 80px;
+                min-height: 28px;
                 font-size: 13px;
             }}
             QPushButton:hover {{
                 background-color: {accent.name()};
                 color: #ffffff;
+                border: 1px solid {accent.name()};
             }}
         """)
         return msg_box.exec_()
