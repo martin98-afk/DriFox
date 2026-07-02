@@ -407,6 +407,7 @@ class FileTreeWidget(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self._tree_card: Optional["FileTreeCard"] = None
+        logger.debug("[FileTreeWidget] 已创建，拖拽模式=DragDrop，ItemIsDragEnabled 已启用")
 
     def set_tree_card(self, card: "FileTreeCard"):
         """设置所属的 FileTreeCard 引用，用于操作后刷新树"""
@@ -439,6 +440,28 @@ class FileTreeWidget(QTreeWidget):
         return mime_data
 
     # ── 内部拖放移动 ─────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        """进入拖放区域：仅接受内部拖放（自身拖出的项）"""
+        if event.source() is self:
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        """拖放移动中：仅高亮可放置的目录节点"""
+        if event.source() is not self:
+            event.ignore()
+            return
+        target_item = self.itemAt(event.pos())
+        if target_item is None:
+            event.ignore()
+            return
+        target_is_dir = target_item.data(0, Qt.UserRole + 1)
+        if target_is_dir:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event):
         """处理拖放事件：内部拖放执行文件移动，外部拖放忽略"""
@@ -951,11 +974,16 @@ class FileTreeCard(QWidget):
         item.setData(0, Qt.UserRole + 1, entry.is_dir)
         item.setData(0, Qt.UserRole + 2, False)  # loaded flag
 
+        # 设置交互 flags：文件/目录均可拖拽，仅目录可作为拖放目标
         if entry.is_dir:
+            flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled
             item.setIcon(0, _get_dir_icon())
             item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
         else:
+            flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled
             item.setIcon(0, _get_file_icon(entry.path))
+
+        item.setFlags(flags)
 
         return item
 
