@@ -536,17 +536,21 @@ class FileTreeWidget(QTreeWidget):
             accent = QColor(102, 198, 255)
             border = QColor(61, 61, 61)
 
-        # 对话框背景
-        msg_box.setStyleSheet(f"QMessageBox {{ background-color: {bg.name()}; }}")
+        # 对话框整体样式（#id 选择器覆盖全局样式）
+        msg_box.setObjectName("file-tree-dialog")
+        msg_box.setStyleSheet(
+            f"#file-tree-dialog {{  background-color: {bg.name()};  color: {tc.name()};  font-size: 14px;}}"
+        )
 
         # 文字标签
         label = msg_box.findChild(QLabel)
         if label is not None:
-            label.setStyleSheet(f"color: {tc.name()}; font-size: 14px; padding: 12px 8px;")
+            label.setStyleSheet(f"color: {tc.name()}; font-size: 14px; padding: 12px 8px; background: transparent;")
 
         # 按钮 - 直接设置样式，不依赖 QSS 选择器优先级
+        # 使用 #file-tree-dialog QPushButton 确保覆盖全局样式
         btn_style = (
-            f"QPushButton {{"
+            f"#file-tree-dialog QPushButton {{"
             f"  background-color: #3a3a3a;"
             f"  color: {tc.name()};"
             f"  border: 1px solid {border.name()};"
@@ -556,7 +560,7 @@ class FileTreeWidget(QTreeWidget):
             f"  min-height: 30px;"
             f"  font-size: 13px;"
             f"}}"
-            f"QPushButton:hover {{"
+            f"#file-tree-dialog QPushButton:hover {{"
             f"  background-color: {accent.name()};"
             f"  color: #ffffff;"
             f"  border: 1px solid {accent.name()};"
