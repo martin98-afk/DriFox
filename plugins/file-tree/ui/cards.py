@@ -496,24 +496,6 @@ class FileTreeWidget(QTreeWidget):
                 return colors.get("accent", QColor("#62a0ea"))
         return QColor("#62a0ea" if isDarkTheme() else "#2878dc")
 
-    def _theme_bg_color(self) -> QColor:
-        """获取对话框背景色"""
-        if self._tree_card is not None:
-            colors = self._tree_card._colors
-            if colors:
-                bg = colors.get("card_bg", QColor())
-                if bg.isValid() and bg.alpha() > 0:
-                    return bg
-        return QColor(32, 32, 32) if isDarkTheme() else QColor(240, 240, 240)
-
-    def _theme_text_color(self) -> QColor:
-        """获取主文字色"""
-        if self._tree_card is not None:
-            colors = self._tree_card._colors
-            if colors:
-                return colors.get("text", QColor(255, 255, 255))
-        return QColor(255, 255, 255) if isDarkTheme() else QColor(0, 0, 0)
-
     def _styled_message_box(
         self,
         icon: QMessageBox.Icon,
@@ -522,7 +504,11 @@ class FileTreeWidget(QTreeWidget):
         buttons: QMessageBox.StandardButtons = QMessageBox.Yes | QMessageBox.No,
         default_button: QMessageBox.StandardButton = QMessageBox.No,
     ) -> int:
-        """创建适配主题色的消息框（解决暗色主题全黑问题）"""
+        """创建适配主题色的消息框
+
+        直接通过 findChildren 设置按钮样式，避免 QSS 选择器优先级被全局样式覆盖。
+        颜色取自 FileTreeCard 上下文主题色。
+        """
         msg_box = QMessageBox(self)
         msg_box.setIcon(icon)
         msg_box.setWindowTitle(title)
@@ -530,46 +516,54 @@ class FileTreeWidget(QTreeWidget):
         msg_box.setStandardButtons(buttons)
         msg_box.setDefaultButton(default_button)
 
-        bg = self._theme_bg_color()
-        tc = self._theme_text_color()
-        accent = self._theme_accent_color()
+        # ── 从 card 上下文获取主题色 ──
+        if self._tree_card is not None:
+            colors = self._tree_card._colors
+            if colors:
+                bg = colors.get("card_bg", QColor(33, 33, 38))
+                tc = colors.get("text", QColor(255, 255, 255))
+                accent = colors.get("accent", QColor(102, 198, 255))
+                border = colors.get("border", QColor(61, 61, 61))
+            else:
+                bg = QColor(33, 33, 38)
+                tc = QColor(255, 255, 255)
+                accent = QColor(102, 198, 255)
+                border = QColor(61, 61, 61)
+        else:
+            bg = QColor(33, 33, 38)
+            tc = QColor(255, 255, 255)
+            accent = QColor(102, 198, 255)
+            border = QColor(61, 61, 61)
 
-        is_dark = bg.lightness() < 128
-        # 按钮背景使用明显区别于对话框背景的颜色
-        btn_bg = "#5a5a5a" if is_dark else "#d4d4d4"
-        btn_border = "#7a7a7a" if is_dark else "#aaaaaa"
-        btn_text = "#ffffff" if is_dark else "#1a1a1a"
+        # 对话框背景
+        msg_box.setStyleSheet(f"QMessageBox {{ background-color: {bg.name()}; }}")
 
-        msg_box.setStyleSheet(f"""
-            QMessageBox {{
-                background-color: {bg.name()};
-                color: {tc.name()};
-                font-size: 14px;
-            }}
-            QMessageBox QLabel {{
-                color: {tc.name()};
-                font-size: 14px;
-                padding: 12px 8px;
-            }}
-            QMessageBox QPushButton {{
-                background-color: {btn_bg};
-                color: {btn_text};
-                border: 1px solid {btn_border};
-                border-radius: 5px;
-                padding: 6px 24px;
-                min-width: 80px;
-                min-height: 30px;
-                font-size: 13px;
-            }}
-            QMessageBox QPushButton:hover {{
-                background-color: {accent.name()};
-                color: #ffffff;
-                border: 1px solid {accent.name()};
-            }}
-            QMessageBox QPushButton:pressed {{
-                background-color: {accent.name()}aa;
-            }}
-        """)
+        # 文字标签
+        label = msg_box.findChild(QLabel)
+        if label is not None:
+            label.setStyleSheet(f"color: {tc.name()}; font-size: 14px; padding: 12px 8px;")
+
+        # 按钮 - 直接设置样式，不依赖 QSS 选择器优先级
+        btn_style = (
+            f"QPushButton {{"
+            f"  background-color: #3a3a3a;"
+            f"  color: {tc.name()};"
+            f"  border: 1px solid {border.name()};"
+            f"  border-radius: 5px;"
+            f"  padding: 6px 24px;"
+            f"  min-width: 80px;"
+            f"  min-height: 30px;"
+            f"  font-size: 13px;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background-color: {accent.name()};"
+            f"  color: #ffffff;"
+            f"  border: 1px solid {accent.name()};"
+            f"}}"
+        )
+        for btn in msg_box.findChildren(QPushButton):
+            btn.setStyleSheet(btn_style)
+
         return msg_box.exec_()
 
     def dropEvent(self, event):
