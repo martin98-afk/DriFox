@@ -20,6 +20,20 @@ from loguru import logger
 from .data import compare_versions
 
 
+# ── 环境检测 ──────────────────────────────────────────────
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_DEV_DRIFOX = _PROJECT_ROOT / ".drifox"
+_USER_DRIFOX = Path.home() / ".drifox"
+
+
+def _drifox_dir() -> Path:
+    """查找 .drifox 目录（开发环境优先，兜底用户目录）"""
+    if _DEV_DRIFOX.exists():
+        return _DEV_DRIFOX
+    return _USER_DRIFOX
+
+
 class PluginInstaller:
     """插件安装器
 
@@ -28,8 +42,9 @@ class PluginInstaller:
     """
 
     def __init__(self):
-        self._plugins_dir = Path.home() / '.drifox' / "plugins"
-        self._cache_dir = Path.home() / '.drifox' / "cache" / "install_tmp"
+        drifox = _drifox_dir()
+        self._plugins_dir = drifox / "plugins"
+        self._cache_dir = drifox / "cache" / "install_tmp"
 
     # ── 安装 ─────────────────────────────────────────────
 

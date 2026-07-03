@@ -52,8 +52,15 @@ from ._squircle_avatar import SquircleAvatar, extract_initials, name_color
 # ── 路径常量 ──────────────────────────────────────────────
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_USER_PLUGINS_DIR = Path.home() / ".drifox" / "plugins"
-_USER_DISABLED_DIR = Path.home() / ".drifox" / "plugins-disabled"
+_DEV_DRIFOX = _PROJECT_ROOT / ".drifox"
+_USER_DRIFOX = Path.home() / ".drifox"
+
+
+def _drifox_dir() -> Path:
+    """查找 .drifox 目录（开发环境优先，兜底用户目录）"""
+    if _DEV_DRIFOX.exists():
+        return _DEV_DRIFOX
+    return _USER_DRIFOX
 
 
 def _plugins_root() -> Path:
@@ -170,9 +177,10 @@ def _discover_plugins() -> list[PluginInfo]:
                     path=child,
                 )
 
-    # 2. 用户已启用插件 ~/.drifox/plugins/
-    if _USER_PLUGINS_DIR.exists():
-        for child in sorted(_USER_PLUGINS_DIR.iterdir()):
+    # 2. 用户已启用插件
+    _user_plugins = _drifox_dir() / "plugins"
+    if _user_plugins.exists():
+        for child in sorted(_user_plugins.iterdir()):
             if not child.is_dir():
                 continue
             meta = _read_plugin_json(child)
@@ -189,9 +197,10 @@ def _discover_plugins() -> list[PluginInfo]:
                 path=child,
             )
 
-    # 3. 用户已禁用插件 ~/.drifox/plugins-disabled/
-    if _USER_DISABLED_DIR.exists():
-        for child in sorted(_USER_DISABLED_DIR.iterdir()):
+    # 3. 用户已禁用插件
+    _user_disabled = _drifox_dir() / "plugins-disabled"
+    if _user_disabled.exists():
+        for child in sorted(_user_disabled.iterdir()):
             if not child.is_dir():
                 continue
             meta = _read_plugin_json(child)
@@ -216,12 +225,13 @@ def _discover_plugins() -> list[PluginInfo]:
 
 def _do_enable(plugin: PluginInfo) -> bool:
     """启用已禁用的插件"""
-    src = _USER_DISABLED_DIR / plugin.name
+    drifox_dir = _drifox_dir()
+    src = drifox_dir / "plugins-disabled" / plugin.name
     if not src.exists():
         return False
     try:
-        _USER_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(_USER_PLUGINS_DIR / plugin.name))
+        (drifox_dir / "plugins").mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(drifox_dir / "plugins" / plugin.name))
         return True
     except Exception as e:
         logger.error(f"[PluginManager] 启用失败 {plugin.name}: {e}")
@@ -230,12 +240,13 @@ def _do_enable(plugin: PluginInfo) -> bool:
 
 def _do_disable(plugin: PluginInfo) -> bool:
     """禁用已启用的用户插件"""
-    src = _USER_PLUGINS_DIR / plugin.name
+    drifox_dir = _drifox_dir()
+    src = drifox_dir / "plugins" / plugin.name
     if not src.exists():
         return False
     try:
-        _USER_DISABLED_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(_USER_DISABLED_DIR / plugin.name))
+        (drifox_dir / "plugins-disabled").mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(drifox_dir / "plugins-disabled" / plugin.name))
         return True
     except Exception as e:
         logger.error(f"[PluginManager] 禁用失败 {plugin.name}: {e}")
@@ -244,7 +255,8 @@ def _do_disable(plugin: PluginInfo) -> bool:
 
 def _do_uninstall(plugin: PluginInfo) -> bool:
     """卸载用户插件"""
-    for d in (_USER_PLUGINS_DIR / plugin.name, _USER_DISABLED_DIR / plugin.name):
+    drifox_dir = _drifox_dir()
+    for d in (drifox_dir / "plugins" / plugin.name, drifox_dir / "plugins-disabled" / plugin.name):
         if d.exists():
             try:
                 shutil.rmtree(d)

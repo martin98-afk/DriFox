@@ -1607,7 +1607,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
             "subagents": self._handle_subagents_command,
-            "title_gen": self._handle_title_gen_command,
+            "title-gen": self._handle_title_gen_command,
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
             "hook-preset": self._handle_hook_preset_command,
@@ -9732,7 +9732,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("sub_agent_compact", self._window_id)
 
     def _handle_title_gen_command(self, args: str):
-        """/title_gen 命令：切换标题生成使用的默认模型
+        """/title-gen 命令：切换标题生成使用的默认模型
 
         参数：
           --model=X  → 设置标题生成默认模型
@@ -9959,7 +9959,7 @@ class OpenAIChatToolWindow(ToolWindow):
         saved = cfg.llm_title_gen_default_model.value or ""
 
         cmd_mgr = CommandManager.get_instance()
-        entries = cmd_mgr._commands.get("title_gen", {})
+        entries = cmd_mgr._commands.get("title-gen", {})
         for cmd_type, cmd_def in entries.items():
             for param in cmd_def.parameters:
                 if param.name == "--model=":
