@@ -3265,12 +3265,16 @@ class CodeWebViewer(QWebEngineView):
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
                         // 同步 auto-scroll（用户未滚动→始终滚底；已滚动且接近底部→滚底）
+                        // 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
+                        // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
                         if (!_wasUserScrolled) {{
                             document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
                         }} else {{
                             var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
                             if (_wasAtBottom) {{
                                 document.body.scrollTop = document.body.scrollHeight;
+                                window._userScrolledWithin = false;
                             }}
                         }}
                         window._suppressScrollEvent = false;
@@ -3532,6 +3536,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
                 // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
+                // 附加修复：auto-scroll 成功后复位 _userScrolledWithin，
+                // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
                     document.body.scrollTop = document.body.scrollHeight;
@@ -3539,9 +3545,13 @@ class CodeWebViewer(QWebEngineView):
                     var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
                     if (wasAtBottom) {{
                         document.body.scrollTop = document.body.scrollHeight;
+                        window._userScrolledWithin = false;
                     }}
                 }}
                 window._suppressScrollEvent = false;
+                // 🐛 修复：文本追加后同步报告高度，缩短 _document_height 更新延迟，
+                // 让 wheelEvent 能及时获取最新 scrollHeight 做边界判定。
+                reportHeight();
             }})();
             """
             self.page().runJavaScript(js)
@@ -5850,6 +5860,8 @@ class MessageCard(SimpleCardWidget):
         if self._streaming and hasattr(self.viewer, "page") and self.viewer.page():
             try:
                 # 🐛 修复：同步 auto-scroll 取代 setTimeout(0)，避免渲染间隙置顶闪烁
+                # 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
+                # 防止用户一次滚轮操作后永久丧失粘性滚底能力。
                 self.viewer.page().runJavaScript(
                     "(function(){"
                     "  window._suppressScrollEvent = true;"
@@ -5861,6 +5873,7 @@ class MessageCard(SimpleCardWidget):
                     + ";"
                     "    if (wasAtBottom) {"
                     "      document.body.scrollTop = document.body.scrollHeight;"
+                    "      window._userScrolledWithin = false;"
                     "    }"
                     "  }"
                     "  window._suppressScrollEvent = false;"

@@ -7330,7 +7330,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_assistant_message(self, card: MessageCard, new_content: str):
         card.update_content(new_content)
-        scroll_to_bottom_if_streaming(self.chat_scroll_area, self._is_streaming)
+        # 🐛 修复：延迟到下一事件循环再滚底，等卡片高度变化（CSS transition / 布局更新）
+        # 完成后再读取 scroll_bar.maximum()，否则高度还没变化时滚底不到位。
+        if self._is_streaming:
+            QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(
+                self.chat_scroll_area, self._is_streaming))
 
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
