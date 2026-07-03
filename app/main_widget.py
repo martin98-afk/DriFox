@@ -1608,6 +1608,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
+        self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
 
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
@@ -9552,6 +9553,35 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
 
+    def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
+        """进入子智能体会话 - 弹出对话框显示该子智能体的运行日志/消息"""
+        if getattr(self, "_is_destroyed", False):
+            return
+
+        # 通过 SubAgentManager 获取任务日志（支持运行中/已完成/数据库三种来源）
+        sub_agent_mgr = self.backend.sub_agent_manager
+        task_log_data = sub_agent_mgr.get_task_logs(task_id)
+
+        if not task_log_data.get("found"):
+            return
+
+        logs = task_log_data.get("logs", [])
+        summary = task_log_data.get("summary", {})
+        status = task_log_data.get("status", "unknown")
+        summary["status"] = status
+        summary["agent_name"] = agent_name
+
+        # 弹出会话对话框
+        from app.widgets.cards.floating.sub_agent_session_dialog import SubAgentSessionDialog
+        dialog = SubAgentSessionDialog(
+            task_id=task_id,
+            agent_name=agent_name,
+            logs=logs,
+            summary=summary,
+            parent=self,
+        )
+        dialog.exec_()
+
     def _handle_compact_command(self, args: str):
         """/compact 命令：触发上下文压缩
 
@@ -9761,9 +9791,11 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         compact = self._sub_agent_compact_widget
-        compact.clear()
 
         for task_id, executor in running_tasks.items():
+            # 如果任务行已存在（之前关闭过），保留已有统计数据
+            if task_id in compact._task_rows:
+                continue
             llm_cfg = getattr(executor, "llm_config", {}) or {}
             model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
             compact.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
@@ -10026,7 +10058,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 紧凑卡片：自动弹出 ──
         compact = self._sub_agent_compact_widget
         if not compact._batch_started:
-            compact.clear()
+            # 只清空已完成的任务，保留运行中的任务行（避免关闭再打开后统计数据重置）
+            finished_ids = [tid for tid, row in compact._task_rows.items() if not row.is_running]
+            for tid in finished_ids:
+                compact.remove_task(tid)
         compact._batch_started = True
 
         # 从 executor 提取模型名称
