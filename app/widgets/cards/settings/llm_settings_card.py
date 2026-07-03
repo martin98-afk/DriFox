@@ -653,8 +653,14 @@ class LLMSettingsCard(SystemCardFrame):
         self._save_timer.start()
 
     def _on_provider_changed(self):
-        """服务商变更（添加/删除/修改）— 只需重载模型配置，不需要刷新外观"""
-        self.configChanged.emit()
+        """服务商变更（添加/删除/修改）— 只需重载模型配置，不需要刷新外观
+
+        qconfig.set(save=True) 已经会触发 cfg.llm_saved_providers.valueChanged
+        → _on_providers_config_changed（轻量级，仅 _load_model_configs +
+        必要时刷新服务商/模型选择卡片），无需再 emit configChanged。
+        后者会走 _on_settings_config_changed → _apply_runtime_ui_settings，
+        全窗口刷一遍 setStyleSheet，导致删除操作明显卡顿。
+        """
         self._save_timer.start()
 
     def _on_config_changed(self):
