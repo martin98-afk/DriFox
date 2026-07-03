@@ -11849,6 +11849,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 同步到 tool_executor
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_workdir(folder_path)
+            # 刷新顶部项目 icon 右侧的分支标签
+            # 修复：_on_new_project_created 中的 _update_branch 在 add_key_document 之前调用，
+            # 此时 DB 没有 workdir，分支标签停留在旧状态（隐藏或显示旧分支）。
+            self._update_branch()
 
             # ── 刷新项目选择卡片 ──
             projects = self.history_manager.get_projects() if self.history_manager else [project_name]
