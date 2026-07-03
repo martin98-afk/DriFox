@@ -74,6 +74,7 @@ class _AgentTaskRow(QFrame):
     """单行子智能体任务 - 点击可展开显示详情"""
 
     toggled = pyqtSignal(str)  # task_id, 当展开/收起时发出
+    enter_session_requested = pyqtSignal(str)  # task_id, 当用户点击"进入会话"时发出
 
     def __init__(self, task_id: str, agent_name: str, task_desc: str, model_name: str = "", parent=None):
         super().__init__(parent)
@@ -213,7 +214,7 @@ class _AgentTaskRow(QFrame):
 
         # Row 0: ● 状态      | 🧠 模型
         # Row 1: 🔧 工具调用  | 📊 上下文
-        # Row 2: ⏱ 耗时      |（占位）
+        # Row 2: ⏱ 耗时      | 🔗 进入会话
 
         sta_icon, self._status_label_detail = _make_item("●", "运行中", f"{Colors.SYNTAX_STEP}")
         detail_layout.addWidget(sta_icon, 0, 0)
@@ -234,6 +235,31 @@ class _AgentTaskRow(QFrame):
         elp_icon, self._elapsed_label_detail = _make_item("⏱", "00:00")
         detail_layout.addWidget(elp_icon, 2, 0)
         detail_layout.addWidget(self._elapsed_label_detail, 2, 1)
+
+        # 进入会话按钮
+        self._enter_session_btn = QPushButton("🔗 进入会话", self._detail_panel)
+        self._enter_session_btn.setFont(get_unified_font(8))
+        self._enter_session_btn.setFixedHeight(22)
+        Colors.refresh()
+        self._enter_session_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.REALTIME_ACCENT};
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 0 8px;
+                {get_font_family_css()}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.REALTIME_ACCENT_WARM};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.REALTIME_ACCENT};
+            }}
+        """)
+        self._enter_session_btn.setCursor(Qt.PointingHandCursor)
+        self._enter_session_btn.clicked.connect(self._on_enter_session_clicked)
+        detail_layout.addWidget(self._enter_session_btn, 2, 2, 1, 2)
 
     # ── 交互 ──────────────────────────────────────────
 
@@ -263,6 +289,10 @@ class _AgentTaskRow(QFrame):
             self._is_expanded = False
             self._detail_panel.setVisible(False)
             self._expand_indicator.setText("▾")
+
+    def _on_enter_session_clicked(self):
+        """进入会话按钮点击 - 发出信号由父组件处理弹出"""
+        self.enter_session_requested.emit(self.task_id)
 
     # ── 公共方法 ──────────────────────────────────────
 
@@ -376,6 +406,23 @@ class _AgentTaskRow(QFrame):
         self._tool_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._ctx_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._elapsed_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+        if hasattr(self, "_enter_session_btn"):
+            self._enter_session_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.REALTIME_ACCENT};
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 0 8px;
+                    {get_font_family_css()}
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.REALTIME_ACCENT_WARM};
+                }}
+                QPushButton:pressed {{
+                    background-color: {Colors.REALTIME_ACCENT};
+                }}
+            """)
 
 
 class SubAgentCompactFloatingWidget(QWidget):
@@ -384,9 +431,11 @@ class SubAgentCompactFloatingWidget(QWidget):
     特性：
     - 内容自适应高度，最多撑到 _MAX_CARD_HEIGHT px，超出时滚动
     - 每行可点击展开详情（模型、状态、工具调用、上下文用量）
+    - 每行详情中提供"进入会话"按钮，弹出对应子智能体会话窗口
     """
 
     closed = pyqtSignal()
+    enter_session_requested = pyqtSignal(str, str)  # task_id, agent_name
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -626,14 +675,30 @@ class SubAgentCompactFloatingWidget(QWidget):
     def add_task(self, task_id: str, agent_name: str, task_description: str, model_name: str = ""):
         """添加一个新的子智能体任务行
 
+        如果 task_id 已存在则跳过（保持已有的统计数据）。用于卡片关闭后重新打开时
+        避免工具计数、运行时间等统计被重置。
+
         Args:
             task_id: 任务唯一标识
             agent_name: 子智能体名称
             task_description: 任务描述
             model_name: 使用的模型名称（可选）
         """
+        # 如果任务已存在，仅更新模型名称并保持已有统计数据
+        existing = self._task_rows.get(task_id)
+        if existing is not None:
+            if model_name:
+                existing.set_model_name(model_name)
+            self._has_running = True
+            self._start_rotation()
+            self._apply_style(True)
+            self._update_status_text()
+            self._reflow()
+            return
+
         row = _AgentTaskRow(task_id, agent_name, task_description, model_name, self._scroll_content)
         row.toggled.connect(self._on_row_toggled)
+        row.enter_session_requested.connect(self._on_enter_session_requested)
         self._task_rows[task_id] = row
         self._body_layout.addWidget(row)
 
@@ -647,6 +712,12 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._apply_style(True)
         self._update_status_text()
         self._reflow()
+
+    def _on_enter_session_requested(self, task_id: str):
+        """处理进入会话请求 - 转发信号给主窗口"""
+        row = self._task_rows.get(task_id)
+        agent_name = row.agent_name if row else ""
+        self.enter_session_requested.emit(task_id, agent_name)
 
     @staticmethod
     def _resolve_context_info(model_name: str) -> str:
@@ -704,6 +775,18 @@ class SubAgentCompactFloatingWidget(QWidget):
         row = self._task_rows.get(task_id)
         if row:
             row.increment_tool_count()
+
+    def remove_task(self, task_id: str):
+        """移除指定任务行
+
+        用于新批次开始时清理已完成的任务，同时保留运行中的任务统计数据。
+        """
+        row = self._task_rows.pop(task_id, None)
+        if row is None:
+            return
+        self._body_layout.removeWidget(row)
+        row.deleteLater()
+        self._reflow()
 
     def set_task_model(self, task_id: str, model_name: str):
         """设置任务的模型名称（运行时更新）"""

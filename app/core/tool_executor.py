@@ -447,6 +447,55 @@ class ToolExecutor:
         self._check_auto_compact(results)
         # ============================================================
 
+        # ====== PostToolUse hook 替换工具结果内容（hookSpecificOutput 约定）======
+        # 适用场景：hook 需要对工具结果做脱敏/过滤/加密，再给大模型。
+        #
+        # 约定：PostToolUse hook 的返回值 JSON 中包含
+        #   hookSpecificOutput.hookEventName == "PostToolUse"
+        #   hookSpecificOutput.replaceContent == "替换后的内容"
+        # 时才触发替换。普通文本输出或其他 JSON 输出不触发。
+        #
+        # 替换后清空 _hook_message_queue 防止双重注入（替换内容已反映在 result.content 中）。
+        if result is not None and result.success and isinstance(result.content, str):
+            _replaced = False
+            for _r in results:
+                if _r.success and _r.output:
+                    try:
+                        _data = _json.loads(_r.output)
+                        if isinstance(_data, dict):
+                            _hso = _data.get("hookSpecificOutput")
+                            if (
+                                isinstance(_hso, dict)
+                                and _hso.get("hookEventName") == "PostToolUse"
+                                and "replaceContent" in _hso
+                            ):
+                                result.content = str(_hso["replaceContent"])
+                                _replaced = True
+                                logger.debug(
+                                    f"[ToolExecutor] PostToolUse hook 替换了 {tool_name}"
+                                    f" 结果内容 ({len(result.content)} chars, replaceContent)"
+                                )
+                                break
+                    except Exception:
+                        pass  # 非 JSON 或无法解析 → 不触发替换
+            if _replaced:
+                # 清空 hook 队列：替换后的内容已在 result.content 中，
+                # 队列中的副本会导致 worker 在下一轮循环中再次注入，造成双重注入。
+                _q2 = getattr(self._backend, "_hook_message_queue", None)
+                if _q2 is not None:
+                    import queue as _queue2
+
+                    while True:
+                        try:
+                            _q2.get_nowait()
+                        except _queue2.Empty:
+                            break
+                    logger.debug(
+                        "[ToolExecutor] PostToolUse 替换后已清空 _hook_message_queue，"
+                        "防止 result.content 与队列消息双重注入"
+                    )
+        # ============================================================
+
     def _check_auto_compact(self, results: list) -> None:
         """检查 PostToolUse hook 结果中是否有 auto-compact 触发信号
 
@@ -753,9 +802,21 @@ class ToolExecutor:
                         f"[ToolExecutor] PreToolUse hook BLOCK: {tool_name}, output={result.output[:100] if result.output else 'empty'}"
                     )
 
-                    # 返回 hook 输出作为工具结果
-                    # ⚠️ hook 输出已由 on_hook_finished 回调排入 _pre_tool_message_queue，
-                    #    worker 的 _inject_pending_pretool_messages() 会将其注入到会话中。
+                    # 🔧 Claude Code 语义对齐：BLOCK 时 hook 输出只通过 result.content 传递，
+                    # 不同时走队列。避免 _inject_pending_pretool_messages() 和
+                    # _build_response_message_sequence(tool_results) 双重注入。
+                    # 清空队列中本应属于此 BLOCK hook 的输出（如果 add_output_to_context=True）。
+                    _q = getattr(self._backend, "_pre_tool_message_queue", None)
+                    if _q is not None:
+                        import queue as _queue
+
+                        while True:
+                            try:
+                                _q.get_nowait()
+                            except _queue.Empty:
+                                break
+
+                    # 返回 hook 输出作为工具结果（单来源：result.content）
                     return ToolResult(
                         True,
                         content=result.output

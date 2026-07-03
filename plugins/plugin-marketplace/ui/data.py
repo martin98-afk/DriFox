@@ -16,11 +16,25 @@ MARKETPLACE_URL = (
 CACHE_TTL = 3600  # 1 小时
 
 
+# ── 环境检测 ──────────────────────────────────────────────
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_DEV_DRIFOX = _PROJECT_ROOT / ".drifox"
+_USER_DRIFOX = Path.home() / ".drifox"
+
+
+def _drifox_dir() -> Path:
+    """查找 .drifox 目录（开发环境优先，兜底用户目录）"""
+    if _DEV_DRIFOX.exists():
+        return _DEV_DRIFOX
+    return _USER_DRIFOX
+
+
 class MarketplaceData:
     """市场数据获取 + 缓存"""
 
     def __init__(self):
-        self._cache_file = Path.home() / '.drifox' / "cache" / "marketplace.json"
+        self._cache_file = _drifox_dir() / "cache" / "marketplace.json"
         self._cache_file.parent.mkdir(parents=True, exist_ok=True)
         self._data: Optional[Dict[str, Any]] = None
         self._fetched_at: float = 0

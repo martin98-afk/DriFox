@@ -12,7 +12,8 @@ import subprocess
 import sys
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QPaintEvent
 from PyQt5.QtWidgets import (
     QDialog,
     QFrame,
@@ -332,26 +333,54 @@ class WorktreeSectionWidget(QWidget):
     """
 
     worktreeSwitched = pyqtSignal(str, str)  # (original_folder, worktree_path)
-    worktreeDeleted = pyqtSignal(str)         # 被删除的 worktree 路径
+    worktreeDeleted = pyqtSignal(str)         # 仅 UI 操作删除时发射
+    workingDirRestored = pyqtSignal(str)      # 外部删除导致工作目录恢复时发射（无重建）
     sizeChanged = pyqtSignal(int)             # 高度变化通知
 
     def refresh_style(self):
         """刷新样式（用于系统字体大小切换时重绘）"""
-        # 重建所有行以应用新的 font_size_css()
-        self._populate_rows()
+        self._repopulate()
 
-    def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None):
+    def __init__(self, repo_info, original_folder: str, parent=None,
+                 current_workdir: str = None, project: str = None):
         super().__init__(parent)
         self._repo_info = repo_info
         self._original_folder = original_folder
-        self._current_workdir = current_workdir  # 当前实际工作目录（用于判断哪个分支激活）
+        self._current_workdir = current_workdir
+        self._project = project or ""  # 用于 DB 直接清理
+        self._last_check_time = 0.0    # paintEvent 防抖时间戳
         self._setup_ui()
+
+    def paintEvent(self, event: QPaintEvent):
+        """在每次绘制时检查 worktree 路径是否仍然存在
+
+        为什么用 paintEvent 而非 QTimer：
+        QTimer 在嵌入 QListWidget.setItemWidget 的 widget 中可能无法可靠触发
+       （widget 不是标准层级结构的一部分）。
+        paintEvent 由 Qt 绘制系统保证调用，是检测文件系统变化的最可靠方式。
+        防抖 5s 避免频繁 I/O。
+        """
+        self._check_paths()
+        super().paintEvent(event)
+
+    def _check_paths(self):
+        import time
+        now = time.monotonic()
+        if now - self._last_check_time < 5.0:
+            return
+        self._last_check_time = now
+
+        if not self._repo_info or not self._repo_info.worktrees:
+            return
+        has_missing = any(not os.path.isdir(wt.path) for wt in self._repo_info.worktrees)
+        if has_missing:
+            logger.info("[Worktree] paintEvent 检测到外部删除，内部清理...")
+            self._repopulate()
 
     def _setup_ui(self):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
 
         layout = QVBoxLayout(self)
-        # 左边距从硬编码 84px 改为 24px，窗口缩小时不会溢出
         layout.setContentsMargins(24, 2, 0, 4)
         layout.setSpacing(0)
 
@@ -363,18 +392,102 @@ class WorktreeSectionWidget(QWidget):
 
         self._populate_rows()
 
-    def _populate_rows(self):
+    def _repopulate(self):
+        """清除缓存后重新 populate
+        
+        如果重新获取失败（_repo_info 为 None），仍要清空旧行避免残留。
+        """
+        GitWorktreeDetector._info_cache.pop(self._original_folder, None)
+        fresh = GitWorktreeDetector.get_repo_info(self._original_folder)
+        self._repo_info = fresh
+        if self._repo_info:
+            self._populate_rows()
+        else:
+            # 获取失败（仓库已删除等），清空所有行
+            self._clear_rows()
+
+    def _cleanup_db(self, path: str):
+        """直接清理 DB 中该路径的记录（不触发父级重建）"""
+        if not self._project:
+            return
+        try:
+            from app.core.memory_manager import MemoryManagerCore
+            mm = MemoryManagerCore.get_instance()
+            if mm and mm._key_documents_repo:
+                mm._key_documents_repo.remove_by_path(self._project, path)
+        except Exception:
+            pass
+
+    def _restore_workdir(self, original_path: str):
+        """将工作目录恢复为原始 git 仓库根目录（当被删 path 恰是当前 workdir 时）"""
+        try:
+            from app.core.memory_manager import MemoryManagerCore
+            mm = MemoryManagerCore.get_instance()
+            if mm and self._project:
+                mm.set_working_directory(self._project, original_path)
+                self._current_workdir = original_path
+                # 通知父级更新缓存（工具执行器等），不触发全量重建
+                self.workingDirRestored.emit(original_path)
+        except Exception:
+            pass
+
+    def _clear_rows(self):
+        """清空所有 worktree 行 + 新建行（供 _populate_rows 和 _repopulate 共用）"""
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        # 用 _current_workdir 来判断哪个分支是当前激活的
+    def _populate_rows(self):
+        """重新构建 worktree 行列表
+
+        处理外部删除的策略（全内部闭环，不触发父级重建）：
+        1. 检测缺失路径
+        2. `git worktree prune` 清理 git 内部记录
+        3. 直接调用 `remove_by_path` 清理 DB
+        4. 若当前 workdir 恰是被删路径 → 恢复为原始仓库
+        5. 跳过缺失行，渲染其余行
+        """
+        self._clear_rows()
+
         current_wd = self._current_workdir or self._original_folder
         normalized_wd = os.path.normpath(current_wd)
 
+        # ====== 检测并处理外部删除 ======
+        missing_paths = [wt.path for wt in self._repo_info.worktrees if not os.path.isdir(wt.path)]
+
+        if missing_paths:
+            logger.info(f"[Worktree] 缺失 {len(missing_paths)} 个外部删除目录，内部清理中...")
+            # 1) prune
+            try:
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    capture_output=True, text=True, cwd=self._repo_info.root,
+                    timeout=5, encoding="utf-8", errors="replace",
+                    creationflags=_CREATION_FLAGS,
+                )
+            except Exception:
+                pass
+            # 2) 重新获取
+            GitWorktreeDetector._info_cache.pop(self._original_folder, None)
+            fresh = GitWorktreeDetector.get_repo_info(self._original_folder)
+            if fresh:
+                self._repo_info = fresh
+            # 3) DB 清理（直接，不走 signal → 不触发 _load_key_documents）
+            for p in missing_paths:
+                self._cleanup_db(p)
+            # 4) 如果当前工作目录就是被删的 path，恢复为原始仓库
+            if self._current_workdir and os.path.normpath(self._current_workdir) in (
+                os.path.normpath(mp) for mp in missing_paths
+            ):
+                logger.info(f"[Worktree] 当前 workdir 已被删除，恢复为原始仓库: {self._original_folder}")
+                self._restore_workdir(self._original_folder)
+
+        # ====== 渲染 ======
+        visible_count = 0
         for wt in self._repo_info.worktrees:
-            # 比较 worktree 路径与当前工作目录
+            if not os.path.isdir(wt.path):
+                continue  # prune 失败等边缘情况
             is_current = os.path.normpath(wt.path) == normalized_wd
             row = _WorktreeRow(
                 branch=wt.branch,
@@ -389,6 +502,7 @@ class WorktreeSectionWidget(QWidget):
             row.switched.connect(self._on_switch)
             row.deleted.connect(self._on_deleted)
             self._rows_layout.addWidget(row)
+            visible_count += 1
 
         add = _AddWorktreeRow(
             self._repo_info.root,
@@ -399,8 +513,7 @@ class WorktreeSectionWidget(QWidget):
         add.createRequested.connect(self._on_create)
         self._rows_layout.addWidget(add)
 
-        # 通知父级高度变化
-        wt_count = len(self._repo_info.worktrees) or 1
+        wt_count = visible_count or 1
         height = wt_count * 24 + 24 + 4
         self.sizeChanged.emit(height)
 
@@ -410,14 +523,12 @@ class WorktreeSectionWidget(QWidget):
             self.worktreeSwitched.emit(self._original_folder, worktree_path)
 
     def _on_deleted(self, worktree_path: str):
-        """删除 worktree"""
-        # 1. 先刷新本地列表（移除已删除的分支）
-        self._refresh()
-        # 2. 再通知父级（worktree_path 只作为标识，worktree 已不存在）
+        """UI 删除 worktree（内联确认后）"""
+        self._repopulate()
         self.worktreeDeleted.emit(worktree_path)
 
     def _refresh(self):
-        """刷新 worktree 列表"""
+        """刷新 worktree 列表（外部调用，如创建新 worktree 后）"""
         # 清除缓存，确保获取最新的 worktree 列表
         GitWorktreeDetector._info_cache.pop(self._original_folder, None)
         self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)

@@ -358,6 +358,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_anchor_timer.setInterval(80)
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
         self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
+        # 🛡️ 会话切换哨兵：_create_new_session 中置 True，丢弃 stop_streaming 后
+        # 仍可能跨线程到达的 worker 旧回调（_on_messages_updated / _do_post_stream_cleanup
+        # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
+        # 在 _on_send_clicked 发起新 AI 请求时清零。
+        self._session_switched = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
@@ -1603,11 +1608,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
+        self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
 
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
             "subagents": self._handle_subagents_command,
-            "title_gen": self._handle_title_gen_command,
+            "title-gen": self._handle_title_gen_command,
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
             "hook-preset": self._handle_hook_preset_command,
@@ -1822,6 +1828,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card_content.newProjectCreated.connect(self._on_new_project_created)
         self._project_selector_card_content.archiveProject.connect(self._on_archive_project)
         self._project_selector_card_content.openFolderRequested.connect(self._on_open_project_folder)
+        self._project_selector_card_content.folderDropped.connect(self._on_project_folder_dropped)
 
         self._project_selector_card.content_layout.addWidget(self._project_selector_card_content)
         # ── 新建项目输入放到标题栏 ──
@@ -1829,10 +1836,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         Colors.refresh()
         self._project_new_edit = QLineEdit(self._project_selector_card)
-        self._project_new_edit.setPlaceholderText("新建项目...")
-        self._project_new_edit.setMaximumWidth(200)
-        self._project_new_edit.setMinimumWidth(100)
-        self._project_new_edit.setFixedHeight(24)
+        self._project_new_edit.setPlaceholderText("新建/搜索项目...")
+        self._project_new_edit.setMaximumWidth(220)
+        self._project_new_edit.setMinimumWidth(130)
+        self._project_new_edit.setFixedHeight(26)
         self._project_new_edit.setStyleSheet(f"""
             QLineEdit {{
                 background: {Colors.HOVER_BG};
@@ -1851,15 +1858,23 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
         """)
         self._project_new_edit.returnPressed.connect(self._on_header_new_project)
+        self._project_new_edit.textChanged.connect(self._on_project_filter_changed)
 
         self._project_new_btn = TransparentToolButton(FluentIcon.ADD, self._project_selector_card)
         self._project_new_btn.setFixedSize(24, 24)
         self._project_new_btn.setToolTip("创建项目")
         self._project_new_btn.clicked.connect(self._on_header_new_project)
 
+        # 选择文件夹按钮（+号右侧）
+        self._project_open_folder_btn = TransparentToolButton(FluentIcon.FOLDER, self._project_selector_card)
+        self._project_open_folder_btn.setFixedSize(24, 24)
+        self._project_open_folder_btn.setToolTip("选择文件夹作为项目根目录")
+        self._project_open_folder_btn.clicked.connect(self._on_project_open_folder_btn)
+
         # 插入到标题栏的额外按钮区（关闭按钮之前）
         self._project_selector_card._extra_buttons_container.insertWidget(0, self._project_new_edit)
         self._project_selector_card._extra_buttons_container.insertWidget(1, self._project_new_btn)
+        self._project_selector_card._extra_buttons_container.insertWidget(2, self._project_open_folder_btn)
 
         self._project_selector_card.setVisible(False)
         self._project_selector_card.closed.connect(
@@ -4950,7 +4965,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -5592,6 +5607,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
 
+        # 🛡️ 标记会话切换：stop_streaming 后 worker 仍可能在跨线程事件循环里
+        # 投递 _on_messages_updated / _on_stream_finished / _do_post_stream_cleanup
+        # 等旧回调。此时 _current_session_id 已被下方 create_session 更新到新会话，
+        # 这些回调若继续执行会把旧会话的消息写到新会话，再被 _do_post_stream_cleanup
+        # 错误地保存到切换后的新项目下，出现「同一对话在两个项目下都出现」的副本 bug。
+        # 哨兵一直保持 True，直到下一次 _on_send_clicked 真正发起新会话的 AI 请求时清零。
+        self._session_switched = True
+
         self._is_streaming = False
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
@@ -6000,8 +6023,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         切换会话时彻底清理当前会话的卡片，释放内存。
 
-        使用 deleteLater() + processEvents() 替代 sip.delete() 即时销毁，
-        避免 Qt 信号-槽连接在销毁过程中被触发导致 access violation。
+        性能优化：移除 QApplication.processEvents()（实测在切换项目中阻塞 UI 事件循环 ~100ms+）；
+        deleteLater() 本身是延迟删除的，由 Qt 下一轮事件循环自然消费即可。
+        全局渲染缓存清理 / 进程堆压缩也推到 singleShot(0) 下一帧，避免同步阻塞主线程。
         """
         # 从布局中取出所有 widgets
         widgets = self._take_chat_widgets()
@@ -6025,14 +6049,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 widget.cleanup()
             widget.deleteLater()
 
-        # 清理全局 Markdown 渲染 LRU 缓存（缓存的 HTML 字符串可达数 MB）
-        clear_global_render_cache()
-
-        # 立即处理所有 deleteLater 事件，确保旧卡片在新卡片创建前被销毁
-        QApplication.processEvents()
-
-        # 卡片清理后压缩进程堆，释放空闲 arena
-        _compact_process_heap_after_cleanup()
+        # 推迟到下一事件循环：清理 Markdown 渲染 LRU 缓存 + 压缩进程堆。
+        # 这两个操作虽各自不重，但 merge 进主线程后会切走 ~50-100ms；
+        # 切项目这一帧只先释放 widget 引用，把重活放到下一帧。
+        QTimer.singleShot(
+            0,
+            lambda: (
+                clear_global_render_cache(),
+                _cleanup_global_lru_caches(),
+                _compact_process_heap_after_cleanup(),
+            ),
+        )
 
     def _cleanup_session_card_cache(self):
         from app.constants import (
@@ -7194,6 +7221,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if session:
             self._displayed_session_id = session.session_id
+            # 🛡️ 锁定首发项目快照：用户首次发消息时记录当前项目。
+            # 一旦锁定，后续即使切换项目，落盘时仍归属首发项目，
+            # 避免"对话完成后立即切换项目导致会话错存到切换后项目"bug。
+            if not session.originating_project and self._current_project:
+                session.originating_project = self._current_project
 
         # 计算当前 user message 的 round_index
         if user_round_index is None:
@@ -7918,10 +7950,15 @@ class OpenAIChatToolWindow(ToolWindow):
                         **worktree_kwargs,
                     )
                 else:
+                    # 🛡️ 罕见路径（恢复时历史被截断）：用 originating_project 优先的
+                    # fallback 链，避免被当前 _current_project 错误覆盖
+                    resolved_project = self._resolve_session_project_fallback(
+                        session.session_id, self._current_project, session=session
+                    )
                     self.history_manager.save_session(
                         session.messages,
                         session_id=session.session_id,
-                        project=self._current_project,
+                        project=resolved_project,
                         **compaction_info,
                         **worktree_kwargs,
                     )
@@ -9177,6 +9214,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         from PyQt5.QtCore import QTimer  # 推迟 send_message 用
 
+        # 🛡️ 清零会话切换哨兵：用户即将发起新 AI 请求，worker 的旧回调通道已无意义，
+        # 后续 _on_messages_updated / _do_post_stream_cleanup 应正常处理新会话。
+        self._session_switched = False
+
         if self._is_auto_loop_running:
             InfoBar.warning(
                 "AutoLoop",
@@ -9512,6 +9553,35 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
 
+    def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
+        """进入子智能体会话 - 弹出对话框显示该子智能体的运行日志/消息"""
+        if getattr(self, "_is_destroyed", False):
+            return
+
+        # 通过 SubAgentManager 获取任务日志（支持运行中/已完成/数据库三种来源）
+        sub_agent_mgr = self.backend.sub_agent_manager
+        task_log_data = sub_agent_mgr.get_task_logs(task_id)
+
+        if not task_log_data.get("found"):
+            return
+
+        logs = task_log_data.get("logs", [])
+        summary = task_log_data.get("summary", {})
+        status = task_log_data.get("status", "unknown")
+        summary["status"] = status
+        summary["agent_name"] = agent_name
+
+        # 弹出会话对话框
+        from app.widgets.cards.floating.sub_agent_session_dialog import SubAgentSessionDialog
+        dialog = SubAgentSessionDialog(
+            task_id=task_id,
+            agent_name=agent_name,
+            logs=logs,
+            summary=summary,
+            parent=self,
+        )
+        dialog.exec_()
+
     def _handle_compact_command(self, args: str):
         """/compact 命令：触发上下文压缩
 
@@ -9721,9 +9791,11 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         compact = self._sub_agent_compact_widget
-        compact.clear()
 
         for task_id, executor in running_tasks.items():
+            # 如果任务行已存在（之前关闭过），保留已有统计数据
+            if task_id in compact._task_rows:
+                continue
             llm_cfg = getattr(executor, "llm_config", {}) or {}
             model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
             compact.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
@@ -9732,7 +9804,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("sub_agent_compact", self._window_id)
 
     def _handle_title_gen_command(self, args: str):
-        """/title_gen 命令：切换标题生成使用的默认模型
+        """/title-gen 命令：切换标题生成使用的默认模型
 
         参数：
           --model=X  → 设置标题生成默认模型
@@ -9959,7 +10031,7 @@ class OpenAIChatToolWindow(ToolWindow):
         saved = cfg.llm_title_gen_default_model.value or ""
 
         cmd_mgr = CommandManager.get_instance()
-        entries = cmd_mgr._commands.get("title_gen", {})
+        entries = cmd_mgr._commands.get("title-gen", {})
         for cmd_type, cmd_def in entries.items():
             for param in cmd_def.parameters:
                 if param.name == "--model=":
@@ -9986,7 +10058,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 紧凑卡片：自动弹出 ──
         compact = self._sub_agent_compact_widget
         if not compact._batch_started:
-            compact.clear()
+            # 只清空已完成的任务，保留运行中的任务行（避免关闭再打开后统计数据重置）
+            finished_ids = [tid for tid, row in compact._task_rows.items() if not row.is_running]
+            for tid in finished_ids:
+                compact.remove_task(tid)
         compact._batch_started = True
 
         # 从 executor 提取模型名称
@@ -10283,8 +10358,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ====== 非流式路径：强制中断并创建新对话轮次 ======
         logger.info(
-            "[SubAgent-Callback] _do_trigger_callback: 非流式路径，创建新对话轮次 "
-            f"total={total}, failed={failed}"
+            f"[SubAgent-Callback] _do_trigger_callback: 非流式路径，创建新对话轮次 total={total}, failed={failed}"
         )
 
         # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
@@ -10569,6 +10643,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
 
+        # 🛡️ 会话切换哨兵：流式回调链最末端的兜底。若 stop_streaming 后 worker
+        # 仍投递了 _on_messages_updated 但被丢弃，但 _on_stream_finished 仍可能
+        # 触发 _do_post_stream_cleanup 把"当前"会话（其实是新会话）保存到新项目。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        if getattr(self, "_session_switched", False):
+            from loguru import logger
+            logger.warning("[PostStreamCleanup] 检测到会话切换哨兵，跳过本次保存防止重复落盘")
+            return
+
         if self.history_manager:
             self._save_current_session_to_history()
             # 🛡️ 立即落盘，确保数据写入 SQLite
@@ -10713,21 +10796,36 @@ class OpenAIChatToolWindow(ToolWindow):
             # 如果不支持余额查询，隐藏
             balance_display.setVisible(False)
 
-    def _resolve_session_project_fallback(self, session_id: str, current_project: str) -> str:
+    def _resolve_session_project_fallback(
+        self,
+        session_id: str,
+        current_project: str,
+        session: Optional["ChatSession"] = None,
+    ) -> str:
         """解析会话的项目归属兜底值：优先沿用已有归属，避免被默认项目覆盖。
 
-        策略：
-        1. 通过 history_manager 查询该 session_id 在内存/SQLite 中的现有 project
-        2. 查到非空值则沿用（保护"项目切换不影响老会话归属"）
+        策略（优先级从高到低）：
+        1. session.originating_project：会话级「首发项目」快照。
+           用户首次发消息时锁定（即使用户切换项目也不变），
+           避免"对话完成后立即切换项目导致会话错存到切换后项目"bug。
+        2. 通过 history_manager 查询该 session_id 在内存/SQLite 中的现有 project
+           （保护"项目切换不影响老会话归属"）
         3. 查不到则使用 current_project（仅适用于真正的新会话）
 
         Args:
             session_id: 会话 ID
             current_project: 当前项目（兜底值）
+            session: 可选 ChatSession 对象，若提供则优先用其 originating_project 字段
 
         Returns:
             解析后的项目名
         """
+        # 1. 优先：会话级首发项目快照（用户在哪个项目下首发的对话）
+        if session is not None:
+            op = getattr(session, "originating_project", "") or ""
+            if op:
+                return op
+        # 2. 次之：内存/SQLite 中该 session_id 的已有 project
         if not session_id or not self.history_manager:
             return current_project
         try:
@@ -10738,6 +10836,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     return existing_project
         except Exception as e:
             logger.warning(f"[ProjectResolve] 查询已有项目归属失败: {e}, fallback={current_project}")
+        # 3. 兜底：current_project
         return current_project
 
     def _save_current_session_to_history(self):
@@ -10769,7 +10868,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 🛡️ 内存中找不到（如老会话被 _history_limit=100 截断），
                 # 优先查询 SQLite 原有 project，避免被当前 _current_project 错误覆盖
                 resolved_project = self._resolve_session_project_fallback(
-                    self._current_session_id, self._current_project
+                    self._current_session_id, self._current_project, session=session
                 )
                 self.history_manager.save_session(
                     saved_messages,
@@ -10783,10 +10882,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 self._current_session_id = session.session_id if session else None
         else:
-            # 🛡️ 新会话首次入库：用 _current_project；如果 session.session_id 在 SQLite
-            # 中已存在（极少见的跨窗口/恢复场景），优先沿用其原 project
+            # 🛡️ 新会话首次入库：优先用 session.originating_project（用户首次发消息时锁定），
+            # 若未锁定则查 SQLite，最后兜底 _current_project。
+            # 这条路径专门防止"对话进行中切换项目导致会话错存"bug。
             resolved_project = self._resolve_session_project_fallback(
-                session.session_id if session else None, self._current_project
+                session.session_id if session else None, self._current_project, session=session
             )
             self.history_manager.save_session(
                 saved_messages,
@@ -10808,6 +10908,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 主线程事件循环处理。closeEvent 路径已主动同步应用 + 持久化（见 _apply_interrupted_messages_to_session），
         # 这里无需再 set_messages，避免 UI 副作用（set_meta_info/ring 刷新）访问已销毁的 widget。
         if getattr(self, "_is_destroyed", False):
+            return
+        # 🛡️ 会话切换哨兵：_create_new_session 会创建新会话并 stop_streaming，
+        # 但 worker 跨线程的 _on_messages_updated 可能延迟到达，此时
+        # get_current_session() 返回的是新会话（旧会话已被替换），
+        # 继续 set_messages 会把旧消息写到新会话，再被后续 save 错误保存到新项目。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        if getattr(self, "_session_switched", False):
+            from loguru import logger
+            logger.warning(
+                f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
+                f"msg_count={len(messages)}, current_session_id="
+                f"{self.session_manager.get_current_session().session_id[:8] if self.session_manager.get_current_session() else 'None'}"
+            )
             return
         session = self.session_manager.get_current_session()
         if not session:
@@ -11320,13 +11433,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id is None and session and session.messages:
             worktree_path = self._get_current_worktree_path()
             worktree_kwargs = {"worktree_path": worktree_path or ""}
+            # 🛡️ 新会话首存：使用 originating_project 优先的 fallback 链，
+            # 避免"标题生成完成时用户已切到其他项目"导致会话错存。
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id, self._current_project, session=session
+            )
             self.history_manager.save_session(
                 session.messages if session else [],
                 title=clean_summary,  # 使用生成的摘要作为标题
                 session_id=session.session_id if session else None,
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
-                project=self._current_project,
+                project=resolved_project,
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id if session else None
@@ -11504,6 +11622,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
             self._project_selector_card.set_title_text("📁 项目切换")
+            # 清空过滤输入框
+            self._project_new_edit.clear()
 
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
@@ -11557,13 +11677,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新 tool_executor 的当前项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(project)
+        # 性能优化：先算 workdir（实例缓存 / DB 单次读取），再下发给 memory_card_popup，
+        # 避免 set_project 内部又走一遍 _get_effective_workdir。
+        workdir = self._current_workdir.get(project)
+        if workdir is None and self.backend and self.backend.memory_manager:
+            workdir = self.backend.memory_manager.get_working_directory(project)
+            if workdir:
+                self._current_workdir[project] = workdir
         # 刷新记忆卡片的项目（项目笔记、关键文档会跟着刷新）
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             from loguru import logger
 
             logger.info(f"[MainWidget] Calling set_project({project}) on memory_card_popup")
-            self._memory_card_popup.set_project(project)
-            # 切换项目时自动同步工作目录
+            self._memory_card_popup.set_project(project, workdir=workdir)
+            # 同步到记忆卡片实例缓存 + tool_executor（已有的 _sync_working_directory
+            # 会再做一次 workdir 读取；因为上面已经把它写进 _current_workdir，
+            # 这次读取走的是缓存，DB 命中只一次）。
             self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
@@ -11574,16 +11703,45 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
 
+    def _on_project_filter_changed(self, text: str):
+        """输入过滤文本变化时同步过滤项目列表"""
+        if hasattr(self, "_project_selector_card_content"):
+            self._project_selector_card_content.set_filter(text)
+
     def _on_header_new_project(self):
-        """从标题栏新建项目按钮/回车触发"""
+        """从标题栏新建项目按钮/回车触发
+
+        行为：
+        1. 如果输入内容完全匹配某个已有项目 → 切换到该项目
+        2. 如果输入内容为空 → 不做任何操作
+        3. 否则 → 创建新项目
+        """
         name = self._project_new_edit.text().strip()
         if not name:
             return
+
+        # 检查是否完全匹配某个已有项目
+        if hasattr(self, "_project_selector_card_content"):
+            matching = [p for p in self._project_selector_card_content._projects if p.lower() == name.lower()]
+            if matching:
+                # 匹配到已有项目 → 直接切换
+                self._project_new_edit.clear()
+                self._project_selector_card_content.set_filter("")
+                self._on_project_selected(matching[0])
+                return
+
+        # 无匹配 → 创建新项目
         self._project_new_edit.clear()
+        self._project_selector_card_content.set_filter("")
         self._on_new_project_created(name)
 
-    def _on_new_project_created(self, project: str):
-        """新建项目后"""
+    def _on_new_project_created(self, project: str, suppress_memory_card: bool = False):
+        """新建项目后
+
+        Args:
+            suppress_memory_card: 为 True 时不自动弹出关键文档卡片
+                                  （拖拽/选择文件夹设了根目录时使用）
+        """
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
@@ -11602,12 +11760,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
-        # 自动弹出长期记忆卡片
-        if not self._memory_card.isVisible():
-            self._toggle_memory_card()
-        # 卡片弹出后，再切换到关键文档标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
-        if hasattr(self, "_memory_card") and self._memory_card:
-            self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+        # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
+        if not suppress_memory_card:
+            if not self._memory_card.isVisible():
+                self._toggle_memory_card()
+            # 卡片弹出后，再切换到关键文档标签
+            if hasattr(self, "_memory_card") and self._memory_card:
+                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
         # 自动触发新建会话
         self._create_new_session()
         # 隐藏项目选择卡片
@@ -11706,6 +11865,157 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _on_project_folder_dropped(self, folder_path: str):
+        """拖拽文件夹到项目选择卡片时的处理
+
+        1. 弹出对话框让用户确认/修改项目名（默认使用文件夹名）
+        2. 创建项目
+        3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
+        4. 刷新项目列表
+        """
+        from PyQt5.QtWidgets import QInputDialog
+
+        # ── 提取文件夹名作为默认项目名 ──
+        folder_name = os.path.basename(folder_path.rstrip("/\\"))
+
+        # ── 弹出输入对话框 ──
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("📁 新建项目")
+        dialog.setLabelText("项目名称：\n（将自动绑定此文件夹为项目根目录）")
+        dialog.setTextValue(folder_name)
+        dialog.setOkButtonText("创建")
+        dialog.setCancelButtonText("取消")
+        # 应用主题样式
+        Colors.refresh()
+        dialog.setStyleSheet(f"""
+            QInputDialog {{
+                background-color: {Colors.CARD_BG.format(alpha=240)};
+                color: {Colors.TEXT_PRIMARY};
+            }}
+            QInputDialog QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)};
+            }}
+            QLineEdit {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 6px 10px;
+                {font_size_css(13)}
+                {get_font_family_css()}
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {Colors.TEXT_ACCENT};
+            }}
+            QPushButton {{
+                background-color: {Colors.BORDER_ACCENT};
+                color: {Colors.BUTTON_TEXT_ON_ACCENT};
+                border: 1px solid {Colors.BORDER_ACCENT};
+                border-radius: 4px;
+                padding: 6px 18px;
+                min-width: 64px;
+                {font_size_css(13)}
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.SEND_BTN_HOVER_START};
+            }}
+        """)
+        ok = dialog.exec_()
+        project_name = dialog.textValue().strip()
+
+        if not ok or not project_name:
+            return
+
+        # ── 检查项目名是否已存在 ──
+        projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
+        if project_name in projects:
+            InfoBar.warning(
+                title="项目已存在",
+                content=f"项目「{project_name}」已存在，请使用其他名称",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        # ── 创建项目（已设根目录，跳过关键文档卡片弹出） ──
+        self._on_new_project_created(project_name, suppress_memory_card=True)
+
+        # ── 将拖入文件夹加入关键文档并设为工作目录（根目录） ──
+        try:
+            if self.backend and self.backend.memory_manager:
+                # 添加为关键文档
+                self.backend.memory_manager.add_key_document(project_name, folder_path, added_by="manual")
+                # 设置为工作目录（根目录）
+                self.backend.memory_manager.set_working_directory(project_name, folder_path)
+                logger.info(f"[MainWidget] 已绑定项目「{project_name}」根目录: {folder_path}")
+
+            # 同步实例缓存（与手动添加并标记根目录路径保持一致）
+            # 修复 bug：_on_new_project_created 内部调用的 _sync_working_directory 在
+            # add_key_document 之前执行，导致 _instance_workdir 被错误缓存为空字符串，
+            # 后续 _get_effective_workdir 返回 None，has_active_wd=False，
+            # 关键文档 Tab 中工作目录条目下方的 worktree section 永远不显示。
+            self._current_workdir[project_name] = folder_path
+            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+                self._memory_card_popup._instance_workdir[project_name] = folder_path
+                # 主动刷新关键文档 UI，确保 worktree section 立即显示
+                # （与 _switch_to_worktree 行为保持一致）
+                self._memory_card_popup._load_key_documents()
+            # 同步到 tool_executor
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_workdir(folder_path)
+            # 刷新顶部项目 icon 右侧的分支标签
+            # 修复：_on_new_project_created 中的 _update_branch 在 add_key_document 之前调用，
+            # 此时 DB 没有 workdir，分支标签停留在旧状态（隐藏或显示旧分支）。
+            self._update_branch()
+
+            # ── 刷新项目选择卡片 ──
+            projects = self.history_manager.get_projects() if self.history_manager else [project_name]
+            if self._current_project not in projects:
+                projects.insert(0, self._current_project)
+            meta_map = self._build_project_meta_map(projects)
+            root_dir_map = self._build_project_root_dir_map(projects)
+            self._project_selector_card_content.set_projects_data(
+                projects, self._current_project, meta_map, root_dir_map
+            )
+
+            InfoBar.success(
+                title="项目已创建",
+                content=f"已创建项目「{project_name}」并绑定根目录",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                parent=self,
+            )
+        except Exception as e:
+            logger.error(f"[MainWidget] 绑定项目根目录失败: {e}")
+            InfoBar.error(
+                title="绑定失败",
+                content=f"项目「{project_name}」创建成功，但绑定根目录时出错: {e}",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=5000,
+                parent=self,
+            )
+
+    def _on_project_open_folder_btn(self):
+        """选择文件夹按钮：弹出文件夹选择器，选取文件夹后走拖拽建项目流程"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择项目根目录",
+            "",
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not folder_path:
+            return
+        # 复用手动选择文件夹 → 弹出建项目对话框
+        self._on_project_folder_dropped(folder_path)
 
     def _on_memory_tab_changed(self, tab_id: str):
         """处理记忆管理标签切换"""
@@ -12019,7 +12329,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 🛡️ 内存找不到（老会话被截断出 _history_limit）：
                 # 先查 SQLite 原 project，避免被当前 _current_project 覆盖
                 resolved_project = self._resolve_session_project_fallback(
-                    self._current_session_id, self._current_project
+                    self._current_session_id, self._current_project, session=session
                 )
                 self.history_manager.save_session(
                     session.messages,
@@ -12033,7 +12343,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id = session.session_id
         else:
             # 🛡️ 新会话：用 _current_project；若 session_id 在 SQLite 已存在则沿用原 project
-            resolved_project = self._resolve_session_project_fallback(session.session_id, self._current_project)
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id, self._current_project, session=session
+            )
             self.history_manager.save_session(
                 session.messages,
                 session_id=session.session_id,
@@ -12108,7 +12420,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 多窗口隔离：注销窗口及其卡片数据
@@ -12129,7 +12441,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
@@ -12367,6 +12679,17 @@ class OpenAIChatToolWindow(ToolWindow):
         由 _interrupt_complete 信号触发。
         """
         if getattr(self, "_is_destroyed", False):
+            return
+
+        # 🛡️ 会话切换哨兵：用户在 AI 流式期间切换了项目或新建了会话，
+        # finalize_stop 此时才到达，apply_interrupted_messages 会把旧消息写到新会话，
+        # save 会落到新项目。直接丢弃整条回调（closeEvent 路径已处理数据持久化）。
+        if getattr(self, "_session_switched", False):
+            from loguru import logger
+            logger.warning(
+                f"[FinalizeStop] 检测到会话切换哨兵，丢弃 finalize 回调："
+                f"interrupted_count={len(interrupted_messages) if interrupted_messages else 0}"
+            )
             return
 
         current_session = self.session_manager.get_current_session()

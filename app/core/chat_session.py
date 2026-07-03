@@ -46,6 +46,10 @@ class ChatSession:
         self._system_prompt_agent: str = ""  # 缓存 system prompt 对应的 agent 名
         self.metadata: Dict[str, Any] = {}  # 扩展元数据（如模型/Agent 覆盖）
         self.context_usage: int = 0  # 消息列表估算 token 总数，保存时计算
+        # 🛡️ 首发项目快照：用户在哪个项目下首发的对话。
+        # 用于"对话进行中切换项目导致落盘错存"bug 的兜底：
+        # 一旦锁定不再改变，即使后续切换项目，会话仍归属首发项目。
+        self.originating_project: str = ""
 
     @staticmethod
     def _default_compaction_state() -> Dict:
@@ -164,6 +168,7 @@ class ChatSession:
             "user_edited_title": self.user_edited_title,
             "metadata": self.metadata,
             "context_usage": self.context_usage,
+            "originating_project": self.originating_project,
         }
 
     @classmethod
@@ -185,6 +190,7 @@ class ChatSession:
         session.metadata = data.get("metadata", {}) or {}
         session.user_edited_title = data.get("user_edited_title", False)
         session.context_usage = data.get("context_usage", 0)
+        session.originating_project = data.get("originating_project", "") or ""
         return session
 
     def set_user_edited_title(self, edited: bool = True):

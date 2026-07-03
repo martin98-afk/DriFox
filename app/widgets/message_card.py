@@ -15,12 +15,14 @@ MessageCard - 消息卡片组件
 - tool_calls: List[Dict]     # 工具调用
 - tool_call_id: str         # 工具结果关联 ID
 """
+
 import base64
 import hashlib
 import math
 import os
 import random
 import re
+import sys
 import time
 import urllib.parse
 from datetime import datetime
@@ -127,9 +129,45 @@ _NEXT_FIELD_PATTERN = re.compile(r"\n(?:success|tool_call_id|diff|echarts):")
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
+# ===== Pygments lexer/formatter 缓存（避免每个代码块每周期重建） =====
+_LEXER_CACHE: dict = {}
+_TEXT_LEXER = TextLexer()
+# formatter 含动态字号，缓存当前字号对应的实例
+_FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
+
+
+def _get_lexer_cached(lang: str):
+    """按语言名缓存 lexer 实例（lexer 构造开销大，含完整词法分析器初始化）"""
+    if not lang:
+        return _TEXT_LEXER
+    lex = _LEXER_CACHE.get(lang)
+    if lex is None:
+        try:
+            lex = get_lexer_by_name(lang, stripall=False)
+        except Exception:
+            lex = _TEXT_LEXER
+        _LEXER_CACHE[lang] = lex
+    return lex
+
+
+def _get_formatter_cached():
+    """HtmlFormatter 单例，字号变化时重建"""
+    fs = scale_font_size(13)
+    if _FORMATTER_CACHE["font_size"] != fs:
+        _FORMATTER_CACHE["font_size"] = fs
+        _FORMATTER_CACHE["formatter"] = HtmlFormatter(
+            style="dracula",
+            linenos=False,
+            noclasses=True,
+            cssclass="code-block",
+            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px; color:#D4D4D4;",
+        )
+    return _FORMATTER_CACHE["formatter"]
+
+
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
-AUTO_SCROLL_THRESHOLD = 1000      # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -162,16 +200,10 @@ def _unwrap_code_blocks_with_context_links(md_text: str) -> str:
     def replacer(match):
         lang_part = match.group(1) or ""
         code_content = match.group(2)
-        if _LINK_DETECTION_PATTERN.search(code_content) and lang_part not in (
-                "python"
-        ):
+        if _LINK_DETECTION_PATTERN.search(code_content) and lang_part not in ("python"):
             return code_content
         else:
-            return (
-                f"```{lang_part}\n{code_content}```"
-                if lang_part
-                else f"```\n{code_content}```"
-            )
+            return f"```{lang_part}\n{code_content}```" if lang_part else f"```\n{code_content}```"
 
     return _CODE_BLOCK_PATTERN.sub(replacer, md_text)
 
@@ -221,29 +253,6 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
                 # JSON 解析失败，降级为普通代码块
                 pass
 
-        # ===== Mermaid 图代码块：渲染为交互式图表 =====
-        if lang == "mermaid":
-            try:
-                # 解码 HTML 实体，得到原始 mermaid 定义
-                mermaid_def = (
-                    code_content_raw.replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&amp;", "&")
-                    .replace("&#39;", "'")
-                    .replace("&quot;", '"')
-                )
-                if not mermaid_def.strip():
-                    raise ValueError("empty mermaid definition")
-                # base64 编码防止 HTML 属性转义问题
-                b64_def = base64.b64encode(mermaid_def.encode("utf-8")).decode("ascii")
-                diagram_id = "mermaid-" + hashlib.sha1(mermaid_def.encode("utf-8")).hexdigest()[:12]
-                return f'''
-                <div id="{diagram_id}" class="mermaid-container" data-mermaid-def="{b64_def}"></div>
-                '''
-            except Exception:
-                # 降级为普通代码块
-                pass
-
         # --- 普通代码块处理 ---
         try:
             copy_text = (
@@ -263,14 +272,8 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
 
         # 高亮代码（获取 <pre> 内部 HTML）
         try:
-            lexer = get_lexer_by_name(lang, stripall=False) if lang else TextLexer()
-            formatter = HtmlFormatter(
-                style="dracula",
-                linenos=False,
-                noclasses=True,
-                cssclass="code-block",
-                prestyles="margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{scale_font_size(13)}px; color:#D4D4D4;",
-            )
+            lexer = _get_lexer_cached(lang)
+            formatter = _get_formatter_cached()
             highlighted = highlight(copy_text, lexer, formatter)
             # 提取 <pre> 内部内容
             pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
@@ -392,13 +395,13 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
     flat = text.replace("\n", " ")
 
     # ── 检测是否英文为主（中文占比 < 30%） ──
-    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    cjk_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     is_english_heavy = cjk_count < len(text) * 0.3
 
     if is_english_heavy:
         # 英文为主的策略：按句尾标点+空格+大写字母分句
         # 避免 1. / 2. / U.S. / v2.5 等被误判为句子边界
-        raw_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', flat)
+        raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat)
         # 清理空串和过短片段（纯粹的数字编号如 "1." 直接丢弃）
         raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) >= 4]
     else:
@@ -518,124 +521,235 @@ _THINK_TAGS = [
     {
         "tag": "分析",
         "priority": 3,
-        "cn": ("问题出在", "原因在于", "关键问题", "核心问题",
-               "需要分析", "需要理解", "需要考虑",
-               "问题", "分析", "理解", "排查"),
-        "en": ("problem", "issue", "analyze", "understand",
-               "root cause", "what went wrong", "why"),
+        "cn": (
+            "问题出在",
+            "原因在于",
+            "关键问题",
+            "核心问题",
+            "需要分析",
+            "需要理解",
+            "需要考虑",
+            "问题",
+            "分析",
+            "理解",
+            "排查",
+        ),
+        "en": ("problem", "issue", "analyze", "understand", "root cause", "what went wrong", "why"),
     },
     {
         "tag": "设计",
         "priority": 2,
-        "cn": ("设计方案", "实现方案", "架构设计",
-               "方案", "设计", "架构", "策略", "规划"),
-        "en": ("solution", "design", "approach", "strategy",
-               "architecture", "plan to", "propose to"),
+        "cn": ("设计方案", "实现方案", "架构设计", "方案", "设计", "架构", "策略", "规划"),
+        "en": ("solution", "design", "approach", "strategy", "architecture", "plan to", "propose to"),
     },
     {
         "tag": "探索",
         "priority": 2,
-        "cn": ("探索", "研究", "了解", "学习", "查阅", "参考",
-               "知识", "概念", "原理", "定义", "资料", "文献",
-               "查询", "搜索", "调查"),
-        "en": ("explore", "research", "learn", "study",
-               "concept", "definition", "principle",
-               "reference", "knowledge", "investigate"),
+        "cn": (
+            "探索",
+            "研究",
+            "了解",
+            "学习",
+            "查阅",
+            "参考",
+            "知识",
+            "概念",
+            "原理",
+            "定义",
+            "资料",
+            "文献",
+            "查询",
+            "搜索",
+            "调查",
+        ),
+        "en": (
+            "explore",
+            "research",
+            "learn",
+            "study",
+            "concept",
+            "definition",
+            "principle",
+            "reference",
+            "knowledge",
+            "investigate",
+        ),
     },
     {
         "tag": "验证",
         "priority": 2,
-        "cn": ("验证", "测试", "检测", "调试", "断言",
-               "校验", "用例", "覆盖", "回归",
-               "边界条件", "测试用例", "单元测试", "集成测试"),
-        "en": ("test", "verify", "validate",
-               "debug", "assert", "coverage", "regression",
-               "unit test", "integration test", "test case"),
+        "cn": (
+            "验证",
+            "测试",
+            "检测",
+            "调试",
+            "断言",
+            "校验",
+            "用例",
+            "覆盖",
+            "回归",
+            "边界条件",
+            "测试用例",
+            "单元测试",
+            "集成测试",
+        ),
+        "en": (
+            "test",
+            "verify",
+            "validate",
+            "debug",
+            "assert",
+            "coverage",
+            "regression",
+            "unit test",
+            "integration test",
+            "test case",
+        ),
     },
     {
         "tag": "版本",
         "priority": 3,
-        "cn": ("版本控制", "仓库", "回滚", "PR",
-               "rebase", "stash", "cherry-pick",
-               "git bisect", "git blame", "git log"),
-        "en": ("rebase", "cherry-pick", "checkout",
-               "git bisect", "git blame", "git log",
-               "version control", "source control"),
+        "cn": (
+            "版本控制",
+            "仓库",
+            "回滚",
+            "PR",
+            "rebase",
+            "stash",
+            "cherry-pick",
+            "git bisect",
+            "git blame",
+            "git log",
+        ),
+        "en": (
+            "rebase",
+            "cherry-pick",
+            "checkout",
+            "git bisect",
+            "git blame",
+            "git log",
+            "version control",
+            "source control",
+        ),
     },
     {
         "tag": "实现",
         "priority": 2,
-        "cn": ("具体实现", "代码片段", "接口定义", "类型定义",
-               "模块结构", "类设计", "方法签名", "API设计"),
-        "en": ("implement the", "define the", "interface",
-               "method signature", "API design", "class definition",
-               "module structure"),
+        "cn": ("具体实现", "代码片段", "接口定义", "类型定义", "模块结构", "类设计", "方法签名", "API设计"),
+        "en": (
+            "implement the",
+            "define the",
+            "interface",
+            "method signature",
+            "API design",
+            "class definition",
+            "module structure",
+        ),
     },
     {
         "tag": "修复",
         "priority": 2,
-        "cn": ("错误", "异常", "报错", "修复", "崩溃",
-               "排查错误", "错误原因", "调试日志"),
-        "en": ("bug", "crash", "fix the",
-               "broken", "stack trace", "traceback",
-               "debugging the error"),
+        "cn": ("错误", "异常", "报错", "修复", "崩溃", "排查错误", "错误原因", "调试日志"),
+        "en": ("bug", "crash", "fix the", "broken", "stack trace", "traceback", "debugging the error"),
     },
     {
         "tag": "优化",
         "priority": 2,
         "cn": ("性能", "优化", "速度", "效率", "延迟", "瓶颈"),
-        "en": ("performance", "optimize", "speed", "efficiency",
-               "latency", "bottleneck", "slow"),
+        "en": ("performance", "optimize", "speed", "efficiency", "latency", "bottleneck", "slow"),
     },
     {
         "tag": "安全",
         "priority": 2,
         "cn": ("安全", "权限", "漏洞", "风险", "加密", "认证"),
-        "en": ("security", "permission", "auth", "vulnerability",
-               "encrypt", "risk", "compliance"),
+        "en": ("security", "permission", "auth", "vulnerability", "encrypt", "risk", "compliance"),
     },
     {
         "tag": "重构",
         "priority": 2,
-        "cn": ("重构", "重写", "清理代码", "消除重复", "简化代码",
-               "代码整理", "提取方法", "模块拆分", "内联函数"),
-        "en": ("refactor", "cleanup", "simplify",
-               "extract method", "inline",
-               "split into", "restructure"),
+        "cn": ("重构", "重写", "清理代码", "消除重复", "简化代码", "代码整理", "提取方法", "模块拆分", "内联函数"),
+        "en": ("refactor", "cleanup", "simplify", "extract method", "inline", "split into", "restructure"),
     },
     {
         "tag": "配置",
         "priority": 2,
-        "cn": ("配置", "参数设置", "环境变量", "开关",
-               "配置文件", "config", "设置项", "调整参数",
-               "初始化配置", "dotenv"),
-        "en": ("configuration", "env var", "environment variable",
-               "setting", "parameter", "config file",
-               "dotenv", ".env"),
+        "cn": (
+            "配置",
+            "参数设置",
+            "环境变量",
+            "开关",
+            "配置文件",
+            "config",
+            "设置项",
+            "调整参数",
+            "初始化配置",
+            "dotenv",
+        ),
+        "en": (
+            "configuration",
+            "env var",
+            "environment variable",
+            "setting",
+            "parameter",
+            "config file",
+            "dotenv",
+            ".env",
+        ),
     },
     {
         "tag": "审查",
         "priority": 2,
-        "cn": ("审查", "review代码", "代码检查", "风格检查",
-               "lint", "代码质量", "检查规范", "静态分析"),
-        "en": ("code review", "lint", "code quality",
-               "inspect", "check style", "static analysis"),
+        "cn": ("审查", "review代码", "代码检查", "风格检查", "lint", "代码质量", "检查规范", "静态分析"),
+        "en": ("code review", "lint", "code quality", "inspect", "check style", "static analysis"),
     },
 ]
 # 结论标记（中英文，优先级最高）
 _CONCLUSION_MARKERS = (
-    "因此", "所以", "综上", "综上所述", "总而言之",
-    "总的来说", "建议", "推荐", "结论是", "答案是",
-    "总结一下", "也就是说", "最终",
-    "therefore", "in conclusion", "overall",
-    "the answer is", "the solution is",
-    "i recommend", "i suggest", "so the answer",
+    "因此",
+    "所以",
+    "综上",
+    "综上所述",
+    "总而言之",
+    "总的来说",
+    "建议",
+    "推荐",
+    "结论是",
+    "答案是",
+    "总结一下",
+    "也就是说",
+    "最终",
+    "therefore",
+    "in conclusion",
+    "overall",
+    "the answer is",
+    "the solution is",
+    "i recommend",
+    "i suggest",
+    "so the answer",
 )
 # 常见高频词（权值0.5，避免误触）
 _COMMON_WORDS = frozenset(
-    ("问题", "分析", "代码", "方案", "设计", "安全", "性能",
-     "实现", "错误", "优化", "检查", "考虑", "需要", "处理",
-     "解决", "使用", "支持", "提供", "操作")
+    (
+        "问题",
+        "分析",
+        "代码",
+        "方案",
+        "设计",
+        "安全",
+        "性能",
+        "实现",
+        "错误",
+        "优化",
+        "检查",
+        "考虑",
+        "需要",
+        "处理",
+        "解决",
+        "使用",
+        "支持",
+        "提供",
+        "操作",
+    )
 )
 
 
@@ -649,10 +763,10 @@ def _pattern_weight(p: str, position: float = 0.5) -> float:
     """
     base = 1.0
 
-    if " " in p:          # 多词短语（英文短语或中文带空格）
+    if " " in p:  # 多词短语（英文短语或中文带空格）
         base = 3.0
     else:
-        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in p)
+        has_cjk = any("\u4e00" <= c <= "\u9fff" for c in p)
         if has_cjk:
             if len(p) >= 4:
                 base = 3.0
@@ -706,7 +820,7 @@ def _classify_think_tag(content: str) -> str:
     # ── 计算每个关键词在窗口中的最佳位置 ──
     def _find_position(pattern: str, text: str, text_lower: str) -> float:
         """返回关键词在文本中的相对位置 (0~1)，找不到返回 -1"""
-        if any('\u4e00' <= c <= '\u9fff' for c in pattern):
+        if any("\u4e00" <= c <= "\u9fff" for c in pattern):
             idx = text.find(pattern)
         else:
             idx = text_lower.find(pattern)
@@ -762,14 +876,9 @@ def _classify_think_tag(content: str) -> str:
                     uniq[p] = pos
 
         # 加权计分：权重 × 排他性
-        score = sum(
-            _pattern_weight(p, position=pos) * _exclusivity_multiplier(p)
-            for p, pos in uniq.items()
-        )
+        score = sum(_pattern_weight(p, position=pos) * _exclusivity_multiplier(p) for p, pos in uniq.items())
 
-        if score > best_score or (
-            score == best_score and tag_def["priority"] > best_priority
-        ):
+        if score > best_score or (score == best_score and tag_def["priority"] > best_priority):
             best_score = score
             best_tag = tag_def["tag"]
             best_priority = tag_def["priority"]
@@ -786,7 +895,7 @@ _THINK_SNAKE_SVG = (
     ' stroke-linecap="round" stroke-dasharray="12 38" class="think-snake-arc think-snake-body" />'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,1)" stroke-width="2.5"'
     ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
-    '</svg>'
+    "</svg>"
 )
 
 
@@ -799,7 +908,7 @@ _REVIEW_SVG = (
     '<circle cx="11" cy="11" r="6.5"/>'
     '<line x1="20" y1="20" x2="15.8" y2="15.8"/>'
     '<polyline points="8.2 11.2 10.4 13.4 13.8 9.6"/>'
-    '</svg>'
+    "</svg>"
 )
 
 
@@ -912,7 +1021,9 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     if completed:
         # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
-        status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
+        status_text = (
+            f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
+        )
         content_escaped = escape(_strip_code_blocks(content))
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
@@ -933,13 +1044,12 @@ def _render_think_block(content: str, completed: bool = True) -> str:
 
     # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f'''<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
         {spinner_html}
         <span>思考中...</span>
     </span>
-</div>'''
-
+</div>"""
 
 
 def _render_think_block_lightweight(content: str, completed: bool = True) -> str:
@@ -952,7 +1062,9 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     if completed:
         # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
-        status_text = f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
+        status_text = (
+            f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
+        )
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
@@ -971,13 +1083,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 
     # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f'''<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
         {spinner_html}
         <span>思考中...</span>
     </span>
-</div>'''
-
+</div>"""
 
 
 def _inject_think_cards(md_text: str, completed: bool = True) -> str:
@@ -1065,7 +1176,7 @@ def _render_tool_block_content(content: str) -> str:
 
                 # 字符串内不计入深度
                 if in_string:
-                    if c == '\\':
+                    if c == "\\":
                         i += 2
                         continue
                     elif c == '"':
@@ -1078,12 +1189,12 @@ def _render_tool_block_content(content: str) -> str:
                     i += 1
                     continue
 
-                if c == '{' or c == '[':
+                if c == "{" or c == "[":
                     depth += 1
-                elif c == '}' or c == ']':
+                elif c == "}" or c == "]":
                     depth -= 1
                     if depth == 0:
-                        tool_args_str = content[brace_start:i + 1]
+                        tool_args_str = content[brace_start : i + 1]
                         result_search_start = i + 1
                         break
                 i += 1
@@ -1094,7 +1205,7 @@ def _render_tool_block_content(content: str) -> str:
                 result_search_start = i
         else:
             line = content[args_start:].split("\n")[0]
-            tool_args_str = line[args_start + 5:].strip()
+            tool_args_str = line[args_start + 5 :].strip()
             result_search_start = args_start + len(line)
     else:
         # 没有找到 args:，尝试直接解析整个 JSON 对象
@@ -1120,11 +1231,11 @@ def _render_tool_block_content(content: str) -> str:
     diff_content = ""
     diff_start = content.find("\ndiff:")
     if diff_start != -1:
-        diff_after = content[diff_start + 6:]  # skip "\ndiff:"
+        diff_after = content[diff_start + 6 :]  # skip "\ndiff:"
         # diff 内容持续到下一个字段（\nsuccess:）或末尾
         diff_next = _NEXT_FIELD_PATTERN.search(diff_after)
         if diff_next:
-            diff_content = diff_after[:diff_next.start()].strip()
+            diff_content = diff_after[: diff_next.start()].strip()
         else:
             diff_content = diff_after.strip()
 
@@ -1132,19 +1243,19 @@ def _render_tool_block_content(content: str) -> str:
     echarts_content = ""
     echarts_start = content.find("\necharts:")
     if echarts_start != -1:
-        echarts_after = content[echarts_start + 9:]
+        echarts_after = content[echarts_start + 9 :]
         # echarts JSON 持续到末尾或下一个字段
         echarts_next = _NEXT_FIELD_PATTERN.search(echarts_after)
         if echarts_next:
-            echarts_content = echarts_after[:echarts_next.start()].strip()
+            echarts_content = echarts_after[: echarts_next.start()].strip()
         else:
             echarts_content = echarts_after.strip()
     if result_start >= 0:
-        result_after = content[result_start + 7:]  # 跳过 "result:"
+        result_after = content[result_start + 7 :]  # 跳过 "result:"
         # 找到 result 内容的结束位置（下一个字段之前）
         next_field = _NEXT_FIELD_PATTERN.search(result_after)
         if next_field:
-            tool_result = result_after[:next_field.start()].strip()
+            tool_result = result_after[: next_field.start()].strip()
         else:
             tool_result = result_after.strip()
     else:
@@ -1165,8 +1276,8 @@ def _render_tool_block_content(content: str) -> str:
             # JSON 解析失败，可能是因为不完整，尝试智能修复
             fixed_args_str = tool_args_str.strip()
             # 如果是未闭合，尝试补全括号
-            if fixed_args_str.startswith('{') and not fixed_args_str.endswith('}'):
-                fixed_args_str += '}'
+            if fixed_args_str.startswith("{") and not fixed_args_str.endswith("}"):
+                fixed_args_str += "}"
                 try:
                     args_dict = json.loads(fixed_args_str)
                     if not isinstance(args_dict, dict):
@@ -1210,8 +1321,14 @@ def _render_tool_block_content(content: str) -> str:
         if isinstance(args_dict[key], str):
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
     return render_tool_block(
-        tool_name, args_dict, tool_result, tool_success, collapsed=True,
-        tool_call_id=tool_call_id, diff=diff_content, echarts=echarts_content
+        tool_name,
+        args_dict,
+        tool_result,
+        tool_success,
+        collapsed=True,
+        tool_call_id=tool_call_id,
+        diff=diff_content,
+        echarts=echarts_content,
     )
 
 
@@ -1225,19 +1342,19 @@ def _find_string_end(s, start):
     n = len(s)
     while i < n:
         c = s[i]
-        if c == '\\':
+        if c == "\\":
             # 转义序列，跳过下一个字符
             i += 2
         elif c == '"':
             # 检查后面是否是真正的分隔符
             next_i = i + 1
             # 跳过空白
-            while next_i < n and s[next_i] in ' \t\n\r':
+            while next_i < n and s[next_i] in " \t\n\r":
                 next_i += 1
             if next_i < n:
                 next_c = s[next_i]
                 # 只有后面是这些字符才是真正结束：, } ] 或 : (key后面的值结束时)
-                if next_c in ',}:]':
+                if next_c in ",}:]":
                     return i
             i += 1
         else:
@@ -1255,7 +1372,7 @@ def _parse_json_partial(json_str: str) -> dict:
         c = json_str[i]
 
         # 跳过空白
-        if c in ' \t\n\r':
+        if c in " \t\n\r":
             i += 1
             continue
 
@@ -1266,11 +1383,11 @@ def _parse_json_partial(json_str: str) -> dict:
 
         # 解析 key
         key_end = _find_string_end(json_str, i + 1)
-        key = json_str[i + 1:key_end]
+        key = json_str[i + 1 : key_end]
         i = key_end + 1
 
         # 跳过空白和冒号
-        while i < n and json_str[i] in ' \t\n\r:':
+        while i < n and json_str[i] in " \t\n\r:":
             i += 1
         if i >= n:
             break
@@ -1280,12 +1397,12 @@ def _parse_json_partial(json_str: str) -> dict:
         # 解析 value
         if c == '"':
             value_end = _find_string_end(json_str, i + 1)
-            value = json_str[i + 1:value_end]
+            value = json_str[i + 1 : value_end]
             i = value_end + 1
             # 处理转义（简化处理）
-            value = value.replace('\\"', '"').replace('\\\\', '\\')
+            value = value.replace('\\"', '"').replace("\\\\", "\\")
             args[key] = value
-        elif c == '{':
+        elif c == "{":
             obj_start = i
             depth = 1
             i += 1
@@ -1294,9 +1411,9 @@ def _parse_json_partial(json_str: str) -> dict:
                 if ch == '"':
                     str_end = _find_string_end(json_str, i + 1)
                     i = str_end + 1
-                elif ch in '{[':
+                elif ch in "{[":
                     depth += 1
-                elif ch in '}]':
+                elif ch in "}]":
                     depth -= 1
                 i += 1
             obj_str = json_str[obj_start:i]
@@ -1304,7 +1421,7 @@ def _parse_json_partial(json_str: str) -> dict:
                 args[key] = json.loads(obj_str)
             except Exception:
                 args[key] = obj_str
-        elif c == '[':
+        elif c == "[":
             arr_start = i
             depth = 1
             i += 1
@@ -1313,9 +1430,9 @@ def _parse_json_partial(json_str: str) -> dict:
                 if ch == '"':
                     str_end = _find_string_end(json_str, i + 1)
                     i = str_end + 1
-                elif ch in '{[':
+                elif ch in "{[":
                     depth += 1
-                elif ch in '}]':
+                elif ch in "}]":
                     depth -= 1
                 i += 1
             arr_str = json_str[arr_start:i]
@@ -1323,30 +1440,30 @@ def _parse_json_partial(json_str: str) -> dict:
                 args[key] = json.loads(arr_str)
             except Exception:
                 args[key] = arr_str
-        elif c.isdigit() or c == '-':
+        elif c.isdigit() or c == "-":
             num_str = c
             i += 1
-            while i < n and json_str[i].isdigit() or json_str[i] in '.eE+-':
+            while i < n and json_str[i].isdigit() or json_str[i] in ".eE+-":
                 num_str += json_str[i]
                 i += 1
             try:
-                args[key] = float(num_str) if '.' in num_str else int(num_str)
+                args[key] = float(num_str) if "." in num_str else int(num_str)
             except Exception:
                 args[key] = num_str
-        elif i + 4 <= n and json_str[i:i + 4] == 'true':
+        elif i + 4 <= n and json_str[i : i + 4] == "true":
             args[key] = True
             i += 4
-        elif i + 5 <= n and json_str[i:i + 5] == 'false':
+        elif i + 5 <= n and json_str[i : i + 5] == "false":
             args[key] = False
             i += 5
-        elif i + 4 <= n and json_str[i:i + 4] == 'null':
+        elif i + 4 <= n and json_str[i : i + 4] == "null":
             args[key] = None
             i += 4
         else:
             i += 1
 
         # 跳过空白和逗号
-        while i < n and json_str[i] in ' \t\n\r,':
+        while i < n and json_str[i] in " \t\n\r,":
             i += 1
 
     return args
@@ -1354,7 +1471,7 @@ def _parse_json_partial(json_str: str) -> dict:
 
 def _find_json_bounds(content: str) -> tuple:
     """找到 JSON 对象的起始和结束位置"""
-    start = content.find('{')
+    start = content.find("{")
     if start == -1:
         return -1, -1
 
@@ -1370,7 +1487,7 @@ def _find_json_bounds(content: str) -> tuple:
             escape_next = False
             i += 1
             continue
-        if c == '\\':
+        if c == "\\":
             escape_next = True
             i += 1
             continue
@@ -1379,9 +1496,9 @@ def _find_json_bounds(content: str) -> tuple:
             i += 1
             continue
         if not in_string:
-            if c == '{':
+            if c == "{":
                 depth += 1
-            elif c == '}':
+            elif c == "}":
                 depth -= 1
                 if depth == 0:
                     return start, i + 1
@@ -1455,13 +1572,22 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
         parts.append(md_text[i:start_idx])
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
         if end_idx != -1:
-            content = md_text[start_idx + len("<tool>"): end_idx]
+            content = md_text[start_idx + len("<tool>") : end_idx]
             parts.append(_render_tool_block_content(content))
             i = end_idx + len("</tool>")
         else:
             parts.append(md_text[start_idx:])
             break
     return "".join(parts)
+
+
+# ===== _inject_hook_blocks 预编译正则（流式时每周期调用，避免重复编译） =====
+_RE_SYS_REMINDER_FULL = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+_RE_SYS_REMINDER_HALF = re.compile(r"<system-reminder>.*", re.DOTALL)
+_RE_HOOK_TAG_FULL = re.compile(r"<([a-z0-9-]+-hook)>.*?</\1>", re.DOTALL)
+_RE_HOOK_TAG_HALF = re.compile(r"<[a-z0-9-]+-hook>.*", re.DOTALL)
+_RE_HOOK_EVENT_FULL = re.compile(r'<hook\s+event="[^"]+">.*?</hook>', re.DOTALL)
+_RE_HOOK_EVENT_HALF = re.compile(r'<hook\s+event="[^"]+">.*', re.DOTALL)
 
 
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
@@ -1488,49 +1614,19 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
         return md_text
 
     # 1) 完整 <system-reminder>...</system-reminder> 整段丢
-    md_text = re.sub(
-        r'<system-reminder>.*?</system-reminder>',
-        '',
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_SYS_REMINDER_FULL.sub("", md_text)
     # 2) 半截 <system-reminder>...</字符串末尾> 也要丢（流式中间态）
-    md_text = re.sub(
-        r'<system-reminder>.*',
-        '',
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_SYS_REMINDER_HALF.sub("", md_text)
 
     # 3) 完整 <xxx-hook>...</xxx-hook> 整段丢（兼容早期无 system-reminder 包裹的消息）
-    md_text = re.sub(
-        r'<([a-z0-9-]+-hook)>.*?</\1>',
-        '',
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_TAG_FULL.sub("", md_text)
     # 4) 半截 <xxx-hook>...</末尾> 也要丢
-    md_text = re.sub(
-        r'<[a-z0-9-]+-hook>.*',
-        '',
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_TAG_HALF.sub("", md_text)
 
     # 5) 完整 <hook event="Xxx">...</hook> 整段丢（兼容最早旧格式）
-    md_text = re.sub(
-        r'<hook\s+event="[^"]+">.*?</hook>',
-        '',
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_EVENT_FULL.sub("", md_text)
     # 6) 半截 <hook event=...>...</末尾> 也要丢
-    md_text = re.sub(
-        r'<hook\s+event="[^"]+">.*',
-        '',
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_EVENT_HALF.sub("", md_text)
 
     return md_text
 
@@ -1572,7 +1668,7 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
         raw_md = _render_think_block(reasoning, completed=True) + raw_md
 
     # 大文本跳过缓存，防止内存膨胀
-    text_size = len(raw_md.encode('utf-8'))
+    text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
         # 大文本直接渲染，绕过缓存
         # 临时禁用缓存
@@ -1636,16 +1732,19 @@ def _inject_context_links(md_text: str) -> str:
     return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
 
 
+# ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
+_IMG_SRC_PATTERN = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def _resolve_image_src(html_content: str) -> str:
     """
     将 HTML 中的图片 src 相对路径转为绝对 file:/// 路径。
-    
+
     检测 <img src="相对路径"> 中的 src，如果路径是相对路径且本地文件存在，
     则转换为 file:/// 绝对路径，确保 QWebEngineView 能正常加载。
     已存在的绝对路径（http/https/file/data/qrc）跳过处理。
     """
-    _img_src_pattern = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
-    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     def _replacer(match):
         prefix = match.group(1)
@@ -1653,8 +1752,7 @@ def _resolve_image_src(html_content: str) -> str:
         suffix = match.group(3)
 
         # 跳过已经是绝对 URL 或 data URI 的 src
-        if src.startswith(('http://', 'https://', 'file://', 'data:',
-                           'qrc:/', '#', 'blob:')):
+        if src.startswith(("http://", "https://", "file://", "data:", "qrc:/", "#", "blob:")):
             return match.group(0)
 
         # 尝试解析为绝对路径
@@ -1663,16 +1761,62 @@ def _resolve_image_src(html_content: str) -> str:
             candidate = os.path.normpath(src)
         else:
             # 相对路径：以项目根目录为基准拼接
-            candidate = os.path.normpath(os.path.join(_project_root, src))
+            candidate = os.path.normpath(os.path.join(_PROJECT_ROOT, src))
 
         if os.path.isfile(candidate):
             # 本地文件存在，转为 file:/// 路径
             file_url = QUrl.fromLocalFile(candidate).toString()
-            return f'{prefix}{file_url}{suffix}'
+            return f"{prefix}{file_url}{suffix}"
 
         return match.group(0)
 
-    return _img_src_pattern.sub(_replacer, html_content)
+    return _IMG_SRC_PATTERN.sub(_replacer, html_content)
+
+
+# ======== 本地 Vendor JS 脚本（离线优先，CDN 降级） ========
+_vendor_script_tags_cache: Optional[str] = None
+
+
+def _get_vendor_script_tags() -> str:
+    """构建本地 vendor JS 脚本标签（离线优先，CDN 降级）。
+
+    优先引用本地 app/resources/web/vendor/ 下的 JS 库（离线可用），
+    本地文件缺失时降级为 CDN，确保离线环境 echarts 可用。
+    结果做模块级缓存，避免每次 _load_skeleton 都做文件系统检查。
+    """
+    global _vendor_script_tags_cache
+    if _vendor_script_tags_cache is not None:
+        return _vendor_script_tags_cache
+
+    # PyInstaller 打包后资源可能在 _MEIPASS 下
+    base_dirs = [_PROJECT_ROOT]
+    if hasattr(sys, "_MEIPASS"):
+        base_dirs.append(sys._MEIPASS)
+
+    vendor_libs = [
+        ("app/resources/web/vendor/echarts.min.js", "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"),
+        (
+            "app/resources/web/vendor/echarts-wordcloud.min.js",
+            "https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js",
+        ),
+    ]
+
+    tags = []
+    for rel_path, cdn_url in vendor_libs:
+        local_found = False
+        for base in base_dirs:
+            candidate = os.path.join(base, rel_path)
+            if os.path.isfile(candidate):
+                # 用绝对 file:/// URL，确保任何 baseUrl 下都能加载
+                local_url = QUrl.fromLocalFile(candidate).toString()
+                tags.append(f'<script src="{local_url}"></script>')
+                local_found = True
+                break
+        if not local_found:
+            tags.append(f'<script src="{cdn_url}"></script>')
+
+    _vendor_script_tags_cache = "\n        ".join(tags)
+    return _vendor_script_tags_cache
 
 
 # ======== WebViewer ========
@@ -1699,20 +1843,20 @@ class ConsoleMonitorPage(QWebEnginePage):
 
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
         msg = message.strip()
-        if msg == "pywebview_ready":
-            self.contentReady.emit()
-        elif msg.startswith("pywebview_height:"):
+        # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
+        # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
+        if msg.startswith("pywebview_height:"):
             try:
                 self.heightReported.emit(int(float(msg.split(":")[1])))
             except Exception:
                 pass
+        elif msg == "pywebview_ready":
+            self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
             if "context|||" in msg:
                 try:
                     parts = msg.split("|||")
-                    self.contextActionRequested.emit(
-                        urllib.parse.unquote(parts[1]), urllib.parse.unquote(parts[2])
-                    )
+                    self.contextActionRequested.emit(urllib.parse.unquote(parts[1]), urllib.parse.unquote(parts[2]))
                 except Exception:
                     pass
             elif "context_lost" in msg:
@@ -1734,16 +1878,16 @@ class ConsoleMonitorPage(QWebEnginePage):
                     import os
                     import subprocess
 
-                    if os.name == 'nt':
+                    if os.name == "nt":
                         if os.path.isdir(file_path):
                             # 文件夹：直接在资源管理器中打开
-                            subprocess.Popen(['explorer', file_path])
+                            subprocess.Popen(["explorer", file_path])
                         else:
                             # 文件：使用系统默认程序打开
                             os.startfile(file_path)
                     else:
                         # macOS/Linux
-                        cmd = 'open' if os.uname().sysname == 'Darwin' else 'xdg-open'
+                        cmd = "open" if os.uname().sysname == "Darwin" else "xdg-open"
                         subprocess.Popen([cmd, file_path])
                 except Exception:
                     pass
@@ -1776,9 +1920,7 @@ class ConsoleMonitorPage(QWebEnginePage):
             else:
                 try:
                     p = msg.split(":")
-                    self.codeActionRequested.emit(
-                        base64.b64decode(p[2]).decode("utf-8"), p[1]
-                    )
+                    self.codeActionRequested.emit(base64.b64decode(p[2]).decode("utf-8"), p[1])
                 except Exception:
                     pass
 
@@ -1812,6 +1954,9 @@ class CodeWebViewer(QWebEngineView):
         self._is_js_ready = False
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
+        # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
+        self._processed_md_hash = None
+        self._cached_streaming_html = None
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         self._min_render_interval = 50
@@ -1915,7 +2060,7 @@ class CodeWebViewer(QWebEngineView):
     def event(self, event):
         """拦截 WebEngine 事件"""
         # 处理上下文丢失
-        if event.type() == QTimerEvent and hasattr(self, '_context_lost_timer'):
+        if event.type() == QTimerEvent and hasattr(self, "_context_lost_timer"):
             pass
         return super().event(event)
 
@@ -1925,14 +2070,14 @@ class CodeWebViewer(QWebEngineView):
         try:
             widget = self
             for _ in range(5):
-                if hasattr(widget, 'chat_scroll_area'):
+                if hasattr(widget, "chat_scroll_area"):
                     break
                 parent_widget = widget.parent()
                 if parent_widget is None:
                     break
                 widget = parent_widget
 
-            outer_area = getattr(widget, 'chat_scroll_area', None) if hasattr(widget, 'chat_scroll_area') else None
+            outer_area = getattr(widget, "chat_scroll_area", None) if hasattr(widget, "chat_scroll_area") else None
             if not outer_area:
                 super().wheelEvent(event)
                 return
@@ -1989,8 +2134,8 @@ class CodeWebViewer(QWebEngineView):
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出"""
         # 计算安全尺寸
-        w = args[0] if len(args) > 0 else kwargs.get('width', self.MAX_WIDTH)
-        h = args[1] if len(args) > 1 else kwargs.get('height', self.MAX_HEIGHT)
+        w = args[0] if len(args) > 0 else kwargs.get("width", self.MAX_WIDTH)
+        h = args[1] if len(args) > 1 else kwargs.get("height", self.MAX_HEIGHT)
 
         # 限制最大尺寸
         safe_w = min(w, self.MAX_WIDTH) if isinstance(w, int) else w
@@ -2000,8 +2145,8 @@ class CodeWebViewer(QWebEngineView):
 
     def resize(self, *args, **kwargs):
         """限制 resize 尺寸，防止过大导致 GPU 内存溢出"""
-        w = args[0] if len(args) > 0 else kwargs.get('width', self.MAX_WIDTH)
-        h = args[1] if len(args) > 1 else kwargs.get('height', self.MAX_HEIGHT)
+        w = args[0] if len(args) > 0 else kwargs.get("width", self.MAX_WIDTH)
+        h = args[1] if len(args) > 1 else kwargs.get("height", self.MAX_HEIGHT)
 
         # 限制最大尺寸
         safe_w = min(w, self.MAX_WIDTH) if isinstance(w, int) else w
@@ -2047,10 +2192,7 @@ class CodeWebViewer(QWebEngineView):
                 while parent:
                     parent.lower()
                     # 找到 MessageCard 或聊天容器为止
-                    if (
-                            hasattr(parent, "chat_layout")
-                            or parent.__class__.__name__ == "MessageCard"
-                    ):
+                    if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
                         break
                     parent = parent.parent()
                 # 同时将弹窗提升到最顶层
@@ -2112,6 +2254,7 @@ class CodeWebViewer(QWebEngineView):
         font_family = "Segoe UI, sans-serif"
         try:
             from app.utils.config import Settings
+
             settings = Settings.get_instance()
             font_family = settings.llm_font_family.value
             if not font_family:
@@ -2120,25 +2263,22 @@ class CodeWebViewer(QWebEngineView):
             pass
 
         self._viewer_font_family = font_family
-        self._viewer_font_css = f"{get_font_family_css()} font-family: {font_family}, sans-serif; font-size: {scale_font_size(14)}px;"
+        self._viewer_font_css = (
+            f"{get_font_family_css()} font-family: {font_family}, sans-serif; font-size: {scale_font_size(14)}px;"
+        )
 
         tag_css = []
         for act, col in ACTION_COLOR_MAP.items():
             tag_css.append(
                 f'.context-tag[data-type="{act}"] {{ background: {col}15; border-color: {col}60; color: {col}; }}'
             )
-            tag_css.append(
-                f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}'
-            )
+            tag_css.append(f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}')
 
         if self._light_skeleton:
             cdn_libs = ""
         else:
-            cdn_libs = """
-        <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-        """
+            # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN
+            cdn_libs = _get_vendor_script_tags()
 
         scrollbar_css = """
             /* 统一滚动条样式 - 深色模式适配 */
@@ -2420,7 +2560,9 @@ class CodeWebViewer(QWebEngineView):
                 /* 代码块通用样式 */
                 .code-table {{ width: 100%; border-collapse: collapse; }}
                 .code-table td {{ padding: 0; vertical-align: top; }}
-                .lineno {{ width: 32px; text-align: right; padding-right: 8px !important; color: #606060; border-right: 1px solid #404040; user-select: none; font-size: {small_font_size}px; line-height: 1.5; }}
+                .lineno {{ width: 32px; text-align: right; padding-right: 8px !important; color: #606060; border-right: 1px solid #404040; user-select: none; font-size: {
+            small_font_size
+        }px; line-height: 1.5; }}
                 /* 优化后的代码块布局：行号固定，代码可横向滚动 */
                 .code-container {{
                     display: flex;
@@ -2954,7 +3096,10 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
-                {'' if self._light_skeleton else '''
+                {
+            ""
+            if self._light_skeleton
+            else '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
                     width: 100%;
@@ -2965,32 +3110,8 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(22, 27, 34, 0.6);
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
-                /* ===== Mermaid 图表容器 ===== */
-                .mermaid-container {{
-                    display: flex;
-                    justify-content: center;
-                    width: 100%;
-                    margin: 12px 0;
-                    padding: 16px 8px;
-                    background: rgba(255,255,255,0.02);
-                    border: 1px solid var(--border);
-                    border-radius: 12px;
-                    overflow-x: auto;
-                    min-height: 60px;
-                }}
-                .mermaid-container svg {{
-                    max-width: 100%;
-                    height: auto;
-                }}
-                .mermaid-error {{
-                    color: #ff7b7b;
-                    font-family: {mono_font};
-                    font-size: {code_font_size}px;
-                    padding: 12px 16px;
-                    white-space: pre-wrap;
-                    word-break: break-word;
-                }}
-                '''}
+                '''
+        }
 
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
@@ -3104,6 +3225,10 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
+                // ===== Mermaid 渲染（已移除） =====
+                // mermaid 图表渲染功能因 QtWebEngine Chromium 版本兼容问题已整体移除。
+                // mermaid 代码块（```mermaid）降级为普通代码块，由 Pygments 高亮显示。
+
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
@@ -3127,10 +3252,27 @@ class CodeWebViewer(QWebEngineView):
                         _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *{{transition:none!important}}';
 
                         // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件，
-                        // 导致 _userScrolledWithin 被误设为 true，后续 auto-scroll 失效。
-                        // 用 _suppressScrollEvent 标志抑制这次误触发。
+                        // 导致"置顶闪烁"和用户滚动后永久卡顶的问题。
+                        // 解决方案：保存 scrollTop 前置位 + _userScrolledWithin 快照，
+                        // innerHTML 后立即恢复滚动位置，再同步执行 auto-scroll，
+                        // 避免 setTimeout(0) 的渲染间隙（浏览器在间隙中 paint 出 scroll=0 的画面）。
+                        var _scrollThreshold = {AUTO_SCROLL_THRESHOLD};
+                        var _prevScrollTop = document.body.scrollTop;
+                        var _wasUserScrolled = window._userScrolledWithin;
                         window._suppressScrollEvent = true;
                         container.innerHTML = newHtml;
+                        // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
+                        var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
+                        document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
+                        // 同步 auto-scroll（用户未滚动→始终滚底；已滚动且接近底部→滚底）
+                        if (!_wasUserScrolled) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                        }} else {{
+                            var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
+                            if (_wasAtBottom) {{
+                                document.body.scrollTop = document.body.scrollHeight;
+                            }}
+                        }}
                         window._suppressScrollEvent = false;
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
@@ -3192,89 +3334,8 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
-                        // 初始化 Mermaid 图表
-                        if (typeof mermaid !== 'undefined') {{
-                            document.querySelectorAll('.mermaid-container').forEach(function(el) {{
-                                try {{
-                                    var defB64 = el.getAttribute('data-mermaid-def');
-                                    if (!defB64 || el._mermaidInited) return;
-                                    var _bytes = Uint8Array.from(atob(defB64), function(c) {{ return c.charCodeAt(0); }});
-                                    var definition = new TextDecoder('utf-8').decode(_bytes);
-                                    // 直接将 mermaid 定义文本放入元素，mermaid.run() 会自动渲染
-                                    el.textContent = definition;
-                                    el._mermaidInited = true;
-                                }} catch(e) {{
-                                    console.error('Mermaid decode error:', e);
-                                    el.innerHTML = '<div class=\"mermaid-error\">Mermaid 解析失败: ' + e.message + '</div>';
-                                }}
-                            }});
-                            // 批量渲染所有新增的 mermaid 图表
-                            mermaid.run({{
-                                querySelector: '.mermaid-container',
-                            }}).then(function() {{
-                                // 清理残留文本节点，防止它们撑高容器
-                                document.querySelectorAll('.mermaid-container').forEach(function(el) {{
-                                    for (var i = el.childNodes.length - 1; i >= 0; i--) {{
-                                        if (el.childNodes[i].nodeType === 3 /* TEXT_NODE */) {{
-                                            el.removeChild(el.childNodes[i]);
-                                        }}
-                                    }}
-                                    // 强制容器高度匹配 SVG 实际高度
-                                    var svg = el.querySelector('svg');
-                                    if (svg) {{
-                                        var svgH = svg.getBoundingClientRect().height;
-                                        if (svgH > 0) {{
-                                            el.style.height = (svgH + 32) + 'px';
-                                            el.style.overflow = 'hidden';
-                                        }}
-                                    }}
-                                }});
-                                reportHeight();
-                            }}).catch(function(err) {{
-                                console.error('Mermaid render error:', err);
-                                // 渲染失败的容器显示错误提示，并重置 _mermaidInited 以允许下次重试
-                                document.querySelectorAll('.mermaid-container').forEach(function(el) {{
-                                    if (el._mermaidInited && el.querySelector('svg') === null) {{
-                                        var defB64 = el.getAttribute('data-mermaid-def');
-                                        if (defB64) {{
-                                            try {{
-                                                var _b = Uint8Array.from(atob(defB64), function(c) {{ return c.charCodeAt(0); }});
-                                                var _d = new TextDecoder('utf-8').decode(_b);
-                                                el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 语法错误:\\n' + _d.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
-                                            }} catch(decodeErr) {{
-                                                el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 渲染失败</div>';
-                                            }}
-                                        }} else {{
-                                            el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 渲染失败</div>';
-                                        }}
-                                        // 重置标记，允许下次 updateContent 时重新尝试渲染
-                                        el._mermaidInited = false;
-                                    }}
-                                }});
-                                reportHeight();
-                            }});
-                        }}
-
-                        // 自动滚动到 body 底部（流式时新内容在底部）
-                        // 🐛 修复：只在用户已处于底部时才滚动到底部，避免与用户手动滚动冲突。
-                        // 用 scrollHeight - scrollTop - clientHeight < {AUTO_SCROLL_THRESHOLD} 判断是否"接近底部"。
-                        // 🐛 修复2：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
-                        // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
-                        // 未滚动时强制 auto-scroll 到底部。
-                        setTimeout(function() {{
-                            if (!window._userScrolledWithin) {{
-                                window._suppressScrollEvent = true;
-                                document.body.scrollTop = document.body.scrollHeight;
-                                window._suppressScrollEvent = false;
-                            }} else {{
-                                var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
-                                if (wasAtBottom) {{
-                                    window._suppressScrollEvent = true;
-                                    document.body.scrollTop = document.body.scrollHeight;
-                                    window._suppressScrollEvent = false;
-                                }}
-                            }}
-                        }}, 0);
+                        // 自动滚动已在 innerHTML 替换后同步处理（见上方 _suppressScrollEvent 段），
+                        // 不再依赖 setTimeout(0) 异步 auto-scroll 避免 paint 间隙闪烁。
 
                         // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
@@ -3345,23 +3406,6 @@ class CodeWebViewer(QWebEngineView):
                 document.addEventListener('DOMContentLoaded', () => {{
                     console.log('pywebview_ready');
                     reportHeight();
-                    // ── Mermaid 全局初始化 ──
-                    if (typeof mermaid !== 'undefined') {{
-                        mermaid.initialize({{
-                            startOnLoad: false,
-                            theme: 'dark',
-                            securityLevel: 'sandbox',
-                            themeVariables: {{
-                                darkMode: true,
-                                background: 'transparent',
-                                primaryColor: '#3a3f50',
-                                primaryTextColor: '#c9d1d9',
-                                lineColor: '#58a6ff',
-                                secondaryColor: '#21262d',
-                                tertiaryColor: '#161b22',
-                            }},
-                        }});
-                    }}
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
                     new ResizeObserver(() => {{
@@ -3435,8 +3479,7 @@ class CodeWebViewer(QWebEngineView):
         </html>
         """
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
-        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self.setHtml(html, QUrl.fromLocalFile(_project_root + "/"))
+        self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
     def append_chunk(self, text: str):
         if not text:
@@ -3487,24 +3530,18 @@ class CodeWebViewer(QWebEngineView):
                     p.textContent = {json.dumps(escaped)};
                     c.appendChild(p);
                 }}
-                // 流式增量追加时，仅在用户已处于底部时才滚动到最底部
-                // 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
-                // wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
-                // 未滚动时强制 auto-scroll 到底部。
-                setTimeout(function() {{
-                    if (!window._userScrolledWithin) {{
-                        window._suppressScrollEvent = true;
+                // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
+                // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
+                window._suppressScrollEvent = true;
+                if (!window._userScrolledWithin) {{
+                    document.body.scrollTop = document.body.scrollHeight;
+                }} else {{
+                    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
+                    if (wasAtBottom) {{
                         document.body.scrollTop = document.body.scrollHeight;
-                        window._suppressScrollEvent = false;
-                    }} else {{
-                        var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
-                        if (wasAtBottom) {{
-                            window._suppressScrollEvent = true;
-                            document.body.scrollTop = document.body.scrollHeight;
-                            window._suppressScrollEvent = false;
-                        }}
                     }}
-                }}, 0);
+                }}
+                window._suppressScrollEvent = false;
             }})();
             """
             self.page().runJavaScript(js)
@@ -3535,7 +3572,7 @@ class CodeWebViewer(QWebEngineView):
         streaming_md = raw_md.rstrip()
         if self._streaming and streaming_md.endswith("</think>") and not self._thinking_finalized:
             # 末尾正好是 reasoning 块的闭合标签，去掉它表示该块尚未完成
-            streaming_md = streaming_md[:-len("</think>")].rstrip()
+            streaming_md = streaming_md[: -len("</think>")].rstrip()
 
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
@@ -3543,6 +3580,14 @@ class CodeWebViewer(QWebEngineView):
         processed_md = _inject_think_cards(safe_md, self._streaming is False)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
+
+        # [PERF] 实例级哈希缓存：processed_md 未变时直接返回缓存的 HTML，
+        # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。
+        # 命中场景：resize 触发重复渲染、thinking_finalized 状态切换但内容未变、
+        # finish_streaming 后的 immediate render 与随后 render 定时器重叠
+        processed_hash = hash(processed_md)
+        if self._processed_md_hash == processed_hash and self._cached_streaming_html is not None:
+            return self._cached_streaming_html
 
         try:
             md = get_markdown_instance()
@@ -3558,6 +3603,9 @@ class CodeWebViewer(QWebEngineView):
                 char_count_html = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
                 html_content = html_content + char_count_html
 
+            # 缓存渲染结果（只存一份，内存开销小）
+            self._processed_md_hash = processed_hash
+            self._cached_streaming_html = html_content
             return html_content
         except Exception:
             return f"<pre>{escape(raw_md)}</pre>"
@@ -3594,14 +3642,14 @@ class CodeWebViewer(QWebEngineView):
 
     def _refresh_viewer_font(self):
         """刷新 viewer 字体样式，响应系统字体设置变化"""
-        if not hasattr(self, '_viewer_font_family'):
+        if not hasattr(self, "_viewer_font_family"):
             return
         self._refresh_viewer_font_css()
         self._schedule_render(immediate=True)
 
     def _refresh_viewer_font_css(self):
         """刷新字体 CSS 变量，供 render 使用"""
-        if not hasattr(self, '_viewer_font_family'):
+        if not hasattr(self, "_viewer_font_family"):
             return
         font_family = self._viewer_font_family
         font_css = get_font_family_css()
@@ -3624,24 +3672,11 @@ class CodeWebViewer(QWebEngineView):
                 html_content = self._render_markdown_to_html(self._markdown_text)
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
+                # [PERF] 非流式路径：历史内容无 JS 增量注入的活跃块，
+                # 所有工具块由 markdown 重新生成，无需 save/restore，直接 updateContent
                 js_code = (
-                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失。
-                    # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
-                    # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
-                    # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
-                    "(function(){"
-                    "var _sbs=[];"
-                    "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
-                    "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                    "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
-                    "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
-                    "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                    "var _bk=_t.firstElementChild;if(_bk){"
-                    "_c.appendChild(_bk);}}});}"
-                    "})();"
                 )
                 self._last_rendered_html = None
                 self.page().runJavaScript(js_code)
@@ -3665,6 +3700,11 @@ class CodeWebViewer(QWebEngineView):
                 # 覆盖 DOM，避免"闪灭→再现"闪烁和重复工作。
                 return
 
+            # [PERF-opt] 内容变化检测：markdown 未变化时跳过全量渲染
+            # 避免定时器空转、回调无变化等场景下的冗余 innerHTML 替换
+            if self._markdown_text == self._last_rendered_markdown:
+                return
+
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
@@ -3672,17 +3712,13 @@ class CodeWebViewer(QWebEngineView):
             self._last_rendered_markdown = self._markdown_text
             self._last_rendered_html = html_content
             self._height_report_pending = True
-            # 全量更新前清除已通过 JS 增量注入的工具块，避免重复；
-            # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
-            # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
-            # 因找不到流式块而追加重复的 data-tool-injected 块）
-            # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
-            # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
-            # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
+            # [PERF] 只保存活跃流式块（data-streaming="true"），已完成块由 markdown 重新生成。
+            # 活跃块是 JS 增量注入的、不在 markdown 中的块，必须 save/restore 避免丢失。
+            # 跳过已完成块的 outerHTML 序列化，减少 O(块数×块大小) 开销
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
-                "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
+                "document.querySelectorAll('[data-tool-call-id][data-streaming=\"true\"]').forEach(function(el){"
                 "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
@@ -3703,6 +3739,7 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         self._schedule_render(immediate=True)
 
     def _cleanup_render_cache(self):
@@ -3776,7 +3813,7 @@ class CodeWebViewer(QWebEngineView):
         """请求查看差异 - 向上查找 MessageCard 并发出 cardDiffRequested 信号"""
         parent = self.parent()
         while parent:
-            if hasattr(parent, 'cardDiffRequested'):
+            if hasattr(parent, "cardDiffRequested"):
                 # 通知父组件显示卡片差异
                 if parent._round_index is not None and parent._message_index is not None:
                     parent.cardDiffRequested.emit(parent._round_index, parent._message_index)
@@ -3787,6 +3824,7 @@ class CodeWebViewer(QWebEngineView):
         """复制内容到剪贴板（使用系统原生 API）"""
         try:
             import win32clipboard
+
             win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardText(self._markdown_text or "", win32clipboard.CF_UNICODETEXT)
@@ -3794,18 +3832,20 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             # 兜底：使用 PyQt5 剪贴板
             from PyQt5.QtWidgets import QApplication
+
             clipboard = QApplication.clipboard()
             clipboard.setText(self._markdown_text or "")
 
     def _get_default_filename(self) -> str:
         """生成默认导出文件名：会话名_时间戳"""
         from datetime import datetime
+
         session_name = "消息"
         try:
             # 沿父链向上查找主窗口（self.window() 返回 ToolPopupDialog，没有 session_manager）
             parent_widget = self.parent()
             while parent_widget is not None:
-                if hasattr(parent_widget, 'session_manager'):
+                if hasattr(parent_widget, "session_manager"):
                     session = parent_widget.session_manager.get_current_session()
                     if session:
                         name = (session.topic_summary or session.name or "").strip()
@@ -3818,7 +3858,7 @@ class CodeWebViewer(QWebEngineView):
         # 移除文件名非法字符
         invalid_chars = r'<>:"/\|?*'
         for c in invalid_chars:
-            session_name = session_name.replace(c, '_')
+            session_name = session_name.replace(c, "_")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{session_name}_{ts}"
 
@@ -3828,10 +3868,7 @@ class CodeWebViewer(QWebEngineView):
 
         default_name = self._get_default_filename()
         file_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "导出消息",
-            default_name,
-            "PNG 图片 (*.png);;Markdown (*.md);;HTML (*.html)"
+            self, "导出消息", default_name, "PNG 图片 (*.png);;Markdown (*.md);;HTML (*.html)"
         )
 
         if not file_path:
@@ -3840,24 +3877,24 @@ class CodeWebViewer(QWebEngineView):
         content = self._markdown_text or ""
 
         try:
-            is_png = "PNG" in selected_filter or file_path.lower().endswith('.png')
-            is_html = "HTML" in selected_filter or file_path.lower().endswith('.html')
+            is_png = "PNG" in selected_filter or file_path.lower().endswith(".png")
+            is_html = "HTML" in selected_filter or file_path.lower().endswith(".html")
             if is_png:
-                if not file_path.lower().endswith('.png'):
-                    file_path += '.png'
+                if not file_path.lower().endswith(".png"):
+                    file_path += ".png"
                 self._export_as_image(file_path)
             elif is_html:
-                if not file_path.lower().endswith('.html'):
-                    file_path += '.html'
+                if not file_path.lower().endswith(".html"):
+                    file_path += ".html"
                 html_content = self._convert_md_to_html(content)
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
                 logger.info(f"消息已导出到: {file_path}")
                 self._show_save_success(file_path)
             else:
-                if not file_path.lower().endswith('.md'):
-                    file_path += '.md'
-                with open(file_path, 'w', encoding='utf-8') as f:
+                if not file_path.lower().endswith(".md"):
+                    file_path += ".md"
+                with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
                 logger.info(f"消息已导出到: {file_path}")
                 self._show_save_success(file_path)
@@ -3896,10 +3933,11 @@ class CodeWebViewer(QWebEngineView):
         import re
 
         from PyQt5.QtGui import QColor
+
         parent = self.parent()
         while parent:
-            if hasattr(parent, '_theme') and isinstance(parent._theme, dict) and 'bg' in parent._theme:
-                bg = parent._theme['bg']
+            if hasattr(parent, "_theme") and isinstance(parent._theme, dict) and "bg" in parent._theme:
+                bg = parent._theme["bg"]
                 # 1. 先试标准颜色字符串（#hex、named color 等）
                 color = QColor(bg)
                 if color.isValid():
@@ -3907,7 +3945,7 @@ class CodeWebViewer(QWebEngineView):
                     return color
                 # 2. 兜底：手动解析 rgba(r, g, b[, a]) / rgb(r, g, b) 字符串
                 m = re.match(
-                    r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)',
+                    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)",
                     bg,
                 )
                 if m:
@@ -3930,6 +3968,7 @@ class CodeWebViewer(QWebEngineView):
             填充实心卡片背景 + 绘制 source 的合成 pixmap
         """
         from PyQt5.QtGui import QPainter, QPixmap
+
         if width <= 0 or height <= 0:
             return source
         result = QPixmap(width, height)
@@ -3962,15 +4001,13 @@ class CodeWebViewer(QWebEngineView):
         cur_h = self.height()
 
         # 1. 获取完整内容高度
-        dims_raw = self._run_js_sync(
-            "JSON.stringify({sh: document.body.scrollHeight})"
-        )
+        dims_raw = self._run_js_sync("JSON.stringify({sh: document.body.scrollHeight})")
         if not dims_raw:
             # 拿不到高度 → 兜底：直接 grab + 强制实心背景
             return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
 
         try:
-            scroll_h = json_mod.loads(dims_raw).get('sh', 0)
+            scroll_h = json_mod.loads(dims_raw).get("sh", 0)
         except Exception:
             scroll_h = 0
 
@@ -4021,8 +4058,8 @@ class CodeWebViewer(QWebEngineView):
             try:
                 prev = json_mod.loads(old_styles)
                 js_restore = f"""
-                    document.body.style.maxHeight = {json_mod.dumps(prev.get('maxHeight', ''))};
-                    document.body.style.overflowY = {json_mod.dumps(prev.get('overflowY', 'auto'))};
+                    document.body.style.maxHeight = {json_mod.dumps(prev.get("maxHeight", ""))};
+                    document.body.style.overflowY = {json_mod.dumps(prev.get("overflowY", "auto"))};
                     window.scrollTo(0, 0);
                 """
                 self._run_js_sync(js_restore)
@@ -4049,7 +4086,7 @@ class CodeWebViewer(QWebEngineView):
         # 计算最佳列数：使拼接后的宽高比接近目标比例
         target_ratio = 1.5  # 3:2
         best_cols = 1
-        best_diff = float('inf')
+        best_diff = float("inf")
 
         for cols in range(2, min(max_cols + 1, (h + w - 1) // w + 1)):
             strip_h = h / cols
@@ -4111,7 +4148,8 @@ class CodeWebViewer(QWebEngineView):
     def _convert_md_to_html(self, markdown_text: str) -> str:
         """将 Markdown 文本转换为独立 HTML 页面"""
         from markdown import Markdown
-        md = Markdown(extensions=['fenced_code', 'codehilite', 'tables'])
+
+        md = Markdown(extensions=["fenced_code", "codehilite", "tables"])
         body_html = md.convert(markdown_text)
 
         return f"""<!DOCTYPE html>
@@ -4140,6 +4178,7 @@ class CodeWebViewer(QWebEngineView):
         """显示保存成功提示"""
         try:
             from qfluentwidgets import InfoBar, InfoBarPosition
+
             main_window = self.window()
             if main_window:
                 InfoBar.success(
@@ -4156,6 +4195,7 @@ class CodeWebViewer(QWebEngineView):
         """显示保存失败提示"""
         try:
             from qfluentwidgets import InfoBar, InfoBarPosition
+
             main_window = self.window()
             if main_window:
                 InfoBar.error(
@@ -4203,6 +4243,7 @@ class CodeWebViewer(QWebEngineView):
         # CodeWebViewer 实例的引用，导致 GC 无法回收且事件循环误调用已释放对象
         try:
             from PyQt5.QtWidgets import QApplication
+
             QApplication.instance().removeEventFilter(self)
         except Exception:
             pass
@@ -4223,19 +4264,19 @@ class CodeWebViewer(QWebEngineView):
 
         # 断开所有信号连接
         try:
-            if hasattr(self._page, 'codeActionRequested'):
+            if hasattr(self._page, "codeActionRequested"):
                 self._page.codeActionRequested.disconnect()
-            if hasattr(self._page, 'contextActionRequested'):
+            if hasattr(self._page, "contextActionRequested"):
                 self._page.contextActionRequested.disconnect()
-            if hasattr(self._page, 'heightReported'):
+            if hasattr(self._page, "heightReported"):
                 self._page.heightReported.disconnect()
-            if hasattr(self._page, 'contentReady'):
+            if hasattr(self._page, "contentReady"):
                 self._page.contentReady.disconnect()
-            if hasattr(self._page, 'toolDiffRequested'):
+            if hasattr(self._page, "toolDiffRequested"):
                 self._page.toolDiffRequested.disconnect()
-            if hasattr(self._page, 'subAgentLogRequested'):
+            if hasattr(self._page, "subAgentLogRequested"):
                 self._page.subAgentLogRequested.disconnect()
-            if hasattr(self._page, 'saveFileRequested'):
+            if hasattr(self._page, "saveFileRequested"):
                 self._page.saveFileRequested.disconnect()
         except Exception:
             pass
@@ -4245,12 +4286,16 @@ class CodeWebViewer(QWebEngineView):
         self._markdown_text = ""
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
+        self._processed_md_hash = None
+        self._cached_streaming_html = None
+        self._lazy_markdown_cb = None  # 清理懒回调引用，释放 content_data
         self._is_js_ready = False
 
         # 清理上下文状态
         self._context_lost = False
         self._height_report_pending = False
         self._resize_locked = False
+
 
         # 清理页面：先加载空白页释放资源
         try:
@@ -4260,7 +4305,7 @@ class CodeWebViewer(QWebEngineView):
 
         # 清理页面对象
         try:
-            if hasattr(self, '_page'):
+            if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
         except (RuntimeError, AttributeError):
@@ -4268,11 +4313,11 @@ class CodeWebViewer(QWebEngineView):
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
         # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。
-        if hasattr(self, '_profile'):
+        if hasattr(self, "_profile"):
             self._profile = None
 
         # 清理代码块缓存
-        if hasattr(self, '_code_block_cache'):
+        if hasattr(self, "_code_block_cache"):
             self._code_block_cache.clear()
             self._code_block_cache = None
 
@@ -4414,7 +4459,7 @@ class PlainTextViewer(QWidget):
         self._text = ""
 
         # 清理 QTextEdit（关键修复：先清空内容，再释放文档）
-        if hasattr(self, 'text_edit') and self.text_edit:
+        if hasattr(self, "text_edit") and self.text_edit:
             try:
                 self.text_edit.clear()
                 # 释放文档以释放内存
@@ -4483,6 +4528,7 @@ class PlainTextViewer(QWidget):
                             为 False 时直接复制全文（工具栏按钮行为）。
         """
         from PyQt5.QtWidgets import QApplication
+
         clipboard = QApplication.clipboard()
         if copy_selection:
             cursor = self.text_edit.textCursor()
@@ -4495,6 +4541,7 @@ class PlainTextViewer(QWidget):
     def _convert_text_to_html(self, text: str) -> str:
         """将纯文本转换为独立 HTML 页面"""
         import html as html_mod
+
         escaped = html_mod.escape(text)
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4516,6 +4563,7 @@ class PlainTextViewer(QWidget):
         """显示保存成功提示"""
         try:
             from qfluentwidgets import InfoBar, InfoBarPosition
+
             main_window = self.window()
             if main_window:
                 InfoBar.success(
@@ -4532,6 +4580,7 @@ class PlainTextViewer(QWidget):
         """显示保存失败提示"""
         try:
             from qfluentwidgets import InfoBar, InfoBarPosition
+
             main_window = self.window()
             if main_window:
                 InfoBar.error(
@@ -4549,7 +4598,7 @@ class PlainTextViewer(QWidget):
         # 向上查找 MessageCard 并发出 undoRequested 信号
         parent = self.parent()
         while parent:
-            if hasattr(parent, 'undoRequested'):
+            if hasattr(parent, "undoRequested"):
                 parent.undoRequested.emit()
                 break
             parent = parent.parent()
@@ -4559,7 +4608,7 @@ class PlainTextViewer(QWidget):
         # 向上查找 MessageCard 并发出 deleteRequested 信号
         parent = self.parent()
         while parent:
-            if hasattr(parent, 'deleteRequested'):
+            if hasattr(parent, "deleteRequested"):
                 parent.deleteRequested.emit()
                 break
             parent = parent.parent()
@@ -4582,14 +4631,14 @@ class MessageCard(SimpleCardWidget):
     modelLabelClicked = pyqtSignal(str, str)  # provider_name, model_name — 用户点击页脚模型标签时触发
 
     def __init__(
-            self,
-            role: str,
-            timestamp: str = None,
-            parent=None,
-            error: bool = False,
-            reasoning_content: str = "",
-            model_name: str = None,
-            provider_name: str = None,
+        self,
+        role: str,
+        timestamp: str = None,
+        parent=None,
+        error: bool = False,
+        reasoning_content: str = "",
+        model_name: str = None,
+        provider_name: str = None,
     ):
         super().__init__(parent)
         self._parent = parent
@@ -4724,22 +4773,22 @@ class MessageCard(SimpleCardWidget):
         self._base_border = self._theme["border"]
         self._apply_card_style()
         # 更新头像
-        if hasattr(self, '_av_label'):
+        if hasattr(self, "_av_label"):
             self._av_label.setStyleSheet(self._build_avatar_style())
         # 更新标题
-        if hasattr(self, '_name_label'):
+        if hasattr(self, "_name_label"):
             font_css = get_font_family_css()
             self._name_label.setStyleSheet(
                 f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
             )
         # 更新副标题
-        if hasattr(self, '_subtitle_label'):
+        if hasattr(self, "_subtitle_label"):
             font_css = get_font_family_css()
             self._subtitle_label.setStyleSheet(
                 f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
             )
         # 更新时间戳
-        if hasattr(self, '_ts_label'):
+        if hasattr(self, "_ts_label"):
             self._ts_label.setStyleSheet(
                 f"""
                 QLabel {{
@@ -4753,7 +4802,7 @@ class MessageCard(SimpleCardWidget):
                 """
             )
         # 刷新富文本视图字体
-        if hasattr(self, 'viewer') and self.viewer and hasattr(self.viewer, '_refresh_viewer_font'):
+        if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
             self.viewer._refresh_viewer_font()
 
     def _get_footer_model_text(self) -> str:
@@ -4775,7 +4824,7 @@ class MessageCard(SimpleCardWidget):
         if provider_name is not None:
             self.provider_name = provider_name
         footer_text = self._get_footer_model_text()
-        if hasattr(self, '_ts_label'):
+        if hasattr(self, "_ts_label"):
             self._ts_label.setText(model_name)
             self._ts_label.setVisible(True)
             self._ts_label.setStyleSheet(
@@ -4882,9 +4931,7 @@ class MessageCard(SimpleCardWidget):
         # 模型名称（可点击，仅显示模型名，服务商名已隐藏但保留用于跳转）
         footer_text = self._get_footer_model_text()
         model_l = QLabel(footer_text, self)
-        model_l.setStyleSheet(
-            f"{label_style}"
-        )
+        model_l.setStyleSheet(f"{label_style}")
         model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
@@ -4896,7 +4943,7 @@ class MessageCard(SimpleCardWidget):
 
     def set_meta_info(self, elapsed: float = None, token_usage: dict = None):
         """设置助手卡片的元信息（耗时和 token 消耗）
-        
+
         Args:
             elapsed: 响应耗时（秒），如 3.2。传入后停止实时计时。
             token_usage: 如 {"input": 1234, "output": 567, "total": 1801}
@@ -4913,7 +4960,7 @@ class MessageCard(SimpleCardWidget):
         if token_usage is not None and self._footer_tokens_label:
             total = token_usage.get("total", 0)
             if total >= 1000:
-                text = f"{total/1000:.1f}K tokens"
+                text = f"{total / 1000:.1f}K tokens"
             else:
                 text = f"{total} tokens"
             self._footer_tokens_label.setText(text)
@@ -4967,8 +5014,7 @@ class MessageCard(SimpleCardWidget):
             )
             self._footer_review_btn.setVisible(True)
 
-    def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0,
-                        seen_files: set = None):
+    def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0, seen_files: set = None):
         """增量累加差异统计（工具执行时实时调用，文件级去重避免多次编辑同一文件重复计数）
 
         Args:
@@ -4983,13 +5029,13 @@ class MessageCard(SimpleCardWidget):
             return
 
         # 懒初始化累积计数器
-        if not hasattr(self, '_diff_seen_files'):
+        if not hasattr(self, "_diff_seen_files"):
             self._diff_seen_files = set()
-        if not hasattr(self, '_diff_files_total'):
+        if not hasattr(self, "_diff_files_total"):
             self._diff_files_total = 0
-        if not hasattr(self, '_diff_additions_total'):
+        if not hasattr(self, "_diff_additions_total"):
             self._diff_additions_total = 0
-        if not hasattr(self, '_diff_deletions_total'):
+        if not hasattr(self, "_diff_deletions_total"):
             self._diff_deletions_total = 0
 
         if seen_files:
@@ -5091,9 +5137,7 @@ class MessageCard(SimpleCardWidget):
         font_css = get_font_family_css()
         nm_l = QLabel(self._theme["title"], self)
         self._name_label = nm_l
-        nm_l.setStyleSheet(
-            f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
-        )
+        nm_l.setStyleSheet(f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;")
         sub_l = QLabel(self._theme["subtitle"], self)
         self._subtitle_label = sub_l
         sub_l.setStyleSheet(
@@ -5192,7 +5236,8 @@ class MessageCard(SimpleCardWidget):
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
             placeholder.setStyleSheet(
-                f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}")
+                f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
+            )
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             main.addWidget(self._viewer_container)
@@ -5316,7 +5361,7 @@ class MessageCard(SimpleCardWidget):
         self._pulse_phase = (self._pulse_phase + 0.035) % (math.pi * 2)
         # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）
         if self._retrying:
-            if not hasattr(self, '_retry_status_tick'):
+            if not hasattr(self, "_retry_status_tick"):
                 self._retry_status_tick = 0
             self._retry_status_tick += 1
             if self._retry_status_tick >= 4:  # 50ms * 4 = 200ms
@@ -5458,7 +5503,7 @@ class MessageCard(SimpleCardWidget):
 
         # 保存当前内容
         markdown_text = None
-        if hasattr(self.viewer, '_markdown_text'):
+        if hasattr(self.viewer, "_markdown_text"):
             markdown_text = self.viewer._markdown_text
 
         # 销毁旧viewer
@@ -5783,7 +5828,7 @@ class MessageCard(SimpleCardWidget):
         self._apply_viewer_height(target_height)
 
     def _on_height_anim_state_changed(self, state):
-        self._is_height_animating = (state == QVariantAnimation.Running)
+        self._is_height_animating = state == QVariantAnimation.Running
         # 动画结束时触发一次高度变化信号，让父容器更新
         if state == QVariantAnimation.Stopped:
             self.heightChanged.emit(self._last_applied_viewer_height)
@@ -5802,23 +5847,24 @@ class MessageCard(SimpleCardWidget):
         # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
         # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
         # 未滚动时强制 auto-scroll 到底部。
-        if self._streaming and hasattr(self.viewer, 'page') and self.viewer.page():
+        if self._streaming and hasattr(self.viewer, "page") and self.viewer.page():
             try:
+                # 🐛 修复：同步 auto-scroll 取代 setTimeout(0)，避免渲染间隙置顶闪烁
                 self.viewer.page().runJavaScript(
-                    "setTimeout(function() {"
+                    "(function(){"
+                    "  window._suppressScrollEvent = true;"
                     "  if (!window._userScrolledWithin) {"
-                    "    window._suppressScrollEvent = true;"
                     "    document.body.scrollTop = document.body.scrollHeight;"
-                    "    window._suppressScrollEvent = false;"
                     "  } else {"
-                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < " + str(AUTO_SCROLL_THRESHOLD) + ";"
+                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < "
+                    + str(AUTO_SCROLL_THRESHOLD)
+                    + ";"
                     "    if (wasAtBottom) {"
-                    "      window._suppressScrollEvent = true;"
                     "      document.body.scrollTop = document.body.scrollHeight;"
-                    "      window._suppressScrollEvent = false;"
                     "    }"
                     "  }"
-                    "}, 0);"
+                    "  window._suppressScrollEvent = false;"
+                    "})();"
                 )
             except RuntimeError:
                 pass
@@ -5854,7 +5900,7 @@ class MessageCard(SimpleCardWidget):
             self.blockSignals(False)
 
         # 宽度同步后触发 viewer 高度重算（用于 user 卡片的 PlainTextViewer）
-        if not self._resize_preview_mode and hasattr(self.viewer, 'update_height'):
+        if not self._resize_preview_mode and hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
 
     def set_resize_preview_mode(self, enabled: bool):
@@ -6032,14 +6078,14 @@ class MessageCard(SimpleCardWidget):
             self._content_just_loaded = True
 
     def append_tool_result(
-            self,
-            tool_name: str,
-            arguments: Dict[str, Any] = None,
-            result: Any = None,
-            success: bool = True,
-            tool_call_id: str = None,
-            diff: str = None,
-            echarts: str = None,
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any] = None,
+        result: Any = None,
+        success: bool = True,
+        tool_call_id: str = None,
+        diff: str = None,
+        echarts: str = None,
     ):
         self._content_data.append(
             make_tool_result_block(
@@ -6083,28 +6129,24 @@ class MessageCard(SimpleCardWidget):
                 diff=diff,
                 echarts=echarts,
             )
-            safe_html = json.dumps(block_html).decode('utf-8')
+            safe_html = json.dumps(block_html).decode("utf-8")
 
             # 提取 inner HTML（去掉外层 <div> 包装），用于原地更新已有 DOM 节点
             # outerHTML 替换会销毁旧元素再创建新元素，在 WebEngine 渲染管线中
             # 可能形成"旧元素消失 → 新元素出现"的跨帧闪烁。
             # 原地更新保持同一 DOM 节点，消除闪烁。
-            _inner_match = re.match(
-                r'^<div[^>]*>(.*)</div>$', block_html, re.DOTALL
-            )
+            _inner_match = re.match(r"^<div[^>]*>(.*)</div>$", block_html, re.DOTALL)
             if _inner_match:
                 inner_html = _inner_match.group(1).strip()
             else:
                 inner_html = block_html  # 兜底：整个当作 inner HTML
-            safe_inner = json.dumps(inner_html).decode('utf-8')
+            safe_inner = json.dumps(inner_html).decode("utf-8")
 
             # 提取外层 <div> 的 style 属性（如 display: flex; align-items: center;）
             # 用于 INLINE_TOOLS 原地转换时应用到现有元素，保持 flex 布局
-            _outer_style_match = re.search(
-                r'<div[^>]*\sstyle="([^"]*)"', block_html
-            )
+            _outer_style_match = re.search(r'<div[^>]*\sstyle="([^"]*)"', block_html)
             outer_style = _outer_style_match.group(1) if _outer_style_match else ""
-            safe_outer_style = json.dumps(outer_style).decode('utf-8')
+            safe_outer_style = json.dumps(outer_style).decode("utf-8")
 
             # 提取 block_key（用于设置 data-block-key 属性）
             _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
@@ -6113,29 +6155,21 @@ class MessageCard(SimpleCardWidget):
             # ── 增量更新解析：将 inner_html 拆分为 button 和 body 两部分 ──
             # 避免 existing.innerHTML = safe_inner 整体替换导致的子节点空窗期
             # （外层 div 子节点清空瞬间 margin 暴露为可见间距，详见 #间距修复）
-            _btn_match = re.match(
-                r'<button[^>]*>(.*?)</button>', inner_html, re.DOTALL
-            )
-            _body_match = re.search(
-                r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$',
-                inner_html, re.DOTALL
-            )
+            _btn_match = re.match(r"<button[^>]*>(.*?)</button>", inner_html, re.DOTALL)
+            _body_match = re.search(r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$', inner_html, re.DOTALL)
             if _btn_match and _body_match:
                 btn_inner = _btn_match.group(1)
                 body_inner = _body_match.group(1)
                 # 提取 body div 上可能携带的 style（如 expanded: height:auto）
-                _body_style_match = re.search(
-                    r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"',
-                    inner_html
-                )
+                _body_style_match = re.search(r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"', inner_html)
                 body_style = _body_style_match.group(1) if _body_style_match else ""
-                safe_btn_inner = json.dumps(btn_inner).decode('utf-8')
-                safe_body_inner = json.dumps(body_inner).decode('utf-8')
-                safe_body_style = json.dumps(body_style).decode('utf-8')
-                _use_incremental = 'true'
+                safe_btn_inner = json.dumps(btn_inner).decode("utf-8")
+                safe_body_inner = json.dumps(body_inner).decode("utf-8")
+                safe_body_style = json.dumps(body_style).decode("utf-8")
+                _use_incremental = "true"
             else:
                 safe_btn_inner = safe_body_inner = safe_body_style = '""'
-                _use_incremental = 'false'
+                _use_incremental = "false"
 
             js_code = f"""
             (function() {{
@@ -6191,7 +6225,7 @@ class MessageCard(SimpleCardWidget):
         避免信号链引起的 _on_code_action（clipboard.setText + InfoBar 动画），
         消除主线程阻塞（大文本 clipboard 操作）和 InfoBar 滑入动画叠加造成的闪烁。
         """
-        if hasattr(self.viewer, '_copy_to_clipboard'):
+        if hasattr(self.viewer, "_copy_to_clipboard"):
             self.viewer._copy_to_clipboard(copy_selection=False)
 
     def get_plain_text(self) -> str:
@@ -6241,7 +6275,7 @@ class MessageCard(SimpleCardWidget):
             self.viewer._thinking_finalized = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
-        if self.viewer and getattr(self.viewer, 'page', None):
+        if self.viewer and getattr(self.viewer, "page", None):
             try:
                 self.viewer.page().runJavaScript("""
                 (function() {
@@ -6259,8 +6293,12 @@ class MessageCard(SimpleCardWidget):
     # ── 工具流式调用块 ──────────────────────────────────
 
     def _inject_tool_streaming_html(
-        self, tool_call_id: str, tool_name: str, preview: str,
-        char_count: int = 0, completed: bool = False,
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        preview: str,
+        char_count: int = 0,
+        completed: bool = False,
     ):
         """通过 JS 注入/更新工具流式块
 
@@ -6269,7 +6307,7 @@ class MessageCard(SimpleCardWidget):
         preview 为 None 时表示仅更新 data-streaming 状态，不修改任何文字内容。
         用于 preview 阶段的 finish_tool_streaming 调用（参数全是占位键时）。
         """
-        if not hasattr(self, 'viewer') or not self.viewer:
+        if not hasattr(self, "viewer") or not self.viewer:
             return
 
         # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
@@ -6281,8 +6319,8 @@ class MessageCard(SimpleCardWidget):
 
         # [PERF-opt] 状态切换（完成或 text_only）时：取消待处理的全量渲染定时器，
         # 防止其覆盖增量 JS 更新造成"闪灭→再现"闪烁。增量更新已足够，不需要全量 re-render。
-        if (completed or preview is None) and hasattr(self, 'viewer') and self.viewer:
-            if hasattr(self.viewer, '_render_timer') and self.viewer._render_timer.isActive():
+        if (completed or preview is None) and hasattr(self, "viewer") and self.viewer:
+            if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
                 self.viewer._render_timer.stop()
 
         try:
@@ -6296,10 +6334,10 @@ class MessageCard(SimpleCardWidget):
                 char_count=char_count,
                 completed=completed,
             )
-            safe_html = json.dumps(block_html).decode('utf-8')
-            safe_preview = json.dumps(preview_content).decode('utf-8')
-            streaming_flag = 'true' if not completed else 'false'
-            _text_only_js = 'true' if _text_only else 'false'
+            safe_html = json.dumps(block_html).decode("utf-8")
+            safe_preview = json.dumps(preview_content).decode("utf-8")
+            streaming_flag = "true" if not completed else "false"
+            _text_only_js = "true" if _text_only else "false"
             js_code = f"""
             (function() {{
                 var c = document.getElementById('content-placeholder');
@@ -6386,7 +6424,7 @@ class MessageCard(SimpleCardWidget):
         self.viewer._thinking_finalized = True
 
         # [PERF-opt] 取消待处理的全量渲染定时器，防止覆盖增量 JS 思考框更新
-        if hasattr(self.viewer, '_render_timer') and self.viewer._render_timer.isActive():
+        if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
             self.viewer._render_timer.stop()
 
         # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
@@ -6395,11 +6433,11 @@ class MessageCard(SimpleCardWidget):
             status_html = f'<span class="think-bulb">💡</span> {escape(tag)}'
         else:
             status_html = '<span class="think-bulb">💡</span>'
-        safe_status = json.dumps(status_html).decode('utf-8')
+        safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
         completed_html = _render_think_block(content, completed=True)
-        safe_completed_html = json.dumps(completed_html).decode('utf-8')
+        safe_completed_html = json.dumps(completed_html).decode("utf-8")
 
         # 直接 JS 处理 DOM 上残留的"思考中"状态
         # 注意：不能走全量渲染 — `_render_markdown_to_html` 流式模式会去掉末尾 </think>，
@@ -6455,7 +6493,10 @@ class MessageCard(SimpleCardWidget):
             pass
 
     def update_tool_streaming(
-        self, tool_call_id: str, tool_name: str, partial_args: dict = None,
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        partial_args: dict = None,
     ):
         """更新工具流式参数预览 — 更新已注入的工具块预览文本
 
@@ -6481,7 +6522,7 @@ class MessageCard(SimpleCardWidget):
                 display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
                 if display:
                     try:
-                        args_str = json.dumps(display).decode('utf-8')
+                        args_str = json.dumps(display).decode("utf-8")
                         if len(args_str) > 100:
                             preview = args_str[:100] + "..."
                         else:
@@ -6491,12 +6532,13 @@ class MessageCard(SimpleCardWidget):
                         preview = "..."
                 else:
                     preview = "正在准备参数..."
-        self._inject_tool_streaming_html(
-            tool_call_id, tool_name, preview, char_count, completed=False
-        )
+        self._inject_tool_streaming_html(tool_call_id, tool_name, preview, char_count, completed=False)
 
     def finish_tool_streaming(
-        self, tool_call_id: str, tool_name: str, arguments: dict = None,
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict = None,
     ):
         """工具参数接收完成 — 将流式块转为完成态，显示工具名和完整参数
 
@@ -6511,7 +6553,7 @@ class MessageCard(SimpleCardWidget):
             display = {k: v for k, v in arguments.items() if not k.startswith("_")}
             if display:
                 try:
-                    args_str = json.dumps(display).decode('utf-8')
+                    args_str = json.dumps(display).decode("utf-8")
                     if len(args_str) > 100:
                         preview = args_str[:100] + "..."
                     else:
@@ -6521,17 +6563,13 @@ class MessageCard(SimpleCardWidget):
                     preview = "..."
             else:
                 # 参数全部是 _ 前缀占位键（preview 阶段），仅更新状态不覆盖文字
-                self._inject_tool_streaming_html(
-                    tool_call_id, tool_name, preview=None, char_count=0, completed=True
-                )
+                self._inject_tool_streaming_html(tool_call_id, tool_name, preview=None, char_count=0, completed=True)
                 return
-        self._inject_tool_streaming_html(
-            tool_call_id, tool_name, preview, char_count, completed=True
-        )
+        self._inject_tool_streaming_html(tool_call_id, tool_name, preview, char_count, completed=True)
 
     def remove_tool_streaming(self, tool_call_id: str):
         """移除工具流式块 — 工具执行完成后清理"""
-        if not hasattr(self, 'viewer') or not self.viewer:
+        if not hasattr(self, "viewer") or not self.viewer:
             return
         try:
             js_code = f"""
@@ -6561,8 +6599,9 @@ class MessageCard(SimpleCardWidget):
 
         if last_reasoning_idx >= 0:
             # 找到已有的最后一个 reasoning 块，追加内容
-            self._content_data[last_reasoning_idx]["content"] = (self._content_data[last_reasoning_idx].get("content",
-                                                                                                            "") or "") + text
+            self._content_data[last_reasoning_idx]["content"] = (
+                self._content_data[last_reasoning_idx].get("content", "") or ""
+            ) + text
         else:
             # 未找到，新增 reasoning 块
             self._content_data.append({"type": "reasoning", "content": text})
@@ -6591,7 +6630,7 @@ class MessageCard(SimpleCardWidget):
         思考中不再更新预览文字，仅显示转圈+思考中。
         结束时通过全量渲染更新预览文字到 summary 右侧。
         """
-        if not hasattr(self.viewer, 'page'):
+        if not hasattr(self.viewer, "page"):
             return
 
         # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
@@ -6652,15 +6691,13 @@ class MessageCard(SimpleCardWidget):
     def set_intervention_mode(self, enabled: bool):
         """设置人工干预模式"""
         if enabled:
-            self.interventionRequested.emit(
-                {"card_id": id(self), "message": "请求人工干预"}
-            )
+            self.interventionRequested.emit({"card_id": id(self), "message": "请求人工干预"})
 
     def finish_streaming(self):
         try:
-            if self.viewer is not None and hasattr(self.viewer, 'finish_streaming'):
+            if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 self.viewer.finish_streaming()
-                if hasattr(self.viewer, '_cleanup_render_cache'):
+                if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
         except RuntimeError:
             pass
@@ -6717,7 +6754,7 @@ class MessageCard(SimpleCardWidget):
         self._disconnect_all_signals()
 
         # 调用 viewer 的清理方法（先清理后释放引用）
-        if hasattr(self.viewer, 'cleanup'):
+        if hasattr(self.viewer, "cleanup"):
             try:
                 self.viewer.cleanup()
             except RuntimeError:
@@ -6736,7 +6773,7 @@ class MessageCard(SimpleCardWidget):
         self._tool_args_first_seen_ids.clear()
 
         # 清理 markdown_cache 如果存在
-        if hasattr(self, '_markdown_cache') and self._markdown_cache:
+        if hasattr(self, "_markdown_cache") and self._markdown_cache:
             self._markdown_cache.clear()
             self._markdown_cache = None
 
@@ -6746,8 +6783,11 @@ class MessageCard(SimpleCardWidget):
 
 
 def create_welcome_card(
-        parent=None, agent_name: str = "", agent_description: str = "",
-        recent_sessions: list = None, top_by_count: list = None
+    parent=None,
+    agent_name: str = "",
+    agent_description: str = "",
+    recent_sessions: list = None,
+    top_by_count: list = None,
 ) -> MessageCard:
     """创建欢迎卡片
 
@@ -6799,7 +6839,7 @@ def create_welcome_card(
             else:
                 right_cell = "-"
 
-            table_rows += f'<tr><td>{left_cell}</td><td>{right_cell}</td></tr>'
+            table_rows += f"<tr><td>{left_cell}</td><td>{right_cell}</td></tr>"
 
         history_section = f"""
 <table class="session-table">

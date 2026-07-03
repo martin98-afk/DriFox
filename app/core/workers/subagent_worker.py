@@ -936,6 +936,7 @@ class SubAgentExecutor(QThread):
 
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
+            self._add_log("tool_call", tool_name, {"args": arguments})
             QCoreApplication.processEvents()
 
             # 工具执行也算活跃（避免 stall 检测器误杀）
@@ -947,6 +948,7 @@ class SubAgentExecutor(QThread):
             success = getattr(result, "success", True) if result else False
 
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
+            self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
             QCoreApplication.processEvents()
 
             # 在每个 tool_result 之前，先消费 PreToolUse 队列（按 Claude Code 约定：PreToolUse 在 result 前）

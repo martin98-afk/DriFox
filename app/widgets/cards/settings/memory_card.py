@@ -6,7 +6,7 @@
 3. 关键文档 - 列表 + 拖拽添加
 """
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QKeyEvent
@@ -805,8 +805,16 @@ class MemoryCardContent(QWidget):
             parent = parent.parent()
         return None
 
-    def set_project(self, project: str):
-        """设置当前项目"""
+    def set_project(self, project: str, workdir: Optional[str] = None):
+        """设置当前项目
+
+        Args:
+            project: 项目名
+            workdir: 可选 — 由调用方（main_widget）算好的工作目录。
+                     传入后会写入实例缓存，避免内部重复查询 DB。
+        """
+        if workdir is not None:
+            self._instance_workdir[project] = workdir or ""
         if self._current_project != project:
             self._current_project = project
         # 强制刷新项目笔记和关键文档
@@ -1431,13 +1439,21 @@ class MemoryCardContent(QWidget):
 
     # ==================== 项目笔记操作 ====================
 
-    def _load_project_note(self):
-        """加载项目笔记（从当前 workdir 的 AGENTS.md）"""
+    def _load_project_note(self, workdir_override: Optional[str] = None):
+        """加载项目笔记（从当前 workdir 的 AGENTS.md）
+
+        Args:
+            workdir_override: 调用方已算好的工作目录；非 None 时跳过 _get_effective_workdir 查询
+        """
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
             return
 
-        workdir = self._get_effective_workdir(self._current_project)
+        workdir = (
+            (workdir_override or None)
+            if workdir_override is not None
+            else self._get_effective_workdir(self._current_project)
+        )
         self.project_name_label.setText(f" {self._current_project}")
         # 同步更新方形 avatar
         if hasattr(self, '_notes_project_avatar'):
@@ -1487,8 +1503,12 @@ class MemoryCardContent(QWidget):
 
     # ==================== 关键文档操作 ====================
 
-    def _load_key_documents(self):
-        """加载关键文档（过滤掉 git_worktree 条目，但保留根目录视觉效果）"""
+    def _load_key_documents(self, workdir_override: Optional[str] = None):
+        """加载关键文档（过滤掉 git_worktree 条目，但保留根目录视觉效果）
+
+        Args:
+            workdir_override: 调用方已算好的工作目录；非 None 时跳过 _get_effective_workdir 查询
+        """
         self.docs_list.clear()
         memory_mgr = self._get_memory_manager()
         if not memory_mgr:
@@ -1497,7 +1517,11 @@ class MemoryCardContent(QWidget):
         all_docs = memory_mgr.get_key_documents(self._current_project)
 
         # 获取实际工作目录（多窗口隔离：实例缓存优先）
-        actual_wd = self._get_effective_workdir(self._current_project)
+        actual_wd = (
+            (workdir_override or None)
+            if workdir_override is not None
+            else self._get_effective_workdir(self._current_project)
+        )
 
         # 预检：当前工作目录是否指向 worktree（需要在循环前确定，用于后续 git 检测判断）
         is_worktree_active = False
@@ -1587,6 +1611,7 @@ class MemoryCardContent(QWidget):
                 wt_widget = WorktreeSectionWidget(
                     widget._repo_info, file_path, self,
                     current_workdir=actual_wd,
+                    project=self._current_project,
                 )
                 wt_widget.sizeChanged.connect(lambda h, item=wt_item: (
                     item.setSizeHint(QSize(0, h)),
@@ -1594,6 +1619,7 @@ class MemoryCardContent(QWidget):
                 ))
                 wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
                 wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
+                wt_widget.workingDirRestored.connect(self._on_workdir_restored)
                 self.docs_list.addItem(wt_item)
                 self.docs_list.setItemWidget(wt_item, wt_widget)
 
@@ -1739,6 +1765,14 @@ class MemoryCardContent(QWidget):
                 self.workingDirChanged.emit("")
 
         self._load_key_documents()
+
+    def _on_workdir_restored(self, path: str):
+        """外部删除导致 workdir 恢复为原始仓库时，更新实例缓存（不触发全量重建）
+
+        由 WorktreeSectionWidget.workingDirRestored 信号触发。
+        """
+        self._instance_workdir[self._current_project] = path
+        self.workingDirChanged.emit(path)
 
     def _open_folder(self, path: str):
         """打开文件/文件夹/URL"""
