@@ -358,6 +358,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_anchor_timer.setInterval(80)
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
         self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
+        # 🛡️ 会话切换哨兵：_create_new_session 中置 True，丢弃 stop_streaming 后
+        # 仍可能跨线程到达的 worker 旧回调（_on_messages_updated / _do_post_stream_cleanup
+        # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
+        # 在 _on_send_clicked 发起新 AI 请求时清零。
+        self._session_switched = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
@@ -5601,6 +5606,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
 
+        # 🛡️ 标记会话切换：stop_streaming 后 worker 仍可能在跨线程事件循环里
+        # 投递 _on_messages_updated / _on_stream_finished / _do_post_stream_cleanup
+        # 等旧回调。此时 _current_session_id 已被下方 create_session 更新到新会话，
+        # 这些回调若继续执行会把旧会话的消息写到新会话，再被 _do_post_stream_cleanup
+        # 错误地保存到切换后的新项目下，出现「同一对话在两个项目下都出现」的副本 bug。
+        # 哨兵一直保持 True，直到下一次 _on_send_clicked 真正发起新会话的 AI 请求时清零。
+        self._session_switched = True
+
         self._is_streaming = False
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
@@ -6009,8 +6022,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         切换会话时彻底清理当前会话的卡片，释放内存。
 
-        使用 deleteLater() + processEvents() 替代 sip.delete() 即时销毁，
-        避免 Qt 信号-槽连接在销毁过程中被触发导致 access violation。
+        性能优化：移除 QApplication.processEvents()（实测在切换项目中阻塞 UI 事件循环 ~100ms+）；
+        deleteLater() 本身是延迟删除的，由 Qt 下一轮事件循环自然消费即可。
+        全局渲染缓存清理 / 进程堆压缩也推到 singleShot(0) 下一帧，避免同步阻塞主线程。
         """
         # 从布局中取出所有 widgets
         widgets = self._take_chat_widgets()
@@ -6034,14 +6048,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 widget.cleanup()
             widget.deleteLater()
 
-        # 清理全局 Markdown 渲染 LRU 缓存（缓存的 HTML 字符串可达数 MB）
-        clear_global_render_cache()
-
-        # 立即处理所有 deleteLater 事件，确保旧卡片在新卡片创建前被销毁
-        QApplication.processEvents()
-
-        # 卡片清理后压缩进程堆，释放空闲 arena
-        _compact_process_heap_after_cleanup()
+        # 推迟到下一事件循环：清理 Markdown 渲染 LRU 缓存 + 压缩进程堆。
+        # 这两个操作虽各自不重，但 merge 进主线程后会切走 ~50-100ms；
+        # 切项目这一帧只先释放 widget 引用，把重活放到下一帧。
+        QTimer.singleShot(
+            0,
+            lambda: (
+                clear_global_render_cache(),
+                _cleanup_global_lru_caches(),
+                _compact_process_heap_after_cleanup(),
+            ),
+        )
 
     def _cleanup_session_card_cache(self):
         from app.constants import (
@@ -7203,6 +7220,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if session:
             self._displayed_session_id = session.session_id
+            # 🛡️ 锁定首发项目快照：用户首次发消息时记录当前项目。
+            # 一旦锁定，后续即使切换项目，落盘时仍归属首发项目，
+            # 避免"对话完成后立即切换项目导致会话错存到切换后项目"bug。
+            if not session.originating_project and self._current_project:
+                session.originating_project = self._current_project
 
         # 计算当前 user message 的 round_index
         if user_round_index is None:
@@ -7927,10 +7949,15 @@ class OpenAIChatToolWindow(ToolWindow):
                         **worktree_kwargs,
                     )
                 else:
+                    # 🛡️ 罕见路径（恢复时历史被截断）：用 originating_project 优先的
+                    # fallback 链，避免被当前 _current_project 错误覆盖
+                    resolved_project = self._resolve_session_project_fallback(
+                        session.session_id, self._current_project, session=session
+                    )
                     self.history_manager.save_session(
                         session.messages,
                         session_id=session.session_id,
-                        project=self._current_project,
+                        project=resolved_project,
                         **compaction_info,
                         **worktree_kwargs,
                     )
@@ -9185,6 +9212,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         from PyQt5.QtCore import QTimer  # 推迟 send_message 用
+
+        # 🛡️ 清零会话切换哨兵：用户即将发起新 AI 请求，worker 的旧回调通道已无意义，
+        # 后续 _on_messages_updated / _do_post_stream_cleanup 应正常处理新会话。
+        self._session_switched = False
 
         if self._is_auto_loop_running:
             InfoBar.warning(
@@ -10577,6 +10608,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
 
+        # 🛡️ 会话切换哨兵：流式回调链最末端的兜底。若 stop_streaming 后 worker
+        # 仍投递了 _on_messages_updated 但被丢弃，但 _on_stream_finished 仍可能
+        # 触发 _do_post_stream_cleanup 把"当前"会话（其实是新会话）保存到新项目。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        if getattr(self, "_session_switched", False):
+            from loguru import logger
+            logger.warning("[PostStreamCleanup] 检测到会话切换哨兵，跳过本次保存防止重复落盘")
+            return
+
         if self.history_manager:
             self._save_current_session_to_history()
             # 🛡️ 立即落盘，确保数据写入 SQLite
@@ -10721,21 +10761,36 @@ class OpenAIChatToolWindow(ToolWindow):
             # 如果不支持余额查询，隐藏
             balance_display.setVisible(False)
 
-    def _resolve_session_project_fallback(self, session_id: str, current_project: str) -> str:
+    def _resolve_session_project_fallback(
+        self,
+        session_id: str,
+        current_project: str,
+        session: Optional["ChatSession"] = None,
+    ) -> str:
         """解析会话的项目归属兜底值：优先沿用已有归属，避免被默认项目覆盖。
 
-        策略：
-        1. 通过 history_manager 查询该 session_id 在内存/SQLite 中的现有 project
-        2. 查到非空值则沿用（保护"项目切换不影响老会话归属"）
+        策略（优先级从高到低）：
+        1. session.originating_project：会话级「首发项目」快照。
+           用户首次发消息时锁定（即使用户切换项目也不变），
+           避免"对话完成后立即切换项目导致会话错存到切换后项目"bug。
+        2. 通过 history_manager 查询该 session_id 在内存/SQLite 中的现有 project
+           （保护"项目切换不影响老会话归属"）
         3. 查不到则使用 current_project（仅适用于真正的新会话）
 
         Args:
             session_id: 会话 ID
             current_project: 当前项目（兜底值）
+            session: 可选 ChatSession 对象，若提供则优先用其 originating_project 字段
 
         Returns:
             解析后的项目名
         """
+        # 1. 优先：会话级首发项目快照（用户在哪个项目下首发的对话）
+        if session is not None:
+            op = getattr(session, "originating_project", "") or ""
+            if op:
+                return op
+        # 2. 次之：内存/SQLite 中该 session_id 的已有 project
         if not session_id or not self.history_manager:
             return current_project
         try:
@@ -10746,6 +10801,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     return existing_project
         except Exception as e:
             logger.warning(f"[ProjectResolve] 查询已有项目归属失败: {e}, fallback={current_project}")
+        # 3. 兜底：current_project
         return current_project
 
     def _save_current_session_to_history(self):
@@ -10777,7 +10833,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 🛡️ 内存中找不到（如老会话被 _history_limit=100 截断），
                 # 优先查询 SQLite 原有 project，避免被当前 _current_project 错误覆盖
                 resolved_project = self._resolve_session_project_fallback(
-                    self._current_session_id, self._current_project
+                    self._current_session_id, self._current_project, session=session
                 )
                 self.history_manager.save_session(
                     saved_messages,
@@ -10791,10 +10847,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 self._current_session_id = session.session_id if session else None
         else:
-            # 🛡️ 新会话首次入库：用 _current_project；如果 session.session_id 在 SQLite
-            # 中已存在（极少见的跨窗口/恢复场景），优先沿用其原 project
+            # 🛡️ 新会话首次入库：优先用 session.originating_project（用户首次发消息时锁定），
+            # 若未锁定则查 SQLite，最后兜底 _current_project。
+            # 这条路径专门防止"对话进行中切换项目导致会话错存"bug。
             resolved_project = self._resolve_session_project_fallback(
-                session.session_id if session else None, self._current_project
+                session.session_id if session else None, self._current_project, session=session
             )
             self.history_manager.save_session(
                 saved_messages,
@@ -10816,6 +10873,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 主线程事件循环处理。closeEvent 路径已主动同步应用 + 持久化（见 _apply_interrupted_messages_to_session），
         # 这里无需再 set_messages，避免 UI 副作用（set_meta_info/ring 刷新）访问已销毁的 widget。
         if getattr(self, "_is_destroyed", False):
+            return
+        # 🛡️ 会话切换哨兵：_create_new_session 会创建新会话并 stop_streaming，
+        # 但 worker 跨线程的 _on_messages_updated 可能延迟到达，此时
+        # get_current_session() 返回的是新会话（旧会话已被替换），
+        # 继续 set_messages 会把旧消息写到新会话，再被后续 save 错误保存到新项目。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        if getattr(self, "_session_switched", False):
+            from loguru import logger
+            logger.warning(
+                f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
+                f"msg_count={len(messages)}, current_session_id="
+                f"{self.session_manager.get_current_session().session_id[:8] if self.session_manager.get_current_session() else 'None'}"
+            )
             return
         session = self.session_manager.get_current_session()
         if not session:
@@ -11328,13 +11398,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id is None and session and session.messages:
             worktree_path = self._get_current_worktree_path()
             worktree_kwargs = {"worktree_path": worktree_path or ""}
+            # 🛡️ 新会话首存：使用 originating_project 优先的 fallback 链，
+            # 避免"标题生成完成时用户已切到其他项目"导致会话错存。
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id, self._current_project, session=session
+            )
             self.history_manager.save_session(
                 session.messages if session else [],
                 title=clean_summary,  # 使用生成的摘要作为标题
                 session_id=session.session_id if session else None,
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
-                project=self._current_project,
+                project=resolved_project,
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id if session else None
@@ -11567,13 +11642,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新 tool_executor 的当前项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(project)
+        # 性能优化：先算 workdir（实例缓存 / DB 单次读取），再下发给 memory_card_popup，
+        # 避免 set_project 内部又走一遍 _get_effective_workdir。
+        workdir = self._current_workdir.get(project)
+        if workdir is None and self.backend and self.backend.memory_manager:
+            workdir = self.backend.memory_manager.get_working_directory(project)
+            if workdir:
+                self._current_workdir[project] = workdir
         # 刷新记忆卡片的项目（项目笔记、关键文档会跟着刷新）
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             from loguru import logger
 
             logger.info(f"[MainWidget] Calling set_project({project}) on memory_card_popup")
-            self._memory_card_popup.set_project(project)
-            # 切换项目时自动同步工作目录
+            self._memory_card_popup.set_project(project, workdir=workdir)
+            # 同步到记忆卡片实例缓存 + tool_executor（已有的 _sync_working_directory
+            # 会再做一次 workdir 读取；因为上面已经把它写进 _current_workdir，
+            # 这次读取走的是缓存，DB 命中只一次）。
             self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
@@ -12210,7 +12294,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 🛡️ 内存找不到（老会话被截断出 _history_limit）：
                 # 先查 SQLite 原 project，避免被当前 _current_project 覆盖
                 resolved_project = self._resolve_session_project_fallback(
-                    self._current_session_id, self._current_project
+                    self._current_session_id, self._current_project, session=session
                 )
                 self.history_manager.save_session(
                     session.messages,
@@ -12224,7 +12308,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id = session.session_id
         else:
             # 🛡️ 新会话：用 _current_project；若 session_id 在 SQLite 已存在则沿用原 project
-            resolved_project = self._resolve_session_project_fallback(session.session_id, self._current_project)
+            resolved_project = self._resolve_session_project_fallback(
+                session.session_id, self._current_project, session=session
+            )
             self.history_manager.save_session(
                 session.messages,
                 session_id=session.session_id,
@@ -12558,6 +12644,17 @@ class OpenAIChatToolWindow(ToolWindow):
         由 _interrupt_complete 信号触发。
         """
         if getattr(self, "_is_destroyed", False):
+            return
+
+        # 🛡️ 会话切换哨兵：用户在 AI 流式期间切换了项目或新建了会话，
+        # finalize_stop 此时才到达，apply_interrupted_messages 会把旧消息写到新会话，
+        # save 会落到新项目。直接丢弃整条回调（closeEvent 路径已处理数据持久化）。
+        if getattr(self, "_session_switched", False):
+            from loguru import logger
+            logger.warning(
+                f"[FinalizeStop] 检测到会话切换哨兵，丢弃 finalize 回调："
+                f"interrupted_count={len(interrupted_messages) if interrupted_messages else 0}"
+            )
             return
 
         current_session = self.session_manager.get_current_session()

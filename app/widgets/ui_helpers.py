@@ -1173,10 +1173,17 @@ def save_or_archive_session(
         compaction_info = get_session_compaction_info(session)
 
     # 🛡️ 优先沿用会话已存在的 project 归属，避免被 "默认项目" 兜底覆盖
-    # 查询顺序：内存缓存 → SQLite。两者都没有则使用 project_fallback。
+    # 优先级（从高到低）：
+    #   1. session.originating_project：会话级首发项目快照（用户在哪个项目下首发的对话）
+    #   2. 内存缓存 / SQLite 中该 session_id 的已有 project
+    #   3. project_fallback（通常是当前 main_widget._current_project）
     resolved_project = None
-    target_session_id = current_session_id or session.session_id
-    if target_session_id and history_manager:
+    if session is not None:
+        op = getattr(session, "originating_project", "") or ""
+        if op:
+            resolved_project = op
+    target_session_id = current_session_id or (session.session_id if session else None)
+    if resolved_project is None and target_session_id and history_manager:
         try:
             existing = history_manager.get_session_by_session_id(target_session_id)
             if existing:
