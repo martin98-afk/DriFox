@@ -61,17 +61,38 @@ class KeyDocumentsRepository:
         except Exception:
             pass  # 列已存在
 
+    def _get_by_path(self, project: str, file_path: str) -> Optional[Dict]:
+        """按 project+file_path 查询已有记录（仅返回 id 和 added_by）"""
+        file_path = str(file_path).replace("\\", "/")
+        try:
+            success, rows = self._execute(
+                f'SELECT id, added_by FROM {self.TABLE_NAME} WHERE project = ? AND file_path = ?',
+                (project, file_path)
+            )
+            if success and rows:
+                row = rows[0]
+                if isinstance(row, tuple):
+                    return {"id": row[0], "added_by": row[1]}
+                return {"id": row.get("id", ""), "added_by": row.get("added_by", "manual")}
+        except Exception:
+            pass
+        return None
+
     def add(self, project: str, file_path: str, added_by: str = "manual") -> bool:
         """
         添加关键文档
-        
+
         Args:
             project: 项目名称
             file_path: 文件路径或 URL
-            added_by: 添加方式 ('manual' 或 'stage_files')
-        
+            added_by: 添加方式 ('manual' 或 'git_worktree' / 'stage_files')
+
         Returns:
             bool: 添加是否成功
+
+        关键行为：
+        - 如果路径已存在且 added_by='git_worktree'，用户重新手动添加时会自动升级为 'manual'
+          （解决「僵尸文档」问题：worktree 自动添加的文档被 UI 过滤，用户手动重加也显示不出）
         """
         if not self._ensure_table():
             return False
@@ -91,6 +112,21 @@ class KeyDocumentsRepository:
         doc_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{hashlib.md5(file_path.encode()).hexdigest()[:8]}"
 
         try:
+            # 预检：如果已存在 git_worktree 记录，升级为 manual
+            existing = self._get_by_path(project, file_path)
+            if existing:
+                if existing["added_by"] == "git_worktree" and added_by == "manual":
+                    # 僵尸文档复活：把 git_worktree 升级为 manual + 刷新时间戳
+                    success, _ = self._execute(
+                        f'UPDATE {self.TABLE_NAME} SET added_by=?, added_at=?, file_name=?, id=? '
+                        f'WHERE id=?',
+                        (added_by, now, file_name, doc_id, existing["id"])
+                    )
+                    return success
+                # 已存在且非 git_worktree → 跳过（不去重）
+                return True
+
+            # 正常插入
             success, _ = self._execute(f'''
                 INSERT OR IGNORE INTO {self.TABLE_NAME} 
                 (id, project, file_path, file_name, added_at, added_by)

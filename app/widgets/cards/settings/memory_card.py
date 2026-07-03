@@ -1611,6 +1611,7 @@ class MemoryCardContent(QWidget):
                 wt_widget = WorktreeSectionWidget(
                     widget._repo_info, file_path, self,
                     current_workdir=actual_wd,
+                    project=self._current_project,
                 )
                 wt_widget.sizeChanged.connect(lambda h, item=wt_item: (
                     item.setSizeHint(QSize(0, h)),
@@ -1618,6 +1619,7 @@ class MemoryCardContent(QWidget):
                 ))
                 wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
                 wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
+                wt_widget.workingDirRestored.connect(self._on_workdir_restored)
                 self.docs_list.addItem(wt_item)
                 self.docs_list.setItemWidget(wt_item, wt_widget)
 
@@ -1763,6 +1765,14 @@ class MemoryCardContent(QWidget):
                 self.workingDirChanged.emit("")
 
         self._load_key_documents()
+
+    def _on_workdir_restored(self, path: str):
+        """外部删除导致 workdir 恢复为原始仓库时，更新实例缓存（不触发全量重建）
+
+        由 WorktreeSectionWidget.workingDirRestored 信号触发。
+        """
+        self._instance_workdir[self._current_project] = path
+        self.workingDirChanged.emit(path)
 
     def _open_folder(self, path: str):
         """打开文件/文件夹/URL"""

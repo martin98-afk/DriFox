@@ -747,7 +747,6 @@ class LLMSettingsCard(SystemCardFrame):
         LLMSettingsCard._autostart_toggling = True
         try:
             if enabled:
-                # 开启前检查平台支持
                 import os
 
                 if os.name != "nt":
@@ -763,14 +762,11 @@ class LLMSettingsCard(SystemCardFrame):
                     ).show()
                     return
 
+            # 1. 先写入注册表（独立 try，不相互污染异常处理）
             try:
                 set_auto_start(enabled)
-                # 确保配置持久化到 Settings 文件（.drifox/app.config）
-                self.cfg.save()
             except Exception as exc:
-                # 失败时回退开关状态和 ConfigItem 值
-                # 注意：setChecked 可能触发 checkedChanged 信号导致重入，
-                # 防重入标志已在上层设置，防止递归
+                # 注册表写入失败 → 回退 UI 和配置
                 self.autoStartCard.switchButton.setChecked(not enabled)
                 self.cfg.set(self.cfg.auto_start, not enabled, save=True)
                 from qfluentwidgets import InfoBar, InfoBarPosition
@@ -782,6 +778,14 @@ class LLMSettingsCard(SystemCardFrame):
                     duration=3000,
                     parent=self,
                 ).show()
+                return
+
+            # 2. 再单独保存配置（SwitchSettingCard 已通过 qconfig.set 保存过，
+            #    此处 save 用于兜底写入，失败不滚回注册表）
+            try:
+                self.cfg.save()
+            except Exception as e:
+                logger.warning(f"[AutoStart] 配置保存失败，但注册表已更新: {e}")
         finally:
             LLMSettingsCard._autostart_toggling = False
 

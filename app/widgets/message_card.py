@@ -22,6 +22,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 import urllib.parse
 from datetime import datetime
@@ -128,6 +129,42 @@ _NEXT_FIELD_PATTERN = re.compile(r"\n(?:success|tool_call_id|diff|echarts):")
 # 性能优化：正则提取后备方案使用的预编译模式
 _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
+# ===== Pygments lexer/formatter 缓存（避免每个代码块每周期重建） =====
+_LEXER_CACHE: dict = {}
+_TEXT_LEXER = TextLexer()
+# formatter 含动态字号，缓存当前字号对应的实例
+_FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
+
+
+def _get_lexer_cached(lang: str):
+    """按语言名缓存 lexer 实例（lexer 构造开销大，含完整词法分析器初始化）"""
+    if not lang:
+        return _TEXT_LEXER
+    lex = _LEXER_CACHE.get(lang)
+    if lex is None:
+        try:
+            lex = get_lexer_by_name(lang, stripall=False)
+        except Exception:
+            lex = _TEXT_LEXER
+        _LEXER_CACHE[lang] = lex
+    return lex
+
+
+def _get_formatter_cached():
+    """HtmlFormatter 单例，字号变化时重建"""
+    fs = scale_font_size(13)
+    if _FORMATTER_CACHE["font_size"] != fs:
+        _FORMATTER_CACHE["font_size"] = fs
+        _FORMATTER_CACHE["formatter"] = HtmlFormatter(
+            style="dracula",
+            linenos=False,
+            noclasses=True,
+            cssclass="code-block",
+            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px; color:#D4D4D4;",
+        )
+    return _FORMATTER_CACHE["formatter"]
+
+
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
@@ -216,29 +253,6 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
                 # JSON 解析失败，降级为普通代码块
                 pass
 
-        # ===== Mermaid 图代码块：渲染为交互式图表 =====
-        if lang == "mermaid":
-            try:
-                # 解码 HTML 实体，得到原始 mermaid 定义
-                mermaid_def = (
-                    code_content_raw.replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&amp;", "&")
-                    .replace("&#39;", "'")
-                    .replace("&quot;", '"')
-                )
-                if not mermaid_def.strip():
-                    raise ValueError("empty mermaid definition")
-                # base64 编码防止 HTML 属性转义问题
-                b64_def = base64.b64encode(mermaid_def.encode("utf-8")).decode("ascii")
-                diagram_id = "mermaid-" + hashlib.sha1(mermaid_def.encode("utf-8")).hexdigest()[:12]
-                return f'''
-                <div id="{diagram_id}" class="mermaid-container" data-mermaid-def="{b64_def}"></div>
-                '''
-            except Exception:
-                # 降级为普通代码块
-                pass
-
         # --- 普通代码块处理 ---
         try:
             copy_text = (
@@ -258,14 +272,8 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
 
         # 高亮代码（获取 <pre> 内部 HTML）
         try:
-            lexer = get_lexer_by_name(lang, stripall=False) if lang else TextLexer()
-            formatter = HtmlFormatter(
-                style="dracula",
-                linenos=False,
-                noclasses=True,
-                cssclass="code-block",
-                prestyles="margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{scale_font_size(13)}px; color:#D4D4D4;",
-            )
+            lexer = _get_lexer_cached(lang)
+            formatter = _get_formatter_cached()
             highlighted = highlight(copy_text, lexer, formatter)
             # 提取 <pre> 内部内容
             pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
@@ -1573,6 +1581,15 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
     return "".join(parts)
 
 
+# ===== _inject_hook_blocks 预编译正则（流式时每周期调用，避免重复编译） =====
+_RE_SYS_REMINDER_FULL = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+_RE_SYS_REMINDER_HALF = re.compile(r"<system-reminder>.*", re.DOTALL)
+_RE_HOOK_TAG_FULL = re.compile(r"<([a-z0-9-]+-hook)>.*?</\1>", re.DOTALL)
+_RE_HOOK_TAG_HALF = re.compile(r"<[a-z0-9-]+-hook>.*", re.DOTALL)
+_RE_HOOK_EVENT_FULL = re.compile(r'<hook\s+event="[^"]+">.*?</hook>', re.DOTALL)
+_RE_HOOK_EVENT_HALF = re.compile(r'<hook\s+event="[^"]+">.*', re.DOTALL)
+
+
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
     """彻底丢弃所有 hook 输出（不再渲染折叠框）。
 
@@ -1597,49 +1614,19 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
         return md_text
 
     # 1) 完整 <system-reminder>...</system-reminder> 整段丢
-    md_text = re.sub(
-        r"<system-reminder>.*?</system-reminder>",
-        "",
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_SYS_REMINDER_FULL.sub("", md_text)
     # 2) 半截 <system-reminder>...</字符串末尾> 也要丢（流式中间态）
-    md_text = re.sub(
-        r"<system-reminder>.*",
-        "",
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_SYS_REMINDER_HALF.sub("", md_text)
 
     # 3) 完整 <xxx-hook>...</xxx-hook> 整段丢（兼容早期无 system-reminder 包裹的消息）
-    md_text = re.sub(
-        r"<([a-z0-9-]+-hook)>.*?</\1>",
-        "",
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_TAG_FULL.sub("", md_text)
     # 4) 半截 <xxx-hook>...</末尾> 也要丢
-    md_text = re.sub(
-        r"<[a-z0-9-]+-hook>.*",
-        "",
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_TAG_HALF.sub("", md_text)
 
     # 5) 完整 <hook event="Xxx">...</hook> 整段丢（兼容最早旧格式）
-    md_text = re.sub(
-        r'<hook\s+event="[^"]+">.*?</hook>',
-        "",
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_EVENT_FULL.sub("", md_text)
     # 6) 半截 <hook event=...>...</末尾> 也要丢
-    md_text = re.sub(
-        r'<hook\s+event="[^"]+">.*',
-        "",
-        md_text,
-        flags=re.DOTALL,
-    )
+    md_text = _RE_HOOK_EVENT_HALF.sub("", md_text)
 
     return md_text
 
@@ -1745,6 +1732,11 @@ def _inject_context_links(md_text: str) -> str:
     return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
 
 
+# ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
+_IMG_SRC_PATTERN = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def _resolve_image_src(html_content: str) -> str:
     """
     将 HTML 中的图片 src 相对路径转为绝对 file:/// 路径。
@@ -1753,8 +1745,6 @@ def _resolve_image_src(html_content: str) -> str:
     则转换为 file:/// 绝对路径，确保 QWebEngineView 能正常加载。
     已存在的绝对路径（http/https/file/data/qrc）跳过处理。
     """
-    _img_src_pattern = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
-    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     def _replacer(match):
         prefix = match.group(1)
@@ -1771,7 +1761,7 @@ def _resolve_image_src(html_content: str) -> str:
             candidate = os.path.normpath(src)
         else:
             # 相对路径：以项目根目录为基准拼接
-            candidate = os.path.normpath(os.path.join(_project_root, src))
+            candidate = os.path.normpath(os.path.join(_PROJECT_ROOT, src))
 
         if os.path.isfile(candidate):
             # 本地文件存在，转为 file:/// 路径
@@ -1780,7 +1770,53 @@ def _resolve_image_src(html_content: str) -> str:
 
         return match.group(0)
 
-    return _img_src_pattern.sub(_replacer, html_content)
+    return _IMG_SRC_PATTERN.sub(_replacer, html_content)
+
+
+# ======== 本地 Vendor JS 脚本（离线优先，CDN 降级） ========
+_vendor_script_tags_cache: Optional[str] = None
+
+
+def _get_vendor_script_tags() -> str:
+    """构建本地 vendor JS 脚本标签（离线优先，CDN 降级）。
+
+    优先引用本地 app/resources/web/vendor/ 下的 JS 库（离线可用），
+    本地文件缺失时降级为 CDN，确保离线环境 echarts 可用。
+    结果做模块级缓存，避免每次 _load_skeleton 都做文件系统检查。
+    """
+    global _vendor_script_tags_cache
+    if _vendor_script_tags_cache is not None:
+        return _vendor_script_tags_cache
+
+    # PyInstaller 打包后资源可能在 _MEIPASS 下
+    base_dirs = [_PROJECT_ROOT]
+    if hasattr(sys, "_MEIPASS"):
+        base_dirs.append(sys._MEIPASS)
+
+    vendor_libs = [
+        ("app/resources/web/vendor/echarts.min.js", "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"),
+        (
+            "app/resources/web/vendor/echarts-wordcloud.min.js",
+            "https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js",
+        ),
+    ]
+
+    tags = []
+    for rel_path, cdn_url in vendor_libs:
+        local_found = False
+        for base in base_dirs:
+            candidate = os.path.join(base, rel_path)
+            if os.path.isfile(candidate):
+                # 用绝对 file:/// URL，确保任何 baseUrl 下都能加载
+                local_url = QUrl.fromLocalFile(candidate).toString()
+                tags.append(f'<script src="{local_url}"></script>')
+                local_found = True
+                break
+        if not local_found:
+            tags.append(f'<script src="{cdn_url}"></script>')
+
+    _vendor_script_tags_cache = "\n        ".join(tags)
+    return _vendor_script_tags_cache
 
 
 # ======== WebViewer ========
@@ -1807,13 +1843,15 @@ class ConsoleMonitorPage(QWebEnginePage):
 
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
         msg = message.strip()
-        if msg == "pywebview_ready":
-            self.contentReady.emit()
-        elif msg.startswith("pywebview_height:"):
+        # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
+        # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
+        if msg.startswith("pywebview_height:"):
             try:
                 self.heightReported.emit(int(float(msg.split(":")[1])))
             except Exception:
                 pass
+        elif msg == "pywebview_ready":
+            self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
             if "context|||" in msg:
                 try:
@@ -1916,6 +1954,9 @@ class CodeWebViewer(QWebEngineView):
         self._is_js_ready = False
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
+        # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
+        self._processed_md_hash = None
+        self._cached_streaming_html = None
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         self._min_render_interval = 50
@@ -2236,11 +2277,8 @@ class CodeWebViewer(QWebEngineView):
         if self._light_skeleton:
             cdn_libs = ""
         else:
-            cdn_libs = """
-        <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-        """
+            # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN
+            cdn_libs = _get_vendor_script_tags()
 
         scrollbar_css = """
             /* 统一滚动条样式 - 深色模式适配 */
@@ -3072,31 +3110,6 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(22, 27, 34, 0.6);
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
-                /* ===== Mermaid 图表容器 ===== */
-                .mermaid-container {{
-                    display: flex;
-                    justify-content: center;
-                    width: 100%;
-                    margin: 12px 0;
-                    padding: 16px 8px;
-                    background: rgba(255,255,255,0.02);
-                    border: 1px solid var(--border);
-                    border-radius: 12px;
-                    overflow-x: auto;
-                    min-height: 60px;
-                }}
-                .mermaid-container svg {{
-                    max-width: 100%;
-                    height: auto;
-                }}
-                .mermaid-error {{
-                    color: #ff7b7b;
-                    font-family: {mono_font};
-                    font-size: {code_font_size}px;
-                    padding: 12px 16px;
-                    white-space: pre-wrap;
-                    word-break: break-word;
-                }}
                 '''
         }
 
@@ -3212,6 +3225,10 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
+                // ===== Mermaid 渲染（已移除） =====
+                // mermaid 图表渲染功能因 QtWebEngine Chromium 版本兼容问题已整体移除。
+                // mermaid 代码块（```mermaid）降级为普通代码块，由 Pygments 高亮显示。
+
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
@@ -3317,69 +3334,6 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
-                        // 初始化 Mermaid 图表
-                        if (typeof mermaid !== 'undefined') {{
-                            document.querySelectorAll('.mermaid-container').forEach(function(el) {{
-                                try {{
-                                    var defB64 = el.getAttribute('data-mermaid-def');
-                                    if (!defB64 || el._mermaidInited) return;
-                                    var _bytes = Uint8Array.from(atob(defB64), function(c) {{ return c.charCodeAt(0); }});
-                                    var definition = new TextDecoder('utf-8').decode(_bytes);
-                                    // 直接将 mermaid 定义文本放入元素，mermaid.run() 会自动渲染
-                                    el.textContent = definition;
-                                    el._mermaidInited = true;
-                                }} catch(e) {{
-                                    console.error('Mermaid decode error:', e);
-                                    el.innerHTML = '<div class=\"mermaid-error\">Mermaid 解析失败: ' + e.message + '</div>';
-                                }}
-                            }});
-                            // 批量渲染所有新增的 mermaid 图表
-                            mermaid.run({{
-                                querySelector: '.mermaid-container',
-                            }}).then(function() {{
-                                // 清理残留文本节点，防止它们撑高容器
-                                document.querySelectorAll('.mermaid-container').forEach(function(el) {{
-                                    for (var i = el.childNodes.length - 1; i >= 0; i--) {{
-                                        if (el.childNodes[i].nodeType === 3 /* TEXT_NODE */) {{
-                                            el.removeChild(el.childNodes[i]);
-                                        }}
-                                    }}
-                                    // 强制容器高度匹配 SVG 实际高度
-                                    var svg = el.querySelector('svg');
-                                    if (svg) {{
-                                        var svgH = svg.getBoundingClientRect().height;
-                                        if (svgH > 0) {{
-                                            el.style.height = (svgH + 32) + 'px';
-                                            el.style.overflow = 'hidden';
-                                        }}
-                                    }}
-                                }});
-                                reportHeight();
-                            }}).catch(function(err) {{
-                                console.error('Mermaid render error:', err);
-                                // 渲染失败的容器显示错误提示，并重置 _mermaidInited 以允许下次重试
-                                document.querySelectorAll('.mermaid-container').forEach(function(el) {{
-                                    if (el._mermaidInited && el.querySelector('svg') === null) {{
-                                        var defB64 = el.getAttribute('data-mermaid-def');
-                                        if (defB64) {{
-                                            try {{
-                                                var _b = Uint8Array.from(atob(defB64), function(c) {{ return c.charCodeAt(0); }});
-                                                var _d = new TextDecoder('utf-8').decode(_b);
-                                                el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 语法错误:\\n' + _d.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
-                                            }} catch(decodeErr) {{
-                                                el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 渲染失败</div>';
-                                            }}
-                                        }} else {{
-                                            el.innerHTML = '<div class=\"mermaid-error\">&#9888; Mermaid 渲染失败</div>';
-                                        }}
-                                        // 重置标记，允许下次 updateContent 时重新尝试渲染
-                                        el._mermaidInited = false;
-                                    }}
-                                }});
-                                reportHeight();
-                            }});
-                        }}
-
                         // 自动滚动已在 innerHTML 替换后同步处理（见上方 _suppressScrollEvent 段），
                         // 不再依赖 setTimeout(0) 异步 auto-scroll 避免 paint 间隙闪烁。
 
@@ -3452,23 +3406,6 @@ class CodeWebViewer(QWebEngineView):
                 document.addEventListener('DOMContentLoaded', () => {{
                     console.log('pywebview_ready');
                     reportHeight();
-                    // ── Mermaid 全局初始化 ──
-                    if (typeof mermaid !== 'undefined') {{
-                        mermaid.initialize({{
-                            startOnLoad: false,
-                            theme: 'dark',
-                            securityLevel: 'sandbox',
-                            themeVariables: {{
-                                darkMode: true,
-                                background: 'transparent',
-                                primaryColor: '#3a3f50',
-                                primaryTextColor: '#c9d1d9',
-                                lineColor: '#58a6ff',
-                                secondaryColor: '#21262d',
-                                tertiaryColor: '#161b22',
-                            }},
-                        }});
-                    }}
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
                     new ResizeObserver(() => {{
@@ -3542,8 +3479,7 @@ class CodeWebViewer(QWebEngineView):
         </html>
         """
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
-        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self.setHtml(html, QUrl.fromLocalFile(_project_root + "/"))
+        self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
     def append_chunk(self, text: str):
         if not text:
@@ -3645,6 +3581,14 @@ class CodeWebViewer(QWebEngineView):
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
 
+        # [PERF] 实例级哈希缓存：processed_md 未变时直接返回缓存的 HTML，
+        # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。
+        # 命中场景：resize 触发重复渲染、thinking_finalized 状态切换但内容未变、
+        # finish_streaming 后的 immediate render 与随后 render 定时器重叠
+        processed_hash = hash(processed_md)
+        if self._processed_md_hash == processed_hash and self._cached_streaming_html is not None:
+            return self._cached_streaming_html
+
         try:
             md = get_markdown_instance()
             md.reset()
@@ -3659,6 +3603,9 @@ class CodeWebViewer(QWebEngineView):
                 char_count_html = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
                 html_content = html_content + char_count_html
 
+            # 缓存渲染结果（只存一份，内存开销小）
+            self._processed_md_hash = processed_hash
+            self._cached_streaming_html = html_content
             return html_content
         except Exception:
             return f"<pre>{escape(raw_md)}</pre>"
@@ -3725,24 +3672,11 @@ class CodeWebViewer(QWebEngineView):
                 html_content = self._render_markdown_to_html(self._markdown_text)
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
+                # [PERF] 非流式路径：历史内容无 JS 增量注入的活跃块，
+                # 所有工具块由 markdown 重新生成，无需 save/restore，直接 updateContent
                 js_code = (
-                    # 保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失。
-                    # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
-                    # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
-                    # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
-                    "(function(){"
-                    "var _sbs=[];"
-                    "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
-                    "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                    "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
-                    "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
-                    "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                    "var _bk=_t.firstElementChild;if(_bk){"
-                    "_c.appendChild(_bk);}}});}"
-                    "})();"
                 )
                 self._last_rendered_html = None
                 self.page().runJavaScript(js_code)
@@ -3766,6 +3700,11 @@ class CodeWebViewer(QWebEngineView):
                 # 覆盖 DOM，避免"闪灭→再现"闪烁和重复工作。
                 return
 
+            # [PERF-opt] 内容变化检测：markdown 未变化时跳过全量渲染
+            # 避免定时器空转、回调无变化等场景下的冗余 innerHTML 替换
+            if self._markdown_text == self._last_rendered_markdown:
+                return
+
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
@@ -3773,17 +3712,13 @@ class CodeWebViewer(QWebEngineView):
             self._last_rendered_markdown = self._markdown_text
             self._last_rendered_html = html_content
             self._height_report_pending = True
-            # 全量更新前清除已通过 JS 增量注入的工具块，避免重复；
-            # 同时保存流式工具块（带 data-tool-call-id），updateContent 替换 innerHTML 后会丢失，
-            # 若新内容中无同 ID 块则恢复之（避免流式块"闪灭→再现"闪烁，并防止 append_tool_result
-            # 因找不到流式块而追加重复的 data-tool-injected 块）
-            # 🐛 修复：始终 appendChild 到 content-placeholder 末尾，而非 insertBefore 到旧子节点索引。
-            # 原因：updateContent 重新渲染后 markdown 的 DOM 结构可能与旧 DOM 不同（如 markdown
-            # 将单行文本拆为多段 <p>），旧索引指向错误位置导致工具块插在文本段落之间。
+            # [PERF] 只保存活跃流式块（data-streaming="true"），已完成块由 markdown 重新生成。
+            # 活跃块是 JS 增量注入的、不在 markdown 中的块，必须 save/restore 避免丢失。
+            # 跳过已完成块的 outerHTML 序列化，减少 O(块数×块大小) 开销
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
-                "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
+                "document.querySelectorAll('[data-tool-call-id][data-streaming=\"true\"]').forEach(function(el){"
                 "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
@@ -3804,6 +3739,7 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         self._schedule_render(immediate=True)
 
     def _cleanup_render_cache(self):
@@ -4350,12 +4286,16 @@ class CodeWebViewer(QWebEngineView):
         self._markdown_text = ""
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
+        self._processed_md_hash = None
+        self._cached_streaming_html = None
+        self._lazy_markdown_cb = None  # 清理懒回调引用，释放 content_data
         self._is_js_ready = False
 
         # 清理上下文状态
         self._context_lost = False
         self._height_report_pending = False
         self._resize_locked = False
+
 
         # 清理页面：先加载空白页释放资源
         try:
@@ -4368,7 +4308,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -6787,7 +6727,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):
