@@ -1822,6 +1822,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card_content.newProjectCreated.connect(self._on_new_project_created)
         self._project_selector_card_content.archiveProject.connect(self._on_archive_project)
         self._project_selector_card_content.openFolderRequested.connect(self._on_open_project_folder)
+        self._project_selector_card_content.folderDropped.connect(self._on_project_folder_dropped)
 
         self._project_selector_card.content_layout.addWidget(self._project_selector_card_content)
         # ── 新建项目输入放到标题栏 ──
@@ -1829,10 +1830,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         Colors.refresh()
         self._project_new_edit = QLineEdit(self._project_selector_card)
-        self._project_new_edit.setPlaceholderText("新建项目...")
-        self._project_new_edit.setMaximumWidth(200)
-        self._project_new_edit.setMinimumWidth(100)
-        self._project_new_edit.setFixedHeight(24)
+        self._project_new_edit.setPlaceholderText("新建/搜索项目...")
+        self._project_new_edit.setMaximumWidth(220)
+        self._project_new_edit.setMinimumWidth(130)
+        self._project_new_edit.setFixedHeight(26)
         self._project_new_edit.setStyleSheet(f"""
             QLineEdit {{
                 background: {Colors.HOVER_BG};
@@ -1851,15 +1852,23 @@ class OpenAIChatToolWindow(ToolWindow):
             }}
         """)
         self._project_new_edit.returnPressed.connect(self._on_header_new_project)
+        self._project_new_edit.textChanged.connect(self._on_project_filter_changed)
 
         self._project_new_btn = TransparentToolButton(FluentIcon.ADD, self._project_selector_card)
         self._project_new_btn.setFixedSize(24, 24)
         self._project_new_btn.setToolTip("创建项目")
         self._project_new_btn.clicked.connect(self._on_header_new_project)
 
+        # 选择文件夹按钮（+号右侧）
+        self._project_open_folder_btn = TransparentToolButton(FluentIcon.FOLDER, self._project_selector_card)
+        self._project_open_folder_btn.setFixedSize(24, 24)
+        self._project_open_folder_btn.setToolTip("选择文件夹作为项目根目录")
+        self._project_open_folder_btn.clicked.connect(self._on_project_open_folder_btn)
+
         # 插入到标题栏的额外按钮区（关闭按钮之前）
         self._project_selector_card._extra_buttons_container.insertWidget(0, self._project_new_edit)
         self._project_selector_card._extra_buttons_container.insertWidget(1, self._project_new_btn)
+        self._project_selector_card._extra_buttons_container.insertWidget(2, self._project_open_folder_btn)
 
         self._project_selector_card.setVisible(False)
         self._project_selector_card.closed.connect(
@@ -4950,7 +4959,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -10283,8 +10292,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ====== 非流式路径：强制中断并创建新对话轮次 ======
         logger.info(
-            "[SubAgent-Callback] _do_trigger_callback: 非流式路径，创建新对话轮次 "
-            f"total={total}, failed={failed}"
+            f"[SubAgent-Callback] _do_trigger_callback: 非流式路径，创建新对话轮次 total={total}, failed={failed}"
         )
 
         # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
@@ -11504,6 +11512,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
             self._project_selector_card.set_title_text("📁 项目切换")
+            # 清空过滤输入框
+            self._project_new_edit.clear()
 
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
@@ -11574,16 +11584,45 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
 
+    def _on_project_filter_changed(self, text: str):
+        """输入过滤文本变化时同步过滤项目列表"""
+        if hasattr(self, "_project_selector_card_content"):
+            self._project_selector_card_content.set_filter(text)
+
     def _on_header_new_project(self):
-        """从标题栏新建项目按钮/回车触发"""
+        """从标题栏新建项目按钮/回车触发
+
+        行为：
+        1. 如果输入内容完全匹配某个已有项目 → 切换到该项目
+        2. 如果输入内容为空 → 不做任何操作
+        3. 否则 → 创建新项目
+        """
         name = self._project_new_edit.text().strip()
         if not name:
             return
+
+        # 检查是否完全匹配某个已有项目
+        if hasattr(self, "_project_selector_card_content"):
+            matching = [p for p in self._project_selector_card_content._projects if p.lower() == name.lower()]
+            if matching:
+                # 匹配到已有项目 → 直接切换
+                self._project_new_edit.clear()
+                self._project_selector_card_content.set_filter("")
+                self._on_project_selected(matching[0])
+                return
+
+        # 无匹配 → 创建新项目
         self._project_new_edit.clear()
+        self._project_selector_card_content.set_filter("")
         self._on_new_project_created(name)
 
-    def _on_new_project_created(self, project: str):
-        """新建项目后"""
+    def _on_new_project_created(self, project: str, suppress_memory_card: bool = False):
+        """新建项目后
+
+        Args:
+            suppress_memory_card: 为 True 时不自动弹出关键文档卡片
+                                  （拖拽/选择文件夹设了根目录时使用）
+        """
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
@@ -11602,12 +11641,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
-        # 自动弹出长期记忆卡片
-        if not self._memory_card.isVisible():
-            self._toggle_memory_card()
-        # 卡片弹出后，再切换到关键文档标签（避免被 _toggle_memory_card 内的硬编码 "entries" 覆盖）
-        if hasattr(self, "_memory_card") and self._memory_card:
-            self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+        # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
+        if not suppress_memory_card:
+            if not self._memory_card.isVisible():
+                self._toggle_memory_card()
+            # 卡片弹出后，再切换到关键文档标签
+            if hasattr(self, "_memory_card") and self._memory_card:
+                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
         # 自动触发新建会话
         self._create_new_session()
         # 隐藏项目选择卡片
@@ -11706,6 +11746,138 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _on_project_folder_dropped(self, folder_path: str):
+        """拖拽文件夹到项目选择卡片时的处理
+
+        1. 弹出对话框让用户确认/修改项目名（默认使用文件夹名）
+        2. 创建项目
+        3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
+        4. 刷新项目列表
+        """
+        from PyQt5.QtWidgets import QInputDialog
+
+        # ── 提取文件夹名作为默认项目名 ──
+        folder_name = os.path.basename(folder_path.rstrip("/\\"))
+
+        # ── 弹出输入对话框 ──
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("📁 新建项目")
+        dialog.setLabelText("项目名称：\n（将自动绑定此文件夹为项目根目录）")
+        dialog.setTextValue(folder_name)
+        dialog.setOkButtonText("创建")
+        dialog.setCancelButtonText("取消")
+        # 应用主题样式
+        Colors.refresh()
+        dialog.setStyleSheet(f"""
+            QInputDialog {{
+                background-color: {Colors.CARD_BG.format(alpha=240)};
+                color: {Colors.TEXT_PRIMARY};
+            }}
+            QInputDialog QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)};
+            }}
+            QLineEdit {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 6px 10px;
+                {font_size_css(13)}
+                {get_font_family_css()}
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {Colors.TEXT_ACCENT};
+            }}
+            QPushButton {{
+                background-color: {Colors.BORDER_ACCENT};
+                color: {Colors.BUTTON_TEXT_ON_ACCENT};
+                border: 1px solid {Colors.BORDER_ACCENT};
+                border-radius: 4px;
+                padding: 6px 18px;
+                min-width: 64px;
+                {font_size_css(13)}
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.SEND_BTN_HOVER_START};
+            }}
+        """)
+        ok = dialog.exec_()
+        project_name = dialog.textValue().strip()
+
+        if not ok or not project_name:
+            return
+
+        # ── 检查项目名是否已存在 ──
+        projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
+        if project_name in projects:
+            InfoBar.warning(
+                title="项目已存在",
+                content=f"项目「{project_name}」已存在，请使用其他名称",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        # ── 创建项目（已设根目录，跳过关键文档卡片弹出） ──
+        self._on_new_project_created(project_name, suppress_memory_card=True)
+
+        # ── 将拖入文件夹加入关键文档并设为工作目录（根目录） ──
+        try:
+            if self.backend and self.backend.memory_manager:
+                # 添加为关键文档
+                self.backend.memory_manager.add_key_document(project_name, folder_path, added_by="manual")
+                # 设置为工作目录（根目录）
+                self.backend.memory_manager.set_working_directory(project_name, folder_path)
+                logger.info(f"[MainWidget] 已绑定项目「{project_name}」根目录: {folder_path}")
+
+            # ── 刷新项目选择卡片 ──
+            projects = self.history_manager.get_projects() if self.history_manager else [project_name]
+            if self._current_project not in projects:
+                projects.insert(0, self._current_project)
+            meta_map = self._build_project_meta_map(projects)
+            root_dir_map = self._build_project_root_dir_map(projects)
+            self._project_selector_card_content.set_projects_data(
+                projects, self._current_project, meta_map, root_dir_map
+            )
+
+            InfoBar.success(
+                title="项目已创建",
+                content=f"已创建项目「{project_name}」并绑定根目录",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                parent=self,
+            )
+        except Exception as e:
+            logger.error(f"[MainWidget] 绑定项目根目录失败: {e}")
+            InfoBar.error(
+                title="绑定失败",
+                content=f"项目「{project_name}」创建成功，但绑定根目录时出错: {e}",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=5000,
+                parent=self,
+            )
+
+    def _on_project_open_folder_btn(self):
+        """选择文件夹按钮：弹出文件夹选择器，选取文件夹后走拖拽建项目流程"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择项目根目录",
+            "",
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not folder_path:
+            return
+        # 复用手动选择文件夹 → 弹出建项目对话框
+        self._on_project_folder_dropped(folder_path)
 
     def _on_memory_tab_changed(self, tab_id: str):
         """处理记忆管理标签切换"""
@@ -12108,7 +12280,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 多窗口隔离：注销窗口及其卡片数据
@@ -12129,7 +12301,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

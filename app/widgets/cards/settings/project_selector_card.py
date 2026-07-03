@@ -5,8 +5,10 @@
 """
 
 import colorsys
+import os
 import re
 import zlib
+from pathlib import Path
 from typing import Dict
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -387,6 +389,7 @@ class ProjectSelectorCardContent(QWidget):
     newProjectCreated = pyqtSignal(str)
     archiveProject = pyqtSignal(str)
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
+    folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -394,7 +397,11 @@ class ProjectSelectorCardContent(QWidget):
         self._current_project: str = ""
         self._meta_map: Dict[str, Dict[str, int]] = {}
         self._root_dir_map: Dict[str, str] = {}
+        self._project_items: list = []  # 存储 ProjectItem 实例，用于过滤
+        self._filter_text: str = ""
         self._setup_ui()
+        # 启用拖拽
+        self.setAcceptDrops(True)
 
     def _setup_ui(self):
         Colors.refresh()
@@ -439,6 +446,8 @@ class ProjectSelectorCardContent(QWidget):
 
         self._content_widget = QWidget()
         self._content_widget.setStyleSheet("background: transparent;")
+        self._content_widget.setAcceptDrops(True)
+        # 内容 widget 也接受拖拽，扩大拖拽热区
         self._content_layout = QVBoxLayout(self._content_widget)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
         # 项目之间用 1px 细缝：避免 0 完全相连导致看不出分隔，又比 2px 紧凑
@@ -446,7 +455,57 @@ class ProjectSelectorCardContent(QWidget):
 
         self._scroll_area.setWidget(self._content_widget)
         self._scroll_area.setMinimumHeight(40)
+        # scroll_area 本身也启用拖拽（用户可能拖到空白区）
+        self._scroll_area.setAcceptDrops(True)
+        self._content_widget.setAcceptDrops(True)
         layout.addWidget(self._scroll_area, 1)
+
+    # ── 拖拽支持 ──────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        """判断拖入内容是否为文件夹（URL 指向本地路径）"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path):
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        """拖拽移动时保持接受状态"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile() and os.path.isdir(url.toLocalFile()):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        """放下文件夹时发射信号"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path):
+                        self.folderDropped.emit(path)
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    # ── 拖拽视觉反馈 ──
+    def _show_drop_indicator(self, visible: bool):
+        """拖拽悬停时的视觉反馈（可在此添加背景色等效果）"""
+        if visible:
+            self._scroll_area.setStyleSheet(
+                self._scroll_area.styleSheet()
+                + """
+                QScrollArea { background: rgba(255, 255, 255, 30); border: 2px dashed #4a9eff; }
+            """
+            )
+        else:
+            self.refresh_style()
 
     def refresh_style(self):
         """刷新主题样式"""
@@ -474,6 +533,20 @@ class ProjectSelectorCardContent(QWidget):
         self._meta_map = meta_map or {}
         self._root_dir_map = root_dir_map or {}
         self._refresh_project_list()
+        # 设置完后重新应用当前过滤
+        if self._filter_text:
+            self.set_filter(self._filter_text)
+
+    def set_filter(self, text: str):
+        """根据文本过滤项目列表，空文本/无匹配时显示全部"""
+        self._filter_text = text
+        keyword = text.strip().lower() if text.strip() else ""
+
+        for item in self._project_items:
+            if not keyword:
+                item.setVisible(True)
+            else:
+                item.setVisible(keyword in item._name.lower())
 
     def _refresh_project_list(self):
         """刷新项目列表"""
@@ -482,6 +555,7 @@ class ProjectSelectorCardContent(QWidget):
             child = self._content_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+        self._project_items.clear()
 
         # 添加项目
         for proj_name in self._projects:
@@ -499,6 +573,7 @@ class ProjectSelectorCardContent(QWidget):
             item.archiveClicked.connect(self._on_archive_clicked)
             item.openFolderClicked.connect(self._on_open_folder_clicked)
             self._content_layout.addWidget(item)
+            self._project_items.append(item)
 
         self._content_layout.addStretch(1)
 
