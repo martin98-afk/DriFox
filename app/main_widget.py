@@ -11835,6 +11835,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.backend.memory_manager.set_working_directory(project_name, folder_path)
                 logger.info(f"[MainWidget] 已绑定项目「{project_name}」根目录: {folder_path}")
 
+            # 同步实例缓存（与手动添加并标记根目录路径保持一致）
+            # 修复 bug：_on_new_project_created 内部调用的 _sync_working_directory 在
+            # add_key_document 之前执行，导致 _instance_workdir 被错误缓存为空字符串，
+            # 后续 _get_effective_workdir 返回 None，has_active_wd=False，
+            # 关键文档 Tab 中工作目录条目下方的 worktree section 永远不显示。
+            self._current_workdir[project_name] = folder_path
+            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+                self._memory_card_popup._instance_workdir[project_name] = folder_path
+                # 主动刷新关键文档 UI，确保 worktree section 立即显示
+                # （与 _switch_to_worktree 行为保持一致）
+                self._memory_card_popup._load_key_documents()
+            # 同步到 tool_executor
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_workdir(folder_path)
+
             # ── 刷新项目选择卡片 ──
             projects = self.history_manager.get_projects() if self.history_manager else [project_name]
             if self._current_project not in projects:
