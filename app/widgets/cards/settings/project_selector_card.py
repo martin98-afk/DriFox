@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import TransparentToolButton
 
-from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
 
@@ -422,26 +422,7 @@ class ProjectSelectorCardContent(QWidget):
             QScrollArea > QWidget > QWidget {{
                 background: transparent;
             }}
-            QScrollBar:vertical {{
-                border: none;
-                background: transparent;
-                width: 12px;
-                margin: 4px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {Colors.BORDER};
-                border-radius: 6px;
-                min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {Colors.TEXT_MUTED};
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-                background: none;
-            }}
+            {get_unified_scrollbar_style(8)}
         """)
 
         self._content_widget = QWidget()

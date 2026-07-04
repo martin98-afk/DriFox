@@ -72,6 +72,7 @@ class SubAgentExecutor(QThread):
     tool_call_started = pyqtSignal(str, str, dict)  # task_id, tool_name, args
     tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
     token_usage_updated = pyqtSignal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
+    thinking_received = pyqtSignal(str, str)  # task_id, reasoning_content
 
     def __init__(
         self,
@@ -484,6 +485,8 @@ class SubAgentExecutor(QThread):
             # 记录大模型生成内容（thinking + ai_response），排除工具调用结果
             if current_reasoning:
                 self._add_log("thinking", current_reasoning)
+                # 实时推送到 UI（浮动卡片可即时显示思考内容）
+                self.thinking_received.emit(self.task_id, current_reasoning)
             if response_content:
                 self._add_log("ai_response", response_content)
 
@@ -492,7 +495,11 @@ class SubAgentExecutor(QThread):
 
             # 没有工具调用，直接返回结果（提前有结果了）
             if not tool_calls:
-                return self._filter_thinking_content(response_content)
+                # 【修复】将 reasoning_content 以 <think> 标签嵌入结果文本，
+                # 前端 _inject_think_cards 会自动渲染为可折叠思考块
+                if current_reasoning:
+                    return f"<think>{current_reasoning}</think>\n\n{response_content}"
+                return response_content
 
             # DeepSeek V4 thinking mode: 需要传递 reasoning_content
             assistant_msg = {
@@ -527,7 +534,11 @@ class SubAgentExecutor(QThread):
             QCoreApplication.processEvents()
             time.sleep(0.2)
 
-        return self._filter_thinking_content(response_content)
+        # 【修复】将 reasoning_content 以 <think> 标签嵌入结果文本，
+        # 前端 _inject_think_cards 会自动渲染为可折叠思考块
+        if current_reasoning:
+            return f"<think>{current_reasoning}</think>\n\n{response_content}"
+        return response_content
 
     def _build_final_summary_prompt(self) -> str:
         """构建最终总结提示"""

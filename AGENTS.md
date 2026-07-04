@@ -72,3 +72,4 @@ feat|fix|docs|chore|refactor|test: scope - summary
 - **hook 双重注入** (06-26): `on_hook_finished` 写入双路径导致翻倍。修复：只写格式化版本 + 去重。
 - **工具循环卡死** (06-26): V2 重写截断逻辑，保留正确轮次。测试 21 项全过。
 - **tool_control_card 不更新** (06-18): 补全信号链、删除重复定义。
+- **卡片内部滚轮 race condition** (07-04): 流式输出时 `_suppressScrollEvent=false` 同步解除，但 Chromium scroll 事件异步派发，pending scroll 在 suppress 解除后才被 dispatch，错误地把程序 auto-scroll 标记为"用户主动滚动" → `_userScrolledWithin=true` 累积 → 后续 updateContent 跳过 auto-scroll → 视觉上"卡顶部"。修复：在所有 auto-scroll 入口打 `_autoScrollTime = performance.now()` 时间戳；scroll 事件回调增加 50ms 时间窗检查，识别程序触发的事件并跳过标记。

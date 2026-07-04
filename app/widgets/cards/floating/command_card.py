@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
 from app.core.ui_plugin_registry import UIPluginRegistry
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.widgets.elided_label import _ElidedLabel
 
@@ -579,6 +579,7 @@ class CommandCard(QWidget):
         self._scroll_area.setFrameShape(QScrollArea.NoFrame)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        Colors.refresh()
         self._scroll_area.setStyleSheet(f"""
             QScrollArea, QScrollArea * {{
                 background: transparent;
@@ -586,27 +587,7 @@ class CommandCard(QWidget):
                 padding: 0;
                 margin: 0;
             }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 12px;
-                margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {Colors.SCROLLBAR_HANDLE_BG};
-                border-radius: 6px;
-                min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
-            }}
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {{
-                background: none;
-            }}
+{get_unified_scrollbar_style(8)}
         """)
 
         self._scroll_content = QWidget()
@@ -655,11 +636,7 @@ class CommandCard(QWidget):
         Colors.refresh()
         scroll_area.setStyleSheet(f"""
             QScrollArea {{ background: transparent; border: none; }}
-            QScrollBar:vertical {{ background: transparent; width: 4px; margin: 0; }}
-            QScrollBar::handle:vertical {{ background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 2px; min-height: 20px; }}
-            QScrollBar::handle:vertical:hover {{ background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+{get_unified_scrollbar_style(4)}
         """)
         scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
 

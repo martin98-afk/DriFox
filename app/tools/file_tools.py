@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from app.constants import IMAGE_EXTENSIONS
 from app.tools.result import ToolResult
 
 MAX_GREP_CONTENT_LENGTH = 15000
@@ -192,9 +193,8 @@ class FileTools:
                 return self.list_directory(path)
 
             # ===== 图片文件检测：自动读取为 base64，供视觉模型使用 =====
-            _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
             ext = full_path.suffix.lower()
-            if ext in _IMAGE_EXTENSIONS:
+            if ext in IMAGE_EXTENSIONS:
                 import base64
 
                 with open(full_path, "rb") as f:

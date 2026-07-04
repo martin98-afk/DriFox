@@ -37,6 +37,7 @@ from openai import (
 from PyQt5.QtCore import QCoreApplication, QThread, pyqtSignal
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
+
 from app.core.conversation.config import PermissionCache
 from app.core.message_content import append_text_block, consolidate_messages, messages_to_api, to_api_message
 from app.core.model_capabilities import get_model_capabilities
@@ -46,6 +47,15 @@ from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
 from app.core.workers.worker_event_bus import WorkerEvent, WorkerEventBus
+
+# ========== 模块级共享线程池 ==========
+# 复用而非每次并行工具执行都新建 ThreadPoolExecutor，消除重复创建/销毁开销
+# max_workers=8：与原始单次池上限一致，lazy 创建线程（未使用的线程不实际分配）
+# thread_name_prefix 便于调试/性能分析时识别池来源
+_SHARED_TOOL_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=min(8, os.cpu_count() or 4),
+    thread_name_prefix="tool_parallel",
+)
 
 # 预编译正则表达式
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -133,6 +143,7 @@ class OpenAIChatWorker(QThread):
         self._last_persist_stats: Optional[Dict[str, Any]] = None
         # 同步设置模型名称，用于模型感知的成本计算
         model_name = str(self.llm_config.get("模型名称", "") or "")
+        self._cached_model_name = model_name  # 缓存，避免 _build_response_message_sequence 重复 get
         if model_name:
             self._cache_tracker.set_model(model_name)
 
@@ -626,15 +637,13 @@ class OpenAIChatWorker(QThread):
             results: trigger_event 返回的 HookExecutionResult 列表
             backend: ChatBackend 实例
         """
-        import json as _json
-
         if not results:
             return
         for r in results:
             if not r.success or not r.output:
                 continue
             try:
-                data = _json.loads(r.output)
+                data = json.loads(r.output)  # 使用模块级 orjson
                 if isinstance(data, dict) and data.get("auto_compact"):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
@@ -798,22 +807,24 @@ class OpenAIChatWorker(QThread):
             # 这里吞掉而非向上抛，避免阻断并行工具结果的处理路径。
             logger.debug(f"[Signal] _emit_with_callback 兜底 {signal_name}: {e}")
 
+    # 信号名 → WorkerEvent 映射（类变量，避免每次调用重建 dict）
+    _SIGNAL_NAME_MAP: dict = {
+        "content_received": WorkerEvent.CONTENT_RECEIVED,
+        "reasoning_content_received": WorkerEvent.REASONING_RECEIVED,
+        "finished_with_content": WorkerEvent.FINISHED_WITH_CONTENT,
+        "finished_with_messages": WorkerEvent.FINISHED_WITH_MESSAGES,
+        "compaction_status_changed": WorkerEvent.COMPACTION_STATUS,
+        "tool_call_started": WorkerEvent.TOOL_CALL_STARTED,
+        "tool_args_updated": WorkerEvent.TOOL_CALL_STREAM,
+        "tool_result_received": WorkerEvent.TOOL_RESULT_RECEIVED,
+        "question_asked": WorkerEvent.QUESTION_ASKED,
+        "permission_approval_requested": WorkerEvent.PERMISSION_REQUESTED,
+        "error_occurred": WorkerEvent.ERROR,
+    }
+
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
-        """将 signal name 映射到 WorkerEvent"""
-        mapping = {
-            "content_received": WorkerEvent.CONTENT_RECEIVED,
-            "reasoning_content_received": WorkerEvent.REASONING_RECEIVED,
-            "finished_with_content": WorkerEvent.FINISHED_WITH_CONTENT,
-            "finished_with_messages": WorkerEvent.FINISHED_WITH_MESSAGES,
-            "compaction_status_changed": WorkerEvent.COMPACTION_STATUS,
-            "tool_call_started": WorkerEvent.TOOL_CALL_STARTED,
-            "tool_args_updated": WorkerEvent.TOOL_CALL_STREAM,
-            "tool_result_received": WorkerEvent.TOOL_RESULT_RECEIVED,
-            "question_asked": WorkerEvent.QUESTION_ASKED,
-            "permission_approval_requested": WorkerEvent.PERMISSION_REQUESTED,
-            "error_occurred": WorkerEvent.ERROR,
-        }
-        return mapping.get(signal_name)
+        """将 signal name 映射到 WorkerEvent（使用类变量缓存）"""
+        return self._SIGNAL_NAME_MAP.get(signal_name)
 
     def cancel(self):
         self._state.is_cancelled = True
@@ -1741,77 +1752,87 @@ class OpenAIChatWorker(QThread):
             # 工具执行完成后，清理 round 缓存（为下一轮 API 调用做准备）
             self._permission_cache.clear_round()
 
+    def _make_assistant_msg(self, content, model_name, reasoning_content, timestamp):
+        """构建 assistant 消息 dict（消除 3 处重复构造）"""
+        msg = {"role": "assistant", "timestamp": timestamp}
+        if content:
+            msg["content"] = content
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
+        if model_name:
+            msg["model_name"] = model_name
+        return msg
+
     def _build_response_message_sequence(self, tool_results=None) -> List[Dict]:
+        """构建响应消息序列（性能优化版）"""
         now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        model_name = str(self.llm_config.get("模型名称", "") or "")
 
-        # 性能优化：缓存 reasoning_content，避免重复 join
+        # 预缓存：避免循环内重复调用
+        model_name = self._cached_model_name
         reasoning_content = self._get_reasoning_content()
+        has_reasoning = bool(reasoning_content)
+        has_model_name = bool(model_name)
 
+        # ---- Phase 1: 构建 tool_call_map（三合一） ----
         tool_call_map = {}
-        # 从 _current_tool_calls 字典获取 tool_calls
-        current_tcs = self._current_tool_calls
-        if current_tcs:
-            for tc in current_tcs.values():
-                if not isinstance(tc, dict):
-                    continue
-                tool_call_id = str(tc.get("id") or "")
-                if not tool_call_id:
-                    continue
-                function = tc.get("function") or {}
-                normalized_tc = {
-                    "id": tool_call_id,
-                    "type": tc.get("type", "function"),
-                    "function": {
-                        "name": function.get("name"),
-                        "arguments": function.get("arguments", "{}"),
-                    },
-                }
-                tool_call_map[tool_call_id] = normalized_tc
+        # 来源1: _current_tool_calls
+        for tc in (self._current_tool_calls or {}).values():
+            if not isinstance(tc, dict):
+                continue
+            tc_id = tc.get("id")
+            if not tc_id:
+                continue
+            func = tc.get("function") or {}
+            tool_call_map[tc_id] = {
+                "id": tc_id,
+                "type": tc.get("type", "function"),
+                "function": {
+                    "name": func.get("name"),
+                    "arguments": func.get("arguments", "{}"),
+                },
+            }
 
-        # 从 _tool_calls_buffer 获取未解析完成的 tool_calls
-        tool_calls_buffer = self._tool_calls_buffer
-        if tool_calls_buffer:
-            for tc_id, buffer in tool_calls_buffer.items():
-                if tc_id in tool_call_map:
-                    continue
-                function = buffer.get("function") or {}
+        # 来源2: _tool_calls_buffer（补充缺失项）
+        for tc_id, buf in (self._tool_calls_buffer or {}).items():
+            if tc_id in tool_call_map:
+                continue
+            func = buf.get("function") or {}
+            tool_call_map[tc_id] = {
+                "id": tc_id,
+                "type": buf.get("type", "function"),
+                "function": {
+                    "name": func.get("name", ""),
+                    "arguments": func.get("arguments", "{}"),
+                },
+            }
+
+        # 来源3: tool_results 中未记录的回填
+        for item in (tool_results or []):
+            if not isinstance(item, dict):
+                continue
+            tc_id = item.get("tool_call_id")
+            if tc_id and tc_id not in tool_call_map:
                 tool_call_map[tc_id] = {
                     "id": tc_id,
-                    "type": buffer.get("type", "function"),
+                    "type": "function",
                     "function": {
-                        "name": function.get("name", ""),
-                        "arguments": function.get("arguments", "{}"),
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", "{}"),
                     },
                 }
 
-        # 也从 tool_results 中的 _tool_call 字段获取
-        if tool_results:
-            for item in tool_results:
-                if isinstance(item, dict) and "tool_call_id" in item:
-                    tc_id = item["tool_call_id"]
-                    if tc_id and tc_id not in tool_call_map:
-                        tool_call_map[tc_id] = {
-                            "id": tc_id,
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name", ""),
-                                "arguments": item.get("arguments", "{}"),
-                            },
-                        }
-
+        # ---- Phase 2: 构建 tool_result_map ----
         tool_result_map = {}
         if tool_results:
             for item in tool_results:
                 if not isinstance(item, dict):
                     continue
-                tool_call_id = str(item.get("tool_call_id") or "")
-                if not tool_call_id:
+                tc_id = item.get("tool_call_id")
+                if not tc_id:
                     continue
-
-                tool_result_map[tool_call_id] = {
+                tool_result_map[tc_id] = {
                     "role": "tool",
-                    "tool_call_id": tool_call_id,
+                    "tool_call_id": tc_id,
                     "name": item.get("name", "tool"),
                     "arguments": item.get("arguments", {}),
                     "content": item.get("content", ""),
@@ -1824,27 +1845,25 @@ class OpenAIChatWorker(QThread):
                     "lsp_diagnostic": item.get("lsp_diagnostic"),
                 }
 
-        # 预防性修复：过滤掉没有对应 tool 结果的 tool_call
-        # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
+        # ---- Phase 3: 过滤无结果的 tool_call（原地 del，避免重建 dict） ----
         if tool_result_map:
-            # 只有有结果的 tool_call 才能发送给 API，避免用户中断时产生 2013 错误
-            valid_tc_ids = set(tool_result_map.keys())
-            filtered_tool_call_map = {}
-            for tc_id, tc in tool_call_map.items():
-                if tc_id in valid_tc_ids:
-                    filtered_tool_call_map[tc_id] = tc
-                else:
-                    logger.warning(f"[ToolCall预防] 过滤了无结果的 tool_call: {tc_id[:20]}...")
-            tool_call_map = filtered_tool_call_map
+            orphan_ids = [tc_id for tc_id in tool_call_map if tc_id not in tool_result_map]
+            for tc_id in orphan_ids:
+                logger.warning(f"[ToolCall预防] 过滤了无结果的 tool_call: {tc_id[:20]}...")
+                del tool_call_map[tc_id]
 
-        sequence: List[Dict] = []
+        # ---- Phase 4: 构建 sequence + 用 set 跟踪已添加的 tool_result ----
+        sequence = []
+        added_tool_ids = set()
         pending_text_blocks = []
+
         response_blocks = self._response_content_blocks
         if response_blocks:
             for block in response_blocks:
                 if not isinstance(block, dict):
                     continue
                 block_type = block.get("type")
+
                 if block_type == "text":
                     text = str(block.get("text", ""))
                     if text:
@@ -1854,81 +1873,61 @@ class OpenAIChatWorker(QThread):
                 if block_type != "tool_call_marker":
                     continue
 
-                tool_call_id = str(block.get("tool_call_id") or "")
-                # 在取消中断场景下，tool_call_marker 已被过滤掉，不会走到这里
-                assistant_msg: Dict[str, Any] = {
-                    "role": "assistant",
-                    "timestamp": now_ts,
-                }
+                tc_id = str(block.get("tool_call_id") or "")
+                tool_call = tool_call_map.get(tc_id)
+
+                # assistant 消息
+                asst_msg = {"role": "assistant", "timestamp": now_ts}
                 if pending_text_blocks:
-                    assistant_msg["content"] = pending_text_blocks[0].get("text")
-                tool_call = tool_call_map.get(tool_call_id)
+                    asst_msg["content"] = pending_text_blocks[0].get("text")
                 if tool_call:
-                    assistant_msg["tool_calls"] = [tool_call]
-                if reasoning_content:
-                    assistant_msg["reasoning_content"] = reasoning_content
-                if model_name:
-                    assistant_msg["model_name"] = model_name
-                if assistant_msg.get("content") or assistant_msg.get("tool_calls"):
-                    sequence.append(assistant_msg)
+                    asst_msg["tool_calls"] = [tool_call]
+                if has_reasoning:
+                    asst_msg["reasoning_content"] = reasoning_content
+                if has_model_name:
+                    asst_msg["model_name"] = model_name
+
+                if asst_msg.get("content") or asst_msg.get("tool_calls"):
+                    sequence.append(asst_msg)
 
                 pending_text_blocks = []
-                tool_result = tool_result_map.get(tool_call_id)
+
+                tool_result = tool_result_map.get(tc_id)
                 if tool_result:
                     sequence.append(tool_result)
+                    added_tool_ids.add(tc_id)
 
-        # 处理没有对应 marker 的 tool_result
-        for tool_call_id, tool_result in tool_result_map.items():
-            already_added = False
-            for block in sequence:
-                if block.get("role") == "tool" and block.get("tool_call_id") == tool_call_id:
-                    already_added = True
-                    break
-            if not already_added:
-                assistant_msg: Dict[str, Any] = {
-                    "role": "assistant",
-                    "timestamp": now_ts,
-                }
-                tool_call = tool_call_map.get(tool_call_id)
-                if tool_call:
-                    assistant_msg["tool_calls"] = [tool_call]
-                if reasoning_content:
-                    assistant_msg["reasoning_content"] = reasoning_content
-                if model_name:
-                    assistant_msg["model_name"] = model_name
-                if assistant_msg.get("tool_calls"):
-                    sequence.append(assistant_msg)
-                sequence.append(tool_result)
+        # ---- Phase 5: Orphan tool_result（用集合查找替代 O(n*m) 循环） ----
+        for tc_id, tool_result in tool_result_map.items():
+            if tc_id in added_tool_ids:
+                continue
+            tool_call = tool_call_map.get(tc_id)
+            asst_msg = {"role": "assistant", "timestamp": now_ts}
+            if has_reasoning:
+                asst_msg["reasoning_content"] = reasoning_content
+            if has_model_name:
+                asst_msg["model_name"] = model_name
+            if tool_call:
+                asst_msg["tool_calls"] = [tool_call]
+            if asst_msg.get("tool_calls"):
+                sequence.append(asst_msg)
+            sequence.append(tool_result)
 
+        # ---- Phase 6: 尾部文本 / 兜底 ----
         if pending_text_blocks:
-            assistant_msg = {
-                "role": "assistant",
-                "content": pending_text_blocks[0].get("text"),
-                "timestamp": now_ts,
-            }
-            if reasoning_content:
-                assistant_msg["reasoning_content"] = reasoning_content
-            if model_name:
-                assistant_msg["model_name"] = model_name
-            sequence.append(assistant_msg)
+            sequence.append(
+                self._make_assistant_msg(pending_text_blocks[0].get("text"), model_name, reasoning_content if has_reasoning else None, now_ts)
+            )
         elif not sequence and self.full_response:
-            assistant_msg = {
-                "role": "assistant",
-                "content": append_text_block([], self.full_response)[0].get("text"),
-                "timestamp": now_ts,
-            }
-            if reasoning_content:
-                assistant_msg["reasoning_content"] = reasoning_content
-            if model_name:
-                assistant_msg["model_name"] = model_name
-            sequence.append(assistant_msg)
-        elif not sequence and not response_blocks:
-            empty_msg = {"role": "assistant", "content": [], "timestamp": now_ts}
-            if model_name:
-                empty_msg["model_name"] = model_name
-            sequence.append(empty_msg)
+            text = append_text_block([], self.full_response)[0].get("text")
+            sequence.append(self._make_assistant_msg(text, model_name, reasoning_content if has_reasoning else None, now_ts))
+        elif not sequence:
+            empty = {"role": "assistant", "content": [], "timestamp": now_ts}
+            if has_model_name:
+                empty["model_name"] = model_name
+            sequence.append(empty)
 
-        # 将 token_usage 注入到 sequence 中的 assistant 消息
+        # ---- Phase 7: token_usage 注入 ----
         if self._last_usage:
             usage = {
                 "input": self._last_usage.get("prompt_tokens", 0),
@@ -1938,7 +1937,7 @@ class OpenAIChatWorker(QThread):
             for msg in sequence:
                 if msg.get("role") == "assistant":
                     msg["token_usage"] = usage
-                    break  # 只用一次，后续轮次会重新设置
+                    break
 
         return sequence
 
@@ -2887,9 +2886,9 @@ class OpenAIChatWorker(QThread):
         if _content_batch:
             self._emit_with_callback("content_received", self.content_received, _content_batch)
 
-        # 尝试让主线程处理刚排队的 content_received 信号
-        # (注：从 worker 线程调用可能仅处理 worker 自身事件，主线程事件在下一轮 event loop 处理)
-        QCoreApplication.processEvents()
+        # 性能优化：移除从 worker 线程调用的 processEvents()
+        # 跨线程信号传递由 Qt 的 QueuedConnection 自动处理，无需手动 processEvents
+        # QCoreApplication.processEvents()
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
         # 在所有 chunk 接收完成后，再次尝试解析仍处于等待状态的 tool_calls
@@ -3170,44 +3169,46 @@ class OpenAIChatWorker(QThread):
             return pre_results
 
         # ====== Phase 2: 并行执行 ======
+        # 使用模块级共享线程池 —— 避免每次调用都创建/销毁 ThreadPoolExecutor 的开销
+        # 共享池 max_workers=8（上限），lazy 创建线程，空闲时不消耗 OS 线程资源
         parallel_results = []
+        executor = _SHARED_TOOL_POOL
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
-            future_map = {}
-            for idx, tool_name, tool_call_id, arguments, round_id in tasks:
-                future = executor.submit(
-                    self._execute_one_tool_parallel,
-                    tool_name,
-                    tool_call_id,
-                    arguments,
-                    round_id,
-                    idx,
-                )
-                future_map[future] = idx
+        future_map = {}
+        for idx, tool_name, tool_call_id, arguments, round_id in tasks:
+            future = executor.submit(
+                self._execute_one_tool_parallel,
+                tool_name,
+                tool_call_id,
+                arguments,
+                round_id,
+                idx,
+            )
+            future_map[future] = idx
 
-            # 🛡️ 支持取消：用 wait() 循环替代 as_completed()，每 0.5s 检测取消标志
-            # 避免 as_completed() 在工具线程完成前无限阻塞，导致 cancel() 无法生效
-            pending = set(future_map.keys())
-            while pending:
-                if self._is_cancelled or self._tool_execution_cancelled:
-                    for f in pending:
-                        f.cancel()  # 取消尚未启动的任务
-                    break
-                done, pending = concurrent.futures.wait(
-                    pending,
-                    timeout=0.5,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                for future in done:
-                    original_idx = future_map[future]
-                    try:
-                        result = future.result()
-                        if result is not None:
-                            parallel_results.append((original_idx, result))
-                    except concurrent.futures.CancelledError:
-                        pass  # 被取消的任务，忽略
-                    except Exception as e:
-                        logger.error(f"[ToolCall] 并行工具执行异常: {e}")
+        # 🛡️ 支持取消：用 wait() 循环替代 as_completed()，每 0.5s 检测取消标志
+        # 避免 as_completed() 在工具线程完成前无限阻塞，导致 cancel() 无法生效
+        pending = set(future_map.keys())
+        while pending:
+            if self._is_cancelled or self._tool_execution_cancelled:
+                for f in pending:
+                    f.cancel()  # 取消尚未启动的任务
+                break
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=0.5,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                original_idx = future_map[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        parallel_results.append((original_idx, result))
+                except concurrent.futures.CancelledError:
+                    pass  # 被取消的任务，忽略
+                except Exception as e:
+                    logger.error(f"[ToolCall] 并行工具执行异常: {e}")
 
         # 按原始索引排序，保持结果顺序稳定
         parallel_results.sort(key=lambda x: x[0])

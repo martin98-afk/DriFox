@@ -25,6 +25,9 @@ class SessionRepository:
             db_manager: DatabaseManager 实例
         """
         self._db = db_manager
+        # 内容地址缓存：session_id -> hash(messages_serialized)
+        # 用于跳过内容未变的重复持久化，节省全量序列化+zstd压缩开销
+        self._content_hash_cache: Dict[str, int] = {}
 
     @property
     def is_initialized(self) -> bool:
@@ -108,7 +111,7 @@ class SessionRepository:
 
     def save(self, session: Dict) -> bool:
         """
-        原子性保存单个会话
+        原子性保存单个会话（带内容去重，内容未变时跳过序列化和写盘）
 
         Args:
             session: 会话数据字典
@@ -125,6 +128,13 @@ class SessionRepository:
             logger.warning("[SessionRepository] session_id 不能为空")
             return False
 
+        # 内容去重：只 hash 快速字段（hash 消息列表比全量序列化+zstd 快 100x+）
+        messages = session.get("messages", [])
+        content_key = hash(str(messages))
+        cached = self._content_hash_cache.get(session_id)
+        if cached is not None and cached == content_key:
+            return True  # 消息未变，跳过昂贵的序列化+压缩+写盘
+
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             user_edited = 1 if session.get("user_edited_title", False) else 0
@@ -134,7 +144,7 @@ class SessionRepository:
                 "title": session.get("topic_summary") or session.get("name") or session.get("title", ""),
                 "project": session.get("project", "默认项目"),
                 # 使用 serde 透明压缩（zstd + 格式魔数），DB 体积减少 50-80%
-                "messages": serialize(session.get("messages", [])),
+                "messages": serialize(messages),
                 "system_prompt": session.get("system_prompt", ""),
                 "compaction_state": serialize(session.get("compaction_state", {})),
                 "compaction_cache": serialize(session.get("compaction_cache", {})),
@@ -176,6 +186,8 @@ class SessionRepository:
             )
 
             if success:
+                # 更新内容 hash 缓存
+                self._content_hash_cache[session_id] = content_key
                 # INSERT OR REPLACE = DELETE 旧行 + INSERT 新行，旧页全部进 freelist
                 # 高频率 save（每次用户发消息+Agent 回复）叠加 zstd 压缩后 blob
                 # 大小波动（50KB~500KB），持续制造不可复用的空闲页。
@@ -218,13 +230,15 @@ class SessionRepository:
             pass  # auto_vacuum 未启用时静默跳过，不阻塞保存流程
 
     def get(self, session_id: str) -> Optional[Dict]:
-        """根据 ID 获取单个会话"""
+        """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
         if not self.is_initialized:
             return None
 
         try:
             success, rows = self._execute(f"SELECT * FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success and rows and len(rows) > 0:
+                # 外部加载了最新数据，失效内容缓存，下次 save 会重建
+                self._content_hash_cache.pop(session_id, None)
                 return self._row_to_session(rows[0])
             return None
         except Exception as e:
@@ -376,11 +390,12 @@ class SessionRepository:
             return ["默认项目"]
 
     def delete(self, session_id: str) -> bool:
-        """删除指定会话"""
+        """删除指定会话（同时清除内容 hash 缓存）"""
         if not self.is_initialized:
             return False
 
         try:
+            self._content_hash_cache.pop(session_id, None)
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             return success
         except Exception as e:
@@ -418,23 +433,20 @@ class SessionRepository:
             return False
 
     def archive_by_project(self, project: str) -> int:
-        """归档指定项目的所有会话"""
+        """归档指定项目的所有会话（单条 SQL，避免 N+1 查询）"""
         if not self.is_initialized:
             return 0
 
         try:
-            sessions = self.get_by_project(project, limit=1000)
-            count = 0
-            for s in sessions:
-                sid = s.get("session_id")
-                if sid:
-                    success, _ = self._execute(
-                        f"UPDATE {self.TABLE_NAME} SET project = ? WHERE session_id = ?",
-                        (f"__archived__/{project}", sid),
-                    )
-                    if success:
-                        count += 1
-            return count
+            archived_project = f"__archived__/{project}"
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            success, result = self._execute(
+                f"UPDATE {self.TABLE_NAME} SET project = ?, updated_at = ? WHERE project = ?",
+                (archived_project, now, project),
+            )
+            if success and result is not None:
+                return int(result)
+            return 0
         except Exception as e:
             logger.error(f"[SessionRepository] archive_sessions_by_project 异常: {e}")
             return 0

@@ -40,9 +40,8 @@ sys.path.insert(0, project_root)
 def main():
     """启动 LLM Chatter"""
     from loguru import logger
-    from PyQt5.QtCore import Qt
+    from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
-    from app.utils import icons_rc  # noqa: F401  副作用导入：注册 Qt 资源文件中的图标，删除会导致图标无法显示
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
     # 这些设置必须在任何 Qt 模块导入之前或 QApplication 创建之前完成
@@ -53,53 +52,72 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
-    # 提前导入，确保在 app 创建之前触发
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
-    # 迁移旧版本数据（打包版从安装目录迁到用户 home 目录）
-    from app.utils.utils import get_app_data_dir, migrate_app_data_if_needed
-    migrate_app_data_if_needed()
+    # 注册 Qt 资源文件中的图标 — 尽早导入，确保 widget 能引用图标资源
+    from app.utils import icons_rc  # noqa: F401
 
-    # 设置日志 (使用统一路径获取方法，DMG 只读时也需要可写)
-    log_dir = get_app_data_dir() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    logger.add(
-        log_dir / "llm_chatter.log",
-        rotation="10 MB",
-        level="DEBUG",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-    )
-
-    # 单独的内存诊断日志文件（仅含 [MEM] / [MEM-LEAK] 标签的日志）
-    # 用于排查工具迭代中的内存泄漏，与业务日志分离便于查看
-    # 由 main.py 顶部的 MEM_DIAG_ENABLED 控制总开关
-    if MEM_DIAG_ENABLED:
-        logger.add(
-            log_dir / "mem_diag.log",
-            rotation="10 MB",
-            level="DEBUG",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-            filter=lambda r: "[MEM]" in r["message"],
-        )
-
-    # 创建应用
+    # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
 
+    # ========== 延迟启动的非关键 I/O 操作 ==========
+    # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
+
+    def _deferred_startup():
+        """在事件循环启动后执行的非关键初始化"""
+        # 迁移旧版本数据
+        try:
+            from app.utils.utils import migrate_app_data_if_needed
+            migrate_app_data_if_needed()
+        except Exception:
+            logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
+
+        # 设置日志
+        try:
+            from app.utils.utils import get_app_data_dir
+            log_dir = get_app_data_dir() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            logger.add(
+                log_dir / "llm_chatter.log",
+                rotation="10 MB",
+                level="DEBUG",
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+            )
+        except Exception:
+            pass
+
+        # 单独的内存诊断日志文件
+        if MEM_DIAG_ENABLED:
+            try:
+                from app.utils.utils import get_app_data_dir
+                log_dir = get_app_data_dir() / "logs"
+                logger.add(
+                    log_dir / "mem_diag.log",
+                    rotation="10 MB",
+                    level="DEBUG",
+                    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+                    filter=lambda r: "[MEM]" in r["message"],
+                )
+            except Exception:
+                pass
+
+        # 同步开机自启注册表状态
+        try:
+            from app.utils.startup_manager import sync_auto_start_from_config
+            sync_auto_start_from_config()
+        except Exception:
+            logger.exception("[DeferredStartup] sync_auto_start_from_config 失败")
+
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
-    # PyQt5 默认：信号槽中 Python 异常 → pyqt5_err_print() → qFatal() → abort()
-    # 自定义处理器将 qFatal 转换为日志，防止整个进程崩溃
     from loguru import logger as _logger
     from PyQt5.QtCore import QtMsgType, qInstallMessageHandler
 
     def _qt_message_handler(msg_type, msg_context, msg_text):
         if msg_type == QtMsgType.QtFatalMsg:
             _logger.error(f"[QtFatal] {msg_text}")
-            # 不 abort()，仅记录日志后返回，让进程继续运行
-            # 注意：某些 PyQt5 版本中 pyqt5_err_print() 直接在 C++ 层调用 abort()
-            # 此处理器无法阻止那一类 abort，需要配合信号槽外层 try-catch
         elif msg_type == QtMsgType.QtCriticalMsg:
             _logger.error(f"[QtCritical] {msg_text}")
 
@@ -112,8 +130,7 @@ def main():
         _logger.error("".join(_traceback.format_exception(exc_type, exc_val, exc_tb)))
     sys.excepthook = _pyqt_exception_hook
 
-    # sys.unraisablehook：处理 Python 对象析构时抛出的不可捕获异常
-    # 防止 GC 收集 SIP 包装器时对象已释放导致的内存错误
+    # sys.unraisablehook
     def _unraisable_hook(unraisable):
         msg = getattr(unraisable.exc_value, 'args', (str(unraisable.exc_value),))
         err_msg = msg[0] if msg else str(unraisable.exc_value)
@@ -123,16 +140,13 @@ def main():
         _logger.error(f"  Err: {unraisable.err_msg}")
     sys.unraisablehook = _unraisable_hook
 
-    # 禁用默认退出行为（让最后一个窗口隐藏到托盘而不是退出）
+    # 禁用默认退出行为
     app.setQuitOnLastWindowClosed(False)
 
     # ========== 单实例检查 ==========
-    # 在 QApplication 创建之后立即检查，
-    # 避免在已运行的情况下重复创建窗口
     from app.core.single_instance import SingleInstanceGuard
     _guard = SingleInstanceGuard("Drifox")
     if not _guard.try_lock():
-        # 已有实例在运行 → 通知其显示窗口，然后本实例退出
         _guard.request_show_window()
         _guard.cleanup()
         return
@@ -141,26 +155,20 @@ def main():
     from qfluentwidgets import Theme, setTheme
     setTheme(Theme.DARK)
 
-    # 初始化共享 WebEngine Profile（所有 WebEngine 视图共用）
-    # 必须在创建任何 QWebEngineView 之前完成，因此放在此位置
+    # 初始化共享 WebEngine Profile
     from app.core.webengine_profile import init_shared_web_profile
     init_shared_web_profile(parent=app)
+
     # 获取全局字体配置
+    from app.utils.config import Settings
     try:
-        from app.utils.config import Settings
-        font_family = Settings.get_instance().llm_font_family.value
+        settings = Settings.get_instance()
+        font_family = settings.llm_font_family.value
     except Exception:
         try:
             font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
             font_family = "Segoe UI"
-
-    # 启动时同步开机自启注册表状态
-    try:
-        from app.utils.startup_manager import sync_auto_start_from_config
-        sync_auto_start_from_config()
-    except Exception:
-        logger.exception("[AutoStart] main.py 中调用 sync_auto_start_from_config 失败")
 
     try:
         from app.utils.design_tokens import scale_font_size
@@ -179,18 +187,15 @@ def main():
                 font-family: '{font_family}';
             }}
         """)
-    # 创建并显示窗口 - 直接使用 ToolPopupDialog
+    # 创建并显示窗口
     logger.info("LLM Chatter 启动中...")
 
     from PyQt5.QtWidgets import QWidget
-
     from app.main_widget import OpenAIChatToolWindow
 
-    # 创建模拟的 homepage
     class FakePage(QWidget):
         def __init__(self):
             super().__init__()
-            from app.utils.config import Settings
             self.cfg = Settings.get_instance()
             setFontFamilies([self.cfg.llm_font_family.value])
 
@@ -206,7 +211,6 @@ def main():
             class FakeSignal:
                 def connect(self, *args, **kwargs):
                     pass
-
             return FakeSignal()
 
         def setUpdatesEnabled(self, enabled):
@@ -224,12 +228,8 @@ def main():
     fake_page = FakePage()
     chat_window = OpenAIChatToolWindow(fake_page)
 
-    # 延迟创建 ToolPopupDialog 和初始化 TrayManager
-    # 等 chat_window 的 __init__ 完成后再创建弹窗，避免窗口渲染阻塞主线程
-    from PyQt5.QtCore import QTimer
-
     def _activate_window(window):
-        """激活窗口：显示 + 置前 + 还原（从最小化/隐藏恢复）"""
+        """激活窗口：显示 + 置前 + 还原"""
         window.show()
         window.activateWindow()
         window.raise_()
@@ -237,29 +237,22 @@ def main():
             window.showNormal()
 
     def _show_popup():
-        # ToolPopupDialog 构造（包含 QSettings 读取、布局构建）
-        # 注：TrayManager 已由 ToolPopupDialog 延迟初始化，不再在此处创建
         from app.tool_popup import ToolPopupDialog
         popup = ToolPopupDialog(chat_window, None)
         popup.setWindowTitle("Drifox")
-
-        # 跳过历史会话恢复
         chat_window._skip_restore_history = True
-
-        # 连接单实例信号：当其他实例启动时，激活本窗口
         _guard.show_requested.connect(lambda: _activate_window(popup))
-
         popup.show()
         logger.info("LLM Chatter 启动成功")
 
-    # 应用退出时清理单实例资源（共享内存 + IPC 服务器）
+    # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)
-    # 标记数据库正常关闭，下次启动跳过完整性检查
     from app.core.store.session_store import SessionStore
     app.aboutToQuit.connect(SessionStore.mark_clean_shutdown)
 
-    # 等 chat_window.__init__ 完成后再创建弹窗
+    # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
+    QTimer.singleShot(0, _deferred_startup)
 
     sys.exit(app.exec_())
 

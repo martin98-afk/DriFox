@@ -51,6 +51,7 @@ from qfluentwidgets import (
 
 from app.constants import (
     FREE_PROVIDERS,
+    IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
     PROVIDER_MODELS,
@@ -7330,7 +7331,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_assistant_message(self, card: MessageCard, new_content: str):
         card.update_content(new_content)
-        scroll_to_bottom_if_streaming(self.chat_scroll_area, self._is_streaming)
+        # 🐛 修复：延迟到下一事件循环再滚底，等卡片高度变化（CSS transition / 布局更新）
+        # 完成后再读取 scroll_bar.maximum()，否则高度还没变化时滚底不到位。
+        if self._is_streaming:
+            QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(
+                self.chat_scroll_area, self._is_streaming))
 
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
@@ -9359,12 +9364,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
             if _supports_vision:
                 # 视觉模型：收集图片路径到 _image_paths，编码推迟
-                _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-                _image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
+                _image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS]
             else:
                 # 非视觉模型 → 图片路径已作为文本拼入 user_text
-                _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-                has_image = any(os.path.splitext(p)[1].lower() in _IMAGE_EXTS for p in self._attachments)
+                has_image = any(os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS for p in self._attachments)
                 if has_image:
                     logger.warning(
                         f"[ImageAttach] 模型 {_model_name} 不支持视觉 (caps={_model_caps})，"
@@ -10120,6 +10123,13 @@ class OpenAIChatToolWindow(ToolWindow):
             executor.token_usage_updated.connect(
                 lambda tid, pt, ct, tt: (
                     self._on_sub_agent_token_usage(tid, pt, ct, tt)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
+                )
+            )
+            executor.thinking_received.connect(
+                lambda tid, thinking: (
+                    self._sub_agent_floating_widget.add_thinking(tid, thinking)
                     if not getattr(self, "_is_destroyed", False)
                     else None
                 )

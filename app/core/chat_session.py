@@ -99,7 +99,7 @@ class ChatSession:
         if provider_name:
             msg["provider_name"] = provider_name
         self.messages.append(msg)
-        self.messages = consolidate_messages(self.messages)
+        # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
         self._update_timestamp()
 
     def add_user_message(self, content, **kwargs):
@@ -108,13 +108,16 @@ class ChatSession:
         if kwargs.get("params"):
             msg["params"] = kwargs["params"]
         self.messages.append(msg)
-        self.messages = consolidate_messages(self.messages)
+        # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
         self._update_timestamp()
 
     def _update_timestamp(self):
         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.message_count = len(self.messages)
-        self.context_usage = count_messages_tokens(self.messages)
+        # 增量模式下避免每次 append 都遍历全量消息算 token；
+        # context_usage 在 save 时由持久化层统一计算
+        if self.context_usage == 0 and self.messages:
+            self.context_usage = count_messages_tokens(self.messages)
 
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
@@ -153,15 +156,22 @@ class ChatSession:
         self.invalidate_compaction()
         self._update_timestamp()
 
-    def to_dict(self) -> Dict:
+    def to_dict(self, consolidated: bool = True) -> Dict:
+        """转换为字典
+
+        Args:
+            consolidated: 是否在导出时调用 consolidate_messages。
+                          save 路径传 True，临时读取传 False 以节省性能。
+        """
+        msgs = consolidate_messages(self.messages) if consolidated else self.messages
         return {
             "session_id": self.session_id,
             "name": self.name,
-            "messages": self.messages,
+            "messages": msgs,
             "topic_summary": self.topic_summary,
             "created_at": self.created_at,
             "last_updated": self.last_updated,
-            "message_count": self.message_count,
+            "message_count": len(msgs),
             "compaction_state": self.compaction_state,
             "compaction_cache": self.compaction_cache,
             "system_prompt": self.system_prompt,
@@ -223,25 +233,35 @@ class SessionManager(QObject):
         return None
 
     def _touch_session(self, session_id: str):
-        """更新会话最后访问时间"""
+        """更新会话最后访问时间（限制 last_access 字典防无限增长）"""
         import time
 
         self._last_access[session_id] = time.time()
+        # 防内存泄漏：只保留活跃记录（最多 max_cached 的 2 倍）
+        if len(self._last_access) > self.max_cached_sessions * 2:
+            stale = [sid for sid in self._last_access
+                     if sid not in {s.session_id for s in self.sessions}]
+            for sid in stale:
+                self._last_access.pop(sid, None)
 
     def _evict_if_needed(self):
-        """如果超过最大缓存数，淘汰最久未访问的非当前会话"""
-        if len(self.sessions) <= self.max_cached_sessions:
+        """如果超过最大缓存数，淘汰最久未访问的非当前会话（O(n) 优化版）"""
+        n_sessions = len(self.sessions)
+        if n_sessions <= self.max_cached_sessions:
             return
 
         # 获取当前会话ID，不淘汰当前会话
         current_session = self.get_current_session()
         current_id = current_session.session_id if current_session else None
 
+        # 建立 session_id → index 的快速映射（O(n)）
+        session_index = {s.session_id: i for i, s in enumerate(self.sessions)}
+
         # 找出所有非当前会话，按访问时间排序（最久未访问在前）
         candidates = [
             (sid, t)
             for sid, t in self._last_access.items()
-            if sid != current_id and any(s.session_id == sid for s in self.sessions)
+            if sid != current_id and sid in session_index
         ]
         if not candidates:
             return
@@ -250,21 +270,22 @@ class SessionManager(QObject):
         candidates.sort(key=lambda x: x[1])
 
         # 淘汰最久未访问的，直到满足最大缓存限制
-        to_remove = len(self.sessions) - self.max_cached_sessions
+        to_remove = n_sessions - self.max_cached_sessions
         removed = 0
         for sid, _ in candidates:
             if removed >= to_remove:
                 break
-            # 找到会话在列表中的索引
-            for idx, session in enumerate(self.sessions):
-                if session.session_id == sid:
-                    self.sessions.pop(idx)
-                    self._last_access.pop(sid, None)
-                    removed += 1
-                    # 调整当前索引
-                    if idx <= self.current_index and self.current_index > 0:
-                        self.current_index -= 1
-                    break
+            idx = session_index.get(sid)
+            if idx is None:
+                continue
+            self.sessions.pop(idx)
+            self._last_access.pop(sid, None)
+            removed += 1
+            # 调整当前索引
+            if idx <= self.current_index and self.current_index > 0:
+                self.current_index -= 1
+            # 后续索引前移，更新映射
+            session_index = {s.session_id: i for i, s in enumerate(self.sessions)}
 
     def set_max_cached_sessions(self, max_cached: int):
         """设置最大缓存会话数"""

@@ -4,7 +4,7 @@ from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon, TransparentToolButton
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, get_unified_scrollbar_style
 from app.utils.utils import get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -65,33 +65,22 @@ class _DragHandle(QWidget):
         event.accept()
 
 
-_SCROLL_AREA_STYLE = """
-    QScrollArea {
+def _build_scroll_area_style() -> str:
+    return f"""
+    QScrollArea {{
         background: transparent;
         border: none;
-    }
-    QScrollArea > QWidget > QWidget {
+    }}
+    QScrollArea > QWidget > QWidget {{
         background: transparent;
-    }
-    QScrollBar:vertical {
-        background: transparent;
-        width: 6px;
-        margin: 0;
-    }
-    QScrollBar::handle:vertical {
-        background: rgba(255, 255, 255, 0.2);
-        border-radius: 3px;
-        min-height: 20px;
-    }
-    QScrollBar::handle:vertical:hover {
-        background: rgba(255, 255, 255, 0.35);
-    }
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    }}
+    {get_unified_scrollbar_style(8)}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0px;
-    }
-    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
         background: transparent;
-    }
+    }}
 """
 
 
@@ -159,7 +148,7 @@ class TodoFloatingWidget(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setFrameShape(QScrollArea.NoFrame)
-        self.scroll_area.setStyleSheet(_SCROLL_AREA_STYLE)
+        self.scroll_area.setStyleSheet(_build_scroll_area_style())
         self.scroll_area.viewport().setAutoFillBackground(False)
         self.scroll_area.setWidget(self.content_label)
 

@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
@@ -347,27 +347,7 @@ class FileMentionCard(QWidget):
                 padding: 0;
                 margin: 0;
             }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 12px;
-                margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {Colors.SCROLLBAR_HANDLE_BG};
-                border-radius: 6px;
-                min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
-            }}
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {{
-                background: none;
-            }}
+            {get_unified_scrollbar_style(8)}
         """)
 
         self._scroll_content = QWidget()

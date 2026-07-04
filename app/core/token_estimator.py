@@ -11,6 +11,7 @@ Token 估算模块 - 提供精确的 token 计数功能
 """
 
 import re
+import threading
 from functools import lru_cache
 from typing import Dict, List, Optional
 
@@ -165,6 +166,26 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     return _fast_estimate_tokens(text)
 
 
+# ========== count_messages_tokens 脏标记缓存 ==========
+# 基于 id+len+model 的缓存，避免同列表反复遍历
+_token_count_cache_local = threading.local()
+
+
+def _get_token_cache() -> dict:
+    cache = getattr(_token_count_cache_local, "cache", None)
+    if cache is None:
+        cache = {"key": None, "result": 0}
+        _token_count_cache_local.cache = cache
+    return cache
+
+
+def _set_token_cache(list_id: int, list_len: int, model: str, result: int):
+    cache = _get_token_cache()
+    cache["key"] = (list_id, list_len, model)
+    cache["result"] = result
+# ==========
+
+
 def count_messages_tokens(
     messages: List[Dict],
     model: str = "gpt-4",
@@ -172,24 +193,30 @@ def count_messages_tokens(
 ) -> int:
     """
     计算消息列表的总 token 数
-    
+
     OpenAI 消息格式费用计算:
     - 每条消息: 4 tokens (overhead)
     - role 字段: + tokens
     - content: + tokens
     - tool_calls: + tokens
     - tool_call_id: + tokens
-    
+
     Args:
         messages: 消息列表
         model: 模型名称
         tools: 工具定义列表
-    
+
     Returns:
         总 token 数 (最小为 0)
     """
     if not messages:
         return 0
+
+    # 脏标记缓存：仅对完整列表且 model 相同时命中（tools 几乎总为 None）
+    cache_key = (id(messages), len(messages), model)
+    _cache = _get_token_cache()
+    if _cache["key"] == cache_key:
+        return _cache["result"]
 
     total = 0
 
@@ -256,7 +283,9 @@ def count_messages_tokens(
     total = int(total * _get_model_token_ratio(model))
 
     # 确保返回值非负（防御性编程）
-    return max(0, total)
+    result = max(0, total)
+    _set_token_cache(id(messages), len(messages), model, result)
+    return result
 
 
 def count_tools_tokens(tools: List[Dict], model: str = "gpt-4") -> int:

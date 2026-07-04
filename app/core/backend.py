@@ -3,6 +3,7 @@
 ChatBackend - 统一后端接口
 后端自己创建和管理所有组件，前端只负责 UI 调用
 """
+from __future__ import annotations
 
 import asyncio
 import os
@@ -15,21 +16,10 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
+from app.constants import IMAGE_EXTENSIONS
+
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
-
-from app.core.agent import AgentManager
-from app.core.chat_session import ChatSession, SessionManager
-from app.core.engines.ui import ChatEngine
-from app.core.hook_manager import HookManager
-from app.core.memory_manager import MemoryManagerCore
-from app.core.store import SessionStore
-from app.core.tool_executor import ToolExecutor
-from app.core.workers.subagent_worker import SubAgentManager
-from app.utils.history_manager import HistoryManager
-
-# 支持的图片扩展名
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 def _event_to_tag(event_name: str) -> str:
@@ -146,7 +136,7 @@ def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
         path = match.group(1).strip()
         if os.path.isfile(path):
             ext = os.path.splitext(path)[1].lower()
-            if ext in _IMAGE_EXTENSIONS:
+            if ext in IMAGE_EXTENSIONS:
                 image_paths.append(path)
                 return ""  # 移除图片标记
         return match.group(0)  # 保留原样
@@ -348,16 +338,21 @@ class ChatBackend(QObject):
 
         self._get_model_config = get_model_config
 
-        # 1. 创建 SessionManager
+        # 1. 创建 SessionManager（延迟导入，减少 import 级联）
+        from app.core.store import SessionStore
+        from app.core.chat_session import SessionManager
+
         self._session_store = SessionStore.get_instance()
         self._session_manager = SessionManager()
         logger.info("[ChatBackend] SessionManager 创建完成")
 
         # 2. 创建 MemoryManager（全局单例，跨窗口共享）
+        from app.core.memory_manager import MemoryManagerCore
         self._memory_manager = MemoryManagerCore.get_instance()
         logger.info("[ChatBackend] MemoryManager 创建完成")
 
         # 3. 创建 HookManager（必须在 create_session 之前）
+        from app.core.hook_manager import HookManager
         self._hook_manager = HookManager(self._thread_pool, window_id=self._window_id)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
@@ -436,6 +431,7 @@ class ChatBackend(QObject):
 
         # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
         # agents_dir 传 None，智能体从已启用插件动态加载
+        from app.core.agent import AgentManager
         self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
 
@@ -459,6 +455,7 @@ class ChatBackend(QObject):
                     logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
 
         # 6. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
+        from app.core.tool_executor import ToolExecutor
         self._tool_executor = ToolExecutor(workdir=workdir, backend=self)
         self._tool_executor.set_memory_manager(self._memory_manager)
         self._tool_executor.set_llm_config_getter(get_model_config)
@@ -474,6 +471,7 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] ToolExecutor 创建完成")
 
         # 7. 创建 ChatEngine（暂时不传 get_memory_context，后面通过 setter 设置）
+        from app.core.engines.ui import ChatEngine
         self._chat_engine = ChatEngine(
             session_manager=self._session_manager,
             get_model_config=get_model_config,
@@ -513,6 +511,7 @@ class ChatBackend(QObject):
                     return resolved
             return get_model_config()
 
+        from app.core.workers.subagent_worker import SubAgentManager
         self._sub_agent_manager = SubAgentManager(
             agent_manager=self._agent_manager,
             tool_executor=self._tool_executor,
@@ -530,6 +529,7 @@ class ChatBackend(QObject):
 
         self._get_memory_context_getter = None
 
+        from app.utils.history_manager import HistoryManager
         self._history_manager = HistoryManager.get_instance()
 
         # 8. 初始化 PluginManager（系统 + 用户插件发现）
@@ -2273,6 +2273,7 @@ class ChatBackend(QObject):
                 chat_session = self._gateway_engine.find_session(stored_chat_id)
 
             if not chat_session:
+                from app.core.chat_session import ChatSession
                 user_name = gw_session.user_name or user_id[:8]
                 chat_session = ChatSession(
                     name=f"{platform}对话"  # UI 显示用（后续会被 topic_summary 覆盖）

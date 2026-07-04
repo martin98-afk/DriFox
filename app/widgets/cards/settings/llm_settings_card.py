@@ -28,11 +28,12 @@ from app.utils.design_tokens import (
     ComboBoxStyles,
     apply_font_size_to_widget,
     get_ui_font_size,
+    invalidate_font_cache,
     scale_icon_size,
 )
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -507,7 +508,7 @@ class LLMSettingsCard(SystemCardFrame):
                     self.label_by_value.get(config_item.value, next(iter(self.value_by_label)))
                 )
                 self.comboBox.setMinimumWidth(130)
-                self.comboBox.setStyleSheet(ComboBoxStyles.dark_combo())
+                ComboBoxStyles.apply(self.comboBox)
                 self.comboBox.currentTextChanged.connect(self._on_changed)
 
                 self.hBoxLayout.addWidget(self.comboBox)
@@ -519,8 +520,7 @@ class LLMSettingsCard(SystemCardFrame):
 
             def refresh_style(self):
                 """主题变更时刷新下拉框样式"""
-                Colors.refresh()
-                self.comboBox.setStyleSheet(ComboBoxStyles.dark_combo())
+                ComboBoxStyles.apply(self.comboBox)
 
             def _on_changed(self, label):
                 value = self.value_by_label.get(label)
@@ -665,6 +665,9 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_config_changed(self):
         """外观/模型相关设置变更 — 需要全量刷新"""
+        # 失效字体/字号缓存，让后续渲染读取新配置
+        invalidate_font_cache()
+        invalidate_font_family_css_cache()
         self.configChanged.emit()
         self._save_timer.start()
         # 立即刷新字体大小和主题样式（不等待保存定时器）

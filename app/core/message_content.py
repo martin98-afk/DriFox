@@ -1,8 +1,30 @@
 # -*- coding: utf-8 -*-
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 import orjson as json
+from loguru import logger
+
+# ========== consolidate_messages 脏标记缓存 ==========
+_consolidate_cache_local = threading.local()
+
+
+def _get_consolidate_cache() -> dict:
+    cache = getattr(_consolidate_cache_local, "cache", None)
+    if cache is None:
+        cache = {"key": None, "result": None}
+        _consolidate_cache_local.cache = cache
+    return cache
+
+
+def _set_consolidate_cache(list_id: int, list_len: int, result: list):
+    cache = _get_consolidate_cache()
+    cache["key"] = (list_id, list_len)
+    cache["result"] = result
+
+
+# ==========
 
 VALID_MESSAGE_ROLES = {"system", "user", "assistant", "tool"}
 
@@ -632,12 +654,27 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     保持消息列表平坦，不再合并。
     每个 assistant 消息只包含自己的内容和 tool_calls。
     每个 tool 结果独立为一条 tool 消息。
+
+    使用脏标记缓存：调用方传入同一个列表对象且长度未变时不重复计算。
+    消息列表只追加（长度增加）或整体替换（id 变化），不原地修改内容，此策略安全。
     """
+    # 脏标记缓存：key=(id, len)，仅对非空列表有效
+    # 消息从不原地修改内容，只追加或整体替换，此策略正确
+    if messages is not None:
+        cache_key = (id(messages), len(messages))
+        _cache = _get_consolidate_cache()
+        if _cache["key"] == cache_key:
+            return _cache["result"]
+
     normalized: List[Dict[str, Any]] = []
     for message in messages or []:
         item = normalize_message(message)
         if item:
             normalized.append(item)
+
+    if messages is not None:
+        _set_consolidate_cache(id(messages), len(messages), normalized)
+
     return normalized
 
 

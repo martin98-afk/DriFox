@@ -4,7 +4,7 @@ import uuid
 
 import psutil
 from loguru import logger
-from PyQt5.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, QEasingCurve, pyqtSignal
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter
 from PyQt5.QtWidgets import (
     QApplication,
@@ -712,6 +712,12 @@ class ToolPopupDialog(QDialog):
         if title_bar_layout:
             title_bar_layout.insertWidget(2, self._selection_indicator)
 
+        # ========== 首次显示动画状态（克制：仅首次缩放+淡入） ==========
+        self._is_first_show = True
+        self._show_anim = None
+        self._fade_anim = None
+        self._anim_target_geometry = None
+
     def _on_lock_changed(self, locked: bool):
         """处理窗口锁定状态变化"""
         self._lock_mode = locked
@@ -807,12 +813,83 @@ class ToolPopupDialog(QDialog):
         self._sync_lock_btn_position()
         self._lock_btn_widget.show()
 
+        # 首次显示：缩放+淡入动画（克制风格，200ms OutCubic）
+        if self._is_first_show:
+            self._is_first_show = False
+            self._play_show_animation()
+
     def hideEvent(self, event):
         """窗口隐藏时（包括最小化）保存位置 + 隐藏锁定按钮"""
         self._save_geometry()
         super().hideEvent(event)
         if self._lock_btn_widget:
             self._lock_btn_widget.hide()
+
+    def _play_show_animation(self):
+        """首次显示动画：92% → 100% 缩放 + 透明度淡入
+
+        时长 200ms，OutCubic 缓动，整体克制不浮夸。
+        仅首次显示触发，后续 show 不再做动画（响应迅速优先）。
+        """
+        try:
+            # 等待几何稳定（_restore_geometry 已调用）
+            target_rect = self.geometry()
+            self._anim_target_geometry = QRect(target_rect)
+
+            # 计算起点（以中心点不变，缩到 92%）
+            cx = target_rect.center().x()
+            cy = target_rect.center().y()
+            start_w = max(int(target_rect.width() * 0.92), self.minimumWidth())
+            start_h = max(int(target_rect.height() * 0.92), self.minimumHeight())
+            start_x = cx - start_w // 2
+            start_y = cy - start_h // 2
+            start_rect = QRect(start_x, start_y, start_w, start_h)
+
+            # 几何动画（缩放）
+            self._show_anim = QPropertyAnimation(self, b"geometry", self)
+            self._show_anim.setDuration(200)
+            self._show_anim.setStartValue(start_rect)
+            self._show_anim.setEndValue(target_rect)
+            self._show_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+            # 透明度动画（淡入）
+            self.setWindowOpacity(0.0)
+            self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self._fade_anim.setDuration(200)
+            self._fade_anim.setStartValue(0.0)
+            self._fade_anim.setEndValue(1.0)
+            self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+            # 动画结束后清理引用
+            self._show_anim.finished.connect(self._on_show_anim_finished)
+            self._show_anim.start()
+            self._fade_anim.start()
+        except Exception as e:
+            # 动画异常时降级：直接显示
+            logger.warning(f"[ToolPopupDialog] 首次显示动画失败，降级: {e}")
+            self.setWindowOpacity(1.0)
+            self._anim_target_geometry = None
+
+    def _on_show_anim_finished(self):
+        """首次显示动画结束回调：确保最终状态正确
+
+        若动画期间外部修改了几何（如最大化、用户拖拽），尊重新几何而非强制重置。
+        """
+        try:
+            if (self._anim_target_geometry is not None
+                    and self.geometry() == self._anim_target_geometry):
+                # 几何未被外部修改，确保透明度完全恢复
+                self.setWindowOpacity(1.0)
+            elif self._anim_target_geometry is not None:
+                # 几何已被外部修改（如窗口状态变化），只确保透明度
+                logger.debug("[ToolPopupDialog] 动画期间几何已变更，跳过重置")
+                self.setWindowOpacity(1.0)
+            self._anim_target_geometry = None
+        except Exception:
+            pass
+        finally:
+            self._show_anim = None
+            self._fade_anim = None
 
     def _restore_geometry(self):
         from PyQt5.QtCore import QSettings
@@ -1009,16 +1086,17 @@ class ToolPopupDialog(QDialog):
             bg_color = QColor(245, 245, 245, int(255 * opacity))
             shadow_color = QColor(0, 0, 0, int(50 * opacity))
 
-        # 根据配置设置边框颜色
+        # 根据配置设置边框颜色 — 默认边框跟随主题（Colors.BORDER）
         border_color_map = {
             "white": QColor(255, 255, 255, int(255 * opacity)),
             "yellow": QColor(255, 200, 0, int(255 * opacity)),
         }
         if self._border_color == "none":
-            if isDarkTheme():
-                border_color = QColor(55, 55, 55, int(255 * opacity))
-            else:
-                border_color = QColor(200, 200, 200, int(255 * opacity))
+            # 主题感知边框：解析 Colors.BORDER 为 QColor，并跟随透明度
+            Colors.refresh()
+            theme_border = QColor(Colors.BORDER)
+            theme_border.setAlpha(int(255 * opacity))
+            border_color = theme_border
         else:
             border_color = border_color_map.get(
                 self._border_color,
