@@ -10128,6 +10128,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     else None
                 )
             )
+            executor.thinking_received.connect(
+                lambda tid, thinking: (
+                    self._sub_agent_floating_widget.add_thinking(tid, thinking)
+                    if not getattr(self, "_is_destroyed", False)
+                    else None
+                )
+            )
             executor.finished_with_result.connect(
                 lambda tid, result: (
                     self._on_sub_agent_finished(tid, result) if not getattr(self, "_is_destroyed", False) else None

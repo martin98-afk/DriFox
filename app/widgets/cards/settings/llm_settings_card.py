@@ -507,7 +507,7 @@ class LLMSettingsCard(SystemCardFrame):
                     self.label_by_value.get(config_item.value, next(iter(self.value_by_label)))
                 )
                 self.comboBox.setMinimumWidth(130)
-                self.comboBox.setStyleSheet(ComboBoxStyles.dark_combo())
+                ComboBoxStyles.apply(self.comboBox)
                 self.comboBox.currentTextChanged.connect(self._on_changed)
 
                 self.hBoxLayout.addWidget(self.comboBox)
@@ -519,8 +519,7 @@ class LLMSettingsCard(SystemCardFrame):
 
             def refresh_style(self):
                 """主题变更时刷新下拉框样式"""
-                Colors.refresh()
-                self.comboBox.setStyleSheet(ComboBoxStyles.dark_combo())
+                ComboBoxStyles.apply(self.comboBox)
 
             def _on_changed(self, label):
                 value = self.value_by_label.get(label)

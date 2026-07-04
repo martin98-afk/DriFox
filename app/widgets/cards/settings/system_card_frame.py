@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, PrimaryToolButton, StrongBodyLabel, TransparentToolButton
 
-from app.utils.design_tokens import Colors, TabStyles, font_size_css, scale_icon_size
+from app.utils.design_tokens import Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -219,27 +219,8 @@ class SystemCardFrame(QFrame):
             QScrollArea > QWidget > QWidget {
                 background: transparent;
             }
-            QScrollBar:vertical {
-                border: none;
-                background: transparent;
-                width: 10px;
-                margin: 4px 2px 4px 2px;
-            }
-            QScrollBar::handle:vertical {
-                background: %s;
-                border-radius: 5px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: %s;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
-            }
-        """ % (Colors.SCROLLBAR_HANDLE_BG, Colors.SCROLLBAR_HANDLE_HOVER_BG)
+            """ + get_unified_scrollbar_style(8) + """
+        """
 
     # ── 公开控制 ───────────────────────────────────────
 
