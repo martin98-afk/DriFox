@@ -386,6 +386,9 @@ class SessionStore:
                 # 创建索引
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
+                # file_operations 表索引（几乎所有查询都按 session_id / call_id 过滤）
+                self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
+                self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_call ON file_operations(session_id, call_id)")
 
                 # 迁移逻辑
                 self._migrate_add_project_column()

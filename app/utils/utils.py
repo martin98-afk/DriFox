@@ -636,8 +636,17 @@ def get_unified_font(size=10, bold=False):
     return font
 
 
+_cached_font_family_css: str | None = None
+
+
 def get_font_family_css() -> str:
-    """获取 CSS font-family 字符串，用于 stylesheet 中保持字体统一"""
+    """获取 CSS font-family 字符串，用于 stylesheet 中保持字体统一（缓存）
+
+    字体设置仅在用户更改配置时变化，缓存后由 invalidate_font_cache() 失效。
+    """
+    global _cached_font_family_css
+    if _cached_font_family_css is not None:
+        return _cached_font_family_css
     try:
         font_family = Settings.get_instance().llm_font_family.value
     except Exception:
@@ -645,7 +654,14 @@ def get_font_family_css() -> str:
             font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
             font_family = "Segoe UI"
-    return f"font-family: '{font_family}';"
+    _cached_font_family_css = f"font-family: '{font_family}';"
+    return _cached_font_family_css
+
+
+def invalidate_font_family_css_cache() -> None:
+    """字体 CSS 缓存失效（与 design_tokens.invalidate_font_cache 配合使用）"""
+    global _cached_font_family_css
+    _cached_font_family_css = None
 
 
 def str_to_bool(value):

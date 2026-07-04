@@ -28,11 +28,12 @@ from app.utils.design_tokens import (
     ComboBoxStyles,
     apply_font_size_to_widget,
     get_ui_font_size,
+    invalidate_font_cache,
     scale_icon_size,
 )
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -664,6 +665,9 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_config_changed(self):
         """外观/模型相关设置变更 — 需要全量刷新"""
+        # 失效字体/字号缓存，让后续渲染读取新配置
+        invalidate_font_cache()
+        invalidate_font_family_css_cache()
         self.configChanged.emit()
         self._save_timer.start()
         # 立即刷新字体大小和主题样式（不等待保存定时器）

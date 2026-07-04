@@ -637,15 +637,13 @@ class OpenAIChatWorker(QThread):
             results: trigger_event 返回的 HookExecutionResult 列表
             backend: ChatBackend 实例
         """
-        import json as _json
-
         if not results:
             return
         for r in results:
             if not r.success or not r.output:
                 continue
             try:
-                data = _json.loads(r.output)
+                data = json.loads(r.output)  # 使用模块级 orjson
                 if isinstance(data, dict) and data.get("auto_compact"):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
@@ -809,22 +807,24 @@ class OpenAIChatWorker(QThread):
             # 这里吞掉而非向上抛，避免阻断并行工具结果的处理路径。
             logger.debug(f"[Signal] _emit_with_callback 兜底 {signal_name}: {e}")
 
+    # 信号名 → WorkerEvent 映射（类变量，避免每次调用重建 dict）
+    _SIGNAL_NAME_MAP: dict = {
+        "content_received": WorkerEvent.CONTENT_RECEIVED,
+        "reasoning_content_received": WorkerEvent.REASONING_RECEIVED,
+        "finished_with_content": WorkerEvent.FINISHED_WITH_CONTENT,
+        "finished_with_messages": WorkerEvent.FINISHED_WITH_MESSAGES,
+        "compaction_status_changed": WorkerEvent.COMPACTION_STATUS,
+        "tool_call_started": WorkerEvent.TOOL_CALL_STARTED,
+        "tool_args_updated": WorkerEvent.TOOL_CALL_STREAM,
+        "tool_result_received": WorkerEvent.TOOL_RESULT_RECEIVED,
+        "question_asked": WorkerEvent.QUESTION_ASKED,
+        "permission_approval_requested": WorkerEvent.PERMISSION_REQUESTED,
+        "error_occurred": WorkerEvent.ERROR,
+    }
+
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
-        """将 signal name 映射到 WorkerEvent"""
-        mapping = {
-            "content_received": WorkerEvent.CONTENT_RECEIVED,
-            "reasoning_content_received": WorkerEvent.REASONING_RECEIVED,
-            "finished_with_content": WorkerEvent.FINISHED_WITH_CONTENT,
-            "finished_with_messages": WorkerEvent.FINISHED_WITH_MESSAGES,
-            "compaction_status_changed": WorkerEvent.COMPACTION_STATUS,
-            "tool_call_started": WorkerEvent.TOOL_CALL_STARTED,
-            "tool_args_updated": WorkerEvent.TOOL_CALL_STREAM,
-            "tool_result_received": WorkerEvent.TOOL_RESULT_RECEIVED,
-            "question_asked": WorkerEvent.QUESTION_ASKED,
-            "permission_approval_requested": WorkerEvent.PERMISSION_REQUESTED,
-            "error_occurred": WorkerEvent.ERROR,
-        }
-        return mapping.get(signal_name)
+        """将 signal name 映射到 WorkerEvent（使用类变量缓存）"""
+        return self._SIGNAL_NAME_MAP.get(signal_name)
 
     def cancel(self):
         self._state.is_cancelled = True
@@ -2886,9 +2886,9 @@ class OpenAIChatWorker(QThread):
         if _content_batch:
             self._emit_with_callback("content_received", self.content_received, _content_batch)
 
-        # 尝试让主线程处理刚排队的 content_received 信号
-        # (注：从 worker 线程调用可能仅处理 worker 自身事件，主线程事件在下一轮 event loop 处理)
-        QCoreApplication.processEvents()
+        # 性能优化：移除从 worker 线程调用的 processEvents()
+        # 跨线程信号传递由 Qt 的 QueuedConnection 自动处理，无需手动 processEvents
+        # QCoreApplication.processEvents()
 
         # 处理等待完整参数的 tool_calls（超长 arguments 场景）
         # 在所有 chunk 接收完成后，再次尝试解析仍处于等待状态的 tool_calls

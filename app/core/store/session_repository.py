@@ -433,23 +433,20 @@ class SessionRepository:
             return False
 
     def archive_by_project(self, project: str) -> int:
-        """归档指定项目的所有会话"""
+        """归档指定项目的所有会话（单条 SQL，避免 N+1 查询）"""
         if not self.is_initialized:
             return 0
 
         try:
-            sessions = self.get_by_project(project, limit=1000)
-            count = 0
-            for s in sessions:
-                sid = s.get("session_id")
-                if sid:
-                    success, _ = self._execute(
-                        f"UPDATE {self.TABLE_NAME} SET project = ? WHERE session_id = ?",
-                        (f"__archived__/{project}", sid),
-                    )
-                    if success:
-                        count += 1
-            return count
+            archived_project = f"__archived__/{project}"
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            success, result = self._execute(
+                f"UPDATE {self.TABLE_NAME} SET project = ?, updated_at = ? WHERE project = ?",
+                (archived_project, now, project),
+            )
+            if success and result is not None:
+                return int(result)
+            return 0
         except Exception as e:
             logger.error(f"[SessionRepository] archive_sessions_by_project 异常: {e}")
             return 0

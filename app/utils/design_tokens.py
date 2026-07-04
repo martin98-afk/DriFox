@@ -11,18 +11,40 @@ from PyQt5.QtCore import QSize
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
 
+# ─── 字体/字号缓存 ──────────────────────────────────────────
+# 渲染热路径中 scale_font_size 每帧调用 15-50 次，
+# get_font_family_css / _get_global_font 同样高频。
+# 字体设置仅在用户更改配置时变化，缓存后在设置变更时失效即可。
+_cached_font_family: str | None = None
+_cached_font_size_key: str | None = None
+_cached_font_size_delta: int = 0
+_cached_font_size_base: int = 14
+
+
+def invalidate_font_cache() -> None:
+    """字体/字号缓存失效（在设置变更回调中调用）"""
+    global _cached_font_family, _cached_font_size_key, _cached_font_size_delta, _cached_font_size_base
+    _cached_font_family = None
+    _cached_font_size_key = None
+    _cached_font_size_delta = 0
+    _cached_font_size_base = 14
+
 
 def _get_global_font() -> str:
-    """获取全局字体名称，用于样式表"""
+    """获取全局字体名称，用于样式表（缓存）"""
+    global _cached_font_family
+    if _cached_font_family is not None:
+        return _cached_font_family
     try:
         from app.utils.config import Settings
 
-        return Settings.get_instance().llm_font_family.value
+        _cached_font_family = Settings.get_instance().llm_font_family.value
     except Exception:
         try:
-            return Settings.get_instance().canvas_font_selected.value
+            _cached_font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
-            return "Segoe UI"
+            _cached_font_family = "Segoe UI"
+    return _cached_font_family
 
 
 FONT_SIZE_OPTIONS = {
@@ -34,22 +56,34 @@ FONT_SIZE_OPTIONS = {
 
 
 def get_ui_font_size_key() -> str:
+    global _cached_font_size_key, _cached_font_size_delta, _cached_font_size_base
+    if _cached_font_size_key is not None:
+        return _cached_font_size_key
     try:
         from app.utils.config import Settings
 
         key = Settings.get_instance().ui_font_size.value
     except Exception:
         key = "medium"
-    return key if key in FONT_SIZE_OPTIONS else "medium"
+    if key not in FONT_SIZE_OPTIONS:
+        key = "medium"
+    _cached_font_size_key = key
+    _cached_font_size_delta = FONT_SIZE_OPTIONS[key]["delta"]
+    _cached_font_size_base = FONT_SIZE_OPTIONS[key]["base"]
+    return key
 
 
 def get_ui_font_size() -> int:
     """获取当前配置的基础字体大小（未缩放）"""
-    return FONT_SIZE_OPTIONS[get_ui_font_size_key()]["base"]
+    get_ui_font_size_key()  # 确保缓存已填充
+    return _cached_font_size_base
 
 
 def scale_font_size(size: int) -> int:
-    return max(8, int(size) + FONT_SIZE_OPTIONS[get_ui_font_size_key()]["delta"])
+    # 确保缓存已填充（首次调用时），后续直接用缓存值
+    if _cached_font_size_key is None:
+        get_ui_font_size_key()
+    return max(8, int(size) + _cached_font_size_delta)
 
 
 def scale_icon_size(size: int) -> int:
@@ -57,7 +91,9 @@ def scale_icon_size(size: int) -> int:
 
     使用与字体相同的 delta 缩放量，保证图标与文字比例协调。
     """
-    return max(8, int(size) + FONT_SIZE_OPTIONS[get_ui_font_size_key()]["delta"])
+    if _cached_font_size_key is None:
+        get_ui_font_size_key()
+    return max(8, int(size) + _cached_font_size_delta)
 
 
 def font_size_css(size: int) -> str:
@@ -195,6 +231,10 @@ GLOW_PRESETS = {
 # ============ 颜色系统 ============
 class Colors:
     """颜色 Token - 动态从 ThemeManager 读取"""
+
+    # 缓存：记录上一次实际刷新的主题条目，避免 100+ 次冗余调用
+    # 同一个主题文件加载期内，Colors.refresh() 只执行一次有效刷新
+    _cached_theme_items: Optional[frozenset] = None
 
     # 默认值（fallback，用于主题未加载时）
     CARD_BG = "rgba(33, 33, 38, {alpha})"
@@ -395,10 +435,20 @@ class Colors:
 
     @classmethod
     def refresh(cls) -> None:
-        """从 ThemeManager 同步当前主题颜色到类属性"""
+        """从 ThemeManager 同步当前主题颜色到类属性
+
+        幂等缓存：同一份 theme dict 仅执行一次有效刷新，
+        后续冗余调用（widget 初始化时普遍模式）直接跳过。
+        """
         theme = current_theme()
         if not theme:
             return
+
+        # 幂等检查：主题 dict 未变化时跳过刷新
+        current_items = frozenset(theme.items())
+        if cls._cached_theme_items == current_items:
+            return
+        cls._cached_theme_items = current_items
 
         # 1. 特殊处理：CARD_BG 需要 {alpha} 模板
         if "card_bg" in theme:
