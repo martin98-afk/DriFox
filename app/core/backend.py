@@ -16,11 +16,10 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
+from app.constants import IMAGE_EXTENSIONS
+
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
-
-# 支持的图片扩展名
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 def _event_to_tag(event_name: str) -> str:
@@ -137,7 +136,7 @@ def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
         path = match.group(1).strip()
         if os.path.isfile(path):
             ext = os.path.splitext(path)[1].lower()
-            if ext in _IMAGE_EXTENSIONS:
+            if ext in IMAGE_EXTENSIONS:
                 image_paths.append(path)
                 return ""  # 移除图片标记
         return match.group(0)  # 保留原样

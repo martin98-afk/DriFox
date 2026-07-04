@@ -51,6 +51,7 @@ from qfluentwidgets import (
 
 from app.constants import (
     FREE_PROVIDERS,
+    IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
     PROVIDER_MODELS,
@@ -9363,12 +9364,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
             if _supports_vision:
                 # 视觉模型：收集图片路径到 _image_paths，编码推迟
-                _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-                _image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
+                _image_paths = [p for p in self._attachments if os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS]
             else:
                 # 非视觉模型 → 图片路径已作为文本拼入 user_text
-                _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-                has_image = any(os.path.splitext(p)[1].lower() in _IMAGE_EXTS for p in self._attachments)
+                has_image = any(os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS for p in self._attachments)
                 if has_image:
                     logger.warning(
                         f"[ImageAttach] 模型 {_model_name} 不支持视觉 (caps={_model_caps})，"
