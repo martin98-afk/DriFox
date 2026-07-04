@@ -369,6 +369,8 @@ class HookOverrideManager:
     def __init__(self):
         self._overrides: Dict[str, Dict[str, Any]] = {}
         self._storage_path: Optional[str] = None
+        # 内存缓存上次写入的 payload，避免每次 _save 都读盘比较
+        self._cached_payload: Optional[str] = None
         self._init_storage_path()
         self._load()
 
@@ -381,32 +383,45 @@ class HookOverrideManager:
         self._storage_path = str(storage_dir / self.OVERRIDES_FILE)
 
     def _load(self):
-        """从文件加载覆写配置"""
+        """从文件加载覆写配置（同步更新内存缓存）"""
         if not self._storage_path or not os.path.exists(self._storage_path):
             return
         try:
             with open(self._storage_path, "r", encoding="utf-8") as f:
-                self._overrides = json.load(f)
+                raw = f.read()
+                self._overrides = json.loads(raw)
+                # 兼容 __new__ 创建实例跳过 __init__ 的情况
+                if not hasattr(self, "_cached_payload"):
+                    self._cached_payload = None
+                self._cached_payload = raw
             logger.debug(f"[HookOverrideManager] Loaded {len(self._overrides)} overrides")
         except Exception as e:
             logger.error(f"[HookOverrideManager] Failed to load overrides: {e}")
             self._overrides = {}
+
+    def reload(self):
+        """从文件重新加载覆写配置（用于多窗口同步），强制刷新内存缓存"""
+        if not hasattr(self, "_cached_payload"):
+            self._cached_payload = None
+        self._cached_payload = None
+        self._load()
 
     def _save(self):
         """保存覆写配置到文件（内容未变时跳过写盘，避免触发文件监视器）"""
         if not self._storage_path:
             return
         try:
-            # 序列化当前数据，与磁盘内容比较
+            # 兼容 __new__ 创建实例跳过 __init__ 的情况
+            if not hasattr(self, "_cached_payload"):
+                self._cached_payload = None
+            # 序列化当前数据，与内存缓存比较（避免读盘）
             payload = json.dumps(self._overrides, indent=2, ensure_ascii=False)
-            try:
-                with open(self._storage_path, "r", encoding="utf-8") as f:
-                    if f.read() == payload:
-                        return  # 内容未变，跳过写盘
-            except FileNotFoundError, OSError:
-                pass  # 文件不存在或读失败，继续写入
+            if self._cached_payload == payload:
+                return  # 内容未变，跳过写盘
+            # 首次写入或内容变化时写盘
             with open(self._storage_path, "w", encoding="utf-8") as f:
                 f.write(payload)
+            self._cached_payload = payload
             logger.debug(f"[HookOverrideManager] Saved {len(self._overrides)} overrides")
         except Exception as e:
             logger.error(f"[HookOverrideManager] Failed to save overrides: {e}")
@@ -551,7 +566,7 @@ class HookWorker(QRunnable):
                 enc = preferred
             try:
                 result = subprocess.run(command, encoding=enc, **subprocess_kwargs)
-            except UnicodeDecodeError, LookupError:
+            except (UnicodeDecodeError, LookupError):
                 # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
             exit_code = result.returncode
@@ -2316,7 +2331,7 @@ class HookPresetManager:
                 with open(self._storage_path, "r", encoding="utf-8") as f:
                     if f.read() == payload:
                         return  # 内容未变，跳过写盘
-            except FileNotFoundError, OSError:
+            except (FileNotFoundError, OSError):
                 pass  # 文件不存在或读失败，继续写入
             with open(self._storage_path, "w", encoding="utf-8") as f:
                 f.write(payload)
