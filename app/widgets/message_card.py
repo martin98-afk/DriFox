@@ -3267,6 +3267,8 @@ class CodeWebViewer(QWebEngineView):
                         // 同步 auto-scroll（用户未滚动→始终滚底；已滚动且接近底部→滚底）
                         // 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
                         // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
+                        // 附加修复：打 auto-scroll 时间戳，让 scroll 事件回调识别
+                        // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
                         if (!_wasUserScrolled) {{
                             document.body.scrollTop = document.body.scrollHeight;
                             window._userScrolledWithin = false;
@@ -3277,6 +3279,7 @@ class CodeWebViewer(QWebEngineView):
                                 window._userScrolledWithin = false;
                             }}
                         }}
+                        window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
@@ -3448,12 +3451,16 @@ class CodeWebViewer(QWebEngineView):
                 // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
                 window._userScrolledWithin = false;
                 window._suppressScrollEvent = false;
-                // 🐛 修复：_suppressScrollEvent 防误触 — updateContent 中
-                // innerHTML 替换重置 scrollTop 触发 scroll 事件，但这是 DOM 重建
-                // 而非用户主动滚动。在 container.innerHTML = newHtml 前后设置
-                // _suppressScrollEvent=true/false 来抑制这种误触发。
+                // 🐛 修复 race condition：scroll 事件是异步派发的（Chromium 在下一帧
+                // dispatch），即使同步代码末尾已经 _suppressScrollEvent=false，
+                // pending 的 scroll 事件仍可能在 suppress=false 之后才被 dispatch，
+                // 错误地把程序 auto-scroll 触发的滚动标记为"用户主动滚动"，导致
+                // 后续 updateContent 跳过 auto-scroll → 用户视觉上"卡在顶部"。
+                // 修复：用时间戳识别 auto-scroll 触发的 scroll 事件（< 50ms 内视为程序驱动）。
+                window._autoScrollTime = 0;
                 document.body.addEventListener('scroll', function() {{
                     if (window._suppressScrollEvent) return;
+                    if (performance.now() - window._autoScrollTime < 50) return;
                     window._userScrolledWithin = true;
                 }});
                 // ======================================================
@@ -3538,6 +3545,8 @@ class CodeWebViewer(QWebEngineView):
                 // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
                 // 附加修复：auto-scroll 成功后复位 _userScrolledWithin，
                 // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
+                // 附加修复（race condition）：打 auto-scroll 时间戳，防止异步派发的
+                // scroll 事件在 _suppressScrollEvent=false 后被误判为用户主动滚动。
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
                     document.body.scrollTop = document.body.scrollHeight;
@@ -3548,6 +3557,7 @@ class CodeWebViewer(QWebEngineView):
                         window._userScrolledWithin = false;
                     }}
                 }}
+                window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
                 // 🐛 修复：文本追加后同步报告高度，缩短 _document_height 更新延迟，
                 // 让 wheelEvent 能及时获取最新 scrollHeight 做边界判定。
@@ -4306,7 +4316,6 @@ class CodeWebViewer(QWebEngineView):
         self._height_report_pending = False
         self._resize_locked = False
 
-
         # 清理页面：先加载空白页释放资源
         try:
             self.setHtml("")
@@ -4318,7 +4327,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -5862,6 +5871,9 @@ class MessageCard(SimpleCardWidget):
                 # 🐛 修复：同步 auto-scroll 取代 setTimeout(0)，避免渲染间隙置顶闪烁
                 # 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
                 # 防止用户一次滚轮操作后永久丧失粘性滚底能力。
+                # 🐛 修复 race condition：打 auto-scroll 时间戳，防止异步派发的
+                # scroll 事件在 _suppressScrollEvent=false 后被误判为用户主动滚动，
+                # 导致后续流式输出卡顶部。
                 self.viewer.page().runJavaScript(
                     "(function(){"
                     "  window._suppressScrollEvent = true;"
@@ -5876,6 +5888,7 @@ class MessageCard(SimpleCardWidget):
                     "      window._userScrolledWithin = false;"
                     "    }"
                     "  }"
+                    "  window._autoScrollTime = performance.now();"
                     "  window._suppressScrollEvent = false;"
                     "})();"
                 )
@@ -6740,7 +6753,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):
