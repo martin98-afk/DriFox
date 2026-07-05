@@ -694,8 +694,12 @@ def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int
     避免 hook 消息同时属于两个 round。
     """
     canonical_messages = consolidate_messages(messages or [])
+    # 跳过 hook 合成消息（如 Stop block 续命注入的 user 消息），
+    # 不作为 round 起点。续命回复纳入前一个真实 user round 范围，
+    # 与 build_node_preview_data 的节点过滤保持一致。
     user_indices = [
-        idx for idx, msg in enumerate(canonical_messages) if msg.get("role") == "user"
+        idx for idx, msg in enumerate(canonical_messages)
+        if msg.get("role") == "user" and not msg.get("_hook_event")
     ]
 
     # 第一遍：计算每个 round 的 start

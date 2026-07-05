@@ -589,8 +589,13 @@ class OpenAIChatWorker(QThread):
             # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
             block_reason: Optional[str] = None
             for r in results:
-                # ★ 修复：只有标记为 add_to_context 的 hook 输出才注入消息列表
-                if r.success and r.output and r.add_to_context:
+                # Stop 事件的 BLOCK 决策有独立的合成 user message 注入路径
+                # （_build_stop_block_synthetic_user_message），此处跳过避免同一内容
+                # 被注入为 assistant hook message + user 合成消息，导致 LLM 收到重复内容
+                is_stop_block = event_name == "Stop" and getattr(r.decision, "value", "") == "block"
+
+                # 只有标记为 add_to_context 的 hook 输出才注入消息列表
+                if r.success and r.output and r.add_to_context and not is_stop_block:
                     msg = _make_hook_message(event_name, r.output, r.status_message)
                     current_messages.append(msg)
                     current_session_messages.append(msg)
@@ -598,7 +603,7 @@ class OpenAIChatWorker(QThread):
                     # 追加到 API 缓存
                     self._append_to_api_cache([msg])
 
-                    logger.debug(f"[HookManager] Worker hook injected: {event_name}, message: {msg[:100]}...")
+                    logger.debug(f"[HookManager] Worker hook injected: {event_name}, message: {msg.get('content', '')[:100]}...")
 
                 # 检查 BLOCK 决策（Claude Code Stop hook 强制续命机制）
                 # HookDecision.BLOCK 来自 hook_manager.py，对应：
@@ -643,12 +648,12 @@ class OpenAIChatWorker(QThread):
             if not r.success or not r.output:
                 continue
             try:
-                data = json.loads(r.output)  # 使用模块级 orjson
+                data = json.loads(r.output)
                 if isinstance(data, dict) and data.get("auto_compact"):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (_json.JSONDecodeError, ValueError, TypeError):
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
     @staticmethod
@@ -672,7 +677,7 @@ class OpenAIChatWorker(QThread):
 
         # 尝试解析 JSON
         try:
-            data = orjson.loads(output)
+            data = json.loads(output)
             if isinstance(data, dict):
                 # 优先级 1: hookify 风格
                 if data.get("reason"):
@@ -683,7 +688,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except (orjson.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
         # 优先级 4: raw output 兜底

@@ -1536,6 +1536,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
         # Hook 开关/增删 → 广播到其他窗口同步
         self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
+        # Hook 轻量开关同步（仅更新 switch 状态，不触发全量刷新）
+        self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
 
         # 连接 MCP 添加/编辑信号
         self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
@@ -4104,9 +4106,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.show_card("settings", self._window_id)
 
     def _on_hook_toggled(self):
-        """Hook 开关/增删 → 广播到其他窗口刷新列表"""
+        """Hook 开关/增删 → 广播到所有窗口刷新列表"""
         for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed or win is self:
+            if win._is_destroyed:
                 continue
             settings_popup = getattr(win, "_settings_popup", None)
             if settings_popup is None:
@@ -4120,6 +4122,23 @@ class OpenAIChatToolWindow(ToolWindow):
                 if hm:
                     hm.reload_global_hooks(str(hook_card._hooks_config_file))
                     hook_card._refresh(reload=True)
+
+    def _on_hook_toggled_light(self, hook_id: str, enabled: bool):
+        """Hook 单项开关同步 → 仅更新其他窗口对应 Switch 状态，不重渲整个列表
+
+        避免 reload_global_hooks + 全量 _refresh 引起的卡顿和 source_type 退化。
+        """
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed or win is self:
+                continue
+            settings_popup = getattr(win, "_settings_popup", None)
+            if settings_popup is None:
+                continue
+            hook_card = getattr(settings_popup, "hookListCard", None)
+            if hook_card is None:
+                continue
+            if win._card_manager.is_card_visible("settings", win._window_id):
+                hook_card.update_toggle_state(hook_id, enabled)
 
     def _on_mcp_servers_toggled(self):
         """MCP 服务器开关变更 → 广播到其他窗口刷新列表"""

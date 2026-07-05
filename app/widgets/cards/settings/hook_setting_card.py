@@ -31,6 +31,8 @@ from qfluentwidgets import (
     ToolButton,
 )
 
+from typing import Dict
+
 from app.tools.tool_name_mapper import ToolNameMapper
 from app.utils.design_tokens import ButtonStyles, Colors, ComboBoxStyles, Sizes, SwitchStyles, scale_font_size
 from app.utils.utils import get_app_data_dir, get_font_family_css, get_unified_font
@@ -922,6 +924,7 @@ class HookListSettingCard(ExpandSettingCard):
     """Hook 管理设置卡片"""
 
     hooksChanged = pyqtSignal()
+    hookToggled = pyqtSignal(str, bool)  # (hook_id, enabled) 轻量信号，避免全量刷新
     showAddHookCard = pyqtSignal()  # 显示添加 Hook 卡片
     showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (hook_id, hook_data)
 
@@ -932,6 +935,8 @@ class HookListSettingCard(ExpandSettingCard):
         self.title = title
         self.grouped_hooks = {"plugin": {}, "skill": {}, "user": {}}
         self._hooks_config_file = self._get_global_hooks_file()
+        # hook_id -> HookItem 映射，用于轻量级状态更新（不触发全量 _refresh）
+        self._hook_items: Dict[str, HookItem] = {}
         self._setup_ui()
         self._refresh()
 
@@ -988,6 +993,7 @@ class HookListSettingCard(ExpandSettingCard):
             if w is not None:
                 w.deleteLater()
 
+        self._hook_items.clear()
         self._render_hooks()
 
         from PyQt5.QtCore import QCoreApplication
@@ -1058,6 +1064,7 @@ class HookListSettingCard(ExpandSettingCard):
                 item.edited.connect(lambda hid: self._edit_hook_by_id(hid))
                 item.toggled.connect(lambda hid, enabled: self._toggle_hook_by_id(hid, enabled))
                 self.viewLayout.addWidget(item)
+                self._hook_items[hook_id] = item
 
     def _edit_hook_by_id(self, hook_id: str):
         """在所有分组中查找 hook 数据并发出编辑信号"""
@@ -1084,10 +1091,27 @@ class HookListSettingCard(ExpandSettingCard):
             self.hooksChanged.emit()
 
     def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
-        """切换 hook 启用状态（自动持久化 + 通知）"""
+        """切换 hook 启用状态（仅更新内存+持久化，不触发全量刷新）
+
+        toggle_hook_by_id 已更新内存和持久化状态，HookItem 的 Switch 控件
+        已由用户点击自动更新，无需全量 _refresh 重绘整个列表。
+        通过 hookToggled 轻量信号同步到其他窗口，避免 reload_global_hooks + 全量渲染。
+        """
         if self._hook_manager:
             self._hook_manager.toggle_hook_by_id(hook_id, enabled)
-            self.hooksChanged.emit()
+            self.hookToggled.emit(hook_id, enabled)
+
+    def update_toggle_state(self, hook_id: str, enabled: bool):
+        """轻量更新单个 hook 的开关状态（跨窗口同步用，不触发全量 _refresh）"""
+        item = self._hook_items.get(hook_id)
+        if item is not None:
+            # 阻塞信号避免 setChecked 触发 checkedChanged → _toggle_hook_by_id 死循环
+            item.switch.blockSignals(True)
+            try:
+                item.switch.setChecked(enabled)
+            finally:
+                item.switch.blockSignals(False)
+            item._hook_data["enabled"] = enabled
 
     def _add_hook(
         self,

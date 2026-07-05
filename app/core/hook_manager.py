@@ -678,9 +678,61 @@ class HookManager:
         self._cwd_resolve_cache: Dict[int, tuple] = HookManager._shared_cwd_resolve_cache
         self._CWD_CACHE_TTL = 30.0  # 30秒缓存
 
+        # hook 开关持久化（所有 hook 共用，不受插件源文件限制）
+        self._hook_states: Dict[str, bool] = self._load_hook_states()
+
+    @staticmethod
+    def _get_hook_states_path() -> str:
+        """获取 hook 状态持久化文件路径"""
+        from app.utils.utils import get_app_data_dir
+        data_dir = get_app_data_dir() / "plugins" / "user-custom" / "hooks"
+        return str(data_dir / "hook_states.json")
+
+    def _load_hook_states(self) -> Dict[str, bool]:
+        """从磁盘加载所有 hook 的开关状态"""
+        fp = self._get_hook_states_path()
+        if not os.path.exists(fp):
+            return {}
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                return dict(json.load(f))
+        except Exception:
+            return {}
+
+    def _save_hook_states(self):
+        """将所有 hook 的开关状态写入磁盘"""
+        fp = self._get_hook_states_path()
+        try:
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(self._hook_states, f, indent=2)
+        except Exception as e:
+            logger.error(f"[HookManager] Failed to save hook states: {e}")
+
+    def _apply_hook_state(self, hook: Hook):
+        """将持久化的开关状态应用到 hook 对象（如果存在）"""
+        if hook.id in self._hook_states:
+            hook.enabled = self._hook_states[hook.id]
+
     def _is_user_custom_hook(self, hook: Hook) -> bool:
-        """判断 hook 是否为用户自定义（非 plugin/skill）"""
-        return "user-custom" in (hook.config_file or "") or not hook.config_file
+        """判断 hook 是否属于 user-custom skill（可安全写回源文件）
+
+        通过 _skill_to_hooks 查找 hook.id 所在的 skill_name，
+        避免把非系统插件（如普通 skill 插件）的 hook 误判为自定义 hook。
+        """
+        # 先通过 config_file 路径快速判断
+        if hook.config_file and "user-custom" in hook.config_file.replace("\\", "/"):
+            return True
+        # 兜底：通过 _skill_to_hooks 索引查找
+        for skill_name, entries in self._skill_to_hooks.items():
+            if skill_name == "user-custom":
+                for event_name, rule_idx in entries:
+                    if event_name in self._hooks and rule_idx < len(self._hooks[event_name]):
+                        rule = self._hooks[event_name][rule_idx]
+                        for h in rule.hooks:
+                            if h.id == hook.id:
+                                return True
+        return False
 
     def _get_effective_hook_dict(self, hook: Hook) -> dict:
         """获取 hook 的字典表示"""
@@ -789,6 +841,15 @@ class HookManager:
         # 持久化生成的 hook id 到源文件（确保下次启动 id 不变）
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
+
+        # 从持久化的状态恢复已注册 hook 的开关（覆盖插件源文件中的默认值）
+        if count > 0 and self._hook_states:
+            for event_name, rules in raw_hooks.items():
+                if event_name not in self._hooks:
+                    continue
+                for rule in self._hooks[event_name]:
+                    for hook in rule.hooks:
+                        self._apply_hook_state(hook)
 
         return count
 
@@ -1749,9 +1810,13 @@ class HookManager:
 
         hook.enabled = enabled
 
-        # 持久化到源文件（user-custom hook）
+        # 持久化到 hook_states.json（所有 hook 共用，跨会话保持）
+        self._hook_states[hook.id] = enabled
+        self._save_hook_states()
+
+        # 也持久化到源文件（user-custom hook 的源 JSON 文件），使用 ID 匹配
         if self._is_user_custom_hook(hook):
-            self._save_hook_to_file(hook, event_name)
+            self._save_hook_to_file_by_id(hook, {"enabled": enabled})
 
         logger.info(f"[HookManager] Toggled hook {hook_id} enabled={enabled}")
         return True
