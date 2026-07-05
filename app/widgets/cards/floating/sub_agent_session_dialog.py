@@ -206,10 +206,13 @@ class SubAgentSessionDialog(QDialog):
         """构建摘要信息栏"""
         bar = QFrame(self)
         bar.setObjectName("SessionSummary")
+        bar.setAutoFillBackground(True)
         Colors.refresh()
+        # 无边框透明窗口下，REALTIME_TAG_BG(0.15 alpha) 会透出桌面，
+        # 这里改用基于 REALTIME_BG 的不透明纯色，保持层次感同时不漏底
         bar.setStyleSheet(f"""
             #SessionSummary {{
-                background-color: {Colors.REALTIME_TAG_BG};
+                background-color: rgb(28, 40, 66);
                 border-bottom: 1px solid {Colors.REALTIME_BORDER};
             }}
         """)

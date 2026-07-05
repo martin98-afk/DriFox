@@ -135,6 +135,19 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".stop_cleanup:hook",
+            "add_output_to_context": true,
+            "statusMessage": "会话结束清理:",
+            "id": "builtin_stop_cleanup"
+          }
+        ]
+      }
     ]
   }
 }
