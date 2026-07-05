@@ -681,6 +681,11 @@ class HookManager:
         # hook 开关持久化（所有 hook 共用，不受插件源文件限制）
         self._hook_states: Dict[str, bool] = self._load_hook_states()
 
+        # hook 内容覆盖持久化（系统 hook 编辑覆盖，与 hook_states 共享同一文件）
+        # 存储格式: {hook_id: {"command": "...", "statusMessage": "...", ...}}
+        # 加载时覆盖系统插件源文件中的默认值，实现系统 hook 可编辑不丢失
+        self._hook_overrides: Dict[str, Dict[str, Any]] = self._load_hook_overrides()
+
     @staticmethod
     def _get_hook_states_path() -> str:
         """获取 hook 状态持久化文件路径"""
@@ -689,23 +694,40 @@ class HookManager:
         return str(data_dir / "hook_states.json")
 
     def _load_hook_states(self) -> Dict[str, bool]:
-        """从磁盘加载所有 hook 的开关状态"""
+        """从磁盘加载所有 hook 的开关状态（过滤 _overrides 键）"""
         fp = self._get_hook_states_path()
         if not os.path.exists(fp):
             return {}
         try:
             with open(fp, "r", encoding="utf-8") as f:
-                return dict(json.load(f))
+                data = json.load(f)
+            return {k: v for k, v in data.items() if k != "_overrides" and isinstance(v, bool)}
+        except Exception:
+            return {}
+
+    def _load_hook_overrides(self) -> Dict[str, Dict[str, Any]]:
+        """从 hook_states.json 加载 hook 内容覆盖（系统 hook 编辑持久化）"""
+        fp = self._get_hook_states_path()
+        if not os.path.exists(fp):
+            return {}
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("_overrides", {})
         except Exception:
             return {}
 
     def _save_hook_states(self):
-        """将所有 hook 的开关状态写入磁盘"""
+        """将所有 hook 的开关状态 + 内容覆盖写入磁盘"""
         fp = self._get_hook_states_path()
         try:
             os.makedirs(os.path.dirname(fp), exist_ok=True)
+            # 合并状态和覆盖到同一文件
+            data: dict = dict(self._hook_states)  # 复制状态
+            if self._hook_overrides:
+                data["_overrides"] = dict(self._hook_overrides)  # 追加覆盖
             with open(fp, "w", encoding="utf-8") as f:
-                json.dump(self._hook_states, f, indent=2)
+                json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[HookManager] Failed to save hook states: {e}")
 
@@ -713,6 +735,43 @@ class HookManager:
         """将持久化的开关状态应用到 hook 对象（如果存在）"""
         if hook.id in self._hook_states:
             hook.enabled = self._hook_states[hook.id]
+
+    def _apply_hook_overrides(self, hook: Hook, rule: HookMatchRule = None):
+        """将持久化的内容覆盖应用到 hook 对象（系统 hook 编辑持久化）
+
+        从 _hook_overrides 中读取 hook.id 对应的覆盖字段，写入 Hook 对象属性。
+        支持所有 edit_hook_by_id 能处理的字段，包括 matcher（写入 rule）。
+
+        Args:
+            hook: 要应用覆盖的 Hook 对象
+            rule: 包含该 hook 的匹配规则（用于 matcher 覆盖）
+        """
+        overrides = self._hook_overrides.get(hook.id)
+        if not overrides:
+            return
+
+        # ── 应用 matcher（写入 rule 级别） ──
+        if "matcher" in overrides and rule is not None:
+            rule.matcher = overrides["matcher"] or None
+
+        # ── 应用 Hook 对象字段 ──
+        field_mapping = {
+            "type": "type",
+            "command": "command",
+            "url": "url",
+            "function": "function",
+            "prompt": "prompt",
+            "cwd": "cwd",
+            "add_output_to_context": "add_output_to_context",
+            "timeout": "timeout",
+            "retry": "retry",
+            "commandWindows": "commandWindows",
+            "statusMessage": "statusMessage",
+            "function_args": "function_args",
+        }
+        for key, attr in field_mapping.items():
+            if key in overrides:
+                setattr(hook, attr, overrides[key])
 
     def _is_user_custom_hook(self, hook: Hook) -> bool:
         """判断 hook 是否属于 user-custom skill（可安全写回源文件）
@@ -842,14 +901,19 @@ class HookManager:
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
 
-        # 从持久化的状态恢复已注册 hook 的开关（覆盖插件源文件中的默认值）
-        if count > 0 and self._hook_states:
+        # 从持久化的状态恢复已注册 hook 的开关和内容覆盖
+        if count > 0:
             for event_name, rules in raw_hooks.items():
                 if event_name not in self._hooks:
                     continue
                 for rule in self._hooks[event_name]:
                     for hook in rule.hooks:
-                        self._apply_hook_state(hook)
+                        # 恢复开关状态（覆盖插件源文件中的默认值）
+                        if self._hook_states:
+                            self._apply_hook_state(hook)
+                        # 应用内容覆盖（系统 hook 编辑持久化，如 command/prompt/statusMessage 等）
+                        if self._hook_overrides:
+                            self._apply_hook_overrides(hook, rule)
 
         return count
 
@@ -1783,6 +1847,19 @@ class HookManager:
         # 持久化到源文件（user-custom hook）
         if self._is_user_custom_hook(hook):
             self._save_hook_to_file_by_id(hook, new_data)
+        else:
+            # 系统 hook / skill hook：持久化到 _hook_overrides（与 hook_states 共享同一文件）
+            # 只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
+            override_fields = {
+                "type", "command", "url", "function", "prompt",
+                "cwd", "add_output_to_context", "timeout", "retry",
+                "commandWindows", "statusMessage", "function_args",
+                "matcher",
+            }
+            overrides = {k: v for k, v in new_data.items() if k in override_fields}
+            if overrides:
+                self._hook_overrides[hook.id] = overrides
+                self._save_hook_states()
 
         logger.info(f"[HookManager] Edited hook {hook_id}")
         return True
