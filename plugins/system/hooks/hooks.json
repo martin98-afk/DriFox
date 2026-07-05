@@ -140,10 +140,9 @@
       {
         "hooks": [
           {
-            "type": "python",
-            "function": ".stop_cleanup:hook",
-            "add_output_to_context": true,
-            "statusMessage": "会话结束清理:",
+            "type": "prompt",
+            "prompt": "最后我要清理本次会话制造的临时文件和垃圾，确保不会影响后续任务。",
+            "statusMessage": "结束清理:",
             "id": "builtin_stop_cleanup"
           }
         ]
