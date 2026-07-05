@@ -353,7 +353,7 @@ class ChatBackend(QObject):
 
         # 3. 创建 HookManager（必须在 create_session 之前）
         from app.core.hook_manager import HookManager
-        self._hook_manager = HookManager(self._thread_pool, window_id=self._window_id)
+        self._hook_manager = HookManager(self._thread_pool)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
 
@@ -810,11 +810,10 @@ class ChatBackend(QObject):
                             if p.endswith(("\\", "/")) or "." not in p.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]:
                                 continue
                         # 跳过用户自定义目录中的内部数据文件（避免自我触发）
-                        # 这些是 HookOverrideManager / HookPresetManager 写入的数据文件，
-                        # 不是插件源码，修改它们不需要触发插件热更新
+                        # 这些是 hook 持久化的数据文件，不是插件源码，修改它们不需要触发插件热更新
                         if "user-custom" in p:
                             pname = change_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
-                            if pname in ("hooks_overrides.json", "hook_presets.json", "hooks.json"):
+                            if pname in ("hooks_overrides.json", "hooks.json"):
                                 continue
                         relevant_changes.append((change_type, change_path))
 

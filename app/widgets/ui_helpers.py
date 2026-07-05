@@ -671,6 +671,11 @@ def build_node_preview_data(messages: list, content_getter: Optional[Callable] =
 
     for msg in messages:
         if msg.get("role") == "user":
+            # 跳过 hook 合成消息（如 Stop block 续命注入的 user 消息），
+            # 不在时间线显示为节点。与 group_messages_for_display 的
+            # _is_hook_message 过滤保持一致，避免节点数与批次映射错位。
+            if msg.get("_hook_event"):
+                continue
             content = content_getter(msg.get("content", ""))[:max_len]
             current_user_msg = content
         elif msg.get("role") == "assistant" and current_user_msg:

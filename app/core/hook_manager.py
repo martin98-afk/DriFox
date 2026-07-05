@@ -345,144 +345,6 @@ class HookWorkerSignals(QObject):
     status_changed = pyqtSignal(str, str, bool)  # event_name, status_message, is_start
 
 
-class HookOverrideManager:
-    """
-    Hook 覆写层管理器
-    用于覆盖 plugin/skill hooks 的配置字段（不影响源文件）
-    存储位置: ~/.drifox/plugins/user-custom/hooks_overrides.json
-
-    格式:
-    {
-      "hook_id": {
-        "enabled": false,           # 开关覆写（旧格式兼容）
-        "command": "new command",   # 字段级覆写
-        "matcher": "startup|clear",
-        "commandWindows": "win cmd"
-      }
-    }
-
-    编辑 plugin/skill hook 时只写此文件，不碰源文件。
-    """
-
-    OVERRIDES_FILE = "hooks_overrides.json"
-
-    def __init__(self):
-        self._overrides: Dict[str, Dict[str, Any]] = {}
-        self._storage_path: Optional[str] = None
-        # 内存缓存上次写入的 payload，避免每次 _save 都读盘比较
-        self._cached_payload: Optional[str] = None
-        self._init_storage_path()
-        self._load()
-
-    def _init_storage_path(self):
-        """初始化存储路径（与项目 get_app_data_dir 保持一致）"""
-        from app.utils.utils import get_app_data_dir
-
-        storage_dir = get_app_data_dir() / "plugins" / "user-custom"
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        self._storage_path = str(storage_dir / self.OVERRIDES_FILE)
-
-    def _load(self):
-        """从文件加载覆写配置（同步更新内存缓存）"""
-        if not self._storage_path or not os.path.exists(self._storage_path):
-            return
-        try:
-            with open(self._storage_path, "r", encoding="utf-8") as f:
-                raw = f.read()
-                self._overrides = json.loads(raw)
-                # 兼容 __new__ 创建实例跳过 __init__ 的情况
-                if not hasattr(self, "_cached_payload"):
-                    self._cached_payload = None
-                self._cached_payload = raw
-            logger.debug(f"[HookOverrideManager] Loaded {len(self._overrides)} overrides")
-        except Exception as e:
-            logger.error(f"[HookOverrideManager] Failed to load overrides: {e}")
-            self._overrides = {}
-
-    def reload(self):
-        """从文件重新加载覆写配置（用于多窗口同步），强制刷新内存缓存"""
-        if not hasattr(self, "_cached_payload"):
-            self._cached_payload = None
-        self._cached_payload = None
-        self._load()
-
-    def _save(self):
-        """保存覆写配置到文件（内容未变时跳过写盘，避免触发文件监视器）"""
-        if not self._storage_path:
-            return
-        try:
-            # 兼容 __new__ 创建实例跳过 __init__ 的情况
-            if not hasattr(self, "_cached_payload"):
-                self._cached_payload = None
-            # 序列化当前数据，与内存缓存比较（避免读盘）
-            payload = json.dumps(self._overrides, indent=2, ensure_ascii=False)
-            if self._cached_payload == payload:
-                return  # 内容未变，跳过写盘
-            # 首次写入或内容变化时写盘
-            with open(self._storage_path, "w", encoding="utf-8") as f:
-                f.write(payload)
-            self._cached_payload = payload
-            logger.debug(f"[HookOverrideManager] Saved {len(self._overrides)} overrides")
-        except Exception as e:
-            logger.error(f"[HookOverrideManager] Failed to save overrides: {e}")
-
-    def reload(self):
-        """从文件重新加载覆写配置（用于多窗口同步）"""
-        self._load()
-
-    def get_effective_enabled(self, hook_id: str, default: bool) -> bool:
-        """获取 hook 的有效 enabled 状态（覆写优先）"""
-        if hook_id in self._overrides and "enabled" in self._overrides[hook_id]:
-            return self._overrides[hook_id]["enabled"]
-        return default
-
-    def set_hook_enabled(self, hook_id: str, enabled: bool):
-        """设置 hook 的覆写 enabled 状态"""
-        if hook_id not in self._overrides:
-            self._overrides[hook_id] = {}
-        self._overrides[hook_id]["enabled"] = enabled
-        self._save()
-
-    def get_effective_value(self, hook_id: str, field: str, default: Any = None) -> Any:
-        """获取 hook 指定字段的覆写值（覆写优先）"""
-        if hook_id in self._overrides and field in self._overrides[hook_id]:
-            return self._overrides[hook_id][field]
-        return default
-
-    def set_hook_overrides(self, hook_id: str, overrides: dict):
-        """批量设置 hook 的字段覆写
-
-        Args:
-            hook_id: hook 唯一标识
-            overrides: 要覆写的字段字典，如 {"command": "new", "matcher": "startup|clear"}
-        """
-        if hook_id not in self._overrides:
-            self._overrides[hook_id] = {}
-        self._overrides[hook_id].update(overrides)
-        self._save()
-
-    def remove_hook_overrides(self, hook_id: str, fields: list = None):
-        """移除 hook 的指定字段覆写（不传 fields 则移除全部）
-
-        Args:
-            hook_id: hook 唯一标识
-            fields: 要移除的字段列表，None=移除全部
-        """
-        if hook_id not in self._overrides:
-            return
-        if fields:
-            for f in fields:
-                self._overrides[hook_id].pop(f, None)
-            # 如果只剩空 dict 或只残留空值，清理整个条目
-            if not self._overrides[hook_id]:
-                del self._overrides[hook_id]
-        else:
-            del self._overrides[hook_id]
-        self._save()
-
-    def get_all_overrides(self, hook_id: str) -> dict:
-        """获取 hook 的所有覆写字段"""
-        return dict(self._overrides.get(hook_id, {}))
 
 
 class HookWorker(QRunnable):
@@ -788,16 +650,13 @@ class HookManager:
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
 
-    def __init__(self, thread_pool: Optional[QThreadPool] = None, window_id: str = ""):
+    def __init__(self, thread_pool: Optional[QThreadPool] = None):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
         self._hooks: Dict[str, List[HookMatchRule]] = HookManager._shared_hooks
         self._skill_to_hooks: Dict[str, List[tuple[str, int]]] = HookManager._shared_skill_to_hooks
 
         # 线程池
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
-
-        # 窗口标识（用于 per-window 预设隔离）
-        self._window_id: str = window_id
 
         # 完成回调（每个窗口独立）(event_name, output, success, status_message)
         self._on_finished_callback: Optional[Callable[[str, str, bool, str], None]] = None
@@ -819,70 +678,124 @@ class HookManager:
         self._cwd_resolve_cache: Dict[int, tuple] = HookManager._shared_cwd_resolve_cache
         self._CWD_CACHE_TTL = 30.0  # 30秒缓存
 
-        # 覆写层管理器
-        self._override_manager = HookOverrideManager()
+        # hook 开关持久化（所有 hook 共用，不受插件源文件限制）
+        self._hook_states: Dict[str, bool] = self._load_hook_states()
 
-        # 预设管理器（每个窗口独立实例，按 window_id 隔离）
-        self._preset_manager = HookPresetManager(window_id=window_id)
+        # hook 内容覆盖持久化（系统 hook 编辑覆盖，与 hook_states 共享同一文件）
+        # 存储格式: {hook_id: {"command": "...", "statusMessage": "...", ...}}
+        # 加载时覆盖系统插件源文件中的默认值，实现系统 hook 可编辑不丢失
+        self._hook_overrides: Dict[str, Dict[str, Any]] = self._load_hook_overrides()
+
+    @staticmethod
+    def _get_hook_states_path() -> str:
+        """获取 hook 状态持久化文件路径"""
+        from app.utils.utils import get_app_data_dir
+        data_dir = get_app_data_dir() / "plugins" / "user-custom" / "hooks"
+        return str(data_dir / "hook_states.json")
+
+    def _load_hook_states(self) -> Dict[str, bool]:
+        """从磁盘加载所有 hook 的开关状态（过滤 _overrides 键）"""
+        fp = self._get_hook_states_path()
+        if not os.path.exists(fp):
+            return {}
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {k: v for k, v in data.items() if k != "_overrides" and isinstance(v, bool)}
+        except Exception:
+            return {}
+
+    def _load_hook_overrides(self) -> Dict[str, Dict[str, Any]]:
+        """从 hook_states.json 加载 hook 内容覆盖（系统 hook 编辑持久化）"""
+        fp = self._get_hook_states_path()
+        if not os.path.exists(fp):
+            return {}
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("_overrides", {})
+        except Exception:
+            return {}
+
+    def _save_hook_states(self):
+        """将所有 hook 的开关状态 + 内容覆盖写入磁盘"""
+        fp = self._get_hook_states_path()
+        try:
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            # 合并状态和覆盖到同一文件
+            data: dict = dict(self._hook_states)  # 复制状态
+            if self._hook_overrides:
+                data["_overrides"] = dict(self._hook_overrides)  # 追加覆盖
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[HookManager] Failed to save hook states: {e}")
+
+    def _apply_hook_state(self, hook: Hook):
+        """将持久化的开关状态应用到 hook 对象（如果存在）"""
+        if hook.id in self._hook_states:
+            hook.enabled = self._hook_states[hook.id]
+
+    def _apply_hook_overrides(self, hook: Hook, rule: HookMatchRule = None):
+        """将持久化的内容覆盖应用到 hook 对象（系统 hook 编辑持久化）
+
+        从 _hook_overrides 中读取 hook.id 对应的覆盖字段，写入 Hook 对象属性。
+        支持所有 edit_hook_by_id 能处理的字段，包括 matcher（写入 rule）。
+
+        Args:
+            hook: 要应用覆盖的 Hook 对象
+            rule: 包含该 hook 的匹配规则（用于 matcher 覆盖）
+        """
+        overrides = self._hook_overrides.get(hook.id)
+        if not overrides:
+            return
+
+        # ── 应用 matcher（写入 rule 级别） ──
+        if "matcher" in overrides and rule is not None:
+            rule.matcher = overrides["matcher"] or None
+
+        # ── 应用 Hook 对象字段 ──
+        field_mapping = {
+            "type": "type",
+            "command": "command",
+            "url": "url",
+            "function": "function",
+            "prompt": "prompt",
+            "cwd": "cwd",
+            "add_output_to_context": "add_output_to_context",
+            "timeout": "timeout",
+            "retry": "retry",
+            "commandWindows": "commandWindows",
+            "statusMessage": "statusMessage",
+            "function_args": "function_args",
+        }
+        for key, attr in field_mapping.items():
+            if key in overrides:
+                setattr(hook, attr, overrides[key])
 
     def _is_user_custom_hook(self, hook: Hook) -> bool:
-        """判断 hook 是否为用户自定义（非 plugin/skill）"""
-        return "user-custom" in (hook.config_file or "") or not hook.config_file
+        """判断 hook 是否属于 user-custom skill（可安全写回源文件）
+
+        通过 _skill_to_hooks 查找 hook.id 所在的 skill_name，
+        避免把非系统插件（如普通 skill 插件）的 hook 误判为自定义 hook。
+        """
+        # 先通过 config_file 路径快速判断
+        if hook.config_file and "user-custom" in hook.config_file.replace("\\", "/"):
+            return True
+        # 兜底：通过 _skill_to_hooks 索引查找
+        for skill_name, entries in self._skill_to_hooks.items():
+            if skill_name == "user-custom":
+                for event_name, rule_idx in entries:
+                    if event_name in self._hooks and rule_idx < len(self._hooks[event_name]):
+                        rule = self._hooks[event_name][rule_idx]
+                        for h in rule.hooks:
+                            if h.id == hook.id:
+                                return True
+        return False
 
     def _get_effective_hook_dict(self, hook: Hook) -> dict:
-        """获取覆写后的 hook dict（覆写层所有字段优先于源文件）"""
-        d = hook.to_dict()
-        # user-custom 的 hook 不走覆写层（直接改源文件）
-        if not self._is_user_custom_hook(hook):
-            # plugin/skill hooks 走覆写层：所有已覆写的字段覆盖源文件值
-            overrides = self._override_manager.get_all_overrides(hook.id)
-            for key, val in overrides.items():
-                if key == "matcher":
-                    continue  # matcher 属于 Rule 层，不在 Hook dict 中
-                d[key] = val
-        return d
-
-    # ── 预设管理 ──
-
-    def get_hook_preset_manager(self) -> "HookPresetManager":
-        """获取预设管理器实例"""
-        return self._preset_manager
-
-    def has_preset(self, name: str) -> bool:
-        """检查预设是否存在"""
-        return self._preset_manager.has_preset(name)
-
-    def get_preset_names(self) -> List[str]:
-        """获取所有预设名称列表"""
-        return self._preset_manager.list_presets()
-
-    def get_current_preset_name(self) -> str:
-        """获取当前预设名称"""
-        return self._preset_manager.get_current_preset_name()
-
-    def create_preset(self, name: str) -> bool:
-        """将当前 hook 状态保存为新预设"""
-        hook_states = HookPresetManager.collect_hook_states(self)
-        agent_identity = HookPresetManager.collect_agent_identity()
-        return self._preset_manager.create_preset(name, hook_states, agent_identity)
-
-    def save_preset(self, name: str) -> bool:
-        """以当前状态覆盖更新已有预设"""
-        hook_states = HookPresetManager.collect_hook_states(self)
-        agent_identity = HookPresetManager.collect_agent_identity()
-        return self._preset_manager.save_current_state_as_preset(name, self, agent_identity)
-
-    def rename_preset(self, old_name: str, new_name: str) -> bool:
-        """重命名预设"""
-        return self._preset_manager.rename_preset(old_name, new_name)
-
-    def delete_preset(self, name: str) -> bool:
-        """删除预设"""
-        return self._preset_manager.delete_preset(name)
-
-    def apply_preset(self, name: str) -> bool:
-        """应用指定预设"""
-        return self._preset_manager.apply_preset(name, self)
+        """获取 hook 的字典表示"""
+        return hook.to_dict()
 
     def set_on_finished_callback(self, callback: Callable[[str, str, bool, str], None]):
         """设置 Hook 执行完成回调 (event_name, output, success, status_message)"""
@@ -988,13 +901,19 @@ class HookManager:
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
 
-        # 为新注册的 hook 应用覆写层（确保 hot reload 后覆写生效）
+        # 从持久化的状态恢复已注册 hook 的开关和内容覆盖
         if count > 0:
-            for event_name, rules in self._hooks.items():
-                for rule in rules:
-                    self._apply_matcher_override(rule)
+            for event_name, rules in raw_hooks.items():
+                if event_name not in self._hooks:
+                    continue
+                for rule in self._hooks[event_name]:
                     for hook in rule.hooks:
-                        self._apply_overrides_to_hook(hook)
+                        # 恢复开关状态（覆盖插件源文件中的默认值）
+                        if self._hook_states:
+                            self._apply_hook_state(hook)
+                        # 应用内容覆盖（系统 hook 编辑持久化，如 command/prompt/statusMessage 等）
+                        if self._hook_overrides:
+                            self._apply_hook_overrides(hook, rule)
 
         return count
 
@@ -1280,61 +1199,23 @@ class HookManager:
 
         results = []
         for rule in self._hooks[event_name]:
-            # 检查 matcher 条件
             if not rule.matches(context):
                 continue
 
-            # 应用 matcher 覆写（plugin/skill 的 matcher 编辑存于覆写层）
-            self._apply_matcher_override(rule)
-
             for hook in rule.hooks:
-                # 检查启用状态（走覆写层：plugin/skill 看 override，user-custom 看源文件）
-                if not self._is_user_custom_hook(hook):
-                    effective_enabled = self._override_manager.get_effective_enabled(hook.id, hook.enabled)
-                    if not effective_enabled:
-                        continue
-                else:
-                    if not hook.enabled:
-                        continue
+                if not hook.enabled:
+                    continue
 
                 # 检查执行条件
                 if not self._check_conditions(hook, context):
                     logger.debug(f"[HookManager] Hook conditions not met: {event_name}")
                     continue
 
-                # 执行前应用字段覆写（plugin/skill 才有覆写）
-                self._apply_overrides_to_hook(hook)
-
                 # 执行 hook
                 result = self._execute_hook(hook, context, trigger_async)
                 results.append(result)
 
         return results
-
-    def _apply_overrides_to_hook(self, hook: Hook):
-        """将覆写层的字段值应用到 Hook 对象（执行前调用）"""
-        if self._is_user_custom_hook(hook):
-            return
-        overrides = self._override_manager.get_all_overrides(hook.id)
-        if not overrides:
-            return
-        # 排除 enabled（已单独处理）和 matcher（属于 Rule 层，不在 Hook 上）
-        for key, val in overrides.items():
-            if key in ("enabled", "matcher"):
-                continue
-            if hasattr(hook, key):
-                setattr(hook, key, val)
-
-    def _apply_matcher_override(self, rule: HookMatchRule):
-        """将覆写层的 matcher 值应用到 Rule 对象"""
-        if not rule.hooks:
-            return
-        hook = rule.hooks[0]
-        if self._is_user_custom_hook(hook):
-            return
-        matcher_override = self._override_manager.get_effective_value(hook.id, "matcher")
-        if matcher_override is not None:
-            rule.matcher = matcher_override or None
 
     def _execute_hook(self, hook: Hook, context: Dict[str, Any], trigger_async: bool = True) -> HookExecutionResult:
         """执行单个 Hook"""
@@ -1887,11 +1768,14 @@ class HookManager:
 
     def edit_hook_by_id(self, hook_id: str, new_data: dict) -> bool:
         """
-        通过 id 编辑 hook
+        通过 id 编辑 hook — 直接修改共享 Hook 对象并持久化到源文件
+
+        字段变更（command/matcher/type 等）直接写入共享 Hook 对象的属性，
+        如果是 user-custom hook，同时持久化到源配置文件。
 
         Args:
             hook_id: hook 唯一标识
-            new_data: 要更新的字段（如 {"command": "new_cmd", "enabled": False}）
+            new_data: 要更新的字段（如 {"command": "new_cmd", "matcher": "tool:write"}）
 
         Returns:
             是否成功
@@ -1903,44 +1787,11 @@ class HookManager:
 
         event_name, rule_idx, hook_idx, hook = result
 
-        # 更新内存中的 hook 对象
-        if "command" in new_data:
-            hook.command = new_data["command"]
-        if "url" in new_data:
-            hook.url = new_data["url"]
-        if "function" in new_data:
-            hook.function = new_data["function"]
-        if "type" in new_data:
-            hook.type = new_data["type"]
-        if "enabled" in new_data:
-            hook.enabled = new_data["enabled"]
-        if "cwd" in new_data:
-            hook.cwd = new_data["cwd"]
-        if "timeout" in new_data:
-            hook.timeout = new_data["timeout"]
-        if "retry" in new_data:
-            hook.retry = new_data["retry"]
-        if "matcher" in new_data:
-            # 更新内存中的 matcher
-            self._hooks[event_name][rule_idx].matcher = new_data["matcher"]
-        if "conditions" in new_data:
-            hook.conditions = [HookCondition.from_dict(c) for c in new_data["conditions"]]
-        if "headers" in new_data:
-            hook.headers = new_data["headers"]
-        if "allowedEnvVars" in new_data:
-            hook.allowed_env_vars = new_data["allowedEnvVars"]
-        if "function_args" in new_data:
-            hook.function_args = new_data["function_args"]
-        if "add_output_to_context" in new_data:
-            hook.add_output_to_context = new_data["add_output_to_context"]
-        if "commandWindows" in new_data:
-            hook.commandWindows = new_data["commandWindows"]
-        if "statusMessage" in new_data:
-            hook.statusMessage = new_data["statusMessage"]
-
-        # 事件变更：从当前事件移动到新事件
+        # ── 事件变更：修改共享 _hooks（位置是全局的） ──
         new_event = new_data.get("event", event_name)
-        if new_event != event_name:
+        event_changed = new_event != event_name
+
+        if event_changed:
             # 从旧事件移除 rule（如果只剩这个 hook）
             rule = self._hooks[event_name][rule_idx]
             rule.hooks.remove(hook)
@@ -1953,7 +1804,6 @@ class HookManager:
             if new_event not in self._hooks:
                 self._hooks[new_event] = []
             new_matcher = new_data.get("matcher", rule.matcher or "")
-            # 查找是否已有相同 matcher 的 rule
             matched_rule = None
             for r in self._hooks[new_event]:
                 if (r.matcher or "") == new_matcher:
@@ -1965,20 +1815,51 @@ class HookManager:
                 new_rule = HookMatchRule(matcher=new_matcher or None, hooks=[hook])
                 self._hooks[new_event].append(new_rule)
 
-            # 找到新 rule 索引
             new_rule_idx = next((i for i, r in enumerate(self._hooks[new_event]) if hook in r.hooks), 0)
             self._update_skill_index_for_hook(hook, new_event, new_rule_idx)
-        else:
-            # 同事件内更新 matcher
-            if "matcher" in new_data:
-                self._hooks[event_name][rule_idx].matcher = new_data["matcher"] or None
+            # 用户自定义 hook 的事件变更也持久化到源文件（全局生效）
+            if self._is_user_custom_hook(hook):
+                self._save_hook_to_file_by_id(hook, new_data)
+        elif "matcher" in new_data:
+            # 同事件内更新共享内存的 matcher，用于 trigger_event 初始匹配
+            self._hooks[event_name][rule_idx].matcher = new_data["matcher"] or None
 
-        # 持久化：user-custom → 写源文件；plugin/skill → 写覆写层
+        # ── 内容字段直接写入 Hook 对象 ──
+        # 对于 user-custom hook，同时持久化到源配置文件
+        field_mapping = {
+            "command": "command",
+            "type": "type",
+            "url": "url",
+            "function": "function",
+            "prompt": "prompt",
+            "cwd": "cwd",
+            "add_output_to_context": "add_output_to_context",
+            "timeout": "timeout",
+            "retry": "retry",
+            "commandWindows": "commandWindows",
+            "statusMessage": "statusMessage",
+            "function_args": "function_args",
+        }
+        for key, attr in field_mapping.items():
+            if key in new_data:
+                setattr(hook, attr, new_data[key])
+
+        # 持久化到源文件（user-custom hook）
         if self._is_user_custom_hook(hook):
             self._save_hook_to_file_by_id(hook, new_data)
         else:
-            # plugin/skill hooks 只写覆写层，不碰源文件
-            self._override_manager.set_hook_overrides(hook.id, new_data)
+            # 系统 hook / skill hook：持久化到 _hook_overrides（与 hook_states 共享同一文件）
+            # 只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
+            override_fields = {
+                "type", "command", "url", "function", "prompt",
+                "cwd", "add_output_to_context", "timeout", "retry",
+                "commandWindows", "statusMessage", "function_args",
+                "matcher",
+            }
+            overrides = {k: v for k, v in new_data.items() if k in override_fields}
+            if overrides:
+                self._hook_overrides[hook.id] = overrides
+                self._save_hook_states()
 
         logger.info(f"[HookManager] Edited hook {hook_id}")
         return True
@@ -1986,6 +1867,9 @@ class HookManager:
     def toggle_hook_by_id(self, hook_id: str, enabled: bool) -> bool:
         """
         通过 id 切换 hook 启用状态
+
+        直接修改共享 Hook 对象的 enabled 字段，
+        如果是 user-custom hook，同时持久化到源配置文件。
 
         Args:
             hook_id: hook 唯一标识
@@ -2001,14 +1885,15 @@ class HookManager:
 
         event_name, rule_idx, hook_idx, hook = result
 
-        # 判断 hook 来源：user-custom 直接改源文件，plugin/skill 走覆写层
+        hook.enabled = enabled
+
+        # 持久化到 hook_states.json（所有 hook 共用，跨会话保持）
+        self._hook_states[hook.id] = enabled
+        self._save_hook_states()
+
+        # 也持久化到源文件（user-custom hook 的源 JSON 文件），使用 ID 匹配
         if self._is_user_custom_hook(hook):
-            # user-custom: 直接改内存 + 写回源文件
-            hook.enabled = enabled
             self._save_hook_to_file_by_id(hook, {"enabled": enabled})
-        else:
-            # plugin/skill: 写覆写层
-            self._override_manager.set_hook_enabled(hook_id, enabled)
 
         logger.info(f"[HookManager] Toggled hook {hook_id} enabled={enabled}")
         return True
@@ -2048,10 +1933,7 @@ class HookManager:
         if not self._hooks.get(event_name):
             del self._hooks[event_name]
 
-        # 从覆写层清除记录
-        self._override_manager.remove_hook_overrides(hook_id)
-
-        # 从源文件删除（仅 user-custom hook 操作源文件，plugin/skill 只清覆写层）
+        # 从源文件删除（仅 user-custom hook 操作源文件）
         if self._is_user_custom_hook(hook) and config_file and os.path.exists(config_file):
             try:
                 with open(config_file, "r", encoding="utf-8") as f:
@@ -2252,382 +2134,3 @@ class HookManager:
     # 所有 hooks 现在只从插件 hooks/ 目录加载
 
 
-class HookPresetManager:
-    """
-    Hook 预设管理器
-
-    管理不同场景下的 Hook 配置预设（preset）。
-    每个预设只存储 Hook 的开关状态（enabled/disabled）和智能体身份（agent_identity）。
-    不存储 Hook 的内容（command/prompt/function 等），这些由 hooks.json 定义。
-
-    存储位置: ~/.drifox/plugins/user-custom/hooks/hook_presets.json
-
-    格式:
-    {
-        "current": "coding",           # 全局默认预设（新窗口使用）
-        "per_window": {                # 各窗口独立选择的预设（窗口ID → 预设名）
-            "a1b2c3d4": "coding",
-            "e5f6g7h8": "writing"
-        },
-        "presets": {
-            "coding": {
-                "name": "编码模式",
-                "hook_states": {
-                    "builtin_global_contract": true,
-                    "builtin_inject_skills": false,
-                    ...
-                },
-                "agent_identity": "build"
-            }
-        }
-    }
-    """
-
-    PRESETS_FILE = "hook_presets.json"
-
-    # 预留的默认预设名称
-    DEFAULT_PRESET = "default"
-
-    def __init__(self, window_id: str = ""):
-        self._storage_path: Optional[str] = None
-        self._data: Dict[str, Any] = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
-        self._window_id: str = window_id
-        self._init_storage_path()
-
-    def _init_storage_path(self):
-        """初始化存储路径（与 HookOverrideManager 保持一致）"""
-        from app.utils.utils import get_app_data_dir
-
-        storage_dir = get_app_data_dir() / "plugins" / "user-custom" / "hooks"
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        self._storage_path = str(storage_dir / self.PRESETS_FILE)
-        self._load()
-
-    def _load(self):
-        """从文件加载预设配置"""
-        if not self._storage_path or not os.path.exists(self._storage_path):
-            # 文件不存在时初始化默认预设
-            self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
-            return
-        try:
-            with open(self._storage_path, "r", encoding="utf-8") as f:
-                self._data = json.load(f)
-            # 兼容旧格式：若缺少 per_window 字段，自动补全
-            if "per_window" not in self._data:
-                self._data["per_window"] = {}
-            logger.debug(f"[HookPresetManager] Loaded {len(self._data.get('presets', {}))} presets")
-        except Exception as e:
-            logger.error(f"[HookPresetManager] Failed to load presets: {e}")
-            self._data = {"current": self.DEFAULT_PRESET, "per_window": {}, "presets": {}}
-
-    def _save(self):
-        """保存预设配置到文件（内容未变时跳过写盘，避免触发文件监视器）"""
-        if not self._storage_path:
-            return
-        try:
-            # 序列化当前数据，与磁盘内容比较
-            payload = json.dumps(self._data, indent=2, ensure_ascii=False)
-            try:
-                with open(self._storage_path, "r", encoding="utf-8") as f:
-                    if f.read() == payload:
-                        return  # 内容未变，跳过写盘
-            except (FileNotFoundError, OSError):
-                pass  # 文件不存在或读失败，继续写入
-            with open(self._storage_path, "w", encoding="utf-8") as f:
-                f.write(payload)
-            logger.debug(f"[HookPresetManager] Saved {len(self._data.get('presets', {}))} presets")
-        except Exception as e:
-            logger.error(f"[HookPresetManager] Failed to save presets: {e}")
-
-    def reload(self):
-        """从文件重新加载（用于多窗口同步）"""
-        self._load()
-
-    # ── 查询方法 ──
-
-    def list_presets(self) -> List[str]:
-        """返回所有预设名称列表"""
-        return list(self._data.get("presets", {}).keys())
-
-    def get_current_preset_name(self) -> str:
-        """获取当前窗口激活的预设名称
-
-        优先返回 per_window 中当前窗口的记录，
-        若无窗口级记录则返回全局默认 current。
-        """
-        if self._window_id:
-            per_window = self._data.get("per_window", {})
-            win_preset = per_window.get(self._window_id)
-            if win_preset and win_preset in self._data.get("presets", {}):
-                return win_preset
-        return self._data.get("current", self.DEFAULT_PRESET)
-
-    def get_preset(self, name: str) -> Optional[dict]:
-        """获取指定预设的数据"""
-        return self._data.get("presets", {}).get(name)
-
-    def has_preset(self, name: str) -> bool:
-        """检查预设是否存在"""
-        return name in self._data.get("presets", {})
-
-    # ── 预设管理 ──
-
-    def create_preset(self, name: str, hook_states: Dict[str, bool], agent_identity: str = "") -> bool:
-        """
-        创建新预设
-
-        Args:
-            name: 预设名称（用于 UI 显示和标识）
-            hook_states: hook_id -> enabled 的映射
-            agent_identity: 智能体身份（用于 inject_agent_identity hook）
-
-        Returns:
-            是否成功
-        """
-        presets = self._data.setdefault("presets", {})
-        if name in presets:
-            logger.warning(f"[HookPresetManager] Preset '{name}' already exists")
-            return False
-        if not name.strip():
-            return False
-
-        presets[name] = {
-            "name": name,
-            "hook_states": dict(hook_states),
-            "agent_identity": agent_identity or "",
-        }
-
-        # 如果还没有当前预设，设置为这个
-        if not self._data.get("current"):
-            self._data["current"] = name
-
-        self._save()
-        logger.info(f"[HookPresetManager] Created preset '{name}' with {len(hook_states)} hook states")
-        return True
-
-    def rename_preset(self, old_name: str, new_name: str) -> bool:
-        """重命名预设"""
-        presets = self._data.get("presets", {})
-        if old_name not in presets:
-            return False
-        if new_name in presets:
-            return False
-        if not new_name.strip():
-            return False
-
-        presets[new_name] = presets.pop(old_name)
-        presets[new_name]["name"] = new_name
-
-        # 如果重命名的是当前预设，同步更新
-        if self._data.get("current") == old_name:
-            self._data["current"] = new_name
-        # 同步更新 per_window 中的引用（所有窗口）
-        per_window = self._data.get("per_window", {})
-        for wid, preset_name in list(per_window.items()):
-            if preset_name == old_name:
-                per_window[wid] = new_name
-
-        self._save()
-        return True
-
-    def delete_preset(self, name: str) -> bool:
-        """删除预设"""
-        presets = self._data.get("presets", {})
-        if name not in presets:
-            return False
-
-        del presets[name]
-
-        # 如果删除了当前预设，切换到第一个可用的
-        if self._data.get("current") == name:
-            available = list(presets.keys())
-            self._data["current"] = available[0] if available else self.DEFAULT_PRESET
-        # 清理 per_window 中对已删除预设的引用（所有窗口）
-        per_window = self._data.get("per_window", {})
-        for wid, preset_name in list(per_window.items()):
-            if preset_name == name or preset_name not in presets:
-                del per_window[wid]
-
-        self._save()
-        return True
-
-    def set_current_preset(self, name: str) -> bool:
-        """设置当前窗口激活的预设（不实际应用，只记录）
-
-        如果有 window_id，记录到 per_window；
-        同时更新全局 current 作为新窗口的默认值。
-        """
-        presets = self._data.get("presets", {})
-        if name not in presets:
-            return False
-        # 始终更新全局 current（新窗口以此为默认值）
-        self._data["current"] = name
-        # 如果有 window_id，记录到 per_window
-        if self._window_id:
-            per_window = self._data.setdefault("per_window", {})
-            per_window[self._window_id] = name
-        self._save()
-        return True
-
-    # ── 状态采集与应用 ──
-
-    @staticmethod
-    def collect_hook_states(hook_manager: "HookManager") -> Dict[str, bool]:
-        """
-        从 HookManager 收集所有 hook 的当前开关状态
-
-        Args:
-            hook_manager: HookManager 实例
-
-        Returns:
-            {hook_id: enabled, ...}
-        """
-        states: Dict[str, bool] = {}
-        for event_name, rules in hook_manager._hooks.items():
-            for rule in rules:
-                for hook in rule.hooks:
-                    hook_id = hook.id
-                    if not hook_id:
-                        continue
-                    # 使用覆写层判断有效 enabled 状态
-                    if hook_manager._is_user_custom_hook(hook):
-                        states[hook_id] = hook.enabled
-                    else:
-                        effective = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
-                        states[hook_id] = effective
-        return states
-
-    @staticmethod
-    def collect_agent_identity() -> str:
-        """收集当前设置的 agent_identity（从 Settings 读取）"""
-        try:
-            from app.utils.config import Settings
-
-            return Settings.get_instance().llm_primary_agent.value or ""
-        except Exception:
-            return ""
-
-    def save_current_state_as_preset(self, name: str, hook_manager: "HookManager", agent_identity: str = None) -> bool:
-        """
-        将当前状态保存为预设（如果已存在则覆盖）
-
-        Args:
-            name: 预设名称
-            hook_manager: HookManager 实例
-            agent_identity: 智能体身份，None 则从 Settings 自动读取
-
-        Returns:
-            是否成功
-        """
-        hook_states = self.collect_hook_states(hook_manager)
-        if agent_identity is None:
-            agent_identity = self.collect_agent_identity()
-
-        presets = self._data.setdefault("presets", {})
-        presets[name] = {
-            "name": name,
-            "hook_states": hook_states,
-            "agent_identity": agent_identity or "",
-        }
-
-        # 如果是覆盖保存且当前没有预设指向它，自动设为当前
-        self._data["current"] = name
-        if self._window_id:
-            per_window = self._data.setdefault("per_window", {})
-            per_window[self._window_id] = name
-        self._save()
-        logger.info(f"[HookPresetManager] Saved current state as preset '{name}' ({len(hook_states)} hooks)")
-        return True
-
-    def apply_preset(self, name: str, hook_manager: "HookManager") -> bool:
-        """
-        应用指定预设到 HookManager
-
-        遍历 preset 中的 hook_states，对每个 hook_id 调用 toggle_hook_by_id。
-        如果 preset 中有 agent_identity，更新 Settings.llm_primary_agent。
-
-        Args:
-            name: 预设名称
-            hook_manager: HookManager 实例
-
-        Returns:
-            是否成功
-        """
-        presets = self._data.get("presets", {})
-        if name not in presets:
-            logger.warning(f"[HookPresetManager] Preset '{name}' not found")
-            return False
-
-        preset = presets[name]
-        hook_states = preset.get("hook_states", {})
-        agent_identity = preset.get("agent_identity", "")
-
-        # 1. 先快速统计需要变更的 hook 数量
-        to_toggle = 0
-        for hook_id, target_enabled in hook_states.items():
-            result = hook_manager._find_hook_by_id(hook_id)
-            if result is None:
-                continue
-            _, _, _, hook = result
-            if hook_manager._is_user_custom_hook(hook):
-                current = hook.enabled
-            else:
-                current = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
-            if current != target_enabled:
-                to_toggle += 1
-
-        logger.info(
-            f"[HookPresetManager] Applying preset '{name}': {to_toggle} hooks to change out of {len(hook_states)}"
-        )
-
-        # 2. 逐个切换 hook 状态
-        changed_count = 0
-        for hook_id, target_enabled in hook_states.items():
-            result = hook_manager._find_hook_by_id(hook_id)
-            if result is None:
-                continue
-            _, _, _, hook = result
-            if hook_manager._is_user_custom_hook(hook):
-                current = hook.enabled
-            else:
-                current = hook_manager._override_manager.get_effective_enabled(hook_id, hook.enabled)
-            if current != target_enabled:
-                hook_manager.toggle_hook_by_id(hook_id, target_enabled)
-                changed_count += 1
-
-        # 3. 应用 agent_identity（如果预设中有设置）
-        if agent_identity:
-            try:
-                from app.utils.config import Settings
-
-                current_agent = Settings.get_instance().llm_primary_agent.value
-                if current_agent != agent_identity:
-                    Settings.get_instance().llm_primary_agent.value = agent_identity
-                    logger.info(f"[HookPresetManager] Switched agent identity to '{agent_identity}'")
-
-                # 同时更新 inject_agent_identity hook 的 agent 字段（覆写层）
-                # 让 hook 数据中也持有正确的 agent 值，编辑卡片打开时能正确显示
-                hook_result = hook_manager._find_hook_by_id("builtin_inject_agent_identity")
-                if hook_result:
-                    _, _, _, hook_obj = hook_result
-                    if not hook_manager._is_user_custom_hook(hook_obj):
-                        hook_manager._override_manager.set_hook_overrides(
-                            "builtin_inject_agent_identity", {"agent": agent_identity}
-                        )
-            except Exception as e:
-                logger.warning(f"[HookPresetManager] Failed to set agent identity: {e}")
-
-        # 4. 更新当前预设记录（per-window + 全局默认）
-        self._data["current"] = name
-        if self._window_id:
-            per_window = self._data.setdefault("per_window", {})
-            per_window[self._window_id] = name
-        self._save()
-
-        logger.info(f"[HookPresetManager] Applied preset '{name}': toggled {changed_count} hooks")
-        return True
-
-    def get_current_preset_data(self) -> Optional[dict]:
-        """获取当前预设的完整数据"""
-        current = self.get_current_preset_name()
-        return self.get_preset(current)
