@@ -10,7 +10,7 @@ import time
 from typing import Any, Dict, List
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QCursor
+from PyQt5.QtGui import QColor, QCursor, QMouseEvent
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
     QDialog,
@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizeGrip,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -48,6 +49,34 @@ LOG_COLORS = {
 }
 
 
+class _DraggableHeader(QFrame):
+    """可拖拽标题栏 - 无边框窗口通过拖动标题栏移动整体位置"""
+
+    def __init__(self, parent_dialog, parent=None):
+        super().__init__(parent)
+        self._dialog = parent_dialog
+        self._drag_offset = None
+
+    def mousePressEvent(self, event: QMouseEvent):
+        # 左键按下时记录全局偏移量，用于后续拖动
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = event.globalPos() - self._dialog.pos()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._drag_offset is not None and (event.buttons() & Qt.LeftButton):
+            self._dialog.move(event.globalPos() - self._drag_offset)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class SubAgentSessionDialog(QDialog):
     """子智能体会话对话框 - MessageCard 同款样式渲染"""
 
@@ -67,9 +96,10 @@ class SubAgentSessionDialog(QDialog):
 
         self.setWindowTitle(f"🤖 {agent_name} - 会话日志")
         self.setMinimumSize(640, 480)
-        self.setWindowFlags(
-            Qt.Dialog | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
-        )
+        # 无边框：去掉系统原生标题栏，使用内部绘制的标题栏（已含标题与关闭按钮）
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        # 半透明背景：让圆角在桌面背景下干净呈现
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self._setup_ui()
         self._render_logs()
 
@@ -104,9 +134,29 @@ class SubAgentSessionDialog(QDialog):
         self._web_view.setStyleSheet(f"background-color: {Colors.REALTIME_BG}; border: none;")
         main_layout.addWidget(self._web_view, 1)
 
+        # ── 底部圆角封边 + 尺寸调节手柄（无边框窗口需自行提供缩放入口）──
+        footer = QFrame(self)
+        footer.setObjectName("SessionFooter")
+        footer.setFixedHeight(16)
+        Colors.refresh()
+        footer.setStyleSheet(f"""
+            #SessionFooter {{
+                background-color: {Colors.REALTIME_BG};
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }}
+        """)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.addStretch()
+        grip = QSizeGrip(footer)
+        grip.setStyleSheet("background: transparent;")
+        footer_layout.addWidget(grip, 0, Qt.AlignBottom | Qt.AlignRight)
+        main_layout.addWidget(footer)
+
     def _build_header(self) -> QWidget:
         """构建标题栏"""
-        header = QFrame(self)
+        header = _DraggableHeader(self, self)
         header.setObjectName("SessionHeader")
         header.setFixedHeight(44)
         Colors.refresh()
@@ -124,6 +174,8 @@ class SubAgentSessionDialog(QDialog):
         title = QLabel(f"🤖  {self._agent_name}  —  会话日志", header)
         title.setFont(get_unified_font(12, True))
         title.setStyleSheet("color: #ffffff; background: transparent;")
+        # 标题文字对鼠标透明，确保点击标题区域可触发标题栏拖动
+        title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(title)
 
         layout.addStretch()
@@ -413,6 +465,7 @@ class SubAgentSessionDialog(QDialog):
             args_html = ""
             if args:
                 import orjson as json
+
                 try:
                     args_str = json.dumps(args, option=json.OPT_INDENT_2).decode("utf-8")
                     args_html = f"<pre>{self._escape_html(args_str)}</pre>"

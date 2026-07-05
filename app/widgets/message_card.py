@@ -3254,8 +3254,7 @@ class CodeWebViewer(QWebEngineView):
                         // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件，
                         // 导致"置顶闪烁"和用户滚动后永久卡顶的问题。
                         // 解决方案：保存 scrollTop 前置位 + _userScrolledWithin 快照，
-                        // innerHTML 后立即恢复滚动位置，再同步执行 auto-scroll，
-                        // 避免 setTimeout(0) 的渲染间隙（浏览器在间隙中 paint 出 scroll=0 的画面）。
+                        // innerHTML 后立即恢复滚动位置，避免 paint 间隙闪烁。
                         var _scrollThreshold = {AUTO_SCROLL_THRESHOLD};
                         var _prevScrollTop = document.body.scrollTop;
                         var _wasUserScrolled = window._userScrolledWithin;
@@ -3264,23 +3263,6 @@ class CodeWebViewer(QWebEngineView):
                         // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
-                        // 同步 auto-scroll（用户未滚动→始终滚底；已滚动且接近底部→滚底）
-                        // 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
-                        // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
-                        // 附加修复：打 auto-scroll 时间戳，让 scroll 事件回调识别
-                        // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
-                        if (!_wasUserScrolled) {{
-                            document.body.scrollTop = document.body.scrollHeight;
-                            window._userScrolledWithin = false;
-                        }} else {{
-                            var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
-                            if (_wasAtBottom) {{
-                                document.body.scrollTop = document.body.scrollHeight;
-                                window._userScrolledWithin = false;
-                            }}
-                        }}
-                        window._autoScrollTime = performance.now();
-                        window._suppressScrollEvent = false;
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                         container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
@@ -3341,10 +3323,27 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
-                        // 自动滚动已在 innerHTML 替换后同步处理（见上方 _suppressScrollEvent 段），
-                        // 不再依赖 setTimeout(0) 异步 auto-scroll 避免 paint 间隙闪烁。
+                        // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
+                        // think-block 展开、ECharts 初始化）之后执行，确保 scrollHeight 值反映
+                        // 最终渲染结果，避免因 collapsible 展开 / tool-block restore 等操作
+                        // 在 auto-scroll 后增加高度而导致的"滚不到底部"问题。
+                        // 附加修复：打 auto-scroll 时间戳，让 scroll 事件回调识别
+                        // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
+                        // 此时 _suppressScrollEvent 仍为 true，所有 scroll 事件仍被抑制。
+                        if (!_wasUserScrolled) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }} else {{
+                            var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
+                            if (_wasAtBottom) {{
+                                document.body.scrollTop = document.body.scrollHeight;
+                                window._userScrolledWithin = false;
+                            }}
+                        }}
+                        window._autoScrollTime = performance.now();
+                        window._suppressScrollEvent = false;
 
-                        // 使用延迟报告，确保折叠框高度设为 auto 后浏览器布局完成
+                        // 使用延迟报告，确保浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
                     }}
                 }}
@@ -3460,7 +3459,12 @@ class CodeWebViewer(QWebEngineView):
                 window._autoScrollTime = 0;
                 document.body.addEventListener('scroll', function() {{
                     if (window._suppressScrollEvent) return;
-                    if (performance.now() - window._autoScrollTime < 50) return;
+                    // 🐛 修复：增加时间窗到 200ms。在 QtWebEngine 中，innerHTML 替换
+                    // 触发的 scroll 事件（scrollTop=0）可能因事件循环繁忙而延迟 dispatch，
+                    // 原 50ms 窗口不足时会被误判为用户主动滚动，导致后续 auto-scroll 跳过。
+                    // 用户真实滚动会连续产生多帧 scroll 事件（~60fps），第一帧可能在 200ms
+                    // 窗口内被忽略，但后续帧会正常通过并正确标记 _userScrolledWithin=true。
+                    if (performance.now() - window._autoScrollTime < 200) return;
                     window._userScrolledWithin = true;
                 }});
                 // ======================================================
@@ -3748,6 +3752,20 @@ class CodeWebViewer(QWebEngineView):
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
                 "_c.appendChild(_bk);}}});}"
+                # 🐛 修复：工具块 restore 后 scrollHeight 可能增加（流式工具块推送新内容），
+                # 但 scrollTop 仍停留在 restore 前的位置，导致"滚不到底部"。
+                # 追加 auto-scroll：用户未滚动 -> 强制滚底；已滚动但接近底部 -> 粘性滚底
+                "window._suppressScrollEvent=true;"
+                "if(!window._userScrolledWithin){"
+                "document.body.scrollTop=document.body.scrollHeight;"
+                "}else{"
+                f"var _prd=Math.abs(document.body.scrollHeight-document.body.scrollTop-document.body.clientHeight);"
+                f"if(_prd<{AUTO_SCROLL_THRESHOLD}){{"
+                "document.body.scrollTop=document.body.scrollHeight;"
+                "window._userScrolledWithin=false;"
+                "}}"
+                "window._autoScrollTime=performance.now();"
+                "window._suppressScrollEvent=false;"
                 "})();"
             )
             self.page().runJavaScript(js_code)
