@@ -275,6 +275,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（持久化 ID，跨重启稳定）
         from app.core.team_manager import TeamManager
+
         self._window_id = TeamManager.get_instance().generate_window_id()
         # 注册由 _rxmb_zbshud_vhmcnvr_sn_sdzl_lzmzfdq() 触发
         self._sync_active_windows_to_team_manager()
@@ -363,7 +364,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
         self._team_watch_paths: set = set()
         self._team_processing: bool = False  # 串行处理锁
-    
+
         self._bottom_anchor_timer = QTimer(self)
         self._bottom_anchor_timer.setSingleShot(True)
         self._bottom_anchor_timer.setInterval(80)
@@ -2714,38 +2715,53 @@ class OpenAIChatToolWindow(ToolWindow):
         """处理 /team 命令：团队管理与协作
 
         用法:
-          /team                  显示帮助
-          /team --join=<agent>   加入团队，指定角色智能体
-          /team --join           弹出子智能体选择列表
-          /team --leave          离开团队
-          /team --status         查看团队状态
+          /team                       显示帮助
+          /team --join=<agent>        加入团队，指定角色智能体
+          /team --join                弹出子智能体选择列表
+          /team --leave               离开团队
+          /team --status              查看团队状态
           /team --send=<agent> <msg>  给队友发消息
+          /team --save=<name>         保存当前窗口的 agent 列表为命名模板
+          /team --load=<name>         一键应用模板（重新分配所有活跃窗口的身份）
+          /team --templates           列出所有已保存模板
+          /team --delete=<name>       删除模板
         """
         import re
+
         args = args.strip()
 
         if not args:
             InfoBar.info(
                 "团队命令",
-                "  /team --join=<agent>    加入团队（如 --join=build）\n"
-                "  /team --join            弹出选择\n"
-                "  /team --leave           离开团队\n"
-                "  /team --status          查看团队状态\n"
-                "  /team --send=<agent> <msg>  发送消息",
+                "  /team --join=<agent>        加入团队（如 --join=build）\n"
+                "  /team --join                弹出选择\n"
+                "  /team --leave               离开团队\n"
+                "  /team --status              查看团队状态\n"
+                "  /team --send=<agent> <msg>  发送消息\n"
+                "  /team --save=<name>         保存当前窗口的 agent 列表为模板\n"
+                "  /team --load=<name>         一键应用模板（重新分配所有窗口）\n"
+                "  /team --templates           列出所有模板\n"
+                "  /team --delete=<name>       删除模板",
                 parent=self,
-                duration=5000,
+                duration=6000,
                 position=InfoBarPosition.BOTTOM,
             )
             return
 
         # ── --join / --join=xxx ──
         if args.startswith("--join"):
-            m = re.match(r'^--join(?:=(.*))?$', args)
+            m = re.match(r"^--join(?:=(.*))?$", args)
             if m:
                 agent_name = (m.group(1) or "").strip()
                 self._handle_team_join(agent_name)
             else:
-                InfoBar.warning("格式错误", "用法: /team --join=<agent> 或 /team --join", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "格式错误",
+                    "用法: /team --join=<agent> 或 /team --join",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
             return
 
         # ── --leave ──
@@ -2760,18 +2776,74 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── --send=<agent> <msg> ──
         if args.startswith("--send"):
-            m = re.match(r'^--send=(\S+)\s+(.*)', args)
+            m = re.match(r"^--send=(\S+)\s+(.*)", args)
             if m:
                 self._handle_team_send(m.group(1), m.group(2))
                 return
-            m = re.match(r'^--send=(\S+)\s*$', args)
+            m = re.match(r"^--send=(\S+)\s*$", args)
             if m:
-                InfoBar.warning("缺少消息", f"用法: /team --send={m.group(1)} <消息>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+                InfoBar.warning(
+                    "缺少消息",
+                    f"用法: /team --send={m.group(1)} <消息>",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
                 return
-            InfoBar.warning("格式错误", "用法: /team --send=<agent> <消息>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            InfoBar.warning(
+                "格式错误",
+                "用法: /team --send=<agent> <消息>",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
-        InfoBar.warning("未知参数", f"未知的 team 参数: {args}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+        # ── --save=<name> ──
+        if args.startswith("--save"):
+            m = re.match(r"^--save=(\S+)\s*$", args)
+            if m:
+                self._handle_team_save(m.group(1))
+            else:
+                InfoBar.warning(
+                    "格式错误", "用法: /team --save=<name>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                )
+            return
+
+        # ── --load=<name> ──
+        if args.startswith("--load"):
+            m = re.match(r"^--load=(\S+)\s*$", args)
+            if m:
+                self._handle_team_load(m.group(1))
+            else:
+                InfoBar.warning(
+                    "格式错误", "用法: /team --load=<name>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                )
+            return
+
+        # ── --templates ──
+        if args == "--templates":
+            self._handle_team_templates()
+            return
+
+        # ── --delete=<name> ──
+        if args.startswith("--delete"):
+            m = re.match(r"^--delete=(\S+)\s*$", args)
+            if m:
+                self._handle_team_delete(m.group(1))
+            else:
+                InfoBar.warning(
+                    "格式错误",
+                    "用法: /team --delete=<name>",
+                    parent=self,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            return
+
+        InfoBar.warning(
+            "未知参数", f"未知的 team 参数: {args}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+        )
 
     # ── 团队操作 ─────────────────────────────────────
 
@@ -2783,7 +2855,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         if not agent_name:
-            InfoBar.warning("未指定角色", "请使用 --join=<agent> 指定子智能体角色", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            InfoBar.warning(
+                "未指定角色",
+                "请使用 --join=<agent> 指定子智能体角色",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         # 验证 agent 存在
@@ -2857,7 +2935,13 @@ class OpenAIChatToolWindow(ToolWindow):
         mails = tm.get_mailbox_mails(self._window_id)
 
         if not members:
-            InfoBar.info("团队状态", "当前没有团队成员。使用 /team --join 加入", parent=self, duration=4000, position=InfoBarPosition.BOTTOM)
+            InfoBar.info(
+                "团队状态",
+                "当前没有团队成员。使用 /team --join 加入",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         lines = [f"团队成员 ({len(members)} 人):"]
@@ -2869,7 +2953,13 @@ class OpenAIChatToolWindow(ToolWindow):
             lines.append(f"\n待处理任务邮件: {len(pending)} 封")
         lines.append(f"邮箱总计: {len(mails)} 封")
 
-        InfoBar.info(f"团队状态 ({len(members)} 人)", "\n".join(lines), parent=self, duration=6000, position=InfoBarPosition.BOTTOM)
+        InfoBar.info(
+            f"团队状态 ({len(members)} 人)",
+            "\n".join(lines),
+            parent=self,
+            duration=6000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     # ── 消息 ─────────────────────────────────────────
 
@@ -2892,16 +2982,348 @@ class OpenAIChatToolWindow(ToolWindow):
             label = target_agent
             if target:
                 label = f"{target['agent_name']}@{target['window_id']}"
-            InfoBar.success("任务已发送", f"给 {label}: {message[:60]}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            InfoBar.success(
+                "任务已发送", f"给 {label}: {message[:60]}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+            )
         else:
             members = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in tm.get_members())
-            InfoBar.warning("发送失败", f"未找到队友「{target_agent}」，当前成员: {members}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            InfoBar.warning(
+                "发送失败",
+                f"未找到队友「{target_agent}」，当前成员: {members}",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    # ── 团队模板（save / load / list / delete）────────
+
+    def _handle_team_save(self, name: str):
+        """保存当前活跃窗口的 agent 列表为命名模板。
+
+        收集所有 OpenAIChatToolWindow._instances 的 _current_agent，
+        去重后写入 plugins/system/team_templates/<name>.yaml。
+        """
+        from app.core.team.template_manager import TemplateManager
+        from app.core.team.template_schema import Template, TemplateAgent
+
+        # 收集当前所有活跃窗口的 agent 名称（去重，保留顺序）
+        seen: set = set()
+        agent_names: List[str] = []
+        try:
+            instances = list(getattr(OpenAIChatToolWindow, "_instances", []))
+        except Exception:
+            instances = []
+        for win in instances:
+            try:
+                if getattr(win, "_is_destroyed", False):
+                    continue
+                agent = getattr(win, "_current_agent", None)
+                if not agent:
+                    continue
+                if agent in seen:
+                    continue
+                seen.add(agent)
+                agent_names.append(agent)
+            except Exception:
+                continue
+
+        if not agent_names:
+            InfoBar.warning(
+                "无法保存",
+                "当前没有任何活跃窗口持有有效 agent。请先 /team --join=<agent>",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        template = Template(
+            schema_version=1,
+            template_name=name,
+            description=f"由 {len(instances)} 个活跃窗口保存（去重 {len(agent_names)} 个角色）",
+            agents=[TemplateAgent(agent_name=a) for a in agent_names],
+        )
+
+        try:
+            tm = TemplateManager.get_instance()
+            path = tm.save(template)
+            InfoBar.success(
+                "模板已保存",
+                f"  名称: {name}\n  角色: {', '.join(agent_names)}\n  路径: {path}",
+                parent=self,
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except TemplateError as e:  # noqa: F821 — 由 import 提供
+            InfoBar.error("保存失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+        except Exception as e:  # noqa: BLE001
+            InfoBar.error("保存失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+
+    def _handle_team_load(self, name: str):
+        """应用模板：重新分配所有活跃窗口的 agent 身份并 join team。
+
+        流程：
+        1. 读取 template，校验 agent_name 在系统中存在
+        2. 缺失窗口数 N：调用 _safe_duplicate_window 同步创建 N 个新窗口
+        3. 给每个窗口预分配 agent：当前窗口拿 agents[0]，其他已有窗口按顺序拿 agents[1..K-1]
+        4. 已有的活跃窗口立即切换 + join
+        5. 新建的窗口延后到下一帧（QTimer）切换 + join，确保 backend 初始化完成
+        6. 触发 Ctrl+Shift+G 排列窗口
+        """
+        from app.core.team.template_manager import TemplateManager
+        from app.core.team.template_schema import TemplateError
+
+        try:
+            tm = TemplateManager.get_instance()
+            template = tm.load(name)
+        except TemplateError as e:
+            InfoBar.error("加载失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            return
+
+        # 校验 agent_name 在系统中存在
+        agent_mgr = self.backend.agent_manager
+        if not agent_mgr:
+            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            return
+        available_names = [a.name for a in agent_mgr.list_agents(include_hidden=False) if a.mode in ("subagent", "all")]
+        missing = template.validate_agent_names(available_names)
+        if missing:
+            InfoBar.error(
+                "模板角色缺失",
+                f"以下 agent 在系统中不存在: {', '.join(missing)}\n模板 {name} 加载中止",
+                parent=self,
+                duration=6000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 收集当前活跃窗口（排除已销毁的）
+        active_windows: List["OpenAIChatToolWindow"] = []
+        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+            try:
+                if not getattr(win, "_is_destroyed", False) and win.isVisible():
+                    active_windows.append(win)
+            except Exception:
+                continue
+
+        # 排序：当前窗口排第一，其他窗口按 window_id 稳定排序
+        def _sort_key(w: "OpenAIChatToolWindow"):
+            return (0 if w is self else 1, getattr(w, "_window_id", ""))
+
+        active_windows.sort(key=_sort_key)
+
+        agents_needed = [a.agent_name for a in template.agents]
+        needed_count = len(agents_needed)
+        current_count = len(active_windows)
+
+        # 1) 缺窗口：自动创建
+        new_windows: List["OpenAIChatToolWindow"] = []
+        if current_count < needed_count:
+            missing_n = needed_count - current_count
+            InfoBar.info(
+                "正在准备窗口",
+                f"模板需要 {needed_count} 个窗口，当前 {current_count} 个，正在新建 {missing_n} 个…",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            before_ids = {getattr(w, "_window_id", None) for w in active_windows}
+            for _ in range(missing_n):
+                try:
+                    self._safe_duplicate_window(branch=False)
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
+            # 重新收集活跃窗口
+            after_windows: List["OpenAIChatToolWindow"] = []
+            for win in getattr(OpenAIChatToolWindow, "_instances", []):
+                try:
+                    if not getattr(win, "_is_destroyed", False) and win.isVisible():
+                        after_windows.append(win)
+                except Exception:
+                    continue
+            after_windows.sort(key=_sort_key)
+            new_windows = [w for w in after_windows if getattr(w, "_window_id", None) not in before_ids]
+            active_windows = after_windows
+
+        # 2) 重新分配 agent + join（已有的活跃窗口立即 join；新窗口延后 join）
+        results: List[str] = []
+        reassign_pairs: List[tuple] = []  # (window, agent_name)
+        for i, agent_name in enumerate(agents_needed):
+            if i >= len(active_windows):
+                results.append(f"  {agent_name}: ⚠ 窗口不足（模板第 {i + 1} 项未分配）")
+                continue
+            win = active_windows[i]
+            wid = getattr(win, "_window_id", "?")
+            reassign_pairs.append((win, agent_name))
+            results.append(f"  {agent_name}@{wid}")
+
+        # 当前窗口立即 join（确保用户立即看到反馈）
+        tm_mgr = self._get_team_manager()
+        # 先清空旧 team（确保 join_team 不残留旧成员记录）
+        for win in active_windows:
+            try:
+                if win is not self:
+                    tm_mgr.leave_team(getattr(win, "_window_id", ""))
+            except Exception:
+                pass
+
+        for win, agent_name in reassign_pairs:
+            try:
+                if win is self:
+                    # 当前窗口：同步切换 + join + UI 刷新（与 _do_join_team 路径一致）
+                    self._on_agent_changed(agent_name)
+                    tm_mgr.join_team(window_id=self._window_id, agent_name=agent_name)
+                    self._refresh_team_ui(agent_name)
+                    self._sync_active_windows_to_team_manager()
+                    self._start_team_watcher()
+                else:
+                    # 其他已有窗口：同步切换 + join（不刷自己的 UI，避免互相干扰）
+                    if hasattr(win, "_on_agent_changed"):
+                        win._on_agent_changed(agent_name)
+                    tm_mgr.join_team(window_id=getattr(win, "_window_id", ""), agent_name=agent_name)
+                    if hasattr(win, "_refresh_team_ui"):
+                        try:
+                            win._refresh_team_ui(agent_name)
+                        except Exception:
+                            pass
+                    if hasattr(win, "_start_team_watcher"):
+                        try:
+                            win._start_team_watcher()
+                        except Exception:
+                            pass
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[_handle_team_load] 分配 {agent_name} 失败: {e}")
+                results.append(f"  ({agent_name}: ⚠ {e})")
+
+        # 新窗口延后 join（确保 backend.agent_manager 已初始化）
+        for win in new_windows:
+            agent_name = None
+            # 找到 template 中分配给这个新窗口的位置
+            try:
+                idx = active_windows.index(win)
+            except ValueError:
+                idx = -1
+            if 0 <= idx < len(agents_needed):
+                agent_name = agents_needed[idx]
+            if not agent_name:
+                continue
+            wid = getattr(win, "_window_id", "?")
+            QTimer.singleShot(
+                300,
+                lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
+            )
+
+        # 3) 触发 Ctrl+Shift+G 排列
+        try:
+            from app.tray_manager import TrayManager
+
+            TrayManager.get_instance().arrange_selected_windows_grid()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_handle_team_load] 网格排列失败: {e}")
+
+        # 4) 反馈
+        InfoBar.success(
+            f"模板已应用: {name}",
+            f"已分配 {len(reassign_pairs)} 个角色:\n"
+            + "\n".join(results[:8])
+            + (f"\n  ... 共 {len(results)} 项" if len(results) > 8 else ""),
+            parent=self,
+            duration=6000,
+            position=InfoBarPosition.BOTTOM,
+        )
+
+    def _join_new_window_for_template(self, win, agent_name: str, window_id: str):
+        """为模板新建的窗口延后执行 join team（确保 backend 已初始化）。"""
+        try:
+            if getattr(win, "_is_destroyed", False):
+                return
+            if not getattr(win, "backend", None) or not win.backend.agent_manager:
+                logger.warning(f"[_join_new_window_for_template] window {window_id} backend 未就绪，跳过")
+                return
+            if hasattr(win, "_on_agent_changed"):
+                win._on_agent_changed(agent_name)
+            tm_mgr = self._get_team_manager()
+            tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
+            if hasattr(win, "_refresh_team_ui"):
+                try:
+                    win._refresh_team_ui(agent_name)
+                except Exception:
+                    pass
+            if hasattr(win, "_start_team_watcher"):
+                try:
+                    win._start_team_watcher()
+                except Exception:
+                    pass
+            self._sync_active_windows_to_team_manager()
+            logger.info(f"[_join_new_window_for_template] {agent_name}@{window_id} 已加入模板团队")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[_join_new_window_for_template] 失败: {e}")
+
+    def _handle_team_templates(self):
+        """列出所有已保存模板。"""
+        from app.core.team.template_manager import TemplateManager
+
+        try:
+            tm = TemplateManager.get_instance()
+            templates = tm.list_templates()
+        except Exception as e:  # noqa: BLE001
+            InfoBar.error(
+                "列出失败", f"读取模板目录失败: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM
+            )
+            return
+
+        if not templates:
+            InfoBar.info(
+                "无模板",
+                f"当前没有模板。\n保存: /team --save=<name>\n示例目录: {TemplateManager.get_instance().templates_dir}",
+                parent=self,
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        lines = [f"已保存模板 ({len(templates)} 个):"]
+        for t in templates:
+            desc = t.get("description") or "(无描述)"
+            agents = ", ".join(t.get("agent_names", []))
+            lines.append(f"  • {t['name']} — {t['agent_count']} 个角色 [{agents}]\n      {desc}")
+        InfoBar.info(
+            f"团队模板 ({len(templates)})",
+            "\n".join(lines),
+            parent=self,
+            duration=8000,
+            position=InfoBarPosition.BOTTOM,
+        )
+
+    def _handle_team_delete(self, name: str):
+        """删除模板文件。"""
+        from app.core.team.template_manager import TemplateManager, TemplateError
+
+        try:
+            tm = TemplateManager.get_instance()
+            deleted = tm.delete(name)
+        except TemplateError as e:
+            InfoBar.error("删除失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            return
+        except Exception as e:  # noqa: BLE001
+            InfoBar.error("删除失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            return
+
+        if deleted:
+            InfoBar.success(
+                "模板已删除", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+            )
+        else:
+            InfoBar.warning(
+                "模板不存在", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+            )
 
     # ── 邮箱监听与任务处理 ───────────────────────────
 
     def _start_team_watcher(self):
         """启动邮箱目录的文件系统监听"""
         from app.core.team_manager import TeamManager
+
         tm = TeamManager.get_instance()
 
         mailbox_dir = str(tm._mailbox_dir("default", self._window_id))
@@ -2984,6 +3406,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         from app.core import content_to_text
+
                         content = content_to_text(content)
                     result = content or ""
                     break
@@ -2996,6 +3419,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """获取当前模型配置（兜底）"""
         try:
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
             return {
                 "api_base": cfg.llm_api_base.value or "",
@@ -3008,6 +3432,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _sync_active_windows_to_team_manager(self):
         """同步当前所有活跃窗口 ID 到 TeamManager，触发失效成员清理"""
         from app.core.team_manager import TeamManager
+
         tm = TeamManager.get_instance()
         active_ids = set()
         for inst in OpenAIChatToolWindow._instances:
@@ -3020,6 +3445,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _get_team_manager(self):
         from app.core.team_manager import TeamManager
+
         return TeamManager.get_instance()
 
     def _agent_to_color(self, agent_name: str) -> str:
@@ -3059,8 +3485,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _set_dialog_border(self, color: str):
         """设置外层弹窗的边框颜色"""
         try:
-            dialog = self.window() if hasattr(self, 'window') else None
-            if dialog and hasattr(dialog, 'set_border_color'):
+            dialog = self.window() if hasattr(self, "window") else None
+            if dialog and hasattr(dialog, "set_border_color"):
                 dialog.set_border_color(color)
         except Exception:
             pass
@@ -5335,7 +5761,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -5400,7 +5826,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -5411,7 +5837,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
@@ -5428,7 +5854,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -5462,7 +5888,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -5503,7 +5929,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -5530,7 +5956,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7703,8 +8129,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🐛 修复：延迟到下一事件循环再滚底，等卡片高度变化（CSS transition / 布局更新）
         # 完成后再读取 scroll_bar.maximum()，否则高度还没变化时滚底不到位。
         if self._is_streaming:
-            QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(
-                self.chat_scroll_area, self._is_streaming))
+            QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(self.chat_scroll_area, self._is_streaming))
 
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
@@ -9945,6 +10370,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 弹出会话对话框
         from app.widgets.cards.floating.sub_agent_session_dialog import SubAgentSessionDialog
+
         dialog = SubAgentSessionDialog(
             task_id=task_id,
             agent_name=agent_name,
@@ -10263,7 +10689,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
-
 
     def _update_subagents_param_description(self):
         """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
@@ -11188,6 +11613,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
         if getattr(self, "_session_switched", False):
             from loguru import logger
+
             logger.warning(
                 f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
                 f"msg_count={len(messages)}, current_session_id="
@@ -12699,7 +13125,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -12726,7 +13152,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
@@ -12971,6 +13397,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # save 会落到新项目。直接丢弃整条回调（closeEvent 路径已处理数据持久化）。
         if getattr(self, "_session_switched", False):
             from loguru import logger
+
             logger.warning(
                 f"[FinalizeStop] 检测到会话切换哨兵，丢弃 finalize 回调："
                 f"interrupted_count={len(interrupted_messages) if interrupted_messages else 0}"

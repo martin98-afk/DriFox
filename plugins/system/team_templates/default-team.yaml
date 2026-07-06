@@ -1,0 +1,9 @@
+# 默认团队模板
+# 用法：/team --load=default-team
+schema_version: 1
+template_name: default-team
+description: 经典三角色团队：构建 + 审查 + 计划
+agents:
+  - agent_name: plan
+  - agent_name: build
+  - agent_name: review
