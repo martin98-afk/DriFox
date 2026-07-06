@@ -3303,7 +3303,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 agents = ", ".join(t.get("agent_names", []))
                 lines.append(f"    \u2022 {t['name']} \u2014 {t['agent_count']} 个角色 [{agents}]")
                 lines.append(f"      {desc}")
-        lines.append(f"\n保存: /team --save=<name>  |  删除: /team --delete=<name>")
+        lines.append("\n保存: /team --save=<name>  |  删除: /team --delete=<name>")
         InfoBar.info(
             f"团队模板 ({len(templates)})",
             "\n".join(lines),
