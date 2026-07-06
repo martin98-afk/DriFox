@@ -804,21 +804,9 @@ class OpenAIChatToolWindow(ToolWindow):
             branch: 如果为 True，则复制当前会话的消息到新窗口
         """
         try:
-            # 清理已关闭的弹窗引用，防止内存泄漏
-            # 使用 sip.isdeleted 检查对象是否仍然有效
+            # 验证 self 和 homepage 是否有效
             from PyQt5 import sip
 
-            if hasattr(self, "_popup_refs"):
-                valid_refs = []
-                for ref in self._popup_refs:
-                    try:
-                        if ref is not None and not sip.isdeleted(ref) and ref.isVisible():
-                            valid_refs.append(ref)
-                    except Exception:
-                        pass  # 忽略检查失败的引用
-                self._popup_refs = valid_refs
-
-            # 验证 self 和 homepage 是否有效
             try:
                 if sip.isdeleted(self) or sip.isdeleted(self.homepage):
                     InfoBar.error(
@@ -891,9 +879,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 ):
                     new_instance._current_provider_name = self._current_provider_name
                     new_instance._current_model_name = self._current_model_name
+                    # 性能优化：直接复制 _valid_configs，避免新窗口在 showEvent 中
+                    # 重新从磁盘加载全部服务商配置（_load_model_configs 很重）
+                    new_instance._valid_configs = dict(self._valid_configs)
                     new_instance._update_model_selector_btn()
             except Exception:
                 pass  # 忽略模型复制失败
+
+            # 性能优化：标记为复制窗口，showEvent 中将跳过冗余初始化步骤
+            new_instance._is_duplicate_window = True
 
             # ── 多窗口隔离：复制工具权限设置(user + active + agent 状态) ──
             try:
@@ -1031,6 +1025,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记正在初始化，防止窗口在初始化完成前被关闭导致竞态条件
         self._initialization_in_progress = True
 
+        # 判断是否为复制/分支窗口（_duplicate_window 中设置）
+        is_duplicate = getattr(self, "_is_duplicate_window", False)
+
         # 使用 _safe_timer_call 包装所有异步回调，在 widget 销毁后自动跳过
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._load_agent_list))
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
@@ -1039,11 +1036,16 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             QTimer.singleShot(0, lambda: self._safe_timer_call(self._create_new_session))
 
-        QTimer.singleShot(100, lambda: self._safe_timer_call(self._load_model_configs))
-        # 初始化当前项目的工作目录
-        QTimer.singleShot(200, lambda: self._safe_timer_call(self._sync_working_directory))
-        # 初始化完成后解除保护
-        QTimer.singleShot(300, lambda: self._safe_timer_call(self._on_initialization_complete))
+        # 性能优化：复制窗口已从源窗口复制了 _valid_configs 和 workdir，
+        # 跳过从磁盘重载模型配置和工作目录，直接进入完成状态
+        if is_duplicate:
+            QTimer.singleShot(0, lambda: self._safe_timer_call(self._on_initialization_complete))
+        else:
+            QTimer.singleShot(100, lambda: self._safe_timer_call(self._load_model_configs))
+            # 初始化当前项目的工作目录
+            QTimer.singleShot(200, lambda: self._safe_timer_call(self._sync_working_directory))
+            # 初始化完成后解除保护
+            QTimer.singleShot(300, lambda: self._safe_timer_call(self._on_initialization_complete))
         self._connect_opacity_signal()
         super().showEvent(event)
 
