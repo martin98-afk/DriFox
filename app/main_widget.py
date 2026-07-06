@@ -222,6 +222,8 @@ class OpenAIChatToolWindow(ToolWindow):
     # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
     # TODO: 根据用户机器性能动态调整此值
     _TEMPLATE_JOIN_DELAY_MS: int = 300
+    # 模板加载时待排列的新窗口计数（延迟 join 完成后递减，归零时触发自动排列）
+    _pending_arrange_count: int = 0
 
     # 系统配置卡片 ID 列表 — 这些卡片打开时自动隐藏输入区域。
     # 列表可由 register_system_card() 动态扩展（UI 插件注册浮动卡片时调用）。
@@ -2889,18 +2891,28 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _handle_team_leave(self):
         """离开团队"""
+        # 1) 先停 watcher，避免后续 rmtree 触发 watcher 事件重建目录
+        self._stop_team_watcher()
+
+        # 2) 离开团队（清理邮箱目录）
         tm = self._get_team_manager()
         tm.leave_team(self._window_id)
-        self._stop_team_watcher()
+
+        # 3) 刷新 UI
         self._refresh_team_ui(is_team=False)
 
-        # 还原智能体身份到系统 hook 设定（Settings.llm_primary_agent 或默认 "build"）
-        default_agent = Settings.get_instance().llm_primary_agent.value or "build"
-        # 确保默认智能体存在，否则 fallback 到第一个可用主智能体
-        if not self.backend.get_agent(default_agent):
-            agents = self.backend.get_primary_agents()
-            default_agent = agents[0].name if agents else "build"
-        self._on_agent_changed(default_agent)
+        # 4) 同步活跃窗口列表（触发失效成员清理）
+        self._sync_active_windows_to_team_manager()
+
+        # 5) 还原智能体身份到系统 hook 设定
+        try:
+            default_agent = Settings.get_instance().llm_primary_agent.value or "build"
+            if not self.backend.get_agent(default_agent):
+                agents = self.backend.get_primary_agents()
+                default_agent = agents[0].name if agents else "build"
+            self._on_agent_changed(default_agent)
+        except Exception:
+            logger.exception("[_handle_team_leave] 切换默认智能体失败")
 
         InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
 
@@ -3171,21 +3183,25 @@ class OpenAIChatToolWindow(ToolWindow):
                 lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
             )
 
-        # 3) 全部选中分配好的窗口 → 自动排列
+        # 3) 选中已有窗口 + 初始化延迟计数
+        self._pending_arrange_count = len(new_windows)
         try:
             from app.tray_manager import TrayManager
 
             tm_tray = TrayManager.get_instance()
-            # 清空现有选中，全选当前已分配窗口
             tm_tray.deselect_all()
             for win, _ in reassign_pairs:
-                # OpenAIChatToolWindow → 所属 ToolPopupDialog
-                dialog = win.window() if hasattr(win, "window") else win
-                if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
-                    tm_tray._select_window(dialog)
-            tm_tray.arrange_selected_windows_grid()
+                # 已有窗口立即选中，新窗口在 join 完成后再选
+                if win not in new_windows:
+                    dialog = win.window() if hasattr(win, "window") else win
+                    if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
+                        tm_tray._select_window(dialog)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[_handle_team_load] 窗口选中/排列失败: {e}")
+            logger.warning(f"[_handle_team_load] 窗口选中失败: {e}")
+
+        # 新窗口没延迟任务 → 立即排列（纯已有窗口场景）
+        if self._pending_arrange_count == 0:
+            self._do_team_window_arrange()
 
         # 4) 反馈
         InfoBar.success(
@@ -3222,8 +3238,35 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             self._sync_active_windows_to_team_manager()
             logger.info(f"[_join_new_window_for_template] {agent_name}@{window_id} 已加入模板团队")
+
+            # 选中该窗口并递减待排列计数
+            self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+            try:
+                from app.tray_manager import TrayManager
+
+                tm_tray = TrayManager.get_instance()
+                dialog = win.window() if hasattr(win, "window") else win
+                if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
+                    tm_tray._select_window(dialog)
+            except Exception:
+                pass
+
+            if self._pending_arrange_count == 0:
+                self._do_team_window_arrange()
         except Exception as e:  # noqa: BLE001
             logger.error(f"[_join_new_window_for_template] 失败: {e}")
+            self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+            if self._pending_arrange_count == 0:
+                self._do_team_window_arrange()
+
+    def _do_team_window_arrange(self):
+        """在模板加载后自动排列已选中的窗口（归零回调）。"""
+        try:
+            from app.tray_manager import TrayManager
+
+            TrayManager.get_instance().arrange_selected_windows_grid()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_do_team_window_arrange] 网格排列失败: {e}")
 
     def _handle_team_templates(self):
         """列出所有已保存模板。"""

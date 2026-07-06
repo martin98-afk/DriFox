@@ -333,7 +333,8 @@ class TeamManager:
     def get_mailbox_mails(self, window_id: str, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
         """获取窗口邮箱中的所有邮件（按创建时间排序）"""
         mailbox_dir = self._mailbox_dir(team_name, window_id)
-        mailbox_dir.mkdir(parents=True, exist_ok=True)
+        if not mailbox_dir.exists():
+            return []
 
         mails = []
         for f in sorted(mailbox_dir.glob("mail_*.json")):
