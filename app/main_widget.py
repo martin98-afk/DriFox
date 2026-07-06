@@ -311,7 +311,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend.set_tool_permission_controller(self._tool_permission_controller)
         self.backend.initialize(
             get_model_config=self._get_current_model_config,
-            workdir=str(Path(__file__).parent.parent.parent),
+            workdir=str(Path(__file__).resolve().parent.parent),
         )
         # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
         # 此时 controller 还没建好,需要延迟绑定)
