@@ -1441,15 +1441,9 @@ class CommandCard(QWidget):
             w.setVisible(True)
             any_visible = True
 
-        # 显示/隐藏参数滚动区
-        self._detail_params_scroll.setVisible(any_visible)
-        if any_visible:
-            self._detail_params_content.setVisible(True)
-            # 从隐藏恢复时，确保 scroll area 及其 viewport 被唤醒
-            self._detail_params_scroll.show()
-            self._detail_params_content.show()
-
         # 调整选中索引：如果当前选中的参数已被隐藏，跳到第一个可见参数
+        # 注意：此时还未切换 _detail_params_scroll 的可见性（见下方统一处理），
+        # 但 _update_param_selection 内部的 ensureWidgetVisible 对隐藏 widget 是 noop。
         if not any_visible:
             self._selected_param_index = -1
         elif (
@@ -1469,6 +1463,24 @@ class CommandCard(QWidget):
         # 注意：此方法只匹配完整参数名 + =（如 --model=），不做前缀匹配
         if full_text and any_visible:
             self._auto_switch_to_value_selection(full_text, cursor_pos)
+
+        # 统一根据值选择模式决定参数/值列表的可见性
+        # 必须在 _auto_switch_to_value_selection 之后调用：
+        # 该方法在 refresh 分支（同参数 + 已值选择模式）只调 _refresh_value_list，
+        # 不会隐藏参数列表；如果此时仍按 any_visible 显示参数列表，
+        # 会导致参数列表与值列表同时可见的 UI bug。
+        if self._value_selection_mode:
+            self._detail_params_scroll.setVisible(False)
+            self._detail_value_scroll.setVisible(True)
+        else:
+            self._detail_params_scroll.setVisible(any_visible)
+            # 确保值列表隐藏（避免退出值选择模式后残留）
+            self._detail_value_scroll.setVisible(False)
+            if any_visible:
+                self._detail_params_content.setVisible(True)
+                # 从隐藏恢复时，确保 scroll area 及其 viewport 被唤醒
+                self._detail_params_scroll.show()
+                self._detail_params_content.show()
 
         # 重算高度
         self._adjust_detail_height()

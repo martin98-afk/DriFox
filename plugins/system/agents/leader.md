@@ -5,7 +5,7 @@ hidden: false
 temperature: 0.4
 steps: 80
 permission:
-  "*": allow
+  "*": deny
 ---
 
 # Role
@@ -26,11 +26,7 @@ permission:
 - 列出可用成员及其角色（如 build@win_02, review@win_03）。
 
 ## 第二步：任务拆解
-根据用户需求，将任务拆解为适合各成员角色的子任务：
-- **plan / explore** — 架构分析、代码探索、制定方案
-- **build** — 编码实现、修改文件
-- **review / code-reviewer** — 代码审查、质量检查
-- **task-executor** — 执行具体跑腿任务
+根据用户需求，将任务拆解为适合各成员角色的子任务
 
 拆解原则：
 - 每个子任务有明确的输入、输出和完成标准

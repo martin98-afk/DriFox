@@ -639,6 +639,8 @@ class SendableTextEdit(TextEdit):
         自动补全 --model= 的值。
         如果值包含空格（如 "Azure OpenAI:gpt-4o"），自动加双引号。
         防御：如果文本在当前光标前已包含该值，跳过插入避免重复。
+        替换：用户在 --model= 后已输入部分过滤词（如 "gpt"），选中项应替换该部分，
+        而不是追加在末尾。
         """
         text = self.toPlainText()
         cursor_pos = self.textCursor().position()
@@ -646,6 +648,30 @@ class SendableTextEdit(TextEdit):
 
         # 确定要插入的值（含空格时自动加双引号）
         inserted_value = f'"{value}"' if " " in value else value
+
+        # 替换模式：查找光标前最近的 --xxx= 模式，把 = 后的部分输入替换为选中值
+        # 这样用户在 --model=gpt 后选中 "Azure OpenAI:gpt-4o" 时，
+        # 结果是 --model="Azure OpenAI:gpt-4o" 而不是 --model=gpt"Azure OpenAI:gpt-4o"
+        import re
+
+        eq_matches = list(re.finditer(r"--[\w-]+=", before_cursor))
+        if eq_matches:
+            last_eq = eq_matches[-1]
+            eq_end = last_eq.end()
+            partial_input = before_cursor[eq_end:]  # = 到光标之间的部分输入
+
+            if partial_input:
+                cursor = self.textCursor()
+                # 选中 partial_input 并替换为完整值
+                cursor.setPosition(eq_end)
+                cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
+                cursor.insertText(inserted_value)
+                cursor.insertText(" ")
+                self.setTextCursor(cursor)
+                self.setFocus(Qt.OtherFocusReason)
+                # 值插入后同步参数显隐（如 --model= 选择完成后）
+                self._sync_detail_params()
+                return
 
         # 检查光标前是否已有 --key=value（用户手动输入后按 Tab 确认）
         # 同时检查原始值和带引号版本
