@@ -1172,6 +1172,8 @@ class CommandCard(QWidget):
             return
 
         # 2. 查找文本中完整的参数名（含 =），取最后一个匹配
+        #    同时检查光标位置：如果光标已越过参数值后的空格（用户已输入下一个参数），
+        #    则跳过此参数，不再弹出枚举列表。
         best_match = None  # (match_end, widget, query)
 
         for w in candidate_params:
@@ -1179,6 +1181,10 @@ class CommandCard(QWidget):
             m = re.search(re.escape(param_clean) + r"=", text)
             if m and (best_match is None or m.end() > best_match[0]):
                 token_end = m.end()
+                # 光标位置检查：如果光标已越过参数值后的第一个空格，
+                # 说明用户已离开此参数，不应再触发值选择
+                if self._cursor_past_param_value(text, token_end, cursor_pos):
+                    continue  # 用户已离开此参数，跳过
                 query = self._extract_value_query(text, token_end, cursor_pos)
                 best_match = (m.end(), w, query)
 
@@ -1194,6 +1200,18 @@ class CommandCard(QWidget):
 
         # 4. 切到值选择模式
         self._switch_to_value_selection(target_widget, query=query)
+
+    def _cursor_past_param_value(self, text: str, token_end: int, cursor_pos: int) -> bool:
+        """判断光标是否已越过参数值后的第一个空格（即离开此参数）
+
+        用于决定是否退出或跳过值选择模式。
+        注意：参数值在末尾（无空格）或紧跟另一参数名时，
+        cursor_pos 不会 > space_after，不会误判为"已离开"。
+        """
+        if cursor_pos < 0:
+            return False
+        space_after = text.find(" ", token_end)
+        return space_after >= 0 and cursor_pos > space_after
 
     def _extract_value_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
         """提取 value 参数 = 之后到光标前/下一个空格前的子串作为搜索关键字"""
@@ -1349,13 +1367,24 @@ class CommandCard(QWidget):
             if not self._param_widgets:
                 return
 
-        # 值选择模式：检查对应的参数是否还在输入中
+        # 值选择模式：检查对应的参数是否还在输入中，以及光标是否已离开
         if self._value_selection_mode and self._value_selection_param:
             param_clean = self._value_selection_param.rstrip("=")
             # value 参数必须有 = 才算激活（防止 --xxx 裸名也被算作激活）
             still_active = any("=" in a and a.rstrip("=") == param_clean for a in active)
-            if not still_active:
-                # 参数已被删掉 → 退出值选择模式，回到参数列表
+            # 光标位置检查：如果光标已越过参数值后的第一个空格，说明用户已离开
+            should_exit = False
+            if still_active and cursor_pos >= 0 and full_text:
+                # 用正则查找最后一个匹配（与 _auto_switch_to_value_selection 一致）
+                import re
+                matches = list(re.finditer(re.escape(param_clean) + r"=", full_text))
+                if matches:
+                    last_match = matches[-1]
+                    token_end = last_match.end()
+                    if self._cursor_past_param_value(full_text, token_end, cursor_pos):
+                        should_exit = True
+            if not still_active or should_exit:
+                # 参数已被删掉 或 光标已离开 → 退出值选择模式，回到参数列表
                 self._exit_value_selection()
 
         # 提取输入前缀过滤（用户正在输入的 --xxx 部分）

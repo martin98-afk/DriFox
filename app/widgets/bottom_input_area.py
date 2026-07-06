@@ -88,8 +88,29 @@ PLACEHOLDER_TIPS = [
     # ════ 高级功能 ════
     "点击上下文指示器查看 Token 详情",
     "子智能体协作处理复杂任务",
+    "子智能体对话框实时查看任务日志与执行摘要",
     "长对话自动启用上下文压缩省 Token",
     "历史会话自动保存，关闭不丢失",
+    "来源项目追踪：切换项目不串会话",
+
+    # ════ 动态主题 ════
+    "设置中实时切换主题配色，全局即时生效",
+    "UI 插件自动适配主题色，无需手动配置",
+
+    # ════ UI 插件系统 ════
+    "ui插件提供可热加载的ui组件，支持自定义按钮、面板、卡片等",
+    "/ui-plugin-creator：创建自定义UI插件，扩展界面功能",
+
+    # ════ 插件与市场 ════
+    "插件市场浏览安装社区插件，即装即用",
+    "/plugin-market：浏览/安装社区插件，扩展功能",
+    "/plugin-manager:管理已安装插件，启用/禁用/卸载",
+    "/system-cleaner：清理系统缓存和临时文件",
+    "/context-usage-stats：Token 趋势/消息量图表",
+    "/file-tree：浏览/搜索/实时监听文件变更",
+
+    # ════ Hook 预设 ════
+    "系统 Hook：项目智能 + 安全守卫增强对话质量",
 
     # ════ MCP 系统 ════
     "系统设置中配置 MCP Server 扩展能力",
@@ -255,7 +276,7 @@ class SendableTextEdit(TextEdit):
         """初始化完成后重置标志，允许高度调整"""
 
     def _rotate_placeholder_tip(self):
-        """随机切换 placeholder tips"""
+        """定时随机切换 placeholder tips (QTimer 15s 触发 random.choice)"""
         if not self.toPlainText():
             self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
 
