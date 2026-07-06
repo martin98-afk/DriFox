@@ -1073,6 +1073,11 @@ class ToolPopupDialog(QDialog):
         """显示/隐藏选中标记"""
         self._selection_indicator.setVisible(visible)
 
+    def set_border_color(self, color: str):
+        """动态更新窗口边框颜色并立即刷新"""
+        self._border_color = color
+        self.update()  # 触发重绘 paintEvent
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)

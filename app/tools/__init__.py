@@ -23,6 +23,7 @@ from app.tools.file_tools import FileTools
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult
 from app.tools.task_tools import TaskTools
+from app.tools.team_tools import TeamTools
 from app.tools.terminal_tools import TerminalTools
 from app.tools.tool_classifier import (
     DANGEROUS_TOOLS,
@@ -46,6 +47,10 @@ class BuiltinTools(QObject):
     def __init__(self, homepage=None, workdir: str = None):
         super().__init__(homepage)
         self.homepage = homepage
+
+        # 团队上下文（不依赖 homepage，由 backend 设置）
+        self._team_window_id: str = ""
+        self._team_agent_name: str = ""
 
         if workdir:
             self.workdir = Path(workdir)
@@ -95,6 +100,9 @@ class BuiltinTools(QObject):
         # LSP 工具集成
         self._lsp_tools = LspToolsIntegration(LspManager.get_instance(), owner=self)
         self._tools["lsp"] = self._lsp_tools
+
+        # 团队协作工具
+        self._tools["team"] = TeamTools(self)
 
         # Expose properties for backward compatibility
         self._file_tools = file_tools
@@ -147,6 +155,11 @@ class BuiltinTools(QObject):
 
     # The following methods have special handling (additional logic)
     # so they are kept here instead of dynamic dispatch
+
+    def set_team_context(self, window_id: str, agent_name: str):
+        """设置团队上下文（由 ChatBackend 在初始化/切换 agent 时调用）"""
+        self._team_window_id = window_id
+        self._team_agent_name = agent_name
 
     def get_todos(self):
         """获取待办事项列表（返回副本，防止外部直接修改内部状态）"""
@@ -967,6 +980,37 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["path", "operation"],
+            },
+        },
+    },
+    # ── 团队协作工具（精简版）─────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "team_list_members",
+            "description": "列出团队中的所有成员（返回 agent_name@window_id 格式的唯一标识符，如 build@win_02）。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "team_send_message",
+            "description": "向团队中的另一个智能体发送任务邮件（仅团队模式下可用）。对方会串行处理任务，完成后自动回复结果到你的邮箱。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_agent": {
+                        "type": "string",
+                        "description": "目标成员标识，支持 agent_name（如 build）或 agent_name@window_id（如 build@win_02），通过 team_list_members 查看",
+                    },
+                    "message": {"type": "string", "description": "消息内容"},
+                },
+                "required": ["to_agent", "message"],
             },
         },
     },

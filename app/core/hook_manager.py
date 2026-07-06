@@ -264,6 +264,11 @@ class HookMatchRule:
             roles = [r.strip() for r in self.matcher.split("|")]
             return current_role in roles
 
+        # 团队模式匹配：matcher="#team_member" 仅当窗口已加入团队时触发
+        # 由 chat_worker._trigger_worker_hook 注入的 is_team_member 字段判断
+        if self.matcher == "#team_member":
+            return bool(context.get("is_team_member", False))
+
         # 工具名匹配（支持别名）
         if self.matcher.startswith("tool:"):
             pattern = self.matcher[5:]

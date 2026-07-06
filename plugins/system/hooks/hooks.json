@@ -146,6 +146,17 @@
             "id": "builtin_stop_cleanup"
           }
         ]
+      },
+      {
+        "matcher": "#team_member",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "你是团队中的成员。请判断是否需要通过 team_send_message 通知队友当前任务已完成。如果需要请调用该工具发送通知。",
+            "statusMessage": "消息回调:",
+            "id": "team_member_notify"
+          }
+        ]
       }
     ]
   }

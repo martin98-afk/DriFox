@@ -19,6 +19,7 @@ import sip
 from loguru import logger
 from PyQt5.QtCore import (
     QEvent,
+    QFileSystemWatcher,
     Qt,
     QThreadPool,
     QTimer,
@@ -272,8 +273,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离：实例级模型配置缓存（必须覆盖类变量，防止多窗口共享）
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
         self._is_destroyed = False
-        # 多窗口隔离：窗口唯一标识（用于 CardManager 按窗口隔离）
-        self._window_id = str(uuid.uuid4())[:8]
+        # 多窗口隔离：窗口唯一标识（持久化 ID，跨重启稳定）
+        from app.core.team_manager import TeamManager
+        self._window_id = TeamManager.get_instance().generate_window_id()
+        TeamManager.get_instance().generate_window_id()  # just generate, register handled by _sync
+        self._sync_active_windows_to_team_manager()
 
         # 系统卡片 ID 集合 — 显示时自动隐藏输入区。
         # 初始化为类常量 _BASE_SYSTEM_CARD_IDS，运行时由 register_system_card()
@@ -354,6 +358,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_bottom_timer.setSingleShot(True)
         self._scroll_bottom_timer.setInterval(24)
         self._scroll_bottom_timer.timeout.connect(self._do_scroll_to_bottom)
+        # 团队模式：文件系统监听器（检测新邮件到达）
+        self._team_fs_watcher = QFileSystemWatcher(self)
+        self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
+        self._team_watch_paths: set = set()
+        self._team_processing: bool = False  # 串行处理锁
+    
         self._bottom_anchor_timer = QTimer(self)
         self._bottom_anchor_timer.setSingleShot(True)
         self._bottom_anchor_timer.setInterval(80)
@@ -1606,6 +1616,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "title-gen": self._handle_title_gen_command,
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
+            "team": self._handle_team_command,
         }
 
         # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
@@ -2699,6 +2710,357 @@ class OpenAIChatToolWindow(ToolWindow):
         elif command_name == "remember":
             self._remember_to_memory(args)
 
+    def _handle_team_command(self, args: str):
+        """处理 /team 命令：团队管理与协作
+
+        用法:
+          /team                  显示帮助
+          /team --join=<agent>   加入团队，指定角色智能体
+          /team --join           弹出子智能体选择列表
+          /team --leave          离开团队
+          /team --status         查看团队状态
+          /team --send=<agent> <msg>  给队友发消息
+        """
+        import re
+        args = args.strip()
+
+        if not args:
+            InfoBar.info(
+                "团队命令",
+                "  /team --join=<agent>    加入团队（如 --join=build）\n"
+                "  /team --join            弹出选择\n"
+                "  /team --leave           离开团队\n"
+                "  /team --status          查看团队状态\n"
+                "  /team --send=<agent> <msg>  发送消息",
+                parent=self,
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # ── --join / --join=xxx ──
+        if args.startswith("--join"):
+            m = re.match(r'^--join(?:=(.*))?$', args)
+            if m:
+                agent_name = (m.group(1) or "").strip()
+                self._handle_team_join(agent_name)
+            else:
+                InfoBar.warning("格式错误", "用法: /team --join=<agent> 或 /team --join", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            return
+
+        # ── --leave ──
+        if args == "--leave":
+            self._handle_team_leave()
+            return
+
+        # ── --status ──
+        if args == "--status":
+            self._handle_team_status()
+            return
+
+        # ── --send=<agent> <msg> ──
+        if args.startswith("--send"):
+            m = re.match(r'^--send=(\S+)\s+(.*)', args)
+            if m:
+                self._handle_team_send(m.group(1), m.group(2))
+                return
+            m = re.match(r'^--send=(\S+)\s*$', args)
+            if m:
+                InfoBar.warning("缺少消息", f"用法: /team --send={m.group(1)} <消息>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+                return
+            InfoBar.warning("格式错误", "用法: /team --send=<agent> <消息>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            return
+
+        InfoBar.warning("未知参数", f"未知的 team 参数: {args}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+
+    # ── 团队操作 ─────────────────────────────────────
+
+    def _handle_team_join(self, agent_name: str):
+        """加入团队：--join=<agent> 直接指定，--join 由命令卡片枚举选择"""
+        agent_mgr = self.backend.agent_manager
+        if not agent_mgr:
+            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            return
+
+        if not agent_name:
+            InfoBar.warning("未指定角色", "请使用 --join=<agent> 指定子智能体角色", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            return
+
+        # 验证 agent 存在
+        all_agents = agent_mgr.list_agents(include_hidden=False)
+        subagents = [a for a in all_agents if a.mode in ("subagent", "all")]
+        available_names = [a.name for a in subagents]
+
+        if agent_name not in available_names:
+            InfoBar.warning(
+                "未知智能体",
+                f"未找到: {agent_name}\n可用: {', '.join(available_names)}",
+                parent=self,
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        self._do_join_team(agent_name)
+
+    def _do_join_team(self, agent_name: str):
+        """实际执行加入团队"""
+        agent_mgr = self.backend.agent_manager
+        if not agent_mgr:
+            return
+        all_agents = agent_mgr.list_agents(include_hidden=False)
+        subagents = [a for a in all_agents if a.mode in ("subagent", "all")]
+        available_names = [a.name for a in subagents]
+
+        if agent_name not in available_names:
+            InfoBar.warning(
+                "未知智能体",
+                f"未找到: {agent_name}\n可用: {', '.join(available_names)}",
+                parent=self,
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 切换智能体 + 加入团队
+        self._on_agent_changed(agent_name)
+        tm = self._get_team_manager()
+        tm.join_team(window_id=self._window_id, agent_name=agent_name)
+        self._refresh_team_ui(agent_name)
+
+        # 同步活跃窗口列表（触发失效成员清理）
+        self._sync_active_windows_to_team_manager()
+
+        # 启动邮箱文件监听（检测新任务邮件）
+        self._start_team_watcher()
+
+        InfoBar.success(
+            "已加入团队",
+            f"角色: {agent_name}\n队友可通过 /team --send={agent_name} <任务> 向你派发任务",
+            parent=self,
+            duration=4000,
+            position=InfoBarPosition.BOTTOM,
+        )
+
+    def _handle_team_leave(self):
+        """离开团队"""
+        tm = self._get_team_manager()
+        tm.leave_team(self._window_id)
+        self._stop_team_watcher()
+        self._refresh_team_ui(is_team=False)
+        InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+
+    def _handle_team_status(self):
+        """查看团队状态"""
+        tm = self._get_team_manager()
+        members = tm.get_members()
+        mails = tm.get_mailbox_mails(self._window_id)
+
+        if not members:
+            InfoBar.info("团队状态", "当前没有团队成员。使用 /team --join 加入", parent=self, duration=4000, position=InfoBarPosition.BOTTOM)
+            return
+
+        lines = [f"团队成员 ({len(members)} 人):"]
+        for m in members:
+            lines.append(f"  {m['agent_name']}@{m['window_id']}")
+
+        pending = [m for m in mails if m.get("type") == "task" and m.get("status") == "pending"]
+        if pending:
+            lines.append(f"\n待处理任务邮件: {len(pending)} 封")
+        lines.append(f"邮箱总计: {len(mails)} 封")
+
+        InfoBar.info(f"团队状态 ({len(members)} 人)", "\n".join(lines), parent=self, duration=6000, position=InfoBarPosition.BOTTOM)
+
+    # ── 消息 ─────────────────────────────────────────
+
+    def _handle_team_send(self, target_agent: str, message: str):
+        """发送任务邮件 /team --send=<agent> <任务描述>"""
+        if not message.strip():
+            InfoBar.warning("消息为空", "请提供任务描述", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            return
+
+        tm = self._get_team_manager()
+        from_agent = getattr(self, "_current_agent", "build")
+        mail_id = tm.send_task(
+            from_window=self._window_id,
+            from_agent=from_agent,
+            to_identifier=target_agent,  # 支持 agent 或 agent@window
+            task_description=message,
+        )
+        if mail_id:
+            target = tm.find_member(target_agent)
+            label = target_agent
+            if target:
+                label = f"{target['agent_name']}@{target['window_id']}"
+            InfoBar.success("任务已发送", f"给 {label}: {message[:60]}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+        else:
+            members = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in tm.get_members())
+            InfoBar.warning("发送失败", f"未找到队友「{target_agent}」，当前成员: {members}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+
+    # ── 邮箱监听与任务处理 ───────────────────────────
+
+    def _start_team_watcher(self):
+        """启动邮箱目录的文件系统监听"""
+        from app.core.team_manager import TeamManager
+        tm = TeamManager.get_instance()
+
+        mailbox_dir = str(tm._mailbox_dir("default", self._window_id))
+        if mailbox_dir not in self._team_watch_paths:
+            self._team_fs_watcher.addPath(mailbox_dir)
+            self._team_watch_paths.add(mailbox_dir)
+
+        # 启动时立即处理已有未处理邮件
+        self._check_and_process_pending()
+
+    def _stop_team_watcher(self):
+        """停止邮箱文件监听"""
+        for p in list(self._team_watch_paths):
+            try:
+                self._team_fs_watcher.removePath(p)
+            except Exception:
+                pass
+        self._team_watch_paths.clear()
+
+    def _on_team_mailbox_changed(self, path: str):
+        """邮箱目录变更 → 检查新邮件，串行处理"""
+        if getattr(self, "_is_destroyed", False):
+            self._stop_team_watcher()
+            return
+        self._check_and_process_pending()
+
+    def _check_and_process_pending(self):
+        """检查并处理待办任务邮件（串行：一次只处理一个）"""
+        if self._team_processing:
+            return  # 正在处理中，跳过
+
+        tm = self._get_team_manager()
+        pending = tm.get_pending_tasks(self._window_id)
+        if not pending:
+            return
+
+        # 串行处理第一封
+        self._team_processing = True
+        mail = pending[0]
+        self._process_team_task(mail)
+
+    def _process_team_task(self, mail: dict):
+        """处理任务邮件：标记运行中，插入聊天流走正常对话流程"""
+        tm = self._get_team_manager()
+        tm.mark_mail_running(mail["id"], self._window_id)
+
+        task_desc = mail.get("body", mail.get("subject", ""))
+        from_agent = mail.get("from_agent", "?")
+
+        # 保存邮件上下文（供流完成时清理用）
+        self._current_team_mail = {
+            "mail": mail,
+            "from_agent": from_agent,
+        }
+
+        # 像正常对话一样发送任务消息
+        user_msg = f"📨 **来自 [{from_agent}] 的任务邮件：**\n\n{task_desc}"
+        self._on_send_clicked(user_msg)
+
+    def _on_task_stream_finished(self):
+        """流式完成后标记任务邮件为已完成"""
+        ctx = getattr(self, "_current_team_mail", None)
+        if not ctx:
+            return
+        self._current_team_mail = None
+
+        mail = ctx["mail"]
+        tm = self._get_team_manager()
+
+        # 获取最后一条 assistant 消息作为结果记录
+        result = ""
+        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
+        if session and session.messages:
+            for msg in reversed(session.messages):
+                if msg.get("role") == "assistant" and not msg.get("_hook_event"):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        from app.core import content_to_text
+                        content = content_to_text(content)
+                    result = content or ""
+                    break
+
+        tm.mark_mail_done(mail["id"], self._window_id, result)
+        self._team_processing = False
+        self._check_and_process_pending()
+
+    def _get_model_config_obj(self) -> dict:
+        """获取当前模型配置（兜底）"""
+        try:
+            from app.utils.config import Settings
+            cfg = Settings.get_instance()
+            return {
+                "api_base": cfg.llm_api_base.value or "",
+                "api_key": cfg.llm_api_key.value or "",
+                "model": cfg.llm_model.value or "",
+            }
+        except Exception:
+            return {}
+
+    def _sync_active_windows_to_team_manager(self):
+        """同步当前所有活跃窗口 ID 到 TeamManager，触发失效成员清理"""
+        from app.core.team_manager import TeamManager
+        tm = TeamManager.get_instance()
+        active_ids = set()
+        for inst in OpenAIChatToolWindow._instances:
+            wid = getattr(inst, "_window_id", None)
+            if wid and not getattr(inst, "_is_destroyed", False):
+                active_ids.add(wid)
+        tm.set_active_window_ids(active_ids)
+
+    # ── 内部辅助 ─────────────────────────────────────
+
+    def _get_team_manager(self):
+        from app.core.team_manager import TeamManager
+        return TeamManager.get_instance()
+
+    def _agent_to_color(self, agent_name: str) -> str:
+        """用智能体名称的 hash 生成稳定的辨识色
+
+        保证输出的 HSL 颜色有良好的饱和度和亮度，避免过亮/过暗。
+        同一 agent_name 始终返回同一颜色。
+        """
+        # 使用 Python 内置 hash（稳定但进程间不一致，够用）
+        h = abs(hash(agent_name)) % 360
+        # 固定饱和 65%，亮度 50%（中等亮度）
+        return f"hsl({h}, 65%, 50%)"
+
+    def _refresh_team_ui(self, agent_name: str = "", is_team: bool = True):
+        """刷新团队模式下的 UI
+
+        - 更新窗口标题
+        - 更新窗口边框样式
+        """
+        if is_team and agent_name:
+            # 团队模式：标题显示角色
+            title = f"飘狐 [🏠 {agent_name}]"
+            # 窗口边框：根据 agent 生成辨识色，通过 ToolPopupDialog 绘制
+            color = self._agent_to_color(agent_name)
+            self._set_dialog_border(color)
+        else:
+            # 独立模式：恢复原标题和默认边框
+            title = "飘狐"
+            self._set_dialog_border("none")
+
+        try:
+            if self._title_bar:
+                self._title_bar.set_title(title)
+        except Exception:
+            pass
+
+    def _set_dialog_border(self, color: str):
+        """设置外层弹窗的边框颜色"""
+        try:
+            dialog = self.window() if hasattr(self, 'window') else None
+            if dialog and hasattr(dialog, 'set_border_color'):
+                dialog.set_border_color(color)
+        except Exception:
+            pass
+
     def _execute_subagent_task(
         self,
         agent_name: str,
@@ -3147,6 +3509,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 构建数据源（供 detail 模式参数列表使用）
         data_provider = {
             "model_options": self._get_all_model_options_flat(),
+            "agent_options": self._get_subagent_names(),
         }
         # 提取当前输入文本和光标位置，让 show_command_detail 重建 widgets
         # 后能立即应用 active 状态（修复失焦→重新聚焦时 active 状态丢失）
@@ -3253,6 +3616,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for model in models:
                 options.append(f"{display}:{model}")
         return sorted(options)
+
+    def _get_subagent_names(self) -> list:
+        """获取所有可作为子智能体的 agent 名称列表"""
+        if not self.backend or not self.backend.agent_manager:
+            return []
+        all_agents = self.backend.agent_manager.list_agents(include_hidden=False)
+        return sorted([a.name for a in all_agents if a.mode in ("subagent", "all")])
 
     def _toggle_model_selector_card(self):
         """切换模型选择卡片的显示"""
@@ -10530,6 +10900,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 卡顿后「刷的更新一片」
         QTimer.singleShot(0, self._do_post_stream_cleanup)
 
+        # 团队任务：流式完成后清理邮件状态 + 注入 Stop 提示
+        if getattr(self, "_current_team_mail", None):
+            self._on_task_stream_finished()
+
         if self.input_area:
             self.input_area.setFocus()
 
@@ -12297,6 +12671,13 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
+        # 🔧 清理团队邮箱监听器
+        if getattr(self, "_team_fs_watcher", None):
+            try:
+                self._stop_team_watcher()
+            except Exception:
+                pass
+
         # 🔧 内存泄漏修复：停止窗口级 ThreadPool
         if hasattr(self, "_gen_thread_pool") and self._gen_thread_pool:
             try:
@@ -12315,6 +12696,12 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             OpenAIChatToolWindow._instances.remove(self)
         except (ValueError, Exception):
+            pass
+
+        # 离开团队并同步活跃窗口
+        try:
+            self._sync_active_windows_to_team_manager()
+        except Exception:
             pass
 
         # 多窗口隔离：注销窗口及其卡片数据

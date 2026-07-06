@@ -1096,6 +1096,8 @@ class CommandCard(QWidget):
         options = []
         if param_name == "--model=":
             options = self._data_provider.get("model_options", [])
+        elif param_name in ("--join=", "--send="):
+            options = self._data_provider.get("agent_options", [])
         else:
             options = param.value_options or []
 
@@ -1164,6 +1166,8 @@ class CommandCard(QWidget):
                 continue
             # --model= 使用动态数据源；其他参数需有静态 value_options
             if w.param_name == "--model=":
+                candidate_params.append(w)
+            elif w.param_name in ("--join=", "--send="):
                 candidate_params.append(w)
             elif w._param.value_options:
                 candidate_params.append(w)
@@ -1241,6 +1245,8 @@ class CommandCard(QWidget):
         options = []
         if param_name == "--model=":
             options = self._data_provider.get("model_options", [])
+        elif param_name in ("--join=", "--send="):
+            options = self._data_provider.get("agent_options", [])
         else:
             # 非 --model= 的 value 参数：从 widget 反查
             for w in self._param_widgets:

@@ -964,6 +964,12 @@ class ToolExecutor:
                 column=int(args.get("column", 0) or 0),
                 language=args.get("language"),
             ),
+            # ========== 团队协作工具 ==========
+            "team_send_message": lambda: self._builtin_tools.team_send_message(
+                to_agent=args.get("to_agent", ""),
+                message=args.get("message", ""),
+            ),
+            "team_list_members": lambda: self._builtin_tools.team_list_members(),
         }
 
         # ========== 工具执行前的有效性检查 ==========
