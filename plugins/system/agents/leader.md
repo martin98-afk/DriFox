@@ -5,6 +5,8 @@ hidden: false
 temperature: 0.4
 steps: 80
 permission:
+  "team_list_members": allow
+  "team_send_message": allow
   "*": deny
 ---
 

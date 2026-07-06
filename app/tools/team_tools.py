@@ -32,7 +32,7 @@ class TeamTools:
 
     def team_list_members(self) -> ToolResult:
         """列出团队中的所有成员，返回 agent_name@window_id 格式的标识符"""
-        window_id, _ = self._get_window_context()
+        window_id, agent_name = self._get_window_context()
         if not window_id:
             return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
 
@@ -43,7 +43,10 @@ class TeamTools:
 
         lines = [f"团队成员 ({len(members)} 人):"]
         for m in members:
-            lines.append(f"  - {m['agent_name']}@{m['window_id']}")
+            suffix = ""
+            if m["window_id"] == window_id and m["agent_name"] == agent_name:
+                suffix = " ← 你"
+            lines.append(f"  - {m['agent_name']}@{m['window_id']}{suffix}")
         return ToolResult(True, content="\n".join(lines))
 
     def team_send_message(self, to_agent: str, message: str) -> ToolResult:
