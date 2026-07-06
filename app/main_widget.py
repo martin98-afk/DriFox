@@ -2958,10 +2958,10 @@ class OpenAIChatToolWindow(ToolWindow):
     # ── 团队模板（save / load / list / delete）────────
 
     def _handle_team_save(self, name: str):
-        """保存当前活跃窗口的 agent 列表为命名模板。
+        """保存当前活跃窗口的 agent 列表为命名模板到 user-custom 插件。
 
         收集所有 OpenAIChatToolWindow._instances 的 _current_agent，
-        去重后写入 plugins/system/team_templates/<name>.yaml。
+        去重后写入 .drifox/plugins/user-custom/team_templates/<name>.yaml。
         """
         from app.core.team.template_manager import TemplateManager
         from app.core.team.template_schema import Template, TemplateAgent
@@ -3284,25 +3284,45 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         if not templates:
+            user_dir = tm.user_dir
+            dir_hint = str(user_dir) if user_dir else "user-custom 插件"
             InfoBar.info(
                 "无模板",
-                f"当前没有模板。\n保存: /team --save=<name>\n示例目录: {TemplateManager.get_instance().templates_dir}",
+                f"当前没有模板。\n保存: /team --save=<name>\n保存目录: {dir_hint}",
                 parent=self,
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
             return
 
-        lines = [f"已保存模板 ({len(templates)} 个):"]
+        source_labels = {
+            tm.SOURCE_USER: "\U0001f464 用户",
+            tm.SOURCE_PLUGIN: "\U0001f4e6 插件",
+            tm.SOURCE_SYSTEM: "\U00002699 系统",
+        }
+        groups: Dict[str, List] = {}
         for t in templates:
-            desc = t.get("description") or "(无描述)"
-            agents = ", ".join(t.get("agent_names", []))
-            lines.append(f"  • {t['name']} — {t['agent_count']} 个角色 [{agents}]\n      {desc}")
+            src = t.get("source", tm.SOURCE_SYSTEM)
+            groups.setdefault(src, []).append(t)
+
+        lines = [f"已保存模板 ({len(templates)} 个):"]
+        for src_key in [tm.SOURCE_USER, tm.SOURCE_PLUGIN, tm.SOURCE_SYSTEM]:
+            group = groups.get(src_key)
+            if not group:
+                continue
+            label = source_labels.get(src_key, src_key)
+            lines.append(f"  \u2500\u2500 {label} \u2500\u2500")
+            for t in group:
+                desc = t.get("description") or "(无描述)"
+                agents = ", ".join(t.get("agent_names", []))
+                lines.append(f"    \u2022 {t['name']} \u2014 {t['agent_count']} 个角色 [{agents}]")
+                lines.append(f"      {desc}")
+        lines.append(f"\n保存: /team --save=<name>  |  删除: /team --delete=<name>")
         InfoBar.info(
             f"团队模板 ({len(templates)})",
             "\n".join(lines),
             parent=self,
-            duration=8000,
+            duration=10000,
             position=InfoBarPosition.BOTTOM,
         )
 
@@ -3325,9 +3345,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 "模板已删除", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
             )
         else:
-            InfoBar.warning(
-                "模板不存在", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
-            )
+            # 检查模板是否存在于其他来源（系统/插件），给出更具体的提示
+            source = tm.get_source(name)
+            if source:
+                source_labels = {
+                    tm.SOURCE_SYSTEM: "系统内置",
+                    tm.SOURCE_PLUGIN: "插件提供",
+                    tm.SOURCE_USER: "用户自定义",
+                }
+                src_label = source_labels.get(source, source)
+                InfoBar.warning(
+                    "只读模板",
+                    f"模板「{name}」来自 {src_label}，只读不可删除。\n"
+                    f"仅用户保存的模板（来源: user）可删除。",
+                    parent=self,
+                    duration=5000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            else:
+                InfoBar.warning(
+                    "模板不存在", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                )
 
     # ── 邮箱监听与任务处理 ───────────────────────────
 
@@ -3477,15 +3515,22 @@ class OpenAIChatToolWindow(ToolWindow):
         - 更新窗口边框样式
         """
         if is_team and agent_name:
-            # 团队模式：标题显示角色
-            title = f"飘狐 [🏠 {agent_name}]"
-            # 窗口边框：根据 agent 生成辨识色，通过 ToolPopupDialog 绘制
+            # 团队模式：标题只显示 agent 名称
+            title = agent_name
+            # 窗口边框 + 标题字体颜色：根据 agent 生成辨识色
             color = self._agent_to_color(agent_name)
             self._set_dialog_border(color)
+            if self._title_bar:
+                self._title_bar.set_title_color(color)
         else:
-            # 独立模式：恢复原标题和默认边框
+            # 独立模式：恢复原标题、默认边框和默认字体颜色
             title = "飘狐"
             self._set_dialog_border("none")
+            # 恢复默认字体颜色：清除行内颜色样式 + 刷新标题栏样式
+            if self._title_bar:
+                self._title_bar.set_title_color("")
+                if hasattr(self._title_bar, 'refresh_style'):
+                    self._title_bar.refresh_style()
 
         try:
             if self._title_bar:
@@ -3582,8 +3627,9 @@ class OpenAIChatToolWindow(ToolWindow):
         支持以下写法（按优先级）：
           1. config_id（如 "b2c3d4e5"）—— 直接命中 _valid_configs
           2. display_name（如 "OpenCode Zen #2"）—— 查 _display_to_config_id 映射
-          3. provider_name（如 "OpenCode Zen"，同名时取第一个）—— 遍历匹配
-          4. 大小写不敏感的 provider_name 匹配
+          3. display_name 遍历 _valid_configs（_display_to_config_id 未就绪时的兜底）
+          4. provider_name（如 "OpenCode Zen"，同名时取第一个）—— 遍历匹配
+          5. 大小写不敏感的 provider_name 匹配
         返回 None 表示找不到。
         """
         if not name:
@@ -3591,15 +3637,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 1. config_id 直接命中
         if name in self._valid_configs:
             return name
-        # 2. display_name 命中
+        # 2. display_name 命中 _display_to_config_id 缓存
         display_to_config = getattr(self, "_display_to_config_id", {})
         if name in display_to_config:
             return display_to_config[name]
-        # 3. provider_name 精确匹配（同名取第一个）
+        # 3. display_name 遍历 _valid_configs 兜底（缓存未就绪时仍可匹配）
+        for cid, info in self._valid_configs.items():
+            if info.get("display_name") == name:
+                return cid
+        # 4. provider_name 精确匹配（同名取第一个）
         for cid, info in self._valid_configs.items():
             if info.get("provider_name") == name:
                 return cid
-        # 4. provider_name 大小写不敏感匹配
+        # 5. provider_name 大小写不敏感匹配
         name_lower = name.lower()
         for cid, info in self._valid_configs.items():
             pname = info.get("provider_name", "")
@@ -10472,7 +10522,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- --model=xxx：设置默认模型 ----
         model_match = re.match(r"^--model=(.+)$", args)
         if model_match:
-            model_value = model_match.group(1).strip()
+            model_value = model_match.group(1).strip().strip("\"'")
             if not model_value:
                 InfoBar.warning(
                     title="参数错误",
@@ -10654,7 +10704,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- --model=xxx：设置默认模型 ----
         model_match = re.match(r"^--model=(.+)$", args)
         if model_match:
-            model_value = model_match.group(1).strip()
+            model_value = model_match.group(1).strip().strip("\"'")
             if not model_value:
                 InfoBar.warning(
                     title="参数错误",

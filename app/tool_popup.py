@@ -150,6 +150,16 @@ class ToolWindowTitleBar(QWidget):
     def set_title(self, title):
         self._title_label.setText(title)
 
+    def set_title_color(self, color: str):
+        """设置标题文字颜色（覆盖默认的 TEXT_PRIMARY）
+
+        传入空字符串 '' 可清除行内颜色样式，恢复默认主题色。
+        """
+        if color:
+            self._title_label.setStyleSheet(f"color: {color};")
+        else:
+            self._title_label.setStyleSheet("")
+
     def add_button(self, widget, stretch=0):
         self._action_layout.insertWidget(self._action_layout.count() - 2, widget, stretch=stretch)
         self._custom_buttons.append(widget)

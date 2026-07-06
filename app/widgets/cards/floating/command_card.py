@@ -1098,6 +1098,8 @@ class CommandCard(QWidget):
             options = self._data_provider.get("model_options", [])
         elif param_name == "--load=":
             options = self._data_provider.get("template_options", [])
+        elif param_name == "--delete=":
+            options = self._data_provider.get("template_options", [])
         elif param_name == "--join=":
             options = self._data_provider.get("agent_options", [])
         else:
@@ -1248,6 +1250,8 @@ class CommandCard(QWidget):
         if param_name == "--model=":
             options = self._data_provider.get("model_options", [])
         elif param_name == "--load=":
+            options = self._data_provider.get("template_options", [])
+        elif param_name == "--delete=":
             options = self._data_provider.get("template_options", [])
         elif param_name == "--join=":
             options = self._data_provider.get("agent_options", [])
