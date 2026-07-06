@@ -400,10 +400,25 @@ def _format_pct(v: float) -> str:
     return f"{v * 100:.0f}%"
 
 
+def _parse_mmdd(date_str: str) -> datetime:
+    """将 'mm-dd' 转 datetime，自动判断跨年边界（数据来自近 14 天）"""
+    try:
+        parts = date_str.split("-")
+        month, day = int(parts[0]), int(parts[1])
+        now = datetime.now()
+        dt = datetime(now.year, month, day)
+        # 如果算出来比今天晚 >30 天 → 去年底的日期（跨年边界）
+        if dt > now + timedelta(days=30):
+            dt = datetime(now.year - 1, month, day)
+        return dt
+    except (ValueError, IndexError):
+        return datetime.now()
+
+
 def _short_weekday(date_str: str) -> str:
     """将 '01-15' 转换为 '01-15\n周一' 格式"""
     try:
-        dt = datetime.strptime(f"2025-{date_str}", "%Y-%m-%d")
+        dt = _parse_mmdd(date_str)
         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         wd = weekdays[dt.weekday()]
         return f"{date_str}\n{wd}"
@@ -477,7 +492,7 @@ class _BarChartWidget(QWidget):
             try:
                 parts = label.split("-")
                 if len(parts) == 2:
-                    dt = datetime.strptime(f"2025-{parts[0]}-{parts[1]}", "%Y-%m-%d")
+                    dt = _parse_mmdd(label)
                     weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
@@ -593,7 +608,7 @@ class _BarChartWidget(QWidget):
             try:
                 parts = label.split("-")
                 if len(parts) == 2:
-                    dt = datetime.strptime(f"2025-{parts[0]}-{parts[1]}", "%Y-%m-%d")
+                    dt = _parse_mmdd(label)
                     wd = dt.weekday()
                     if wd in (0, 5, 6):  # 周一、周六、周日显示星期
                         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -693,7 +708,7 @@ class _LineChartWidget(QWidget):
             try:
                 parts = label.split("-")
                 if len(parts) == 2:
-                    dt = datetime.strptime(f"2025-{parts[0]}-{parts[1]}", "%Y-%m-%d")
+                    dt = _parse_mmdd(label)
                     weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
@@ -864,7 +879,7 @@ class _LineChartWidget(QWidget):
             try:
                 parts = label.split("-")
                 if len(parts) == 2:
-                    dt = datetime.strptime(f"2025-{parts[0]}-{parts[1]}", "%Y-%m-%d")
+                    dt = _parse_mmdd(label)
                     wd = dt.weekday()
                     if wd in (0, 5, 6):
                         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
