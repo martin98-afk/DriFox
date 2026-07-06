@@ -1826,6 +1826,9 @@ class ChatBackend(QObject):
         """切换 Agent"""
         if self._chat_engine:
             self._chat_engine.switch_agent(agent_name)
+        # 同步更新团队工具上下文（使 team_send_message 的 from_agent 正确）
+        if self._tool_executor and self._tool_executor._builtin_tools:
+            self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
 
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
         """批准工具调用权限"""

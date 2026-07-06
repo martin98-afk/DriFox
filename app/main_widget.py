@@ -2957,8 +2957,12 @@ class OpenAIChatToolWindow(ToolWindow):
             "from_agent": from_agent,
         }
 
+        # 显示完整发送方身份（agent@window），方便 member 回调
+        from_window = mail.get("from_window", "?")
+        sender_id = f"{from_agent}@{from_window}"
+
         # 像正常对话一样发送任务消息
-        user_msg = f"📨 **来自 [{from_agent}] 的任务邮件：**\n\n{task_desc}"
+        user_msg = f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n{task_desc}"
         self._on_send_clicked(user_msg)
 
     def _on_task_stream_finished(self):
