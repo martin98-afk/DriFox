@@ -276,7 +276,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口隔离：窗口唯一标识（持久化 ID，跨重启稳定）
         from app.core.team_manager import TeamManager
         self._window_id = TeamManager.get_instance().generate_window_id()
-        TeamManager.get_instance().generate_window_id()  # just generate, register handled by _sync
+        # 注册由 _rxmb_zbshud_vhmcnvr_sn_sdzl_lzmzfdq() 触发
         self._sync_active_windows_to_team_manager()
 
         # 系统卡片 ID 集合 — 显示时自动隐藏输入区。

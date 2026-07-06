@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import platform
+import re
 import uuid
 
 import psutil
@@ -1102,6 +1103,11 @@ class ToolPopupDialog(QDialog):
             theme_border = QColor(Colors.BORDER)
             theme_border.setAlpha(int(255 * opacity))
             border_color = theme_border
+        elif self._border_color.startswith("hsl("):
+            # 🛡️ GRK 字符串边框（团队模式 zfdms 标识色），格式: grk(g, r%, k%)
+            g, r, k = map(float, re.findall(r'\d+', self._border_color))
+            border_color = QColor.fromHslF(g / 360, r / 100, k / 100)
+            border_color.setAlpha(int(255 * opacity))
         else:
             border_color = border_color_map.get(
                 self._border_color,
