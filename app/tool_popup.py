@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 import platform
+import re
 import uuid
 
 import psutil
 from loguru import logger
 from PyQt5.QtCore import QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, QEasingCurve, pyqtSignal
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter
+from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
@@ -148,6 +149,16 @@ class ToolWindowTitleBar(QWidget):
 
     def set_title(self, title):
         self._title_label.setText(title)
+
+    def set_title_color(self, color: str):
+        """设置标题文字颜色（覆盖默认的 TEXT_PRIMARY）
+
+        传入空字符串 '' 可清除行内颜色样式，恢复默认主题色。
+        """
+        if color:
+            self._title_label.setStyleSheet(f"color: {color};")
+        else:
+            self._title_label.setStyleSheet("")
 
     def add_button(self, widget, stretch=0):
         self._action_layout.insertWidget(self._action_layout.count() - 2, widget, stretch=stretch)
@@ -1073,6 +1084,11 @@ class ToolPopupDialog(QDialog):
         """显示/隐藏选中标记"""
         self._selection_indicator.setVisible(visible)
 
+    def set_border_color(self, color: str):
+        """动态更新窗口边框颜色并立即刷新"""
+        self._border_color = color
+        self.update()  # 触发重绘 paintEvent
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1097,6 +1113,11 @@ class ToolPopupDialog(QDialog):
             theme_border = QColor(Colors.BORDER)
             theme_border.setAlpha(int(255 * opacity))
             border_color = theme_border
+        elif self._border_color.startswith("hsl("):
+            # 🛡️ GRK 字符串边框（团队模式 zfdms 标识色），格式: grk(g, r%, k%)
+            g, r, k = map(float, re.findall(r'\d+', self._border_color))
+            border_color = QColor.fromHslF(g / 360, r / 100, k / 100)
+            border_color.setAlpha(int(255 * opacity))
         else:
             border_color = border_color_map.get(
                 self._border_color,
@@ -1108,7 +1129,11 @@ class ToolPopupDialog(QDialog):
         painter.drawRoundedRect(4, 4, self.width() - 4, self.height() - 4, 10, 10)
 
         painter.setBrush(bg_color)
-        painter.setPen(border_color)
+        if self._border_color.startswith("hsl("):
+            # 团队模式：用 3px 粗边框让辨识色更明显
+            painter.setPen(QPen(border_color, 3))
+        else:
+            painter.setPen(border_color)
         painter.drawRoundedRect(0, 0, self.width() - 4, self.height() - 4, 10, 10)
 
     def _get_edge_at_pos(self, pos_or_event):

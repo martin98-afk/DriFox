@@ -61,6 +61,18 @@ _SHARED_TOOL_POOL = concurrent.futures.ThreadPoolExecutor(
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
+def _check_team_member(backend) -> bool:
+    """检查当前窗口是否是团队成员（供 hook context 使用）"""
+    try:
+        wid = getattr(backend, "_window_id", None)
+        if not wid:
+            return False
+        from app.core.team_manager import TeamManager
+        return TeamManager.get_instance().is_team_member(wid)
+    except Exception:
+        return False
+
+
 class OpenAIChatWorker(QThread):
     content_received = pyqtSignal(str)
     reasoning_content_received = pyqtSignal(str)  # DeepSeek thinking mode
@@ -545,6 +557,8 @@ class OpenAIChatWorker(QThread):
                 # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
                 "current_role": "primary",
                 "is_subagent_call": False,
+                # 团队上下文：当前窗口是否是团队成员
+                "is_team_member": _check_team_member(backend),
             }
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息

@@ -460,6 +460,11 @@ class ChatBackend(QObject):
         self._tool_executor.set_memory_manager(self._memory_manager)
         self._tool_executor.set_llm_config_getter(get_model_config)
         self._tool_executor.set_agent_manager(self._agent_manager)
+        # 初始化团队上下文（窗口 ID + 当前 agent，供团队工具使用）
+        if self._tool_executor._builtin_tools:
+            agent_name = self._agent_manager.list_agents(include_hidden=False)
+            default_agent = agent_name[0].name if agent_name else "build"
+            self._tool_executor._builtin_tools.set_team_context(self._window_id, default_agent)
         # 设置 AgentManager 的 builtin_tools 引用（用于获取 MCP 工具 schema）
         self._agent_manager._builtin_tools = self._tool_executor._builtin_tools
         # 设置关键文档仓储
@@ -1821,6 +1826,9 @@ class ChatBackend(QObject):
         """切换 Agent"""
         if self._chat_engine:
             self._chat_engine.switch_agent(agent_name)
+        # 同步更新团队工具上下文（使 team_send_message 的 from_agent 正确）
+        if self._tool_executor and self._tool_executor._builtin_tools:
+            self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
 
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
         """批准工具调用权限"""
@@ -2186,6 +2194,9 @@ class ChatBackend(QObject):
         """设置当前 Agent"""
         if self._chat_engine:
             self._chat_engine.set_current_agent(agent_name)
+        # 同步更新团队工具上下文
+        if self._tool_executor and self._tool_executor._builtin_tools:
+            self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
 
     def set_streaming_state(self, is_streaming: bool):
         """设置流式状态"""

@@ -36,6 +36,10 @@ class SystemCardFrame(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 构造期间即隐藏：系统卡片内容重（子卡片多），若构造时父窗口已可见
+        # （如懒加载场景），可见但未布局定位的卡片会瞬间绘制在 (0,0) 造成残影。
+        # 所有系统卡片均经 CardManager 切换显隐，默认隐藏不影响正常使用。
+        self.setVisible(False)
         self._height_mode = SystemCardFrame._height_mode
         self._build_base_ui()
 

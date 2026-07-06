@@ -672,9 +672,16 @@ class AgentManager:
 
         perm_resolver = PermissionResolver(agent.permission, global_permission or {}, agent.tools)
 
+        # 团队协作工具始终允许（工具内部会检查团队模式，非团队模式返回错误）
+        team_tools = {"team_send_message", "team_list_members"}
+
         filtered_tools = []
         for tool in all_tools:
             tool_name = tool["function"]["name"].lower()
+            # 团队工具不受 agent 工具白名单限制（运行时自检）
+            if tool_name in team_tools:
+                filtered_tools.append(tool)
+                continue
             permission = perm_resolver.resolve(tool_name)
             if permission in ("allow", "ask"):
                 filtered_tools.append(tool)
@@ -699,23 +706,17 @@ class AgentManager:
                 - False: 主智能体自身运行，或子智能体独立运行
             extra_context: 额外上下文（如 project_root/project_name），传递给 BuildSystemPrompt hook
         """
-        # ── 主智能体身份覆盖：优先使用用户在 inject_agent_identity hook 中选择的智能体 ──
-        # 钩子的下拉框选择会写入 Settings.llm_primary_agent，
-        # 覆盖 chat engine 传入的默认 agent_name（通常为 "build"），
-        # 使 BuildSystemPrompt 钩子注入的身份定义与用户选择保持一致。
-        if not is_subagent_call:
+        # ── 主智能体身份回退：仅当未指定 agent 时使用全局默认 ──
+        # 多窗口场景下，每个窗口的 ChatEngine 已维护自己的 _current_agent，
+        # 不再全局覆盖。仅当 agent_name 为 "build"（引擎默认值）且用户通过
+        # hook 设置卡片选择了其他智能体时，才回退到全局设置。
+        if not is_subagent_call and agent_name in ("build", "", None):
             try:
                 from app.utils.config import Settings
                 primary_agent = Settings.get_instance().llm_primary_agent.value
                 if primary_agent and primary_agent != agent_name:
                     if self.get_agent(primary_agent):
                         agent_name = primary_agent
-                    else:
-                        from loguru import logger as _logger
-                        _logger.warning(
-                            f"[AgentManager] Settings.llm_primary_agent='{primary_agent}' "
-                            f"对应的智能体不存在，回退到 '{agent_name}'"
-                        )
             except Exception:
                 pass
 

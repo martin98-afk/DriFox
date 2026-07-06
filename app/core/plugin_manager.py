@@ -506,6 +506,11 @@ class PluginManager:
             for comp_name in ("commands", "agents", "skills", "themes"):
                 if (plugin_dir / comp_name).exists():
                     detected_components[comp_name] = True
+            # 团队模板：检测 team_templates/ 目录（含 .yaml 文件才标记）
+            if (plugin_dir / "team_templates").exists():
+                has_yaml = any((plugin_dir / "team_templates").glob("*.yaml"))
+                if has_yaml:
+                    detected_components["team_templates"] = True
             if (plugin_dir / "hooks").exists() and (plugin_dir / "hooks" / "hooks.json").exists():
                 detected_components["hooks"] = True
             if (plugin_dir / ".mcp.json").exists():
@@ -980,6 +985,7 @@ class PluginManager:
         components = manifest.get("components", {})
         components["mcp"] = True
         components["hooks"] = True
+        components["team_templates"] = True
         manifest["components"] = components
         if "name" not in manifest:
             manifest["name"] = "user-custom"
