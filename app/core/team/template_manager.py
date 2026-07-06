@@ -68,7 +68,7 @@ class TemplateManager:
         """解析模板根目录（项目内 <repo>/plugins/system/team_templates/）。
 
         解析策略：
-        1. 从本文件位置向上 3 层得到项目根
+        1. 从本文件位置向上 4 层得到项目根
         2. 若该目录不可写（PyInstaller 打包后常见），fallback 到 ~/.drifox/team_templates/
         """
         # app/core/team/template_manager.py

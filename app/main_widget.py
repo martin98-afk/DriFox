@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -217,6 +218,10 @@ class OpenAIChatToolWindow(ToolWindow):
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
+
+    # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
+    # TODO: 根据用户机器性能动态调整此值
+    _TEMPLATE_JOIN_DELAY_MS: int = 300
 
     # 系统配置卡片 ID 列表 — 这些卡片打开时自动隐藏输入区域。
     # 列表可由 register_system_card() 动态扩展（UI 插件注册浮动卡片时调用）。
@@ -3007,19 +3012,21 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.team.template_schema import Template, TemplateAgent
 
         # 收集当前所有活跃窗口的 agent 名称（去重，保留顺序）
+        # 注意：_instances 可能包含已销毁的窗口（windowClosed=True），需过滤
         seen: set = set()
         agent_names: List[str] = []
-        try:
-            instances = list(getattr(OpenAIChatToolWindow, "_instances", []))
-        except Exception:
-            instances = []
-        for win in instances:
+        active_windows: List["OpenAIChatToolWindow"] = []
+        for win in getattr(OpenAIChatToolWindow, "_instances", []):
             try:
                 if getattr(win, "_is_destroyed", False):
+                    continue
+                # 额外检查 windowClosed（OpenAIChatToolWindow 的关闭标志）
+                if getattr(win, "windowClosed", False):
                     continue
                 agent = getattr(win, "_current_agent", None)
                 if not agent:
                     continue
+                active_windows.append(win)
                 if agent in seen:
                     continue
                 seen.add(agent)
@@ -3037,10 +3044,12 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
+        # description 用「实际非已关闭窗口数」而非 _instances 长度（含已销毁的会偏大）
+        active_count = len(active_windows)
         template = Template(
             schema_version=1,
             template_name=name,
-            description=f"由 {len(instances)} 个活跃窗口保存（去重 {len(agent_names)} 个角色）",
+            description=f"由 {active_count} 个活跃窗口保存（去重 {len(agent_names)} 个角色）",
             agents=[TemplateAgent(agent_name=a) for a in agent_names],
         )
 
@@ -3069,9 +3078,22 @@ class OpenAIChatToolWindow(ToolWindow):
         4. 已有的活跃窗口立即切换 + join
         5. 新建的窗口延后到下一帧（QTimer）切换 + join，确保 backend 初始化完成
         6. 触发 Ctrl+Shift+G 排列窗口
+
+        重要：load 不会调用 leave_team()，避免销毁窗口的 mailbox 目录（含未读任务邮件）。
         """
         from app.core.team.template_manager import TemplateManager
         from app.core.team.template_schema import TemplateError
+
+        # ⚠ 破坏性操作：先弹确认框，避免用户误操作导致正在进行的任务被无感切换
+        reply = QMessageBox.question(
+            self,
+            "加载团队模板",
+            f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
 
         try:
             tm = TemplateManager.get_instance()
@@ -3158,14 +3180,9 @@ class OpenAIChatToolWindow(ToolWindow):
             results.append(f"  {agent_name}@{wid}")
 
         # 当前窗口立即 join（确保用户立即看到反馈）
+        # 注意：不要再调 leave_team()，否则会 rmtree 销毁该窗口 mailbox 目录（含未读任务邮件）。
+        # join_team 内部是覆盖式赋值（members[wid]={...}），不会清空邮箱文件。
         tm_mgr = self._get_team_manager()
-        # 先清空旧 team（确保 join_team 不残留旧成员记录）
-        for win in active_windows:
-            try:
-                if win is not self:
-                    tm_mgr.leave_team(getattr(win, "_window_id", ""))
-            except Exception:
-                pass
 
         for win, agent_name in reassign_pairs:
             try:
@@ -3209,7 +3226,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             wid = getattr(win, "_window_id", "?")
             QTimer.singleShot(
-                300,
+                self._TEMPLATE_JOIN_DELAY_MS,
                 lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
             )
 

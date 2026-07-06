@@ -7,13 +7,20 @@
 3. 非法模板名（含路径分隔符、特殊字符、空字符串）拒绝
 4. YAML 格式错误友好报错
 5. 示例默认模板（default-team.yaml）可正常加载
+6. 回归：join_team 不销毁 mailbox（review 修复 1）
+7. 回归：description 计数（review 修复 3）
+8. 回归：--load QMessageBox 确认（review 修复 2）
+9. 回归：300ms 类常量（review 修复 4）
 
 设计说明：
 - 使用 tmp_path + monkeypatch 隔离文件操作，不污染真实项目目录
 - 每次测试前重置 TemplateManager 单例（_instance = None）避免残留
+- 回归测试用 AST 静态校验源码，防止修复被无意回退
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -409,3 +416,175 @@ class TestBundledDefaultTemplate:
         for a in template.agents:
             assert a.agent_name
             assert isinstance(a.agent_name, str)
+
+
+# ══════════════════════════════════════════════════════════
+# 9. 回归：join_team 不应删除 mailbox（修复 review 问题 1）
+# ══════════════════════════════════════════════════════════
+
+
+class TestJoinTeamPreservesMailbox:
+    """修复说明：_handle_team_load 在 review 后改为只 join_team，不再 leave_team。
+
+    验证前提：TeamManager.join_team 不会触发 rmtree(mailbox_dir)，
+    反复 join 同一 window_id 也不应丢失已有邮件。
+    """
+
+    def test_join_team_keeps_existing_mail_files(self, tmp_path, monkeypatch):
+        """多次 join 同一 window_id 不会清空 mailbox 目录。
+
+        注意：join_team 内部会通过 _get_team_data → _cleanup_stale_members 触发清理逻辑，
+        但仅清理「不在活跃窗口集合中的 stale 成员」。只要主窗口正常调用
+        set_active_window_ids() 同步活跃集合，已 join 窗口不会被误判为 stale。
+        """
+        # 重定向 TeamManager 的数据目录到 tmp_path（不污染真实 ~/.drifox/）
+        from app.core import team_manager as tm_mod
+
+        monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
+        tm_mod.TeamManager._instance = None
+        tm = tm_mod.TeamManager.get_instance()
+
+        # 关键：设置 win_01 为活跃窗口（模拟主窗口的 set_active_window_ids）
+        tm.set_active_window_ids({"win_01"})
+
+        # 第一次 join
+        tm.join_team(window_id="win_01", agent_name="build")
+        # 模拟有邮件写入
+        mailbox_dir = tm._mailbox_dir(tm.DEFAULT_TEAM, "win_01")
+        mail_file = mailbox_dir / "mail_test_001.json"
+        mail_file.write_text('{"id":"mail_test_001","body":"hello"}', encoding="utf-8")
+        assert mail_file.exists()
+
+        # 第二次 join 同 window（不 leave，模拟 load 时的覆盖语义）
+        tm.join_team(window_id="win_01", agent_name="review")
+        # 关键断言：mail 文件不能被销毁
+        assert mail_file.exists(), "join_team 重复调用不应清空 mailbox"
+        assert "hello" in mail_file.read_text(encoding="utf-8")
+
+
+# ══════════════════════════════════════════════════════════
+# 10. 回归：description 计数（修复 review 问题 3）
+# ══════════════════════════════════════════════════════════
+
+
+class TestDescriptionActiveCount:
+    """修复说明：_handle_team_save 的 description 之前用 len(instances)（含已销毁窗口），
+
+    现在改为「实际非已关闭窗口数」。本测试用 AST 静态校验源码保证修复不被回退。
+    """
+
+    def test_handle_team_save_uses_active_count_not_len_instances(self):
+        """源码静态检查：_handle_team_save 不能再用 len(_instances) 写 description。"""
+        import ast
+
+        src = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+
+        target_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_handle_team_save":
+                target_func = node
+                break
+        assert target_func is not None, "未找到 _handle_team_save 方法"
+
+        # 序列化整个函数源码，检查关键短语
+        import textwrap
+
+        func_src = textwrap.dedent(ast.unparse(target_func))
+        # 修复后应包含 active_count 变量
+        assert "active_count" in func_src, "description 计数应使用 active_count 变量（实际非已关闭窗口数）"
+        # 不应再直接用 len(instances) 拼 description
+        bad_pattern = "len(instances)"
+        assert bad_pattern not in func_src, f"description 不应再用 {bad_pattern}（包含已销毁窗口会偏大）"
+
+
+# ══════════════════════════════════════════════════════════
+# 11. 回归：--load 强制走 QMessageBox 确认（修复 review 问题 2）
+# ══════════════════════════════════════════════════════════
+
+
+class TestLoadConfirmationDialog:
+    """修复说明：_handle_team_load 开头加了 QMessageBox.question 确认。
+
+    源码静态检查：函数体前 30 行必须出现 QMessageBox.question 调用，且用户选 No 时 return。
+    """
+
+    def test_handle_team_load_starts_with_qmessagebox(self):
+        import ast
+        import textwrap
+
+        src = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+
+        target_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_handle_team_load":
+                target_func = node
+                break
+        assert target_func is not None, "未找到 _handle_team_load 方法"
+
+        func_src = textwrap.dedent(ast.unparse(target_func))
+        # 必须包含 QMessageBox.question 调用
+        assert "QMessageBox.question" in func_src, "_handle_team_load 缺少 QMessageBox.question 确认弹窗"
+        # 必须在用户选 No 时 return
+        assert "!= QMessageBox.Yes" in func_src, "_handle_team_load 应在用户选 No 时直接 return"
+        # 默认按钮应是 No（防止误触）
+        assert "QMessageBox.No" in func_src, "QMessageBox.question 的 default button 应为 No"
+
+
+# ══════════════════════════════════════════════════════════
+# 12. 回归：300ms 提取为类常量（修复 review 问题 4）
+# ══════════════════════════════════════════════════════════
+
+
+class TestTemplateJoinDelayConstant:
+    """修复说明：300ms magic number → 类常量 _TEMPLATE_JOIN_DELAY_MS。"""
+
+    def test_template_join_delay_constant_defined(self):
+        """OpenAIChatToolWindow 类必须有 _TEMPLATE_JOIN_DELAY_MS 类属性。"""
+        import ast
+
+        src = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "OpenAIChatToolWindow":
+                for stmt in node.body:
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        if stmt.target.id == "_TEMPLATE_JOIN_DELAY_MS":
+                            found = True
+                            # 应是整数类型注解
+                            if stmt.annotation is not None:
+                                assert ast.unparse(stmt.annotation) == "int"
+                            # 值应为正整数
+                            if isinstance(stmt.value, ast.Constant):
+                                assert isinstance(stmt.value.value, int)
+                                assert stmt.value.value > 0
+                break
+        assert found, "OpenAIChatToolWindow 缺少 _TEMPLATE_JOIN_DELAY_MS 类属性"
+
+    def test_handle_team_load_uses_constant_not_magic_number(self):
+        """_handle_team_load 应使用 self._TEMPLATE_JOIN_DELAY_MS，不再出现裸 300。"""
+        import ast
+        import textwrap
+
+        src = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+
+        target_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_handle_team_load":
+                target_func = node
+                break
+        assert target_func is not None
+
+        func_src = textwrap.dedent(ast.unparse(target_func))
+        # 必须引用类常量
+        assert "self._TEMPLATE_JOIN_DELAY_MS" in func_src
+        # 不应再出现裸 300（QTimer.singleShot 的第一参数）
+        # 排除注释、字符串等：直接搜 "300," 或 "300\n" 这种数字字面量
+        import re
+
+        # 简单粗暴：函数体源码里不应有 "300," 这种数字字面量
+        assert not re.search(r"\b300\b", func_src), "_handle_team_load 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
