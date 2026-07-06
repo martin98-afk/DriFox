@@ -6,7 +6,7 @@ import uuid
 import psutil
 from loguru import logger
 from PyQt5.QtCore import QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, QEasingCurve, pyqtSignal
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter
+from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
@@ -1119,7 +1119,11 @@ class ToolPopupDialog(QDialog):
         painter.drawRoundedRect(4, 4, self.width() - 4, self.height() - 4, 10, 10)
 
         painter.setBrush(bg_color)
-        painter.setPen(border_color)
+        if self._border_color.startswith("hsl("):
+            # 团队模式：用 3px 粗边框让辨识色更明显
+            painter.setPen(QPen(border_color, 3))
+        else:
+            painter.setPen(border_color)
         painter.drawRoundedRect(0, 0, self.width() - 4, self.height() - 4, 10, 10)
 
     def _get_edge_at_pos(self, pos_or_event):

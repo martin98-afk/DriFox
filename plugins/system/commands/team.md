@@ -5,9 +5,9 @@ argument-hint:
   '[--join=]': '加入团队（如 --join=build 或 --join 弹出选择）'
   '[--leave]': '离开团队恢复独立模式'
   '[--status]': '查看团队状态和成员'
-  '[--send=]': '给队友派发任务（如 --send=build 实现登录API）'
   '[--save=]': '保存当前活跃窗口的 agent 列表为命名模板'
-  '[--load=]': '一键应用模板（按需新建窗口、重新分配 agent 身份并加入团队）'
-  '[--templates]': '列出所有已保存的团队模板'
-  '[--delete=]': '删除已保存的团队模板'
+  '[--load=]': '加载模板（不指定名称时列出可用模板）；支持 UI 枚举选择'
+  '[--delete=]': '删除模板（不指定名称时列出可用模板）'
+mutex_groups:
+  action: ['--join=', '--leave', '--status', '--save=', '--load=', '--delete=']
 ---

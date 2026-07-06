@@ -2725,11 +2725,10 @@ class OpenAIChatToolWindow(ToolWindow):
           /team --join                弹出子智能体选择列表
           /team --leave               离开团队
           /team --status              查看团队状态
-          /team --send=<agent> <msg>  给队友发消息
           /team --save=<name>         保存当前窗口的 agent 列表为命名模板
           /team --load=<name>         一键应用模板（重新分配所有活跃窗口的身份）
-          /team --templates           列出所有已保存模板
-          /team --delete=<name>       删除模板
+          /team --load                显示所有可用模板
+          /team --delete=<name>       删除模板（不指定名称时列出可用模板）
         """
         import re
 
@@ -2742,11 +2741,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 "  /team --join                弹出选择\n"
                 "  /team --leave               离开团队\n"
                 "  /team --status              查看团队状态\n"
-                "  /team --send=<agent> <msg>  发送消息\n"
                 "  /team --save=<name>         保存当前窗口的 agent 列表为模板\n"
-                "  /team --load=<name>         一键应用模板（重新分配所有窗口）\n"
-                "  /team --templates           列出所有模板\n"
-                "  /team --delete=<name>       删除模板",
+                "  /team --load=<name>         加载模板（不指定名称时列出可用模板）\n"
+                "  /team --delete=<name>       删除模板（不指定名称时列出可用模板）\n"
+                "（消息发送请直接在 UI 中操作）",
                 parent=self,
                 duration=6000,
                 position=InfoBarPosition.BOTTOM,
@@ -2779,31 +2777,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._handle_team_status()
             return
 
-        # ── --send=<agent> <msg> ──
-        if args.startswith("--send"):
-            m = re.match(r"^--send=(\S+)\s+(.*)", args)
-            if m:
-                self._handle_team_send(m.group(1), m.group(2))
-                return
-            m = re.match(r"^--send=(\S+)\s*$", args)
-            if m:
-                InfoBar.warning(
-                    "缺少消息",
-                    f"用法: /team --send={m.group(1)} <消息>",
-                    parent=self,
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-            InfoBar.warning(
-                "格式错误",
-                "用法: /team --send=<agent> <消息>",
-                parent=self,
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
         # ── --save=<name> ──
         if args.startswith("--save"):
             m = re.match(r"^--save=(\S+)\s*$", args)
@@ -2815,35 +2788,24 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
             return
 
-        # ── --load=<name> ──
+        # ── --load=<name> / --load ──
         if args.startswith("--load"):
             m = re.match(r"^--load=(\S+)\s*$", args)
             if m:
                 self._handle_team_load(m.group(1))
             else:
-                InfoBar.warning(
-                    "格式错误", "用法: /team --load=<name>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
-                )
+                # --load 或 --load= 不指定名称 → 显示可用模板列表
+                self._handle_team_templates()
             return
 
-        # ── --templates ──
-        if args == "--templates":
-            self._handle_team_templates()
-            return
-
-        # ── --delete=<name> ──
+        # ── --delete=<name> / --delete ──
         if args.startswith("--delete"):
             m = re.match(r"^--delete=(\S+)\s*$", args)
             if m:
                 self._handle_team_delete(m.group(1))
             else:
-                InfoBar.warning(
-                    "格式错误",
-                    "用法: /team --delete=<name>",
-                    parent=self,
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
+                # --delete 或 --delete= 不指定名称 → 显示可用模板列表
+                self._handle_team_templates()
             return
 
         InfoBar.warning(
@@ -2919,7 +2881,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         InfoBar.success(
             "已加入团队",
-            f"角色: {agent_name}\n队友可通过 /team --send={agent_name} <任务> 向你派发任务",
+            f"角色: {agent_name}\n队友可通过 UI 消息界面向你派发任务",
             parent=self,
             duration=4000,
             position=InfoBarPosition.BOTTOM,
@@ -2931,6 +2893,15 @@ class OpenAIChatToolWindow(ToolWindow):
         tm.leave_team(self._window_id)
         self._stop_team_watcher()
         self._refresh_team_ui(is_team=False)
+
+        # 还原智能体身份到系统 hook 设定（Settings.llm_primary_agent 或默认 "build"）
+        default_agent = Settings.get_instance().llm_primary_agent.value or "build"
+        # 确保默认智能体存在，否则 fallback 到第一个可用主智能体
+        if not self.backend.get_agent(default_agent):
+            agents = self.backend.get_primary_agents()
+            default_agent = agents[0].name if agents else "build"
+        self._on_agent_changed(default_agent)
+
         InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
 
     def _handle_team_status(self):
@@ -2968,37 +2939,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ── 消息 ─────────────────────────────────────────
 
-    def _handle_team_send(self, target_agent: str, message: str):
-        """发送任务邮件 /team --send=<agent> <任务描述>"""
-        if not message.strip():
-            InfoBar.warning("消息为空", "请提供任务描述", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
-            return
-
-        tm = self._get_team_manager()
-        from_agent = getattr(self, "_current_agent", "build")
-        mail_id = tm.send_task(
-            from_window=self._window_id,
-            from_agent=from_agent,
-            to_identifier=target_agent,  # 支持 agent 或 agent@window
-            task_description=message,
-        )
-        if mail_id:
-            target = tm.find_member(target_agent)
-            label = target_agent
-            if target:
-                label = f"{target['agent_name']}@{target['window_id']}"
-            InfoBar.success(
-                "任务已发送", f"给 {label}: {message[:60]}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
-            )
-        else:
-            members = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in tm.get_members())
-            InfoBar.warning(
-                "发送失败",
-                f"未找到队友「{target_agent}」，当前成员: {members}",
-                parent=self,
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
+    # --send 已移除，消息发送请直接使用 UI 界面的 team_send_message 工具
 
     # ── 团队模板（save / load / list / delete）────────
 
@@ -3230,13 +3171,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
             )
 
-        # 3) 触发 Ctrl+Shift+G 排列
+        # 3) 全部选中分配好的窗口 → 自动排列
         try:
             from app.tray_manager import TrayManager
 
-            TrayManager.get_instance().arrange_selected_windows_grid()
+            tm_tray = TrayManager.get_instance()
+            # 清空现有选中，全选当前已分配窗口
+            tm_tray.deselect_all()
+            for win, _ in reassign_pairs:
+                # OpenAIChatToolWindow → 所属 ToolPopupDialog
+                dialog = win.window() if hasattr(win, "window") else win
+                if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
+                    tm_tray._select_window(dialog)
+            tm_tray.arrange_selected_windows_grid()
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[_handle_team_load] 网格排列失败: {e}")
+            logger.warning(f"[_handle_team_load] 窗口选中/排列失败: {e}")
 
         # 4) 反馈
         InfoBar.success(
@@ -3957,6 +3906,7 @@ class OpenAIChatToolWindow(ToolWindow):
         data_provider = {
             "model_options": self._get_all_model_options_flat(),
             "agent_options": self._get_subagent_names(),
+            "template_options": self._get_team_template_names(),
         }
         # 提取当前输入文本和光标位置，让 show_command_detail 重建 widgets
         # 后能立即应用 active 状态（修复失焦→重新聚焦时 active 状态丢失）
@@ -4070,6 +4020,15 @@ class OpenAIChatToolWindow(ToolWindow):
             return []
         all_agents = self.backend.agent_manager.list_agents(include_hidden=False)
         return sorted([a.name for a in all_agents if a.mode in ("subagent", "all")])
+
+    def _get_team_template_names(self) -> list:
+        """获取所有已保存的团队模板名称列表"""
+        try:
+            from app.core.team.template_manager import TemplateManager
+            templates = TemplateManager.get_instance().list_templates()
+            return sorted([t["name"] for t in templates])
+        except Exception:
+            return []
 
     def _toggle_model_selector_card(self):
         """切换模型选择卡片的显示"""
