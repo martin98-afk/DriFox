@@ -2887,8 +2887,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 切换智能体 + 加入团队
+        # 切换智能体 + 注入 agent 工具权限(与 agent 命令路径一致)
         self._on_agent_changed(agent_name)
+        self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
         tm.join_team(window_id=self._window_id, agent_name=agent_name)
         self._refresh_team_ui(agent_name)
@@ -2912,9 +2913,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 1) 先停 watcher，避免后续 rmtree 触发 watcher 事件重建目录
         self._stop_team_watcher()
 
-        # 2) 离开团队（清理邮箱目录）
+        # 2) 离开团队（清理邮箱目录）+ 恢复用户工具权限
         tm = self._get_team_manager()
         tm.leave_team(self._window_id)
+        self._tool_permission_controller.restore_user()
 
         # 3) 刷新 UI
         self._refresh_team_ui(is_team=False)
@@ -3121,16 +3123,19 @@ class OpenAIChatToolWindow(ToolWindow):
         for win, agent_name in reassign_pairs:
             try:
                 if win is self:
-                    # 当前窗口：同步切换 + join + UI 刷新（与 _do_join_team 路径一致）
+                    # 当前窗口：同步切换 + 注入 agent 工具权限 + join + UI 刷新（与 _do_join_team 路径一致）
                     self._on_agent_changed(agent_name)
+                    self._apply_agent_command_permissions(agent_name)
                     tm_mgr.join_team(window_id=self._window_id, agent_name=agent_name)
                     self._refresh_team_ui(agent_name)
                     self._sync_active_windows_to_team_manager()
                     self._start_team_watcher()
                 else:
-                    # 其他已有窗口：同步切换 + join（不刷自己的 UI，避免互相干扰）
+                    # 其他已有窗口：同步切换 + 注入 agent 工具权限 + join（不刷自己的 UI，避免互相干扰）
                     if hasattr(win, "_on_agent_changed"):
                         win._on_agent_changed(agent_name)
+                    if hasattr(win, "_apply_agent_command_permissions"):
+                        win._apply_agent_command_permissions(agent_name)
                     tm_mgr.join_team(window_id=getattr(win, "_window_id", ""), agent_name=agent_name)
                     if hasattr(win, "_refresh_team_ui"):
                         try:
@@ -3205,6 +3210,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
             if hasattr(win, "_on_agent_changed"):
                 win._on_agent_changed(agent_name)
+            if hasattr(win, "_apply_agent_command_permissions"):
+                win._apply_agent_command_permissions(agent_name)
             tm_mgr = self._get_team_manager()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):
