@@ -265,7 +265,14 @@ class OpenAIChatToolWindow(ToolWindow):
     # 套餐用量查询结果桥接信号（后台线程 → 主线程）
     _coding_plan_result_ready = pyqtSignal(object)
 
-    def __init__(self, homepage):
+    def __init__(self, homepage, source_window=None):
+        # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
+        # 因为父类 __init__ 会触发 setup_ui，其中 _update_branch 需要根据此标志
+        # 跳过冗余的 `git branch --show-current` 子进程调用，直接复制源窗口分支状态。
+        # 复制/分支窗口与源窗口共享完全相同的项目与工作目录，git 分支必然一致，
+        # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
+        self._is_duplicate_window = source_window is not None
+        self._source_window = source_window
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
         super().__init__(homepage)
         # 需要在 super().__init__() 之前初始化所有依赖项
@@ -304,7 +311,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend.set_tool_permission_controller(self._tool_permission_controller)
         self.backend.initialize(
             get_model_config=self._get_current_model_config,
-            workdir=str(Path(__file__).parent.parent.parent),
+            workdir=str(Path(__file__).resolve().parent.parent),
         )
         # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
         # 此时 controller 还没建好,需要延迟绑定)
@@ -593,14 +600,8 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
 
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "settings",
-            self._settings_popup,
-            system_card=True,
-        )
-        self._top_card_container.add_card("settings", self._settings_popup)
+        # 注：settings 弹窗已改为懒构建（_build_settings_popup，首帧后），
+        # 其 CardManager 注册与容器 add_card 一并移入该方法，避免此处引用尚未构建的对象。
 
         mgr.register_card(
             self._window_id,
@@ -824,8 +825,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if valid_homepage is None:
                 return
 
-            # 创建新的窗口实例
-            new_instance = OpenAIChatToolWindow(valid_homepage)
+            # 创建新的窗口实例（传入 source_window 以标记复制/分支窗口，
+            # setup_ui 中将据此跳过 git 子进程、直接复制源窗口分支状态）
+            new_instance = OpenAIChatToolWindow(valid_homepage, source_window=self)
 
             # ── 多窗口隔离：把源窗口的项目上下文原样复制给新窗口 ──
             # 必须在 __init__ 跑完之后立刻覆盖,否则新窗口会从全局 cfg 读到
@@ -846,10 +848,15 @@ class OpenAIChatToolWindow(ToolWindow):
                         new_instance._memory_card_popup._instance_workdir[proj] = wd
             # ──────────────────────────────────────────────────
 
-            # 同步刷新面包屑样式与 git 分支标签(在 _update_branch 里读 workdir)
+            # 同步刷新面包屑样式与 git 分支标签
             if hasattr(new_instance, "_refresh_project_branch_style"):
                 new_instance._refresh_project_branch_style()
-            if hasattr(new_instance, "_update_branch"):
+            # 性能优化：复制/分支窗口与源窗口共享完全相同的项目与工作目录，
+            # 分支必然一致。setup_ui 已从源窗口复制了分支标签状态，这里再次从
+            # 源窗口(self)复制，跳过 _update_branch 的同步 git 子进程调用。
+            if hasattr(new_instance, "_copy_branch_from"):
+                new_instance._copy_branch_from(self)
+            elif hasattr(new_instance, "_update_branch"):
                 new_instance._update_branch()
             # ──────────────────────────────────────────────────
 
@@ -886,8 +893,8 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass  # 忽略模型复制失败
 
-            # 性能优化：标记为复制窗口，showEvent 中将跳过冗余初始化步骤
-            new_instance._is_duplicate_window = True
+            # 注：_is_duplicate_window 已在 __init__(source_window=self) 中设置，
+            # showEvent 据此跳过冗余初始化步骤（_load_model_configs / _sync_working_directory）。
 
             # ── 多窗口隔离：复制工具权限设置(user + active + agent 状态) ──
             try:
@@ -1025,7 +1032,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记正在初始化，防止窗口在初始化完成前被关闭导致竞态条件
         self._initialization_in_progress = True
 
-        # 判断是否为复制/分支窗口（_duplicate_window 中设置）
+        # 判断是否为复制/分支窗口（__init__ 中通过 source_window 参数设置）
         is_duplicate = getattr(self, "_is_duplicate_window", False)
 
         # 使用 _safe_timer_call 包装所有异步回调，在 widget 销毁后自动跳过
@@ -1401,7 +1408,9 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.utils.config import Settings
 
         if Settings.get_instance().pet_enabled.value:
-            self._init_pixel_pet()
+            # 性能优化：桌宠非关键装饰，延迟到首帧后再初始化，
+            # 避免在窗口出现的关键路径上加载 spritesheet / 播放入场动画。
+            QTimer.singleShot(0, self._init_pixel_pet)
 
         # 桌宠显示开关的实时响应
         Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
@@ -1448,7 +1457,12 @@ class OpenAIChatToolWindow(ToolWindow):
         pb_layout.addWidget(self._branch_widget)
 
         self._refresh_project_branch_style()
-        self._update_branch()
+        # 性能优化：复制/分支窗口直接从源窗口复制 git 分支标签状态，
+        # 跳过同步 git 子进程（最坏可达 3s），避免重复窗口出现卡顿
+        if getattr(self, "_is_duplicate_window", False) and getattr(self, "_source_window", None):
+            self._copy_branch_from(self._source_window)
+        else:
+            self._update_branch()
 
         # 将组合控件加入布局
         # 标题编辑（行内编辑模式）
@@ -1522,51 +1536,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
         layout.addWidget(self.node_preview)
 
-        # ===== 创建卡片容器 =====
-        self._top_card_container = TopCardContainer()
-        self._bottom_card_container = BottomCardContainer()
-
-        # ===== 创建卡片容器 =====
-        self._top_card_container = TopCardContainer()
-        self._bottom_card_container = BottomCardContainer()
-
-        self._settings_popup = LLMSettingsCard(self)
-        self._settings_popup.setVisible(False)
-        self._settings_popup.configChanged.connect(self._on_settings_config_changed)
-        self._settings_popup.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("settings", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-
-        # 监听服务商配置变更，确保多窗口同步
-        # 当任意窗口添加/修改/删除服务商时，所有窗口的模型列表都会自动刷新
+        # 监听服务商配置变更，确保多窗口同步（全局监听，需尽早连接）
         self.cfg.llm_saved_providers.valueChanged.connect(self._on_providers_config_changed)
-
         # 监听技能配置变更（启用/禁用），确保多窗口同步
         self.cfg.llm_enabled_skills.valueChanged.connect(self._on_skills_config_changed)
 
-        # 连接服务商添加/编辑信号
-        self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
-        self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
-
-        # 连接 Hook 添加/编辑信号
-        self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
-        self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
-        # Hook 开关/增删 → 广播到其他窗口同步
-        self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
-        # Hook 轻量开关同步（仅更新 switch 状态，不触发全量刷新）
-        self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
-
-        # 连接 MCP 添加/编辑信号
-        self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
-        self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
-        # MCP 开关变更 → 广播到其他窗口（热更新防抖 2 秒太慢）
-        self._settings_popup.mcpListCard.serversChanged.connect(self._on_mcp_servers_toggled)
-
-        # Gateway 开关/保存变更 → 广播到其他窗口
-        self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
+        # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
+        # 延迟到首帧绘制后再构建，让窗口外壳先出现，压缩"打开/复制窗口"的出现耗时。
+        QTimer.singleShot(0, self._build_settings_popup)
 
         # Hook 编辑卡片
         self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
@@ -1656,8 +1633,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
         self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # 背景图片层 - 从主题配置加载
-        self._apply_bg_from_theme()
+        # 背景图片层 - 从主题配置加载（延迟到首帧后，背景为纯装饰，不阻塞出现）
+        QTimer.singleShot(0, self._apply_bg_from_theme)
 
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background: transparent;")
@@ -2351,6 +2328,52 @@ class OpenAIChatToolWindow(ToolWindow):
         # 初始刷新工具开关按钮
         self._refresh_tool_toggle_btn()
 
+    def _build_settings_popup(self):
+        """性能优化：懒构建设置弹窗（重型，隐藏构件）。
+
+        原在 setup_ui 中同步构建 LLMSettingsCard（内含服务商/Hook/MCP/Gateway 等
+        全部子卡片，含 get_icon 加载与数据加载，较重），拖慢窗口首帧。改为首帧绘制后
+        （QTimer 0）再构建，窗口外壳先出现。幂等：重复调用安全（showEvent 等路径）。
+        """
+        if getattr(self, "_settings_popup", None) is not None:
+            return
+        self._settings_popup = LLMSettingsCard(self)
+        self._settings_popup.setVisible(False)
+        self._settings_popup.configChanged.connect(self._on_settings_config_changed)
+        self._settings_popup.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("settings", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        # 连接服务商添加/编辑信号
+        self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
+        self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
+        # 连接 Hook 添加/编辑信号
+        self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
+        self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
+        # Hook 开关/增删 → 广播到其他窗口同步
+        self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
+        # Hook 轻量开关同步（仅更新 switch 状态，不触发全量刷新）
+        self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
+        # 连接 MCP 添加/编辑信号
+        self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
+        self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
+        # MCP 开关变更 → 广播到其他窗口（热更新防抖 2 秒太慢）
+        self._settings_popup.mcpListCard.serversChanged.connect(self._on_mcp_servers_toggled)
+        # Gateway 开关/保存变更 → 广播到其他窗口
+        self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
+        # 注册到 CardManager 与顶层容器（原在 _register_cards_to_manager 中，随弹窗一起延迟）
+        mgr = self._card_manager
+        mgr.register_card(
+            self._window_id,
+            ContainerType.TOP,
+            "settings",
+            self._settings_popup,
+            system_card=True,
+        )
+        self._top_card_container.add_card("settings", self._settings_popup)
+
     def _position_bottom_toolbar(self):
         """将底部工具栏绝对定位到窗口底部 36px。
 
@@ -2728,7 +2751,6 @@ class OpenAIChatToolWindow(ToolWindow):
           /team --join=<agent>        加入团队，指定角色智能体
           /team --join                弹出子智能体选择列表
           /team --leave               离开团队
-          /team --status              查看团队状态
           /team --save=<name>         保存当前窗口的 agent 列表为命名模板
           /team --load=<name>         一键应用模板（重新分配所有活跃窗口的身份）
           /team --load                显示所有可用模板
@@ -2744,7 +2766,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 "  /team --join=<agent>        加入团队（如 --join=build）\n"
                 "  /team --join                弹出选择\n"
                 "  /team --leave               离开团队\n"
-                "  /team --status              查看团队状态\n"
                 "  /team --save=<name>         保存当前窗口的 agent 列表为模板\n"
                 "  /team --load=<name>         加载模板（不指定名称时列出可用模板）\n"
                 "  /team --delete=<name>       删除模板（不指定名称时列出可用模板）\n"
@@ -2774,11 +2795,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── --leave ──
         if args == "--leave":
             self._handle_team_leave()
-            return
-
-        # ── --status ──
-        if args == "--status":
-            self._handle_team_status()
             return
 
         # ── --save=<name> ──
@@ -2871,8 +2887,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 切换智能体 + 加入团队
+        # 切换智能体 + 注入 agent 工具权限(与 agent 命令路径一致)
         self._on_agent_changed(agent_name)
+        self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
         tm.join_team(window_id=self._window_id, agent_name=agent_name)
         self._refresh_team_ui(agent_name)
@@ -2896,9 +2913,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 1) 先停 watcher，避免后续 rmtree 触发 watcher 事件重建目录
         self._stop_team_watcher()
 
-        # 2) 离开团队（清理邮箱目录）
+        # 2) 离开团队（清理邮箱目录）+ 恢复用户工具权限
         tm = self._get_team_manager()
         tm.leave_team(self._window_id)
+        self._tool_permission_controller.restore_user()
 
         # 3) 刷新 UI
         self._refresh_team_ui(is_team=False)
@@ -2918,50 +2936,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
 
-    def _handle_team_status(self):
-        """查看团队状态"""
-        tm = self._get_team_manager()
-        members = tm.get_members()
-        mails = tm.get_mailbox_mails(self._window_id)
-
-        if not members:
-            InfoBar.info(
-                "团队状态",
-                "当前没有团队成员。使用 /team --join 加入",
-                parent=self,
-                duration=4000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        lines = [f"团队成员 ({len(members)} 人):"]
-        for m in members:
-            lines.append(f"  {m['agent_name']}@{m['window_id']}")
-
-        pending = [m for m in mails if m.get("type") == "task" and m.get("status") == "pending"]
-        if pending:
-            lines.append(f"\n待处理任务邮件: {len(pending)} 封")
-        lines.append(f"邮箱总计: {len(mails)} 封")
-
-        InfoBar.info(
-            f"团队状态 ({len(members)} 人)",
-            "\n".join(lines),
-            parent=self,
-            duration=6000,
-            position=InfoBarPosition.BOTTOM,
-        )
-
-    # ── 消息 ─────────────────────────────────────────
-
-    # --send 已移除，消息发送请直接使用 UI 界面的 team_send_message 工具
-
     # ── 团队模板（save / load / list / delete）────────
 
     def _handle_team_save(self, name: str):
-        """保存当前活跃窗口的 agent 列表为命名模板。
+        """保存当前活跃窗口的 agent 列表为命名模板到 user-custom 插件。
 
         收集所有 OpenAIChatToolWindow._instances 的 _current_agent，
-        去重后写入 plugins/system/team_templates/<name>.yaml。
+        去重后写入 .drifox/plugins/user-custom/team_templates/<name>.yaml。
         """
         from app.core.team.template_manager import TemplateManager
         from app.core.team.template_schema import Template, TemplateAgent
@@ -3142,16 +3123,19 @@ class OpenAIChatToolWindow(ToolWindow):
         for win, agent_name in reassign_pairs:
             try:
                 if win is self:
-                    # 当前窗口：同步切换 + join + UI 刷新（与 _do_join_team 路径一致）
+                    # 当前窗口：同步切换 + 注入 agent 工具权限 + join + UI 刷新（与 _do_join_team 路径一致）
                     self._on_agent_changed(agent_name)
+                    self._apply_agent_command_permissions(agent_name)
                     tm_mgr.join_team(window_id=self._window_id, agent_name=agent_name)
                     self._refresh_team_ui(agent_name)
                     self._sync_active_windows_to_team_manager()
                     self._start_team_watcher()
                 else:
-                    # 其他已有窗口：同步切换 + join（不刷自己的 UI，避免互相干扰）
+                    # 其他已有窗口：同步切换 + 注入 agent 工具权限 + join（不刷自己的 UI，避免互相干扰）
                     if hasattr(win, "_on_agent_changed"):
                         win._on_agent_changed(agent_name)
+                    if hasattr(win, "_apply_agent_command_permissions"):
+                        win._apply_agent_command_permissions(agent_name)
                     tm_mgr.join_team(window_id=getattr(win, "_window_id", ""), agent_name=agent_name)
                     if hasattr(win, "_refresh_team_ui"):
                         try:
@@ -3226,6 +3210,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
             if hasattr(win, "_on_agent_changed"):
                 win._on_agent_changed(agent_name)
+            if hasattr(win, "_apply_agent_command_permissions"):
+                win._apply_agent_command_permissions(agent_name)
             tm_mgr = self._get_team_manager()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):
@@ -3284,25 +3270,45 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         if not templates:
+            user_dir = tm.user_dir
+            dir_hint = str(user_dir) if user_dir else "user-custom 插件"
             InfoBar.info(
                 "无模板",
-                f"当前没有模板。\n保存: /team --save=<name>\n示例目录: {TemplateManager.get_instance().templates_dir}",
+                f"当前没有模板。\n保存: /team --save=<name>\n保存目录: {dir_hint}",
                 parent=self,
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
             return
 
-        lines = [f"已保存模板 ({len(templates)} 个):"]
+        source_labels = {
+            tm.SOURCE_USER: "\U0001f464 用户",
+            tm.SOURCE_PLUGIN: "\U0001f4e6 插件",
+            tm.SOURCE_SYSTEM: "\U00002699 系统",
+        }
+        groups: Dict[str, List] = {}
         for t in templates:
-            desc = t.get("description") or "(无描述)"
-            agents = ", ".join(t.get("agent_names", []))
-            lines.append(f"  • {t['name']} — {t['agent_count']} 个角色 [{agents}]\n      {desc}")
+            src = t.get("source", tm.SOURCE_SYSTEM)
+            groups.setdefault(src, []).append(t)
+
+        lines = [f"已保存模板 ({len(templates)} 个):"]
+        for src_key in [tm.SOURCE_USER, tm.SOURCE_PLUGIN, tm.SOURCE_SYSTEM]:
+            group = groups.get(src_key)
+            if not group:
+                continue
+            label = source_labels.get(src_key, src_key)
+            lines.append(f"  \u2500\u2500 {label} \u2500\u2500")
+            for t in group:
+                desc = t.get("description") or "(无描述)"
+                agents = ", ".join(t.get("agent_names", []))
+                lines.append(f"    \u2022 {t['name']} \u2014 {t['agent_count']} 个角色 [{agents}]")
+                lines.append(f"      {desc}")
+        lines.append("\n保存: /team --save=<name>  |  删除: /team --delete=<name>")
         InfoBar.info(
             f"团队模板 ({len(templates)})",
             "\n".join(lines),
             parent=self,
-            duration=8000,
+            duration=10000,
             position=InfoBarPosition.BOTTOM,
         )
 
@@ -3325,9 +3331,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 "模板已删除", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
             )
         else:
-            InfoBar.warning(
-                "模板不存在", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
-            )
+            # 检查模板是否存在于其他来源（系统/插件），给出更具体的提示
+            source = tm.get_source(name)
+            if source:
+                source_labels = {
+                    tm.SOURCE_SYSTEM: "系统内置",
+                    tm.SOURCE_PLUGIN: "插件提供",
+                    tm.SOURCE_USER: "用户自定义",
+                }
+                src_label = source_labels.get(source, source)
+                InfoBar.warning(
+                    "只读模板",
+                    f"模板「{name}」来自 {src_label}，只读不可删除。\n"
+                    f"仅用户保存的模板（来源: user）可删除。",
+                    parent=self,
+                    duration=5000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            else:
+                InfoBar.warning(
+                    "模板不存在", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                )
 
     # ── 邮箱监听与任务处理 ───────────────────────────
 
@@ -3365,6 +3389,12 @@ class OpenAIChatToolWindow(ToolWindow):
         """检查并处理待办任务邮件（串行：一次只处理一个）"""
         if self._team_processing:
             return  # 正在处理中，跳过
+
+        # 🛡️ 流式守卫：正在流式输出时不处理团队邮件，避免 _on_send_clicked 内的
+        # _on_stop_clicked() 中断当前 AI 回复。流式结束后由 _on_stream_finished
+        # 重新触发本函数。
+        if self._is_streaming:
+            return
 
         tm = self._get_team_manager()
         pending = tm.get_pending_tasks(self._window_id)
@@ -3477,15 +3507,22 @@ class OpenAIChatToolWindow(ToolWindow):
         - 更新窗口边框样式
         """
         if is_team and agent_name:
-            # 团队模式：标题显示角色
-            title = f"飘狐 [🏠 {agent_name}]"
-            # 窗口边框：根据 agent 生成辨识色，通过 ToolPopupDialog 绘制
+            # 团队模式：标题只显示 agent 名称
+            title = agent_name
+            # 窗口边框 + 标题字体颜色：根据 agent 生成辨识色
             color = self._agent_to_color(agent_name)
             self._set_dialog_border(color)
+            if self._title_bar:
+                self._title_bar.set_title_color(color)
         else:
-            # 独立模式：恢复原标题和默认边框
+            # 独立模式：恢复原标题、默认边框和默认字体颜色
             title = "飘狐"
             self._set_dialog_border("none")
+            # 恢复默认字体颜色：清除行内颜色样式 + 刷新标题栏样式
+            if self._title_bar:
+                self._title_bar.set_title_color("")
+                if hasattr(self._title_bar, 'refresh_style'):
+                    self._title_bar.refresh_style()
 
         try:
             if self._title_bar:
@@ -3582,8 +3619,9 @@ class OpenAIChatToolWindow(ToolWindow):
         支持以下写法（按优先级）：
           1. config_id（如 "b2c3d4e5"）—— 直接命中 _valid_configs
           2. display_name（如 "OpenCode Zen #2"）—— 查 _display_to_config_id 映射
-          3. provider_name（如 "OpenCode Zen"，同名时取第一个）—— 遍历匹配
-          4. 大小写不敏感的 provider_name 匹配
+          3. display_name 遍历 _valid_configs（_display_to_config_id 未就绪时的兜底）
+          4. provider_name（如 "OpenCode Zen"，同名时取第一个）—— 遍历匹配
+          5. 大小写不敏感的 provider_name 匹配
         返回 None 表示找不到。
         """
         if not name:
@@ -3591,15 +3629,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 1. config_id 直接命中
         if name in self._valid_configs:
             return name
-        # 2. display_name 命中
+        # 2. display_name 命中 _display_to_config_id 缓存
         display_to_config = getattr(self, "_display_to_config_id", {})
         if name in display_to_config:
             return display_to_config[name]
-        # 3. provider_name 精确匹配（同名取第一个）
+        # 3. display_name 遍历 _valid_configs 兜底（缓存未就绪时仍可匹配）
+        for cid, info in self._valid_configs.items():
+            if info.get("display_name") == name:
+                return cid
+        # 4. provider_name 精确匹配（同名取第一个）
         for cid, info in self._valid_configs.items():
             if info.get("provider_name") == name:
                 return cid
-        # 4. provider_name 大小写不敏感匹配
+        # 5. provider_name 大小写不敏感匹配
         name_lower = name.lower()
         for cid, info in self._valid_configs.items():
             pname = info.get("provider_name", "")
@@ -4544,6 +4586,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _open_settings_popup(self):
         """打开设置卡片"""
+        # 确保懒构建的设置弹窗已就绪（首帧后才会构建）
+        self._build_settings_popup()
         self._card_manager.toggle_card("settings", self._window_id)
         if self._card_manager.is_card_visible("settings", self._window_id):
             # 确保顶层窗口从最小化恢复并激活
@@ -5121,7 +5165,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
-        return [
+        # 设置弹窗为懒构建，首帧后才会存在；过滤 None 防止 _is_any_system_card_visible
+        # 在弹窗构建前调用时触发 None.isVisible() 异常。
+        cards = [
             self._model_config_card,
             self._history_card,
             self._settings_popup,
@@ -5130,6 +5176,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_loop_config_card,
             self._hook_edit_card,
         ]
+        return [c for c in cards if c is not None]
 
     def _is_any_system_card_visible(self) -> bool:
         """检查是否有任何系统卡片可见"""
@@ -5782,7 +5829,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -5847,7 +5894,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -5858,7 +5905,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
@@ -5875,7 +5922,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -5909,7 +5956,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -5950,7 +5997,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -5977,7 +6024,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -10472,7 +10519,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- --model=xxx：设置默认模型 ----
         model_match = re.match(r"^--model=(.+)$", args)
         if model_match:
-            model_value = model_match.group(1).strip()
+            model_value = model_match.group(1).strip().strip("\"'")
             if not model_value:
                 InfoBar.warning(
                     title="参数错误",
@@ -10654,7 +10701,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- --model=xxx：设置默认模型 ----
         model_match = re.match(r"^--model=(.+)$", args)
         if model_match:
-            model_value = model_match.group(1).strip()
+            model_value = model_match.group(1).strip().strip("\"'")
             if not model_value:
                 InfoBar.warning(
                     title="参数错误",
@@ -11353,6 +11400,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 团队任务：流式完成后清理邮件状态 + 注入 Stop 提示
         if getattr(self, "_current_team_mail", None):
             self._on_task_stream_finished()
+        else:
+            # 🆕 流式结束（非团队任务场景），检查流式过程中是否有新到达的团队邮件
+            # 被 _is_streaming 守卫拦住，现在重新触发处理
+            self._check_and_process_pending()
 
         if self.input_area:
             self.input_area.setFocus()
@@ -12251,6 +12302,35 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步刷新分支按钮样式
         self._refresh_branch_widget_style()
 
+    def _copy_branch_from(self, source):
+        """性能优化：从源窗口复制 git 分支标签状态，跳过同步 git 子进程调用。
+
+        复制/分支窗口与源窗口共享完全相同的项目与工作目录，git 分支必然一致，
+        无需再次执行 `git branch --show-current`（最坏可达 3s 阻塞主线程）。
+        直接复制源窗口已渲染的分支标签 UI 状态（文本/可见性/提示/项目 avatar 提示）即可。
+        """
+        from PyQt5 import sip
+
+        try:
+            if sip.isdeleted(source) or not hasattr(source, "_branch_widget"):
+                self._update_branch()
+                return
+            if sip.isdeleted(source._branch_widget):
+                self._update_branch()
+                return
+            branch_visible = source._branch_widget.isVisible()
+            self._branch_widget.setText(source._branch_widget.text())
+            self._branch_widget.setVisible(branch_visible)
+            self._branch_widget.setToolTip(source._branch_widget.toolTip())
+            if hasattr(self, "_pb_separator"):
+                self._pb_separator.setVisible(branch_visible)
+            # 同步项目 avatar tooltip（含完整项目名、路径、分支）
+            if hasattr(self, "_project_avatar") and hasattr(source, "_project_avatar"):
+                self._project_avatar.setToolTip(source._project_avatar.toolTip())
+        except Exception:
+            # 兜底：复制失败则回退到正常的 git 检测
+            self._update_branch()
+
     def _update_branch(self):
         """从工作目录检测 git 分支并更新分支标签"""
         branch = None
@@ -13146,7 +13226,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -13173,7 +13253,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

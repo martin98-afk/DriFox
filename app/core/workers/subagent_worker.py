@@ -511,7 +511,7 @@ class SubAgentExecutor(QThread):
                 assistant_msg["reasoning_content"] = current_reasoning
             current_messages.append(assistant_msg)
 
-            tool_results = self._execute_tools(tool_calls)
+            tool_results, hook_messages = self._execute_tools(tool_calls)
 
             if tool_results is None:
                 while self._pending_answer is None and not self._is_cancelled:
@@ -530,7 +530,10 @@ class SubAgentExecutor(QThread):
                 self._pending_answer = None
                 continue
 
+            # 先 extend tool_results（纯 role="tool" 消息，紧跟在 assistant(tool_calls) 之后），
+            # 再 extend hook_messages（role="assistant" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
             current_messages.extend(tool_results)
+            current_messages.extend(hook_messages)
             QCoreApplication.processEvents()
             time.sleep(0.2)
 
@@ -909,18 +912,24 @@ class SubAgentExecutor(QThread):
         # 4. 只做绝对上限保护（避免明显错误的极值）
         return min(requested_int, absolute_limit)
 
-    def _execute_tools(self, tool_calls: List[Dict]) -> Optional[List[Dict]]:
+    def _execute_tools(self, tool_calls: List[Dict]) -> tuple:
         """执行工具调用
 
+        返回 (tool_results, hook_messages) 元组。
+        - tool_results: 纯 role="tool" 消息列表，可安全 extend 到 assistant(tool_calls) 之后
+        - hook_messages: PreToolUse/PostToolUse 的 role="assistant" 消息列表，
+          应在所有 tool_results 被 extend 之后再 extend，避免插入 assistant(tool_calls)
+          和 tool 消息之间导致 API 2013 错误
+
         同步执行所有 tool_executor.execute()，并在末尾消费 backend 的 hook 队列：
-        - _pre_tool_message_queue → PreToolUse 消息（应在 tool_result 之前注入）
-        - _hook_message_queue    → PostToolUse 消息（应在 tool_result 之后注入）
-        把这些 hook 消息夹在 tool_result 序列之间，让 LLM 看到 hook 反馈。
+        - _pre_tool_message_queue → PreToolUse 消息（role="assistant"）
+        - _hook_message_queue    → PostToolUse 消息（role="assistant"）
         """
         if not tool_calls or not self.tool_executor:
-            return []
+            return [], []
 
-        results = []
+        tool_results = []
+        hook_messages = []
         for tc in tool_calls:
             tool_name = tc["function"]["name"]
             arguments = tc["function"]["arguments"]
@@ -943,7 +952,7 @@ class SubAgentExecutor(QThread):
 
             if tool_name == "question":
                 # 子智能体不需要 question 工具
-                return None
+                return None, []
 
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
@@ -962,10 +971,10 @@ class SubAgentExecutor(QThread):
             self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
             QCoreApplication.processEvents()
 
-            # 在每个 tool_result 之前，先消费 PreToolUse 队列（按 Claude Code 约定：PreToolUse 在 result 前）
+            # 消费 PreToolUse 队列（role="assistant" 消息），放入 hook_messages 而非 tool_results
             pretool_msgs = self._drain_pretool_queue()
             if pretool_msgs:
-                results.extend(pretool_msgs)
+                hook_messages.extend(pretool_msgs)
 
             raw_result = {
                 "role": "tool",
@@ -979,14 +988,14 @@ class SubAgentExecutor(QThread):
                 "anchors": getattr(result, "anchors", None) if result else None,
             }
             # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
-            results.append(to_api_message(raw_result) or raw_result)
+            tool_results.append(to_api_message(raw_result) or raw_result)
 
-            # 在 tool_result 之后，再消费 PostToolUse 队列（按 Claude Code 约定：PostToolUse 在 result 后）
+            # 消费 PostToolUse 队列（role="assistant" 消息），放入 hook_messages 而非 tool_results
             posttool_msgs = self._drain_posttool_queue()
             if posttool_msgs:
-                results.extend(posttool_msgs)
+                hook_messages.extend(posttool_msgs)
 
-        return results
+        return tool_results, hook_messages
 
     def _drain_pretool_queue(self) -> List[Dict[str, Any]]:
         """仅消费 backend 的 _pre_tool_message_queue（PreToolUse 消息）"""
