@@ -261,6 +261,20 @@ class HookMatchRule:
             states = [s.strip() for s in self.matcher.split("|")]
             return session_state in states
 
+        # Stop 停止原因匹配（参考 SessionStart 的 state 模式）
+        # matcher 格式如 "completed|cancelled|error"，匹配 context["reason"]
+        # reason 字段由 chat_worker.py 在 3 处 Stop 触发点注入：
+        #   - 正常完成 → "completed"
+        #   - 用户取消 → "cancelled"
+        #   - API 异常 → "error"
+        # matcher="#team_member" 特例保持一致：仅团队成员窗口触发
+        if event_name == "Stop":
+            if self.matcher == "#team_member":
+                return bool(context.get("is_team_member", False))
+            stop_reason = context.get("reason", "completed")
+            reasons = [r.strip() for r in self.matcher.split("|")]
+            return stop_reason in reasons
+
         # BuildSystemPrompt 智能体角色匹配
         # matcher 格式如 "primary|subagent"，匹配 context["current_role"]
         if event_name == "BuildSystemPrompt":

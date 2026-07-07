@@ -2946,25 +2946,71 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
-                /* 段落级差异：双栏对照（旧在左、新在右，配对行对齐） */
+                /* 空白上下文行（源文件空行）：折叠为紧凑细分隔线，避免单列模式下
+                   段落差异之间出现 bulky 空行；连续空行只渲染一条。 */
+                .tool-diff-inline .diff-line.diff-ctx-blank {{
+                    min-height: 0;
+                    height: 9px;
+                    border-bottom: 1px dashed rgba(139, 148, 158, 0.18);
+                }}
+                .tool-diff-inline .diff-line.diff-ctx-blank .line-code {{
+                    color: transparent;
+                }}
+                /* 段落级差异：默认单列（上下堆叠），双列模式(.split-view)左右对照 */
                 .tool-diff-inline .diff-segment {{
                     display: block;
                 }}
+                /* 默认单列：两栏上下堆叠，各占满宽 */
                 .tool-diff-inline .diff-seg-row {{
                     display: flex;
+                    flex-direction: column;
                     align-items: stretch;
                 }}
                 .tool-diff-inline .diff-seg-row > .diff-line {{
-                    flex: 1 1 50%;
+                    flex: 1 1 auto;
+                    width: 100%;
                     min-width: 0;
                     border-bottom: 1px solid transparent;
                 }}
+                /* 单列模式隐藏空栏占位（纯删/纯增段），避免空白行 */
                 .tool-diff-inline .diff-seg-empty {{
+                    display: none;
+                }}
+                /* 双列模式：左右对照，恢复占位栏 */
+                .tool-diff-inline.split-view .diff-seg-row {{
+                    flex-direction: row;
+                }}
+                .tool-diff-inline.split-view .diff-seg-row > .diff-line {{
+                    flex: 1 1 50%;
+                    width: auto;
+                }}
+                .tool-diff-inline.split-view .diff-seg-empty {{
+                    display: flex;
                     background: transparent !important;
                     box-shadow: none !important;
                 }}
                 .tool-diff-inline .diff-seg-empty .line-code {{
                     color: transparent;
+                }}
+                /* 单列/双列切换按钮（header 右上角） */
+                .tool-diff-inline__toggle {{
+                    flex: 0 0 auto;
+                    margin-left: 8px;
+                    padding: 2px 9px;
+                    font-size: {tag_font_size - 1}px;
+                    font-weight: 600;
+                    color: #8b949e;
+                    background: rgba(13,17,23,0.5);
+                    border: 1px solid rgba(139,148,158,0.3);
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-family: inherit;
+                    transition: color .15s, border-color .15s, background .15s;
+                }}
+                .tool-diff-inline__toggle:hover {{
+                    color: #c9d1d9;
+                    border-color: rgba(139,148,158,0.55);
+                    background: rgba(13,17,23,0.75);
                 }}
                 /* 元信息行（文件头/hunk头/截断）：行号列与符号列隐形，避免空列割裂视觉 */
                 .tool-diff-inline .diff-meta .line-num {{

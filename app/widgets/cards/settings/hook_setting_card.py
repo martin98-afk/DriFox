@@ -367,7 +367,16 @@ class HookEditCard(QWidget):
     """
 
     # SessionStart 会话状态选项
-    SESSION_STATES = ["startup", "resume", "clear", "compact"]
+    # 最后一项 "#team_member" 是精确匹配的特殊值，仅团队成员窗口触发；
+    # 在 matches() 中走 `if matcher == "#team_member"` 分支，与其他选项互斥。
+    SESSION_STATES = ["startup", "resume", "clear", "compact", "#team_member"]
+
+    # Stop 停止原因选项（对应 chat_worker.py 中三个 Stop 触发点的 reason 字段）
+    # - completed：正常完成（chat_worker.py:1477）
+    # - cancelled：用户取消（chat_worker.py:735-741）
+    # - error：API 异常退出（chat_worker.py:1714-1720）
+    # 最后一项 "#team_member" 是精确匹配的特殊值，仅团队成员窗口触发。
+    STOP_REASONS = ["completed", "cancelled", "error", "#team_member"]
 
     saved = pyqtSignal(dict)
     closed = pyqtSignal()
@@ -612,13 +621,13 @@ class HookEditCard(QWidget):
         """根据事件类型更新 matcher 输入框的占位提示"""
         placeholders = {
             "BuildSystemPrompt": ("匹配智能体角色：primary（主智能体）| subagent（子智能体）"),
-            "SessionStart": ("匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）"),
+            "SessionStart": ("匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）；#team_member 仅团队成员窗口触发（与其他互斥）"),
             "UserPromptSubmit": ("匹配用户提交的提问内容，正则表达式，如 .*帮助.* 或 .*错误.*"),
             "PreUserMessage": ("匹配即将发送的用户消息，正则表达式，如 .*安全.* 或 .*密码.*"),
             "PostUserMessage": ("匹配已处理的用户消息，正则表达式，如 .*代码.* 或 .*文件.*"),
             "PreAssistantMessage": ("匹配即将回复的上下文（基于用户消息），如 .*总结.* 或 .*翻译.*"),
             "PostAssistantMessage": ("匹配助手回复的内容，正则表达式，如 .*敏感信息.* 或 .*请注意.*"),
-            "Stop": ("匹配流式输出停止时的回复内容，如 .*完成.* 或 .*错误.*"),
+            "Stop": ("匹配停止原因：completed（完成）| cancelled（取消）| error（错误）；#team_member 仅团队成员窗口触发（与其他互斥）"),
         }
         # PreToolUse / PostToolUse 用 tool:xxx 示例
         tool_ph = "匹配工具：tool:edit（精确）| Edit|Write（正则）| .*文件.*（内容）"
@@ -660,6 +669,8 @@ class HookEditCard(QWidget):
             options = ["primary", "subagent"]
         elif event_name == "SessionStart":
             options = list(self.SESSION_STATES)
+        elif event_name == "Stop":
+            options = list(self.STOP_REASONS)
         elif event_name in ("PreToolUse", "PostToolUse"):
             options = sorted(ToolNameMapper.ALIAS_MAP.keys())
 
@@ -713,9 +724,37 @@ class HookEditCard(QWidget):
             self._matcher_checkboxes.append((cb, opt))
 
     def _on_matcher_check_toggled(self):
-        """勾选框变化 -> 更新文本输入框"""
+        """勾选框变化 -> 更新文本输入框
+
+        互斥规则：当 #team_member 在选项列表中（Stop/SessionStart 事件）时，
+        #team_member 与其他选项互斥——因为 hook_manager.matches() 中
+        `#team_member` 是精确匹配（matcher == "#team_member"），不能 pipe 组合。
+        """
         if self._syncing_matcher:
             return
+        # 检测当前事件是否含 #team_member 选项（Stop/SessionStart）
+        has_team_member_option = any(opt == "#team_member" for _, opt in self._matcher_checkboxes)
+        if has_team_member_option:
+            sender = self.sender()
+            sender_text = sender.text() if sender else ""
+            if sender_text == "#team_member" and sender.isChecked():
+                # 勾选 #team_member → 取消所有其他选项
+                self._syncing_matcher = True
+                try:
+                    for cb, opt in self._matcher_checkboxes:
+                        if opt != "#team_member" and cb.isChecked():
+                            cb.setChecked(False)
+                finally:
+                    self._syncing_matcher = False
+            elif sender_text != "#team_member" and sender.isChecked():
+                # 勾选非 #team_member → 取消 #team_member
+                self._syncing_matcher = True
+                try:
+                    for cb, opt in self._matcher_checkboxes:
+                        if opt == "#team_member" and cb.isChecked():
+                            cb.setChecked(False)
+                finally:
+                    self._syncing_matcher = False
         self._sync_matcher_text_from_checks()
 
     def _on_matcher_text_changed(self, text: str):
@@ -727,13 +766,22 @@ class HookEditCard(QWidget):
     def _sync_matcher_text_from_checks(self):
         """勾选框状态 -> pipe 分隔文本
 
-        注意：无勾选框时（如 Stop 事件）跳过，避免清空已手动输入的 matcher 文本。
+        注意：
+        - 无勾选框时（如 PreUserMessage 等纯正则事件）跳过
+        - 所有勾选框都未勾选时也跳过，避免清空 matcherEdit 文本
+          （保护用户手动输入的非预定义值，如 `#team_member`）
+        - 只有至少一个勾选框被勾选时才把文本同步为已选项
         """
         if not self._matcher_checkboxes:
             return
+        selected = [opt for cb, opt in self._matcher_checkboxes if cb.isChecked()]
+        if not selected:
+            # 全未勾选 → 不动 matcherEdit，保留用户已输入的手动文本
+            # 这避免了 #team_member 这种 matcher 在加载时（__init__ 末尾同步）
+            # 被静默清空成空字符串的回归
+            return
         self._syncing_matcher = True
         try:
-            selected = [opt for cb, opt in self._matcher_checkboxes if cb.isChecked()]
             text = "|".join(selected)
             self.matcherEdit.setText(text)
         finally:

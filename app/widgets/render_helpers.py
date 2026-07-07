@@ -491,7 +491,7 @@ def _render_diff_preview(diff_text: str) -> str:
     # ---- 3. 渲染 ----
     def _cell(kind, ln, sign, code_html, empty=False):
         if empty:
-            return ('<div class="diff-line seg-empty">'
+            return ('<div class="diff-line diff-seg-empty">'
                     '<span class="line-num">&nbsp;</span>'
                     '<span class="line-sign"></span>'
                     '<span class="line-code">&nbsp;</span></div>')
@@ -502,21 +502,16 @@ def _render_diff_preview(diff_text: str) -> str:
                 f'<span class="line-code">{code_html}</span></div>')
 
     rows = []
+    _prev_blank = False  # 折叠连续空上下文行，只保留一条细分隔线
     for seg in segments:
         if isinstance(seg, list):
-            # 差异段
+            _prev_blank = False
+            # 差异段：统一包成 .diff-segment > .diff-seg-row（左栏=旧/删除，右栏=新/新增）。
+            # 单列模式（.tool-diff-inline 默认）下 .diff-seg-row 上下堆叠、隐藏空栏占位；
+            # 双列模式（.split-view）下左右对照 —— 仅靠 CSS 的 flex-direction 切换，无需重渲染。
             dels = [p for p in seg if p["kind"] == "del"]
             adds = [p for p in seg if p["kind"] == "add"]
             pair = min(len(dels), len(adds))
-            if pair == 0:
-                # 纯删除 / 纯新增：单列渲染，避免半屏空白
-                for p in seg:
-                    if p["kind"] == "del":
-                        rows.append(_cell("del", p["old_ln"], "-", _highlight_code_line(p["text"], p["lexer"])))
-                    else:
-                        rows.append(_cell("add", p["new_ln"], "+", _highlight_code_line(p["text"], p["lexer"])))
-                continue
-            # 双栏段落级对照（旧在左、新在右，配对行对齐）
             rows.append('<div class="diff-segment">')
             for k in range(pair):
                 od, oa = dels[k], adds[k]
@@ -539,6 +534,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 rows.append('</div>')
             rows.append('</div>')
         elif seg["kind"] == "file":
+            _prev_blank = False
             rows.append(
                 f'<div class="diff-line diff-file-header diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
@@ -546,6 +542,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(seg["text"])}</span></div>'
             )
         elif seg["kind"] == "hunk":
+            _prev_blank = False
             rows.append(
                 f'<div class="diff-line diff-hunk diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
@@ -553,6 +550,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 f'<span class="line-code">{escape(seg["text"])}</span></div>'
             )
         elif seg["kind"] == "truncated":
+            _prev_blank = False
             rows.append(
                 f'<div class="diff-line diff-truncated diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
@@ -560,6 +558,20 @@ def _render_diff_preview(diff_text: str) -> str:
                 f'<span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>'
             )
         else:  # ctx
+            # 空白上下文行（源文件里的空行）折叠成一条紧凑细分隔线，避免单列模式下
+            # 段落差异之间出现 bulky 的空行。连续多个空行只保留第一条。
+            if seg["text"].strip() == "":
+                if _prev_blank:
+                    continue
+                _prev_blank = True
+                rows.append(
+                    '<div class="diff-line diff-ctx diff-ctx-blank">'
+                    '<span class="line-num">&nbsp;</span>'
+                    '<span class="line-sign"></span>'
+                    '<span class="line-code">&nbsp;</span></div>'
+                )
+                continue
+            _prev_blank = False
             rows.append(
                 f'<div class="diff-line diff-ctx">'
                 f'<span class="line-num">{seg["new_ln"] if seg["new_ln"] > 0 else ""}</span>'
@@ -1377,6 +1389,8 @@ def render_tool_block(
                     <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
                     <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
                 </span>
+                <button type="button" class="tool-diff-inline__toggle" title="切换单列/双列视图"
+                    onclick="var t=this.closest('.tool-diff-inline');var sp=t.classList.toggle('split-view');this.textContent=sp?'单列':'双列';">双列</button>
             </div>
             <div class="tool-diff-inline__body" style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
                 {diff_body}
