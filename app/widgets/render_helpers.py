@@ -379,8 +379,9 @@ def _render_diff_preview(diff_text: str) -> str:
 
     - 相邻的增/删差异（包括被 hunk 头隔开的紧邻小改动）聚合成一个
       「差异段」，差异段同时输出两套视图：
-      · 单列视图（.diff-seg-col，默认）：配对行做词级差异高亮（与双列共用
-        同一份 _highlighted_word_diff_html 输出），未配对行降级为整行高亮
+      · 单列视图（.diff-seg-col，默认）：所有删除行先、所有新增行后，
+        配对行做词级差异高亮（与双列共用同一份 _highlighted_word_diff_html
+        输出，未配对行降级为整行高亮
       · 双列视图（.diff-seg-paired，split-view）：左右对照的配对行 + 词级差异高亮
     超过 500 行时截断并显示行数。
     """
@@ -511,21 +512,34 @@ def _render_diff_preview(diff_text: str) -> str:
             pair = min(len(dels), len(adds))
 
             # === 双模式差异段 ===
-            # .diff-seg-col（单列默认）：配对竖排（删除与新增交替，带词级高亮）
+            # .diff-seg-col（单列默认）：所有删除先、所有新增后（带词级高亮）
             # .diff-seg-paired（双列 split-view）：左右对照的配对行
             rows.append('<div class="diff-segment">')
 
-            # ── 单列视图：配对竖排（删除与新增交替，带词级高亮） ──
-            rows.append('<div class="diff-seg-col">')
+            # ── 单列视图：所有删除行先、所有新增行后（带词级高亮） ──
+            # 先把配对行的词级高亮 HTML 算好缓存到 paired_htmls，
+            # 再分两段输出：先 del 全打，再 add 全打——避免 del/add 交替时
+            # 既要保持 "del→add" 配对又得来回切上下文。
             # TODO(refactor): 抽出 paired-row 渲染辅助函数与双列分支共用，避免再出"忘了同步"回归
+            rows.append('<div class="diff-seg-col">')
+            paired_htmls = []
             for k in range(pair):
                 od, oa = dels[k], adds[k]
                 old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
+                paired_htmls.append((od, old_html, oa, new_html))
+
+            # 1) 所有删除行
+            for k in range(pair):
+                od, old_html, _, _ = paired_htmls[k]
                 rows.append(_cell("del", od["old_ln"], "-", old_html))
-                rows.append(_cell("add", oa["new_ln"], "+", new_html))
             for k in range(pair, len(dels)):
                 od = dels[k]
                 rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
+
+            # 2) 所有新增行
+            for k in range(pair):
+                _, _, oa, new_html = paired_htmls[k]
+                rows.append(_cell("add", oa["new_ln"], "+", new_html))
             for k in range(pair, len(adds)):
                 oa = adds[k]
                 rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))

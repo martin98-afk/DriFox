@@ -2946,12 +2946,11 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
-                /* 空白上下文行（源文件空行）：折叠为紧凑细分隔线，避免单列模式下
+                /* 空白上下文行（源文件空行）：折叠为紧凑空隙，避免单列模式下
                    段落差异之间出现 bulky 空行；连续空行只渲染一条。 */
                 .tool-diff-inline .diff-line.diff-ctx-blank {{
                     min-height: 0;
                     height: 9px;
-                    border-bottom: 1px dashed rgba(139, 148, 158, 0.18);
                 }}
                 .tool-diff-inline .diff-line.diff-ctx-blank .line-code {{
                     color: transparent;

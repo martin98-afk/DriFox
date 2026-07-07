@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """测试 _render_diff_preview 单列视图的词级高亮与 fast-path。
 
-回归目标：commit 91012ce3 引入双视图后，单列分支 (.diff-seg-col) 默认隐藏
-了 .word-add/.word-del 字符级标识（必须手动切换到双列才看到）。修复后
-默认单列视图也应输出词级 span。
+回归目标：
+1. commit 91012ce3 引入双视图后，单列分支 (.diff-seg-col) 默认隐藏
+   了 .word-add/.word-del 字符级标识（必须手动切换到双列才看到）。修复后
+   默认单列视图也应输出词级 span。
+2. 单列视图布局为"所有删除行先、所有新增行后"（连续堆叠，不再
+   del/add 交替），同时保留词级差异高亮。
 
 覆盖场景：
-1. pair>0：单列视图内必须同时含 .word-del 与 .word-add span，且行号正确
+1. pair>0：单列视图内必须同时含 .word-del 与 .word-add span，
+   行号正确，且所有 del 集中在所有 add 之前
 2. pair=0（纯删/纯增）：走未配对 fallback，无词级 span
 3. >2000 字符：触发 fast-path 返回纯语法高亮，无词级 span
 """
@@ -45,7 +49,11 @@ class TestInlineDiffSingleColumn:
     """_render_diff_preview 单列视图词级高亮回归"""
 
     def test_pair_lines_have_word_markers_in_single_column(self):
-        """pair>0：单列视图内必须同时含 .word-del 与 .word-add span"""
+        """pair>0：单列视图内必须同时含 .word-del 与 .word-add span
+
+        布局约束：所有删除行连续堆叠在最前，所有新增行连续堆叠在最后
+        （区别于修复前的"先全删后全增"以及中间状态的"配对竖排 del/add 交替"）。
+        """
         diff = (
             "--- a/foo.py\n"
             "+++ b/foo.py\n"
@@ -57,12 +65,16 @@ class TestInlineDiffSingleColumn:
         html = _render_diff_preview(diff)
         seg_col = _extract_seg_col(html)
 
-        # 配对竖排：先 del 再 add（区别于修复前的"先全删后全增"）
+        # 所有删除行先、所有新增行后（连续堆叠）
         assert 'class="diff-line diff-del"' in seg_col, "应有 diff-del 行"
         assert 'class="diff-line diff-add"' in seg_col, "应有 diff-add 行"
-        del_pos = seg_col.find('class="diff-line diff-del"')
-        add_pos = seg_col.find('class="diff-line diff-add"')
-        assert del_pos < add_pos, "单列应为配对竖排：del 在 add 之前"
+        first_del = seg_col.find('class="diff-line diff-del"')
+        first_add = seg_col.find('class="diff-line diff-add"')
+        assert first_del < first_add, "单列布局：所有 del 行应位于所有 add 行之前"
+
+        # 强约束：最后一个 del 行的位置早于第一个 add 行（即 del 与 add 不交错）
+        last_del = seg_col.rfind('class="diff-line diff-del"')
+        assert last_del < first_add, "单列布局：所有 del 行必须连续堆叠在所有 add 行之前（不允许 del/add 交替）"
 
         # 核心断言：词级标识在单列视图中可见
         assert '<span class="word-del">' in seg_col, "单列 .diff-seg-col 必须包含 .word-del span（修复目标）"
@@ -105,9 +117,12 @@ class TestInlineDiffSingleColumn:
         html = _render_diff_preview(diff)
         seg_col = _extract_seg_col(html)
 
-        # 配对竖排仍然存在（修复后的结构）
+        # 布局仍然满足"所有 del 在前、所有 add 在后"
         assert 'class="diff-line diff-del"' in seg_col
         assert 'class="diff-line diff-add"' in seg_col
+        first_del = seg_col.find('class="diff-line diff-del"')
+        first_add = seg_col.find('class="diff-line diff-add"')
+        assert first_del < first_add, ">2000 字符 fast-path 也应保持 del→add 布局"
 
         # fast-path：不生成词级 span（_highlight_code_line 直接染色）
         assert '<span class="word-del">' not in seg_col, ">2000 字符 fast-path 不应输出 .word-del span"
