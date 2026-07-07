@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "## CodeGraph 代码智能引擎\n\n本项目已集成 **CodeGraph** — 一个基于符号索引的代码智能引擎，可以精确查找函数/类的定义、调用链和引用关系。\n\n### 使用方式\n- **优先使用 `codegraph`** mcp工具进行代码探索和符号查找，它比 grep/read 更精准、更高效\n- 当你需要理解某个函数、类或模块的结构时，直接通过符号名称查询即可获取完整源码和依赖链路\n- 查找调用者/被调用者、分析影响范围时，CodeGraph 能给出结构化的结果\n\n### CodeGraph 尚未初始化？\n如果当前项目还没有 `.codegraph/` 索引目录（表现为 codegraph 工具无法查询），请加载 **codegraph-init** 技能来初始化 CodeGraph 索引。该技能会自动扫描项目文件、构建符号索引。",
+            "id": "codegraph-session-prompt",
+            "enabled": true
+          }
+        ]
+      }
+    ]
+  }
+}
