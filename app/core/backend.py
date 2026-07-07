@@ -368,6 +368,16 @@ class ChatBackend(QObject):
         # Hook 完成回调 — 仅处理需要通过队列传递给 worker 的事件
         # 预对话事件（SessionStart, PreUserMessage, PostUserMessage 等）不经过此回调，
         # 由 engine.py 收集 trigger_event 返回值后直接注入 session.messages
+        # 🛡️ 这些预对话事件由调用方以 trigger_async=False 同步触发，结果通过返回值 +
+        # _inject_hook_to_session 直接写入 session.messages。若在 _execute_hook 同步路径中
+        # 再走本回调，会出现「signal 早于 _inject_hook_to_session」竞态：
+        # _on_hook_messages_changed 看到 session.messages 还是空的，但此时若处在
+        # _create_new_session 留下的 _session_switched 哨兵窗口里，_on_messages_updated 会
+        # 误报「worker 过期回调」并在 main_widget 中产生 WARNING 日志。
+        # 直接 return 让最终的 signal 由调用方（create_session / trigger_session_event /
+        # engine.send_message）在所有 hook 输出注入完成后再 emit。
+        _PRE_DIALOG_EVENTS = {"SessionStart", "PreUserMessage", "PostUserMessage"}
+
         def on_hook_finished(event_name: str, output: str, success: bool, status_message: str = ""):
             if not getattr(self, "_ui_valid", True):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
@@ -380,6 +390,12 @@ class ChatBackend(QObject):
             # BuildSystemPrompt hook 的输出已在 get_agent_system_prompt() 中直接注入 system prompt，
             # 不需要再通过队列注入到 assistant 消息中，跳过回调避免双重注入。
             if event_name == "BuildSystemPrompt":
+                return
+
+            # 🛡️ 预对话 hook 的输出由调用方负责直接注入 session.messages；
+            # 这里再 emit signal 会和 _session_switched 哨兵冲突，同时还会污染
+            # _hook_message_queue（chat_worker 不会消费 SessionStart 等预对话事件）。
+            if event_name in _PRE_DIALOG_EVENTS:
                 return
 
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
@@ -590,6 +606,13 @@ class ChatBackend(QObject):
 
         session = self.get_current_session()
         if not session:
+            return
+
+        # 🛡️ 兜底：极少数遗留路径仍可能在 _inject_hook_to_session 之前 emit signal
+        # （例如未来新增的预对话 hook 漏掉 on_hook_finished 跳过的情形）。
+        # 空消息触发 messages_updated 会让 UI 进入「等不到消息」状态，且会触发
+        # _session_switched 哨兵误报。直接跳过即可，调用方会在注入后再 emit 一次。
+        if not session.messages:
             return
 
         # 通知 UI 刷新消息列表
@@ -2063,6 +2086,15 @@ class ChatBackend(QObject):
             "state": state,
             "project_name": os.path.basename(project_root),
         }
+
+        # 团队模式：让 SessionStart hook 也能按 #team_member matcher 精确触发
+        # （与 chat_worker._trigger_worker_hook 注入的 is_team_member 字段对齐）
+        try:
+            from app.core.workers.chat_worker import _check_team_member
+
+            ctx["is_team_member"] = _check_team_member(self)
+        except Exception:
+            ctx["is_team_member"] = False
 
         # 项目笔记由 read_project_notes hook（BuildSystemPrompt）从本地 AGENTS.md 直接读取，
         # SessionStart 不再预取 notes 内容

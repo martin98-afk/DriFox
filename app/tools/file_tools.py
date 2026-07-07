@@ -649,10 +649,6 @@ class FileTools:
                     scanned_count += 1
                     if scanned_count % _log_interval == 0:
                         elapsed = time.time() - start_time
-                        logger.info(
-                            f"[grep] 已扫描 {scanned_count}/{len(file_paths)} 个文件"
-                            f"（{elapsed:.1f}s），累计命中 {len(all_results)} 条"
-                        )
                     hits = future.result()
                     all_results.extend(hits)
                     if len(all_results) >= result_limit:

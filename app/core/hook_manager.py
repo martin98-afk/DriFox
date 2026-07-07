@@ -252,7 +252,11 @@ class HookMatchRule:
 
         # SessionStart 会话状态匹配
         # matcher 格式如 "startup|resume|clear|compact"，匹配 context["state"]
+        # matcher="#team_member" 特例：仅当窗口是团队成员时触发（让 hooks.json 能为
+        # 团队成员单独配置会话启动指引，避免普通会话看到团队相关提示）
         if event_name == "SessionStart":
+            if self.matcher == "#team_member":
+                return bool(context.get("is_team_member", False))
             session_state = context.get("state", "startup")
             states = [s.strip() for s in self.matcher.split("|")]
             return session_state in states
