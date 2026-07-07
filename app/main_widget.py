@@ -9519,8 +9519,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 兼容 str_replace_editor / apply_patch 这类常见别名；读取类不在此列）
             WRITE_TOOLS = {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
 
-            diff_text_parts: list[str] = []
-            file_summaries: list[str] = []
+            # 按文件路径分组：同一文件在当轮的多次连续编辑合并为一份累积 diff，
+            # 避免文件名列重复、diff 碎片化，让 review 看清从初始到最终的完整变化。
+            file_ops: dict = {}
             for op in all_operations:
                 backup_path = op.get("backup_path", "")
                 file_path = op.get("file_path", "")
@@ -9529,11 +9530,25 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 if tool_name not in WRITE_TOOLS:
                     continue
+                key = file_path or Path(backup_path).name
+                if key not in file_ops:
+                    file_ops[key] = []
+                file_ops[key].append(op)
+
+            diff_text_parts: list[str] = []
+            file_summaries: list[str] = []
+
+            for file_key, ops in file_ops.items():
+                # 首操作的备份 = 编辑前的原始内容；尾操作编辑后的内容 = 最终状态
+                first_bp = ops[0].get("backup_path", "")
+                last_bp = ops[-1].get("backup_path", "")
                 try:
-                    old_content, new_content, backup_file = read_backup_files(backup_path)
+                    old_content, _, _ = read_backup_files(first_bp)
+                    last_after = str(Path(last_bp).with_suffix('.after.bak'))
+                    with open(last_after, 'r', encoding='utf-8', errors='replace') as f:
+                        new_content = f.read()
                 except Exception as exc:
-                    # 不要静默吞掉：让问题可追溯；保留旧行为（继续审查其他文件）
-                    logger.warning(f"[card-review] 跳过文件 {file_path or backup_path}: 读取备份失败 {exc}")
+                    logger.warning(f"[card-review] 跳过文件 {file_key}: 读取备份失败 {exc}")
                     continue
 
                 old_lines = normalize_lines(old_content)
@@ -9541,14 +9556,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 diff_iter = difflib.unified_diff(
                     old_lines,
                     new_lines,
-                    fromfile=f"a/{file_path or backup_file.name}",
-                    tofile=f"b/{file_path or backup_file.name}",
+                    fromfile=f"a/{file_key}",
+                    tofile=f"b/{file_key}",
                     lineterm="\n",
                 )
                 diff_text = "".join(diff_iter)
                 if diff_text:
                     diff_text_parts.append(diff_text)
-                    file_summaries.append(file_path or backup_file.name)
+                    file_summaries.append(file_key)
 
             if not diff_text_parts:
                 InfoBar.warning(
@@ -13520,8 +13535,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # finalize_stop 此时才到达，apply_interrupted_messages 会把旧消息写到新会话，
         # save 会落到新项目。直接丢弃整条回调（closeEvent 路径已处理数据持久化）。
         if getattr(self, "_session_switched", False):
-            from loguru import logger
-
             logger.warning(
                 f"[FinalizeStop] 检测到会话切换哨兵，丢弃 finalize 回调："
                 f"interrupted_count={len(interrupted_messages) if interrupted_messages else 0}"

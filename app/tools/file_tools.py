@@ -564,8 +564,10 @@ class FileTools:
             search_root = self._resolve_path(path)
             if not search_root.exists():
                 return ToolResult(False, error=f"Path not found: {path}")
-            if not search_root.is_dir():
-                return ToolResult(False, error=f"Not a directory: {path}")
+
+            # ── 支持直接传入文件路径 ──
+            if search_root.is_file():
+                return self._grep_single_file(search_root, pattern)
 
             regex = _compile_grep_pattern(pattern)
 
@@ -680,6 +682,39 @@ class FileTools:
 
         except Exception as e:
             return ToolResult(False, error=f"Grep error: {str(e)}")
+
+    def _grep_single_file(self, file_path: Path, pattern: str) -> ToolResult:
+        """在单个文件中执行 grep 搜索"""
+        try:
+            regex = _compile_grep_pattern(pattern)
+            # 跳过二进制文件
+            if _is_binary_file(file_path):
+                return ToolResult(True, content=f"Skipped binary file: {file_path.name}")
+            try:
+                if file_path.stat().st_size > 1 * 1024 * 1024:
+                    return ToolResult(True, content=f"File too large (>1MB): {file_path.name}")
+            except OSError:
+                return ToolResult(False, error=f"Cannot access file: {file_path}")
+
+            results: list[str] = []
+            try:
+                rel = file_path.relative_to(self.workdir)
+            except ValueError:
+                rel = file_path
+
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                for i, line in enumerate(f, 1):
+                    if regex.search(line):
+                        results.append(f"{rel}:{i}: {line.strip()[:300]}")
+                        if len(results) >= 100:
+                            break
+
+            if not results:
+                return ToolResult(True, content=f"No matches found in {rel}")
+            meta = f"# Search: {pattern} in {rel} | {len(results)} matches\n\n"
+            return ToolResult(True, content=meta + "\n".join(results))
+        except Exception as e:
+            return ToolResult(False, error=f"Grep single file error: {str(e)}")
 
     def list_directory(self, path: str = ".") -> ToolResult:
         """
