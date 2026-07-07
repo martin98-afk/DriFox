@@ -4343,7 +4343,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -6769,7 +6769,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):

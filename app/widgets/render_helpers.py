@@ -229,7 +229,7 @@ def _parse_subagent_task_ids(result: str) -> str:
                 return ",".join(task_ids)
         elif isinstance(data, list):
             return ",".join(data)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         pass
 
     # 尝试从文本中提取 task_id（UUID 格式）
@@ -567,7 +567,7 @@ def _extract_screenshot_image_path(result: str) -> str:
             path = data.get("absolute_path") or data.get("path") or ""
             if path and os.path.isfile(path):
                 return path
-    except ValueError, SyntaxError, MemoryError:
+    except (ValueError, SyntaxError, MemoryError):
         pass
 
     # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
@@ -984,7 +984,7 @@ def _parse_questions_field(questions_raw) -> list:
                 return [_normalize_question_item(q) for q in parsed]
             elif isinstance(parsed, dict):
                 return [_normalize_question_item(parsed)]
-        except json.JSONDecodeError, ValueError:
+        except (json.JSONDecodeError, ValueError):
             pass
         # JSON 解析失败（可能被截断），作为单个问题展示原始文本
         return [{"question": questions_raw, "options": [], "multiple": False}]
