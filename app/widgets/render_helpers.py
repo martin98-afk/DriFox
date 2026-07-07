@@ -506,13 +506,27 @@ def _render_diff_preview(diff_text: str) -> str:
     for seg in segments:
         if isinstance(seg, list):
             _prev_blank = False
-            # 差异段：统一包成 .diff-segment > .diff-seg-row（左栏=旧/删除，右栏=新/新增）。
-            # 单列模式（.tool-diff-inline 默认）下 .diff-seg-row 上下堆叠、隐藏空栏占位；
-            # 双列模式（.split-view）下左右对照 —— 仅靠 CSS 的 flex-direction 切换，无需重渲染。
             dels = [p for p in seg if p["kind"] == "del"]
             adds = [p for p in seg if p["kind"] == "add"]
             pair = min(len(dels), len(adds))
+
+            # === 双模式差异段 ===
+            # .diff-seg-col（单列默认）：删除行全部在一起，新增行全部在一起
+            # .diff-seg-paired（双列 split-view）：左右对照的配对行
             rows.append('<div class="diff-segment">')
+
+            # ── 单列视图：所有删除行 → 所有新增行 ──
+            rows.append('<div class="diff-seg-col">')
+            for d in dels:
+                rows.append(_cell("del", d["old_ln"], "-",
+                    _highlight_code_line(d["text"], d["lexer"])))
+            for a in adds:
+                rows.append(_cell("add", a["new_ln"], "+",
+                    _highlight_code_line(a["text"], a["lexer"])))
+            rows.append('</div>')
+
+            # ── 双列视图：配对行（旧左新右），带词级高亮 ──
+            rows.append('<div class="diff-seg-paired">')
             for k in range(pair):
                 od, oa = dels[k], adds[k]
                 old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
@@ -523,16 +537,20 @@ def _render_diff_preview(diff_text: str) -> str:
             for k in range(pair, len(dels)):
                 od = dels[k]
                 rows.append('<div class="diff-seg-row">')
-                rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
+                rows.append(_cell("del", od["old_ln"], "-",
+                    _highlight_code_line(od["text"], od["lexer"])))
                 rows.append(_cell("add", "", "", "", empty=True))
                 rows.append('</div>')
             for k in range(pair, len(adds)):
                 oa = adds[k]
                 rows.append('<div class="diff-seg-row">')
                 rows.append(_cell("del", "", "", "", empty=True))
-                rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
+                rows.append(_cell("add", oa["new_ln"], "+",
+                    _highlight_code_line(oa["text"], oa["lexer"])))
                 rows.append('</div>')
-            rows.append('</div>')
+            rows.append('</div>')  # /.diff-seg-paired
+
+            rows.append('</div>')  # /.diff-segment
         elif seg["kind"] == "file":
             _prev_blank = False
             rows.append(

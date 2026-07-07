@@ -2956,35 +2956,41 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-line.diff-ctx-blank .line-code {{
                     color: transparent;
                 }}
-                /* 段落级差异：默认单列（上下堆叠），双列模式(.split-view)左右对照 */
+                /* === 差异段：单列默认为"删除→新增"分组，双列(split-view)为配对行左右对照 === */
                 .tool-diff-inline .diff-segment {{
                     display: block;
                 }}
-                /* 默认单列：两栏上下堆叠，各占满宽 */
+                /* 单列模式（默认）：所有删除先、所有新增后，连续堆叠 */
+                .tool-diff-inline .diff-seg-col {{
+                    display: block;
+                }}
+                .tool-diff-inline .diff-seg-col > .diff-line {{
+                    border-bottom: 1px solid transparent;
+                }}
+                /* 配对行视图（双列模式用）：默认隐藏 */
+                .tool-diff-inline .diff-seg-paired {{
+                    display: none;
+                }}
+                /* 双列模式：隐藏单列视图，显示配对视图 */
+                .tool-diff-inline.split-view .diff-seg-col {{
+                    display: none;
+                }}
+                .tool-diff-inline.split-view .diff-seg-paired {{
+                    display: block;
+                }}
+                /* 配对行：左右对照（始终 row，因为仅在 split-view 中出现） */
                 .tool-diff-inline .diff-seg-row {{
                     display: flex;
-                    flex-direction: column;
+                    flex-direction: row;
                     align-items: stretch;
                 }}
                 .tool-diff-inline .diff-seg-row > .diff-line {{
-                    flex: 1 1 auto;
-                    width: 100%;
-                    min-width: 0;
-                    border-bottom: 1px solid transparent;
-                }}
-                /* 单列模式隐藏空栏占位（纯删/纯增段），避免空白行 */
-                .tool-diff-inline .diff-seg-empty {{
-                    display: none;
-                }}
-                /* 双列模式：左右对照，恢复占位栏 */
-                .tool-diff-inline.split-view .diff-seg-row {{
-                    flex-direction: row;
-                }}
-                .tool-diff-inline.split-view .diff-seg-row > .diff-line {{
                     flex: 1 1 50%;
                     width: auto;
+                    border-bottom: 1px solid transparent;
                 }}
-                .tool-diff-inline.split-view .diff-seg-empty {{
+                /* 空栏占位（纯删/纯增段在双列模式中的空白占位列） */
+                .tool-diff-inline .diff-seg-empty {{
                     display: flex;
                     background: transparent !important;
                     box-shadow: none !important;
