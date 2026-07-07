@@ -378,10 +378,10 @@ def _render_diff_preview(diff_text: str) -> str:
     将 unified diff 渲染为带语法高亮、段落级差异的 HTML。
 
     - 相邻的增/删差异（包括被 hunk 头隔开的紧邻小改动）聚合成一个
-      「差异段」，用双栏对照呈现（旧版本在左、新版本在右，配对行对齐），
-      消除 - + - + 交替碎片化、优化阅读。
-    - 纯新增 / 纯删除段退化为单列（避免半屏空白）。
-    - 连续 -/+ 配对行做词级差异高亮。
+      「差异段」，差异段同时输出两套视图：
+      · 单列视图（.diff-seg-col，默认）：配对行做词级差异高亮（与双列共用
+        同一份 _highlighted_word_diff_html 输出），未配对行降级为整行高亮
+      · 双列视图（.diff-seg-paired，split-view）：左右对照的配对行 + 词级差异高亮
     超过 500 行时截断并显示行数。
     """
     lines = diff_text.split("\n")[1:]
@@ -511,18 +511,24 @@ def _render_diff_preview(diff_text: str) -> str:
             pair = min(len(dels), len(adds))
 
             # === 双模式差异段 ===
-            # .diff-seg-col（单列默认）：删除行全部在一起，新增行全部在一起
+            # .diff-seg-col（单列默认）：配对竖排（删除与新增交替，带词级高亮）
             # .diff-seg-paired（双列 split-view）：左右对照的配对行
             rows.append('<div class="diff-segment">')
 
-            # ── 单列视图：所有删除行 → 所有新增行 ──
+            # ── 单列视图：配对竖排（删除与新增交替，带词级高亮） ──
             rows.append('<div class="diff-seg-col">')
-            for d in dels:
-                rows.append(_cell("del", d["old_ln"], "-",
-                    _highlight_code_line(d["text"], d["lexer"])))
-            for a in adds:
-                rows.append(_cell("add", a["new_ln"], "+",
-                    _highlight_code_line(a["text"], a["lexer"])))
+            # TODO(refactor): 抽出 paired-row 渲染辅助函数与双列分支共用，避免再出"忘了同步"回归
+            for k in range(pair):
+                od, oa = dels[k], adds[k]
+                old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
+                rows.append(_cell("del", od["old_ln"], "-", old_html))
+                rows.append(_cell("add", oa["new_ln"], "+", new_html))
+            for k in range(pair, len(dels)):
+                od = dels[k]
+                rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
+            for k in range(pair, len(adds)):
+                oa = adds[k]
+                rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
             rows.append('</div>')
 
             # ── 双列视图：配对行（旧左新右），带词级高亮 ──
