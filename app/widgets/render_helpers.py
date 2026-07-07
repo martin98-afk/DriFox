@@ -14,6 +14,100 @@ import orjson as json
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
+# ===== Pygments 语法高亮（行内 diff 代码着色，复用与 message_card 一致的 dracula 主题）=====
+# 注意：render_helpers 被 message_card 反向依赖，若从 message_card 导入会形成循环导入，
+# 因此在此处就地维护一套带缓存的轻量着色逻辑（与 message_card 的 lexer/formatter 模式一致）。
+from pygments import highlight as _pyg_highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
+
+# 行内 diff 专用 formatter：nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
+_DIFF_FORMATTER = HtmlFormatter(nowrap=True, style="dracula", noclasses=True)
+_TEXT_LEXER = TextLexer()
+_DIFF_LEXER_CACHE: dict = {}
+
+# 扩展名 → pygments lexer 别名（get_lexer_for_filename 找不到时的兜底）
+_EXT_LEXER_MAP = {
+    ".py": "python", ".pyi": "python", ".js": "javascript", ".mjs": "javascript",
+    ".ts": "typescript", ".tsx": "tsx", ".jsx": "jsx", ".html": "html", ".htm": "html",
+    ".css": "css", ".scss": "scss", ".less": "less", ".json": "json", ".jsonc": "json",
+    ".md": "markdown", ".markdown": "markdown", ".yml": "yaml", ".yaml": "yaml",
+    ".java": "java", ".go": "go", ".rs": "rust", ".c": "c", ".h": "c", ".cpp": "cpp",
+    ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".cs": "csharp", ".rb": "ruby",
+    ".php": "php", ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".fish": "bash",
+    ".sql": "sql", ".xml": "xml", ".toml": "toml", ".ini": "ini", ".cfg": "ini",
+    ".conf": "ini", ".lua": "lua", ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift",
+    ".r": "r", ".pl": "perl", ".pm": "perl", ".dart": "dart", ".vue": "vue",
+    ".dockerfile": "docker", ".mk": "makefile", ".cmake": "cmake", ".tf": "hcl",
+    ".ex": "elixir", ".exs": "elixir", ".erl": "erlang", ".hs": "haskell",
+    ".scala": "scala", ".groovy": "groovy", ".ps1": "powershell", ".bat": "batch",
+}
+
+
+def _get_diff_lexer(path: str):
+    """根据文件路径推断 lexer，按扩展名缓存，避免重复构造（构造开销大）"""
+    if not path or path == "/dev/null":
+        return _TEXT_LEXER
+    key = os.path.splitext(path)[1].lower() or path
+    cached = _DIFF_LEXER_CACHE.get(key)
+    if cached is not None:
+        return cached
+    lex = _TEXT_LEXER
+    try:
+        lex = get_lexer_for_filename(path)
+    except Exception:
+        alias = _EXT_LEXER_MAP.get(key)
+        if alias:
+            try:
+                lex = get_lexer_by_name(alias)
+            except Exception:
+                lex = _TEXT_LEXER
+    _DIFF_LEXER_CACHE[key] = lex
+    return lex
+
+
+def _highlight_code_line(text: str, lexer) -> str:
+    """对单行代码做语法高亮，返回带内联 color 的 HTML（nowrap，无 <pre> 包裹）
+
+    注意：Pygments 在 nowrap 模式下会在输出末尾追加一个 "\\n"。词级差异会把每个
+    词段单独高亮后拼接，若保留该换行，整行会被切碎、出现多余空白与异常换行。
+    这里统一剥掉末尾换行（高亮的都是单行/单词段，不含真实换行）。
+    """
+    if lexer is None or lexer is _TEXT_LEXER:
+        return escape(text)
+    try:
+        return _pyg_highlight(text, lexer, _DIFF_FORMATTER).rstrip("\n")
+    except Exception:
+        return escape(text)
+
+
+def _highlighted_word_diff_html(old_text: str, new_text: str, lexer) -> tuple:
+    """词级差异高亮（背景叠加）+ 每段语法高亮，返回 (old_html, new_html)
+
+    在原有词级差异（.word-del/.word-add 背景叠加）基础上，对每个词段再做
+    Pygments 着色，使"改了什么"和"语法结构"同时可见。
+    """
+    if len(old_text) + len(new_text) > 2000:
+        return _highlight_code_line(old_text, lexer), _highlight_code_line(new_text, lexer)
+    old_tokens = _WORD_RE.findall(old_text) or [old_text]
+    new_tokens = _WORD_RE.findall(new_text) or [new_text]
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
+    old_parts = []
+    new_parts = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            old_parts.append(_highlight_code_line("".join(old_tokens[i1:i2]), lexer))
+            new_parts.append(_highlight_code_line("".join(new_tokens[j1:j2]), lexer))
+        elif tag == "delete":
+            old_parts.append(f'<span class="word-del">{_highlight_code_line("".join(old_tokens[i1:i2]), lexer)}</span>')
+        elif tag == "insert":
+            new_parts.append(f'<span class="word-add">{_highlight_code_line("".join(new_tokens[j1:j2]), lexer)}</span>')
+        elif tag == "replace":
+            old_parts.append(f'<span class="word-del">{_highlight_code_line("".join(old_tokens[i1:i2]), lexer)}</span>')
+            new_parts.append(f'<span class="word-add">{_highlight_code_line("".join(new_tokens[j1:j2]), lexer)}</span>')
+    return "".join(old_parts), "".join(new_parts)
+
+
 # 预编译正则表达式（模块级别缓存，避免重复编译）
 _CODE_BLOCK_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -244,29 +338,6 @@ def _parse_subagent_task_ids(result: str) -> str:
 _WORD_RE = re.compile(r"(\w+|\W+)")
 
 
-def _word_diff_html(old_text: str, new_text: str) -> tuple:
-    """词级差异高亮，返回 (old_html, new_html)"""
-    if len(old_text) + len(new_text) > 2000:
-        return escape(old_text), escape(new_text)
-    old_tokens = _WORD_RE.findall(old_text) or [old_text]
-    new_tokens = _WORD_RE.findall(new_text) or [new_text]
-    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
-    old_parts = []
-    new_parts = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            old_parts.append(escape("".join(old_tokens[i1:i2])))
-            new_parts.append(escape("".join(new_tokens[j1:j2])))
-        elif tag == "delete":
-            old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
-        elif tag == "insert":
-            new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
-        elif tag == "replace":
-            old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
-            new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
-    return "".join(old_parts), "".join(new_parts)
-
-
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)")
 
 
@@ -324,6 +395,7 @@ def _render_diff_preview(diff_text: str) -> str:
     new_ln = 0
     i = 0
     _pending_old_header = None
+    current_lexer = _TEXT_LEXER  # 随 +++ 文件头切换，用于逐行语法高亮
 
     def _clean_path(p: str) -> str:
         p = p.strip()
@@ -357,6 +429,7 @@ def _render_diff_preview(diff_text: str) -> str:
                     display = f"{old_path} → {new_path}"
                 else:
                     display = new_path or old_path
+                current_lexer = _get_diff_lexer(new_path or old_path)
                 rows.append(
                     f'<div class="diff-line diff-file-header diff-meta">'
                     f'<span class="line-num">&nbsp;</span>'
@@ -364,6 +437,7 @@ def _render_diff_preview(diff_text: str) -> str:
                     f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(display)}</span></div>'
                 )
             else:
+                current_lexer = _get_diff_lexer(_clean_path(line[4:]))
                 rows.append(
                     f'<div class="diff-line diff-file-header diff-meta">'
                     f'<span class="line-num">&nbsp;</span>'
@@ -414,7 +488,7 @@ def _render_diff_preview(diff_text: str) -> str:
             # 便于上下对照词级差异，行号连续
             pair_count = min(len(del_lines), len(add_lines))
             for k in range(pair_count):
-                old_html, new_html = _word_diff_html(del_lines[k], add_lines[k])
+                old_html, new_html = _highlighted_word_diff_html(del_lines[k], add_lines[k], current_lexer)
                 rows.append(
                     f'<div class="diff-line diff-del">'
                     f'<span class="line-num">{old_ln}</span>'
@@ -436,7 +510,7 @@ def _render_diff_preview(diff_text: str) -> str:
                     f'<div class="diff-line diff-del">'
                     f'<span class="line-num">{old_ln}</span>'
                     f'<span class="line-sign">-</span>'
-                    f'<span class="line-code">{escape(del_lines[k])}</span></div>'
+                    f'<span class="line-code">{_highlight_code_line(del_lines[k], current_lexer)}</span></div>'
                 )
                 old_ln += 1
 
@@ -446,7 +520,7 @@ def _render_diff_preview(diff_text: str) -> str:
                     f'<div class="diff-line diff-add">'
                     f'<span class="line-num">{new_ln}</span>'
                     f'<span class="line-sign">+</span>'
-                    f'<span class="line-code">{escape(add_lines[k])}</span></div>'
+                    f'<span class="line-code">{_highlight_code_line(add_lines[k], current_lexer)}</span></div>'
                 )
                 new_ln += 1
 
@@ -456,7 +530,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 f'<div class="diff-line diff-add">'
                 f'<span class="line-num">{new_ln}</span>'
                 f'<span class="line-sign">+</span>'
-                f'<span class="line-code">{escape(line[1:])}</span></div>'
+                f'<span class="line-code">{_highlight_code_line(line[1:], current_lexer)}</span></div>'
             )
             new_ln += 1
             i += 1
@@ -467,7 +541,7 @@ def _render_diff_preview(diff_text: str) -> str:
                 f'<div class="diff-line diff-ctx">'
                 f'<span class="line-num">{new_ln if new_ln > 0 else ""}</span>'
                 f'<span class="line-sign"></span>'
-                f'<span class="line-code">{escape(stripped)}</span></div>'
+                f'<span class="line-code">{_highlight_code_line(stripped, current_lexer)}</span></div>'
             )
             if old_ln > 0:
                 old_ln += 1
