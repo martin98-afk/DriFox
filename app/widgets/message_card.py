@@ -3202,10 +3202,8 @@ class CodeWebViewer(QWebEngineView):
                     body.style.opacity = startOpacity;
                     // 立即设置 overflow 防止内容泄漏
                     body.style.overflow = 'hidden';
-                    // 折叠时立即设置高度，防止视觉抖动
-                    if (isCollapsing) body.style.height = '0px';
 
-                    // 强制重绘
+                    // 强制重绘，确保第一帧从正确的 startHeight 开始
                     void body.offsetHeight;
 
                     // 取消之前的动画
@@ -3219,7 +3217,6 @@ class CodeWebViewer(QWebEngineView):
                         // 使用 easeOutQuad 缓动
                         const eased = 1 - (1 - progress) * (1 - progress);
 
-                        // 折叠时 startHeight 已经是0，currentHeight 计算应该从0开始
                         const currentHeight = isCollapsing 
                             ? startHeight * (1 - eased)  // 从 startHeight 减少到 0
                             : startHeight + (endHeight - startHeight) * eased;
@@ -3234,11 +3231,16 @@ class CodeWebViewer(QWebEngineView):
                             // 动画结束：设置最终状态
                             body.style.height = expand ? 'auto' : '0px';
                             body.style.opacity = endOpacity;
-                            body.style.overflow = '';
-                            // 动画结束后重置高度报告标志
+                            // 折叠后保持 overflow hidden，防止内容溢出导致文档高度波动
+                            if (!expand) body.style.overflow = 'hidden';
+                            else body.style.overflow = '';
+                            // 强制重排确保布局已稳定，然后立即报告最终高度
+                            // 先 void body.offsetHeight 强制同步布局，再 reportHeight
+                            void body.offsetHeight;
+                            reportHeight();
+                            // ⚠️ 最后释放高度报告抑制，避免 ResizeObserver 在布局计算期间
+                            // 被 overflow 等属性变化触发二次报告（50ms 后 viewer 再跳一次）
                             _collapsibleHeightReporting = false;
-                            // 动画结束后延迟报告高度，确保 CSS transition 完成
-                            setTimeout(() => reportHeight(), 80);
                         }}
                     }}
 
@@ -5899,19 +5901,21 @@ class MessageCard(SimpleCardWidget):
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         self._target_viewer_height = target_height
 
-        # 关键优化：高度变化完全由 CSS transition 驱动
-        # PyQt 只设置最终值，不做 QVariantAnimation 插值动画
-        # 因为 CSS transition 已经提供了平滑动画
+        # 关键优化：流式或小变化 → 立即跳转
         if self._streaming or abs(target_height - current_height) < 10:
             if self._height_anim.state() == QVariantAnimation.Running:
                 self._height_anim.stop()
             self._apply_viewer_height(target_height)
             return
 
-        # 停止任何正在进行的动画，直接跳到目标值
-        # CSS transition 会负责平滑过渡
-        self._height_anim.stop()
+        # 非流式大高度变化（折叠/展开）：一次性设 viewer 最终高度，
+        # 但跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
+        # 卡片位置因容器动画与 viewer 高度变化不同步而"闪现"。
+        # card_container 检查 NO_ANIMATION_PROP → 直接 snap 到目标高度。
+        self.setProperty("noContainerAnimation", True)
         self._apply_viewer_height(target_height)
+        # 延迟清除标志，等容器 snap 完成
+        QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
 
     def _on_height_anim_state_changed(self, state):
         self._is_height_animating = state == QVariantAnimation.Running

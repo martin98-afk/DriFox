@@ -2938,6 +2938,9 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             logger.exception("[_handle_team_leave] 切换默认智能体失败")
 
+        # 6) 恢复模型选择按钮的 tooltip（离开团队后不再显示 agent 信息）
+        self._update_model_selector_btn()
+
         InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
 
     # ── 团队模板（save / load / list / delete）────────
@@ -3531,6 +3534,14 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             if self._title_bar:
                 self._title_bar.set_title(title)
+        except Exception:
+            pass
+
+        # 同步更新对话框的窗口标题（影响任务栏底部显示的名称）
+        try:
+            dialog = self.window() if hasattr(self, "window") else None
+            if dialog and hasattr(dialog, "setWindowTitle"):
+                dialog.setWindowTitle(title)
         except Exception:
             pass
 
@@ -6452,9 +6463,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 更新按钮组的 tooltip
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
-            # 更新模型选择按钮的 tooltip
-            if hasattr(self, "current_model_btn"):
-                self.current_model_btn.setToolTip(f"{agent.name}: {agent.description}\nMode: {mode}, {hidden}")
 
     def _create_new_session(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
