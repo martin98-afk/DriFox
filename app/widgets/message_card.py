@@ -2786,43 +2786,21 @@ class CodeWebViewer(QWebEngineView):
                 .tool-expanded-content {{
                     padding: 0;
                 }}
-                .tool-diff-stats {{
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 3px;
-                    margin-left: 4px;
-                    padding: 1px 6px;
-                    border: 1px solid rgba(139, 148, 158, 0.2);
-                    border-radius: 999px;
-                    background: rgba(139, 148, 158, 0.08);
-                    font-weight: 700;
-                    white-space: nowrap;
-                }}
-                .tool-diff-stats__add {{
-                    color: #3fb950;
-                }}
-                .tool-diff-stats__del {{
-                    color: #ff7b72;
-                }}
-                .tool-diff-stats__sep {{
-                    color: #6e7681;
-                }}
                 .tool-diff-inline {{
-                    margin: 0 0 2px;
-                    background: linear-gradient(180deg, rgba(22,27,34,0.62), rgba(13,17,23,0.42));
-                    border: 1px solid rgba(139, 148, 158, 0.22);
+                    margin: 0;
+                    background: rgba(13,17,23,0.40);
+                    border: 1px solid rgba(48,54,61,0.25);
                     border-radius: 8px;
                     overflow: hidden;
-                    box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
                 }}
                 .tool-diff-inline__header {{
                     display: flex;
                     align-items: center;
                     gap: 8px;
                     min-width: 0;
-                    padding: 7px 10px;
-                    background: rgba(255,255,255,0.035);
-                    border-bottom: 1px solid rgba(139, 148, 158, 0.16);
+                    padding: 4px 10px;
+                    background: rgba(22,27,34,0.40);
+                    border-bottom: 1px solid rgba(48,54,61,0.25);
                     color: #8b949e;
                     font-size: {small_font_size}px;
                     font-weight: 600;
@@ -2997,26 +2975,7 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-seg-empty .line-code {{
                     color: transparent;
                 }}
-                /* 单列/双列切换按钮（header 右上角） */
-                .tool-diff-inline__toggle {{
-                    flex: 0 0 auto;
-                    margin-left: 8px;
-                    padding: 2px 9px;
-                    font-size: {tag_font_size - 1}px;
-                    font-weight: 600;
-                    color: #8b949e;
-                    background: rgba(13,17,23,0.5);
-                    border: 1px solid rgba(139,148,158,0.3);
-                    border-radius: 6px;
-                    cursor: pointer;
-                    font-family: inherit;
-                    transition: color .15s, border-color .15s, background .15s;
-                }}
-                .tool-diff-inline__toggle:hover {{
-                    color: #c9d1d9;
-                    border-color: rgba(139,148,158,0.55);
-                    background: rgba(13,17,23,0.75);
-                }}
+
                 /* 元信息行（文件头/hunk头/截断）：行号列与符号列隐形，避免空列割裂视觉 */
                 .tool-diff-inline .diff-meta .line-num {{
                     background: transparent;

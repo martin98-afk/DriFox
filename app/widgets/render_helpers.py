@@ -1324,36 +1324,7 @@ def render_tool_block(
         )
 
     # 文件编辑工具判断
-    file_edit_tools = {"write", "edit", "multi_edit"}
-    is_file_edit = tool_name in file_edit_tools
     diff_summary = _summarize_diff(diff or "") if diff else {"added": 0, "deleted": 0, "files": []}
-
-    # 差异统计（+N/-N）
-    diff_stats_html = ""
-    if diff:
-        added = diff_summary["added"]
-        deleted = diff_summary["deleted"]
-        if added or deleted:
-            diff_stats_html = f"""
-            <span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px; {get_font_family_css()}">
-                <span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{added}</span>
-                <span class="tool-diff-stats__sep" style="color: rgba(255,255,255,0.3);">/</span>
-                <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
-            </span>"""
-
-    # 差异对比按钮
-    diff_icon_html = ""
-    if is_file_edit and tool_call_id:
-        diff_icon_html = f'''
-        {diff_stats_html}
-        <span class="tool-diff-icon-btn" data-tool-call-id="{escape(tool_call_id)}"
-            role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 4px; border-radius: 4px;"
-            onclick="event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId)"
-            onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId); }}"
-            title="查看文件差异">
-            <img src="qrc:/icons/差异对比.svg" style="width: 16px; height: 16px;" />
-        </span>'''
 
     # 子智能体日志查看按钮
     subagent_log_btn_html = ""
@@ -1427,8 +1398,6 @@ def render_tool_block(
                     <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
                     <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
                 </span>
-                <button type="button" class="tool-diff-inline__toggle" title="切换单列/双列视图"
-                    onclick="var t=this.closest('.tool-diff-inline');var sp=t.classList.toggle('split-view');this.textContent=sp?'单列':'双列';">双列</button>
             </div>
             <div class="tool-diff-inline__body" style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
                 {diff_body}
@@ -1554,7 +1523,6 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
             {match_count_html}
-            {diff_icon_html}
             {subagent_log_btn_html}
         </span>
     </button>
