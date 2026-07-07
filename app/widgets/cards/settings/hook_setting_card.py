@@ -238,6 +238,20 @@ class HookItem(QWidget):
         )
         self.typeLabel.setFixedHeight(18)
 
+        # Matcher 标签（仅在非空时显示，如 #team_member）
+        self._matcherLabel = None
+        matcher = self._hook_data.get("matcher", "") or ""
+        if matcher:
+            # 缩短过长的 matcher 显示
+            display_matcher = matcher[:18] + ("…" if len(matcher) > 18 else "")
+            self._matcherLabel = QLabel(display_matcher, self)
+            self._matcherLabel.setStyleSheet(
+                f"background-color: #8E44AD; color: white; "
+                f"{get_font_family_css()} font-size: {scale_font_size(9)}px; "
+                f"padding: 1px 2px; border-radius: 3px; font-weight: bold;"
+            )
+            self._matcherLabel.setFixedHeight(16)
+
         # 命令文本
         display_cmd = self._get_effective_command()
         self.commandLabel = _ElidedLabel(display_cmd, self)
@@ -284,6 +298,9 @@ class HookItem(QWidget):
         self.hBoxLayout.addSpacing(3)
         self.hBoxLayout.addWidget(self.typeLabel, 0)
         self.hBoxLayout.addSpacing(3)
+        if self._matcherLabel:
+            self.hBoxLayout.addWidget(self._matcherLabel, 0)
+            self.hBoxLayout.addSpacing(3)
         self.hBoxLayout.addWidget(self.commandLabel, 1)
         if self._winLabel:
             self.hBoxLayout.addSpacing(2)
@@ -708,7 +725,12 @@ class HookEditCard(QWidget):
         self._sync_matcher_checks_from_text(text)
 
     def _sync_matcher_text_from_checks(self):
-        """勾选框状态 -> pipe 分隔文本"""
+        """勾选框状态 -> pipe 分隔文本
+
+        注意：无勾选框时（如 Stop 事件）跳过，避免清空已手动输入的 matcher 文本。
+        """
+        if not self._matcher_checkboxes:
+            return
         self._syncing_matcher = True
         try:
             selected = [opt for cb, opt in self._matcher_checkboxes if cb.isChecked()]

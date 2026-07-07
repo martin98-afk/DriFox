@@ -15,6 +15,8 @@ import difflib
 import fnmatch
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -92,6 +94,70 @@ _SCAN_EXCLUDE_DIRS = frozenset(
 def _compile_grep_pattern(pattern: str) -> re.Pattern:
     """编译 grep 正则表达式（带缓存）"""
     return re.compile(pattern, re.IGNORECASE)
+
+
+# ========== grep_files 优化：.gitignore 加载与缓存 ==========
+_GITIGNORE_CACHE: dict[str, list[str]] = {}
+
+def _load_gitignore_patterns(search_root: Path) -> list[str]:
+    """读取项目的 .gitignore 并返回 fnmatch 模式列表"""
+    key = str(search_root)
+    if key in _GITIGNORE_CACHE:
+        return _GITIGNORE_CACHE[key]
+    patterns = []
+    gitignore_path = search_root / ".gitignore"
+    if gitignore_path.exists():
+        try:
+            for line in gitignore_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    # 去掉开头的 '/'（.gitignore 中的路径是相对于根目录的）
+                    if line.startswith("/"):
+                        line = line[1:]
+                    # 去掉结尾的 '/'（目录标识）
+                    if line.endswith("/"):
+                        line = line.rstrip("/")
+                    patterns.append(line)
+        except Exception:
+            pass
+    _GITIGNORE_CACHE[key] = patterns
+    # 最多缓存 8 个项目的 .gitignore
+    if len(_GITIGNORE_CACHE) > 8:
+        _GITIGNORE_CACHE.pop(next(iter(_GITIGNORE_CACHE)))
+    return patterns
+
+# 常见二进制文件扩展名（跳过不必要的扫描）
+_BINARY_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".pyd", ".bin",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wav", ".flac",
+    ".pyc", ".pyo", ".class", ".o", ".a", ".lib",
+    ".wasm", ".dat", ".dmg", ".iso",
+    ".min.js", ".min.css",
+})
+
+# 二进制文件嗅探：读取前 8192 字节，如果含 null 字节则视为二进制
+_BINARY_NULL_LIMIT = 8192
+
+
+def _is_binary_file(file_path: Path) -> bool:
+    """快速判断文件是否为二进制"""
+    ext = file_path.suffix.lower()
+    for bin_ext in _BINARY_EXTENSIONS:
+        if file_path.name.endswith(bin_ext):
+            return True
+    # 二进制嗅探：读前 8KB，含 null 字节就跳过
+    try:
+        with open(file_path, "rb") as f:
+            head = f.read(_BINARY_NULL_LIMIT)
+        if b"\0" in head:
+            return True
+    except Exception:
+        return True  # 无法读取就当二进制跳过
+    return False
 
 
 def _resolve_path(workdir: Path, path: str) -> Path:
@@ -471,48 +537,151 @@ class FileTools:
         except Exception as e:
             return ToolResult(False, error=f"Multi-edit error: {str(e)}")
 
-    def grep_files(self, pattern: str, path: str = ".", include: str = None) -> ToolResult:
-        """同步执行 grep"""
+    def grep_files(
+        self,
+        pattern: str,
+        path: str = ".",
+        include: str = None,
+        multiline: bool = False,
+        max_size_mb: int = 1,
+        workers: int = 4,
+    ) -> ToolResult:
+        """
+        高性能 grep：并行搜索文件内容
+
+        Args:
+            pattern: 搜索正则表达式
+            path: 搜索路径（默认 workdir）
+            include: 文件名过滤（fnmatch 模式，如 "*.py"）
+            multiline: 是否启用跨行搜索（默认 False）
+            max_size_mb: 单文件最大 MB，超过跳过（默认 1MB，防大文件卡死）
+            workers: 并行工作线程数（默认 4）
+
+        Returns:
+            ToolResult: 匹配结果
+        """
         try:
             search_root = self._resolve_path(path)
-            # 性能优化：使用带缓存的编译函数
+            if not search_root.exists():
+                return ToolResult(False, error=f"Path not found: {path}")
+            if not search_root.is_dir():
+                return ToolResult(False, error=f"Not a directory: {path}")
+
             regex = _compile_grep_pattern(pattern)
-            results = []
+
+            # ── 1. 收集待搜索文件列表 ──
+            gitignore_patterns = _load_gitignore_patterns(search_root)
+            file_paths: list[Path] = []
 
             for root, dirs, files in os.walk(search_root):
-                # 性能优化：使用 frozenset
+                # 1a. 硬编码排除目录
                 dirs[:] = [d for d in dirs if d not in _GREP_EXCLUDE_DIRS]
-
+                # 1b. .gitignore 排除目录
+                if gitignore_patterns:
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not any(fnmatch.fnmatch(d, p) for p in gitignore_patterns)
+                    ]
                 for filename in files:
                     if include and not fnmatch.fnmatch(filename, include):
                         continue
-
-                    file_path = Path(root) / filename
+                    # 1c. .gitignore 排除文件
+                    if gitignore_patterns and any(
+                        fnmatch.fnmatch(filename, p) for p in gitignore_patterns
+                    ):
+                        continue
+                    fp = Path(root) / filename
+                    # 1d. 跳过二进制 / 大文件
+                    if _is_binary_file(fp):
+                        continue
                     try:
-                        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        if fp.stat().st_size > max_size_mb * 1024 * 1024:
+                            continue
+                    except OSError:
+                        continue
+                    file_paths.append(fp)
+
+            if not file_paths:
+                return ToolResult(True, content="No matching files found to search.")
+
+            # ── 2. 并行搜索 ──
+            all_results: list[str] = []
+            result_limit = 100
+            scanned_count = 0
+            start_time = time.time()
+
+            # 每搜到一点就打日志（防长时间无反馈）
+            _log_interval = max(1, len(file_paths) // 10)
+
+            def _search_single(fp: Path) -> list[str]:
+                """单个文件的搜索任务"""
+                hits: list[str] = []
+                try:
+                    if multiline:
+                        # 跨行模式：整个文件一次读取 + re.DOTALL
+                        text = fp.read_text(encoding="utf-8", errors="ignore")
+                        for m in regex.finditer(text):
+                            # 截取匹配行周围的上下文（取匹配起始行）
+                            line_num = text[: m.start()].count("\n") + 1
+                            try:
+                                rel = fp.relative_to(self.workdir)
+                            except ValueError:
+                                rel = fp
+                            hits.append(f"{rel}:{line_num}: {m.group()[:200]}")
+                    else:
+                        # 逐行模式
+                        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
                             for i, line in enumerate(f, 1):
                                 if regex.search(line):
                                     try:
-                                        rel_path = file_path.relative_to(self.workdir)
+                                        rel = fp.relative_to(self.workdir)
                                     except ValueError:
-                                        rel_path = file_path
-                                    results.append(f"{rel_path}:{i}: {line.strip()}")
-                                    if len(results) >= 100:
-                                        return ToolResult(
-                                            True,
-                                            content="\n".join(results)
-                                            + "\n\n... (Too many matches, please refine your search pattern)",
-                                        )
-                    except Exception:
-                        continue
+                                        rel = fp
+                                    hits.append(f"{rel}:{i}: {line.strip()[:300]}")
+                except Exception:
+                    pass
+                return hits
 
-            content = "\n".join(results) if results else "No matches found."
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_search_single, fp): fp for fp in file_paths}
+                for i, future in enumerate(as_completed(futures)):
+                    scanned_count += 1
+                    if scanned_count % _log_interval == 0:
+                        elapsed = time.time() - start_time
+                        logger.info(
+                            f"[grep] 已扫描 {scanned_count}/{len(file_paths)} 个文件"
+                            f"（{elapsed:.1f}s），累计命中 {len(all_results)} 条"
+                        )
+                    hits = future.result()
+                    all_results.extend(hits)
+                    if len(all_results) >= result_limit:
+                        # 达到上限，取消剩余任务
+                        for f in futures:
+                            f.cancel()
+                        break
+
+            elapsed = time.time() - start_time
+            logger.info(
+                f"[grep] 完成：扫描 {scanned_count}/{len(file_paths)} 个文件"
+                f"，耗时 {elapsed:.1f}s，命中 {len(all_results)} 条"
+            )
+
+            # ── 3. 组装结果 ──
+            if not all_results:
+                content = (f"No matches found for pattern: {pattern}"
+                           f" (scanned {scanned_count} files, skipped binaries/large files)")
+                return ToolResult(True, content=content)
+
+            content = "\n".join(all_results[:result_limit])
             if len(content) > MAX_GREP_CONTENT_LENGTH:
                 content = (
                     content[:MAX_GREP_CONTENT_LENGTH]
                     + f"\n\n... (Content truncated, exceeds {MAX_GREP_CONTENT_LENGTH} characters limit)"
                 )
-            return ToolResult(True, content=content)
+            meta = f"# Search: {pattern} | {len(all_results)} matches in {scanned_count} files ({elapsed:.1f}s)\n\n"
+            return ToolResult(True, content=meta + content)
+
         except Exception as e:
             return ToolResult(False, error=f"Grep error: {str(e)}")
 
@@ -535,26 +704,105 @@ class FileTools:
         except Exception as e:
             return ToolResult(False, error=f"List error: {str(e)}")
 
-    def glob_files(self, pattern: str, path: str = ".") -> ToolResult:
+    def glob_files(self, pattern: str, path: str = ".", max_results: int = 100, workers: int = 4) -> ToolResult:
         """
-        通过通配符查找文件
+        高性能 glob：通过通配符查找文件（带排除和并行收集）
+
+        Args:
+            pattern: 通配符模式，如 "*.py", "**/*.tsx", "src/**/*.css"
+            path: 搜索路径（默认 workdir）
+            max_results: 最大返回数（默认 100）
+            workers: 并行工作线程数（默认 4）
+
+        Returns:
+            ToolResult: 匹配的文件列表
         """
         try:
             search_path = self._resolve_path(path)
-            matches = list(search_path.rglob(pattern))
+            if not search_path.exists():
+                return ToolResult(False, error=f"Path not found: {path}")
+            if not search_path.is_dir():
+                return ToolResult(False, error=f"Not a directory: {path}")
 
-            if not matches:
-                return ToolResult(True, content="No files matched the pattern.")
+            gitignore_patterns = _load_gitignore_patterns(search_path)
 
-            results = []
-            for m in matches[:100]:
-                if m.is_file():
-                    try:
-                        results.append(str(m.relative_to(self.workdir)))
-                    except ValueError:
-                        results.append(str(m))
+            # ── 1. 收集候选文件列表（os.walk + 排除） ──
+            candidates: list[Path] = []
+            for root, dirs, files in os.walk(search_path):
+                dirs[:] = [d for d in dirs if d not in _GREP_EXCLUDE_DIRS]
+                if gitignore_patterns:
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not any(fnmatch.fnmatch(d, p) for p in gitignore_patterns)
+                    ]
+                for filename in files:
+                    if gitignore_patterns and any(
+                        fnmatch.fnmatch(filename, p) for p in gitignore_patterns
+                    ):
+                        continue
+                    candidates.append(Path(root) / filename)
 
-            return ToolResult(True, content="\n".join(results))
+            if not candidates:
+                return ToolResult(True, content="No files found (all excluded by .gitignore or hardcoded rules).")
+
+            start_time = time.time()
+
+            # ── 2. 并行 fnmatch ──
+            _compiled_glob = re.compile(
+                fnmatch.translate(pattern), re.IGNORECASE
+            )
+
+            results: list[str] = []
+
+            def _match_single(fp: Path) -> str | None:
+                """单文件 glob 匹配"""
+                try:
+                    rel = fp.relative_to(self.workdir)
+                except ValueError:
+                    rel = fp
+                rel_str = str(rel)
+                if _compiled_glob.search(rel_str):
+                    return rel_str
+                return None
+
+            # Path.rglob 在剔除排除目录后没意义了，因为我们自己 walk 了
+            # 小规模直接串行，大批量并行
+            if len(candidates) < 500:
+                for fp in candidates:
+                    r = _match_single(fp)
+                    if r:
+                        results.append(r)
+                        if len(results) >= max_results:
+                            break
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {pool.submit(_match_single, fp): fp for fp in candidates}
+                    for future in as_completed(futures):
+                        r = future.result()
+                        if r:
+                            results.append(r)
+                            if len(results) >= max_results:
+                                for f in futures:
+                                    f.cancel()
+                                break
+
+            elapsed = time.time() - start_time
+            logger.info(f"[glob] {pattern}: {len(results)} matches in {len(candidates)} candidates ({elapsed:.2f}s)")
+
+            if not results:
+                return ToolResult(True, content=f"No files matched pattern: {pattern}")
+
+            content = "\n".join(results)
+            if len(content) > MAX_GREP_CONTENT_LENGTH:
+                meta = f"# Glob: {pattern} | {len(results)} matches ({elapsed:.2f}s)\n\n"
+                content = (
+                    content[:MAX_GREP_CONTENT_LENGTH]
+                    + f"\n\n... (Content truncated, exceeds {MAX_GREP_CONTENT_LENGTH} characters limit)"
+                )
+                return ToolResult(True, content=meta + content)
+
+            return ToolResult(True, content=content)
         except Exception as e:
             return ToolResult(False, error=f"Glob error: {str(e)}")
 
