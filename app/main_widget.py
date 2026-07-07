@@ -389,6 +389,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
         # 在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = False
+        # 🛡️ 会话钩子注入标记：_create_new_session / _clear_session / _on_compact_finished
+        # 在触发 SessionStart hook 前置 True，让 _on_messages_updated 能识别出这是
+        # 合法的新会话 hook 输出而非旧 worker 的过期回调，避免被 _session_switched 误拦截。
+        self._pending_session_hook = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
@@ -3885,10 +3889,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._session_card_cache.pop(target_session.session_id, None)
 
         # 触发 SessionStart hook — state="clear"
+        # 标记 _pending_session_hook 避免 _session_switched 残留时误拦截
         try:
+            self._pending_session_hook = True
             self.backend.trigger_session_event("clear")
         except Exception:
             pass
+        finally:
+            self._pending_session_hook = False
 
         # 仅在用户仍停留在原 session 时才同步更新 UI
         if self._current_session_id == session_id:
@@ -3913,11 +3921,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if execution_error:
             return
         try:
+            self._pending_session_hook = True
             self.backend.trigger_session_event("compact")
         except Exception:
             pass
             # 刷新上下文使用率指示器（清空后会回到 0%）
             self._refresh_context_usage_indicator()
+        finally:
+            self._pending_session_hook = False
 
     def _remember_to_memory(self, content: str):
         """将内容存入长期记忆"""
@@ -6506,7 +6517,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 💡 内存优化：新建会话时清理全局 LRU 缓存，释放旧会话渲染/估算数据
         _cleanup_global_lru_caches()
 
-        session = self.backend.create_session()
+        # 🛡️ 标记待注入：create_session 内部会同步触发 SessionStart hook 并
+        # 通过 _hook_messages_updated → _on_messages_updated 回传，此时
+        # _session_switched=True 会误拦截合法输出。置此标记让 _on_messages_updated 放行。
+        self._pending_session_hook = True
+        try:
+            session = self.backend.create_session()
+        finally:
+            self._pending_session_hook = False
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
         # 在 create_session 之后执行，确保 _evict_if_needed 已淘汰旧会话
@@ -11683,15 +11701,20 @@ class OpenAIChatToolWindow(ToolWindow):
         # get_current_session() 返回的是新会话（旧会话已被替换），
         # 继续 set_messages 会把旧消息写到新会话，再被后续 save 错误保存到新项目。
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        #
+        # ⚠️ 例外：_pending_session_hook 标记表示当前正处在 _create_new_session /
+        # _clear_session / _on_compact_finished 中的 SessionStart hook 注入阶段，
+        # 这批消息是合法的新会话 hook 输出，放行不被丢弃。
         if getattr(self, "_session_switched", False):
-            from loguru import logger
+            if not getattr(self, "_pending_session_hook", False):
+                from loguru import logger
 
-            logger.warning(
-                f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
-                f"msg_count={len(messages)}, current_session_id="
-                f"{self.session_manager.get_current_session().session_id[:8] if self.session_manager.get_current_session() else 'None'}"
-            )
-            return
+                logger.warning(
+                    f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
+                    f"msg_count={len(messages)}, current_session_id="
+                    f"{self.session_manager.get_current_session().session_id[:8] if self.session_manager.get_current_session() else 'None'}"
+                )
+                return
         session = self.session_manager.get_current_session()
         if not session:
             return
