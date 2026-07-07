@@ -385,6 +385,9 @@ def _render_diff_preview(diff_text: str) -> str:
     超过 500 行时截断并显示行数。
     """
     lines = diff_text.split("\n")[1:]
+    # 去掉 split 产生的尾随空行（diff 文本通常以一个换行结尾），避免渲染出多余空行
+    while lines and lines[-1] == "":
+        lines.pop()
     MAX_LINES = 500
     truncated = False
     if len(lines) > MAX_LINES:
