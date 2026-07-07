@@ -375,10 +375,13 @@ def _summarize_diff(diff_text: str) -> dict:
 
 def _render_diff_preview(diff_text: str) -> str:
     """
-    将 unified diff 文本渲染为带行号、词级差异高亮的 HTML。
+    将 unified diff 渲染为带语法高亮、段落级差异的 HTML。
 
-    支持: 文件头(---/+++) → hunk 头(@@) → 逐行差异
-    连续 -/+ 行对会做词级差异高亮。
+    - 相邻的增/删差异（包括被 hunk 头隔开的紧邻小改动）聚合成一个
+      「差异段」，用双栏对照呈现（旧版本在左、新版本在右，配对行对齐），
+      消除 - + - + 交替碎片化、优化阅读。
+    - 纯新增 / 纯删除段退化为单列（避免半屏空白）。
+    - 连续 -/+ 配对行做词级差异高亮。
     超过 500 行时截断并显示行数。
     """
     lines = diff_text.split("\n")[1:]
@@ -390,164 +393,176 @@ def _render_diff_preview(diff_text: str) -> str:
         shown = len(lines) - MAX_LINES
         lines = lines[:half] + [None] + lines[-half:]
 
-    rows = []
-    old_ln = 0
-    new_ln = 0
-    i = 0
-    _pending_old_header = None
-    current_lexer = _TEXT_LEXER  # 随 +++ 文件头切换，用于逐行语法高亮
-
     def _clean_path(p: str) -> str:
         p = p.strip()
         if p.startswith("a/") or p.startswith("b/"):
             p = p[2:]
         return p
 
+    # ---- 1. 解析为带类型的行对象 ----
+    parsed = []
+    old_ln = new_ln = 0
+    i = 0
+    pending_old = None
+    current_lexer = _TEXT_LEXER  # 随 +++ 文件头切换，用于逐行语法高亮
     while i < len(lines):
         line = lines[i]
         if line is None:
+            parsed.append({"kind": "truncated"})
+            i += 1
+            continue
+        if line.startswith("--- "):
+            pending_old = line
+            i += 1
+            continue
+        if line.startswith("+++ "):
+            new_path = _clean_path(line[4:])
+            old_path = _clean_path(pending_old[4:]) if pending_old else ""
+            if old_path == new_path:
+                display = old_path
+            elif old_path and new_path:
+                display = f"{old_path} → {new_path}"
+            else:
+                display = new_path or old_path
+            current_lexer = _get_diff_lexer(new_path or old_path)
+            parsed.append({"kind": "file", "text": display, "lexer": current_lexer})
+            pending_old = None
+            i += 1
+            continue
+        if pending_old:
+            # 单独的 --- 行（没有 +++ 跟随）
+            parsed.append({"kind": "file", "text": _clean_path(pending_old[4:]), "lexer": current_lexer})
+            pending_old = None
+            continue
+        if line.startswith("@@"):
+            m = _HUNK_HEADER_RE.match(line)
+            if m:
+                old_ln = int(m.group(1))
+                new_ln = int(m.group(2))
+            parsed.append({"kind": "hunk", "text": line})
+            i += 1
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            parsed.append({"kind": "del", "text": line[1:], "old_ln": old_ln, "new_ln": new_ln, "lexer": current_lexer})
+            old_ln += 1
+            i += 1
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            parsed.append({"kind": "add", "text": line[1:], "old_ln": old_ln, "new_ln": new_ln, "lexer": current_lexer})
+            new_ln += 1
+            i += 1
+            continue
+        # 上下文行（unified diff 上下文带前导空格）；其余元信息行（index / \ No newline 等）跳过，不占行号
+        if line.startswith(" ") or line == "":
+            stripped = line[1:] if line.startswith(" ") else line
+            parsed.append({"kind": "ctx", "text": stripped, "old_ln": old_ln, "new_ln": new_ln, "lexer": current_lexer})
+            old_ln += 1
+            new_ln += 1
+        i += 1
+
+    # ---- 2. 聚合成段落级差异段 ----
+    segments = []
+    cur = None  # 当前差异段（仅含 del/add）
+
+    def _flush():
+        nonlocal cur
+        if cur:
+            segments.append(cur)
+            cur = None
+
+    for p in parsed:
+        k = p["kind"]
+        if k in ("del", "add"):
+            if cur is None:
+                cur = []
+            cur.append(p)
+        elif k == "hunk":
+            # hunk 头不打断相邻差异段的聚合（紧邻小改动合并为一段）
+            if cur is None:
+                segments.append(p)
+        else:  # file / ctx / truncated
+            _flush()
+            segments.append(p)
+    _flush()
+
+    # ---- 3. 渲染 ----
+    def _cell(kind, ln, sign, code_html, empty=False):
+        if empty:
+            return ('<div class="diff-line seg-empty">'
+                    '<span class="line-num">&nbsp;</span>'
+                    '<span class="line-sign"></span>'
+                    '<span class="line-code">&nbsp;</span></div>')
+        cls = "diff-del" if kind == "del" else "diff-add"
+        return (f'<div class="diff-line {cls}">'
+                f'<span class="line-num">{ln}</span>'
+                f'<span class="line-sign">{sign}</span>'
+                f'<span class="line-code">{code_html}</span></div>')
+
+    rows = []
+    for seg in segments:
+        if isinstance(seg, list):
+            # 差异段
+            dels = [p for p in seg if p["kind"] == "del"]
+            adds = [p for p in seg if p["kind"] == "add"]
+            pair = min(len(dels), len(adds))
+            if pair == 0:
+                # 纯删除 / 纯新增：单列渲染，避免半屏空白
+                for p in seg:
+                    if p["kind"] == "del":
+                        rows.append(_cell("del", p["old_ln"], "-", _highlight_code_line(p["text"], p["lexer"])))
+                    else:
+                        rows.append(_cell("add", p["new_ln"], "+", _highlight_code_line(p["text"], p["lexer"])))
+                continue
+            # 双栏段落级对照（旧在左、新在右，配对行对齐）
+            rows.append('<div class="diff-segment">')
+            for k in range(pair):
+                od, oa = dels[k], adds[k]
+                old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
+                rows.append('<div class="diff-seg-row">')
+                rows.append(_cell("del", od["old_ln"], "-", old_html))
+                rows.append(_cell("add", oa["new_ln"], "+", new_html))
+                rows.append('</div>')
+            for k in range(pair, len(dels)):
+                od = dels[k]
+                rows.append('<div class="diff-seg-row">')
+                rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
+                rows.append(_cell("add", "", "", "", empty=True))
+                rows.append('</div>')
+            for k in range(pair, len(adds)):
+                oa = adds[k]
+                rows.append('<div class="diff-seg-row">')
+                rows.append(_cell("del", "", "", "", empty=True))
+                rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
+                rows.append('</div>')
+            rows.append('</div>')
+        elif seg["kind"] == "file":
+            rows.append(
+                f'<div class="diff-line diff-file-header diff-meta">'
+                f'<span class="line-num">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(seg["text"])}</span></div>'
+            )
+        elif seg["kind"] == "hunk":
+            rows.append(
+                f'<div class="diff-line diff-hunk diff-meta">'
+                f'<span class="line-num">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code">{escape(seg["text"])}</span></div>'
+            )
+        elif seg["kind"] == "truncated":
             rows.append(
                 f'<div class="diff-line diff-truncated diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>'
             )
-            i += 1
-            continue
-
-        # 文件头：将 ---/+++ 合并为单个文件路径行
-        if line.startswith("--- "):
-            _pending_old_header = line
-            i += 1
-        elif line.startswith("+++ "):
-            if _pending_old_header:
-                old_path = _clean_path(_pending_old_header[4:])
-                new_path = _clean_path(line[4:])
-                if old_path == new_path:
-                    display = old_path
-                elif old_path and new_path:
-                    display = f"{old_path} → {new_path}"
-                else:
-                    display = new_path or old_path
-                current_lexer = _get_diff_lexer(new_path or old_path)
-                rows.append(
-                    f'<div class="diff-line diff-file-header diff-meta">'
-                    f'<span class="line-num">&nbsp;</span>'
-                    f'<span class="line-sign"></span>'
-                    f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(display)}</span></div>'
-                )
-            else:
-                current_lexer = _get_diff_lexer(_clean_path(line[4:]))
-                rows.append(
-                    f'<div class="diff-line diff-file-header diff-meta">'
-                    f'<span class="line-num">&nbsp;</span>'
-                    f'<span class="line-sign"></span>'
-                    f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(line[4:]))}</span></div>'
-                )
-            _pending_old_header = None
-            i += 1
-        elif _pending_old_header:
-            # 单独的 --- 行（没有 +++ 跟随），先渲染 header 再处理当前行
-            rows.append(
-                f'<div class="diff-line diff-file-header diff-meta">'
-                f'<span class="line-num">&nbsp;</span>'
-                f'<span class="line-sign"></span>'
-                f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(_pending_old_header[4:]))}</span></div>'
-            )
-            _pending_old_header = None
-            continue
-        # hunk 头
-        elif line.startswith("@@"):
-            m = _HUNK_HEADER_RE.match(line)
-            if m:
-                old_ln = int(m.group(1))
-                new_ln = int(m.group(2))
-            rows.append(
-                f'<div class="diff-line diff-hunk diff-meta">'
-                f'<span class="line-num">&nbsp;</span>'
-                f'<span class="line-sign"></span>'
-                f'<span class="line-code">{escape(line)}</span></div>'
-            )
-            i += 1
-        # 删除行-新增行配对处理（做 word diff）
-        elif line.startswith("-") and not line.startswith("---"):
-            del_lines = []
-            while (
-                i < len(lines) and lines[i] is not None and lines[i].startswith("-") and not lines[i].startswith("---")
-            ):
-                del_lines.append(lines[i][1:])  # 去掉前缀 -
-                i += 1
-            add_lines = []
-            while (
-                i < len(lines) and lines[i] is not None and lines[i].startswith("+") and not lines[i].startswith("+++")
-            ):
-                add_lines.append(lines[i][1:])  # 去掉前缀 +
-                i += 1
-
-            # 配对 word diff：- 行紧跟 + 行交替输出（GitHub unified diff 风格）
-            # 便于上下对照词级差异，行号连续
-            pair_count = min(len(del_lines), len(add_lines))
-            for k in range(pair_count):
-                old_html, new_html = _highlighted_word_diff_html(del_lines[k], add_lines[k], current_lexer)
-                rows.append(
-                    f'<div class="diff-line diff-del">'
-                    f'<span class="line-num">{old_ln}</span>'
-                    f'<span class="line-sign">-</span>'
-                    f'<span class="line-code">{old_html}</span></div>'
-                )
-                rows.append(
-                    f'<div class="diff-line diff-add">'
-                    f'<span class="line-num">{new_ln}</span>'
-                    f'<span class="line-sign">+</span>'
-                    f'<span class="line-code">{new_html}</span></div>'
-                )
-                old_ln += 1
-                new_ln += 1
-
-            # 未配对的删除行
-            for k in range(pair_count, len(del_lines)):
-                rows.append(
-                    f'<div class="diff-line diff-del">'
-                    f'<span class="line-num">{old_ln}</span>'
-                    f'<span class="line-sign">-</span>'
-                    f'<span class="line-code">{_highlight_code_line(del_lines[k], current_lexer)}</span></div>'
-                )
-                old_ln += 1
-
-            # 未配对的增加行
-            for k in range(pair_count, len(add_lines)):
-                rows.append(
-                    f'<div class="diff-line diff-add">'
-                    f'<span class="line-num">{new_ln}</span>'
-                    f'<span class="line-sign">+</span>'
-                    f'<span class="line-code">{_highlight_code_line(add_lines[k], current_lexer)}</span></div>'
-                )
-                new_ln += 1
-
-        elif line.startswith("+") and not line.startswith("+++"):
-            # 单独的增加行（前面没有匹配的删除行）
-            rows.append(
-                f'<div class="diff-line diff-add">'
-                f'<span class="line-num">{new_ln}</span>'
-                f'<span class="line-sign">+</span>'
-                f'<span class="line-code">{_highlight_code_line(line[1:], current_lexer)}</span></div>'
-            )
-            new_ln += 1
-            i += 1
-        else:
-            # 上下文行（unified diff 的上下文行带前导空格，去掉）
-            stripped = line[1:] if line.startswith(" ") else line
+        else:  # ctx
             rows.append(
                 f'<div class="diff-line diff-ctx">'
-                f'<span class="line-num">{new_ln if new_ln > 0 else ""}</span>'
+                f'<span class="line-num">{seg["new_ln"] if seg["new_ln"] > 0 else ""}</span>'
                 f'<span class="line-sign"></span>'
-                f'<span class="line-code">{_highlight_code_line(stripped, current_lexer)}</span></div>'
+                f'<span class="line-code">{_highlight_code_line(seg["text"], seg["lexer"])}</span></div>'
             )
-            if old_ln > 0:
-                old_ln += 1
-            if new_ln > 0:
-                new_ln += 1
-            i += 1
 
     return "".join(rows)
 

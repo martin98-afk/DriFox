@@ -2946,6 +2946,26 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
+                /* 段落级差异：双栏对照（旧在左、新在右，配对行对齐） */
+                .tool-diff-inline .diff-segment {{
+                    display: block;
+                }}
+                .tool-diff-inline .diff-seg-row {{
+                    display: flex;
+                    align-items: stretch;
+                }}
+                .tool-diff-inline .diff-seg-row > .diff-line {{
+                    flex: 1 1 50%;
+                    min-width: 0;
+                    border-bottom: 1px solid transparent;
+                }}
+                .tool-diff-inline .diff-seg-empty {{
+                    background: transparent !important;
+                    box-shadow: none !important;
+                }}
+                .tool-diff-inline .diff-seg-empty .line-code {{
+                    color: transparent;
+                }}
                 /* 元信息行（文件头/hunk头/截断）：行号列与符号列隐形，避免空列割裂视觉 */
                 .tool-diff-inline .diff-meta .line-num {{
                     background: transparent;

@@ -74,13 +74,16 @@ HEADERS = _init_headers()
 # 本地 Git 操作
 # ============================================================
 
-def run_git(cmd: str, cwd: str = None) -> tuple:
-    """执行 git 命令，返回 (returncode, stdout, stderr)"""
+def run_git(args: list, cwd: str = None) -> tuple:
+    """执行 git 命令，返回 (returncode, stdout, stderr)
+
+    Args:
+        args: git 子命令参数列表，如 ['status', '--porcelain']
+        cwd: 工作目录（可选）
+    """
     try:
-        import shlex
-        args = shlex.split(cmd)
         result = subprocess.run(
-            args, shell=False, cwd=cwd,
+            ['git', *args], shell=False, cwd=cwd,
             capture_output=True, text=True, encoding='utf-8'
         )
         return result.returncode, result.stdout, result.stderr
@@ -90,7 +93,7 @@ def run_git(cmd: str, cwd: str = None) -> tuple:
 
 def status(path: str = '.') -> bool:
     """查看工作区状态"""
-    returncode, stdout, stderr = run_git('git status --porcelain', cwd=path)
+    returncode, stdout, stderr = run_git(['status', '--porcelain'], cwd=path)
     
     if returncode != 0:
         print("[Error] Not a git repository or git not found")
@@ -130,8 +133,8 @@ def status(path: str = '.') -> bool:
 
 def show_diff(path: str = '.', staged: bool = False) -> bool:
     """查看文件差异"""
-    cmd = 'git diff --staged' if staged else 'git diff'
-    returncode, stdout, stderr = run_git(cmd, cwd=path)
+    args = ['diff', '--staged'] if staged else ['diff']
+    returncode, stdout, stderr = run_git(args, cwd=path)
     
     if returncode != 0:
         print(f"[Error] {stderr or 'Failed to get diff'}")
@@ -155,18 +158,18 @@ def commit(path: str, message: str, files: str = None) -> bool:
     """提交文件变更"""
     # 先暂存文件
     if files:
-        returncode, _, stderr = run_git(f'git add {files}', cwd=path)
+        returncode, _, stderr = run_git(['add', files], cwd=path)
         if returncode != 0:
             print(f"[Error] Failed to stage files: {stderr}")
             return False
     else:
-        returncode, _, stderr = run_git('git add .', cwd=path)
+        returncode, _, stderr = run_git(['add', '.'], cwd=path)
         if returncode != 0:
             print(f"[Error] Failed to stage files: {stderr}")
             return False
     
     # 执行提交
-    returncode, stdout, stderr = run_git(f'git commit -m "{message}"', cwd=path)
+    returncode, stdout, stderr = run_git(['commit', '-m', message], cwd=path)
     
     if returncode != 0:
         print(f"[Error] Commit failed: {stderr}")
@@ -188,7 +191,7 @@ def commit(path: str, message: str, files: str = None) -> bool:
 
 def discard(path: str) -> bool:
     """撤销文件修改"""
-    returncode, _, stderr = run_git(f'git checkout -- "{path}"', cwd=os.path.dirname(path) or '.')
+    returncode, _, stderr = run_git(['checkout', '--', path], cwd=os.path.dirname(path) or '.')
     
     if returncode != 0:
         # 可能是未跟踪文件，尝试删除
@@ -211,7 +214,7 @@ def discard(path: str) -> bool:
 def branch_log(from_branch: str, to_branch: str, path: str = '.') -> bool:
     """查看两个分支之间的差异"""
     returncode, stdout, stderr = run_git(
-        f'git log {to_branch}..{from_branch} --oneline', cwd=path
+        ['log', f'{to_branch}..{from_branch}', '--oneline'], cwd=path
     )
     
     if returncode != 0:
@@ -234,8 +237,11 @@ def branch_log(from_branch: str, to_branch: str, path: str = '.') -> bool:
 
 def push(branch: str, path: str = '.', upstream: bool = False) -> bool:
     """推送分支到远程"""
-    cmd = f'git push {"-u " if upstream else ""}origin {branch}'
-    returncode, stdout, stderr = run_git(cmd, cwd=path)
+    args = ['push']
+    if upstream:
+        args.append('-u')
+    args.extend(['origin', branch])
+    returncode, stdout, stderr = run_git(args, cwd=path)
     
     if returncode != 0:
         print(f"[Error] Push failed: {stderr}")
