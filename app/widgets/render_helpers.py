@@ -1326,6 +1326,19 @@ def render_tool_block(
     # 文件编辑工具判断
     diff_summary = _summarize_diff(diff or "") if diff else {"added": 0, "deleted": 0, "files": []}
 
+    # 差异统计（+N/-N）— 纯展示，无差异对比按钮
+    diff_stats_html = ""
+    if diff:
+        added = diff_summary["added"]
+        deleted = diff_summary["deleted"]
+        if added or deleted:
+            diff_stats_html = f"""
+            <span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px; {get_font_family_css()}">
+                <span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{added}</span>
+                <span class="tool-diff-stats__sep" style="color: rgba(255,255,255,0.3);">/</span>
+                <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
+            </span>"""
+
     # 子智能体日志查看按钮
     subagent_log_btn_html = ""
     if is_sub_agent_task:
@@ -1523,6 +1536,7 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
             {match_count_html}
+            {diff_stats_html}
             {subagent_log_btn_html}
         </span>
     </button>

@@ -2786,6 +2786,27 @@ class CodeWebViewer(QWebEngineView):
                 .tool-expanded-content {{
                     padding: 0;
                 }}
+                .tool-diff-stats {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 3px;
+                    margin-left: 4px;
+                    padding: 1px 6px;
+                    border: 1px solid rgba(139, 148, 158, 0.2);
+                    border-radius: 999px;
+                    background: rgba(139, 148, 158, 0.08);
+                    font-weight: 700;
+                    white-space: nowrap;
+                }}
+                .tool-diff-stats__add {{
+                    color: #3fb950;
+                }}
+                .tool-diff-stats__del {{
+                    color: #ff7b72;
+                }}
+                .tool-diff-stats__sep {{
+                    color: #6e7681;
+                }}
                 .tool-diff-inline {{
                     margin: 0;
                     background: rgba(13,17,23,0.40);
