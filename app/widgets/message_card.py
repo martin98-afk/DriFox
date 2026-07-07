@@ -2808,7 +2808,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #6e7681;
                 }}
                 .tool-diff-inline {{
-                    margin: 8px 0 2px;
+                    margin: 0 0 2px;
                     background: linear-gradient(180deg, rgba(22,27,34,0.62), rgba(13,17,23,0.42));
                     border: 1px solid rgba(139, 148, 158, 0.22);
                     border-radius: 8px;
