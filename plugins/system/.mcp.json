@@ -36,17 +36,6 @@
       "env": {},
       "url": "",
       "headers": {}
-    },
-    "codegraph": {
-      "command": "npx",
-      "args": [
-        "-y @colbymchenry/codegraph serve --mcp"
-      ],
-      "type": "stdio",
-      "enabled": false,
-      "env": {},
-      "url": "",
-      "headers": {}
     }
   }
 }

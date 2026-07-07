@@ -804,13 +804,13 @@ def _render_inline_tool(
     icon = _get_tool_icon(tool_name, tool_args)
     natural_preview = _format_natural_preview(tool_name, tool_args)
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
-    return f"""<div class="tool-block"{tc_id_attr} style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block"{tc_id_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">
             <span style="flex: 0 0 auto;">{icon}</span>
             <span style="white-space: nowrap; flex: 0 0 auto;">{escape(tool_name)}</span>
             {status_html}
         </span>
-        <span style="flex: 1 1 auto; min-width: 0; text-align: right; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
         </span>
     </div>"""
@@ -1243,6 +1243,26 @@ def render_tool_block(
         natural = _format_natural_preview(tool_name, tool_args)
         args_preview = natural if natural else _format_args_preview(tool_args)
 
+    # ── grep/glob 结果计数 ──
+    match_count_html = ""
+    if success and result and tool_name in ("grep", "glob"):
+        import re as _re
+        if tool_name == "grep":
+            # 从 meta 行解析 "# Search: ... | X matches ..."
+            m = _re.search(r"\|\s*(\d+)\s+matches", result)
+            if m:
+                count = m.group(1)
+                match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
+        elif tool_name == "glob":
+            # 先检查是否有 meta 头
+            m = _re.search(r"\|\s*(\d+)\s+matches", result)
+            if m:
+                count = m.group(1)
+            else:
+                # 无 meta 头：每行一个文件
+                count = str(len([ln for ln in result.split("\n") if ln.strip()]))
+            match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
+
     # ── inline diff 预览区 ──
     diff_html = ""
     diff_line_count = 0
@@ -1385,12 +1405,11 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(tool_name)}</span>
             {status_html}
         </span>
-        <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+        <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
-        </span>
-        <span style="display: flex; align-items: center; flex: 0 0 auto; margin-left: 6px;">
+            {match_count_html}
             {diff_icon_html}
             {subagent_log_btn_html}
         </span>

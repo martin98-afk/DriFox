@@ -1005,8 +1005,8 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(display_name)}</span>
             {spinner_html}
         </span>
-        <span style="margin-left: auto; min-width: 0; overflow: hidden; flex-shrink: 1;">
-            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+        <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; margin-left: 10px;">
+            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {preview_display}
             </span>
         </span>
@@ -1042,12 +1042,12 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
         {spinner_html}
-        <span>思考中...</span>
+        <span>深度思考中...</span>
     </span>
 </div>"""
 
@@ -1081,12 +1081,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
         {spinner_html}
-        <span>思考中...</span>
+        <span>深度思考中...</span>
     </span>
 </div>"""
 
@@ -2656,12 +2656,11 @@ class CodeWebViewer(QWebEngineView):
                 .think-block {{
                     margin: 4px 0;
                     background: transparent;
-                    border: 1px solid var(--border);
+                    border: none;
                     border-radius: 6px;
-                    transition: border-color 220ms ease;
                 }}
                 .think-block[data-expanded="true"] {{
-                    border-color: rgba(102, 198, 255, 0.4);
+                    border: none;
                 }}
                 .think-block__summary {{
                     padding: 5px 10px;
@@ -2672,7 +2671,7 @@ class CodeWebViewer(QWebEngineView):
                 .think-streaming {{
                     margin: 4px 0;
                     background: transparent;
-                    border: 1px solid var(--border);
+                    border: none;
                     border-radius: 6px;
                     padding: 8px 10px;
                     color: var(--text-secondary);
@@ -2769,13 +2768,12 @@ class CodeWebViewer(QWebEngineView):
                 .tool-block {{
                     margin: 4px 0;
                     background: transparent;
-                    border: 1px solid var(--border);
+                    border: none;
                     border-radius: 6px;
                     box-shadow: none;
-                    transition: border-color 220ms ease;
                 }}
                 .tool-block[data-expanded="true"] {{
-                    border-color: rgba(95, 209, 140, 0.5);
+                    border: none;
                 }}
                 .tool-block__summary {{
                     padding: 5px 10px;
