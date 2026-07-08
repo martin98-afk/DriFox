@@ -29,6 +29,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 # Windows 专属：防止 subprocess 调 git 时弹出黑色 cmd 窗口
 # CREATE_NO_WINDOW = 0x08000000，仅 Windows 有效
 _CREATE_NO_WINDOW = (
@@ -105,31 +107,56 @@ def _is_git_repo(cwd: str) -> bool:
     return code == 0
 
 
-def _auto_git_init(cwd: str) -> bool:
+def _auto_git_init(cwd: str, project_name: str | None = None) -> bool:
     """若项目不是 git 仓库但系统装了 git，则自动 git init + 空 commit
 
     用于让 model 在非 git 项目里也能感知到默认分支名（init 后立刻有 main/master）。
+
+    Args:
+        cwd: 项目根目录路径
+        project_name: 项目名称（用于安全性校验，防止误在父目录创建 .git）
 
     Returns:
         True  → 项目已经是 git 仓库（无论是否本次 init）
         False → 没有 git 或 init 失败
     """
-    if _is_git_repo(cwd):
+    if not cwd:
+        return False
+
+    # 统一使用 resolved 绝对路径
+    resolved = str(Path(cwd).resolve())
+
+    # 安全性校验：如果 project_name 有效且与目录名不匹配，很可能是 cwd 传错了
+    # （例如 project_root 意外指向了父目录而非项目根目录），跳过自动 init。
+    # 匹配成功或 project_name 为空/默认值时，继续正常的 git init 流程。
+    if project_name is not None and project_name not in ("默认项目", ""):
+        dir_name = Path(resolved).name
+        if dir_name != project_name:
+            logger.warning(
+                f"[format_memory_context] 安全拦截：cwd 目录名 '{dir_name}' "
+                f"与 project_name '{project_name}' 不匹配，跳过自动 git init"
+            )
+            return False
+
+    if _is_git_repo(resolved):
         return True
     if not _is_git_available():
         return False
     # 同一目录只 init 一次，避免每轮用户消息都触发
-    norm = str(Path(cwd).resolve())
-    if norm in _AUTO_INITED:
-        return _is_git_repo(cwd)
-    _AUTO_INITED.add(norm)
+    if resolved in _AUTO_INITED:
+        return _is_git_repo(resolved)
+    _AUTO_INITED.add(resolved)
 
-    _, _, code = _run_git(cwd, "init")
+    logger.info(f"[format_memory_context] 自动 git init: {resolved}")
+    _, _, code = _run_git(resolved, "init")
     if code != 0:
         return False
     # 空 commit 让默认分支立即产生（否则 branch --show-current 返回空）
-    _run_git(cwd, "commit", "--allow-empty", "-m", "init")
-    return _is_git_repo(cwd)
+    _, stderr, code = _run_git(resolved, "commit", "--allow-empty", "-m", "init")
+    if code != 0:
+        logger.warning(f"[format_memory_context] 空 commit 失败: {stderr}")
+        return False
+    return _is_git_repo(resolved)
 
 
 def _parse_branch_header(line: str) -> dict[str, Any]:
@@ -540,15 +567,17 @@ def _auto_generate_or_append_gitignore(cwd: str) -> dict[str, Any]:
         return {"action": "noop", "added": 0, "sections": []}
 
 
-def _build_git_status_block(cwd: str) -> list[str] | None:
+def _build_git_status_block(cwd: str, project_name: str | None = None) -> list[str] | None:
     """组装 Git 状态段，返回 None 表示不可用（让调用方 fallback）
 
     一次性从 _collect_all_git 拿到所有数据（已并发 + 已缓存），
     本函数只负责格式化，不再做任何 subprocess 调用。
     """
-    if not _auto_git_init(cwd):
+    # 统一使用 resolved 绝对路径，确保与 _auto_git_init 内部一致
+    resolved = str(Path(cwd).resolve())
+    if not _auto_git_init(resolved, project_name):
         return None
-    info = _collect_all_git(cwd)
+    info = _collect_all_git(resolved)
     branch = info["branch"]
     ahead = info["ahead"]
     behind = info["behind"]
@@ -567,10 +596,10 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
         parts.append(f"**Stash**: {stash_count} 条未保存的工作")
     parts.extend(_format_status_section(files, diff_stats))
 
-    # 自动处理 .gitignore（无条件跑一次，缓存保证同 cwd 只处理一次）：
+    # 自动处理 .gitignore（无条件跑一次，缓存保证同 resolved 只处理一次）：
     #   - 无 .gitignore → 创建完整版
     #   - 已有 → 仅追加缺失规则
-    gi = _auto_generate_or_append_gitignore(cwd)
+    gi = _auto_generate_or_append_gitignore(resolved)
     if gi["action"] == "created":
         n = gi["added"]
         parts.append("")
@@ -665,7 +694,8 @@ def hook(event: str, context: dict) -> str:
         ctx_lines.append("- 根目录外：用绝对路径")
 
         # 优先复用 Git 状态（与 .drifox/plugins/git-status 同款格式）
-        git_block = _build_git_status_block(project_root) if project_root else None
+        # 传入 project_name 用于安全性校验，防止误在父目录初始化 git 仓库
+        git_block = _build_git_status_block(project_root, project_name) if project_root else None
         if git_block:
             ctx_lines.append("")
             ctx_lines.extend(git_block)
