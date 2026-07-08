@@ -975,10 +975,10 @@ class ToolExecutor:
                 query=args.get("query", ""),
                 mode=args.get("mode", "explore"),
                 depth=int(args.get("depth", 2) or 2),
-                max_files=int(args.get("max_files", 12) or 12),
+                max_files=int(args.get("max_files", 50) or 50),
                 kind=args.get("kind"),
                 directory=args.get("directory"),
-                limit=int(args.get("limit", 20) or 20),
+                limit=int(args.get("limit", 50) or 50),
                 exact=args.get("exact", False),
             ),
         }
