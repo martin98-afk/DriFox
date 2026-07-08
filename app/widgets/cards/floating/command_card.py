@@ -573,6 +573,26 @@ class CommandCard(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # 描述 tooltip（列表模式下显示当前选中项的完整描述）
+        # 设计目的：item 行的 _ElidedLabel 描述在宽度不足时会省略（中间省略），
+        # 用户难以阅读完整说明。此 tooltip 在卡片顶部用完整文本展示，宽度充裕，
+        # 因此换行后能读完整内容；空描述/详情模式下隐藏。
+        self._desc_tooltip_label = QLabel()
+        self._desc_tooltip_label.setWordWrap(True)
+        self._desc_tooltip_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._desc_tooltip_label.setVisible(False)
+        self._desc_tooltip_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        layout.addWidget(self._desc_tooltip_label)
+
+        # tooltip 与列表之间的细分隔线（视觉分组）
+        self._desc_tooltip_divider = QFrame()
+        self._desc_tooltip_divider.setFrameShape(QFrame.HLine)
+        self._desc_tooltip_divider.setFixedHeight(1)
+        self._desc_tooltip_divider.setVisible(False)
+        self._desc_tooltip_divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self._desc_tooltip_divider)
+        self._apply_desc_tooltip_style()
+
         # 滚动区域
         self._scroll_area = QScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
@@ -655,6 +675,8 @@ class CommandCard(QWidget):
         Colors.refresh()
         # 1. CommandCard 自身
         self._apply_self_style()
+        # 1.5 列表顶部描述 tooltip（主题感知）
+        self._apply_desc_tooltip_style()
         # 2. detail 容器内的静态 widget
         self._apply_detail_desc_style()
         self._apply_detail_positional_hint_style()
@@ -760,6 +782,149 @@ class CommandCard(QWidget):
         self._detail_desc_label.setStyleSheet(f"""
             QLabel {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
         """)
+
+    def _apply_desc_tooltip_style(self):
+        """刷新列表顶部描述 tooltip 的样式
+
+        视觉规范：
+        - 浅色半透明背景（HOVER_BG 系），与卡片主体轻微分层形成"tooltip"质感
+        - 圆角 + 上下内边距让它读起来像独立信息条
+        - 文字保持 TEXT_PRIMARY，确保一眼可读
+        """
+        Colors.refresh()
+        if not hasattr(self, "_desc_tooltip_label") or self._desc_tooltip_label is None:
+            return
+        self._desc_tooltip_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(11)};
+                background: {Colors.HOVER_BG};
+                border: none;
+                border-radius: 4px;
+                margin: 6px 8px 4px 8px;
+                padding: 6px 10px;
+            }}
+        """)
+        if hasattr(self, "_desc_tooltip_divider") and self._desc_tooltip_divider is not None:
+            self._desc_tooltip_divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+
+    def _compute_desc_tooltip_height(self, max_lines: int = 4) -> int:
+        """计算描述 tooltip 的高度（像素）
+
+        - 根据当前 selected item 的 description 文本 + 卡片宽度 + 最大行数计算
+        - 卡片宽度未初始化（首次构造）时返回保守默认值 0 —— 由调用方下次重试
+        - 上限 max_lines 行防止长描述占用过多屏幕空间
+        """
+        if not hasattr(self, "_desc_tooltip_label") or self._desc_tooltip_label is None:
+            return 0
+        text = self._desc_tooltip_label.text()
+        if not text.strip():
+            return 0
+        card_w = self.width()
+        if card_w <= 0:
+            return 0
+        # 边距（与样式表中的 margin 6px top + 4px bottom = 10px，左右 8px*2 = 16px）
+        inner_w = max(1, card_w - 16 - 20)  # 左右 margin + padding 安全余量
+        fm = self._desc_tooltip_label.fontMetrics()
+        line_height = fm.lineSpacing()
+        bounding = fm.boundingRect(QRect(0, 0, inner_w, 0), Qt.TextWordWrap, text)
+        line_count = max(1, (bounding.height() + line_height - 1) // line_height)
+        line_count = min(line_count, max_lines)
+        # 总高 = 上下 margin 10px + 上下 padding 12px + N*line_height
+        return 10 + 12 + int(line_count * line_height)
+
+    def _update_desc_tooltip(self, item: Optional[Dict[str, str]] = None):
+        """根据当前选中项更新 tooltip 文本与可见性
+
+        Args:
+            item: 可选的选中项数据；为 None 时从 _filtered_items 与 _selected_index 推导
+        """
+        if not hasattr(self, "_desc_tooltip_label") or self._desc_tooltip_label is None:
+            return
+        # 仅在列表模式下显示 tooltip；detail 模式自带描述区，无需重复
+        if self._detail_mode:
+            self._desc_tooltip_label.setVisible(False)
+            self._desc_tooltip_divider.setVisible(False)
+            # detail 模式的高度由 _adjust_detail_height 控制，此处不刷新
+            return
+        if item is None:
+            if 0 <= self._selected_index < len(self._filtered_items):
+                item = self._filtered_items[self._selected_index]
+            else:
+                item = None
+        desc = (item or {}).get("description", "") if item else ""
+        if not desc.strip():
+            # 空描述：隐藏（不显示空白 tooltip），并刷新卡片高度（清除旧 tooltip 占用空间）
+            self._desc_tooltip_label.setVisible(False)
+            self._desc_tooltip_divider.setVisible(False)
+            self._apply_list_height()
+            return
+        # HTML 转义 + 多关键字高亮（与 _ElidedLabel._update_display 对齐）
+        safe = html.escape(desc)
+        if self._current_text_query:
+            hls = CommandItemWidget._all_highlight_queries(desc, self._current_text_query)
+            if hls:
+                lower_safe = safe.lower()
+                spans = []
+                for hl in hls:
+                    escaped_hl = html.escape(hl)
+                    lower_hl = escaped_hl.lower()
+                    idx = lower_safe.find(lower_hl)
+                    if idx >= 0:
+                        spans.append((idx, idx + len(escaped_hl)))
+                if spans:
+                    spans.sort()
+                    merged = [spans[0]]
+                    for s in spans[1:]:
+                        if s[0] <= merged[-1][1]:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], s[1]))
+                        else:
+                            merged.append(s)
+                    parts = []
+                    pos = 0
+                    for start, end in merged:
+                        if pos < start:
+                            parts.append(safe[pos:start])
+                        parts.append(
+                            f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{safe[start:end]}</span>'
+                        )
+                        pos = end
+                    if pos < len(safe):
+                        parts.append(safe[pos:])
+                    safe = "".join(parts)
+        self._desc_tooltip_label.setText(safe)
+        self._desc_tooltip_label.setVisible(True)
+        self._desc_tooltip_divider.setVisible(True)
+        # 文本更新后重新计算 tooltip 自身高度，再统一刷新卡片总高度
+        tip_h = self._compute_desc_tooltip_height()
+        if tip_h > 0:
+            self._desc_tooltip_label.setFixedHeight(tip_h)
+        self._apply_list_height()
+
+    def _apply_list_height(self):
+        """统一刷新卡片总高度：列表高度 + 顶部描述 tooltip 高度（若可见）
+
+        由 _render / 选中变更 / detail→list 切换等多个入口复用。
+        当卡片空列表时直接置 0（卡片可见性由 _filtered_items 控制，调用方负责）。
+        """
+        item_count = len(self._item_widgets)
+        divider_count = len(self._dividers)
+        total_items = item_count + divider_count
+        if total_items == 0:
+            self.setFixedHeight(0)
+            return
+        visible = min(total_items, MAX_VISIBLE_ITEMS)
+        list_height = visible * ITEM_HEIGHT + divider_count * 1
+        # 顶部 tooltip 仅在列表模式可见；detail 模式自带描述区，不重复显示
+        tooltip_h = 0
+        if (
+            not self._detail_mode
+            and hasattr(self, "_desc_tooltip_label")
+            and self._desc_tooltip_label is not None
+            and self._desc_tooltip_label.isVisible()
+        ):
+            tooltip_h = self._desc_tooltip_label.height()
+        self.setFixedHeight(list_height + tooltip_h)
 
     def _apply_detail_positional_hint_style(self):
         """刷新 detail 模式位置参数提示标签的样式"""
@@ -930,6 +1095,10 @@ class CommandCard(QWidget):
         # 隐藏列表，显示 detail
         self._scroll_area.setVisible(False)
         self._detail_container.setVisible(True)
+        # detail 模式下隐藏顶部描述 tooltip（detail 自带描述区，无需重复）
+        if hasattr(self, "_desc_tooltip_label") and self._desc_tooltip_label is not None:
+            self._desc_tooltip_label.setVisible(False)
+            self._desc_tooltip_divider.setVisible(False)
         self._visible = True
         self.setVisible(True)
 
@@ -1391,6 +1560,7 @@ class CommandCard(QWidget):
             if still_active and cursor_pos >= 0 and full_text:
                 # 用正则查找最后一个匹配（与 _auto_switch_to_value_selection 一致）
                 import re
+
                 matches = list(re.finditer(re.escape(param_clean) + r"=", full_text))
                 if matches:
                     last_match = matches[-1]
@@ -1552,6 +1722,9 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)
         self._scroll_area.setVisible(True)
+        # 回到列表模式后重新激活顶部描述 tooltip
+        # （_update_desc_tooltip 内部会检测 _detail_mode 并显示）
+        self._update_desc_tooltip()
         # 清除 detail 模式设置的固定高度，让列表模式自由撑开
         self.setMaximumHeight(16777215)
         self.setMinimumHeight(0)
@@ -1812,15 +1985,10 @@ class CommandCard(QWidget):
                 # _reset_detail_mode() 会清除卡片的 minH/maxH 约束，
                 # 如果不重新 setFixedHeight，layout 会算出很小的 natural_h
                 # 导致容器无法展开到正常高度（见插件卡片关闭后命令卡片高度异常 bug）
-                item_count = len(new_items)
-                divider_count = len(self._dividers)
-                total_items = item_count + divider_count
-                if total_items == 0:
-                    self.setFixedHeight(0)
-                else:
-                    visible = min(total_items, MAX_VISIBLE_ITEMS)
-                    height = visible * ITEM_HEIGHT + divider_count * 1
-                    self.setFixedHeight(height)
+                self._apply_list_height()
+                # 快速路径 selected_index 不会变，仍需刷新 tooltip（描述可能因 query 高亮而变）
+                if not self._detail_mode:
+                    self._update_desc_tooltip()
                 return
 
         # 构建旧 widget 的 key 映射
@@ -1912,17 +2080,11 @@ class CommandCard(QWidget):
                 next_div_idx += 1
             self._scroll_layout.addWidget(widget)
 
-        # 计算卡片高度
-        item_count = len(new_items)
-        divider_count = len(self._dividers)
-        total_items = item_count + divider_count
-
-        if total_items == 0:
-            self.setFixedHeight(0)
-        else:
-            visible = min(total_items, MAX_VISIBLE_ITEMS)
-            height = visible * ITEM_HEIGHT + divider_count * 1
-            self.setFixedHeight(height)
+        # 计算卡片高度（列表部分 + 顶部描述 tooltip）
+        self._apply_list_height()
+        # 重新渲染后 selected_index 可能已被重置为 0，更新 tooltip
+        if not self._detail_mode:
+            self._update_desc_tooltip()
 
     def _on_item_clicked(self):
         """item 被鼠标点击"""
@@ -1974,6 +2136,10 @@ class CommandCard(QWidget):
             self._current_selected_type = self._filtered_items[self._selected_index].get("type", "")
         else:
             self._current_selected_type = ""
+
+        # 刷新顶部描述 tooltip（仅列表模式；detail 模式自带描述区）
+        if not self._detail_mode:
+            self._update_desc_tooltip()
 
         # 滚动到可见区域
         if 0 <= self._selected_index < len(self._item_widgets):
@@ -2080,6 +2246,11 @@ class CommandCard(QWidget):
         self._reset_detail_mode()
         self._visible = False
         self.setVisible(False)
+        # 关闭时清空 tooltip 文本，避免下次 show_card 闪现旧描述
+        if hasattr(self, "_desc_tooltip_label") and self._desc_tooltip_label is not None:
+            self._desc_tooltip_label.setVisible(False)
+            self._desc_tooltip_divider.setVisible(False)
+            self._desc_tooltip_label.setText("")
         self.dismissed.emit()
 
     def show_card(self, query: str = "", incremental: bool = True):

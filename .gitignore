@@ -61,6 +61,9 @@ app.config
 .coverage
 htmlcov/
 
+# CodeGraph 索引（自动生成，不提交）
+.codegraph/
+
 # 系统文件
 desktop.ini
 $RECYCLE.BIN/

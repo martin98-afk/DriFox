@@ -1005,8 +1005,8 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(display_name)}</span>
             {spinner_html}
         </span>
-        <span style="margin-left: auto; min-width: 0; overflow: hidden; flex-shrink: 1;">
-            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+        <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; margin-left: 10px;">
+            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {preview_display}
             </span>
         </span>
@@ -1042,12 +1042,12 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
         {spinner_html}
-        <span>思考中...</span>
+        <span>深度思考中...</span>
     </span>
 </div>"""
 
@@ -1081,12 +1081,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "思考中"文字 ──
+    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;">
+    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
         {spinner_html}
-        <span>思考中...</span>
+        <span>深度思考中...</span>
     </span>
 </div>"""
 
@@ -2656,12 +2656,11 @@ class CodeWebViewer(QWebEngineView):
                 .think-block {{
                     margin: 4px 0;
                     background: transparent;
-                    border: 1px solid var(--border);
+                    border: none;
                     border-radius: 6px;
-                    transition: border-color 220ms ease;
                 }}
                 .think-block[data-expanded="true"] {{
-                    border-color: rgba(102, 198, 255, 0.4);
+                    border: none;
                 }}
                 .think-block__summary {{
                     padding: 5px 10px;
@@ -2672,7 +2671,7 @@ class CodeWebViewer(QWebEngineView):
                 .think-streaming {{
                     margin: 4px 0;
                     background: transparent;
-                    border: 1px solid var(--border);
+                    border: none;
                     border-radius: 6px;
                     padding: 8px 10px;
                     color: var(--text-secondary);
@@ -2769,13 +2768,12 @@ class CodeWebViewer(QWebEngineView):
                 .tool-block {{
                     margin: 4px 0;
                     background: transparent;
-                    border: 1px solid var(--border);
+                    border: none;
                     border-radius: 6px;
                     box-shadow: none;
-                    transition: border-color 220ms ease;
                 }}
                 .tool-block[data-expanded="true"] {{
-                    border-color: rgba(95, 209, 140, 0.5);
+                    border: none;
                 }}
                 .tool-block__summary {{
                     padding: 5px 10px;
@@ -2810,21 +2808,20 @@ class CodeWebViewer(QWebEngineView):
                     color: #6e7681;
                 }}
                 .tool-diff-inline {{
-                    margin: 8px 0 2px;
-                    background: linear-gradient(180deg, rgba(22,27,34,0.62), rgba(13,17,23,0.42));
-                    border: 1px solid rgba(139, 148, 158, 0.22);
+                    margin: 0;
+                    background: rgba(13,17,23,0.40);
+                    border: 1px solid rgba(48,54,61,0.25);
                     border-radius: 8px;
                     overflow: hidden;
-                    box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
                 }}
                 .tool-diff-inline__header {{
                     display: flex;
                     align-items: center;
                     gap: 8px;
                     min-width: 0;
-                    padding: 7px 10px;
-                    background: rgba(255,255,255,0.035);
-                    border-bottom: 1px solid rgba(139, 148, 158, 0.16);
+                    padding: 4px 10px;
+                    background: rgba(22,27,34,0.40);
+                    border-bottom: 1px solid rgba(48,54,61,0.25);
                     color: #8b949e;
                     font-size: {small_font_size}px;
                     font-weight: 600;
@@ -2948,6 +2945,58 @@ class CodeWebViewer(QWebEngineView):
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
                 }}
+                /* 空白上下文行（源文件空行）：折叠为紧凑空隙，避免单列模式下
+                   段落差异之间出现 bulky 空行；连续空行只渲染一条。 */
+                .tool-diff-inline .diff-line.diff-ctx-blank {{
+                    min-height: 0;
+                    height: 9px;
+                }}
+                .tool-diff-inline .diff-line.diff-ctx-blank .line-code {{
+                    color: transparent;
+                }}
+                /* === 差异段：单列默认为"删除→新增"分组，双列(split-view)为配对行左右对照 === */
+                .tool-diff-inline .diff-segment {{
+                    display: block;
+                }}
+                /* 单列模式（默认）：所有删除先、所有新增后，连续堆叠 */
+                .tool-diff-inline .diff-seg-col {{
+                    display: block;
+                }}
+                .tool-diff-inline .diff-seg-col > .diff-line {{
+                    border-bottom: 1px solid transparent;
+                }}
+                /* 配对行视图（双列模式用）：默认隐藏 */
+                .tool-diff-inline .diff-seg-paired {{
+                    display: none;
+                }}
+                /* 双列模式：隐藏单列视图，显示配对视图 */
+                .tool-diff-inline.split-view .diff-seg-col {{
+                    display: none;
+                }}
+                .tool-diff-inline.split-view .diff-seg-paired {{
+                    display: block;
+                }}
+                /* 配对行：左右对照（始终 row，因为仅在 split-view 中出现） */
+                .tool-diff-inline .diff-seg-row {{
+                    display: flex;
+                    flex-direction: row;
+                    align-items: stretch;
+                }}
+                .tool-diff-inline .diff-seg-row > .diff-line {{
+                    flex: 1 1 50%;
+                    width: auto;
+                    border-bottom: 1px solid transparent;
+                }}
+                /* 空栏占位（纯删/纯增段在双列模式中的空白占位列） */
+                .tool-diff-inline .diff-seg-empty {{
+                    display: flex;
+                    background: transparent !important;
+                    box-shadow: none !important;
+                }}
+                .tool-diff-inline .diff-seg-empty .line-code {{
+                    color: transparent;
+                }}
+
                 /* 元信息行（文件头/hunk头/截断）：行号列与符号列隐形，避免空列割裂视觉 */
                 .tool-diff-inline .diff-meta .line-num {{
                     background: transparent;
@@ -3153,10 +3202,8 @@ class CodeWebViewer(QWebEngineView):
                     body.style.opacity = startOpacity;
                     // 立即设置 overflow 防止内容泄漏
                     body.style.overflow = 'hidden';
-                    // 折叠时立即设置高度，防止视觉抖动
-                    if (isCollapsing) body.style.height = '0px';
 
-                    // 强制重绘
+                    // 强制重绘，确保第一帧从正确的 startHeight 开始
                     void body.offsetHeight;
 
                     // 取消之前的动画
@@ -3170,7 +3217,6 @@ class CodeWebViewer(QWebEngineView):
                         // 使用 easeOutQuad 缓动
                         const eased = 1 - (1 - progress) * (1 - progress);
 
-                        // 折叠时 startHeight 已经是0，currentHeight 计算应该从0开始
                         const currentHeight = isCollapsing 
                             ? startHeight * (1 - eased)  // 从 startHeight 减少到 0
                             : startHeight + (endHeight - startHeight) * eased;
@@ -3185,11 +3231,16 @@ class CodeWebViewer(QWebEngineView):
                             // 动画结束：设置最终状态
                             body.style.height = expand ? 'auto' : '0px';
                             body.style.opacity = endOpacity;
-                            body.style.overflow = '';
-                            // 动画结束后重置高度报告标志
+                            // 折叠后保持 overflow hidden，防止内容溢出导致文档高度波动
+                            if (!expand) body.style.overflow = 'hidden';
+                            else body.style.overflow = '';
+                            // 强制重排确保布局已稳定，然后立即报告最终高度
+                            // 先 void body.offsetHeight 强制同步布局，再 reportHeight
+                            void body.offsetHeight;
+                            reportHeight();
+                            // ⚠️ 最后释放高度报告抑制，避免 ResizeObserver 在布局计算期间
+                            // 被 overflow 等属性变化触发二次报告（50ms 后 viewer 再跳一次）
                             _collapsibleHeightReporting = false;
-                            // 动画结束后延迟报告高度，确保 CSS transition 完成
-                            setTimeout(() => reportHeight(), 80);
                         }}
                     }}
 
@@ -4345,7 +4396,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -5850,19 +5901,21 @@ class MessageCard(SimpleCardWidget):
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         self._target_viewer_height = target_height
 
-        # 关键优化：高度变化完全由 CSS transition 驱动
-        # PyQt 只设置最终值，不做 QVariantAnimation 插值动画
-        # 因为 CSS transition 已经提供了平滑动画
+        # 关键优化：流式或小变化 → 立即跳转
         if self._streaming or abs(target_height - current_height) < 10:
             if self._height_anim.state() == QVariantAnimation.Running:
                 self._height_anim.stop()
             self._apply_viewer_height(target_height)
             return
 
-        # 停止任何正在进行的动画，直接跳到目标值
-        # CSS transition 会负责平滑过渡
-        self._height_anim.stop()
+        # 非流式大高度变化（折叠/展开）：一次性设 viewer 最终高度，
+        # 但跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
+        # 卡片位置因容器动画与 viewer 高度变化不同步而"闪现"。
+        # card_container 检查 NO_ANIMATION_PROP → 直接 snap 到目标高度。
+        self.setProperty("noContainerAnimation", True)
         self._apply_viewer_height(target_height)
+        # 延迟清除标志，等容器 snap 完成
+        QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
 
     def _on_height_anim_state_changed(self, state):
         self._is_height_animating = state == QVariantAnimation.Running
@@ -6771,7 +6824,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):

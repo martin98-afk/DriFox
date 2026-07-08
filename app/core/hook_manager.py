@@ -252,10 +252,28 @@ class HookMatchRule:
 
         # SessionStart 会话状态匹配
         # matcher 格式如 "startup|resume|clear|compact"，匹配 context["state"]
+        # matcher="#team_member" 特例：仅当窗口是团队成员时触发（让 hooks.json 能为
+        # 团队成员单独配置会话启动指引，避免普通会话看到团队相关提示）
         if event_name == "SessionStart":
+            if self.matcher == "#team_member":
+                return bool(context.get("is_team_member", False))
             session_state = context.get("state", "startup")
             states = [s.strip() for s in self.matcher.split("|")]
             return session_state in states
+
+        # Stop 停止原因匹配（参考 SessionStart 的 state 模式）
+        # matcher 格式如 "completed|cancelled|error"，匹配 context["reason"]
+        # reason 字段由 chat_worker.py 在 3 处 Stop 触发点注入：
+        #   - 正常完成 → "completed"
+        #   - 用户取消 → "cancelled"
+        #   - API 异常 → "error"
+        # matcher="#team_member" 特例保持一致：仅团队成员窗口触发
+        if event_name == "Stop":
+            if self.matcher == "#team_member":
+                return bool(context.get("is_team_member", False))
+            stop_reason = context.get("reason", "completed")
+            reasons = [r.strip() for r in self.matcher.split("|")]
+            return stop_reason in reasons
 
         # BuildSystemPrompt 智能体角色匹配
         # matcher 格式如 "primary|subagent"，匹配 context["current_role"]

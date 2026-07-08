@@ -63,6 +63,40 @@ class GitRepoInfo:
     current_branch: str = ""
 
 
+def _finish_worktree(
+    worktrees: List[WorktreeInfo],
+    current: dict[str, str],
+) -> None:
+    """解析 `git worktree list --porcelain` 一个 block，追加到 worktrees 列表"""
+    path = current.get("path", "")
+    if not path:
+        return
+
+    branch_raw = current.get("branch", "")
+    if branch_raw:
+        # refs/heads/<name> → <name>
+        if branch_raw.startswith("refs/heads/"):
+            branch = branch_raw[11:]
+        else:
+            branch = branch_raw
+    else:
+        # 没有 branch 行 = detached HEAD
+        branch = "(detached)"
+
+    is_prunable = "prunable" in current
+    is_main = os.path.isdir(os.path.join(path, ".git"))
+    # git worktree list 第一行是主仓库
+    is_current = len(worktrees) == 0
+
+    worktrees.append(WorktreeInfo(
+        path=path,
+        branch=branch,
+        is_main=is_main,
+        is_current=is_current,
+        is_bare=is_prunable,  # 复用 is_bare 表示可清理状态
+    ))
+
+
 class GitWorktreeDetector:
     """Git/Worktree 检测器（带内存缓存，避免重复调 git 拖慢 UI）"""
 
@@ -169,6 +203,8 @@ class GitWorktreeDetector:
         """
         列出 git 仓库的所有 worktree
         
+        使用 --porcelain 格式确保路径含空格时也能正确解析。
+        
         Args:
             git_root: git 仓库根目录
         
@@ -179,52 +215,40 @@ class GitWorktreeDetector:
             return []
 
         try:
-            result = _run_git(["worktree", "list"], cwd=git_root)
+            result = _run_git(["worktree", "list", "--porcelain"], cwd=git_root)
             if result.returncode != 0:
                 return []
 
-            import re
-            # 格式: /path/to/dir  abc1234 [branch-name]  optional-status
-            # 例: D:/work/DriFoxx  96be02b [dev]
-            # 例: D:/work/DriFoxx-wt  96be02b [feature/test] prunable
-            line_re = re.compile(r'^(\S+)\s+(\S+)\s+\[([^\]]+)\](.*)$')
+            # --porcelain 格式（每条 worktree 为一个 block，空行分隔）：
+            #   worktree <path>
+            #   HEAD <sha1>
+            #   branch refs/heads/<name>     # 有分支时
+            #   (无 branch 行 = detached HEAD)
+            #   prunable gitdir file ...     # 可选，可清理状态
+            worktrees: List[WorktreeInfo] = []
+            current: dict[str, str] = {}
 
-            worktrees = []
-            for line in result.stdout.strip().split("\n"):
+            for line in result.stdout.splitlines():
                 if not line.strip():
+                    # 空行 = 一个 worktree block 结束
+                    if current:
+                        _finish_worktree(worktrees, current)
+                        current = {}
                     continue
 
-                m = line_re.match(line)
-                if not m:
-                    continue
+                if line.startswith("worktree "):
+                    current["path"] = line[9:]
+                elif line.startswith("HEAD "):
+                    current["head"] = line[5:]
+                elif line.startswith("branch "):
+                    current["branch"] = line[7:]  # refs/heads/<name>
+                elif line.startswith("prunable "):
+                    current["prunable"] = line[9:]
+                # 其他行（如 detached）忽略
 
-                path = m.group(1)
-                # commit_hash = m.group(2)  # 不需要
-                branch_raw = m.group(3)
-                status = m.group(4).strip()
-
-                # 解析分支名
-                # [dev] → dev
-                # [refs/heads/dev] → dev
-                # [(detached HEAD)] → detached
-                if branch_raw.startswith("refs/heads/"):
-                    branch = branch_raw[11:]
-                elif "detached" in branch_raw.lower():
-                    branch = "(detached)"
-                else:
-                    branch = branch_raw
-
-                is_prunable = "prunable" in status
-                is_main = os.path.isdir(os.path.join(path, ".git"))
-                is_current = len(worktrees) == 0
-
-                worktrees.append(WorktreeInfo(
-                    path=path,
-                    branch=branch,
-                    is_main=is_main,
-                    is_current=is_current,
-                    is_bare=is_prunable,  # 复用 is_bare 表示可清理状态
-                ))
+            # 最后一段可能没有尾随空行
+            if current:
+                _finish_worktree(worktrees, current)
 
             # 计算每个 worktree 相对主仓库的落后/超前提交数
             main_branch = None
@@ -258,6 +282,7 @@ class GitWorktreeDetector:
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             logger.debug(f"[GitWorktree] list_worktrees failed: {e}")
             return []
+
 
     @staticmethod
     def get_repo_info(path: str) -> Optional[GitRepoInfo]:

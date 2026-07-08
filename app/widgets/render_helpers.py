@@ -14,6 +14,148 @@ import orjson as json
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
+# ===== Pygments 语法高亮（行内 diff 代码着色，复用与 message_card 一致的 dracula 主题）=====
+# 注意：render_helpers 被 message_card 反向依赖，若从 message_card 导入会形成循环导入，
+# 因此在此处就地维护一套带缓存的轻量着色逻辑（与 message_card 的 lexer/formatter 模式一致）。
+from pygments import highlight as _pyg_highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
+
+# 行内 diff 专用 formatter：nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
+_DIFF_FORMATTER = HtmlFormatter(nowrap=True, style="dracula", noclasses=True)
+_TEXT_LEXER = TextLexer()
+_DIFF_LEXER_CACHE: dict = {}
+
+# 扩展名 → pygments lexer 别名（get_lexer_for_filename 找不到时的兜底）
+_EXT_LEXER_MAP = {
+    ".py": "python",
+    ".pyi": "python",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".jsx": "jsx",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".less": "less",
+    ".json": "json",
+    ".jsonc": "json",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".fish": "bash",
+    ".sql": "sql",
+    ".xml": "xml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".cfg": "ini",
+    ".conf": "ini",
+    ".lua": "lua",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".swift": "swift",
+    ".r": "r",
+    ".pl": "perl",
+    ".pm": "perl",
+    ".dart": "dart",
+    ".vue": "vue",
+    ".dockerfile": "docker",
+    ".mk": "makefile",
+    ".cmake": "cmake",
+    ".tf": "hcl",
+    ".ex": "elixir",
+    ".exs": "elixir",
+    ".erl": "erlang",
+    ".hs": "haskell",
+    ".scala": "scala",
+    ".groovy": "groovy",
+    ".ps1": "powershell",
+    ".bat": "batch",
+}
+
+
+def _get_diff_lexer(path: str):
+    """根据文件路径推断 lexer，按扩展名缓存，避免重复构造（构造开销大）"""
+    if not path or path == "/dev/null":
+        return _TEXT_LEXER
+    key = os.path.splitext(path)[1].lower() or path
+    cached = _DIFF_LEXER_CACHE.get(key)
+    if cached is not None:
+        return cached
+    lex = _TEXT_LEXER
+    try:
+        lex = get_lexer_for_filename(path)
+    except Exception:
+        alias = _EXT_LEXER_MAP.get(key)
+        if alias:
+            try:
+                lex = get_lexer_by_name(alias)
+            except Exception:
+                lex = _TEXT_LEXER
+    _DIFF_LEXER_CACHE[key] = lex
+    return lex
+
+
+def _highlight_code_line(text: str, lexer) -> str:
+    """对单行代码做语法高亮，返回带内联 color 的 HTML（nowrap，无 <pre> 包裹）
+
+    注意：Pygments 在 nowrap 模式下会在输出末尾追加一个 "\\n"。词级差异会把每个
+    词段单独高亮后拼接，若保留该换行，整行会被切碎、出现多余空白与异常换行。
+    这里统一剥掉末尾换行（高亮的都是单行/单词段，不含真实换行）。
+    """
+    if lexer is None or lexer is _TEXT_LEXER:
+        return escape(text)
+    try:
+        return _pyg_highlight(text, lexer, _DIFF_FORMATTER).rstrip("\n")
+    except Exception:
+        return escape(text)
+
+
+def _highlighted_word_diff_html(old_text: str, new_text: str, lexer) -> tuple:
+    """词级差异高亮（背景叠加）+ 每段语法高亮，返回 (old_html, new_html)
+
+    在原有词级差异（.word-del/.word-add 背景叠加）基础上，对每个词段再做
+    Pygments 着色，使"改了什么"和"语法结构"同时可见。
+    """
+    if len(old_text) + len(new_text) > 2000:
+        return _highlight_code_line(old_text, lexer), _highlight_code_line(new_text, lexer)
+    old_tokens = _WORD_RE.findall(old_text) or [old_text]
+    new_tokens = _WORD_RE.findall(new_text) or [new_text]
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
+    old_parts = []
+    new_parts = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            old_parts.append(_highlight_code_line("".join(old_tokens[i1:i2]), lexer))
+            new_parts.append(_highlight_code_line("".join(new_tokens[j1:j2]), lexer))
+        elif tag == "delete":
+            old_parts.append(f'<span class="word-del">{_highlight_code_line("".join(old_tokens[i1:i2]), lexer)}</span>')
+        elif tag == "insert":
+            new_parts.append(f'<span class="word-add">{_highlight_code_line("".join(new_tokens[j1:j2]), lexer)}</span>')
+        elif tag == "replace":
+            old_parts.append(f'<span class="word-del">{_highlight_code_line("".join(old_tokens[i1:i2]), lexer)}</span>')
+            new_parts.append(f'<span class="word-add">{_highlight_code_line("".join(new_tokens[j1:j2]), lexer)}</span>')
+    return "".join(old_parts), "".join(new_parts)
+
+
 # 预编译正则表达式（模块级别缓存，避免重复编译）
 _CODE_BLOCK_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -244,29 +386,6 @@ def _parse_subagent_task_ids(result: str) -> str:
 _WORD_RE = re.compile(r"(\w+|\W+)")
 
 
-def _word_diff_html(old_text: str, new_text: str) -> tuple:
-    """词级差异高亮，返回 (old_html, new_html)"""
-    if len(old_text) + len(new_text) > 2000:
-        return escape(old_text), escape(new_text)
-    old_tokens = _WORD_RE.findall(old_text) or [old_text]
-    new_tokens = _WORD_RE.findall(new_text) or [new_text]
-    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
-    old_parts = []
-    new_parts = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            old_parts.append(escape("".join(old_tokens[i1:i2])))
-            new_parts.append(escape("".join(new_tokens[j1:j2])))
-        elif tag == "delete":
-            old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
-        elif tag == "insert":
-            new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
-        elif tag == "replace":
-            old_parts.append(f'<span class="word-del">{escape("".join(old_tokens[i1:i2]))}</span>')
-            new_parts.append(f'<span class="word-add">{escape("".join(new_tokens[j1:j2]))}</span>')
-    return "".join(old_parts), "".join(new_parts)
-
-
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)")
 
 
@@ -304,13 +423,20 @@ def _summarize_diff(diff_text: str) -> dict:
 
 def _render_diff_preview(diff_text: str) -> str:
     """
-    将 unified diff 文本渲染为带行号、词级差异高亮的 HTML。
+    将 unified diff 渲染为带语法高亮、段落级差异的 HTML。
 
-    支持: 文件头(---/+++) → hunk 头(@@) → 逐行差异
-    连续 -/+ 行对会做词级差异高亮。
+    - 相邻的增/删差异（包括被 hunk 头隔开的紧邻小改动）聚合成一个
+      「差异段」，差异段同时输出两套视图：
+      · 单列视图（.diff-seg-col，默认）：所有删除行先、所有新增行后，
+        配对行做词级差异高亮（与双列共用同一份 _highlighted_word_diff_html
+        输出，未配对行降级为整行高亮
+      · 双列视图（.diff-seg-paired，split-view）：左右对照的配对行 + 词级差异高亮
     超过 500 行时截断并显示行数。
     """
     lines = diff_text.split("\n")[1:]
+    # 去掉 split 产生的尾随空行（diff 文本通常以一个换行结尾），避免渲染出多余空行
+    while lines and lines[-1] == "":
+        lines.pop()
     MAX_LINES = 500
     truncated = False
     if len(lines) > MAX_LINES:
@@ -319,161 +445,227 @@ def _render_diff_preview(diff_text: str) -> str:
         shown = len(lines) - MAX_LINES
         lines = lines[:half] + [None] + lines[-half:]
 
-    rows = []
-    old_ln = 0
-    new_ln = 0
-    i = 0
-    _pending_old_header = None
-
     def _clean_path(p: str) -> str:
         p = p.strip()
         if p.startswith("a/") or p.startswith("b/"):
             p = p[2:]
         return p
 
+    # ---- 1. 解析为带类型的行对象 ----
+    parsed = []
+    old_ln = new_ln = 0
+    i = 0
+    pending_old = None
+    current_lexer = _TEXT_LEXER  # 随 +++ 文件头切换，用于逐行语法高亮
     while i < len(lines):
         line = lines[i]
         if line is None:
+            parsed.append({"kind": "truncated"})
+            i += 1
+            continue
+        if line.startswith("--- "):
+            pending_old = line
+            i += 1
+            continue
+        if line.startswith("+++ "):
+            new_path = _clean_path(line[4:])
+            old_path = _clean_path(pending_old[4:]) if pending_old else ""
+            if old_path == new_path:
+                display = old_path
+            elif old_path and new_path:
+                display = f"{old_path} → {new_path}"
+            else:
+                display = new_path or old_path
+            current_lexer = _get_diff_lexer(new_path or old_path)
+            parsed.append({"kind": "file", "text": display, "lexer": current_lexer})
+            pending_old = None
+            i += 1
+            continue
+        if pending_old:
+            # 单独的 --- 行（没有 +++ 跟随）
+            parsed.append({"kind": "file", "text": _clean_path(pending_old[4:]), "lexer": current_lexer})
+            pending_old = None
+            continue
+        if line.startswith("@@"):
+            m = _HUNK_HEADER_RE.match(line)
+            if m:
+                old_ln = int(m.group(1))
+                new_ln = int(m.group(2))
+            parsed.append({"kind": "hunk", "text": line})
+            i += 1
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            parsed.append({"kind": "del", "text": line[1:], "old_ln": old_ln, "new_ln": new_ln, "lexer": current_lexer})
+            old_ln += 1
+            i += 1
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            parsed.append({"kind": "add", "text": line[1:], "old_ln": old_ln, "new_ln": new_ln, "lexer": current_lexer})
+            new_ln += 1
+            i += 1
+            continue
+        # 上下文行（unified diff 上下文带前导空格）；其余元信息行（index / \ No newline 等）跳过，不占行号
+        if line.startswith(" ") or line == "":
+            stripped = line[1:] if line.startswith(" ") else line
+            parsed.append({"kind": "ctx", "text": stripped, "old_ln": old_ln, "new_ln": new_ln, "lexer": current_lexer})
+            old_ln += 1
+            new_ln += 1
+        i += 1
+
+    # ---- 2. 聚合成段落级差异段 ----
+    segments = []
+    cur = None  # 当前差异段（仅含 del/add）
+
+    def _flush():
+        nonlocal cur
+        if cur:
+            segments.append(cur)
+            cur = None
+
+    for p in parsed:
+        k = p["kind"]
+        if k in ("del", "add"):
+            if cur is None:
+                cur = []
+            cur.append(p)
+        elif k == "hunk":
+            # hunk 头不打断相邻差异段的聚合（紧邻小改动合并为一段）
+            if cur is None:
+                segments.append(p)
+        else:  # file / ctx / truncated
+            _flush()
+            segments.append(p)
+    _flush()
+
+    # ---- 3. 渲染 ----
+    def _cell(kind, ln, sign, code_html, empty=False):
+        if empty:
+            return (
+                '<div class="diff-line diff-seg-empty">'
+                '<span class="line-num">&nbsp;</span>'
+                '<span class="line-sign"></span>'
+                '<span class="line-code">&nbsp;</span></div>'
+            )
+        cls = "diff-del" if kind == "del" else "diff-add"
+        return (
+            f'<div class="diff-line {cls}">'
+            f'<span class="line-num">{ln}</span>'
+            f'<span class="line-sign">{sign}</span>'
+            f'<span class="line-code">{code_html}</span></div>'
+        )
+
+    rows = []
+    _prev_blank = False  # 折叠连续空上下文行，只保留一条细分隔线
+    for seg in segments:
+        if isinstance(seg, list):
+            _prev_blank = False
+            dels = [p for p in seg if p["kind"] == "del"]
+            adds = [p for p in seg if p["kind"] == "add"]
+            pair = min(len(dels), len(adds))
+
+            # === 双模式差异段 ===
+            # .diff-seg-col（单列默认）：所有删除先、所有新增后（带词级高亮）
+            # .diff-seg-paired（双列 split-view）：左右对照的配对行
+            rows.append('<div class="diff-segment">')
+
+            # ── 单列视图：所有删除行先、所有新增行后（带词级高亮） ──
+            # 先把配对行的词级高亮 HTML 算好缓存到 paired_htmls，
+            # 再分两段输出：先 del 全打，再 add 全打——避免 del/add 交替时
+            # 既要保持 "del→add" 配对又得来回切上下文。
+            # TODO(refactor): 抽出 paired-row 渲染辅助函数与双列分支共用，避免再出"忘了同步"回归
+            rows.append('<div class="diff-seg-col">')
+            paired_htmls = []
+            for k in range(pair):
+                od, oa = dels[k], adds[k]
+                old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
+                paired_htmls.append((od, old_html, oa, new_html))
+
+            # 1) 所有删除行
+            for k in range(pair):
+                od, old_html, _, _ = paired_htmls[k]
+                rows.append(_cell("del", od["old_ln"], "-", old_html))
+            for k in range(pair, len(dels)):
+                od = dels[k]
+                rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
+
+            # 2) 所有新增行
+            for k in range(pair):
+                _, _, oa, new_html = paired_htmls[k]
+                rows.append(_cell("add", oa["new_ln"], "+", new_html))
+            for k in range(pair, len(adds)):
+                oa = adds[k]
+                rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
+            rows.append("</div>")
+
+            # ── 双列视图：配对行（旧左新右），带词级高亮 ──
+            rows.append('<div class="diff-seg-paired">')
+            for k in range(pair):
+                od, oa = dels[k], adds[k]
+                old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
+                rows.append('<div class="diff-seg-row">')
+                rows.append(_cell("del", od["old_ln"], "-", old_html))
+                rows.append(_cell("add", oa["new_ln"], "+", new_html))
+                rows.append("</div>")
+            for k in range(pair, len(dels)):
+                od = dels[k]
+                rows.append('<div class="diff-seg-row">')
+                rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
+                rows.append(_cell("add", "", "", "", empty=True))
+                rows.append("</div>")
+            for k in range(pair, len(adds)):
+                oa = adds[k]
+                rows.append('<div class="diff-seg-row">')
+                rows.append(_cell("del", "", "", "", empty=True))
+                rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
+                rows.append("</div>")
+            rows.append("</div>")  # /.diff-seg-paired
+
+            rows.append("</div>")  # /.diff-segment
+        elif seg["kind"] == "file":
+            _prev_blank = False
+            rows.append(
+                f'<div class="diff-line diff-file-header diff-meta">'
+                f'<span class="line-num">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(seg["text"])}</span></div>'
+            )
+        elif seg["kind"] == "hunk":
+            _prev_blank = False
+            rows.append(
+                f'<div class="diff-line diff-hunk diff-meta">'
+                f'<span class="line-num">&nbsp;</span>'
+                f'<span class="line-sign"></span>'
+                f'<span class="line-code">{escape(seg["text"])}</span></div>'
+            )
+        elif seg["kind"] == "truncated":
+            _prev_blank = False
             rows.append(
                 f'<div class="diff-line diff-truncated diff-meta">'
                 f'<span class="line-num">&nbsp;</span>'
                 f'<span class="line-sign"></span>'
                 f'<span class="line-code">⋯ 省略 {shown} 行 ⋯</span></div>'
             )
-            i += 1
-            continue
-
-        # 文件头：将 ---/+++ 合并为单个文件路径行
-        if line.startswith("--- "):
-            _pending_old_header = line
-            i += 1
-        elif line.startswith("+++ "):
-            if _pending_old_header:
-                old_path = _clean_path(_pending_old_header[4:])
-                new_path = _clean_path(line[4:])
-                if old_path == new_path:
-                    display = old_path
-                elif old_path and new_path:
-                    display = f"{old_path} → {new_path}"
-                else:
-                    display = new_path or old_path
+        else:  # ctx
+            # 空白上下文行（源文件里的空行）折叠成一条紧凑细分隔线，避免单列模式下
+            # 段落差异之间出现 bulky 的空行。连续多个空行只保留第一条。
+            if seg["text"].strip() == "":
+                if _prev_blank:
+                    continue
+                _prev_blank = True
                 rows.append(
-                    f'<div class="diff-line diff-file-header diff-meta">'
-                    f'<span class="line-num">&nbsp;</span>'
-                    f'<span class="line-sign"></span>'
-                    f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(display)}</span></div>'
+                    '<div class="diff-line diff-ctx diff-ctx-blank">'
+                    '<span class="line-num">&nbsp;</span>'
+                    '<span class="line-sign"></span>'
+                    '<span class="line-code">&nbsp;</span></div>'
                 )
-            else:
-                rows.append(
-                    f'<div class="diff-line diff-file-header diff-meta">'
-                    f'<span class="line-num">&nbsp;</span>'
-                    f'<span class="line-sign"></span>'
-                    f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(line[4:]))}</span></div>'
-                )
-            _pending_old_header = None
-            i += 1
-        elif _pending_old_header:
-            # 单独的 --- 行（没有 +++ 跟随），先渲染 header 再处理当前行
-            rows.append(
-                f'<div class="diff-line diff-file-header diff-meta">'
-                f'<span class="line-num">&nbsp;</span>'
-                f'<span class="line-sign"></span>'
-                f'<span class="line-code" style="color: #8b949e; font-weight: 600;">{escape(_clean_path(_pending_old_header[4:]))}</span></div>'
-            )
-            _pending_old_header = None
-            continue
-        # hunk 头
-        elif line.startswith("@@"):
-            m = _HUNK_HEADER_RE.match(line)
-            if m:
-                old_ln = int(m.group(1))
-                new_ln = int(m.group(2))
-            rows.append(
-                f'<div class="diff-line diff-hunk diff-meta">'
-                f'<span class="line-num">&nbsp;</span>'
-                f'<span class="line-sign"></span>'
-                f'<span class="line-code">{escape(line)}</span></div>'
-            )
-            i += 1
-        # 删除行-新增行配对处理（做 word diff）
-        elif line.startswith("-") and not line.startswith("---"):
-            del_lines = []
-            while (
-                i < len(lines) and lines[i] is not None and lines[i].startswith("-") and not lines[i].startswith("---")
-            ):
-                del_lines.append(lines[i][1:])  # 去掉前缀 -
-                i += 1
-            add_lines = []
-            while (
-                i < len(lines) and lines[i] is not None and lines[i].startswith("+") and not lines[i].startswith("+++")
-            ):
-                add_lines.append(lines[i][1:])  # 去掉前缀 +
-                i += 1
-
-            # 配对 word diff：- 行紧跟 + 行交替输出（GitHub unified diff 风格）
-            # 便于上下对照词级差异，行号连续
-            pair_count = min(len(del_lines), len(add_lines))
-            for k in range(pair_count):
-                old_html, new_html = _word_diff_html(del_lines[k], add_lines[k])
-                rows.append(
-                    f'<div class="diff-line diff-del">'
-                    f'<span class="line-num">{old_ln}</span>'
-                    f'<span class="line-sign">-</span>'
-                    f'<span class="line-code">{old_html}</span></div>'
-                )
-                rows.append(
-                    f'<div class="diff-line diff-add">'
-                    f'<span class="line-num">{new_ln}</span>'
-                    f'<span class="line-sign">+</span>'
-                    f'<span class="line-code">{new_html}</span></div>'
-                )
-                old_ln += 1
-                new_ln += 1
-
-            # 未配对的删除行
-            for k in range(pair_count, len(del_lines)):
-                rows.append(
-                    f'<div class="diff-line diff-del">'
-                    f'<span class="line-num">{old_ln}</span>'
-                    f'<span class="line-sign">-</span>'
-                    f'<span class="line-code">{escape(del_lines[k])}</span></div>'
-                )
-                old_ln += 1
-
-            # 未配对的增加行
-            for k in range(pair_count, len(add_lines)):
-                rows.append(
-                    f'<div class="diff-line diff-add">'
-                    f'<span class="line-num">{new_ln}</span>'
-                    f'<span class="line-sign">+</span>'
-                    f'<span class="line-code">{escape(add_lines[k])}</span></div>'
-                )
-                new_ln += 1
-
-        elif line.startswith("+") and not line.startswith("+++"):
-            # 单独的增加行（前面没有匹配的删除行）
-            rows.append(
-                f'<div class="diff-line diff-add">'
-                f'<span class="line-num">{new_ln}</span>'
-                f'<span class="line-sign">+</span>'
-                f'<span class="line-code">{escape(line[1:])}</span></div>'
-            )
-            new_ln += 1
-            i += 1
-        else:
-            # 上下文行（unified diff 的上下文行带前导空格，去掉）
-            stripped = line[1:] if line.startswith(" ") else line
+                continue
+            _prev_blank = False
             rows.append(
                 f'<div class="diff-line diff-ctx">'
-                f'<span class="line-num">{new_ln if new_ln > 0 else ""}</span>'
+                f'<span class="line-num">{seg["new_ln"] if seg["new_ln"] > 0 else ""}</span>'
                 f'<span class="line-sign"></span>'
-                f'<span class="line-code">{escape(stripped)}</span></div>'
+                f'<span class="line-code">{_highlight_code_line(seg["text"], seg["lexer"])}</span></div>'
             )
-            if old_ln > 0:
-                old_ln += 1
-            if new_ln > 0:
-                new_ln += 1
-            i += 1
 
     return "".join(rows)
 
@@ -520,6 +712,8 @@ _TOOL_ICON_MAP = {
     "keyboard": "⌨️",
     # LSP 工具（默认 = listServers 列表图标；具体 operation 由 _get_tool_icon 解析）
     "lsp": "📋",
+    # CodeGraph 代码智能
+    "codegraph_explore": "🔍",
 }
 
 
@@ -786,6 +980,23 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             desc = f"热键 {keys}" if keys else "热键"
         else:
             desc = "键盘操作"
+    # ── CodeGraph 代码智能 ──
+    elif tool_name == "codegraph_explore":
+        mode = tool_args.get("mode", "explore")
+        query = tool_args.get("query", "")
+        mode_labels = {
+            "status": "查看索引状态",
+            "sync": "同步索引",
+            "search": f'搜索 "{query}"' if query else "搜索符号",
+            "callers": f'查找 "{query}" 的调用者' if query else "查找调用者",
+            "callees": f'查找 "{query}" 调用了什么' if query else "查找被调用者",
+            "explore": f'探索 "{query}"' if query else "代码探索",
+            "impact": f'分析 "{query}" 的影响范围' if query else "影响分析",
+            "files": "列出已索引文件",
+        }
+        desc = mode_labels.get(mode, f"CodeGraph {mode}")
+        if mode in ("search", "callers", "callees", "explore", "impact") and query:
+            desc += f" (深度 {tool_args.get('depth', 2)})"
     return desc
 
 
@@ -804,13 +1015,13 @@ def _render_inline_tool(
     icon = _get_tool_icon(tool_name, tool_args)
     natural_preview = _format_natural_preview(tool_name, tool_args)
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
-    return f"""<div class="tool-block"{tc_id_attr} style="margin: 4px 0; background: transparent; border: 1px solid var(--border); border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block"{tc_id_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">
             <span style="flex: 0 0 auto;">{icon}</span>
             <span style="white-space: nowrap; flex: 0 0 auto;">{escape(tool_name)}</span>
             {status_html}
         </span>
-        <span style="flex: 1 1 auto; min-width: 0; text-align: right; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
         </span>
     </div>"""
@@ -908,6 +1119,48 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
                 lines_html.append(escape(line))
         return f"""
         <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{"\n".join(lines_html)}</pre>"""
+
+    # ── codegraph_explore: 结构化代码探索结果 ──
+    if tool_name == "codegraph_explore":
+        lines = raw.split("\n")
+        html_lines = []
+        for line in lines:
+            escaped = escape(line)
+            # 标题行: ### xxx
+            if line.startswith("### "):
+                html_lines.append(
+                    f'<div style="color:#58a6ff;font-weight:700;font-size:{scale_font_size(14)}px;'
+                    f'padding:8px 0 4px 0;">{escaped}</div>'
+                )
+            # 粗体文件路径: **xxx**
+            elif "**" in line:
+                # 简单替换 **xxx** 为带颜色的粗体
+                parts = []
+                in_bold = False
+                buf = ""
+                for ch in line:
+                    if ch == "*":
+                        continue
+                    # Actually much simpler: just color lines starting with 📄
+                # Simpler approach: check for emoji patterns
+                if line.strip().startswith("📄"):
+                    html_lines.append(f'<div style="color:#7ee787;font-weight:600;padding:2px 0;">{escaped}</div>')
+                elif line.strip().startswith(("⬆", "⬇", "←", "→", "💥")):
+                    html_lines.append(f'<div style="color:#d2a8ff;padding:1px 0 1px 12px;">{escaped}</div>')
+                elif line.strip().startswith(("[", "- [")):
+                    html_lines.append(f'<div style="color:#c9d1d9;padding:1px 0 1px 12px;">{escaped}</div>')
+                else:
+                    html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
+            elif line.strip() == "---":
+                html_lines.append('<div style="border-top:1px solid rgba(48,54,61,0.25);margin:6px 0;"></div>')
+            else:
+                html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
+
+        content = "".join(html_lines)
+        return f"""
+        <div style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;padding:8px 12px;">
+            {content}
+        </div>"""
 
     # ── grep / glob / list / scan: 匹配/列表示结果 ──
     if tool_name in ("grep", "glob", "list", "scan_repo", "stage_files"):
@@ -1182,11 +1435,9 @@ def render_tool_block(
         )
 
     # 文件编辑工具判断
-    file_edit_tools = {"write", "edit", "multi_edit"}
-    is_file_edit = tool_name in file_edit_tools
     diff_summary = _summarize_diff(diff or "") if diff else {"added": 0, "deleted": 0, "files": []}
 
-    # 差异统计（+N/-N）
+    # 差异统计（+N/-N）— 纯展示，无差异对比按钮
     diff_stats_html = ""
     if diff:
         added = diff_summary["added"]
@@ -1198,20 +1449,6 @@ def render_tool_block(
                 <span class="tool-diff-stats__sep" style="color: rgba(255,255,255,0.3);">/</span>
                 <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
             </span>"""
-
-    # 差异对比按钮
-    diff_icon_html = ""
-    if is_file_edit and tool_call_id:
-        diff_icon_html = f'''
-        {diff_stats_html}
-        <span class="tool-diff-icon-btn" data-tool-call-id="{escape(tool_call_id)}"
-            role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 4px; border-radius: 4px;"
-            onclick="event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId)"
-            onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestToolDiff(this.dataset.toolCallId); }}"
-            title="查看文件差异">
-            <img src="qrc:/icons/差异对比.svg" style="width: 16px; height: 16px;" />
-        </span>'''
 
     # 子智能体日志查看按钮
     subagent_log_btn_html = ""
@@ -1242,6 +1479,27 @@ def render_tool_block(
         # 优先使用自然语言预览，无匹配时 fallback 到 key=value 格式
         natural = _format_natural_preview(tool_name, tool_args)
         args_preview = natural if natural else _format_args_preview(tool_args)
+
+    # ── grep/glob 结果计数 ──
+    match_count_html = ""
+    if success and result and tool_name in ("grep", "glob"):
+        import re as _re
+
+        if tool_name == "grep":
+            # 从 meta 行解析 "# Search: ... | X matches ..."
+            m = _re.search(r"\|\s*(\d+)\s+matches", result)
+            if m:
+                count = m.group(1)
+                match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
+        elif tool_name == "glob":
+            # 先检查是否有 meta 头
+            m = _re.search(r"\|\s*(\d+)\s+matches", result)
+            if m:
+                count = m.group(1)
+            else:
+                # 无 meta 头：每行一个文件
+                count = str(len([ln for ln in result.split("\n") if ln.strip()]))
+            match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
 
     # ── inline diff 预览区 ──
     diff_html = ""
@@ -1313,6 +1571,7 @@ def render_tool_block(
             "get_diagnostics",
             "mouse",
             "keyboard",
+            "codegraph_explore",
         }
     )
     raw_output_html = ""
@@ -1385,13 +1644,12 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(tool_name)}</span>
             {status_html}
         </span>
-        <span style="display: flex; align-items: flex-end; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-end; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: right; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+        <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
-        </span>
-        <span style="display: flex; align-items: center; flex: 0 0 auto; margin-left: 6px;">
-            {diff_icon_html}
+            {match_count_html}
+            {diff_stats_html}
             {subagent_log_btn_html}
         </span>
     </button>

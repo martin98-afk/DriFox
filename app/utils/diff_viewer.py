@@ -35,6 +35,19 @@ except Exception:
 
 _HUNK_HEADER_PATTERN = re.compile(r"@@ -(\d+),?\d* \+(\d+),?\d* @@")
 
+# 扩展名 → 高亮语言标签（仅用于决定客户端用哪套着色规则；'other' 不高亮）
+_LANG_EXT_MAP = {
+    "py": "py", "pyi": "py", "js": "js", "mjs": "js", "cjs": "js", "jsx": "jsx",
+    "ts": "ts", "tsx": "tsx", "java": "java", "go": "go", "rs": "rust", "c": "c",
+    "h": "c", "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp", "cs": "csharp",
+    "rb": "ruby", "php": "php", "sh": "sh", "bash": "sh", "zsh": "sh", "fish": "sh",
+    "sql": "sql", "json": "json", "jsonc": "json", "yml": "yaml", "yaml": "yaml",
+    "toml": "toml", "ini": "ini", "cfg": "ini", "conf": "ini", "lua": "lua", "kt": "kt",
+    "kts": "kt", "swift": "swift", "r": "r", "dart": "dart", "vue": "vue", "xml": "xml",
+    "html": "html", "htm": "html", "css": "css", "scss": "css", "less": "css",
+    "md": "md", "markdown": "md",
+}
+
 
 def _get_rss_mb() -> Optional[float]:
     if psutil is None:
@@ -499,6 +512,100 @@ THEME_CSS = r"""
 
 
 # ==========================================================================
+# 客户端语法高亮脚本（注入到 DiffHtmlGenerator 生成的 <script> 内，
+# 叠加在 word-diff 之上，统一处理 Python 预渲染与 JS 懒加载两条路径）
+# ==========================================================================
+DIFF_HIGHLIGHT_JS = r"""
+// ============ 语法高亮（客户端，叠加在 word-diff 之上）============
+var HL_KW = new Set(['if','else','elif','for','while','return','def','class','import','from','as','with','try','except','final','in','not','and','or','is','None','True','False','null','true','false','function','var','let','const','new','await','async','yield','public','private','protected','static','void','int','float','double','string','bool','boolean','struct','enum','interface','type','package','fn','match','case','when','then','end','do','of','to','this','self','super','print','echo','raise','throw','catch','using','namespace','export','default','switch','break','continue','pass','lambda','global','nonlocal','assert','del','goto','unsigned','long','char','typeof','instanceof','extends','implements','trait','where','mut','pub','mod','macro','select','group','order','by','insert','update','delete','create','table','values','set','into','nullptr','auto','constexpr','virtual','override','template','typename','func','protocol','init','guard']);
+
+function hlTok(src, lang){
+  if(src===undefined||src===null) return '';
+  src=String(src);
+  if(lang==='other'||lang==='') return esc(src);
+  var out='', i=0, n=src.length;
+  var lineC = (lang==='py'||lang==='ruby'||lang==='rb'||lang==='sh'||lang==='bash'||lang==='yaml'||lang==='yml'||lang==='toml'||lang==='r'||lang==='sql'||lang==='lua') ? '#' : '//';
+  var C_COM='#6272A4', C_STR='#F1FA8C', C_NUM='#BD93F9', C_KW='#FF79C6', C_FN='#50FA7B';
+  function span(col, t){ out += '<span style="color:'+col+'">'+esc(t)+'</span>'; }
+  while(i<n){
+    if(src[i]==='/'&&src[i+1]==='*'){ var j=src.indexOf('*/',i+2); j=(j<0)?n:(j+2); span(C_COM,src.slice(i,j)); i=j; continue; }
+    if(lineC==='//'&&src[i]==='/'&&src[i+1]==='/'){ var e=src.indexOf('\n',i); e=(e<0)?n:e; span(C_COM,src.slice(i,e)); i=e; continue; }
+    if(lineC==='#'&&src[i]==='#'){ var e=src.indexOf('\n',i); e=(e<0)?n:e; span(C_COM,src.slice(i,e)); i=e; continue; }
+    var c=src[i];
+    if(c==='"'||c==="'"||c==='`'){
+      var q=c, j=i+1;
+      if((q==='"'||q==="'")&&src[i+1]===q&&src[i+2]===q){ q=src.substr(i,3); j=i+3; }
+      while(j<n){ if(src[j]==='\\'){ j+=2; continue; } if(src.substr(j,q.length)===q){ j+=q.length; break; } j++; }
+      span(C_STR,src.slice(i,j)); i=j; continue;
+    }
+    if((c>='0'&&c<='9')||(c==='.'&&src[i+1]>='0'&&src[i+1]<='9')){
+      var j=i; while(j<n&&/[0-9a-fA-FxXoObBeE._]/.test(src[j])) j++;
+      span(C_NUM,src.slice(i,j)); i=j; continue;
+    }
+    if(/[A-Za-z_$]/.test(c)){
+      var j=i; while(j<n&&/[A-Za-z0-9_$]/.test(src[j])) j++;
+      var w=src.slice(i,j); var k=j; while(k<n&&src[k]===' ') k++;
+      if(HL_KW.has(w)) span(C_KW,w);
+      else if(src[k]==='(') span(C_FN,w);
+      else out+=esc(w);
+      i=j; continue;
+    }
+    out+=esc(c); i++;
+  }
+  return out;
+}
+
+function highlightCell(cell, lang){
+  if(!cell) return;
+  var nodes=Array.prototype.slice.call(cell.childNodes);
+  for(var i=0;i<nodes.length;i++){
+    var node=nodes[i];
+    if(node.nodeType===3){
+      if(node.nodeValue==='') continue;
+      var html=hlTok(node.nodeValue, lang);
+      var tmp=document.createElement('span'); tmp.innerHTML=html;
+      while(tmp.firstChild) cell.insertBefore(tmp.firstChild, node);
+      cell.removeChild(node);
+    } else if(node.nodeType===1){
+      var cls=(node.className||'');
+      if(cls.indexOf('w-del')>=0||cls.indexOf('w-add')>=0){
+        node.innerHTML=hlTok(node.textContent, lang);
+      }
+    }
+  }
+}
+
+function _extToLang(ext){
+  ext=(ext||'').toLowerCase();
+  var m={py:'py',pyi:'py',js:'js',mjs:'js',cjs:'js',jsx:'jsx',ts:'ts',tsx:'tsx',java:'java',go:'go',rs:'rust',c:'c',h:'c',cpp:'cpp',cc:'cpp',cxx:'cpp',hpp:'cpp',cs:'csharp',rb:'ruby',php:'php',sh:'sh',bash:'sh',zsh:'sh',fish:'sh',sql:'sql',json:'json',jsonc:'json',yml:'yaml',yaml:'yaml',toml:'toml',ini:'ini',cfg:'ini',conf:'ini',lua:'lua',kt:'kt',kts:'kt',swift:'swift',r:'r',dart:'dart',vue:'vue',xml:'xml',html:'html',htm:'html',css:'css',scss:'css',less:'css',md:'md',markdown:'md'};
+  return m[ext]||'other';
+}
+// 服务端 data-lang 缺失/为 other 时，用文件头路径再推断一次，避免整块无高亮
+function _inferLang(block){
+  var p=block.getAttribute('data-lang')||'';
+  if(p && p!=='other') return p;
+  var a=block.querySelector('.fh-path');
+  if(a){ var t=(a.textContent||''); var d=t.lastIndexOf('.'); if(d>=0) return _extToLang(t.slice(d+1)); }
+  return 'other';
+}
+function postHighlight(block){
+  if(!block) return;
+  var lang=_inferLang(block);
+  if(lang==='other') return;
+  var cells=block.querySelectorAll('.du-code, .ds-code');
+  for(var x=0;x<cells.length;x++){
+    var cell=cells[x];
+    if(cell.getAttribute('data-hl')==='1') continue;
+    var row=cell.parentNode;
+    var dt=(row?row.getAttribute('data-type'):'');
+    if(dt==='hunk-header'){ cell.setAttribute('data-hl','1'); continue; }
+    highlightCell(cell, lang);
+    cell.setAttribute('data-hl','1');
+  }
+}
+"""
+
+# ==========================================================================
 # 3. HTML 生成器
 # ==========================================================================
 class DiffHtmlGenerator:
@@ -510,6 +617,11 @@ class DiffHtmlGenerator:
             return ""
         return (text.replace("&", "&amp;").replace("<", "&lt;")
                 .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;"))
+
+    @classmethod
+    def _lang_for_path(cls, path: str) -> str:
+        ext = Path(path).suffix.lstrip(".").lower()
+        return _LANG_EXT_MAP.get(ext, "other")
 
     @classmethod
     def generate_html_report(
@@ -539,7 +651,7 @@ class DiffHtmlGenerator:
                 blocks_html += f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
             elif lazy_load:
                 blocks_html += (
-                    f'<div class="file-block" id="{fid}" data-placeholder="true"></div>'
+                    f'<div class="file-block" id="{fid}" data-lang="{cls._lang_for_path(fi["path"])}" data-placeholder="true"></div>'
                     f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
                 )
 
@@ -709,6 +821,7 @@ function loadFile(id,idx){{
         var lines=ld?JSON.parse(ld.textContent):[];
         el.innerHTML=genBlock(fi,lines);
         el.removeAttribute('data-placeholder');
+        postHighlight(el);
         applyFold(el);applyView(el);
         if(window._do)window._do.observe(el);
     }}
@@ -835,7 +948,7 @@ window._do=new IntersectionObserver(function(es){{
 document.querySelectorAll('.file-block').forEach(function(b){{window._do.observe(b);}});
 
 requestAnimationFrame(function(){{
-    document.querySelectorAll('.file-block').forEach(function(b){{applyFold(b);applyView(b);}});
+    document.querySelectorAll('.file-block').forEach(function(b){{ try{{postHighlight(b);}}catch(e){{}} try{{applyFold(b);}}catch(e){{}} try{{applyView(b);}}catch(e){{}} }});
     var f=document.querySelector('.tree-item');if(f)f.classList.add('active');
 }});
 
@@ -873,6 +986,9 @@ requestAnimationFrame(function(){{
         }});
     }};
 }})();
+{DIFF_HIGHLIGHT_JS}
+// 立即对预渲染文件块做高亮（脚本解析完即执行，不依赖 rAF 时序）
+try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlight(b); }}); }}catch(e){{}}
 </script>
 </body></html>"""
 
@@ -894,6 +1010,7 @@ requestAnimationFrame(function(){{
                     merged = DiffHunkMerger.merge_file_hunks(cur_lines)
                     files.append({"path": cur_file, "additions": cur_stats["additions"],
                                   "deletions": cur_stats["deletions"], "status": cur_status,
+                                  "lang": cls._lang_for_path(cur_file),
                                   "lines": merged})
                 parts = line[4:].strip()
                 cur_status = "added" if parts == "/dev/null" else "modified"
@@ -919,6 +1036,7 @@ requestAnimationFrame(function(){{
             merged = DiffHunkMerger.merge_file_hunks(cur_lines)
             files.append({"path": cur_file, "additions": cur_stats["additions"],
                           "deletions": cur_stats["deletions"], "status": cur_status,
+                          "lang": cls._lang_for_path(cur_file),
                           "lines": merged})
         return files
 
@@ -953,6 +1071,7 @@ requestAnimationFrame(function(){{
         adds = fi["additions"]
         dels = fi["deletions"]
         icon = cls._icon(p)
+        lang = cls._lang_for_path(p)
         add_s = f'<span class="fh-add">+{adds}</span>' if adds > 0 else ""
         del_s = f'<span class="fh-del">-{dels}</span>' if dels > 0 else ""
         ep = cls.escape_html(p)
@@ -965,7 +1084,7 @@ requestAnimationFrame(function(){{
             <button class="fh-open" onclick="openFile('{ep_js}')">打开</button></div>'''
 
         rows = cls._gen_rows(fi)
-        return f'''<div class="file-block" id="{fid}">
+        return f'''<div class="file-block" id="{fid}" data-lang="{lang}">
             {header}
             <div class="diff-unified" data-view="unified" style="display:none">{rows["u"]}</div>
             <div class="diff-split" data-view="split">{rows["s"]}</div></div>'''
@@ -1113,7 +1232,8 @@ requestAnimationFrame(function(){{
             data.append({"id": f"file-{i}", "path": fi["path"],
                          "icon": cls._icon(fi["path"]),
                          "additions": fi["additions"], "deletions": fi["deletions"],
-                         "status": fi.get("status", "modified")})
+                         "status": fi.get("status", "modified"),
+                         "lang": fi.get("lang", "other")})
         r = json.dumps(data).decode("utf-8")
         return r.replace("</", "\\u003C/")
 

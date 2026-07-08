@@ -3,6 +3,7 @@
 全局唯一托盘图标管理器（单例）
 所有 ToolPopupDialog 共享同一个 QSystemTrayIcon，避免多个托盘图标。
 """
+import math
 import platform
 import uuid
 
@@ -78,6 +79,12 @@ class TrayManager(QObject):
         # ========== 多窗口选中管理 ==========
         self._selected_windows: list = []  # 当前选中的 ToolPopupDialog 列表
 
+        # ========== 排布模式 ==========
+        # 0=网格(grid) / 1=竖列横排(horizontal) / 2=折叠(stack)
+        # Ctrl+Shift+G 依次循环
+        self._arrange_mode: int = 0
+        self._ARRANGE_MODES = ("网格", "竖列", "折叠")
+
         logger.info("TrayManager 初始化完成")
 
     # ========== 多窗口选中管理 ==========
@@ -139,6 +146,7 @@ class TrayManager(QObject):
                 pass
 
     _SNAP_THRESHOLD = 15  # 吸附阈值（像素）
+    _TITLE_BAR_HEIGHT = 28  # 窗口标题栏高度（与 ToolWindowTitleBar.setFixedHeight(28) 一致）
 
     def _snap_position(self, moving_rect, exclude_window=None) -> tuple:
         """计算最近的对齐吸附位置
@@ -234,62 +242,241 @@ class TrayManager(QObject):
         return x, y, snapped_x, snapped_y
 
     def arrange_selected_windows_grid(self) -> None:
-        """将选中的窗口排列成网格布局"""
+        """智能网格模式：右下锚定，自适应列数
+
+        - 列数根据屏幕宽高比 + 窗口数计算(让网格尽量贴近屏幕比例)
+        - 窗口目标尺寸独立从屏幕和列数推算,不读窗口当前尺寸,避免模式间互相影响
+        - 第 1 个窗口始终在右下角,作为视觉重心
+        """
+        self._prune_dead_windows()  # 防御性:剔除已销毁引用,避免按旧数量排布
         if len(self._selected_windows) < 1:
             return
 
-        # 取第一个选中窗口所在屏幕
-        ref = self._selected_windows[0]
-        try:
-            screen = ref.screen()
-            if not screen:
-                return
-            available = screen.availableGeometry()
-        except RuntimeError:
+        available = self._get_screen_geometry()
+        if available is None:
             return
 
         n = len(self._selected_windows)
-        # 计算最佳列数（2-4列，根据窗口数量自适应）
-        if n <= 2:
-            cols = n
-        elif n <= 4:
-            cols = 2
-        elif n <= 6:
-            cols = 3
+        margin = 16  # 统一边距
+
+        # === 智能列数 ===
+        # 目标:让网格整体宽高比接近屏幕宽高比
+        # cols/rows ≈ aspect → cols ≈ sqrt(n * aspect)
+        avail_w = max(1, available.width())
+        avail_h = max(1, available.height())
+        aspect = avail_w / avail_h
+        cols = max(1, round(math.sqrt(n * aspect)))
+        if n >= 2:
+            cols = max(2, min(n, cols))
+        rows = math.ceil(n / cols)
+
+        # === 单格可用区域 ===
+        cell_w = (avail_w - margin * (cols + 1)) / cols
+        cell_h = (avail_h - margin * (rows + 1)) / rows
+
+        # === 独立计算目标尺寸(不读窗口当前尺寸) ===
+        # 单格宽高比决定窗口宽高比
+        cell_aspect = cell_w / max(1.0, cell_h)
+        if cell_aspect >= 1.0:
+            # 偏宽 → 窗口以宽度为基准
+            win_w = cell_w * 0.95
+            win_h = win_w / cell_aspect
         else:
-            cols = 4
+            # 偏高 → 窗口以高度为基准
+            win_h = cell_h * 0.95
+            win_w = win_h * cell_aspect
 
-        rows = (n + cols - 1) // cols
-        margin = 20  # 间距
-
-        # 计算每个窗口的平均大小（按第一个窗口的尺寸）
-        try:
-            win_w = self._selected_windows[0].width()
-            win_h = self._selected_windows[0].height()
-        except RuntimeError:
-            return
-
-        # 总可用空间
-        total_w = available.width() - margin * (cols + 1)
-        total_h = available.height() - margin * (rows + 1)
-
-        # 如果窗口太大放不下，缩小到适配网格
-        cell_w = total_w // cols
-        cell_h = total_h // rows
-        if win_w > cell_w or win_h > cell_h:
-            win_w = min(win_w, cell_w)
-            win_h = min(win_h, cell_h)
+        # 最小尺寸保护
+        win_w = max(260, min(win_w, cell_w))
+        win_h = max(200, min(win_h, cell_h))
 
         for i, w in enumerate(self._selected_windows):
             try:
                 col = i % cols          # 0 = 最右列
                 row = i // cols         # 0 = 最底行
-                # 从右下角开始填充：第1个窗口在右下角，向左/向上排列
+                # 从右下角开始填充(右下为视觉重心)
                 new_x = available.right() - margin - win_w - col * (win_w + margin)
                 new_y = available.bottom() - margin - win_h - row * (win_h + margin)
-                w.setGeometry(new_x, new_y, win_w, win_h)
+                w.setGeometry(int(new_x), int(new_y), int(win_w), int(win_h))
             except RuntimeError:
                 pass
+
+    def arrange_selected_windows_horizontal(self) -> None:
+        """竖列横排模式：右向左排列,右下为视觉重心
+
+        N 个窗口从右向左并排排列(第 1 个在最右),每个窗口高度 ≈ 屏幕高,
+        宽度按窗口数等分。窗口尺寸独立从屏幕推算。
+        """
+        self._prune_dead_windows()  # 防御性:剔除已销毁引用,避免按旧数量排布
+        if len(self._selected_windows) < 1:
+            return
+
+        available = self._get_screen_geometry()
+        if available is None:
+            return
+
+        n = len(self._selected_windows)
+        margin = 12
+
+        # === 独立计算目标尺寸 ===
+        win_h = available.height() - margin * 2
+        win_w = (available.width() - margin * 2) / max(1, n)
+        # 最小宽度保护
+        win_w = max(180, win_w)
+
+        for i, w in enumerate(self._selected_windows):
+            try:
+                # 从右向左:第 1 个在最右(右下锚定)
+                new_x = available.right() - margin - win_w - i * win_w
+                new_y = available.top() + margin
+                # 边界保护:不能超出左边界,允许溢出但不调整(用户能看到每个窗口的左边缘)
+                if new_x < available.left() + margin:
+                    new_x = available.left() + margin
+                w.setGeometry(int(new_x), int(new_y), int(win_w), int(win_h))
+            except RuntimeError:
+                pass
+
+    def arrange_selected_windows_stack(self) -> None:
+        """折叠模式:自适应 cascade,右下锚定,层次清晰
+
+        第 1 个窗口在屏幕右下角,后续窗口依次向左上偏移,形成经典 Windows
+        cascade 视觉效果。两个关键优化:
+
+        1. 窗口尺寸自适应:目标尺寸 = min(屏幕宽30%, 屏幕高55%),并保证
+           所有窗口放下后仍不超出屏幕左/上边界
+        2. 偏移量自适应:默认 dx=40, dy=32(略大于标题栏高度,层次更明显);
+           窗口数多时自动缩小偏移,保证每个窗口的标题栏都能露出
+        """
+        self._prune_dead_windows()  # 防御性:剔除已销毁引用,避免按旧数量排布
+        if len(self._selected_windows) < 1:
+            return
+
+        available = self._get_screen_geometry()
+        if available is None:
+            return
+
+        n = len(self._selected_windows)
+        margin = 20  # 略大的边距,让 cascade 更舒展
+        avail_w = available.width()
+        avail_h = available.height()
+
+        # === 目标窗口尺寸(基于屏幕比例,不读窗口当前尺寸) ===
+        # 目标:宽 = 屏幕30%, 高 = 屏幕55%(保持纵向略高的视觉比例)
+        target_w = int(avail_w * 0.30)
+        target_h = int(avail_h * 0.55)
+        target_side = min(target_w, target_h)
+
+        # === 自适应偏移量 ===
+        # 目标偏移量略大于标题栏高度,层次更清晰
+        target_dx = 40
+        target_dy = 32
+        # 最小偏移量(保证视觉错开)
+        min_dx = 20
+        min_dy = 15
+
+        if n > 1:
+            # 约束 1:总 x 偏移不能太大,否则最后一个窗口飞出屏幕
+            max_dx_for_screen = max(min_dx, (avail_w - 2 * margin - target_side) // (n - 1))
+            # 约束 2:总 y 偏移不能太大,否则最后一个窗口飞出屏幕
+            max_dy_for_screen = max(min_dy, (avail_h - 2 * margin - target_side) // (n - 1))
+            dx = min(target_dx, max_dx_for_screen)
+            dy = min(target_dy, max_dy_for_screen)
+        else:
+            dx = target_dx
+            dy = target_dy
+
+        # === 窗口尺寸(根据最终 dx, dy 微调) ===
+        # 如果偏移缩小了,窗口可以适当放大(因为有更多空间)
+        win_w = target_side
+        win_h = target_side
+        # 适配屏幕
+        if win_w > avail_w - 2 * margin:
+            win_w = avail_w - 2 * margin
+        if win_h > avail_h - 2 * margin:
+            win_h = avail_h - 2 * margin
+        # 保持接近正方形(以宽度为基准)
+        if win_w < win_h:
+            win_h = win_w
+        # 最小保护
+        win_w = max(180, int(win_w))
+        win_h = max(140, int(win_h))
+
+        # === Cascade 偏移 ===
+        for i, w in enumerate(self._selected_windows):
+            try:
+                step = i
+                new_x = available.right() - margin - win_w - step * dx
+                new_y = available.bottom() - margin - win_h - step * dy
+                # 边界保护(即使 dx/dy 已自适应,仍保留兜底)
+                if new_x < available.left() + margin:
+                    new_x = available.left() + margin
+                if new_y < available.top() + margin:
+                    new_y = available.top() + margin
+                w.setGeometry(int(new_x), int(new_y), int(win_w), int(win_h))
+            except RuntimeError:
+                pass
+
+    def _get_screen_geometry(self):
+        """获取第一个选中窗口所在屏幕的可用区域,失败返回 None
+
+        统一封装,供三种排布模式共享。
+        """
+        if not self._selected_windows:
+            return None
+        ref = self._selected_windows[0]
+        try:
+            screen = ref.screen()
+            if not screen:
+                return None
+            return screen.availableGeometry()
+        except RuntimeError:
+            return None
+
+    def cycle_arrange_mode(self) -> str:
+        """循环切换排布模式（Ctrl+Shift+G）
+
+        依次执行：网格 → 竖列 → 折叠 → 网格 …
+        返回本次切换到的模式名称，便于调用方做提示。
+        """
+        # 三个具体排布方法入口已自带 _prune_dead_windows,此处直接分发即可
+        if not self._selected_windows:
+            return ""
+
+        mode = self._arrange_mode
+        if mode == 0:
+            self.arrange_selected_windows_grid()
+        elif mode == 1:
+            self.arrange_selected_windows_horizontal()
+        else:
+            self.arrange_selected_windows_stack()
+
+        # 切换到下一个模式（循环）
+        self._arrange_mode = (self._arrange_mode + 1) % len(self._ARRANGE_MODES)
+        return self._ARRANGE_MODES[mode]
+
+    def _prune_dead_windows(self) -> None:
+        """清理已销毁的窗口引用(C++ 对象已被 deleteLater 销毁)
+
+        通过 try/except isVisible() 检查每个引用是否还有效,无效的从列表移除。
+        作为 unregister_window 的兜底:即使某些路径未走 unregister_window,
+        排布时也能自动剔除无效引用,避免按旧窗口数量排布。
+        """
+        alive = []
+        for w in self._selected_windows:
+            try:
+                _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
+                alive.append(w)
+            except (RuntimeError, Exception):
+                continue
+        if len(alive) != len(self._selected_windows):
+            self._selected_windows = alive
+            self._update_selection_visuals()
+
+    def get_arrange_mode(self) -> str:
+        """获取当前排布模式名称（用于 UI 提示）"""
+        if 0 <= self._arrange_mode < len(self._ARRANGE_MODES):
+            return self._ARRANGE_MODES[self._arrange_mode]
+        return self._ARRANGE_MODES[0]
 
     def register_window(self, window) -> None:
         """注册一个窗口到托盘管理器"""
@@ -301,7 +488,11 @@ class TrayManager(QObject):
         """窗口销毁时注销"""
         if window in self._windows:
             self._windows.remove(window)
-            logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
+        # 同步从选中列表移除,避免关闭窗口后残留引用导致排布按旧窗口数量计算
+        if window in self._selected_windows:
+            self._selected_windows.remove(window)
+            self._update_selection_visuals()
+        logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
 
     def notify(self, title: str, message: str, window: QObject = None) -> None:
         """发送 Windows 通知

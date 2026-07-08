@@ -1461,38 +1461,43 @@ class OpenAIChatWorker(QThread):
                     #   - 第一次 Stop 触发时 _stop_hook_active=False
                     #   - 如果 Stop hook 向消息列表注入了内容，_stop_hook_active 翻转为 True，
                     #     继续一轮让 LLM 看到注入的消息并响应
-                    #   - 重跑出来的 Stop 触发时 _stop_hook_active=True，直接放行退出
+                    #   - 重跑出来的 Stop 时 _stop_hook_active=True，直接跳过 hook 执行、
+                    #     放行退出，避免重复注入消息
                     # 这限制了续命最多 1 次，避免无限循环。
-                    stop_extra_ctx = {
-                        "stop_hook_active": self._stop_hook_active,
-                        "last_assistant_message": self.full_response,
-                        "reason": "completed",
-                    }
-                    # 记录 Stop hook 触发前的消息数，用于检测是否有 hook 消息注入
-                    before_stop_count = len(current_messages)
-                    self._trigger_worker_hook(
-                        "Stop",
-                        current_messages,
-                        current_session_messages,
-                        extra_context=stop_extra_ctx,
-                    )
-
-                    # 检查 Stop hook 是否有消息注入到消息列表（通过正常的 add_to_context 机制）
-                    # 如果有注入且未触发过续命（_stop_hook_active=False），则继续一轮工具迭代
-                    stop_injected = len(current_messages) - before_stop_count
-                    if stop_injected > 0 and not self._stop_hook_active:
-                        # 1. 翻转 _stop_hook_active：下一轮 Stop 触发时直接放行，避免无限循环
-                        self._stop_hook_active = True
-                        # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
-                        self._emit_with_callback(
-                            "finished_with_messages",
-                            self.finished_with_messages,
+                    if not self._stop_hook_active:
+                        # 第一次 Stop：正常触发 hook
+                        stop_extra_ctx = {
+                            "stop_hook_active": self._stop_hook_active,
+                            "last_assistant_message": self.full_response,
+                            "reason": "completed",
+                        }
+                        # 记录 Stop hook 触发前的消息数，用于检测是否有 hook 消息注入
+                        before_stop_count = len(current_messages)
+                        self._trigger_worker_hook(
+                            "Stop",
+                            current_messages,
                             current_session_messages,
+                            extra_context=stop_extra_ctx,
                         )
-                        logger.info(f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation.")
-                        # 3. 清理 pending state 后回到 while 顶部重跑 API
-                        self._clear_pending_response_state()
-                        continue  # 跳回 while 顶部，再来一轮
+
+                        # 检查 Stop hook 是否有消息注入到消息列表（通过正常的 add_to_context 机制）
+                        # 如果有注入且未触发过续命（_stop_hook_active=False），则继续一轮工具迭代
+                        stop_injected = len(current_messages) - before_stop_count
+                        if stop_injected > 0:
+                            # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
+                            self._stop_hook_active = True
+                            # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
+                            self._emit_with_callback(
+                                "finished_with_messages",
+                                self.finished_with_messages,
+                                current_session_messages,
+                            )
+                            logger.info(
+                                f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
+                            )
+                            # 3. 清理 pending state 后回到 while 顶部重跑 API
+                            self._clear_pending_response_state()
+                            continue  # 跳回 while 顶部，再来一轮
 
                     # 真正结束：重置状态
                     self._stop_hook_active = False

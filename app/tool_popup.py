@@ -973,9 +973,11 @@ class ToolPopupDialog(QDialog):
             event.accept()
             return
 
-        # Ctrl+Shift+G: 排列选中窗口为网格
+        # Ctrl+Shift+G: 循环切换窗口排布模式（网格 → 竖列 → 折叠 → 网格 …）
         if event.key() == Qt.Key_G and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
-            TrayManager.get_instance().arrange_selected_windows_grid()
+            mode_name = TrayManager.get_instance().cycle_arrange_mode()
+            if mode_name:
+                logger.info(f"[ToolPopup] 切到排布模式: {mode_name}")
             event.accept()
             return
 

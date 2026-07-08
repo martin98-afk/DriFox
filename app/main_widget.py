@@ -389,6 +389,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
         # 在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = False
+        # 🛡️ 会话钩子注入标记：_create_new_session / _clear_session / _on_compact_finished
+        # 在触发 SessionStart hook 前置 True，让 _on_messages_updated 能识别出这是
+        # 合法的新会话 hook 输出而非旧 worker 的过期回调，避免被 _session_switched 误拦截。
+        self._pending_session_hook = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
@@ -1596,6 +1600,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
         self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
+        self._sub_agent_compact_widget.stop_subagent_requested.connect(self._on_sub_agent_stop_requested)
 
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
@@ -2934,6 +2939,9 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             logger.exception("[_handle_team_leave] 切换默认智能体失败")
 
+        # 6) 恢复模型选择按钮的 tooltip（离开团队后不再显示 agent 信息）
+        self._update_model_selector_btn()
+
         InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
 
     # ── 团队模板（save / load / list / delete）────────
@@ -3303,7 +3311,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 agents = ", ".join(t.get("agent_names", []))
                 lines.append(f"    \u2022 {t['name']} \u2014 {t['agent_count']} 个角色 [{agents}]")
                 lines.append(f"      {desc}")
-        lines.append(f"\n保存: /team --save=<name>  |  删除: /team --delete=<name>")
+        lines.append("\n保存: /team --save=<name>  |  删除: /team --delete=<name>")
         InfoBar.info(
             f"团队模板 ({len(templates)})",
             "\n".join(lines),
@@ -3527,6 +3535,14 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             if self._title_bar:
                 self._title_bar.set_title(title)
+        except Exception:
+            pass
+
+        # 同步更新对话框的窗口标题（影响任务栏底部显示的名称）
+        try:
+            dialog = self.window() if hasattr(self, "window") else None
+            if dialog and hasattr(dialog, "setWindowTitle"):
+                dialog.setWindowTitle(title)
         except Exception:
             pass
 
@@ -3885,10 +3901,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._session_card_cache.pop(target_session.session_id, None)
 
         # 触发 SessionStart hook — state="clear"
+        # 标记 _pending_session_hook 避免 _session_switched 残留时误拦截
         try:
+            self._pending_session_hook = True
             self.backend.trigger_session_event("clear")
         except Exception:
             pass
+        finally:
+            self._pending_session_hook = False
 
         # 仅在用户仍停留在原 session 时才同步更新 UI
         if self._current_session_id == session_id:
@@ -3913,11 +3933,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if execution_error:
             return
         try:
+            self._pending_session_hook = True
             self.backend.trigger_session_event("compact")
         except Exception:
             pass
             # 刷新上下文使用率指示器（清空后会回到 0%）
             self._refresh_context_usage_indicator()
+        finally:
+            self._pending_session_hook = False
 
     def _remember_to_memory(self, content: str):
         """将内容存入长期记忆"""
@@ -6441,9 +6464,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 更新按钮组的 tooltip
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
-            # 更新模型选择按钮的 tooltip
-            if hasattr(self, "current_model_btn"):
-                self.current_model_btn.setToolTip(f"{agent.name}: {agent.description}\nMode: {mode}, {hidden}")
 
     def _create_new_session(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -6506,7 +6526,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 💡 内存优化：新建会话时清理全局 LRU 缓存，释放旧会话渲染/估算数据
         _cleanup_global_lru_caches()
 
-        session = self.backend.create_session()
+        # 🛡️ 标记待注入：create_session 内部会同步触发 SessionStart hook 并
+        # 通过 _hook_messages_updated → _on_messages_updated 回传，此时
+        # _session_switched=True 会误拦截合法输出。置此标记让 _on_messages_updated 放行。
+        self._pending_session_hook = True
+        try:
+            session = self.backend.create_session()
+        finally:
+            self._pending_session_hook = False
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
         # 在 create_session 之后执行，确保 _evict_if_needed 已淘汰旧会话
@@ -9501,8 +9528,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 兼容 str_replace_editor / apply_patch 这类常见别名；读取类不在此列）
             WRITE_TOOLS = {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
 
-            diff_text_parts: list[str] = []
-            file_summaries: list[str] = []
+            # 按文件路径分组：同一文件在当轮的多次连续编辑合并为一份累积 diff，
+            # 避免文件名列重复、diff 碎片化，让 review 看清从初始到最终的完整变化。
+            file_ops: dict = {}
             for op in all_operations:
                 backup_path = op.get("backup_path", "")
                 file_path = op.get("file_path", "")
@@ -9511,11 +9539,25 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 if tool_name not in WRITE_TOOLS:
                     continue
+                key = file_path or Path(backup_path).name
+                if key not in file_ops:
+                    file_ops[key] = []
+                file_ops[key].append(op)
+
+            diff_text_parts: list[str] = []
+            file_summaries: list[str] = []
+
+            for file_key, ops in file_ops.items():
+                # 首操作的备份 = 编辑前的原始内容；尾操作编辑后的内容 = 最终状态
+                first_bp = ops[0].get("backup_path", "")
+                last_bp = ops[-1].get("backup_path", "")
                 try:
-                    old_content, new_content, backup_file = read_backup_files(backup_path)
+                    old_content, _, _ = read_backup_files(first_bp)
+                    last_after = str(Path(last_bp).with_suffix('.after.bak'))
+                    with open(last_after, 'r', encoding='utf-8', errors='replace') as f:
+                        new_content = f.read()
                 except Exception as exc:
-                    # 不要静默吞掉：让问题可追溯；保留旧行为（继续审查其他文件）
-                    logger.warning(f"[card-review] 跳过文件 {file_path or backup_path}: 读取备份失败 {exc}")
+                    logger.warning(f"[card-review] 跳过文件 {file_key}: 读取备份失败 {exc}")
                     continue
 
                 old_lines = normalize_lines(old_content)
@@ -9523,14 +9565,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 diff_iter = difflib.unified_diff(
                     old_lines,
                     new_lines,
-                    fromfile=f"a/{file_path or backup_file.name}",
-                    tofile=f"b/{file_path or backup_file.name}",
+                    fromfile=f"a/{file_key}",
+                    tofile=f"b/{file_key}",
                     lineterm="\n",
                 )
                 diff_text = "".join(diff_iter)
                 if diff_text:
                     diff_text_parts.append(diff_text)
-                    file_summaries.append(file_path or backup_file.name)
+                    file_summaries.append(file_key)
 
             if not diff_text_parts:
                 InfoBar.warning(
@@ -10417,6 +10459,41 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
+
+    def _on_sub_agent_stop_requested(self, task_id: str):
+        """处理子智能体停止请求 - 中止当前运行中的子智能体"""
+        if getattr(self, "_is_destroyed", False):
+            return
+
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor = sub_agent_mgr._running_tasks.get(task_id)
+        if not executor:
+            logger.warning(f"[main_widget] 停止子智能体失败: task_id={task_id} 不在运行中")
+            return
+
+        agent_name = executor.agent_name
+        task_description = getattr(executor, "task_description", "")
+
+        # 1. 设置取消标志 + 执行错误（让后面的 _on_sub_agent_task_finished 读到正确状态）
+        executor.cancel()
+        executor._execution_error = "用户已手动中止子智能体"
+
+        # 2. 通过 task_finished 信号走标准完成路径 → _on_sub_agent_task_finished
+        #    会在那里更新 UI + 写入 _finished_tasks + 从 running_tasks 移除
+        try:
+            sub_agent_mgr.task_finished.emit(task_id, "")
+        except Exception as e:
+            logger.error(f"[main_widget] task_finished.emit 失败 (中止路径): {e}")
+
+        # 3. 通知用户
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        InfoBar.info(
+            title="子智能体已中止",
+            content=f"已手动中止子智能体「{agent_name}」: {task_description[:40]}{'...' if len(task_description) > 40 else ''}",
+            parent=self,
+            duration=3000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
         """进入子智能体会话 - 弹出对话框显示该子智能体的运行日志/消息"""
@@ -11683,15 +11760,20 @@ class OpenAIChatToolWindow(ToolWindow):
         # get_current_session() 返回的是新会话（旧会话已被替换），
         # 继续 set_messages 会把旧消息写到新会话，再被后续 save 错误保存到新项目。
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        #
+        # ⚠️ 例外：_pending_session_hook 标记表示当前正处在 _create_new_session /
+        # _clear_session / _on_compact_finished 中的 SessionStart hook 注入阶段，
+        # 这批消息是合法的新会话 hook 输出，放行不被丢弃。
         if getattr(self, "_session_switched", False):
-            from loguru import logger
+            if not getattr(self, "_pending_session_hook", False):
+                from loguru import logger
 
-            logger.warning(
-                f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
-                f"msg_count={len(messages)}, current_session_id="
-                f"{self.session_manager.get_current_session().session_id[:8] if self.session_manager.get_current_session() else 'None'}"
-            )
-            return
+                logger.warning(
+                    f"[MessagesUpdated] 检测到会话切换哨兵，丢弃 worker 的过期回调："
+                    f"msg_count={len(messages)}, current_session_id="
+                    f"{self.session_manager.get_current_session().session_id[:8] if self.session_manager.get_current_session() else 'None'}"
+                )
+                return
         session = self.session_manager.get_current_session()
         if not session:
             return
@@ -13497,8 +13579,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # finalize_stop 此时才到达，apply_interrupted_messages 会把旧消息写到新会话，
         # save 会落到新项目。直接丢弃整条回调（closeEvent 路径已处理数据持久化）。
         if getattr(self, "_session_switched", False):
-            from loguru import logger
-
             logger.warning(
                 f"[FinalizeStop] 检测到会话切换哨兵，丢弃 finalize 回调："
                 f"interrupted_count={len(interrupted_messages) if interrupted_messages else 0}"
