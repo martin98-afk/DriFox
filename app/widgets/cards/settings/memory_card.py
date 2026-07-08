@@ -1660,16 +1660,29 @@ class MemoryCardContent(QWidget):
         if memory_mgr:
             memory_mgr.remove_key_document(doc_id)
 
+        # 检查移除的是否为当前工作目录，若是则同步清除 workdir
+        is_removed_wd = False
+
         # 直接在列表中查找并移除对应项，不走 _load_key_documents() 全量重建
         for i in range(self.docs_list.count()):
             item = self.docs_list.item(i)
             widget = self.docs_list.itemWidget(item)
             if hasattr(widget, 'doc_id') and widget.doc_id == doc_id:
+                # 检查是否为工作目录
+                if getattr(widget, '_is_working_dir', False) or getattr(widget, 'file_path', '') == self._get_effective_workdir(self._current_project):
+                    is_removed_wd = True
                 taken = self.docs_list.takeItem(i)
                 if taken:
                     widget.deleteLater()  # 主动释放 widget
                     del taken             # 释放 item
                 break
+
+        # 如果移除了工作目录，同步清除 workdir 状态
+        if is_removed_wd:
+            self._instance_workdir[self._current_project] = ""
+            if memory_mgr:
+                memory_mgr.set_working_directory(self._current_project, "clear")
+            self.workingDirChanged.emit("")
 
         # 更新计数（只计 KeyDocumentItemWidget，排除 worktree 区域）
         doc_count = 0

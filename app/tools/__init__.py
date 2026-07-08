@@ -1079,8 +1079,8 @@ TOOL_SCHEMAS = [
                     },
                     "max_files": {
                         "type": "integer",
-                        "description": "explore 模式最大文件数（默认 12）",
-                        "default": 12,
+                        "description": "explore 模式最大文件数（默认 50）",
+                        "default": 50,
                     },
                     "directory": {
                         "type": "string",
@@ -1088,8 +1088,8 @@ TOOL_SCHEMAS = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "search 模式最大返回数（默认 20）",
-                        "default": 20,
+                        "description": "search 模式最大返回数（默认 50）",
+                        "default": 50,
                     },
                     "exact": {
                         "type": "boolean",

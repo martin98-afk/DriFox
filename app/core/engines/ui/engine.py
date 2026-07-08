@@ -348,9 +348,9 @@ class UIEngine(BaseEngine):
 
         # 公共辅助方法：同步触发 hook 并收集输出
         # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
-        _window_workdir = (
-            self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else os.getcwd()
-        )
+        _window_workdir = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
+        if not _window_workdir:
+            _window_workdir = os.getcwd()
 
         def _trigger_and_inject(hook_mgr, event_name, extra_context=None, msg_text=None, inject_to_session=None):
             """同步触发 hook，收集输出并注入 session.messages（只追加不删除）"""
@@ -636,9 +636,9 @@ class UIEngine(BaseEngine):
                         break
 
         # 多窗口隔离：使用当前窗口的工作目录
-        project_root = (
-            self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else os.getcwd()
-        )
+        project_root = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
+        if not project_root:
+            project_root = os.getcwd()
         context = {
             "project_root": project_root,
             "session_id": session_id,  # Claude Code 兼容字段

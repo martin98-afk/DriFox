@@ -65,15 +65,16 @@ class ToolExecutor:
 
     def _initialize_builtin_tools(self):
         """初始化内置工具（每个窗口独立实例，不复用）"""
-        import os
-
+        # 使用已设置的 _workdir（用户可能已通过 set_workdir 或构造函数设置）
+        # 仅当 _workdir 为 None 时才回退到默认路径
         workdir = self._workdir
-        try:
-            from app.utils.utils import resource_path
+        if not workdir:
+            try:
+                from app.utils.utils import resource_path
 
-            workdir = resource_path("")
-        except Exception:
-            workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+                workdir = resource_path("")
+            except Exception:
+                workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
         logger.info(f"[ToolExecutor] Initialized with workdir: {workdir}")
         self._builtin_tools = BuiltinTools(self._homepage, workdir)
@@ -612,25 +613,30 @@ class ToolExecutor:
     def get_workdir(self) -> Optional[str]:
         """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）
 
-        兜底：当 self._workdir 未设置时返回默认工作目录（项目根 / exe 根），
-        避免上游调用方在 None 上崩溃（如 os.path.basename）。
+        返回 None 表示用户未设置根目录（已清除）。
+        上游调用方需自行处理 None 情况（如回退到 os.getcwd() 或""）。
         """
-        return self._workdir or self._default_workdir()
+        return self._workdir if self._workdir else None
 
     def set_workdir(self, workdir: Optional[str]):
-        """设置工作目录（None 或 "" 表示恢复默认）"""
+        """设置工作目录（None 或 "" 表示清除，不保留默认回退）
+
+        清除时 _workdir 设为 None，get_workdir() 返回 None，
+        下游代码据此判断"用户未设置根目录"。
+        """
         if workdir:
             self._workdir = workdir
             if self._builtin_tools:
                 self._builtin_tools.set_workdir(workdir)
         else:
-            # P002: 恢复默认时，self._workdir 与 _builtin_tools.workdir 保持一致
-            # 否则上游 get_workdir() 返回 None，触发 os.path.basename(None) 崩溃
-            default_wd = self._default_workdir()
-            self._workdir = default_wd
+            # 清除工作目录：设为 None，下游可据此判断"无根目录"
+            self._workdir = None
             if self._builtin_tools:
+                # BuiltinTools 需要一个有效路径（文件工具需要），
+                # 回退到默认工作目录
+                default_wd = self._default_workdir()
                 self._builtin_tools.workdir = Path(default_wd)
-        logger.info(f"[ToolExecutor] Workdir updated: {workdir or 'default'}")
+        logger.info(f"[ToolExecutor] Workdir updated: {workdir or 'cleared'}")
 
     def _default_workdir(self) -> str:
         """获取默认工作目录（项目根 / exe 根，与 _initialize_builtin_tools 一致）
@@ -975,10 +981,10 @@ class ToolExecutor:
                 query=args.get("query", ""),
                 mode=args.get("mode", "explore"),
                 depth=int(args.get("depth", 2) or 2),
-                max_files=int(args.get("max_files", 12) or 12),
+                max_files=int(args.get("max_files", 50) or 50),
                 kind=args.get("kind"),
                 directory=args.get("directory"),
-                limit=int(args.get("limit", 20) or 20),
+                limit=int(args.get("limit", 50) or 50),
                 exact=args.get("exact", False),
             ),
         }

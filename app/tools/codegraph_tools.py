@@ -43,7 +43,7 @@ class CodeGraphTools:
         self._cg: Optional[CodeGraph] = None
         self._project_root: Optional[str] = None
         self._last_init_attempt = 0.0
-        self._init_cooldown = 5.0
+        self._init_cooldown = 1.0
 
     @property
     def workdir(self) -> Path:
@@ -67,6 +67,7 @@ class CodeGraphTools:
                 pass
             self._cg = None
             self._project_root = None
+            self._last_init_attempt = 0  # cooldown 复位，允许立即重试
 
         now = time.time()
         if now - self._last_init_attempt < self._init_cooldown:
@@ -437,7 +438,7 @@ class CodeGraphTools:
         if cg is None:
             if not _HAS_CODEGRAPH:
                 return ToolResult(False, error="codegraph-py 未安装，运行: pip install codegraph-py[all]")
-            return ToolResult(False, error="CodeGraph 未初始化，请在项目根运行: codegraph init")
+            return ToolResult(False, error="CodeGraph 索引暂不可用（初始化失败或 cooldown 中），请稍后重试")
 
         # 查询前自动同步索引（sync/status 模式跳过自循环）
         if mode not in ("sync", "status"):
