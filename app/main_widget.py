@@ -1600,6 +1600,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
         self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
+        self._sub_agent_compact_widget.stop_subagent_requested.connect(self._on_sub_agent_stop_requested)
 
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
         self._function_command_handlers = {
@@ -10458,6 +10459,41 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
+
+    def _on_sub_agent_stop_requested(self, task_id: str):
+        """处理子智能体停止请求 - 中止当前运行中的子智能体"""
+        if getattr(self, "_is_destroyed", False):
+            return
+
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor = sub_agent_mgr._running_tasks.get(task_id)
+        if not executor:
+            logger.warning(f"[main_widget] 停止子智能体失败: task_id={task_id} 不在运行中")
+            return
+
+        agent_name = executor.agent_name
+        task_description = getattr(executor, "task_description", "")
+
+        # 1. 设置取消标志 + 执行错误（让后面的 _on_sub_agent_task_finished 读到正确状态）
+        executor.cancel()
+        executor._execution_error = "用户已手动中止子智能体"
+
+        # 2. 通过 task_finished 信号走标准完成路径 → _on_sub_agent_task_finished
+        #    会在那里更新 UI + 写入 _finished_tasks + 从 running_tasks 移除
+        try:
+            sub_agent_mgr.task_finished.emit(task_id, "")
+        except Exception as e:
+            logger.error(f"[main_widget] task_finished.emit 失败 (中止路径): {e}")
+
+        # 3. 通知用户
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        InfoBar.info(
+            title="子智能体已中止",
+            content=f"已手动中止子智能体「{agent_name}」: {task_description[:40]}{'...' if len(task_description) > 40 else ''}",
+            parent=self,
+            duration=3000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
         """进入子智能体会话 - 弹出对话框显示该子智能体的运行日志/消息"""

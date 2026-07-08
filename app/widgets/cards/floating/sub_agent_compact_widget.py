@@ -75,6 +75,7 @@ class _AgentTaskRow(QFrame):
 
     toggled = pyqtSignal(str)  # task_id, 当展开/收起时发出
     enter_session_requested = pyqtSignal(str)  # task_id, 当用户点击"进入会话"时发出
+    stop_requested = pyqtSignal(str)  # task_id, 当用户点击停止按钮时发出
 
     def __init__(self, task_id: str, agent_name: str, task_desc: str, model_name: str = "", parent=None):
         super().__init__(parent)
@@ -212,29 +213,25 @@ class _AgentTaskRow(QFrame):
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             return icon, label
 
-        # Row 0: ● 状态      | 🧠 模型
-        # Row 1: 🔧 工具调用  | 📊 上下文
-        # Row 2: ⏱ 耗时      | 🔗 进入会话
-
-        sta_icon, self._status_label_detail = _make_item("●", "运行中", f"{Colors.SYNTAX_STEP}")
-        detail_layout.addWidget(sta_icon, 0, 0)
-        detail_layout.addWidget(self._status_label_detail, 0, 1)
+        # Row 0: 🧠 模型      | 🔧 工具调用
+        # Row 1: 📊 上下文    | ⏱ 耗时
+        # Row 2: 🔗 进入会话  | ⏹ 停止
 
         mdl_icon, self._model_label_detail = _make_item("🧠", self.model_name or "未指定")
-        detail_layout.addWidget(mdl_icon, 0, 2)
-        detail_layout.addWidget(self._model_label_detail, 0, 3)
+        detail_layout.addWidget(mdl_icon, 0, 0)
+        detail_layout.addWidget(self._model_label_detail, 0, 1)
 
         tool_icon, self._tool_label_detail = _make_item("🔧", "0 次调用")
-        detail_layout.addWidget(tool_icon, 1, 0)
-        detail_layout.addWidget(self._tool_label_detail, 1, 1)
+        detail_layout.addWidget(tool_icon, 0, 2)
+        detail_layout.addWidget(self._tool_label_detail, 0, 3)
 
         ctx_icon, self._ctx_label_detail = _make_item("📊", "—")
-        detail_layout.addWidget(ctx_icon, 1, 2)
-        detail_layout.addWidget(self._ctx_label_detail, 1, 3)
+        detail_layout.addWidget(ctx_icon, 1, 0)
+        detail_layout.addWidget(self._ctx_label_detail, 1, 1)
 
         elp_icon, self._elapsed_label_detail = _make_item("⏱", "00:00")
-        detail_layout.addWidget(elp_icon, 2, 0)
-        detail_layout.addWidget(self._elapsed_label_detail, 2, 1)
+        detail_layout.addWidget(elp_icon, 1, 2)
+        detail_layout.addWidget(self._elapsed_label_detail, 1, 3)
 
         # 进入会话按钮
         self._enter_session_btn = QPushButton("🔗 进入会话", self._detail_panel)
@@ -259,7 +256,33 @@ class _AgentTaskRow(QFrame):
         """)
         self._enter_session_btn.setCursor(Qt.PointingHandCursor)
         self._enter_session_btn.clicked.connect(self._on_enter_session_clicked)
-        detail_layout.addWidget(self._enter_session_btn, 2, 2, 1, 2)
+        detail_layout.addWidget(self._enter_session_btn, 2, 0, 1, 2)
+
+        # 停止按钮（运行中可见）
+        self._stop_btn_detail = QPushButton("⏹ 停止", self._detail_panel)
+        self._stop_btn_detail.setFont(get_unified_font(8))
+        self._stop_btn_detail.setFixedHeight(22)
+        Colors.refresh()
+        self._stop_btn_detail.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {Colors.SYNTAX_ERROR};
+                border: 1px solid {Colors.SYNTAX_ERROR};
+                border-radius: 4px;
+                padding: 0 8px;
+                {get_font_family_css()}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.SYNTAX_ERROR}33;
+                color: {Colors.SYNTAX_ERROR};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.SYNTAX_ERROR}55;
+            }}
+        """)
+        self._stop_btn_detail.setCursor(Qt.PointingHandCursor)
+        self._stop_btn_detail.clicked.connect(self._on_stop_clicked)
+        detail_layout.addWidget(self._stop_btn_detail, 2, 2, 1, 2)
 
     # ── 交互 ──────────────────────────────────────────
 
@@ -294,6 +317,10 @@ class _AgentTaskRow(QFrame):
         """进入会话按钮点击 - 发出信号由父组件处理弹出"""
         self.enter_session_requested.emit(self.task_id)
 
+    def _on_stop_clicked(self):
+        """停止按钮点击 - 发出信号由父组件处理中止逻辑"""
+        self.stop_requested.emit(self.task_id)
+
     # ── 公共方法 ──────────────────────────────────────
 
     def sizeHint(self):
@@ -320,21 +347,19 @@ class _AgentTaskRow(QFrame):
             self._ctx_label_detail.setText(info)
 
     def finish(self, success: bool = True):
-        """标记任务完成"""
+        """标记任务完成（正常完成或中止）"""
+        if self._is_finished:
+            return
         self.is_running = False
         self._is_finished = True
         self.update_elapsed()
         self._rotating_icon.setVisible(False)
 
-        # 更新详情面板的状态
-        if success:
-            self._status_label_detail.setText("✅ 完成")
-            self._status_label_detail.setStyleSheet(f"color: {Colors.SYNTAX_SUCCESS}; background: transparent;")
-        else:
-            self._status_label_detail.setText("❌ 失败")
-            self._status_label_detail.setStyleSheet(f"color: {Colors.SYNTAX_ERROR}; background: transparent;")
+        # 隐藏详情面板中的停止按钮
+        if hasattr(self, "_stop_btn_detail"):
+            self._stop_btn_detail.setVisible(False)
 
-        # 替换旋转图标
+        # 替换旋转图标为完成状态图标
         if success:
             self._success_label = QLabel(self._header_widget)
             self._success_label.setFixedSize(16, 16)
@@ -401,7 +426,6 @@ class _AgentTaskRow(QFrame):
         self.tool_count_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self.time_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._expand_indicator.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
-        self._status_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._model_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._tool_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self._ctx_label_detail.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
@@ -423,6 +447,24 @@ class _AgentTaskRow(QFrame):
                     background-color: {Colors.REALTIME_ACCENT};
                 }}
             """)
+        if hasattr(self, "_stop_btn_detail"):
+            self._stop_btn_detail.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {Colors.SYNTAX_ERROR};
+                    border: 1px solid {Colors.SYNTAX_ERROR};
+                    border-radius: 4px;
+                    padding: 0 8px;
+                    {get_font_family_css()}
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.SYNTAX_ERROR}33;
+                    color: {Colors.SYNTAX_ERROR};
+                }}
+                QPushButton:pressed {{
+                    background-color: {Colors.SYNTAX_ERROR}55;
+                }}
+            """)
 
 
 class SubAgentCompactFloatingWidget(QWidget):
@@ -436,6 +478,7 @@ class SubAgentCompactFloatingWidget(QWidget):
 
     closed = pyqtSignal()
     enter_session_requested = pyqtSignal(str, str)  # task_id, agent_name
+    stop_subagent_requested = pyqtSignal(str)  # task_id, 用户点击停止按钮时发出
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -699,6 +742,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         row = _AgentTaskRow(task_id, agent_name, task_description, model_name, self._scroll_content)
         row.toggled.connect(self._on_row_toggled)
         row.enter_session_requested.connect(self._on_enter_session_requested)
+        row.stop_requested.connect(self._on_row_stop_requested)
         self._task_rows[task_id] = row
         self._body_layout.addWidget(row)
 
@@ -718,6 +762,10 @@ class SubAgentCompactFloatingWidget(QWidget):
         row = self._task_rows.get(task_id)
         agent_name = row.agent_name if row else ""
         self.enter_session_requested.emit(task_id, agent_name)
+
+    def _on_row_stop_requested(self, task_id: str):
+        """处理行停止请求 - 转发给主窗口处理中止逻辑"""
+        self.stop_subagent_requested.emit(task_id)
 
     @staticmethod
     def _resolve_context_info(model_name: str) -> str:
