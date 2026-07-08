@@ -28,19 +28,67 @@ _DIFF_LEXER_CACHE: dict = {}
 
 # 扩展名 → pygments lexer 别名（get_lexer_for_filename 找不到时的兜底）
 _EXT_LEXER_MAP = {
-    ".py": "python", ".pyi": "python", ".js": "javascript", ".mjs": "javascript",
-    ".ts": "typescript", ".tsx": "tsx", ".jsx": "jsx", ".html": "html", ".htm": "html",
-    ".css": "css", ".scss": "scss", ".less": "less", ".json": "json", ".jsonc": "json",
-    ".md": "markdown", ".markdown": "markdown", ".yml": "yaml", ".yaml": "yaml",
-    ".java": "java", ".go": "go", ".rs": "rust", ".c": "c", ".h": "c", ".cpp": "cpp",
-    ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".cs": "csharp", ".rb": "ruby",
-    ".php": "php", ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".fish": "bash",
-    ".sql": "sql", ".xml": "xml", ".toml": "toml", ".ini": "ini", ".cfg": "ini",
-    ".conf": "ini", ".lua": "lua", ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift",
-    ".r": "r", ".pl": "perl", ".pm": "perl", ".dart": "dart", ".vue": "vue",
-    ".dockerfile": "docker", ".mk": "makefile", ".cmake": "cmake", ".tf": "hcl",
-    ".ex": "elixir", ".exs": "elixir", ".erl": "erlang", ".hs": "haskell",
-    ".scala": "scala", ".groovy": "groovy", ".ps1": "powershell", ".bat": "batch",
+    ".py": "python",
+    ".pyi": "python",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".jsx": "jsx",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".less": "less",
+    ".json": "json",
+    ".jsonc": "json",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".fish": "bash",
+    ".sql": "sql",
+    ".xml": "xml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".cfg": "ini",
+    ".conf": "ini",
+    ".lua": "lua",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".swift": "swift",
+    ".r": "r",
+    ".pl": "perl",
+    ".pm": "perl",
+    ".dart": "dart",
+    ".vue": "vue",
+    ".dockerfile": "docker",
+    ".mk": "makefile",
+    ".cmake": "cmake",
+    ".tf": "hcl",
+    ".ex": "elixir",
+    ".exs": "elixir",
+    ".erl": "erlang",
+    ".hs": "haskell",
+    ".scala": "scala",
+    ".groovy": "groovy",
+    ".ps1": "powershell",
+    ".bat": "batch",
 }
 
 
@@ -323,7 +371,7 @@ def _parse_subagent_task_ids(result: str) -> str:
                 return ",".join(task_ids)
         elif isinstance(data, list):
             return ",".join(data)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         pass
 
     # 尝试从文本中提取 task_id（UUID 格式）
@@ -492,15 +540,19 @@ def _render_diff_preview(diff_text: str) -> str:
     # ---- 3. 渲染 ----
     def _cell(kind, ln, sign, code_html, empty=False):
         if empty:
-            return ('<div class="diff-line diff-seg-empty">'
-                    '<span class="line-num">&nbsp;</span>'
-                    '<span class="line-sign"></span>'
-                    '<span class="line-code">&nbsp;</span></div>')
+            return (
+                '<div class="diff-line diff-seg-empty">'
+                '<span class="line-num">&nbsp;</span>'
+                '<span class="line-sign"></span>'
+                '<span class="line-code">&nbsp;</span></div>'
+            )
         cls = "diff-del" if kind == "del" else "diff-add"
-        return (f'<div class="diff-line {cls}">'
-                f'<span class="line-num">{ln}</span>'
-                f'<span class="line-sign">{sign}</span>'
-                f'<span class="line-code">{code_html}</span></div>')
+        return (
+            f'<div class="diff-line {cls}">'
+            f'<span class="line-num">{ln}</span>'
+            f'<span class="line-sign">{sign}</span>'
+            f'<span class="line-code">{code_html}</span></div>'
+        )
 
     rows = []
     _prev_blank = False  # 折叠连续空上下文行，只保留一条细分隔线
@@ -543,7 +595,7 @@ def _render_diff_preview(diff_text: str) -> str:
             for k in range(pair, len(adds)):
                 oa = adds[k]
                 rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
-            rows.append('</div>')
+            rows.append("</div>")
 
             # ── 双列视图：配对行（旧左新右），带词级高亮 ──
             rows.append('<div class="diff-seg-paired">')
@@ -553,24 +605,22 @@ def _render_diff_preview(diff_text: str) -> str:
                 rows.append('<div class="diff-seg-row">')
                 rows.append(_cell("del", od["old_ln"], "-", old_html))
                 rows.append(_cell("add", oa["new_ln"], "+", new_html))
-                rows.append('</div>')
+                rows.append("</div>")
             for k in range(pair, len(dels)):
                 od = dels[k]
                 rows.append('<div class="diff-seg-row">')
-                rows.append(_cell("del", od["old_ln"], "-",
-                    _highlight_code_line(od["text"], od["lexer"])))
+                rows.append(_cell("del", od["old_ln"], "-", _highlight_code_line(od["text"], od["lexer"])))
                 rows.append(_cell("add", "", "", "", empty=True))
-                rows.append('</div>')
+                rows.append("</div>")
             for k in range(pair, len(adds)):
                 oa = adds[k]
                 rows.append('<div class="diff-seg-row">')
                 rows.append(_cell("del", "", "", "", empty=True))
-                rows.append(_cell("add", oa["new_ln"], "+",
-                    _highlight_code_line(oa["text"], oa["lexer"])))
-                rows.append('</div>')
-            rows.append('</div>')  # /.diff-seg-paired
+                rows.append(_cell("add", oa["new_ln"], "+", _highlight_code_line(oa["text"], oa["lexer"])))
+                rows.append("</div>")
+            rows.append("</div>")  # /.diff-seg-paired
 
-            rows.append('</div>')  # /.diff-segment
+            rows.append("</div>")  # /.diff-segment
         elif seg["kind"] == "file":
             _prev_blank = False
             rows.append(
@@ -662,6 +712,8 @@ _TOOL_ICON_MAP = {
     "keyboard": "⌨️",
     # LSP 工具（默认 = listServers 列表图标；具体 operation 由 _get_tool_icon 解析）
     "lsp": "📋",
+    # CodeGraph 代码智能
+    "codegraph_explore": "🧠",
 }
 
 
@@ -709,7 +761,7 @@ def _extract_screenshot_image_path(result: str) -> str:
             path = data.get("absolute_path") or data.get("path") or ""
             if path and os.path.isfile(path):
                 return path
-    except (ValueError, SyntaxError, MemoryError):
+    except ValueError, SyntaxError, MemoryError:
         pass
 
     # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
@@ -928,6 +980,23 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             desc = f"热键 {keys}" if keys else "热键"
         else:
             desc = "键盘操作"
+    # ── CodeGraph 代码智能 ──
+    elif tool_name == "codegraph_explore":
+        mode = tool_args.get("mode", "explore")
+        query = tool_args.get("query", "")
+        mode_labels = {
+            "status": "查看索引状态",
+            "sync": "同步索引",
+            "search": f'搜索 "{query}"' if query else "搜索符号",
+            "callers": f'查找 "{query}" 的调用者' if query else "查找调用者",
+            "callees": f'查找 "{query}" 调用了什么' if query else "查找被调用者",
+            "explore": f'探索 "{query}"' if query else "代码探索",
+            "impact": f'分析 "{query}" 的影响范围' if query else "影响分析",
+            "files": "列出已索引文件",
+        }
+        desc = mode_labels.get(mode, f"CodeGraph {mode}")
+        if mode in ("search", "callers", "callees", "explore", "impact") and query:
+            desc += f" (深度 {tool_args.get('depth', 2)})"
     return desc
 
 
@@ -1051,6 +1120,48 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
         return f"""
         <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{"\n".join(lines_html)}</pre>"""
 
+    # ── codegraph_explore: 结构化代码探索结果 ──
+    if tool_name == "codegraph_explore":
+        lines = raw.split("\n")
+        html_lines = []
+        for line in lines:
+            escaped = escape(line)
+            # 标题行: ### xxx
+            if line.startswith("### "):
+                html_lines.append(
+                    f'<div style="color:#58a6ff;font-weight:700;font-size:{scale_font_size(14)}px;'
+                    f'padding:8px 0 4px 0;">{escaped}</div>'
+                )
+            # 粗体文件路径: **xxx**
+            elif "**" in line:
+                # 简单替换 **xxx** 为带颜色的粗体
+                parts = []
+                in_bold = False
+                buf = ""
+                for ch in line:
+                    if ch == "*":
+                        continue
+                    # Actually much simpler: just color lines starting with 📄
+                # Simpler approach: check for emoji patterns
+                if line.strip().startswith("📄"):
+                    html_lines.append(f'<div style="color:#7ee787;font-weight:600;padding:2px 0;">{escaped}</div>')
+                elif line.strip().startswith(("⬆", "⬇", "←", "→", "💥")):
+                    html_lines.append(f'<div style="color:#d2a8ff;padding:1px 0 1px 12px;">{escaped}</div>')
+                elif line.strip().startswith(("[", "- [")):
+                    html_lines.append(f'<div style="color:#c9d1d9;padding:1px 0 1px 12px;">{escaped}</div>')
+                else:
+                    html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
+            elif line.strip() == "---":
+                html_lines.append('<div style="border-top:1px solid rgba(48,54,61,0.25);margin:6px 0;"></div>')
+            else:
+                html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
+
+        content = "".join(html_lines)
+        return f"""
+        <div style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;padding:8px 12px;">
+            {content}
+        </div>"""
+
     # ── grep / glob / list / scan: 匹配/列表示结果 ──
     if tool_name in ("grep", "glob", "list", "scan_repo", "stage_files"):
         return f"""
@@ -1126,7 +1237,7 @@ def _parse_questions_field(questions_raw) -> list:
                 return [_normalize_question_item(q) for q in parsed]
             elif isinstance(parsed, dict):
                 return [_normalize_question_item(parsed)]
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
         # JSON 解析失败（可能被截断），作为单个问题展示原始文本
         return [{"question": questions_raw, "options": [], "multiple": False}]
@@ -1373,6 +1484,7 @@ def render_tool_block(
     match_count_html = ""
     if success and result and tool_name in ("grep", "glob"):
         import re as _re
+
         if tool_name == "grep":
             # 从 meta 行解析 "# Search: ... | X matches ..."
             m = _re.search(r"\|\s*(\d+)\s+matches", result)
@@ -1459,6 +1571,7 @@ def render_tool_block(
             "get_diagnostics",
             "mouse",
             "keyboard",
+            "codegraph_explore",
         }
     )
     raw_output_html = ""

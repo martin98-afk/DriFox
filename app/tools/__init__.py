@@ -18,6 +18,7 @@ from app.core.lsp.lsp_tools import LspToolsIntegration
 from app.tools.automation import AutomationTools
 
 # Import all tool modules
+from app.tools.codegraph_tools import CodeGraphTools
 from app.tools.diagnostics_tools import DiagnosticsTools
 from app.tools.file_tools import FileTools
 from app.tools.mcp_tools import MCPClientManager
@@ -100,6 +101,10 @@ class BuiltinTools(QObject):
         # LSP 工具集成
         self._lsp_tools = LspToolsIntegration(LspManager.get_instance(), owner=self)
         self._tools["lsp"] = self._lsp_tools
+
+        # CodeGraph 代码智能引擎
+        self._codegraph_tools = CodeGraphTools(self)
+        self._tools["codegraph"] = self._codegraph_tools
 
         # 团队协作工具
         self._tools["team"] = TeamTools(self)
@@ -199,6 +204,10 @@ class BuiltinTools(QObject):
         # 清理文件工具的缓存
         if hasattr(self._file_tools, "cleanup"):
             self._file_tools.cleanup()
+
+        # 释放 CodeGraph 实例
+        if hasattr(self, "_codegraph_tools"):
+            self._codegraph_tools.cleanup()
 
         # 释放 MCP 引用（引用计数归零时才真正断开）
         self._mcp_manager.release()
@@ -1011,6 +1020,84 @@ TOOL_SCHEMAS = [
                     "message": {"type": "string", "description": "消息内容"},
                 },
                 "required": ["to_agent", "message"],
+            },
+        },
+    },
+    # ── CodeGraph 代码智能工具（只读、安全，统一入口）───
+    {
+        "type": "function",
+        "function": {
+            "name": "codegraph_explore",
+            "description": (
+                "统一代码探索工具。通过 mode 切换不同能力：\n"
+                "  - status: 查看索引状态（文件/符号/边/待同步变更）\n"
+                "  - search: 搜索符号（函数/类/方法/变量），支持按 kind 过滤\n"
+                "  - callers: 查找谁调用了指定符号\n"
+                "  - callees: 查找指定符号调用了谁\n"
+                "  - explore: （默认）综合搜索+调用上下文，一次输出\n"
+                "  - impact: 变更影响分析，评估改动波及范围\n"
+                "  - sync: 同步索引与文件系统变更\n"
+                "  - files: 列出已索引文件\n"
+                "\n"
+                "使用示例：\n"
+                "  codegraph_explore(mode='status') — 看索引状态\n"
+                "  codegraph_explore('ChatBackend') — 探索 ChatBackend\n"
+                "  codegraph_explore('send_message', mode='callers') — 找调用者\n"
+                "  codegraph_explore('on_click', mode='impact') — 影响分析"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索的符号名或关键词（status/sync/files 模式不需要）",
+                        "default": "",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": [
+                            "status",
+                            "search",
+                            "callers",
+                            "callees",
+                            "explore",
+                            "impact",
+                            "sync",
+                            "files",
+                        ],
+                        "description": "操作模式（默认 explore）",
+                        "default": "explore",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "callers/callees/impact 的遍历深度（默认 2）",
+                        "default": 2,
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "search 模式按类型过滤：function/class/method/variable/field/enum 等",
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "explore 模式最大文件数（默认 12）",
+                        "default": 12,
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "files 模式按目录筛选（如 app/tools）",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "search 模式最大返回数（默认 20）",
+                        "default": 20,
+                    },
+                    "exact": {
+                        "type": "boolean",
+                        "description": "search 模式是否精确匹配（默认模糊）",
+                        "default": False,
+                    },
+                },
+                "required": [],
             },
         },
     },

@@ -51,6 +51,8 @@ dependencies = [
     # LSP 集成 (Language Server Protocol)
     "pygls>=2.0.0",
     "lsprotocol",
+    # CodeGraph 代码智能引擎 (语义级代码探索)
+    "codegraph-py[all]>=1.1.1",
 ]
 
 # 依赖组（供 uv sync --group / --all-groups 使用）
@@ -123,6 +125,10 @@ quote-style = "double"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+markers = [
+    "perf: 性能基准测试（测量响应时间）",
+    "stress: 压力测试（连续调用验证稳定性）",
+]
 
 # 构建系统配置
 [build-system]

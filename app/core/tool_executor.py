@@ -970,6 +970,17 @@ class ToolExecutor:
                 message=args.get("message", ""),
             ),
             "team_list_members": lambda: self._builtin_tools.team_list_members(),
+            # ========== CodeGraph 代码智能 ==========
+            "codegraph_explore": lambda: self._builtin_tools.codegraph_explore(
+                query=args.get("query", ""),
+                mode=args.get("mode", "explore"),
+                depth=int(args.get("depth", 2) or 2),
+                max_files=int(args.get("max_files", 12) or 12),
+                kind=args.get("kind"),
+                directory=args.get("directory"),
+                limit=int(args.get("limit", 20) or 20),
+                exact=args.get("exact", False),
+            ),
         }
 
         # ========== 工具执行前的有效性检查 ==========

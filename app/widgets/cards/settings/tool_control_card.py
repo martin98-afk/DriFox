@@ -79,6 +79,8 @@ TOOL_DESCRIPTIONS = {
     "subagent_status": "查询子智能体状态",
     "mcp_list_servers": "列出MCP服务器",
     "lsp": "LSP代码智能操作",
+    # CodeGraph 代码智能
+    "codegraph_explore": "语义级代码探索（搜索/调用链/影响分析）",
 }
 
 OFF_BEHAVIOR_OPTIONS = [

@@ -52,6 +52,8 @@ class ToolNameMapper:
         "bg_list": ["BgList", "bg_list"],
         "stage_files": ["StageFiles", "stage_files"],
         "mcp": ["Mcp"],  # MCP 工具前缀
+        # CodeGraph 代码智能工具（单入口）
+        "codegraph_explore": ["CodeGraphExplore", "cg_explore", "codegraph"],
     }
 
     # 反向映射：外来名 → 原生名（延迟构建）

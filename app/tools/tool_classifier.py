@@ -4,29 +4,49 @@
 """
 
 # 危险工具：修改文件、执行命令、控制桌面、上传文件
-DANGEROUS_TOOLS = frozenset({
-    "write", "edit", "multi_edit",           # 文件写入
-    "bash", "bg_start", "bg_stop",           # 终端命令
-    "mouse", "keyboard",                      # 桌面控制
-    "upload_file",                            # 文件上传
-    "todowrite",                              # 状态修改
-    "stage_files",                            # 文件标记
-    "subagent_para", "subagent_dag",          # 子智能体（可执行任意代码/修改文件）
-})
+DANGEROUS_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "multi_edit",  # 文件写入
+        "bash",
+        "bg_start",
+        "bg_stop",  # 终端命令
+        "mouse",
+        "keyboard",  # 桌面控制
+        "upload_file",  # 文件上传
+        "todowrite",  # 状态修改
+        "stage_files",  # 文件标记
+        "subagent_para",
+        "subagent_dag",  # 子智能体（可执行任意代码/修改文件）
+    }
+)
 
 # 安全工具：只读、查询、无副作用
-SAFE_TOOLS = frozenset({
-    "read", "grep", "list", "glob", "scan_repo",     # 文件只读
-    "webfetch", "websearch",                          # 网络查询
-    "bg_logs", "bg_list",                             # 后台查看
-    "screenshot",                                     # 截图
-    "get_diagnostics",                                # 诊断
-    "todoread",                                       # 待办只读
-    "question", "skill", "list_skills",               # 交互/技能
-    "subagent_status",                                # 子智能体（只读查询）
-    "mcp_list_servers",                               # MCP列表
-    "lsp",                                            # LSP 工具（只读）
-})
+SAFE_TOOLS = frozenset(
+    {
+        "read",
+        "grep",
+        "list",
+        "glob",
+        "scan_repo",  # 文件只读
+        "webfetch",
+        "websearch",  # 网络查询
+        "bg_logs",
+        "bg_list",  # 后台查看
+        "screenshot",  # 截图
+        "get_diagnostics",  # 诊断
+        "todoread",  # 待办只读
+        "question",
+        "skill",
+        "list_skills",  # 交互/技能
+        "subagent_status",  # 子智能体（只读查询）
+        "mcp_list_servers",  # MCP列表
+        "lsp",  # LSP 工具（只读）
+        # CodeGraph 代码智能工具（只读）
+        "codegraph_explore",
+    }
+)
 
 
 def classify_tool_danger(tool_name: str) -> str:
