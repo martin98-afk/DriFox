@@ -20,6 +20,8 @@ from loguru import logger
 from PyQt5.QtCore import (
     QEvent,
     QFileSystemWatcher,
+    QObject,
+    QRunnable,
     Qt,
     QThreadPool,
     QTimer,
@@ -188,6 +190,64 @@ from app.widgets.ui_helpers import (
     show_diff_viewer,
     truncate_and_remove_round,
 )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 项目 icon tooltip 异步分支检测
+# ───────────────────────────────────────────────────────────────────────────
+class _BranchDetectSignals(QObject):
+    """后台 git 分支检测的信号桥接（后台线程 → 主线程）。"""
+
+    finished = pyqtSignal(int, str)  # request_id, branch_name（空字符串=无分支/出错）
+
+
+class _BranchDetectTask(QRunnable):
+    """异步 git 分支检测 worker。
+
+    设计动机：
+    - 旧实现 `subprocess.run(['git','branch','show-current'], timeout=3)`
+      阻塞主线程 0~3s，期间 tooltip 不更新（更新在函数末尾）
+    - 改为 QRunnable 后，tooltip 立即显示「项目名+路径」，
+      分支在后台完成后追加
+    - request_id 用于丢弃过期结果（用户连续切换项目时旧检测自动失效）
+    """
+
+    def __init__(self, workdir: str, request_id: int, signals: "_BranchDetectSignals"):
+        super().__init__()
+        self._workdir = workdir
+        self._request_id = request_id
+        self._signals = signals
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        branch = ""
+        try:
+            if not self._workdir or not os.path.isdir(self._workdir):
+                pass
+            else:
+                from app.utils.git_worktree import GitWorktreeDetector
+
+                git_root = GitWorktreeDetector.detect_git(self._workdir)
+                if git_root:
+                    r = subprocess.run(
+                        ["git", "branch", "--show-current"],
+                        capture_output=True,
+                        text=True,
+                        cwd=self._workdir,
+                        timeout=3,
+                        encoding="utf-8",
+                        errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if r.returncode == 0:
+                        branch = r.stdout.strip()
+        except Exception:
+            pass
+        try:
+            self._signals.finished.emit(self._request_id, branch)
+        except Exception:
+            # signals 可能在窗口销毁时被 GC，直接丢弃
+            pass
 
 
 class OpenAIChatToolWindow(ToolWindow):
@@ -366,6 +426,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._interrupt_complete.connect(self._on_finalize_complete)
         # 线程安全桥接：套餐用量查询结果回主线程
         self._coding_plan_result_ready.connect(self._on_coding_plan_result)
+        # 线程安全桥接：后台 git 分支检测结果回主线程
+        self._branch_detect_signals = _BranchDetectSignals()
+        self._branch_detect_signals.finished.connect(self._on_branch_detected)
+        self._branch_detect_request_id = 0
+        self._branch_cache: Dict[str, str] = {}  # workdir → branch（按路径缓存，避免重复 git 调用）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -12413,46 +12478,69 @@ class OpenAIChatToolWindow(ToolWindow):
             # 兜底：复制失败则回退到正常的 git 检测
             self._update_branch()
 
+    def _resolve_project_workdir(self) -> Optional[str]:
+        """解析当前项目的工作目录（多窗口隔离：实例缓存 → DB → tool_executor）"""
+        workdir = self._current_workdir.get(self._current_project)
+        if not workdir and self.backend and self.backend.memory_manager:
+            workdir = self.backend.memory_manager.get_working_directory(self._current_project)
+        if not workdir and self.backend and self.backend.tool_executor:
+            workdir = getattr(self.backend.tool_executor, "_workdir", None)
+        return str(workdir) if workdir else None
+
     def _update_branch(self):
-        """从工作目录检测 git 分支并更新分支标签"""
-        branch = None
-        try:
-            # 多窗口隔离：优先使用实例缓存（与 _sync_working_directory 一致）
-            workdir = None
-            project_workdir = self._current_workdir.get(self._current_project)
-            if project_workdir:
-                workdir = project_workdir
-            # 其次从 memory_manager 获取（DB 默认值）
-            if not workdir and self.backend and self.backend.memory_manager:
-                workdir = self.backend.memory_manager.get_working_directory(self._current_project)
-            # 最后从 tool_executor 获取
-            if not workdir and self.backend and self.backend.tool_executor:
-                workdir = getattr(self.backend.tool_executor, "_workdir", None)
-            # workdir 为空时直接跳过 git 检测，分支标签隐藏
-            if not workdir:
-                pass  # branch 保持 None，分支标签隐藏
-            if workdir and os.path.isdir(str(workdir)):
-                workdir = str(workdir)
-                from app.utils.git_worktree import GitWorktreeDetector
+        """更新项目 avatar tooltip 和分支标签（性能优化：异步 git 检测）
 
-                git_root = GitWorktreeDetector.detect_git(workdir)
-                if git_root:
-                    r = subprocess.run(
-                        ["git", "branch", "--show-current"],
-                        capture_output=True,
-                        text=True,
-                        cwd=workdir,
-                        timeout=3,
-                        encoding="utf-8",
-                        errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                    )
-                    if r.returncode == 0:
-                        branch = r.stdout.strip()
-        except Exception:
-            pass
+        旧实现：在主线程同步执行 `git branch --show-current`（timeout=3），
+        tooltip 在子进程后才更新，导致项目切换/工作目录变更时 tooltip 延迟 0~3s。
+        改为：tooltip 立即显示「项目名+路径」，git 分支后台线程异步检测，
+        完成后通过 _on_branch_detected 回调追加分支信息。
+        """
+        workdir = self._resolve_project_workdir()
 
-        # 更新项目 avatar tooltip（完整项目名、项目路径、当前分支）
+        # Phase A（同步、即时）：tooltip 先显示项目名 + 工作目录
+        tooltip = self._current_project
+        if workdir:
+            tooltip += f"\n{workdir}"
+        self._project_avatar.setToolTip(tooltip)
+
+        # 先隐藏分支标签，等后台检测完成再决定显示
+        self._branch_widget.setVisible(False)
+        self._pb_separator.setVisible(False)
+
+        # Phase B（异步）：git 分支检测
+        if not workdir or not os.path.isdir(workdir):
+            return
+
+        # 缓存命中：直接应用，避免重复 git 调用
+        if workdir in self._branch_cache:
+            self._apply_branch_to_ui(workdir, self._branch_cache[workdir])
+            return
+
+        # 启动后台检测（自增 request_id 用于丢弃过期结果）
+        self._branch_detect_request_id += 1
+        task = _BranchDetectTask(workdir, self._branch_detect_request_id, self._branch_detect_signals)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_branch_detected(self, request_id: int, branch: str):
+        """后台 git 分支检测完成的主线程回调。"""
+        # 过期结果：用户已切换到其他项目，丢弃
+        if request_id != self._branch_detect_request_id:
+            return
+
+        workdir = self._resolve_project_workdir()
+        if not workdir:
+            return
+
+        # 缓存结果（同一路径下次直接命中）
+        self._branch_cache[workdir] = branch
+        # 再次校验：缓存写完后若 request_id 又变了，说明并发切换，仍跳过
+        if request_id != self._branch_detect_request_id:
+            return
+        self._apply_branch_to_ui(workdir, branch)
+
+    def _apply_branch_to_ui(self, workdir: str, branch: str):
+        """应用分支结果到 tooltip 和分支标签。"""
+        # 完整 tooltip（项目名 + 路径 + 分支）
         tooltip = self._current_project
         if workdir:
             tooltip += f"\n{workdir}"
@@ -12460,8 +12548,8 @@ class OpenAIChatToolWindow(ToolWindow):
             tooltip += f"\n🌿 {branch}"
         self._project_avatar.setToolTip(tooltip)
 
+        # 分支标签
         if branch:
-            # 分支名过长时截断显示，悬浮显示全名
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
             self._branch_widget.setText(display)
             self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
@@ -12534,6 +12622,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """构建项目根目录映射 {项目名: 根目录路径}（未设置的项目不会出现）
 
         根目录来源于关键文档中标记为"工作目录"的文件夹（每个项目最多 1 个）。
+        若 DB 中无根目录但实例缓存有临时工作目录，也一并返回。
         """
         root_dir_map: Dict[str, str] = {}
         try:
@@ -12541,6 +12630,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 for p in projects:
                     wd = self.backend.memory_manager.get_working_directory(p)
                     if wd:
+                        root_dir_map[p] = wd
+            # 补充实例缓存中的临时工作目录（未持久化到 DB）
+            if hasattr(self, "_current_workdir") and self._current_workdir:
+                for p, wd in self._current_workdir.items():
+                    if wd and p not in root_dir_map:
                         root_dir_map[p] = wd
         except Exception as e:
             logger.warning(f"[MainWidget] 获取项目根目录异常: {e}")
@@ -12923,24 +13017,29 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新实例缓存（多窗口隔离：每个窗口独立持有自己的 workdir）
         if file_path:
             self._current_workdir[self._current_project] = file_path
+            resolved_path = file_path
         else:
             self._current_workdir.pop(self._current_project, None)
+            # 清除根目录时自动创建临时工作目录兜底
+            resolved_path = self._ensure_temp_workdir(self._current_project) or None
         # 同步到工具执行器
         if self.backend and self.backend.tool_executor:
-            self.backend.tool_executor.set_workdir(file_path or None)
-            from loguru import logger
-
-            logger.info(f"[MainWidget] Working directory synced to tool executor: {file_path or 'default'}")
+            self.backend.tool_executor.set_workdir(resolved_path or None)
+            logger.info(f"[MainWidget] Working directory synced to tool executor: {resolved_path or 'cleared'}")
+        # 同步到记忆卡片的实例缓存（使内部 get_effective_workdir 保持一致）
+        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+            self._memory_card_popup._instance_workdir[self._current_project] = resolved_path or ""
         # 工作目录变更后刷新分支标签
         self._update_branch()
         # 工作目录变更后重扫文件列表（预缓存，下次 @ 即时显示）
-        if hasattr(self, "_file_mention_card") and file_path:
-            self._file_mention_card.ensure_cache(file_path)
+        if hasattr(self, "_file_mention_card") and resolved_path:
+            self._file_mention_card.ensure_cache(resolved_path)
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
 
         多窗口隔离：实例缓存优先；首次启动时从 DB 读取（新窗口默认值回退）。
+        无根目录时自动在当前路径创建临时工作目录。
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -12955,6 +13054,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 workdir = self.backend.memory_manager.get_working_directory(project)
             if workdir:
                 self._current_workdir[project] = workdir
+
+        # 无根目录时自动创建临时工作目录
+        if not workdir:
+            workdir = self._ensure_temp_workdir(project)
+
         self.backend.tool_executor.set_workdir(workdir or None)
 
         # 同步到记忆卡片的实例缓存（确保关键文档能感知到当前工作目录）
@@ -12967,6 +13071,45 @@ class OpenAIChatToolWindow(ToolWindow):
         from loguru import logger
 
         logger.info(f"[MainWidget] Synced working directory for project '{project}': {workdir or 'default'}")
+
+    def _ensure_temp_workdir(self, project: str) -> str:
+        """确保项目有临时工作目录
+
+        当项目未设置根目录时，在应用数据目录下创建 .drifox/workspaces/{project}/
+        作为临时工作目录，确保文件操作总有安全的基础目录。
+
+        使用 resource_path("")（应用数据目录）而非 os.getcwd()，原因：
+        - 多窗口隔离：所有窗口统一使用同一基准，避免进程 cwd 飘移导致混乱
+        - 稳定性：os.getcwd() 可能被外部工具/IDE 改变，resource_path 是固定路径
+        """
+        try:
+            from app.utils.utils import resource_path
+
+            base_dir = resource_path("")
+            temp_dir = os.path.join(base_dir, ".drifox", "workspaces", project)
+            os.makedirs(temp_dir, exist_ok=True)
+            self._current_workdir[project] = temp_dir
+
+            # 将临时目录加入关键文档并标记为工作目录（set_working_directory 会自动插入路径）
+            try:
+                if self.backend and self.backend.memory_manager:
+                    self.backend.memory_manager.set_working_directory(project, temp_dir)
+            except Exception as e:
+                logger.warning(f"[MainWidget] Failed to sync temp workdir to key docs: {e}")
+
+            # 刷新关键文档卡片 UI，使新增的根目录立即可见
+            try:
+                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+                    self._memory_card_popup._instance_workdir[project] = temp_dir
+                    self._memory_card_popup._load_key_documents()
+            except Exception as e:
+                logger.warning(f"[MainWidget] Failed to refresh key docs UI: {e}")
+
+            logger.info(f"[MainWidget] Created temp workdir for '{project}': {temp_dir}")
+            return temp_dir
+        except Exception as e:
+            logger.warning(f"[MainWidget] Failed to create temp workdir: {e}")
+            return ""
 
     def _show_soul_memory(self):
         """切换记忆管理卡片的显示"""

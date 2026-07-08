@@ -2003,7 +2003,7 @@ class ChatBackend(QObject):
 
         # 关键文档（含路径显示）
         try:
-            wd_path = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
             docs = self._memory_manager.get_key_documents(self._current_project)[:50]
             if docs:
                 doc_items = []
@@ -2043,28 +2043,33 @@ class ChatBackend(QObject):
         移到 PreUserMessage，确保每次消息前都注入最新状态。
 
         Returns:
-            包含 worktree 信息和路径建议的 dict
+            包含 worktree 信息和路径建议的 dict（无项目时 project_root 为空字符串，
+            下游 hook 可据此跳过"项目根目录"显示而非把 os.getcwd() 误当项目根）
         """
-        project_root = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+        # 【修复】未设置项目工作目录时直接留空，不要回退到 os.getcwd()。
+        # 之前用 os.getcwd() 兜底，会让 hook（如 format_memory_context）把
+        # 当前进程工作目录误当成"项目根目录"显示出来，与"未配置就不显示"的设计不符。
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
 
         ctx: Dict[str, Any] = {
             "project_root": project_root,
-            "project_name": self._current_project or os.path.basename(project_root),
+            "project_name": self._current_project or (os.path.basename(project_root) if project_root else ""),
         }
 
-        # Worktree / git 分支信息
+        # Worktree / git 分支信息（project_root 为空时 GitWorktreeDetector.get_repo_info 会返回 None）
         try:
             from app.utils.git_worktree import GitWorktreeDetector
 
-            repo_info = GitWorktreeDetector.get_repo_info(project_root)
-            if repo_info and repo_info.worktrees:
-                ctx["worktree"] = {
-                    "repo_name": os.path.basename(repo_info.root),
-                    "current_branch": repo_info.current_branch,
-                    "workdir": project_root,
-                    "is_worktree": project_root != repo_info.root,
-                    "other_branches": [wt.branch for wt in repo_info.worktrees if not wt.is_current],
-                }
+            if project_root:
+                repo_info = GitWorktreeDetector.get_repo_info(project_root)
+                if repo_info and repo_info.worktrees:
+                    ctx["worktree"] = {
+                        "repo_name": os.path.basename(repo_info.root),
+                        "current_branch": repo_info.current_branch,
+                        "workdir": project_root,
+                        "is_worktree": project_root != repo_info.root,
+                        "other_branches": [wt.branch for wt in repo_info.worktrees if not wt.is_current],
+                    }
         except Exception:
             pass
 
@@ -2080,11 +2085,14 @@ class ChatBackend(QObject):
             包含所有项目上下文数据的 dict
         """
         # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
-        project_root = self._tool_executor.get_workdir() if self._tool_executor else os.getcwd()
+        # get_workdir() 返回 None 表示未设置根目录，统一用 "" 表示"无"
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
+        if project_root is None:
+            project_root = ""
         ctx: Dict[str, Any] = {
             "project_root": project_root,
             "state": state,
-            "project_name": os.path.basename(project_root),
+            "project_name": self._current_project or (os.path.basename(project_root) if project_root else ""),
         }
 
         # 团队模式：让 SessionStart hook 也能按 #team_member matcher 精确触发
