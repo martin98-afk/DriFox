@@ -995,8 +995,32 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             "files": "列出已索引文件",
         }
         desc = mode_labels.get(mode, f"CodeGraph {mode}")
+
+        # 各 mode 特有参数的修饰语（修复：之前只显示 query/depth，其它参数全部丢失）
+        extras = []
+        if mode == "files":
+            directory = tool_args.get("directory")
+            if directory:
+                extras.append(f"目录 {directory}")
+        elif mode == "search":
+            kind = tool_args.get("kind")
+            if kind:
+                extras.append(f"类型 {kind}")
+            limit = tool_args.get("limit")
+            if limit is not None and limit != 20:
+                extras.append(f"返回 {limit}")
+            if tool_args.get("exact"):
+                extras.append("精确匹配")
+        elif mode == "explore":
+            max_files = tool_args.get("max_files")
+            if max_files is not None and max_files != 12:
+                extras.append(f"文件数 {max_files}")
+
         if mode in ("search", "callers", "callees", "explore", "impact") and query:
-            desc += f" (深度 {tool_args.get('depth', 2)})"
+            extras.append(f"深度 {tool_args.get('depth', 2)}")
+
+        if extras:
+            desc += " (" + ", ".join(extras) + ")"
     return desc
 
 
