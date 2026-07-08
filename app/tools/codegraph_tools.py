@@ -55,7 +55,18 @@ class CodeGraphTools:
         if not _HAS_CODEGRAPH:
             return None
         if self._cg is not None:
-            return self._cg
+            # 检查缓存的 project_root 是否仍匹配当前 workdir
+            current_root = self._resolve_project_root()
+            if current_root and current_root == self._project_root:
+                return self._cg
+            # 不匹配 → 关闭旧实例，重新初始化
+            logger.info(f"[CodeGraph] workdir 变更: {self._project_root} → {current_root}，重新初始化")
+            try:
+                self._cg.close()
+            except Exception:
+                pass
+            self._cg = None
+            self._project_root = None
 
         now = time.time()
         if now - self._last_init_attempt < self._init_cooldown:
@@ -394,7 +405,7 @@ class CodeGraphTools:
         query: str = "",
         mode: str = "explore",
         depth: int = 2,
-        max_files: int = 12,
+        max_files: int = 50,
         kind: Optional[str] = None,
         directory: Optional[str] = None,
         limit: int = 20,

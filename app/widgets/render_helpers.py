@@ -713,7 +713,7 @@ _TOOL_ICON_MAP = {
     # LSP 工具（默认 = listServers 列表图标；具体 operation 由 _get_tool_icon 解析）
     "lsp": "📋",
     # CodeGraph 代码智能
-    "codegraph_explore": "🧠",
+    "codegraph_explore": "🔍",
 }
 
 
