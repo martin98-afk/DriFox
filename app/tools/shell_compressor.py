@@ -373,7 +373,7 @@ def _compress_git_status(output: str) -> str:
             if section == "staged":
                 staged.append(f"+{f}")
         elif t.startswith('modified:'):
-            f = t[8:].strip()
+            f = t[9:].strip()
             if section == "staged":
                 staged.append(f"~{f}")
             elif section == "unstaged":
@@ -517,7 +517,9 @@ def _compress_git_diff(output: str) -> str:
     stats = stat_match.group(1) if stat_match else ""
 
     # 提取关键文件变更
-    files = re.findall(r'(diff --git.*?)(?=\n(?:diff --git|---|\+\+\+|\Z))', output, re.DOTALL)
+    # ⚠️ lookahead 不能包含 --- 或 +++，它们是 diff 内容的一部分
+    # 只以下一个 diff --git 或结尾为分界
+    files = re.findall(r'(diff --git.*?)(?=\ndiff --git|\Z)', output, re.DOTALL)
     if not files:
         return output.strip()
 
@@ -618,7 +620,8 @@ def _compress_git_pull(output: str) -> str:
 
 def _compress_git_branch(output: str) -> str:
     """git branch 压缩"""
-    lines = [l.strip() for l in output.split('\n') if l.strip() and not l.startswith(' ')]
+    # ⚠️ 不能先过滤 l.startswith(' ')：git branch 输出中非当前分支以 2 空格缩进
+    lines = [l.strip() for l in output.split('\n') if l.strip()]
     # 当前分支有 *，压缩为列表
     branches = [l.replace('* ', '') for l in lines if l != '* (HEAD detached']
     if len(branches) <= 5:
@@ -846,7 +849,7 @@ def _compress_cargo_test(output: str) -> str:
     for line in lines:
         if 'test result:' in line or re.match(r'\d+\s+passed', line):
             return line
-        if 'FAILED' in line or 'test result: .*failures' in output:
+        if 'FAILED' in line or re.search(r'test result:.*failures', output):
             for l in lines:
                 if 'FAILED' in l or 'failures:' in l:
                     return l
