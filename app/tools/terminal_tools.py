@@ -8,17 +8,134 @@
 
 提供同步和后台两种执行模式。
 """
+import os
+import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from app.tools.command_safety import classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.result import ToolResult
+
+# ── 内联脚本自动转临时文件 ──────────────────────────────────────────────
+# Windows cmd 无法可靠处理多行/嵌套引号的 python -c "..." 等内联脚本，
+# 自动将其写入临时文件再执行，对所有解释器通用。
+
+_INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl", "php"})
+_SCRIPT_FLAGS = frozenset({"-c", "-e"})
+_SCRIPT_EXT = {
+    "python": ".py", "python3": ".py",
+    "node": ".js", "ruby": ".rb",
+    "perl": ".pl", "php": ".php",
+}
+
+
+def _parse_inline_script(command: str) -> Optional[dict]:
+    """
+    解析内联脚本命令，返回 {interpreter, flag, script, rest}。
+
+    逐字符扫描寻找匹配的引号，正确处理 \\" 转义。
+    仅当命令格式为：解释器 -c/-e "脚本内容" [剩余参数] 时匹配。
+    """
+    cmd = command.strip()
+    # 1. 提取解释器
+    parts = cmd.split(None, 2)
+    if len(parts) < 3:
+        return None
+    interpreter, flag, rest = parts[0], parts[1], parts[2]
+    if interpreter not in _INTERPRETERS or flag not in _SCRIPT_FLAGS:
+        return None
+
+    # 2. 找到第一个引号
+    quote_char = None
+    script_start = -1
+    for i, ch in enumerate(rest):
+        if ch in ('"', "'"):
+            quote_char = ch
+            script_start = i + 1
+            break
+    if quote_char is None or script_start >= len(rest):
+        return None
+
+    # 3. 逐字符扫描找匹配的结束引号（处理 \\" 转义）
+    script_end = -1
+    i = script_start
+    while i < len(rest):
+        ch = rest[i]
+        if ch == '\\':
+            i += 2  # 跳过转义序列
+            continue
+        if ch == quote_char:
+            script_end = i
+            break
+        i += 1
+
+    if script_end == -1:
+        return None  # 没有匹配的结束引号
+
+    script = rest[script_start:script_end]
+    rest_after = rest[script_end + 1:].strip()
+
+    return {
+        "interpreter": interpreter,
+        "flag": flag,
+        "script": script,
+        "rest": rest_after,
+        "outer_quote": quote_char,
+    }
+
+
+def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
+    """
+    检测内联脚本命令，有多行/引号嵌套时自动写入临时文件。
+
+    Args:
+        command: 原始命令
+
+    Returns:
+        (最终命令, 临时文件路径) — 无需改写则后者为 None
+    """
+    parsed = _parse_inline_script(command)
+    if not parsed:
+        return command, None
+
+    script = parsed["script"]
+    outer_quote = parsed["outer_quote"]
+
+    # 只有脚本含换行 或 含与外围相同的引号（需转义）时才改写
+    has_newline = "\n" in script
+    has_same_quote = outer_quote in script  # 脚本内用了未转义的同种引号
+    if not has_newline and not has_same_quote:
+        return command, None
+
+    ext = _SCRIPT_EXT.get(parsed["interpreter"], ".py")
+    fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="drifox_inline_", text=True)
+    try:
+        os.write(fd, script.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    # 使用正斜杠避免 Windows 路径转义问题
+    safe_path = tmp_path.replace("\\", "/")
+    new_cmd = f"{parsed['interpreter']} {safe_path}"
+    if parsed["rest"]:
+        new_cmd += f" {parsed['rest']}"
+    return new_cmd, tmp_path
+
+
+def _cleanup_script_temp(path: Optional[str]) -> None:
+    """安全删除临时脚本文件"""
+    if path:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
 
 
 def _smart_decode(data: bytes, command: str = "") -> str:
@@ -356,10 +473,15 @@ class TerminalTools:
           - 使用智能解码自动选择正确编码
         """
         try:
+            tmp_script = None
+
             # 安全分类
             classification = classify_command(command)
             if classification == 'block':
                 return ToolResult(False, error=f"命令被安全策略拦截: {command}")
+
+            # ── 内联脚本自动转临时文件（Windows cmd 无法可靠处理多行/嵌套引号）──
+            command, tmp_script = _rewrite_inline_script(command)
 
             use_shell = needs_shell(command)
 
@@ -435,6 +557,8 @@ class TerminalTools:
 
         except Exception as e:
             return ToolResult(False, error=f"Execution error: {str(e)}")
+        finally:
+            _cleanup_script_temp(tmp_script)
 
     def bg_start(self, command: str, cwd: str = None) -> ToolResult:
         """启动后台命令
