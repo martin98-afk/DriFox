@@ -749,7 +749,7 @@ class DownloadThread(QThread):
 
 
 class AsyncUpdateChecker(QThread):
-    finished = pyqtSignal(object)  # 返回 latest_release 或 None
+    check_finished = pyqtSignal(object)  # 返回 latest_release 或 None
     error = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -850,4 +850,4 @@ class AsyncUpdateChecker(QThread):
             self.error.emit(str(e))
             result = None
         finally:
-            self.finished.emit(result)
+            self.check_finished.emit(result)

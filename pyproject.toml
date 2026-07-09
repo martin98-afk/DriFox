@@ -53,6 +53,9 @@ dependencies = [
     "lsprotocol",
     # CodeGraph 代码智能引擎 (语义级代码探索)
     "codegraph-py[all]>=1.3.3",
+    # Windows 平台上 pyqt5-qt5 / pyqtwebengine-qt5 仅 5.15.2 提供 win_amd64 wheel
+    "pyqt5-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
+    "pyqtwebengine-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
 ]
 
 # 依赖组（供 uv sync --group / --all-groups 使用）
