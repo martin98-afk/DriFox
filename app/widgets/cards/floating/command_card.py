@@ -27,6 +27,7 @@ from app.core.command_manager import CommandManager, CommandParameter, CommandTy
 from app.core.ui_plugin_registry import UIPluginRegistry
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
+from app.widgets.cards.card_container import CardContainer
 from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36  # 每个 item 高度
@@ -557,6 +558,8 @@ class CommandCard(QWidget):
         self._selected_value_index: int = -1  # 值列表选中索引
         self._last_selected_value_index: int = -1  # 上次值列表选中索引，用于增量更新
         self._data_provider: dict = {}  # 外部数据源（如 model_options）
+        # 跳过容器展开/折叠动画，消除命令卡片弹出时的延迟感
+        self.setProperty(CardContainer.NO_ANIMATION_PROP, True)
         self.setVisible(False)
         self._setup_ui()
         self._setup_detail_widget()
