@@ -3747,11 +3747,27 @@ class CodeWebViewer(QWebEngineView):
                 html_content = self._render_markdown_to_html(self._markdown_text)
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
-                # [PERF] 非流式路径：历史内容无 JS 增量注入的活跃块，
-                # 所有工具块由 markdown 重新生成，无需 save/restore，直接 updateContent
+                # 🐛 修复：非流式路径也会在"流式结束但工具仍在并行执行"时触发
+                # （finish_streaming 将 _streaming 置 False 后走此分支）。
+                # 此时 DOM 中存在 JS 增量注入的"工具运行折叠框"（data-tool-call-id +
+                # data-streaming="true"），它不在 _content_data 中、也不会被 markdown 重新生成。
+                # 若直接 updateContent 会整体替换 content-placeholder 的 innerHTML，
+                # 把所有运行框连同已完成的工具结果块一并抹掉，导致
+                # "一堆运行框出现后又立马消失，只剩个别框" 的闪灭现象。
+                # 因此与流式分支保持一致：先 save 活跃运行块，updateContent 后用 restore 还原。
                 js_code = (
+                    "(function(){"
+                    "var _sbs=[];"
+                    "document.querySelectorAll('[data-tool-call-id][data-streaming=\"true\"]').forEach(function(el){"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
+                    "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                    "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                    "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+                    "var _t=document.createElement('div');_t.innerHTML=b.html;"
+                    "var _bk=_t.firstElementChild;if(_bk){_c.appendChild(_bk);}}});}"
+                    "})();"
                 )
                 self._last_rendered_html = None
                 self.page().runJavaScript(js_code)
