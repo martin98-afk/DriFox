@@ -3,6 +3,41 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.4] - 2026-07-09
+
+自上一版本以来的变更 | 提交数：30 · 文件变更：32 · +2914/-627 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+
+- **CodeGraph 代码智能引擎**: 集成语义化代码探索引擎，支持 search/explore/callers/callees/impact 五种探索模式；移除旧 CodeGraph 插件，统一通过系统 hooks 调用并添加代码探索提示
+- **Diff 视图全面升级**: 新增单栏/双栏视图模式，支持语法高亮、语言扩展映射；改进 inline diff 语法高亮处理与单词级高亮
+- **工作目录管理优化**: 改进工作目录处理逻辑，支持临时工作目录创建；CodeGraph 实例在工作目录变更时自动重初始化
+- **命令卡片性能优化**: 跳过容器动画减少弹出延迟；为菜单项添加 tooltip 描述并改进布局
+- **团队协作与子智能体增强**: 在 SessionStart hook 中增强团队协作功能；新增子智能体任务停止功能并更新 UI 元素
+- **Session 处理增强**: 引入 pending session hook 标记防止消息拦截；改进 stop hook 消息注入逻辑，防止无限循环
+- **Hook 管理增强**: 添加 stop reason 匹配支持事件处理；增强会话状态选项
+- **工具执行器增强**: 增加 explore/search 模式的默认 max_files/limit 参数；增强工具参数自然语言描述
+- **窗口托盘管理**: 实现所选窗口的循环排列模式
+- **Hook 设置 UI 增强**: 添加 matcher 标签显示，改进命令文本处理
+- **格式化内存上下文增强**: 增强自动 Git 初始化安全检查与日志记录
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **消息卡片折叠动画闪烁修复**: 优化高度过渡处理，防止 collapsible 动画期间布局闪烁
+- **Diff 统计信息恢复**: 在可折叠摘要中恢复 diff 统计信息(+N/-M)
+- **Diff 渲染布局优化**: 移除 tool-diff-inline 顶部间距，消除折叠头与 diff 内容之间的间隙；切换到先删后增布局
+- **单词级高亮恢复**: 在单栏 diff 视图中恢复单词级高亮
+- **异常处理统一**: 整合消息卡片和渲染辅助函数中的异常处理
+- **CodeGraph 根路径校验**: 改进项目根路径验证，确保工作目录变更时正确重初始化
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Diff 内联渲染精简**: 简化 diff 内联渲染为 bash 风格，移除冗余按钮
+
+### 🔧 其他 (Chores & Build)
+
+- 更新版本号至 v0.3.4
+
 ## [v0.3.3] - 2026-07-07
 
 自上一版本以来的变更 | 提交数：15 · 文件变更：27 · +2979/-136 | 贡献者：dingma, mading
