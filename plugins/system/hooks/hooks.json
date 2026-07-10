@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "### 【绝对不能违反的铁律】只改任务范围内的文件\n- **只能修改任务明确指定的文件**，或在实现新功能时需要创建的**新文件**。\n- **绝对禁止**修改、重置（`git checkout`/`git restore`）、删除任何未经任务指定的文件。\n- 发现不属于自己改动范围的文件有变化 → **跳过它，不要碰**。谁改的谁负责。\n- `git diff --stat` 显示的无关文件变更 → 跳过，不要撤销。",
+            "prompt": "### 铁律：只改任务范围文件\n- **只改**任务指定文件 / 新功能需创建的新文件。\n- **禁止**修改/重置/删除未经指定的文件。\n- 非自己范围文件变化 → **跳过**。谁改谁负责。\n- `git diff --stat` 无关变更 → 跳过，不撤销。",
             "add_output_to_context": true,
             "statusMessage": "编码契约:",
             "id": "builtin_global_contract"
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "## 主智能体约束\n### 主动提问规范\n- 需要向用户确认的信息，优先使用 `question` 工具。\n\n### 推荐问题规范\n- 当你预测到用户接下来可能需要的帮助时，请按以下格式给出追问清单（放在回复末尾）：\n  - [问题描述1](ask)\n  - [问题描述2](ask)\n\n### 消息渲染能力\n- 支持 Markdown 渲染、代码高亮\n- 需要行内交互式 ECharts 图表优先使用 ```echarts 代码块生成（JSON 格式的配置项）\n- 工具卡片的 diff 差异对比会自动渲染，无需手动处理",
+            "prompt": "## 主智能体约束\n### 提问\n- 需用户确认 → 用 `question` 工具。\n- 预测用户需追问 → 回复末尾给追问清单：`[问题描述](ask)`。\n\n### 渲染\n- Markdown\n- 行内交互 ECharts → ```echarts 代码块 (JSON 配置)",
             "add_output_to_context": true,
             "statusMessage": "主智能体约束:",
             "id": "builtin_primary_constraints"
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "## 子智能体约束\n- 【禁止】使用 `question` 工具（需要用户交互，不支持）\n- 【禁止】使用 `subagent_para`、`subagent_status` 和 `subagent_dag` 工具（子智能体不能再发布子智能体）\n- 【禁止】使用 `todowrite` 工具（避免与主智能体冲突）\n- 【必须】任务一次性执行完毕，不支持中途暂停或等待用户确认\n- 【必须】独立完成任务，不需要主智能体介入\n- 如果遇到不确定的情况，根据已有信息做出合理假设并继续执行\n- 如需收集信息，使用 webfetch/websearch 工具代替提问",
+            "prompt": "## 子智能体约束\n- 【禁止】`question`（需用户交互）\n- 【禁止】`subagent_para`/`subagent_status`/`subagent_dag`（不能再发子智能体）\n- 【禁止】`todowrite`（防冲突）\n- 【必须】任务一次性执行完，不支持暂停/等待确认\n- 【必须】独立完成，主智能体不介入\n- 不确定 → 合理假设继续\n- 需信息 → `webfetch`/`websearch`，不提问",
             "add_output_to_context": true,
             "statusMessage": "子智能体约束:",
             "id": "builtin_subagent_constraints"
@@ -80,7 +80,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "## 【团队协作启动指引】你当前是团队成员\n\n在每一轮对话开始之前请按以下约定主动协作——团队停滞的最大原因不是没人响应，而是**没人主动发任务 / 没人回报结果**。\n\n### 你必须知道的团队工具\n\n- `team_list_members()` — 列出当前所有团队成员（返回 `agent_name@window_id` 格式），用于建立对团队结构的认知。\n- `team_send_message(to_agent, message)` — 向队友发送任务邮件，`to_agent` 支持 `agent_name` 或 `agent_name@window_id`。\n\n### 主动协作三件事\n\n1. **会话刚启动时**：先调用 `team_list_members()` 了解团队构成（谁是我的队友、谁的角色适合派什么任务），明确可派发对象后再开始工作。\n2. **每轮响应前**：如果当前对话流是队友发给你的任务邮件（消息以 `📨 **来自 [agent@window] 的任务邮件**` 开头），**先评估：能否独立完成？是否需要把子任务拆给其他队友并行做？**\n   - 能独立完成 → 直接做，并在 `Stop` 阶段按回报模板通过 `team_send_message` 回执给发送方。\n   - 需要并行 / 拆解 → **不要全部自己扛**，用 `team_send_message` 把可并行的子任务派给合适的队友。\n3. **主动识别可派发场景**：如果当前任务满足以下任一条件，**主动**派任务而不是独自完成：\n   - 涉及多个独立子模块（如「前后端并行开发」、「多文件批量重构」）\n   - 当前智能体的能力边界不足（如 `build` 派 `plan` 做调研、`plan` 派 `build` 落地）\n   - 需要其他专业角色（`security-auditor`、`test-engineer`、`code-reviewer` 等）介入\n\n### 任务邮件处理约定\n\n- 邮件由 `main_widget` 通过文件系统监听注入对话流，你**不需要自己轮询邮箱**；但若 `team_send_message` 后长时间未收到回复，可用 `team_list_members()` 确认对方是否还在线。\n- 完成任务后**必须主动回报**给发送方，不能沉默；详细回报模板见 `Stop #team_member` hook。\n- 派任务时 `message` 字段要包含完整上下文（目标文件、验收标准、依赖项），让队友无需追问即可开工。\n\n### 反模式（不要这样做）\n\n- ❌ 看到任务邮件就硬扛，不评估是否应拆解\n- ❌ 完成任务后只更新本地状态，不通知发送方\n- ❌ 长时间不调用 `team_list_members()`，不知道队友在不在 / 该派给谁\n- ❌ 派任务时 `message` 写得过于简略（如「帮我看下这个 bug」），让队友来回追问",
+            "prompt": "## 团队协作指引\n\n团队停滞原因：**没人主动发任务 / 没人回报结果**。\n\n### 工具\n- `team_list_members()` — 看谁在线\n- `team_send_message(to, msg)` — 派任务 / 回结果\n\n### 每轮必做\n1. **启动** → `team_list_members()` 了解团队构成\n2. **收任务邮件(📨)** → 评估：独立做 or 拆子任务派队友？\n   - 能独立 → 直接做，Stop 阶段回执\n   - 需并行 → `team_send_message` 派出去\n3. **主动派发** 场景：\n   - 多独立子模块（前后端并行 / 多文件重构）\n   - 能力边界不足（`build` 派 `plan`，`plan` 派 `build`）\n   - 需专业角色（`security-auditor`/`test-engineer`/`code-reviewer`）\n\n### 约定\n- 邮件自动注入，不轮询；长时间无回复用 `team_list_members()` 检查\n- **做完必须主动回报**，不能沉默\n- 派任务 `message` 带完整上下文（目标文件 / 验收标准 / 依赖）\n\n### 反模式\n- ❌ 硬扛不拆\n- ❌ 做完不通知\n- ❌ 不查队友状态\n- ❌ 任务描述太简略",
             "add_output_to_context": true,
             "statusMessage": "团队协作启动指引:",
             "id": "team_member_session_start"
@@ -165,8 +165,8 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "最后我要清理本次会话制造的临时文件和垃圾，确保不会影响后续任务。",
-            "statusMessage": "结束清理:",
+            "prompt": "check uncommitted/incomplete → list todos, clean up trash.",
+            "statusMessage": "Before end:",
             "id": "builtin_stop_cleanup"
           }
         ]
@@ -176,7 +176,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "你是团队中的成员。除非你是leader角色，否则请通过 team_send_message 通知队友当前任务已完成。",
+            "prompt": "团队成员。非 leader → `team_send_message` 通知队友任务完成。",
             "statusMessage": "消息回调:",
             "id": "team_member_notify"
           }
