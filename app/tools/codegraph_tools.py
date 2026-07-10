@@ -38,12 +38,15 @@ except ImportError:
 class CodeGraphTools:
     """CodeGraph 内置工具 — 统一代码探索入口"""
 
-    def __init__(self, owner):
+    def __init__(self, owner, watch: bool = True):
         self._owner = owner
         self._cg: Optional[CodeGraph] = None
         self._project_root: Optional[str] = None
         self._last_init_attempt = 0.0
         self._init_cooldown = 1.0
+        self._last_sync_time = 0.0
+        self._sync_cooldown = 5.0  # 两次自动 sync 的最小间隔（秒）
+        self._watch_enabled = watch  # 是否启用文件监听自动索引
 
     @property
     def workdir(self) -> Path:
@@ -90,6 +93,7 @@ class CodeGraphTools:
                 nodes = getattr(result, "nodes_created", 0)
                 edges = getattr(result, "edges_created", 0)
                 logger.info(f"[CodeGraph] 索引完成: {files} 文件, {nodes} 节点, {edges} 边")
+                self._start_watcher()
                 return self._cg
             except Exception as e:
                 logger.warning(f"[CodeGraph] 自动初始化失败: {e}")
@@ -106,6 +110,7 @@ class CodeGraphTools:
             self._cg = CodeGraph.open_sync(root)
             self._project_root = root
             logger.info(f"[CodeGraph] 已打开索引: {root}")
+            self._start_watcher()
             return self._cg
         except Exception as e:
             logger.warning(f"[CodeGraph] 打开索引失败: {e}")
@@ -127,10 +132,21 @@ class CodeGraphTools:
             return None
         return self._get_cg()
 
+    def _start_watcher(self) -> None:
+        """启动文件监听自动索引，workdir 变化时自动重启。"""
+        if not self._watch_enabled or self._cg is None:
+            return
+        try:
+            self._cg.unwatch()  # 确保旧的已停
+            self._cg.watch()
+            logger.debug(f"[CodeGraph] 文件监听已启动: {self._project_root}")
+        except Exception as e:
+            logger.warning(f"[CodeGraph] 文件监听启动失败（不影响查询）: {e}")
+
     def cleanup(self):
         if self._cg is not None:
             try:
-                self._cg.close()
+                self._cg.close()  # close() 自动 unwatch
             except Exception:
                 pass
             self._cg = None
@@ -441,14 +457,18 @@ class CodeGraphTools:
             return ToolResult(False, error="CodeGraph 索引暂不可用（初始化失败或 cooldown 中），请稍后重试")
 
         # 查询前自动同步索引（sync/status 模式跳过自循环）
+        # 带 cooldown 保护：避免高频调用时反复全目录扫描 + resolver.reinitialize()
         if mode not in ("sync", "status"):
-            try:
-                sync_result = cg.sync()
-                changed = sync_result.files_added + sync_result.files_modified + sync_result.files_removed
-                if changed:
-                    logger.info(f"[CodeGraph] 自动同步: {changed} 个文件变更")
-            except Exception as e:
-                logger.warning(f"[CodeGraph] 自动同步失败（不影响查询）: {e}")
+            now = time.time()
+            if now - self._last_sync_time > self._sync_cooldown:
+                self._last_sync_time = now
+                try:
+                    sync_result = cg.sync()
+                    changed = sync_result.files_added + sync_result.files_modified + sync_result.files_removed
+                    if changed:
+                        logger.info(f"[CodeGraph] 自动同步: {changed} 个文件变更")
+                except Exception as e:
+                    logger.warning(f"[CodeGraph] 自动同步失败（不影响查询）: {e}")
 
         try:
             if mode == "status":
