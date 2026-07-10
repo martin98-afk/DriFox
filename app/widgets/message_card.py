@@ -6426,18 +6426,32 @@ class MessageCard(SimpleCardWidget):
         # 流式文本已由 _append_text_incremental 增量推送，不需要全量渲染。
         self._content_just_loaded = True
 
-        # [PERF-opt] 状态切换（完成或 text_only）时：取消待处理的全量渲染定时器，
-        # 防止其覆盖增量 JS 更新造成"闪灭→再现"闪烁。增量更新已足够，不需要全量 re-render。
-        if (completed or preview is None) and hasattr(self, "viewer") and self.viewer:
+        # 构建预览文本（含 char_count），用于后续内容比较和 JS 注入
+        _text_only = preview is None
+        preview_content = escape(preview) if preview else "准备中..."
+        if not completed and char_count > 0:
+            preview_content += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+
+        # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
+        _cache_key = (tool_call_id, completed)
+        _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
+        if _last.get(_cache_key) == preview_content:
+            return
+        if not hasattr(self, "_tool_streaming_preview_cache"):
+            self._tool_streaming_preview_cache = {}
+        self._tool_streaming_preview_cache[_cache_key] = preview_content
+
+        # ── 停掉全量渲染定时器：流式更新期间不跑全量重渲染 ──
+        # 同时重调度一个"静默后渲染"兜底，确保流式结束后最终状态同步
+        if hasattr(self, "viewer") and self.viewer:
             if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
                 self.viewer._render_timer.stop()
-
+            # 非完成态时重调度一次兜底渲染（500ms 后，流式更新会持续重置）
+            if not completed:
+                self.viewer._schedule_render(immediate=False)
+            else:
+                self.viewer._schedule_render(immediate=True)
         try:
-            _text_only = preview is None
-            preview_content = escape(preview) if preview else "准备中..."
-            # 字符数进度合并到 preview 文本中，确保 JS 更新 innerHTML 时一起刷新
-            if not completed and char_count > 0:
-                preview_content += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -6628,16 +6642,16 @@ class MessageCard(SimpleCardWidget):
                 try:
                     natural = _format_natural_preview(tool_name, display)
                     if natural:
-                        # 流式/运行中状态：附加"中"后缀表示进行中
+                        # 有实参时：显示自然语言描述 + "中"，不需要字符数进度
                         preview = natural + "中"
-                        char_count = len(preview)
+                        char_count = 0
                     else:
                         args_str = json.dumps(display).decode("utf-8")
                         if len(args_str) > 100:
                             preview = args_str[:100] + "..."
                         else:
                             preview = args_str
-                        char_count = len(args_str)
+                        char_count = 0
                 except Exception:
                     preview = "..."
             else:

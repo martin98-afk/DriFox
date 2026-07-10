@@ -472,8 +472,8 @@ class ParameterItemWidget(QWidget):
     def set_active(self, active: bool):
         """设置激活状态：参数已在输入文本中出现时标记为已激活
 
-        激活的参数保持可见（不隐藏），但视觉上降级为次要色 + 绿色 ✓ 前缀，
-        用户仍可阅读参数说明，点击则无操作。
+        激活的参数保持可见（不隐藏），视觉上保留 ✓ 前缀 + 次要色参数名，
+        但不再覆盖背景色，方便 hover 效果穿透，避免取消参数时看不出悬停哪个。
         """
         self._active = active
         self._apply_subwidget_styles()
@@ -490,9 +490,7 @@ class ParameterItemWidget(QWidget):
 
     def _apply_style(self):
         Colors.refresh()
-        if self._active:
-            bg = "rgba(52, 211, 153, 0.12)"  # 绿色微底纹：指示已激活/已选中
-        elif self._selected:
+        if self._selected:
             bg = Colors.REALTIME_TAG_BG
         elif self._hovered:
             bg = Colors.HOVER_BG
