@@ -13560,10 +13560,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_send_stop(self, is_sending: bool):
         if is_sending:
-            self.history_btn.setDisabled(True)
             self.input_area.toggle_send_button(False)
         else:
-            self.history_btn.setDisabled(False)
             self.input_area.toggle_send_button(True)
 
     def _on_stop_clicked(self):
