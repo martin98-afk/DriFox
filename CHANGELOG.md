@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🐛 问题修复 (Bug Fixes)
+
+- **AGENTS.md 偶尔被清空修复**: `MemoryManagerCore.save_project_note` 增加空内容/纯空白保护，阻止 UI 编辑器被全选删除后 300ms 防抖自动保存、或其他上游调用方传入空 content 时意外清空已有 AGENTS.md。**API 行为变化**：修复后 `save_project_note("proj", "")` / `save_project_note("proj", "   \n")` / `save_project_note("proj", None)` 一律返回 `False`（而非写入空文件），调用方需注意处理返回值。新增回归测试 `tests/core/test_memory_manager_empty_protection.py`（7 项用例覆盖空字符串/纯空白/None/边界换行/有效内容/无 workdir 场景）。
+
 ## [v0.3.4] - 2026-07-09
 
 自上一版本以来的变更 | 提交数：30 · 文件变更：32 · +2914/-627 | 贡献者：dingma, mading

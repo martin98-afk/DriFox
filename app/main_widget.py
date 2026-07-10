@@ -12891,7 +12891,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 border-radius: 4px;
                 padding: 6px 18px;
                 min-width: 64px;
-                {font_size_css(13)}
+                {get_font_family_css()} {font_size_css(13)};
                 font-weight: bold;
             }}
             QPushButton:hover {{
