@@ -956,15 +956,18 @@ def _render_tool_streaming_block(
     char_count: int = 0,
     completed: bool = False,
 ) -> str:
-    """渲染工具流式调用块 HTML — 布局与正式工具块一致。
+    """渲染工具流式调用块 HTML — 无折叠 inline 卡片。
 
-    布局：[chevron] [icon] [tool_name] [金色蛇形SVG] | [参数预览 + 字符数]
+    布局：[icon] [tool_name] [spinner] | [预览文本 (N字符)]
+
+    与 _render_inline_tool 风格一致，无折叠/无 body/无可展开内容。
+    工具执行完成后由 _append_tool_result_block 原地替换为 render_tool_block。
 
     Args:
         tool_call_id: 工具调用 ID
         tool_name: 原始工具名（如 read、mcp__playwright__browser_navigate）
         preview: 预览文本
-        char_count: 参数字符数
+        char_count: 已接收参数字符数（追加到预览文本后）
         completed: True=参数接收完成（隐藏蛇形动画），False=流式中
     """
     # MCP 工具名清理
@@ -985,37 +988,29 @@ def _render_tool_streaming_block(
         icon = "🤖"
         title_color = "#9C27B0"
     else:
-        # 流式阶段 tool_args 尚未收齐，_get_tool_icon 退化为查 _TOOL_ICON_MAP 默认值
-        # （lsp 默认 📋，未知工具 🔧）
         icon = _get_tool_icon(tool_name)
         title_color = "#FFA500"
 
-    # spinner 由 CSS data-streaming 控制可见性，完成态时通过 CSS 过渡淡出
+    # spinner
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
 
+    # 合并预览文本 + 字符数进度（放在同一个 span 里，JS 更新 innerHTML 时一起走）
     preview_display = escape(preview) if preview else "准备中..."
+    if not completed and char_count > 0:
+        preview_display += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
 
-    # 始终设置 data-streaming 属性（"true" 或 "false"）
     streaming_state = "false" if completed else "true"
 
-    return f"""<div class="cm-collapsible think-block tool-streaming-block" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 0 auto;">
-            <span class="cm-collapsible__chevron" aria-hidden="true"></span>
-            <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(display_name)}</span>
+    return f"""<div class="tool-block tool-streaming-block" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">
+            <span style="flex: 0 0 auto;">{icon}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto;">{escape(display_name)}</span>
             {spinner_html}
         </span>
-        <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; margin-left: 10px;">
-            <span class="tool-streaming-preview" style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {preview_display}
-            </span>
+        <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+            {preview_display}
         </span>
-    </button>
-    <div class="cm-collapsible__body">
-        <div class="think-content loading" style="white-space: normal; word-break: break-word;">{preview_display}</div>
-    </div>
-</div>"""
+    </div>"""
 
 
 def _render_think_block(content: str, completed: bool = True) -> str:
@@ -6416,10 +6411,10 @@ class MessageCard(SimpleCardWidget):
     ):
         """通过 JS 注入/更新工具流式块
 
-        已有同 ID 块时原地更新文本，不重建 DOM，保持折叠/展开状态不丢失。
+        已有同 ID 块时原地更新预览文本，不重建 DOM，保持折叠/展开状态不丢失。
 
         preview 为 None 时表示仅更新 data-streaming 状态，不修改任何文字内容。
-        用于 preview 阶段的 finish_tool_streaming 调用（参数全是占位键时）。
+        用于 placeholder 阶段的 finish_tool_streaming 调用（参数全是占位键时）。
         """
         if not hasattr(self, "viewer") or not self.viewer:
             return
@@ -6439,8 +6434,10 @@ class MessageCard(SimpleCardWidget):
 
         try:
             _text_only = preview is None
-            preview_escaped = escape(preview) if preview else "准备中..."
-            preview_content = preview_escaped
+            preview_content = escape(preview) if preview else "准备中..."
+            # 字符数进度合并到 preview 文本中，确保 JS 更新 innerHTML 时一起刷新
+            if not completed and char_count > 0:
+                preview_content += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -6469,7 +6466,6 @@ class MessageCard(SimpleCardWidget):
                     // 防止状态回退：已完成的块（data-streaming="false"）不允许
                     // 再切回流式态（data-streaming="true"），避免 spinner 反复闪烁
                     if ('{streaming_flag}' === 'true' && curStreaming === 'false') {{
-                        // 只更新文本内容，保持 data-streaming="false"
                         var previewEl2 = el.querySelector('.tool-streaming-preview');
                         if (previewEl2) {{
                             previewEl2.innerHTML = {safe_preview};
@@ -6480,16 +6476,12 @@ class MessageCard(SimpleCardWidget):
                         if (previewEl) {{
                             previewEl.innerHTML = {safe_preview};
                         }}
-                        var bodyEl = el.querySelector('.cm-collapsible__body .think-content');
-                        if (bodyEl) {{
-                            bodyEl.innerHTML = {safe_preview};
-                        }}
                     }}
                     hr();
                 }} else {{
-                    // text-only 模式下不存在块：不创建（避免 "准备中..." 空块）
+                    // text-only 模式下不存在块：不创建
                     if ({_text_only_js}) return;
-                    // 新块：直接插入，避免额外 wrapper div 影响 margin 折叠
+                    // 新块：直接插入
                     var tmp = document.createElement('div');
                     tmp.innerHTML = {safe_html};
                     var block = tmp.firstElementChild;
@@ -6649,13 +6641,18 @@ class MessageCard(SimpleCardWidget):
                 except Exception:
                     preview = "..."
             else:
-                # 参数尚未到达或全是 _ 占位键：用工具名生成自然语言提示
-                natural = _format_natural_preview(tool_name, {})
+                # 参数尚未到达或全是 _ 占位键
+                # 用 _args_len 获取缓冲区实际接收长度作为字符数进度
+                args_len = partial_args.get("_args_len", 0)
+                # 缓冲区提前提取的 _path（chat_worker regex 提取），用于预览带真实文件名
+                _path = partial_args.get("_path", "")
+                preview_args = {"path": _path} if _path else {}
+                natural = _format_natural_preview(tool_name, preview_args)
                 if natural:
                     preview = natural + "中"
                 else:
                     preview = "准备中..."
-                char_count = len(preview)
+                char_count = args_len if args_len else len(preview)
         self._inject_tool_streaming_html(tool_call_id, tool_name, preview, char_count, completed=False)
 
     def finish_tool_streaming(
