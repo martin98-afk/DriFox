@@ -8,6 +8,7 @@
 
 提供同步和后台两种执行模式。
 """
+
 import os
 import re
 import subprocess
@@ -30,9 +31,12 @@ from app.tools.result import ToolResult
 _INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl", "php"})
 _SCRIPT_FLAGS = frozenset({"-c", "-e"})
 _SCRIPT_EXT = {
-    "python": ".py", "python3": ".py",
-    "node": ".js", "ruby": ".rb",
-    "perl": ".pl", "php": ".php",
+    "python": ".py",
+    "python3": ".py",
+    "node": ".js",
+    "ruby": ".rb",
+    "perl": ".pl",
+    "php": ".php",
 }
 
 
@@ -68,7 +72,7 @@ def _parse_inline_script(command: str) -> Optional[dict]:
     i = script_start
     while i < len(rest):
         ch = rest[i]
-        if ch == '\\':
+        if ch == "\\":
             i += 2  # 跳过转义序列
             continue
         if ch == quote_char:
@@ -80,7 +84,7 @@ def _parse_inline_script(command: str) -> Optional[dict]:
         return None  # 没有匹配的结束引号
 
     script = rest[script_start:script_end]
-    rest_after = rest[script_end + 1:].strip()
+    rest_after = rest[script_end + 1 :].strip()
 
     return {
         "interpreter": interpreter,
@@ -106,13 +110,17 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
         return command, None
 
     script = parsed["script"]
-    outer_quote = parsed["outer_quote"]
 
-    # 只有脚本含换行 或 含与外围相同的引号（需转义）时才改写
+    # 只有脚本含换行才改写为临时文件。
+    # 简单的引号嵌套（has_same_quote）无需改写——Path A (shell=False)
+    # 通过 shlex.split 已能正确处理，走 rewrite 反而引入转义问题。
     has_newline = "\n" in script
-    has_same_quote = outer_quote in script  # 脚本内用了未转义的同种引号
-    if not has_newline and not has_same_quote:
+    if not has_newline:
         return command, None
+
+    # 反转义 shell 转义序列：\\ → \ , \" → "
+    # 原始脚本中的 \" 是为 shell 准备的转义，Python 源码文件不认
+    script = script.replace("\\\\", "\\").replace('\\"', '"')
 
     ext = _SCRIPT_EXT.get(parsed["interpreter"], ".py")
     fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="drifox_inline_", text=True)
@@ -122,8 +130,9 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
         os.close(fd)
 
     # 使用正斜杠避免 Windows 路径转义问题
+    # 路径加引号：避免临时目录含空格时 shlex.split 切碎路径 → FileNotFoundError
     safe_path = tmp_path.replace("\\", "/")
-    new_cmd = f"{parsed['interpreter']} {safe_path}"
+    new_cmd = f'{parsed["interpreter"]} "{safe_path}"'
     if parsed["rest"]:
         new_cmd += f" {parsed['rest']}"
     return new_cmd, tmp_path
@@ -141,16 +150,16 @@ def _cleanup_script_temp(path: Optional[str]) -> None:
 def _smart_decode(data: bytes, command: str = "") -> str:
     """
     智能解码：根据命令类型选择正确的编码
-    
+
     Windows 平台编码规则:
     - Git/npm/Node 等现代工具: 输出 UTF-8
     - Windows 原生命令 (dir, type 等): 输出 GBK/CP936
     - 带管道的命令: 可能是混合编码，用 errors='replace' 容错
-    
+
     Args:
         data: 原始字节数据
         command: 原始命令（用于判断命令类型）
-    
+
     Returns:
         解码后的字符串
     """
@@ -158,40 +167,83 @@ def _smart_decode(data: bytes, command: str = "") -> str:
         return ""
 
     # 常见现代工具（输出 UTF-8）
-    UTF8_TOOLS = frozenset({
-        'git', 'npm', 'yarn', 'pnpm', 'node', 'deno', 'bun',
-        'python', 'python3', 'pip', 'uv', 'cargo', 'rustc',
-        'go', 'java', 'javac', 'mvn', 'gradle',
-        'docker', 'kubectl', 'helm', 'terraform',
-        'curl', 'wget', 'gh', 'aws', 'gcloud', 'az',
-        'ruby', 'gem', 'php', 'composer',
-        'lua', 'perl', 'R', 'julia',
-        'ruff', 'mypy', 'pytest', 'eslint', 'tsc',
-        'flutter', 'dart', 'swift', 'cargo',
-        'make', 'cmake', 'ninja', 'meson',
-        'npx', 'pip3', 'pipx',
-    })
+    UTF8_TOOLS = frozenset(
+        {
+            "git",
+            "npm",
+            "yarn",
+            "pnpm",
+            "node",
+            "deno",
+            "bun",
+            "python",
+            "python3",
+            "pip",
+            "uv",
+            "cargo",
+            "rustc",
+            "go",
+            "java",
+            "javac",
+            "mvn",
+            "gradle",
+            "docker",
+            "kubectl",
+            "helm",
+            "terraform",
+            "curl",
+            "wget",
+            "gh",
+            "aws",
+            "gcloud",
+            "az",
+            "ruby",
+            "gem",
+            "php",
+            "composer",
+            "lua",
+            "perl",
+            "R",
+            "julia",
+            "ruff",
+            "mypy",
+            "pytest",
+            "eslint",
+            "tsc",
+            "flutter",
+            "dart",
+            "swift",
+            "cargo",
+            "make",
+            "cmake",
+            "ninja",
+            "meson",
+            "npx",
+            "pip3",
+            "pipx",
+        }
+    )
 
     cmd_lower = command.lower().strip()
 
     # 判断是否是已知输出 UTF-8 的工具
     is_utf8_tool = False
     for tool in UTF8_TOOLS:
-        if cmd_lower.startswith(tool + ' ') or cmd_lower.startswith(tool + '.exe '):
+        if cmd_lower.startswith(tool + " ") or cmd_lower.startswith(tool + ".exe "):
             is_utf8_tool = True
             break
 
     # 如果命令明确是 UTF-8 工具，优先尝试 UTF-8
     if is_utf8_tool:
         try:
-            return data.decode('utf-8')
+            return data.decode("utf-8")
         except UnicodeDecodeError:
             # UTF-8 失败，降级到 GBK
-            return data.decode('gbk', errors='replace')
+            return data.decode("gbk", errors="replace")
 
     # 对于其他命令，优先尝试 UTF-8（现代工具越来越多）
     try:
-        decoded = data.decode('utf-8')
+        decoded = data.decode("utf-8")
         # 检查是否包含常见乱码特征（GBK 当作 UTF-8 解码时）
         # 如果结果包含大量不可打印字符，可能是 GBK 被误判为 UTF-8
         printable_ratio = sum(c.isprintable() or c.isspace() for c in decoded) / max(len(decoded), 1)
@@ -201,12 +253,13 @@ def _smart_decode(data: bytes, command: str = "") -> str:
         pass
 
     # 回退到 GBK
-    return data.decode('gbk', errors='replace')
+    return data.decode("gbk", errors="replace")
 
 
 @dataclass
 class BackgroundTask:
     """后台任务对象"""
+
     task_id: str
     command: str
     process: subprocess.Popen
@@ -277,7 +330,7 @@ class BackgroundTaskManager:
         workdir = Path(cwd) if cwd else self._effective_workdir()
 
         classification = classify_command(command)
-        if classification == 'block':
+        if classification == "block":
             return task_id, f"❌ 命令被安全策略拦截: {command}"
 
         try:
@@ -327,11 +380,11 @@ class BackgroundTaskManager:
         """捕获进程输出（智能解码）"""
         try:
             if task.process.stdout:
-                for raw_line in iter(task.process.stdout.readline, b''):
+                for raw_line in iter(task.process.stdout.readline, b""):
                     if raw_line:
                         # 智能解码每一行
                         line = _smart_decode(raw_line, task.command)
-                        task.append_output(line.rstrip('\n'))
+                        task.append_output(line.rstrip("\n"))
                     if task.status != "running":
                         break
         except Exception:
@@ -357,12 +410,10 @@ class BackgroundTaskManager:
             # Windows: 使用 taskkill /T 杀死进程树（包括子进程）
             if sys.platform == "win32":
                 import subprocess as sp
+
                 # 先尝试用 taskkill /T 杀死整个进程树
                 result = sp.run(
-                    ["taskkill", "/T", "/F", "/PID", str(task.pid)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
+                    ["taskkill", "/T", "/F", "/PID", str(task.pid)], capture_output=True, text=True, timeout=5
                 )
                 if result.returncode == 0:
                     return True, f"✅ 已终止任务: {task_id} (PID: {task.pid}, 含子进程)"
@@ -396,7 +447,7 @@ class BackgroundTaskManager:
             return f"❌ 任务不存在: {task_id}"
 
         output = task.output_buffer[-lines:] if task.output_buffer else []
-        output_text = '\n'.join(output) if output else "(暂无输出)"
+        output_text = "\n".join(output) if output else "(暂无输出)"
 
         status_icon = "🟢" if task.status == "running" else ("⏹️ " if task.status == "stopped" else "✅")
         elapsed = time.time() - task.start_time
@@ -435,7 +486,7 @@ PID: {task.pid}
             cmd_preview = task.command[:50] + "..." if len(task.command) > 50 else task.command
             lines.append(f"{task.task_id:<14} {status:<10} {task.pid:<8} {elapsed_str:<10} {cmd_preview}")
 
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
     def cleanup_completed(self):
         """清理已结束且超过 1 小时的僵尸任务"""
@@ -477,7 +528,7 @@ class TerminalTools:
 
             # 安全分类
             classification = classify_command(command)
-            if classification == 'block':
+            if classification == "block":
                 return ToolResult(False, error=f"命令被安全策略拦截: {command}")
 
             # ── 内联脚本自动转临时文件（Windows cmd 无法可靠处理多行/嵌套引号）──
@@ -551,6 +602,7 @@ class TerminalTools:
 
             # Shell 输出压缩（减少 token 消耗）
             from app.tools.shell_compressor import compress
+
             compressed = compress(command, combined if combined else "(command completed with no output)")
 
             return ToolResult(True, content=compressed)
