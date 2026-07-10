@@ -1090,10 +1090,10 @@ MIT License
 
 ## Star History
 
-<a href="https://www.star-history.com/#martin98-afk/DriFox&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=martin98-afk%2FDriFox&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=martin98-afk/DriFox&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
  </picture>
 </a>
