@@ -96,6 +96,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render_helpers import (
+    _format_natural_preview,
     _get_tool_icon,
     render_tool_block,
 )
@@ -6613,6 +6614,9 @@ class MessageCard(SimpleCardWidget):
     ):
         """更新工具流式参数预览 — 更新已注入的工具块预览文本
 
+        预览文本使用自然语言描述（如"搜索xxx中"），代替原始 JSON。
+        流式期间附加"中"后缀表示进行中状态。
+
         Args:
             tool_call_id: 工具调用唯一 ID
             tool_name: 工具名
@@ -6627,24 +6631,31 @@ class MessageCard(SimpleCardWidget):
         preview = ""
         char_count = 0
         if partial_args:
-            hint = partial_args.get("_preview_hint")
-            if hint:
-                preview = str(hint)
-                char_count = len(preview)
-            else:
-                display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
-                if display:
-                    try:
+            display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
+            if display:
+                try:
+                    natural = _format_natural_preview(tool_name, display)
+                    if natural:
+                        # 流式/运行中状态：附加"中"后缀表示进行中
+                        preview = natural + "中"
+                        char_count = len(preview)
+                    else:
                         args_str = json.dumps(display).decode("utf-8")
                         if len(args_str) > 100:
                             preview = args_str[:100] + "..."
                         else:
                             preview = args_str
                         char_count = len(args_str)
-                    except Exception:
-                        preview = "..."
+                except Exception:
+                    preview = "..."
+            else:
+                # 参数尚未到达或全是 _ 占位键：用工具名生成自然语言提示
+                natural = _format_natural_preview(tool_name, {})
+                if natural:
+                    preview = natural + "中"
                 else:
-                    preview = "正在准备参数..."
+                    preview = "准备中..."
+                char_count = len(preview)
         self._inject_tool_streaming_html(tool_call_id, tool_name, preview, char_count, completed=False)
 
     def finish_tool_streaming(
@@ -6653,7 +6664,9 @@ class MessageCard(SimpleCardWidget):
         tool_name: str,
         arguments: dict = None,
     ):
-        """工具参数接收完成 — 将流式块转为完成态，显示工具名和完整参数
+        """工具参数接收完成 — 将流式块转为完成态，显示自然语言预览
+
+        使用自然语言描述代替原始 JSON，完成态不加"中"后缀。
 
         Args:
             tool_call_id: 工具调用唯一 ID
@@ -6666,12 +6679,18 @@ class MessageCard(SimpleCardWidget):
             display = {k: v for k, v in arguments.items() if not k.startswith("_")}
             if display:
                 try:
-                    args_str = json.dumps(display).decode("utf-8")
-                    if len(args_str) > 100:
-                        preview = args_str[:100] + "..."
+                    natural = _format_natural_preview(tool_name, display)
+                    if natural:
+                        # 完成态：自然语言描述，不加"中"后缀
+                        preview = natural
+                        char_count = len(preview)
                     else:
-                        preview = args_str
-                    char_count = len(args_str)
+                        args_str = json.dumps(display).decode("utf-8")
+                        if len(args_str) > 100:
+                            preview = args_str[:100] + "..."
+                        else:
+                            preview = args_str
+                        char_count = len(args_str)
                 except Exception:
                     preview = "..."
             else:
