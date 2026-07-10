@@ -89,7 +89,7 @@ class UpdateChecker(QWidget):
             return
 
         self.async_checker = AsyncUpdateChecker(self)
-        self.async_checker.finished.connect(self._on_check_finished)
+        self.async_checker.check_finished.connect(self._on_check_finished)
         self.async_checker.error.connect(
             lambda msg: self.create_errorbar("检查更新失败", msg)
         )

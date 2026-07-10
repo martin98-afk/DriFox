@@ -140,7 +140,15 @@ def hook(event: str, context: dict) -> str:
     if agents_path.exists():
         try:
             notes_content = agents_path.read_text(encoding="utf-8")
-            logger.info(f"[ProjectNotesHook] 已读取项目笔记文件: {agents_path}")
+            # 兜底修复：文件存在但内容为空/纯空白时，按"未初始化"处理
+            # 复现场景：用户在 UI 中清空笔记保存后，AGENTS.md 变成 0 字节，
+            # 此后 BuildSystemPrompt 反复触发都不会自动恢复，导致项目笔记永久空白。
+            if not notes_content.strip():
+                logger.warning(f"[ProjectNotesHook] AGENTS.md 存在但内容为空，重新初始化: {agents_path}")
+                agents_path.write_text(INITIAL_TEMPLATE, encoding="utf-8")
+                notes_content = INITIAL_TEMPLATE
+            else:
+                logger.info(f"[ProjectNotesHook] 已读取项目笔记文件: {agents_path}")
         except Exception as e:
             logger.error(f"[ProjectNotesHook] 读取 {agents_path} 失败: {e}")
             notes_content = ""

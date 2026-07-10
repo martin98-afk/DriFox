@@ -92,12 +92,14 @@ class MemoryManagerCore:
         """添加条目记忆"""
         if not self._entry_memories_repo or not content:
             return False
-        return self._entry_memories_repo.save({
-            "content": content.strip(),
-            "enabled": True,
-            "confidence": 0.8,
-            "source": source,
-        })
+        return self._entry_memories_repo.save(
+            {
+                "content": content.strip(),
+                "enabled": True,
+                "confidence": 0.8,
+                "source": source,
+            }
+        )
 
     def update_entry_memory(self, memory_id: str, content: str) -> bool:
         """更新条目记忆"""
@@ -166,6 +168,14 @@ class MemoryManagerCore:
             return False
 
         path = Path(workdir) / "AGENTS.md"
+
+        # 防御:空内容/纯空白不写入,避免意外清空已有笔记
+        # 触发场景:UI 编辑器被全选删除后 300ms 防抖自动保存(最常见),
+        #          或 LLM/上游调用方传入空 content
+        if not (content or "").strip():
+            logger.warning(f"[MemoryManager] 拒绝写入空内容到 {path} (project={project}),已保留磁盘上原有内容")
+            return False
+
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
@@ -215,7 +225,6 @@ class MemoryManagerCore:
             return False
         return self._key_documents_repo.set_working_directory(project, file_path)
 
-
     def restore_working_directory_mark(self, project: str, file_path: str) -> bool:
         """恢复指定路径的工作目录标记（不清除其他标记）。
 
@@ -225,6 +234,7 @@ class MemoryManagerCore:
         if not self._key_documents_repo:
             return False
         return self._key_documents_repo.set_working_directory_only(project, file_path)
+
     def get_working_directory(self, project: str) -> Optional[str]:
         """获取项目的工作目录"""
         if not self._key_documents_repo:
@@ -290,7 +300,7 @@ class MemoryManagerCore:
             for doc in docs:
                 file_name = doc.get("file_name", "")
                 file_path = doc.get("file_path", "")
-                is_url = file_path and (file_path.startswith('http://') or file_path.startswith('https://'))
+                is_url = file_path and (file_path.startswith("http://") or file_path.startswith("https://"))
                 is_wd = file_path == wd_path
                 if is_wd:
                     has_root_doc = True

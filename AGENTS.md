@@ -73,3 +73,4 @@ feat|fix|docs|chore|refactor|test: scope - summary
 - **工具循环卡死** (06-26): V2 重写截断逻辑，保留正确轮次。测试 21 项全过。
 - **tool_control_card 不更新** (06-18): 补全信号链、删除重复定义。
 - **卡片内部滚轮 race condition** (07-04): 流式输出时 `_suppressScrollEvent=false` 同步解除，但 Chromium scroll 事件异步派发，pending scroll 在 suppress 解除后才被 dispatch，错误地把程序 auto-scroll 标记为"用户主动滚动" → `_userScrolledWithin=true` 累积 → 后续 updateContent 跳过 auto-scroll → 视觉上"卡顶部"。修复：在所有 auto-scroll 入口打 `_autoScrollTime = performance.now()` 时间戳；scroll 事件回调增加 50ms 时间窗检查，识别程序触发的事件并跳过标记。
+- **AGENTS.md 偶尔被清空** (07-10): `MemoryManagerCore.save_project_note` 直接 `write_text(content)`，无空内容/纯空白检查 → UI 编辑器被全选删除后 300ms 防抖自动保存（或上游传空 content）会把 AGENTS.md 写成 0 字节。修复：在 `save_project_note` 入口加 `if not (content or "").strip(): return False, log warning`，保护磁盘上已有内容不被空写入覆盖。回归测试：`tests/core/test_memory_manager_empty_protection.py`（7 项用例）。`read_project_notes.hook` 的"0 字节 → 恢复 INITIAL_TEMPLATE"逻辑保留作为纵深防御。

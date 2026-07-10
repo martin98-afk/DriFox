@@ -35,12 +35,16 @@ _running_threads: Set[QThread] = set()
 
 def _on_thread_finished(thread: QThread) -> None:
     """线程正常结束后从墓地移除"""
-    _running_threads.discard(thread)
+    # 防御：防止 QThread 子类覆写 finished 信号导致传入非 QThread 对象
+    if isinstance(thread, QThread):
+        _running_threads.discard(thread)
 
 
 def _on_thread_destroyed(thread: QThread) -> None:
     """线程被销毁后从墓地移除"""
-    _running_threads.discard(thread)
+    # 防御：防止 QThread 子类覆写 destroyed 信号导致传入非 QThread 对象
+    if isinstance(thread, QThread):
+        _running_threads.discard(thread)
 
 
 def install_guard() -> None:

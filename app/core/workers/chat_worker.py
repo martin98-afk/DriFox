@@ -2666,7 +2666,7 @@ class OpenAIChatWorker(QThread):
                         ):
                             self._previewed_tool_call_ids.add(tc_id)
                             # preview 阶段：arguments 可能还没接收完，显示 "加载中..." 而不是空 {}
-                            preview_args = {"_status": "loading", "_preview_hint": "参数接收中..."}
+                            preview_args = {"_status": "loading"}
                             if self.tool_start_callback:
                                 self.tool_start_callback(tc_id, tool_name, preview_args, "preview")
                             else:
@@ -2715,11 +2715,17 @@ class OpenAIChatWorker(QThread):
                                 prev = self._last_progress_len.get(tc_id, 0)
                                 if not prev or args_len - prev >= 200:
                                     self._last_progress_len[tc_id] = args_len
-                                    tail = buffer["function"]["arguments"][-40:].replace("\n", " ")
                                     progress_args = {
                                         "_status": "loading",
-                                        "_preview_hint": f"接收参数中({args_len}字符):{tail}",
+                                        "_args_len": args_len,
                                     }
+                                    # 缓冲区已有 path/file_path 时提前提取，让 UI 显示真实文件名
+                                    _pm = re.search(
+                                        r'"(?:path|file_path)"\s*:\s*"([^"]+)"',
+                                        buffer["function"]["arguments"],
+                                    )
+                                    if _pm:
+                                        progress_args["_path"] = _pm.group(1)
                                     _buf_name = buffer["function"].get("name", tool_name)
                                     self._emit_with_callback(
                                         "tool_args_updated",
@@ -2741,12 +2747,17 @@ class OpenAIChatWorker(QThread):
                             prev = self._last_progress_len.get(tc_id, 0)
                             if not prev or args_len - prev >= 500:
                                 self._last_progress_len[tc_id] = args_len
-                                # 取累积参数末尾 50 字符作为实时预览（最新到达的内容）
-                                tail = buffer["function"]["arguments"][-50:].replace("\n", " ")
                                 progress_args = {
                                     "_status": "loading",
-                                    "_preview_hint": f"接收参数中({args_len}字符):{tail}",
+                                    "_args_len": args_len,
                                 }
+                                # 缓冲区已有 path/file_path 时提前提取
+                                _pm = re.search(
+                                    r'"(?:path|file_path)"\s*:\s*"([^"]+)"',
+                                    buffer["function"]["arguments"],
+                                )
+                                if _pm:
+                                    progress_args["_path"] = _pm.group(1)
                                 _buf_name = buffer["function"].get("name", tool_name)
                                 self._emit_with_callback(
                                     "tool_args_updated",
