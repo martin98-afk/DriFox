@@ -192,6 +192,8 @@ class OpenAIChatWorker(QThread):
         #           Stop 触发后应立即放行（不再 block），避免无限循环
         # 详见 docs/stop_hook_block.md 设计说明
         self._stop_hook_active: bool = False
+        # Stop hook 续命时保存上轮的完整响应文本，避免续命后第二轮覆盖丢失
+        self._prev_stophook_response: Optional[str] = None
 
     def _get_persister(self) -> Optional["ToolResultPersister"]:
         """
@@ -1330,6 +1332,7 @@ class OpenAIChatWorker(QThread):
             self._current_session_messages = list(current_session_messages)
             self._emit_compaction_status(self._last_compaction_state)
             self.full_response = ""
+            self._prev_stophook_response = None
             self._reasoning_content = ""
             # 开始新对话时，清理所有中间状态
             self._clear_pending_response_state()
