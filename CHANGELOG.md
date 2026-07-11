@@ -1,11 +1,40 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.3.5] - 2026-07-11
+
+自上一版本以来的变更 | 提交数：17 · 文件变更：25 · +1199/-744 | 贡献者：dingma, mading
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **网关与聊天工作者修复**: 修复 Stop hook 续命后 full_response 丢失与 llm_config 未定义问题；为 `_prev_stophook_response` 初始化并简化三元运算，code-review 跟进增强稳定性
+- **卡片滚轮竞态闪烁修复**: 解决流式输出期间 `_suppressScrollEvent=false` 同步解除但 Chromium scroll 事件异步派发引起的"卡顶部"闪烁问题；在所有 auto-scroll 入口打 `_autoScrollTime = performance.now()` 时间戳，scroll 事件回调增加 50ms 时间窗检查
+- **工具流式预览增强**: tool streaming preview 实时显示字符数与文件路径提取；改为自然语言描述提升可读性
+- **AGENTS.md 偶发清空修复**: `MemoryManagerCore.save_project_note` 增加空内容/纯空白保护，阻止 UI 编辑器全选删除后 300ms 防抖自动保存意外清空已有内容
+- **空 AGENTS.md 恢复处理**: `read_project_notes` hook 增加 0 字节 → 恢复 INITIAL_TEMPLATE 兜底逻辑（纵深防御）
+- **上下文构建与历史压缩消息过滤**: 增强 `context_builder` / `history_compactor` 的消息过滤逻辑，修复工具结果显示与消息卡片显示问题
+- **终端工具内联脚本转换**: 修复 inline scripts 自动转换的 3 个 bug，提升命令面板与终端工具的可用性
+- **UI 响应性优化**: `bottom_input_area` / `command_card` / `message_card` 的响应性与命令卡片参数可见性显著提升
+- **CodeGraph 同步与文件监听**: 增强 CodeGraph 文件监听与同步功能，添加冷却保护防止频繁刷新
+- **Hook prompt 提示词清理**: 更新 `hooks.json` 的 prompt 文案，使意图更清晰
+- **更新检测信号重命名**: `update_checker` 的 `finished` 信号重命名为 `check_finished`，`thread_guard` 添加类型检查防止非 QThread 对象误处理
+- **字体与样式微调**: `OpenAIChatToolWindow` 字体族 CSS 与 README 星标历史链接更新
+
+### 🐛 问题修复 (Bug Fixes) — 历史 [Unreleased] 归并
+
 - **AGENTS.md 偶尔被清空修复**: `MemoryManagerCore.save_project_note` 增加空内容/纯空白保护，阻止 UI 编辑器被全选删除后 300ms 防抖自动保存、或其他上游调用方传入空 content 时意外清空已有 AGENTS.md。**API 行为变化**：修复后 `save_project_note("proj", "")` / `save_project_note("proj", "   \n")` / `save_project_note("proj", None)` 一律返回 `False`（而非写入空文件），调用方需注意处理返回值。新增回归测试 `tests/core/test_memory_manager_empty_protection.py`（7 项用例覆盖空字符串/纯空白/None/边界换行/有效内容/无 workdir 场景）。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **代码结构可读性提升**: 优化代码结构以提升可读性与可维护性
+- **ui_helpers 格式化与组织**: 统一字符串引号为双引号、清理多余空行、改进函数调用清晰度、增强注释
+
+### 🔧 其他 (Chores & Build)
+
+- **依赖升级**: `pyproject.toml` 升级 `codegraph-py` 依赖至 1.3.4（提升代码语义探索能力）
+- 更新版本号至 v0.3.5
+
+## [Unreleased]
 
 ## [v0.3.4] - 2026-07-09
 
