@@ -405,8 +405,9 @@ class _CustomInputCard(QWidget):
             if self._text_value:
                 self._text_edit.setPlainText(self._text_value)
             # 延迟到下一轮事件循环，等布局完成（viewport().width() > 0）后再算高度
+            # _adjust_height_to_content 内部已在高度变化时调用 _emit_height_update
+            # 不需要额外的 10ms 兜底 timer（避免与导航路径的 heightChanged 重复触发）
             QTimer.singleShot(0, self._adjust_height_to_content)
-            QTimer.singleShot(10, self._emit_height_update)
         self._apply_style()
 
     def _emit_height_update(self):
@@ -906,10 +907,6 @@ class QuestionFloatingWidget(QWidget):
         saved = self._answers.get(self._current_index)
         if saved:
             self._restore_answer(saved)
-
-        # 如果自定义输入已激活，延迟触发高度更新
-        if self._custom_input_widget and self._custom_input_widget._active:
-            QTimer.singleShot(20, self._on_options_height_changed)
 
         self._update_footer(total)
         # 自动聚焦到下一步按钮，键盘操作立即可用

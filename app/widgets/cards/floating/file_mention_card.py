@@ -40,6 +40,7 @@ class FileMentionItemWidget(QWidget):
     """文件列表单项"""
 
     clicked = pyqtSignal()
+    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
 
     # 扩展名 → emoji 映射（复用 memory_card 的风格，比 IconWidget 轻量无数倍）
     _EMOJI_MAP = {
@@ -225,21 +226,25 @@ class FileMentionItemWidget(QWidget):
         self._apply_bg()
 
     def set_selected(self, selected: bool):
+        """设置选中状态
+
+        鼠标 hover 时 _selected 与 _hovered 同时为 True（hover 即选中）。
+        leaveEvent 只清 _hovered，保持 _selected，确保鼠标离开后键盘仍可继续导航。
+        """
         self._selected = selected
-        if selected:
-            self._hovered = False
+        # 不再在 selected 时清空 _hovered —— hover 即选中，两者共存
         self._apply_bg()
 
     def enterEvent(self, event):
         self._hovered = True
-        if not self._selected:
-            self._apply_bg()
+        # hover 即选中：通知父卡片同步选中索引到此 widget
+        self.hovered.emit(self)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hovered = False
-        if not self._selected:
-            self._apply_bg()
+        # selected 仍可能为 True（hover 即选中），此时背景仍为 REALTIME_TAG_BG
+        self._apply_bg()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -889,6 +894,7 @@ class FileMentionCard(QWidget):
             else:
                 w = FileMentionItemWidget(item, self._current_query, self._scroll_content)
                 w.clicked.connect(self._on_item_clicked)
+                w.hovered.connect(self._on_item_hovered)
                 new_widgets.append(w)
 
         self._item_widgets = new_widgets
@@ -1028,6 +1034,21 @@ class FileMentionCard(QWidget):
             self._selected_index = idx
             self._update_selection()
             self.select_current()
+
+    def _on_item_hovered(self, widget):
+        """鼠标悬停到 item → 同步选中索引
+
+        实现 hover 即选中：鼠标悬停到哪个 item，键盘导航的起始位置就跟随到哪。
+        """
+        try:
+            idx = self._item_widgets.index(widget)
+        except ValueError:
+            return
+        # 索引相同则跳过，避免不必要的重绘
+        if idx == self._selected_index:
+            return
+        self._selected_index = idx
+        self._update_selection()
 
     def _update_selection(self):
         """更新选中高亮"""
