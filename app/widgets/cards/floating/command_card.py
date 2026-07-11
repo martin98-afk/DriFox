@@ -1016,14 +1016,27 @@ class CommandCard(QWidget):
         visible = min(total_items, MAX_VISIBLE_ITEMS)
         list_height = visible * ITEM_HEIGHT + divider_count * 1
         # 顶部 tooltip 仅在列表模式可见；detail 模式自带描述区，不重复显示
+        # 注：tooltip label 和其下的 1px 分隔线共同占 layout 空间，
+        # setFixedHeight 必须包含两者，否则 scroll_area 被挤少 1px → 少显示一个 item
+        # 注：判据用 isHidden() 而非 isVisible()。
+        # Qt 的 isVisible() 要求自身+所有祖先可见。show_card 中
+        # card.setVisible(True) 在 load_items 之后执行，此时卡片自身不可见，
+        # tooltip label 即使 setVisible(True) 也返回 False → tooltip_h=0。
         tooltip_h = 0
         if (
             not self._detail_mode
             and hasattr(self, "_desc_tooltip_label")
             and self._desc_tooltip_label is not None
-            and self._desc_tooltip_label.isVisible()
+            and not self._desc_tooltip_label.isHidden()
         ):
-            tooltip_h = self._desc_tooltip_label.height()
+            # 注：必须用 minimumHeight()，避免 layout pass 延迟。
+            tooltip_h = self._desc_tooltip_label.minimumHeight()
+            if (
+                hasattr(self, "_desc_tooltip_divider")
+                and self._desc_tooltip_divider is not None
+                and not self._desc_tooltip_divider.isHidden()
+            ):
+                tooltip_h += self._desc_tooltip_divider.minimumHeight()
         self.setFixedHeight(list_height + tooltip_h)
 
     def _apply_detail_positional_hint_style(self):
@@ -2116,15 +2129,14 @@ class CommandCard(QWidget):
             except RuntimeError:
                 continue
 
-        # 删除旧分隔线（仅非增量模式）
-        if not incremental:
-            for div in self._dividers:
-                try:
-                    self._scroll_layout.removeWidget(div)
-                    div.deleteLater()
-                except RuntimeError:
-                    pass
-            self._dividers.clear()
+        # 删除旧分隔线（保证 _dividers 与 scroll_layout 状态一致）
+        for div in self._dividers:
+            try:
+                self._scroll_layout.removeWidget(div)
+                div.deleteLater()
+            except RuntimeError:
+                pass
+        self._dividers.clear()
 
         # 清空 layout，重新按正确顺序添加 widget
         while self._scroll_layout.count():
@@ -2144,11 +2156,11 @@ class CommandCard(QWidget):
                 return 2
             return 3  # agent/prompt
 
-        divider_positions = []  # 需要在索引 i 前插入分隔线的位置列表
-        if not incremental:
-            for i in range(1, len(new_items)):
-                if _section(new_items[i]) != _section(new_items[i - 1]):
-                    divider_positions.append(i)
+        # 计算需要在索引 i 前插入分隔线的位置列表
+        divider_positions = []
+        for i in range(1, len(new_items)):
+            if _section(new_items[i]) != _section(new_items[i - 1]):
+                divider_positions.append(i)
 
         # 添加 widget 和分隔线，按顺序
         next_div_idx = 0

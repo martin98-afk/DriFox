@@ -295,6 +295,12 @@ class CardContainer(QWidget):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Resize and obj in self._cards.values():
+            # 动画运行时，卡片 Resize 是动画自身级联副作用（容器撑大 → 卡片撑大），
+            # 若触发 _schedule_expand → _do_expand 会取消进行中的动画并重启，
+            # 形成"动画→Resize→打断→重启→Resize→..."的自激循环，导致高度抖动。
+            # 跳过 Resize，让当前动画完成后再处理最终的尺寸。
+            if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+                return False
             self._schedule_expand()
         return super().eventFilter(obj, event)
 
