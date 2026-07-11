@@ -621,13 +621,17 @@ class HookEditCard(QWidget):
         """根据事件类型更新 matcher 输入框的占位提示"""
         placeholders = {
             "BuildSystemPrompt": ("匹配智能体角色：primary（主智能体）| subagent（子智能体）"),
-            "SessionStart": ("匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）；#team_member 仅团队成员窗口触发（与其他互斥）"),
+            "SessionStart": (
+                "匹配会话状态：startup（启动）| resume（恢复）| clear（清理）| compact（压缩）；#team_member 仅团队成员窗口触发（与其他互斥）"
+            ),
             "UserPromptSubmit": ("匹配用户提交的提问内容，正则表达式，如 .*帮助.* 或 .*错误.*"),
             "PreUserMessage": ("匹配即将发送的用户消息，正则表达式，如 .*安全.* 或 .*密码.*"),
             "PostUserMessage": ("匹配已处理的用户消息，正则表达式，如 .*代码.* 或 .*文件.*"),
             "PreAssistantMessage": ("匹配即将回复的上下文（基于用户消息），如 .*总结.* 或 .*翻译.*"),
             "PostAssistantMessage": ("匹配助手回复的内容，正则表达式，如 .*敏感信息.* 或 .*请注意.*"),
-            "Stop": ("匹配停止原因：completed（完成）| cancelled（取消）| error（错误）；#team_member 仅团队成员窗口触发（与其他互斥）"),
+            "Stop": (
+                "匹配停止原因：completed（完成）| cancelled（取消）| error（错误）；#team_member 仅团队成员窗口触发（与其他互斥）"
+            ),
         }
         # PreToolUse / PostToolUse 用 tool:xxx 示例
         tool_ph = "匹配工具：tool:edit（精确）| Edit|Write（正则）| .*文件.*（内容）"
@@ -755,6 +759,15 @@ class HookEditCard(QWidget):
                             cb.setChecked(False)
                 finally:
                     self._syncing_matcher = False
+        # 用户通过取消勾选导致所有选项都未选中 → 清空 matcherEdit
+        any_checked = any(cb.isChecked() for cb, _ in self._matcher_checkboxes)
+        if not any_checked:
+            self._syncing_matcher = True
+            try:
+                self.matcherEdit.setText("")
+            finally:
+                self._syncing_matcher = False
+            return
         self._sync_matcher_text_from_checks()
 
     def _on_matcher_text_changed(self, text: str):

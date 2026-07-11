@@ -38,6 +38,7 @@ class CommandItemWidget(QWidget):
     """命令/技能列表单项"""
 
     clicked = pyqtSignal()
+    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
 
     def __init__(self, item_data: Dict[str, str], query: str, parent=None):
         super().__init__(parent)
@@ -312,10 +313,13 @@ class CommandItemWidget(QWidget):
             self._tag_label.setVisible(False)
 
     def set_selected(self, selected: bool):
-        """设置选中状态"""
+        """设置选中状态
+
+        鼠标 hover 时 _selected 与 _hovered 同时为 True（hover 即选中）。
+        leaveEvent 只清 _hovered，保持 _selected，确保鼠标离开后键盘仍可继续导航。
+        """
         self._selected = selected
-        if selected:
-            self._hovered = False
+        # 不再在 selected 时清空 _hovered —— hover 即选中，两者共存
         self._apply_style()
 
     def reuse(self, item_data: dict, query: str):
@@ -343,8 +347,8 @@ class CommandItemWidget(QWidget):
 
     def enterEvent(self, event):
         self._hovered = True
-        if not self._selected:
-            self._apply_style()
+        # hover 即选中：通知父卡片同步选中索引到此 widget
+        self.hovered.emit(self)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -370,6 +374,7 @@ class ParameterItemWidget(QWidget):
     """
 
     clicked = pyqtSignal()
+    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
 
     def __init__(self, param: CommandParameter, parent=None):
         super().__init__(parent)
@@ -466,7 +471,13 @@ class ParameterItemWidget(QWidget):
         return self._param.param_type
 
     def set_selected(self, selected: bool):
+        """设置选中状态
+
+        鼠标 hover 时 _selected 与 _hovered 同时为 True（hover 即选中）。
+        leaveEvent 只清 _hovered，保持 _selected，确保鼠标离开后键盘仍可继续导航。
+        """
         self._selected = selected
+        # 不再在 selected 时清空 _hovered —— hover 即选中，两者共存
         self._apply_style()
 
     def set_active(self, active: bool):
@@ -502,20 +513,108 @@ class ParameterItemWidget(QWidget):
 
     def enterEvent(self, event):
         self._hovered = True
-        if not self._selected:
-            self._apply_style()
+        # hover 即选中：通知父卡片同步选中索引到此 widget
+        self.hovered.emit(self)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hovered = False
-        if not self._selected:
-            self._apply_style()
+        # selected 仍可能为 True（hover 即选中），此时背景仍为 REALTIME_TAG_BG
+        self._apply_style()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class ValueItemWidget(QWidget):
+    """值选择列表（枚举列表）单项
+
+    与 CommandItemWidget 一致：hover 即选中，leaveEvent 只清 _hovered 保持 _selected。
+    比 CommandItemWidget 更简单——无描述/快捷键/类型标签，只显示纯文本值。
+    """
+
+    clicked = pyqtSignal()
+    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
+
+    def __init__(self, value: str, parent=None):
+        super().__init__(parent)
+        self._value = value
+        self._hovered = False
+        self._selected = False
+        self.setFixedHeight(ITEM_HEIGHT)
+        self.setCursor(Qt.PointingHandCursor)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setSpacing(0)
+
+        self._text_label = QLabel(self._value)
+        self._text_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self._text_label)
+
+        self._apply_style()
+
+    def _apply_style(self):
+        """应用当前状态的样式（仅自身背景，文字颜色固定为 PRIMARY）"""
+        if self._selected:
+            bg = Colors.REALTIME_TAG_BG
+        elif self._hovered:
+            bg = Colors.HOVER_BG
+        else:
+            bg = "transparent"
+
+        self.setStyleSheet(f"""
+            ValueItemWidget {{
+                background-color: {bg};
+                border: none;
+                border-radius: 4px;
+            }}
+        """)
+        self._text_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+        """)
+
+    def set_selected(self, selected: bool):
+        """设置选中状态
+
+        鼠标 hover 时 _selected 与 _hovered 同时为 True（hover 即选中）。
+        leaveEvent 只清 _hovered，保持 _selected，确保鼠标离开后键盘仍可继续导航。
+        """
+        self._selected = selected
+        # 不再在 selected 时清空 _hovered —— hover 即选中，两者共存
+        self._apply_style()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        # hover 即选中：通知父卡片同步选中索引到此 widget
+        self.hovered.emit(self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        # selected 仍可能为 True（hover 即选中），此时背景仍为 REALTIME_TAG_BG
+        self._apply_style()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    @property
+    def value(self) -> str:
+        return self._value
 
 
 class CommandCard(QWidget):
@@ -702,7 +801,7 @@ class CommandCard(QWidget):
         # 6. 值选择列表项（按当前选中状态）
         for i, w in enumerate(self._value_widgets):
             try:
-                self._apply_value_widget_style(w, selected=(i == self._selected_value_index))
+                w.set_selected(i == self._selected_value_index)
             except RuntimeError:
                 continue
         # 7. 分隔线列表
@@ -952,22 +1051,6 @@ class CommandCard(QWidget):
             QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
         """)
 
-    def _apply_value_widget_style(self, widget: "QLabel", selected: bool = False):
-        """设置值选择列表项的样式（统一入口，供创建/刷新/选中切换调用）
-
-        Args:
-            widget: 值列表 QLabel
-            selected: 是否处于选中状态（高亮背景）
-        """
-        Colors.refresh()
-        bg = Colors.REALTIME_TAG_BG if selected else "transparent"
-        widget.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_PRIMARY}; background: {bg};
-                padding: 0 12px; {get_font_family_css()} {font_size_css(12)};
-            }}
-        """)
-
     # ---- Detail 模式 ----
 
     @property
@@ -1208,6 +1291,7 @@ class CommandCard(QWidget):
                 continue
             w = ParameterItemWidget(p)
             w.clicked.connect(self._on_param_clicked)
+            w.hovered.connect(self._on_param_hovered)
             self._detail_params_layout.addWidget(w)
             self._param_widgets.append(w)
 
@@ -1294,12 +1378,9 @@ class CommandCard(QWidget):
 
         # 构建值列表
         for val in filtered:
-            item = QLabel(val)
-            item.setFixedHeight(ITEM_HEIGHT)
-            item.setCursor(Qt.PointingHandCursor)
-            self._apply_value_widget_style(item, selected=False)
-            # 用 lambda 捕获值
-            item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
+            item = ValueItemWidget(val)
+            item.clicked.connect(self._on_value_clicked)
+            item.hovered.connect(self._on_value_hovered)
             self._detail_value_layout.addWidget(item)
             self._value_widgets.append(item)
 
@@ -1444,11 +1525,9 @@ class CommandCard(QWidget):
         self._value_widgets.clear()
 
         for val in filtered:
-            item = QLabel(val)
-            item.setFixedHeight(ITEM_HEIGHT)
-            item.setCursor(Qt.PointingHandCursor)
-            self._apply_value_widget_style(item, selected=False)
-            item.mousePressEvent = lambda e, v=val: self._on_value_clicked(v)
+            item = ValueItemWidget(val)
+            item.clicked.connect(self._on_value_clicked)
+            item.hovered.connect(self._on_value_hovered)
             self._detail_value_layout.addWidget(item)
             self._value_widgets.append(item)
 
@@ -1460,9 +1539,12 @@ class CommandCard(QWidget):
         self._update_value_selection()
         self._adjust_detail_height()
 
-    def _on_value_clicked(self, value: str):
+    def _on_value_clicked(self):
         """值选择项被点击"""
-        self.parameterValueSelected.emit(value)
+        sender = self.sender()
+        if sender is None:
+            return
+        self.parameterValueSelected.emit(sender.value)
         # 回退到参数列表模式
         self._exit_value_selection()
 
@@ -1692,11 +1774,11 @@ class CommandCard(QWidget):
         # 只更新变化的项
         if old_idx != new_idx:
             if 0 <= old_idx < len(self._value_widgets):
-                self._apply_value_widget_style(self._value_widgets[old_idx], selected=False)
+                self._value_widgets[old_idx].set_selected(False)
             if 0 <= new_idx < len(self._value_widgets):
-                self._apply_value_widget_style(self._value_widgets[new_idx], selected=True)
+                self._value_widgets[new_idx].set_selected(True)
         elif 0 <= new_idx < len(self._value_widgets):
-            self._apply_value_widget_style(self._value_widgets[new_idx], selected=True)
+            self._value_widgets[new_idx].set_selected(True)
 
         # 滚动到可见
         if 0 <= self._selected_value_index < len(self._value_widgets):
@@ -2021,6 +2103,7 @@ class CommandCard(QWidget):
                 # 创建新 widget
                 w = CommandItemWidget(item, self._current_text_query, self._scroll_content)
                 w.clicked.connect(self._on_item_clicked)
+                w.hovered.connect(self._on_item_hovered)
                 new_widgets.append(w)
 
         self._item_widgets = new_widgets
@@ -2095,6 +2178,54 @@ class CommandCard(QWidget):
             self._selected_index = idx
             self._update_selection()
             self.select_current()
+
+    def _on_item_hovered(self, widget):
+        """鼠标悬停到 item → 同步选中索引
+
+        实现 hover 即选中：鼠标悬停到哪个 item，键盘导航的起始位置就跟随到哪。
+        tooltip 也会自动跟随（_update_selection 内部调用 _update_desc_tooltip）。
+        """
+        if self._detail_mode:
+            return  # detail 模式不处理列表 hover
+        try:
+            idx = self._item_widgets.index(widget)
+        except ValueError:
+            return
+        # 索引相同则跳过，避免不必要的重绘
+        if idx == self._selected_index:
+            return
+        self._selected_index = idx
+        self._update_selection()
+
+    def _on_param_hovered(self, widget):
+        """鼠标悬停到参数项 → 同步选中索引（仅在 detail 模式 + 参数列表可见时生效）
+
+        实现 hover 即选中：鼠标悬停到哪个参数，键盘导航的起始位置就跟随到哪。
+        若当前处于值选择模式，悬停参数项不打断值列表浏览（让用户先选完值）。
+        """
+        if not self._detail_mode or self._value_selection_mode:
+            return
+        try:
+            idx = self._param_widgets.index(widget)
+        except ValueError:
+            return
+        if idx == self._selected_param_index:
+            return
+        self._selected_param_index = idx
+        self._update_param_selection()
+
+    def _on_value_hovered(self, widget):
+        """鼠标悬停到值选择项 → 同步选中索引（仅在值选择模式生效）"""
+        if not self._value_selection_mode:
+            return
+        try:
+            idx = self._value_widgets.index(widget)
+        except ValueError:
+            return
+        if idx == self._selected_value_index:
+            return
+        self._selected_value_index = idx
+        self._update_value_selection()
 
     def _on_detail_clicked(self, event):
         """detail 模式点击 → 选中当前命令（携带 detail 选中类型）
@@ -2208,9 +2339,8 @@ class CommandCard(QWidget):
             # 值选择模式：选中当前高亮的值
             if 0 <= self._selected_value_index < len(self._value_widgets):
                 widget = self._value_widgets[self._selected_value_index]
-                text = widget.text() if hasattr(widget, "text") else ""
-                if text:
-                    self.parameterValueSelected.emit(text)
+                if widget.value:
+                    self.parameterValueSelected.emit(widget.value)
                     self._exit_value_selection()
             return
         if self._detail_mode and self._detail_has_params:

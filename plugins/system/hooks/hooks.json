@@ -165,7 +165,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "check uncommitted/incomplete → list todos, clean up trash.",
+            "prompt": "check uncommitted/incomplete → list todos, clean up the trash you made.",
             "statusMessage": "Before end:",
             "id": "builtin_stop_cleanup"
           }
