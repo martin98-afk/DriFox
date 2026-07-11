@@ -2686,6 +2686,8 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {code_font_size}px;
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
+                    max-height: 500px;
+                    overflow-y: auto;
                     transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
@@ -5450,6 +5452,11 @@ class MessageCard(SimpleCardWidget):
         if self._streaming:
             return
         self._streaming = True
+        # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
+        # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
+        # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
+        if self.viewer and hasattr(self.viewer, "_streaming") and not self.viewer._streaming:
+            self.viewer._streaming = True
         self._pulse_phase = 0.0
         try:
             self._anim_timer.start(50)  # 80→50ms，帧率从12.5fps提升到20fps
@@ -6215,18 +6222,18 @@ class MessageCard(SimpleCardWidget):
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
             return
+        # 🐛 就近恢复 viewer 流式模式：finish_streaming 后 viewer._streaming=False，
+        # 但工具结果可能在新一轮流式开始后才到达。先恢复再更新 callback，
+        # 与 start_streaming_anim 中的恢复形成双重保险。
+        if self.viewer and not self.viewer._streaming:
+            self.viewer._streaming = True
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
-            # 修复时序问题：工具结果块注入前先强制渲染 pending 文本，
-            # 避免工具结果块先于前置文本出现在 DOM 中
-            # 🐛 修复工具块"粘底"bug：原条件 `and self.viewer._lazy_markdown_cb` 在
-            # callback 已被前一次 _perform_update 消费后被跳过，导致 _markdown_text
-            # 永远不包含工具结果块，下一次全量渲染不会把工具块放在正确位置。
-            # 改为无条件重置 callback，确保后续 _perform_update 能拿到最新 markdown。
-            if self.viewer._streaming:
-                self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
-                self.viewer._schedule_render(immediate=True)
+            # 🐛 修复"工具结果冒出又消失"：去掉旧的条件判断，始终更新 callback，
+            # 确保 _perform_update 能拿到含最新工具结果的 markdown，不被旧 DOM 覆盖。
+            self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            self.viewer._schedule_render(immediate=True)
 
             block_html = render_tool_block(
                 tool_name=tool_name,

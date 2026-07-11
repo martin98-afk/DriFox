@@ -1037,7 +1037,15 @@ class HistoryCompactor:
                 self._make_cache(),
             )
 
-        summary_message = {"role": "user", "content": compact_summary}
+        # 【修复 issue #225】对话摘要必须以 system 角色注入，绝不能标成 user。
+        # 旧实现 summary_message = {"role": "user", ...} 会把一份"第三人称回顾整个对话"的
+        # 摘要伪装成"用户刚说的话"塞进上下文。当 recent_messages 以 user 消息开头时（很常见），
+        # 还会产生两条连续的 user 消息，破坏 user/assistant 交替结构。
+        # 模型会把这份摘要当成用户发言来读，一旦摘要里出现收尾意味的内容，
+        # 就会幻觉"用户说了谢谢/行了"并误判对话结束（自问自答 / 一直进行下去）。
+        # 用 system 角色 + _compaction_summary 标记：既不会被当作"用户发言"，
+        # 也能在 context_builder 的 system 消息过滤中存活（见 context_builder.py）。
+        summary_message = {"role": "system", "content": compact_summary, "_compaction_summary": True}
         # 跳过开头的 tool 角色（配对保护遗留的孤立 tool 结果）
         first_non_tool = 0
         for idx, msg in enumerate(recent_messages):
