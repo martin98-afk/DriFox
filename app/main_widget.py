@@ -13075,18 +13075,20 @@ class OpenAIChatToolWindow(ToolWindow):
     def _ensure_temp_workdir(self, project: str) -> str:
         """确保项目有临时工作目录
 
-        当项目未设置根目录时，在应用数据目录下创建 .drifox/workspaces/{project}/
-        作为临时工作目录，确保文件操作总有安全的基础目录。
+        当项目未设置根目录时，在 ~/.drifox/workspaces/{project}/ 下创建
+        临时工作目录，确保文件操作总有安全的基础目录。
 
-        使用 resource_path("")（应用数据目录）而非 os.getcwd()，原因：
+        使用 Path.home() / '.drifox'（用户家目录）而非 resource_path("")，原因：
+        - 用户数据归属：工作区数据应归属用户数据目录而非项目目录
+        - 持久性：~/.drifox 在开发和打包环境下始终可写、路径固定
         - 多窗口隔离：所有窗口统一使用同一基准，避免进程 cwd 飘移导致混乱
-        - 稳定性：os.getcwd() 可能被外部工具/IDE 改变，resource_path 是固定路径
+        - 稳定性：os.getcwd() 可能被外部工具/IDE 改变，家目录是固定路径
         """
         try:
-            from app.utils.utils import resource_path
+            from pathlib import Path
 
-            base_dir = resource_path("")
-            temp_dir = os.path.join(base_dir, ".drifox", "workspaces", project)
+            base_dir = str(Path.home() / '.drifox')
+            temp_dir = os.path.join(base_dir, "workspaces", project)
             os.makedirs(temp_dir, exist_ok=True)
             self._current_workdir[project] = temp_dir
 
