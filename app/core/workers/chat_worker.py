@@ -603,6 +603,27 @@ class OpenAIChatWorker(QThread):
                 trigger_async=False,
             )
 
+            # 🛡️ 排出 _hook_message_queue：同步执行路径中 _execute_hook 也会调用
+            # on_hook_finished 回调将输出入队，但同步返回值已由下方 results 循环直接
+            # 注入消息列表。若不排出，_inject_pending_hook_messages 会在下一轮循环顶部
+            # 从队列取出再注入一次，导致重复（尤其是 PROMPT 类型 hook）。
+            # 注意：PostToolUse 等事件由 tool_executor 的同步路径触发并通过队列传递，
+            # 不经过 _trigger_worker_hook，不受此排出影响。
+            _q = getattr(backend, "_hook_message_queue", None)
+            if _q is not None:
+                _drained = 0
+                while True:
+                    try:
+                        _q.get_nowait()
+                        _drained += 1
+                    except Exception:
+                        break
+                if _drained:
+                    logger.debug(
+                        f"[HookManager] Drained {_drained} msg(s) from hook queue"
+                        f" after sync trigger_event({event_name})"
+                    )
+
             # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
             block_reason: Optional[str] = None
             for r in results:

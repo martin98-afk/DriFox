@@ -773,9 +773,14 @@ class HistoryManager:
                     logger.info(f"[HistoryManager] 更新已存在的会话: {existing_session_id}")
                 else:
                     # 检查归档目录中是否已有该会话（避免重复导入归档文件）
-                    archived_files = list(self.archive_dir.glob(f"*{existing_session_id}*.json"))
+                    # 🛡️ 排除当前正在导入的文件自身，避免「自己的影子」触发 session_id 重生成
+                    archived_files = [
+                        f for f in self.archive_dir.glob(f"*{existing_session_id}*.json") if str(f) != file_path
+                    ]
                     if archived_files:
-                        logger.warning(f"[HistoryManager] 该会话已在归档目录中: {existing_session_id}")
+                        logger.warning(
+                            f"[HistoryManager] 该会话已在归档目录中: {existing_session_id} ({len(archived_files)} 个其他文件)"
+                        )
                         # 生成新的 session_id 以避免冲突
                         session["session_id"] = uuid.uuid4().hex[:8]
                         session["title"] = f"[导入] {session.get('title', '新对话')}"
