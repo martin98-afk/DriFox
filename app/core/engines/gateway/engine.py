@@ -14,6 +14,7 @@ GatewayEngine — Gateway 专用引擎，与 UI 的 ChatEngine 完全独立
 - 一次只处理一个 Gateway 消息（单 worker 串行）
 - 共享 ToolExecutor / AgentManager（无状态组件）
 """
+
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -39,7 +40,7 @@ class GatewayEngine(QObject, BaseEngine):
     # 状态信号
     worker_started = pyqtSignal()
     worker_finished = pyqtSignal(str)  # response text
-    worker_error = pyqtSignal(str)     # error message
+    worker_error = pyqtSignal(str)  # error message
 
     # 全局单例
     _global_instance: Optional["GatewayEngine"] = None
@@ -68,6 +69,7 @@ class GatewayEngine(QObject, BaseEngine):
 
         # ===== ConversationExecutor =====
         from app.core.conversation.executor import ConversationExecutor
+
         config = ConversationConfig(
             permission_strategy=PermissionStrategy.AGENT_CONFIG,
         )
@@ -320,13 +322,11 @@ class GatewayEngine(QObject, BaseEngine):
             available = config.get("模型列表", [])
             if available:
                 opt_list = ", ".join(f"`{m}`" for m in available[:10])
-                return (f"📋 **{display_name}** 当前模型: `{model_name}`\n"
-                        f"可选: {opt_list}")
+                return f"📋 **{display_name}** 当前模型: `{model_name}`\n可选: {opt_list}"
             return f"📋 **{display_name}** 当前模型: `{model_name}`"
 
         session.metadata["model"] = {"provider": config_id, "model": model_name}
-        return (f"✅ 已切换到 **{display_name}** 的模型: `{model_name}`\n"
-                f"（仅当前 Gateway 会话生效）")
+        return f"✅ 已切换到 **{display_name}** 的模型: `{model_name}`\n（仅当前 Gateway 会话生效）"
 
     def _cmd_agent(self, args: str, session: ChatSession) -> str:
         """处理 /agent 命令"""
@@ -378,8 +378,7 @@ class GatewayEngine(QObject, BaseEngine):
                 lines.append(f"- `{s.session_id[:12]}...` **{name}** ({msg_count} 条){marker}")
             return "\n".join(lines)
 
-        candidates = [s for s in sm.get_all_sessions()
-                     if args in s.session_id or args in s.name]
+        candidates = [s for s in sm.get_all_sessions() if args in s.session_id or args in s.name]
         if len(candidates) == 1:
             self.switch_to_session(candidates[0].session_id)
             return f"✅ 已切换到会话: **{candidates[0].name}**"
@@ -443,7 +442,7 @@ class GatewayEngine(QObject, BaseEngine):
         tools = self._get_tools(session=session)
 
         # 包装 Gateway 回调
-        wrapped_callbacks = self._make_gateway_callbacks(session, callbacks)
+        wrapped_callbacks = self._make_gateway_callbacks(session, callbacks, llm_config)
 
         # 使用统一 Executor 执行
         self._adapter.set_callbacks(callbacks)
@@ -462,6 +461,7 @@ class GatewayEngine(QObject, BaseEngine):
         self,
         session: ChatSession,
         callbacks: Dict[str, Callable],
+        llm_config: Optional[Dict] = None,
     ) -> Dict[str, Callable]:
         """包装 Gateway 特有逻辑的回调"""
         cb_content = callbacks.get("content_received", _noop)
@@ -483,8 +483,8 @@ class GatewayEngine(QObject, BaseEngine):
                 and self._is_recent_message(current_msgs[-1])
             )
             if not has_new_assistant and final_response.strip():
-                model_name = str(llm_config.get("模型名称", "") or "")
-                session.add_assistant_message(content=final_response, model_name=model_name if model_name else None)
+                model_name = str(llm_config.get("模型名称", "") or "") if llm_config else ""
+                session.add_assistant_message(content=final_response, model_name=model_name or None)
             self._save_to_store(session)
             cb_finished(final_response)
             self.worker_finished.emit(final_response)
@@ -512,6 +512,7 @@ class GatewayEngine(QObject, BaseEngine):
             if messages:
                 session.set_messages(messages, preserve_compaction=True)
                 self._save_to_store(session)
+
         result["messages_updated"] = on_messages_updated
 
         return result
@@ -584,6 +585,7 @@ class GatewayEngine(QObject, BaseEngine):
             )
 
         from app.core.conversation.config import PermissionStrategy, filter_interactive_tools
+
         return filter_interactive_tools(tools, PermissionStrategy.AGENT_CONFIG)
 
     # ==================== 持久化 ====================
@@ -592,13 +594,14 @@ class GatewayEngine(QObject, BaseEngine):
     def _is_recent_message(msg: Dict, threshold_seconds: int = 3) -> bool:
         """检查消息是否是最近几秒内创建的"""
         from datetime import datetime
+
         ts = msg.get("timestamp", "")
         if not ts:
             return False
         try:
             msg_time = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return (datetime.now() - msg_time).total_seconds() < threshold_seconds
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return False
 
     def _save_to_store(self, session: ChatSession) -> None:

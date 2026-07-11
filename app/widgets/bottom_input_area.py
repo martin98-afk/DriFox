@@ -44,47 +44,39 @@ PLACEHOLDER_TIPS = [
     "输入框为空时按 ↑/↓ 切换历史输入",
     "输入 @ 快速引用项目文件",
     "输入 / 查看内建指令",
-
     # ════ 快捷键 ════
     "Ctrl+N 新建对话，Ctrl+L 清空会话",
     "Ctrl+Shift+G 重排分组窗口",
     "Shift+esc 拆散所有分组",
     "Shift+点击窗口头添加分组",
-
     # ════ 项目 ════
     "点击顶部项目名切换/新建/归档项目",
     "项目笔记自动关联，切换项目即切换笔记",
     "文档中添加文件夹作为工具工作目录",
-
     # ════ 模型与参数 ════
     "点击顶部模型名快速切换模型",
     "温度/最大Token影响回复风格",
-
     # ════ 技能系统 ════
     "@brainstorming 集思广益",
     "@git-commit 生成规范提交信息",
     "@skill-creator 创建自定义技能",
     "@minimax-image-understanding 分析图片",
-
     # ════ 代码与工具 ════
     "代码块右上角可复制或保存文件",
     "工具结果点击「查看差异」对比修改",
     "工具悬浮框显示执行详情",
     "撤销按钮可单独撤销编辑操作",
-
     # ════ 窗口与布局 ════
     "右上角「新建窗口」并发处理多任务",
     "「分支」按钮复制会话到新窗口",
     "右下角展开历史会话卡片继续对话",
     "记忆管理让 AI 记住你的偏好",
-
     # ════ 消息卡片页脚 ════
     "页脚：差异 | 审查 | Token | 耗时 | 模型",
     "点击消息页脚差异对比统计查看文件修改对比",
     "点击 🔍 用 code-reviewer 审查修改",
     "点击 Token 查看上下文详情与预算",
     "点击模型名快速切换对应服务商和模型",
-
     # ════ 高级功能 ════
     "点击上下文指示器查看 Token 详情",
     "子智能体协作处理复杂任务",
@@ -92,15 +84,12 @@ PLACEHOLDER_TIPS = [
     "长对话自动启用上下文压缩省 Token",
     "历史会话自动保存，关闭不丢失",
     "来源项目追踪：切换项目不串会话",
-
     # ════ 动态主题 ════
     "设置中实时切换主题配色，全局即时生效",
     "UI 插件自动适配主题色，无需手动配置",
-
     # ════ UI 插件系统 ════
     "ui插件提供可热加载的ui组件，支持自定义按钮、面板、卡片等",
     "/ui-plugin-creator：创建自定义UI插件，扩展界面功能",
-
     # ════ 插件与市场 ════
     "插件市场浏览安装社区插件，即装即用",
     "/plugin-market：浏览/安装社区插件，扩展功能",
@@ -108,24 +97,20 @@ PLACEHOLDER_TIPS = [
     "/system-cleaner：清理系统缓存和临时文件",
     "/context-usage-stats：Token 趋势/消息量图表",
     "/file-tree：浏览/搜索/实时监听文件变更",
-
     # ════ Hook 预设 ════
     "系统 Hook：项目智能 + 安全守卫增强对话质量",
-
     # ════ MCP 系统 ════
     "系统设置中配置 MCP Server 扩展能力",
     "MCP 工具连接后自动可用",
     "npx server-filesystem 让 AI 读写文件",
     "npx @playwright/mcp 让 AI 操作浏览器",
     "npx server-github 让 AI 访问 GitHub",
-
     # ════ 内建指令 ════
     "/new 新建会话 /branch 创建分支",
     "/init 笔记 /review 审查 /theme 主题色",
     "/compact 手动触发上下文压缩",
     "/ 命令支持 #skill #agent #ui 类别过滤",
     "/ 搜索支持 | 和 & 组合关键字",
-
     # ════ 文件提及 ════
     "@ 搜索支持 | 和 & 组合筛选",
     "@ 模糊匹配：rqrmnts 也能找到 requirements.txt",
@@ -212,9 +197,7 @@ class SendableTextEdit(TextEdit):
 
         # 卡片选中项：供 execute() 按选中类型执行
         self._card_selected_name: Optional[str] = None
-        self._card_selected_type: Optional[str] = (
-            None  # display_type: command/prompt/agent/skill
-        )
+        self._card_selected_type: Optional[str] = None  # display_type: command/prompt/agent/skill
 
         # 节流相关：/ 命令触发
         self._slash_throttle_timer = QTimer(self)
@@ -235,9 +218,7 @@ class SendableTextEdit(TextEdit):
         # 输入历史浏览
         self._history_list: list = []  # 最近输入历史（最新在前）
         self._history_index: int = -1  # -1 = 不在浏览模式
-        self._history_working_line: str = (
-            ""  # 进入历史模式时保存的当前输入（退出时恢复）
-        )
+        self._history_working_line: str = ""  # 进入历史模式时保存的当前输入（退出时恢复）
         self._setting_history_text: bool = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
         self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
 
@@ -364,8 +345,8 @@ class SendableTextEdit(TextEdit):
                 cmd_name = query.split(" ", 1)[0]
                 # 检测类别过滤器（#agent, #skill, #prompt, #cmd, #ui 等）
                 # 如果是类别过滤器 + 空格 + 搜索文本 → 保持列表模式，不尝试进入 detail 模式
-                _type_tag_map = {'cmd': 'command', 'skill': 'skill', 'agent': 'agent', 'prompt': 'prompt', 'ui': 'ui'}
-                if cmd_name.startswith('#') and cmd_name[1:] in _type_tag_map:
+                _type_tag_map = {"cmd": "command", "skill": "skill", "agent": "agent", "prompt": "prompt", "ui": "ui"}
+                if cmd_name.startswith("#") and cmd_name[1:] in _type_tag_map:
                     self._slash_trigger_pos = 0
                     self._apply_slash_throttle(query)
                     return
@@ -387,10 +368,7 @@ class SendableTextEdit(TextEdit):
                 if (
                     CommandManager.get_instance().is_known_command_name(cmd_name)
                     or get_skill_by_name(cmd_name)
-                    or (
-                        raw_cmd
-                        and CommandManager.get_instance().is_known_command_name(raw_cmd)
-                    )
+                    or (raw_cmd and CommandManager.get_instance().is_known_command_name(raw_cmd))
                     or (raw_cmd and get_skill_by_name(raw_cmd))
                 ):
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
@@ -494,15 +472,15 @@ class SendableTextEdit(TextEdit):
             at_pos = -1
             for i in range(cursor_pos - 1, -1, -1):
                 ch = text_before_cursor[i]
-                if ch == '@':
+                if ch == "@":
                     # 检查是否为单词边界
-                    if i == 0 or text_before_cursor[i - 1] in (' ', '\n', '\t', '\r'):
+                    if i == 0 or text_before_cursor[i - 1] in (" ", "\n", "\t", "\r"):
                         at_pos = i
                         break
                     else:
                         # 非单词边界（如 email@domain），不触发
                         break
-                elif ch in ('\n', '\r'):
+                elif ch in ("\n", "\r"):
                     # 遇到换行则停止向前搜索
                     break
 
@@ -517,10 +495,10 @@ class SendableTextEdit(TextEdit):
                     self.atDismissed.emit()
                 return
 
-            query = text_before_cursor[at_pos + 1:]
+            query = text_before_cursor[at_pos + 1 :]
 
             # 换行 → 关闭
-            if '\n' in query:
+            if "\n" in query:
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
@@ -707,17 +685,26 @@ class SendableTextEdit(TextEdit):
 
         clean_name = param_name.rstrip("=")
 
+        def _is_partial_match(token: str, m_end: int) -> bool:
+            """判断 token 是否为 param_name 的部分匹配
+
+            额外条件：
+            - token 不能与 param_name 完全相等（已完整无需替换）
+            - token 后不能有 =（属于已完成 value 参数，如 --model=GPT-4o）
+            """
+            if m_end < len(text) and text[m_end] == "=":
+                return False
+            return clean_name.startswith(token) and token != param_name
+
         # 如果有光标位置，优先找光标附近一定范围内的匹配
         if cursor_pos is not None:
             nearby_match = None
             for m in re.finditer(r"--[\w-]+", text):
                 token = m.group()
-                if clean_name.startswith(token) and token != clean_name:
+                if _is_partial_match(token, m.end()):
                     # 匹配在光标附近（前后 30 字符范围内）
                     if abs(m.start() - cursor_pos) <= 30:
-                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(
-                            nearby_match.start() - cursor_pos
-                        ):
+                        if nearby_match is None or abs(m.start() - cursor_pos) < abs(nearby_match.start() - cursor_pos):
                             nearby_match = m
             if nearby_match:
                 return (nearby_match.start(), nearby_match.end())
@@ -725,7 +712,7 @@ class SendableTextEdit(TextEdit):
         # 无光标位置或附近无匹配 → 返回第一个匹配（向后兼容）
         for m in re.finditer(r"--[\w-]+", text):
             token = m.group()
-            if clean_name.startswith(token) and token != clean_name:
+            if _is_partial_match(token, m.end()):
                 return (m.start(), m.end())
         return None
 
@@ -769,7 +756,18 @@ class SendableTextEdit(TextEdit):
         # 智能判断是否需要前导空格：光标前是空格 / -- / 文本开头 → 不加
         need_space = pos > 0 and text[pos - 1] not in (" ", "\t", "\n")
         if pos >= 2 and text[pos - 2 : pos] == "--":
-            need_space = False
+            # 光标前是用户手动输入的 --，替换这 2 个字符为完整参数名，
+            # 避免追加到 -- 后面变成 ----parameter
+            cursor.setPosition(pos - 2)
+            cursor.setPosition(pos, QTextCursor.KeepAnchor)
+            if param_type == "flag":
+                cursor.insertText(f"{param_name} ")
+            elif param_type == "value":
+                cursor.insertText(f"{param_name}")
+            self.setTextCursor(cursor)
+            self.setFocus(Qt.OtherFocusReason)
+            self._sync_detail_params()
+            return
         prefix = " " if need_space else ""
         if param_type == "flag":
             cursor.insertText(f"{prefix}{param_name} ")
@@ -905,9 +903,7 @@ class SendableTextEdit(TextEdit):
         try:
             if self._history_index < 0:
                 # 退出历史模式，恢复进入时保存的文本和附件
-                self._suppress_slash_trigger = (
-                    self._history_working_line.strip().startswith("/")
-                )
+                self._suppress_slash_trigger = self._history_working_line.strip().startswith("/")
                 self.setPlainText(self._history_working_line)
                 self.historyModeExited.emit()
                 cursor = self.textCursor()
@@ -997,10 +993,7 @@ class SendableTextEdit(TextEdit):
         # 注意：_setting_history_text 为 True 时跳过，避免 setPlainText 期间误触发
         if self._history_index >= 0 and not self._setting_history_text:
             idx = self._history_index
-            if (
-                idx < len(self._history_list)
-                and self._history_list[idx].get("text", "") != self.toPlainText()
-            ):
+            if idx < len(self._history_list) and self._history_list[idx].get("text", "") != self.toPlainText():
                 self._reset_history_mode(clear_attachments=False)
         # detail 模式参数同步
         self._sync_detail_params()
@@ -1619,17 +1612,11 @@ class InputGlowUnderlay(QWidget):
         # 先画环境光（弥散底层，更深更柔），再画主光（紧致核心，更亮更窄）
         # 两层叠加形成"边缘核心亮 → 向心柔光晕开"的层次
         if self._ambient_blur > 0 and self._ambient_alpha > 0:
-            self._paint_inner_halo(
-                painter, self._ambient_blur, self._ambient_alpha, falloff=2.0
-            )
+            self._paint_inner_halo(painter, self._ambient_blur, self._ambient_alpha, falloff=2.0)
         if self._primary_blur > 0 and self._primary_alpha > 0:
-            self._paint_inner_halo(
-                painter, self._primary_blur, self._primary_alpha, falloff=2.4
-            )
+            self._paint_inner_halo(painter, self._primary_blur, self._primary_alpha, falloff=2.4)
 
-    def _paint_inner_halo(
-        self, painter: QPainter, blur: int, alpha: int, falloff: float
-    ):
+    def _paint_inner_halo(self, painter: QPainter, blur: int, alpha: int, falloff: float):
         """从胶囊边缘向内堆叠 N 道单像素描边圆角矩形，模拟向心高斯衰减。
 
         第 i 层位于离边缘 i 像素处（向胶囊中心方向），alpha 按
@@ -1679,7 +1666,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text: str):
         import re
 
-        for match in re.finditer(r'\[\[[^\]]*\]\]', text):
+        for match in re.finditer(r"\[\[[^\]]*\]\]", text):
             self.setFormat(match.start(), match.end() - match.start(), self._fmt)
 
 

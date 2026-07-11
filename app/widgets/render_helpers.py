@@ -1419,7 +1419,7 @@ def render_tool_block(
     is_mcp_tool = tool_name.startswith("mcp__") or tool_name == "mcp_list_servers"
 
     # 检测是否为子智能体任务（特殊渲染逻辑）
-    is_sub_agent_task = tool_name in ("task", "subagent_para", "subagent_dag")
+    is_sub_agent_task = tool_name in ("subagent_para", "subagent_dag")
 
     # 状态图标
     status_html = ""

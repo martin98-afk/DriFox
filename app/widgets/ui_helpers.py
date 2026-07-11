@@ -13,6 +13,7 @@ UI 辅助模块 - 从 main_widget.py 提取的 UI 辅助方法
 - 部分函数依赖 MessageCard，需确保已导入
 - 循环导入通过延迟导入解决
 """
+
 import re
 import time
 from datetime import datetime
@@ -82,18 +83,20 @@ __all__ = [
 # 延迟导入 content_to_text（避免循环导入）
 _content_to_text_getter: Optional[Callable] = None
 
+
 def _get_content_to_text() -> Callable:
     """延迟获取 content_to_text 函数"""
     global _content_to_text_getter
     if _content_to_text_getter is None:
         from app.core import content_to_text
+
         _content_to_text_getter = content_to_text
     return _content_to_text_getter
 
 
 # ========== 性能优化：预编译正则表达式 ==========
-_CLASS_PATTERN = re.compile(r'class\s+(\w+)')
-_FUNC_PATTERN = re.compile(r'def\s+(\w+)|function\s+(\w+)')
+_CLASS_PATTERN = re.compile(r"class\s+(\w+)")
+_FUNC_PATTERN = re.compile(r"def\s+(\w+)|function\s+(\w+)")
 
 
 # ==================== 代码保存辅助 ====================
@@ -174,11 +177,11 @@ def extract_code_suggested_filename(code: str, ext: str) -> str:
 def get_default_save_filename(lang: str, code: str) -> str:
     """
     获取默认保存文件名
-    
+
     Args:
         lang: 语言名称
         code: 代码内容
-        
+
     Returns:
         默认文件名
     """
@@ -195,11 +198,11 @@ def get_default_save_filename(lang: str, code: str) -> str:
 def export_messages_to_markdown(messages: list, timestamp: str = None) -> str:
     """
     将消息列表导出为 Markdown 格式
-    
+
     Args:
         messages: 消息列表
         timestamp: 时间戳，默认为当前时间
-        
+
     Returns:
         Markdown 格式的对话内容
     """
@@ -208,7 +211,7 @@ def export_messages_to_markdown(messages: list, timestamp: str = None) -> str:
     from app.core import content_to_text
 
     if timestamp is None:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     lines = ["# 对话记录\n\n", f"导出时间: {timestamp}\n\n"]
 
@@ -260,6 +263,7 @@ CHAT_SCROLL_STYLE = """
     }
 """
 
+
 def _get_title_style():
     """获取标题样式（响应主题）"""
     Colors.refresh()
@@ -277,6 +281,7 @@ def _get_title_style():
         }}
     """
 
+
 def _get_model_btn_style():
     """获取模型按钮样式（响应主题）"""
     Colors.refresh()
@@ -292,10 +297,12 @@ def _get_model_btn_style():
         }}
     """
 
+
 def _get_model_btn_text_style():
     """获取模型按钮文字样式（响应主题）"""
     Colors.refresh()
     return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
+
 
 # 兼容旧引用
 TITLE_STYLE = _get_title_style()
@@ -314,14 +321,15 @@ _USER_MESSAGE_PATTERN = re.compile(
 
 # ==================== UI 辅助函数 ====================
 
+
 def setup_background_label(viewport: QLabel, parent: Optional[object] = None) -> QLabel:
     """
     创建背景图片标签
-    
+
     Args:
         viewport: 父控件的 viewport
         parent: 父对象
-        
+
     Returns:
         配置好的背景标签
     """
@@ -348,6 +356,7 @@ def is_widget_alive(widget: Optional[object]) -> bool:
         return False
     try:
         import sip
+
         return not sip.isdeleted(widget)
     except Exception:
         return True
@@ -356,7 +365,7 @@ def is_widget_alive(widget: Optional[object]) -> bool:
 def sanitize_user_message_for_display(content: str) -> str:
     """
     清理用户消息用于显示
-    
+
     移除消息开头的任务阶段标记。
     """
     if not isinstance(content, str):
@@ -372,7 +381,7 @@ def get_default_timestamp() -> str:
 def filter_alive_cards(cards: List[Any]) -> Tuple[List[Any], bool]:
     """
     过滤存活的卡片
-    
+
     Returns:
         (存活的卡片列表, 是否有卡片被移除)
     """
@@ -383,14 +392,11 @@ def filter_alive_cards(cards: List[Any]) -> Tuple[List[Any], bool]:
 
 # ==================== 卡片管理辅助 ====================
 
-def cleanup_stale_card_cache(
-    session_card_cache: dict,
-    all_session_ids: set,
-    max_size: int = 10
-) -> None:
+
+def cleanup_stale_card_cache(session_card_cache: dict, all_session_ids: set, max_size: int = 10) -> None:
     """
     清理过期的卡片缓存
-    
+
     Args:
         session_card_cache: 会话卡片缓存字典
         all_session_ids: 所有有效的会话 ID 集合
@@ -404,12 +410,12 @@ def cleanup_stale_card_cache(
         if cache_entry and isinstance(cache_entry, dict):
             cards = cache_entry.get("cards", [])
             for card in cards:
-                if hasattr(card, 'cleanup'):
+                if hasattr(card, "cleanup"):
                     try:
                         card.cleanup()
                     except Exception:
                         pass
-                if hasattr(card, 'deleteLater'):
+                if hasattr(card, "deleteLater"):
                     try:
                         card.deleteLater()
                     except Exception:
@@ -427,12 +433,12 @@ def cleanup_stale_card_cache(
             if cache_entry and isinstance(cache_entry, dict):
                 cards = cache_entry.get("cards", [])
                 for card in cards:
-                    if hasattr(card, 'cleanup'):
+                    if hasattr(card, "cleanup"):
                         try:
                             card.cleanup()
                         except Exception:
                             pass
-                    if hasattr(card, 'deleteLater'):
+                    if hasattr(card, "deleteLater"):
                         try:
                             card.deleteLater()
                         except Exception:
@@ -443,30 +449,31 @@ def cleanup_stale_card_cache(
 
 # ==================== Diff 辅助 ====================
 
+
 def normalize_lines(content: str) -> list:
     """
     规范化文本行，确保每行都有换行符
-    
+
     Args:
         content: 原始文本内容
-        
+
     Returns:
         行列表
     """
     lines = content.splitlines(keepends=True)
-    if lines and not lines[-1].endswith('\n'):
-        lines[-1] += '\n'
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
     return lines
 
 
 def truncate_text(text: str, max_length: int = 300) -> str:
     """
     截断过长的文本
-    
+
     Args:
         text: 原始文本
         max_length: 最大长度
-        
+
     Returns:
         截断后的文本
     """
@@ -478,12 +485,12 @@ def truncate_text(text: str, max_length: int = 300) -> str:
 def collect_tool_call_ids(messages: list, start_idx: int, end_idx: int) -> list:
     """
     收集指定范围内的 tool_call_id
-    
+
     Args:
         messages: 消息列表
         start_idx: 起始索引
         end_idx: 结束索引
-        
+
     Returns:
         tool_call_id 列表
     """
@@ -510,11 +517,11 @@ def collect_tool_call_ids(messages: list, start_idx: int, end_idx: int) -> list:
 def format_file_list(files: list, max_count: int = 5) -> str:
     """
     格式化文件列表用于显示
-    
+
     Args:
         files: 文件列表
         max_count: 最大显示数量
-        
+
     Returns:
         格式化后的字符串
     """
@@ -538,6 +545,7 @@ ACTION_COLORS = {
 }
 DEFAULT_ACTION_COLOR = "#888888"
 
+
 def get_action_color(action: str) -> str:
     """获取动作对应的颜色"""
     return ACTION_COLORS.get(action.lower(), DEFAULT_ACTION_COLOR)
@@ -545,20 +553,21 @@ def get_action_color(action: str) -> str:
 
 # ==================== Diff 辅助 ====================
 
+
 def read_backup_files(backup_path: str) -> tuple:
     """
     读取编辑前后的备份文件
-    
+
     Args:
         backup_path: 编辑前备份文件路径
-        
+
     Returns:
         (old_content, new_content, backup_file) 或抛出异常
     """
     from pathlib import Path
 
     backup_file = Path(backup_path)
-    after_backup_path = str(backup_file.with_suffix('.after.bak'))
+    after_backup_path = str(backup_file.with_suffix(".after.bak"))
 
     # 检查编辑后备份是否存在
     after_backup_file = Path(after_backup_path)
@@ -566,9 +575,9 @@ def read_backup_files(backup_path: str) -> tuple:
         raise FileNotFoundError("编辑后备份文件不存在")
 
     # 读取文件
-    with open(backup_path, 'r', encoding='utf-8', errors='replace') as f:
+    with open(backup_path, "r", encoding="utf-8", errors="replace") as f:
         old_content = f.read()
-    with open(after_backup_path, 'r', encoding='utf-8', errors='replace') as f:
+    with open(after_backup_path, "r", encoding="utf-8", errors="replace") as f:
         new_content = f.read()
 
     return old_content, new_content, backup_file
@@ -577,12 +586,12 @@ def read_backup_files(backup_path: str) -> tuple:
 def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     """
     生成 diff HTML 报告
-    
+
     Args:
         old_content: 原始内容
         new_content: 新内容
         backup_file: 文件路径对象
-        
+
     Returns:
         HTML 报告字符串
     """
@@ -593,25 +602,19 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
 
-    diff = difflib.unified_diff(
-        old_lines,
-        new_lines,
-        fromfile=backup_file.name,
-        tofile=backup_file.name,
-        lineterm='\n'
-    )
+    diff = difflib.unified_diff(old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n")
 
-    diff_output = ''.join(diff)
+    diff_output = "".join(diff)
     return DiffHtmlGenerator.generate_html_report(diff_output, "")
 
 
 def generate_multi_file_diff_html(operations: list) -> str:
     """
     为多个文件生成合并的 diff HTML 报告
-    
+
     Args:
         operations: 文件操作列表，每个元素包含 backup_path
-        
+
     Returns:
         HTML 报告字符串
     """
@@ -635,31 +638,28 @@ def generate_multi_file_diff_html(operations: list) -> str:
         new_lines = normalize_lines(new_content)
 
         diff = difflib.unified_diff(
-            old_lines,
-            new_lines,
-            fromfile=f"a/{backup_file.name}",
-            tofile=f"b/{backup_file.name}",
-            lineterm='\n'
+            old_lines, new_lines, fromfile=f"a/{backup_file.name}", tofile=f"b/{backup_file.name}", lineterm="\n"
         )
-        diff_output = ''.join(diff)
+        diff_output = "".join(diff)
         if diff_output:
             diff_parts.append(diff_output)
 
-    combined_diff = ''.join(diff_parts)
+    combined_diff = "".join(diff_parts)
     return DiffHtmlGenerator.generate_html_report(combined_diff, "")
 
 
 # ==================== Node Preview 辅助 ====================
 
+
 def build_node_preview_data(messages: list, content_getter: Optional[Callable] = None, max_len: int = 30) -> list:
     """
     从消息列表构建 node preview 数据
-    
+
     Args:
         messages: 消息列表
         content_getter: 获取消息内容的函数，默认为 content_to_text
         max_len: 最大内容长度
-        
+
     Returns:
         [(content, timestamp), ...] 列表
     """
@@ -693,6 +693,7 @@ def build_node_preview_data(messages: list, content_getter: Optional[Callable] =
 
 # ==================== 卡片删除辅助 ====================
 
+
 def find_widgets_to_remove_for_round(
     chat_layout,
     round_index: int,
@@ -700,12 +701,12 @@ def find_widgets_to_remove_for_round(
 ) -> list:
     """
     找出指定 round 需要删除的消息卡片
-    
+
     Args:
         chat_layout: 聊天布局
         round_index: 目标 round 索引
         user_card_count: 用户消息卡片总数
-        
+
     Returns:
         需要删除的卡片列表
     """
@@ -722,7 +723,7 @@ def find_widgets_to_remove_for_round(
             continue
         widget = item.widget()
 
-        if not hasattr(widget, 'role'):
+        if not hasattr(widget, "role"):
             continue
         if getattr(widget, "_is_welcome", False):
             continue
@@ -749,12 +750,12 @@ def find_widgets_to_remove_from_round(
 ) -> list:
     """
     找出从指定 round 到末尾的所有消息卡片（用于撤销操作）
-    
+
     Args:
         chat_layout: 聊天布局
         round_index: 起始 round 索引
         cards_to_remove_hint: 预期删除的卡片数量（来自 session 数据）
-        
+
     Returns:
         需要删除的卡片列表
     """
@@ -770,7 +771,7 @@ def find_widgets_to_remove_from_round(
             continue
         widget = item.widget()
 
-        if not hasattr(widget, 'role'):
+        if not hasattr(widget, "role"):
             continue
         if getattr(widget, "_is_welcome", False):
             continue
@@ -799,10 +800,10 @@ def find_widgets_to_remove_from_round(
 def deduplicate_operations(operations: list) -> list:
     """
     对文件操作列表去重
-    
+
     Args:
         operations: 文件操作列表
-        
+
     Returns:
         去重后的列表
     """
@@ -819,15 +820,14 @@ def deduplicate_operations(operations: list) -> list:
 def find_last_assistant_card(chat_layout) -> Any:
     """
     找到布局中最后一个 assistant 卡片
-    
+
     Args:
         chat_layout: 聊天布局
-        
+
     Returns:
         最后一个 assistant 卡片，或 None
     """
     # 延迟导入避免循环依赖
-
 
     for i in range(chat_layout.count() - 1, -1, -1):
         item = chat_layout.itemAt(i)
@@ -846,15 +846,14 @@ def find_last_assistant_card(chat_layout) -> Any:
 def count_user_cards_in_layout(chat_layout) -> int:
     """
     计算布局中的用户消息卡片数量（不包括欢迎卡片）
-    
+
     Args:
         chat_layout: 聊天布局
-        
+
     Returns:
         用户消息卡片数量
     """
     # 延迟导入避免循环依赖
-
 
     count = 0
     for i in range(chat_layout.count()):
@@ -873,16 +872,15 @@ def collect_message_cards_from_layout(
 ) -> list:
     """
     从布局中收集消息卡片
-    
+
     Args:
         chat_layout: 聊天布局
         filter_func: 可选的过滤函数，接受 (widget) 返回 True/False
-        
+
     Returns:
         卡片列表
     """
     # 延迟导入避免循环依赖
-
 
     cards = []
     for i in range(chat_layout.count()):
@@ -903,15 +901,14 @@ def collect_message_cards_from_layout(
 def collect_user_card_widgets(chat_layout) -> list:
     """
     收集布局中的用户消息卡片 widgets
-    
+
     Args:
         chat_layout: 聊天布局
-        
+
     Returns:
         用户卡片 widget 列表
     """
     # 延迟导入避免循环依赖
-
 
     widgets = []
     for i in range(chat_layout.count()):
@@ -927,12 +924,12 @@ def collect_user_card_widgets(chat_layout) -> list:
 def create_session_from_record(session_record: dict, messages: list, title: str = None) -> Any:
     """
     从历史记录创建 ChatSession
-    
+
     Args:
         session_record: 会话记录字典
         messages: 消息列表
         title: 会话标题
-        
+
     Returns:
         ChatSession 实例
     """
@@ -941,29 +938,27 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
     session_id = session_record.get("session_id")
     title = title or session_record.get("name") or "历史对话"
 
-    return ChatSession.from_dict({
-        "session_id": session_id,
-        "name": title,
-        "messages": messages,
-        "topic_summary": title,
-        "compaction_state": session_record.get("compaction_state", {}),
-        "compaction_cache": session_record.get("compaction_cache", {}),
-    })
+    return ChatSession.from_dict(
+        {
+            "session_id": session_id,
+            "name": title,
+            "messages": messages,
+            "topic_summary": title,
+            "compaction_state": session_record.get("compaction_state", {}),
+            "compaction_cache": session_record.get("compaction_cache", {}),
+        }
+    )
 
 
-def collect_operations_for_round(
-    file_recorder,
-    session_id: str,
-    call_ids: list
-) -> list:
+def collect_operations_for_round(file_recorder, session_id: str, call_ids: list) -> list:
     """
     收集指定 round 的所有文件操作
-    
+
     Args:
         file_recorder: 文件记录器
         session_id: 会话 ID
         call_ids: tool call ID 列表
-        
+
     Returns:
         操作列表（已去重）
     """
@@ -1013,26 +1008,30 @@ def compute_diff_stats(operations: list) -> dict:
 
             # 读取备份（编辑前）
             if backup_path and Path(backup_path).exists():
-                with open(backup_path, 'r', encoding='utf-8', errors='replace') as f:
+                with open(backup_path, "r", encoding="utf-8", errors="replace") as f:
                     old_content = f.read()
 
             # 读取当前文件（编辑后）
             resolved = Path(file_path)
             if resolved.exists():
-                with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+                with open(resolved, "r", encoding="utf-8", errors="replace") as f:
                     new_content = f.read()
 
             old_lines = old_content.splitlines(True) if old_content else []
             new_lines = new_content.splitlines(True) if new_content else []
 
-            diff = list(difflib.unified_diff(
-                old_lines, new_lines,
-                fromfile='a', tofile='b',
-                n=0,  # 不显示上下文
-            ))
+            diff = list(
+                difflib.unified_diff(
+                    old_lines,
+                    new_lines,
+                    fromfile="a",
+                    tofile="b",
+                    n=0,  # 不显示上下文
+                )
+            )
 
-            additions = sum(1 for line in diff if line.startswith('+') and not line.startswith('+++'))
-            deletions = sum(1 for line in diff if line.startswith('-') and not line.startswith('---'))
+            additions = sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
+            deletions = sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
 
             if additions > 0 or deletions > 0:
                 total_files += 1
@@ -1052,11 +1051,11 @@ def compute_diff_stats(operations: list) -> dict:
 def get_round_message_indices(session, round_index: int) -> tuple:
     """
     获取指定 round 的消息索引范围
-    
+
     Args:
         session: ChatSession 对象
         round_index: round 索引
-        
+
     Returns:
         (start_idx, end_idx) 或 (None, None)
     """
@@ -1074,11 +1073,11 @@ def get_round_message_indices(session, round_index: int) -> tuple:
 def create_new_session_state(old_session_manager=None, old_chat_engine=None) -> dict:
     """
     创建新会话所需的状态初始化
-    
+
     Args:
         old_session_manager: 旧的会话管理器
         old_chat_engine: 旧的聊天引擎
-        
+
     Returns:
         dict 包含 new_session, new_session_id
     """
@@ -1103,10 +1102,10 @@ def create_new_session_state(old_session_manager=None, old_chat_engine=None) -> 
 def is_session_empty(session) -> bool:
     """
     检查会话是否为空
-    
+
     Args:
         session: ChatSession 对象
-        
+
     Returns:
         是否为空
     """
@@ -1116,12 +1115,12 @@ def is_session_empty(session) -> bool:
 def truncate_messages_at_round(session, round_index: int, round_ranges: list) -> bool:
     """
     截断会话消息到指定 round 之前
-    
+
     Args:
         session: ChatSession 对象
         round_index: round 索引
         round_ranges: round 范围列表
-        
+
     Returns:
         是否成功
     """
@@ -1129,19 +1128,17 @@ def truncate_messages_at_round(session, round_index: int, round_ranges: list) ->
         return False
 
     cutoff_index = round_ranges[round_index][0]
-    session.set_messages(
-        session.messages[:cutoff_index], preserve_compaction=False
-    )
+    session.set_messages(session.messages[:cutoff_index], preserve_compaction=False)
     return True
 
 
 def get_session_compaction_info(session) -> dict:
     """
     获取会话的压缩信息
-    
+
     Args:
         session: ChatSession 对象
-        
+
     Returns:
         dict 包含 compaction_state 和 compaction_cache
     """
@@ -1209,43 +1206,26 @@ def save_or_archive_session(
     if current_session_id is not None:
         idx = history_manager.find_index_by_session_id(current_session_id)
         if idx is not None:
-            history_manager.update_session(
-                idx,
-                session.messages,
-                **save_kwargs
-            )
+            history_manager.update_session(idx, session.messages, **save_kwargs)
             return current_session_id
         else:
-            history_manager.save_session(
-                session.messages,
-                session_id=session.session_id,
-                **save_kwargs
-            )
+            history_manager.save_session(session.messages, session_id=session.session_id, **save_kwargs)
             return session.session_id
     else:
-        history_manager.save_session(
-            session.messages,
-            session_id=session.session_id,
-            **save_kwargs
-        )
+        history_manager.save_session(session.messages, session_id=session.session_id, **save_kwargs)
         return session.session_id
 
 
-def truncate_and_remove_round(
-    session,
-    round_index,
-    round_ranges,
-    remove_cards_func=None
-) -> tuple:
+def truncate_and_remove_round(session, round_index, round_ranges, remove_cards_func=None) -> tuple:
     """
     截断并删除指定 round 的消息
-    
+
     Args:
         session: ChatSession 对象
         round_index: round 索引
         round_ranges: round 范围列表（基于规范消息的索引）
         remove_cards_func: 删除卡片的函数
-        
+
     Returns:
         (success, old_count, new_count)
     """
@@ -1268,20 +1248,18 @@ def truncate_and_remove_round(
 def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     """
     显示差异查看器
-    
+
     Args:
         parent: 父控件
         html: HTML 内容
         title: 窗口标题
-        
+
     Returns:
         DiffViewerWindow 实例
     """
     from app.utils.diff_viewer import DiffViewerWindow
 
-    logger.debug(
-        f"[DiffViewer] show_diff_viewer title={title}, html_len={len(html or '')}"
-    )
+    logger.debug(f"[DiffViewer] show_diff_viewer title={title}, html_len={len(html or '')}")
     viewer = DiffViewerWindow(parent=parent, title=title)
     viewer.load_html(html)
     viewer.show()
@@ -1290,8 +1268,7 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
 
 # 预编译 hook 内容格式正则（与 message_content.py 中的 _is_hook_message 保持一致）
 _HOOK_CONTENT_PATTERN = re.compile(
-    r'<system-reminder>\s*<[a-z0-9-]+-hook>.*?</[a-z0-9-]+-hook>\s*</system-reminder>',
-    re.DOTALL
+    r"<system-reminder>\s*<[a-z0-9-]+-hook>.*?</[a-z0-9-]+-hook>\s*</system-reminder>", re.DOTALL
 )
 
 
@@ -1312,7 +1289,7 @@ def _is_hook_message_ui(msg: dict) -> bool:
 def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
     """
     将消息批次渲染到 assistant 卡片
-    
+
     Args:
         assistant_card: Assistant 卡片
         batch: 消息批次列表
@@ -1350,10 +1327,11 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
 
 _scroll_last_time = [0.0]  # 使用 list 实现可变闭包
 
+
 def scroll_to_bottom_if_streaming(scroll_area, is_streaming: bool) -> None:
     """
     如果正在流式输出则滚动到底部（带时间防抖，最高 20fps）
-    
+
     Args:
         scroll_area: 滚动区域
         is_streaming: 是否正在流式输出
@@ -1369,7 +1347,7 @@ def scroll_to_bottom_if_streaming(scroll_area, is_streaming: bool) -> None:
 def log_deletion_stats(round_index: int, ui_deleted: bool, old_count: int, new_count: int) -> None:
     """
     记录删除操作的统计信息
-    
+
     Args:
         round_index: round 索引
         ui_deleted: UI 删除是否成功
@@ -1377,6 +1355,7 @@ def log_deletion_stats(round_index: int, ui_deleted: bool, old_count: int, new_c
         new_count: 新的消息数量
     """
     from loguru import logger
+
     logger.info(f"[DELETE] Starting deletion: round_index={round_index}")
     logger.info(f"[DELETE] UI cards deleted: {ui_deleted}")
     logger.info(f"[DELETE] Session messages updated: {old_count} -> {new_count}")
@@ -1385,7 +1364,7 @@ def log_deletion_stats(round_index: int, ui_deleted: bool, old_count: int, new_c
 def setup_user_card_signals(card, delete_callback, undo_callback, action_callback) -> None:
     """
     设置用户消息卡片的信号连接
-    
+
     Args:
         card: 消息卡片
         delete_callback: 删除回调
@@ -1400,7 +1379,7 @@ def setup_user_card_signals(card, delete_callback, undo_callback, action_callbac
 def restore_input_from_card(input_area, card) -> None:
     """
     从卡片恢复输入框内容
-    
+
     Args:
         input_area: 输入区域控件
         card: 消息卡片
@@ -1417,11 +1396,11 @@ def restore_input_from_card(input_area, card) -> None:
 def find_user_card_at_index(chat_layout, target_index: int) -> Any:
     """
     找到指定索引的 user 卡片
-    
+
     Args:
         chat_layout: 聊天布局
         target_index: 目标索引
-        
+
     Returns:
         找到的卡片或 None
     """
@@ -1444,18 +1423,18 @@ def find_user_card_at_index(chat_layout, target_index: int) -> Any:
 def find_user_round_index(session, user_text: str, timestamp: str) -> int:
     """
     从 session 中找到 user 消息对应的 round_index。
-    
+
     通过在 session.messages 中定位 user 消息，然后计算它是第几个 user。
-    
+
     Args:
         session: ChatSession 对象
         user_text: 用户消息的纯文本内容
         timestamp: 用户消息的时间戳
-        
+
     Returns:
         round_index (0-based)，如果找不到返回 -1
     """
-    if not session or not hasattr(session, 'messages'):
+    if not session or not hasattr(session, "messages"):
         return -1
 
     round_index = 0
@@ -1482,16 +1461,11 @@ def find_user_round_index(session, user_text: str, timestamp: str) -> int:
 
 
 def clear_and_show_welcome(
-    session,
-    session_card_cache,
-    clear_chat_func,
-    clear_preview_func,
-    get_welcome_func,
-    add_widget_func
+    session, session_card_cache, clear_chat_func, clear_preview_func, get_welcome_func, add_widget_func
 ) -> None:
     """
     清空聊天并显示欢迎卡片
-    
+
     Args:
         session: 当前会话
         session_card_cache: 会话卡片缓存
@@ -1511,15 +1485,11 @@ def clear_and_show_welcome(
 
 
 def init_new_session_after_archive(
-    self_widget,
-    new_state,
-    backend=None,
-    clear_chat_func=None,
-    show_welcome_func=None
+    self_widget, new_state, backend=None, clear_chat_func=None, show_welcome_func=None
 ) -> None:
     """
     归档后初始化新会话
-    
+
     Args:
         self_widget: 自身 widget（用于访问 session_manager 等）
         new_state: create_new_session_state 返回的状态
@@ -1532,6 +1502,9 @@ def init_new_session_after_archive(
 
     if backend:
         backend.set_session_context(self_widget._current_session_id)
+        # 🛡️ 同步后端 SessionManager 引用，确保 backend.create_session()
+        # 使用正确的 SessionManager，而非归档前已废弃的旧实例。
+        backend._session_manager = new_state["session_manager"]
 
     if clear_chat_func:
         clear_chat_func()
@@ -1540,16 +1513,10 @@ def init_new_session_after_archive(
     self_widget.title_edit.setText("新对话")
 
 
-def init_after_loading_session(
-    self_widget,
-    session,
-    session_id,
-    title=None,
-    backend=None
-) -> None:
+def init_after_loading_session(self_widget, session, session_id, title=None, backend=None) -> None:
     """
     加载会话后初始化
-    
+
     Args:
         self_widget: 自身 widget
         session: 加载的会话
@@ -1566,15 +1533,10 @@ def init_after_loading_session(
         backend.set_session_context(session_id)
 
 
-def post_append_user_message(
-    self_widget,
-    user_round_index,
-    update_preview_func=None,
-    sync_preview_func=None
-) -> None:
+def post_append_user_message(self_widget, user_round_index, update_preview_func=None, sync_preview_func=None) -> None:
     """
     添加用户消息后的后处理
-    
+
     Args:
         self_widget: 自身 widget
         user_round_index: 用户消息 round 索引（0-based）
@@ -1586,19 +1548,15 @@ def post_append_user_message(
         update_preview_func()
 
 
-def build_node_preview_from_session(
-    session,
-    content_to_text_func,
-    max_len: int = 30
-) -> list:
+def build_node_preview_from_session(session, content_to_text_func, max_len: int = 30) -> list:
     """
     从会话构建节点预览数据
-    
+
     Args:
         session: ChatSession 对象
         content_to_text_func: 内容转文本函数
         max_len: 最大长度
-        
+
     Returns:
         节点预览数据列表
     """
@@ -1611,10 +1569,10 @@ def build_node_preview_from_session(
 def get_first_file_operation(operations: list) -> tuple:
     """
     获取第一个文件操作
-    
+
     Args:
         operations: 操作列表
-        
+
     Returns:
         (success, backup_path, operation)
     """
@@ -1633,7 +1591,7 @@ def get_first_file_operation(operations: list) -> tuple:
 def invalidate_session_card_cache(session, session_card_cache) -> None:
     """
     使会话卡片缓存失效
-    
+
     Args:
         session: ChatSession 对象
         session_card_cache: 会话卡片缓存字典
@@ -1643,14 +1601,11 @@ def invalidate_session_card_cache(session, session_card_cache) -> None:
 
 
 def refresh_session_view(
-    self_widget,
-    invalidate_cache_func=None,
-    display_session_func=None,
-    refresh_context_func=None
+    self_widget, invalidate_cache_func=None, display_session_func=None, refresh_context_func=None
 ) -> None:
     """
     刷新会话视图
-    
+
     Args:
         self_widget: 自身 widget
         invalidate_cache_func: 使缓存失效的函数
@@ -1669,7 +1624,7 @@ def refresh_session_view(
 def refresh_history_card_if_visible(history_card, refresh_func=None) -> None:
     """
     如果历史卡片可见则刷新
-    
+
     Args:
         history_card: 历史卡片控件
         refresh_func: 刷新函数
@@ -1681,13 +1636,13 @@ def refresh_history_card_if_visible(history_card, refresh_func=None) -> None:
 def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanup: bool = True) -> int:
     """
     从布局中删除指定的 widgets
-    
+
     Args:
         widgets_to_remove: 要删除的 widget 列表
         chat_layout: 聊天布局
         call_cleanup: 是否在删除前调用 cleanup 方法（默认 True，
                       但在需要保留卡片数据用于恢复的场景下设为 False）
-        
+
     Returns:
         删除的数量
     """
@@ -1698,7 +1653,7 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
             continue
 
         # 调用清理方法（如果有的话）
-        if call_cleanup and hasattr(widget, 'cleanup'):
+        if call_cleanup and hasattr(widget, "cleanup"):
             try:
                 widget.cleanup()
             except Exception as e:
@@ -1726,12 +1681,12 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
 def find_last_tool_call_id_after_round(messages: list, round_ranges: list, round_index: int) -> Optional[str]:
     """
     查找指定 round 之后最后一个 tool_call_id
-    
+
     Args:
         messages: 消息列表
         round_ranges: round 范围列表
         round_index: 目标 round 索引
-        
+
     Returns:
         最后一个 tool_call_id 或 None
     """
@@ -1790,8 +1745,9 @@ def create_assistant_card_widget(
     Returns:
         配置好的 MessageCard
     """
-    card = MessageCard(parent=parent, role="assistant", timestamp=timestamp,
-                       model_name=model_name, provider_name=provider_name)
+    card = MessageCard(
+        parent=parent, role="assistant", timestamp=timestamp, model_name=model_name, provider_name=provider_name
+    )
     card._round_index = round_index
     if immediate_render:
         # 流式输出需要立即渲染，否则内容无处写入
@@ -1819,19 +1775,16 @@ def create_assistant_card_widget(
 
 # ==================== 滚动位置辅助 ====================
 
-def calculate_scroll_progress(
-    visible_top: float,
-    viewport_height: float,
-    widget_tops: list
-) -> tuple:
+
+def calculate_scroll_progress(visible_top: float, viewport_height: float, widget_tops: list) -> tuple:
     """
     计算滚动进度和可见索引
-    
+
     Args:
         visible_top: 滚动条当前值（可见区域顶部）
         viewport_height: 视口高度
         widget_tops: 用户消息卡片顶部位置列表
-        
+
     Returns:
         (progress, visible_index)
     """
@@ -1860,7 +1813,7 @@ def calculate_scroll_progress(
 def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:
     """
     添加消息卡片到布局
-    
+
     Args:
         widget: 要添加的 widget
         chat_layout: 聊天布局
@@ -1869,7 +1822,7 @@ def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:
     if is_alive_func and not is_alive_func(widget):
         return
     widget.show()
-    if hasattr(widget, 'role'):
+    if hasattr(widget, "role"):
         if widget.role == "user":
             chat_layout.addWidget(widget, 0, Qt.AlignRight)
         else:
@@ -1880,12 +1833,14 @@ def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:
 
 # ==================== 标题编辑控件 ====================
 
+
 class TitleEditWidget(QWidget):
     """标题编辑控件：显示时用 QLabel（自动省略），点击切换到 QLineEdit 行内编辑
-    
+
     对外暴露 text() / setText() / setStyleSheet() 等兼容 QLineEdit 的 API，
     使得 main_widget.py 中 self.title_edit 的引用几乎无需修改。
     """
+
     returnPressed = pyqtSignal()
     editingFinished = pyqtSignal()
 
@@ -1894,7 +1849,7 @@ class TitleEditWidget(QWidget):
         self._full_text = text
         self._editing = False
         self._label_style_cache = ""  # 存 QSS 中 QLabel 部分
-        self._edit_style_cache = ""   # 存 QSS 中 QLineEdit 部分
+        self._edit_style_cache = ""  # 存 QSS 中 QLineEdit 部分
 
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -1962,7 +1917,7 @@ class TitleEditWidget(QWidget):
             if idx >= 0:
                 end = style_sheet.find("}", idx)
                 if end >= 0:
-                    label_part = style_sheet[idx:end+1]
+                    label_part = style_sheet[idx : end + 1]
             # 其余部分给 QLineEdit
             rest = style_sheet.replace(label_part, "")
             if "QLineEdit" in rest or style_sheet:

@@ -68,6 +68,7 @@ def _check_team_member(backend) -> bool:
         if not wid:
             return False
         from app.core.team_manager import TeamManager
+
         return TeamManager.get_instance().is_team_member(wid)
     except Exception:
         return False
@@ -191,6 +192,8 @@ class OpenAIChatWorker(QThread):
         #           Stop 触发后应立即放行（不再 block），避免无限循环
         # 详见 docs/stop_hook_block.md 设计说明
         self._stop_hook_active: bool = False
+        # Stop hook 续命时保存上轮的完整响应文本，避免续命后第二轮覆盖丢失
+        self._prev_stophook_response: Optional[str] = None
 
     def _get_persister(self) -> Optional["ToolResultPersister"]:
         """
@@ -599,6 +602,27 @@ class OpenAIChatWorker(QThread):
                 current_message=current_message_text,
                 trigger_async=False,
             )
+
+            # 🛡️ 排出 _hook_message_queue：同步执行路径中 _execute_hook 也会调用
+            # on_hook_finished 回调将输出入队，但同步返回值已由下方 results 循环直接
+            # 注入消息列表。若不排出，_inject_pending_hook_messages 会在下一轮循环顶部
+            # 从队列取出再注入一次，导致重复（尤其是 PROMPT 类型 hook）。
+            # 注意：PostToolUse 等事件由 tool_executor 的同步路径触发并通过队列传递，
+            # 不经过 _trigger_worker_hook，不受此排出影响。
+            _q = getattr(backend, "_hook_message_queue", None)
+            if _q is not None:
+                _drained = 0
+                while True:
+                    try:
+                        _q.get_nowait()
+                        _drained += 1
+                    except Exception:
+                        break
+                if _drained:
+                    logger.debug(
+                        f"[HookManager] Drained {_drained} msg(s) from hook queue"
+                        f" after sync trigger_event({event_name})"
+                    )
 
             # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
             block_reason: Optional[str] = None
@@ -1329,6 +1353,7 @@ class OpenAIChatWorker(QThread):
             self._current_session_messages = list(current_session_messages)
             self._emit_compaction_status(self._last_compaction_state)
             self.full_response = ""
+            self._prev_stophook_response = None
             self._reasoning_content = ""
             # 开始新对话时，清理所有中间状态
             self._clear_pending_response_state()
@@ -1446,6 +1471,15 @@ class OpenAIChatWorker(QThread):
                     self._append_to_api_cache(response_sequence)
                     # 性能优化：在发送前才合成完整响应字符串
                     self.full_response = "".join(self._response_chunks)
+                    # 🔧 Stop hook 续命恢复：prepend 上次保存的响应文本
+                    # 当 Stop hook 注入消息导致续命时（_stop_hook_active=True），
+                    # _prev_stophook_response 保存了上一轮（续命前）的完整响应文本。
+                    # 在此 prepend 到本轮新生成的响应之前，避免内容丢失。
+                    if self._stop_hook_active:
+                        prev_resp = getattr(self, "_prev_stophook_response", None)
+                        if prev_resp:
+                            self.full_response = prev_resp + self.full_response
+                            self._prev_stophook_response = None
 
                     # ====== PostAssistantMessage hook：assistant 响应后触发 ======
                     self._trigger_worker_hook(
@@ -1495,6 +1529,10 @@ class OpenAIChatWorker(QThread):
                             logger.info(
                                 f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
                             )
+                            # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
+                            # _clear_pending_response_state 会清空 _response_chunks，
+                            # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
+                            self._prev_stophook_response = self.full_response
                             # 3. 清理 pending state 后回到 while 顶部重跑 API
                             self._clear_pending_response_state()
                             continue  # 跳回 while 顶部，再来一轮

@@ -647,6 +647,22 @@ class SubAgentExecutor(QThread):
                 trigger_async=False,
             )
 
+            # 🛡️ 排出同步执行中 _execute_hook 通过 on_hook_finished 入队的消息，
+            # 避免 _inject_pending_hook_messages（_drain_hook_queues）重复注入。
+            _q = getattr(backend, "_hook_message_queue", None)
+            if _q is not None:
+                _drained = 0
+                while True:
+                    try:
+                        _q.get_nowait()
+                        _drained += 1
+                    except Exception:
+                        break
+                if _drained:
+                    logger.debug(
+                        f"[SubAgent] Drained {_drained} msg(s) from hook queue after sync trigger_event({event_name})"
+                    )
+
             # 收集成功执行的 hook 输出，注入 messages
             # ★ 只注入标记为 add_to_context=true 的 hook 结果
             from app.core.backend import _make_hook_message

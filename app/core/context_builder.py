@@ -162,9 +162,11 @@ class ContextBudgetAllocator:
         session.set_compaction_state(compaction_state)
         session.set_compaction_cache(compaction_cache)
 
-        # 过滤旧 system 消息（保留 _hook_event 标记的系统消息，它们是由 hook 注入的动态上下文）
+        # 过滤旧 system 消息（保留 _hook_event 标记的系统消息，它们是由 hook 注入的动态上下文；
+        # 同时保留 _compaction_summary 标记的压缩摘要，它是合法上下文，不应被当作"旧 system 消息"丢弃，
+        # 否则压缩后的历史摘要会整体丢失，见 history_compactor.py issue #225 修复）
         filtered_history = [m for m in history_for_api
-                           if m.get("role") != "system" or m.get("_hook_event")]
+                           if m.get("role") != "system" or m.get("_hook_event") or m.get("_compaction_summary")]
         messages.extend(filtered_history)
 
         # 添加用户消息

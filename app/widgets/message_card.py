@@ -2686,6 +2686,8 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {code_font_size}px;
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
+                    max-height: 500px;
+                    overflow-y: auto;
                     transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
@@ -5450,6 +5452,11 @@ class MessageCard(SimpleCardWidget):
         if self._streaming:
             return
         self._streaming = True
+        # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
+        # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
+        # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
+        if self.viewer and hasattr(self.viewer, "_streaming") and not self.viewer._streaming:
+            self.viewer._streaming = True
         self._pulse_phase = 0.0
         try:
             self._anim_timer.start(50)  # 80→50ms，帧率从12.5fps提升到20fps
@@ -5993,7 +6000,7 @@ class MessageCard(SimpleCardWidget):
         elif self.role == "user":
             horizontal_margin = 180
         else:
-            horizontal_margin = 40
+            horizontal_margin = 20
 
         target_width = max(320, parent_width - horizontal_margin)
 
@@ -6215,18 +6222,18 @@ class MessageCard(SimpleCardWidget):
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
             return
+        # 🐛 就近恢复 viewer 流式模式：finish_streaming 后 viewer._streaming=False，
+        # 但工具结果可能在新一轮流式开始后才到达。先恢复再更新 callback，
+        # 与 start_streaming_anim 中的恢复形成双重保险。
+        if self.viewer and not self.viewer._streaming:
+            self.viewer._streaming = True
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
-            # 修复时序问题：工具结果块注入前先强制渲染 pending 文本，
-            # 避免工具结果块先于前置文本出现在 DOM 中
-            # 🐛 修复工具块"粘底"bug：原条件 `and self.viewer._lazy_markdown_cb` 在
-            # callback 已被前一次 _perform_update 消费后被跳过，导致 _markdown_text
-            # 永远不包含工具结果块，下一次全量渲染不会把工具块放在正确位置。
-            # 改为无条件重置 callback，确保后续 _perform_update 能拿到最新 markdown。
-            if self.viewer._streaming:
-                self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
-                self.viewer._schedule_render(immediate=True)
+            # 🐛 修复"工具结果冒出又消失"：去掉旧的条件判断，始终更新 callback，
+            # 确保 _perform_update 能拿到含最新工具结果的 markdown，不被旧 DOM 覆盖。
+            self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            self.viewer._schedule_render(immediate=True)
 
             block_html = render_tool_block(
                 tool_name=tool_name,
@@ -6426,18 +6433,32 @@ class MessageCard(SimpleCardWidget):
         # 流式文本已由 _append_text_incremental 增量推送，不需要全量渲染。
         self._content_just_loaded = True
 
-        # [PERF-opt] 状态切换（完成或 text_only）时：取消待处理的全量渲染定时器，
-        # 防止其覆盖增量 JS 更新造成"闪灭→再现"闪烁。增量更新已足够，不需要全量 re-render。
-        if (completed or preview is None) and hasattr(self, "viewer") and self.viewer:
+        # 构建预览文本（含 char_count），用于后续内容比较和 JS 注入
+        _text_only = preview is None
+        preview_content = escape(preview) if preview else "准备中..."
+        if not completed and char_count > 0:
+            preview_content += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+
+        # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
+        _cache_key = (tool_call_id, completed)
+        _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
+        if _last.get(_cache_key) == preview_content:
+            return
+        if not hasattr(self, "_tool_streaming_preview_cache"):
+            self._tool_streaming_preview_cache = {}
+        self._tool_streaming_preview_cache[_cache_key] = preview_content
+
+        # ── 停掉全量渲染定时器：流式更新期间不跑全量重渲染 ──
+        # 同时重调度一个"静默后渲染"兜底，确保流式结束后最终状态同步
+        if hasattr(self, "viewer") and self.viewer:
             if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
                 self.viewer._render_timer.stop()
-
+            # 非完成态时重调度一次兜底渲染（500ms 后，流式更新会持续重置）
+            if not completed:
+                self.viewer._schedule_render(immediate=False)
+            else:
+                self.viewer._schedule_render(immediate=True)
         try:
-            _text_only = preview is None
-            preview_content = escape(preview) if preview else "准备中..."
-            # 字符数进度合并到 preview 文本中，确保 JS 更新 innerHTML 时一起刷新
-            if not completed and char_count > 0:
-                preview_content += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
             block_html = _render_tool_streaming_block(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -6628,16 +6649,16 @@ class MessageCard(SimpleCardWidget):
                 try:
                     natural = _format_natural_preview(tool_name, display)
                     if natural:
-                        # 流式/运行中状态：附加"中"后缀表示进行中
+                        # 有实参时：显示自然语言描述 + "中"，不需要字符数进度
                         preview = natural + "中"
-                        char_count = len(preview)
+                        char_count = 0
                     else:
                         args_str = json.dumps(display).decode("utf-8")
                         if len(args_str) > 100:
                             preview = args_str[:100] + "..."
                         else:
                             preview = args_str
-                        char_count = len(args_str)
+                        char_count = 0
                 except Exception:
                     preview = "..."
             else:
