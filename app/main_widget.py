@@ -6688,6 +6688,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._clear_chat_area()
         self.title_edit.setText("新对话")
         self.node_preview.clear_nodes()
+        # 新会话无用户消息，徽章应隐藏（clear_nodes 绕过了 _update_node_preview）
+        self._update_history_questions_badge()
         if self._todo_floating_widget:
             self._todo_floating_widget.clear()
         self.backend.clear_todo_list()
@@ -10635,6 +10637,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 user_msg_count = sum(1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event"))
                 if user_msg_count == 1:
                     self._maybe_generate_topic_summary()
+            # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
+            self._update_history_questions_badge()
 
         QTimer.singleShot(0, _do_deferred_send)
 
