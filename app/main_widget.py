@@ -110,8 +110,8 @@ from app.widgets.cards.floating.sub_agent_compact_widget import (
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
-from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCard
-from app.widgets.cards.floating.share_card import ShareCard
+from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
+from app.widgets.cards.floating.share_card import ShareCardContent
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
@@ -1810,16 +1810,25 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("history", self._history_card)
 
-        # 分享卡片
-        self._share_card = ShareCard(self)
+        # 分享卡片（BaseSettingsCard 包裹，按内容自适应高度）
+        self._share_card_content = ShareCardContent(self)
+        self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
+        self._share_card.content_layout.addWidget(self._share_card_content)
+        self._share_card.set_height_mode("content")
         self._share_card.setVisible(False)
         self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
         self._top_card_container.add_card("share", self._share_card)
 
-        # 历史问题卡片
-        self._history_questions_card = HistoryQuestionsCard(self)
+        # 历史问题卡片（BaseSettingsCard 包裹，按内容自适应高度）
+        self._history_questions_card_content = HistoryQuestionsCardContent(self)
+        self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
+        self._history_questions_card_content.questionClicked.connect(
+            lambda: self._card_manager.hide_card("history_questions", self._window_id)
+        )
+        self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
+        self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
+        self._history_questions_card.set_height_mode("content")
         self._history_questions_card.setVisible(False)
-        self._history_questions_card.questionClicked.connect(self._on_history_question_clicked)
         self._history_questions_card.closed.connect(
             lambda: self._card_manager.hide_card("history_questions", self._window_id)
         )
@@ -6297,8 +6306,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget,
             self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
-            self._share_card,
-            self._history_questions_card,
+            self._share_card_content,
+            self._history_questions_card_content,
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
@@ -8754,7 +8763,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 注入消息数据后显示
-        self._share_card.set_messages(messages, session.name or "")
+        self._share_card_content.set_messages(messages, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
 
     def _toggle_history_questions_popup(self):
@@ -8784,7 +8793,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     text = text[:60] + "…"
                 questions.append((len(questions), text))
 
-        self._history_questions_card.set_questions(questions)
+        self._history_questions_card_content.set_questions(questions)
         self._card_manager.toggle_card("history_questions", self._window_id)
 
     def _on_history_question_clicked(self, index: int):

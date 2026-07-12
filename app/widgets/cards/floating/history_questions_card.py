@@ -1,31 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-历史问题卡片
+历史问题卡片内容组件
 
 展示当前会话中所有用户提问，点击可快速跳转到对应位置。
-以卡片形式嵌入 TopCardContainer，与分享卡片一致。
+通过 BaseSettingsCard 包裹后嵌入 TopCardContainer。
 """
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, TransparentToolButton
-
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_unified_font
 
-_MAX_VISIBLE_ITEMS = 8
 _ITEM_MIN_H = 46
 _ITEM_SPACING = 6
-_SCROLL_PAD = 6
 
 
 class _QuestionItem(QWidget):
@@ -73,13 +66,12 @@ class _QuestionItem(QWidget):
         Colors.refresh()
         bg = Colors.HOVER_BG_STRONG if self._hovered else "transparent"
         dot_bg = Colors.TEXT_ACCENT if self._hovered else "rgba(255, 255, 255, 0.10)"
-        dot_text = "#ffffff"
         text_color = Colors.TEXT_PRIMARY
         arrow_color = Colors.TEXT_ACCENT
 
         self.setStyleSheet(f"background: {bg}; border-radius: 8px;")
         self._dot.setStyleSheet(
-            f"background: {dot_bg}; color: {dot_text}; border-radius: 11px;{get_font_family_css()} {font_size_css(11)}"
+            f"background: {dot_bg}; color: #ffffff; border-radius: 11px;{get_font_family_css()} {font_size_css(11)}"
         )
         self._label.setStyleSheet(
             f"color: {text_color}; background: transparent;{get_font_family_css()} {font_size_css(13)}"
@@ -106,11 +98,10 @@ class _QuestionItem(QWidget):
         super().mousePressEvent(event)
 
 
-class HistoryQuestionsCard(QFrame):
-    """历史问题卡片：展示当前会话所有用户提问，点击跳转"""
+class HistoryQuestionsCardContent(QWidget):
+    """历史问题卡片的内容（问题条目列表），由 BaseSettingsCard 包裹"""
 
     questionClicked = pyqtSignal(int)
-    closed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,105 +109,35 @@ class HistoryQuestionsCard(QFrame):
         self._items = []
         self._setup_ui()
 
+    def sizeHint(self):
+        """显式返回高度，确保 BaseSettingsCard 的 content 模式正确展开"""
+        from PyQt5.QtCore import QSize
+        if not self._items:
+            return super().sizeHint()
+        count = len(self._items)
+        h = count * _ITEM_MIN_H + (count - 1) * _ITEM_SPACING
+        margins = self.layout().contentsMargins()
+        h += margins.top() + margins.bottom()
+        return QSize(max(300, super().sizeHint().width()), h)
+
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self._apply_card_style()
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 8, 10, 10)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(_ITEM_SPACING)
 
-        # ── 标题栏 ──
-        header = QHBoxLayout()
-        header.setSpacing(6)
-
-        title_icon = QLabel("💬")
-        title_icon.setFont(get_unified_font(13))
-
-        title = QLabel("历史问题")
-        title.setFont(get_unified_font(11, bold=True))
-        Colors.refresh()
-        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent;")
-
-        self._count_label = QLabel("")
-        self._count_label.setFont(get_unified_font(10))
-        self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent;")
-
-        header.addWidget(title_icon)
-        header.addWidget(title)
-        header.addSpacing(4)
-        header.addWidget(self._count_label)
-        header.addStretch()
-
-        self.close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
-        self.close_btn.setFixedSize(22, 22)
-        self.close_btn.clicked.connect(lambda: self.closed.emit())
-        header.addWidget(self.close_btn)
-
-        main_layout.addLayout(header)
-
-        # ── 分隔线 ──
-        sep = QFrame(self)
-        sep.setFrameShape(QFrame.HLine)
-        sep.setFixedHeight(1)
-        Colors.refresh()
-        sep.setStyleSheet(f"color: {Colors.DIVIDER_COLOR}; background: {Colors.DIVIDER_COLOR}; border: none;")
-        main_layout.addWidget(sep)
-
-        # ── 滚动区域 ──
-        self.scroll_area = QScrollArea(self)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setFrameShape(QScrollArea.NoFrame)
-        self._apply_scroll_style()
-
-        self.scroll_content = QWidget()
-        self.scroll_content.setStyleSheet("background: transparent;")
-        self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(0, 2, 0, 4)
-        self.scroll_layout.setSpacing(_ITEM_SPACING)
-        self.scroll_area.setWidget(self.scroll_content)
-
-        main_layout.addWidget(self.scroll_area, 1)
-
-        # 空状态
+        # 空状态（默认显示）
         self._empty_label = QLabel("当前会话暂无历史问题", self)
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setFont(get_unified_font(11))
-        self._empty_label.setStyleSheet(f"color: {Colors.INPUT_PLACEHOLDER}; background: transparent; padding: 20px;")
+        Colors.refresh()
+        self._empty_label.setStyleSheet(f"color: {Colors.INPUT_PLACEHOLDER}; background: transparent; padding: 24px;")
         main_layout.addWidget(self._empty_label)
 
-    def _apply_card_style(self):
-        Colors.refresh()
-        self.setStyleSheet(
-            f"""
-            HistoryQuestionsCard {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-radius: 10px;
-            }}
-            """
-        )
-
-    def _apply_scroll_style(self):
-        self.scroll_area.setStyleSheet(
-            f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollArea > QWidget#qt_scrollarea_viewport {{
-                background: transparent;
-            }}
-            {get_unified_scrollbar_style(8)}
-            """
-        )
-
     def refresh_style(self):
-        """响应主题切换"""
-        self._apply_card_style()
-        self._apply_scroll_style()
+        Colors.refresh()
+        self._empty_label.setStyleSheet(f"color: {Colors.INPUT_PLACEHOLDER}; background: transparent; padding: 24px;")
         for item in self._items:
             item._apply_style()
 
@@ -230,42 +151,30 @@ class HistoryQuestionsCard(QFrame):
         self._rebuild_items()
 
     def _rebuild_items(self):
-        """重建条目，滚动区自适应高度"""
+        # 清除旧条目
         for item in self._items:
-            self.scroll_layout.removeWidget(item)
+            self.layout().removeWidget(item)
             item.deleteLater()
         self._items.clear()
 
         has_data = len(self._questions) > 0
         self._empty_label.setVisible(not has_data)
-        self.scroll_area.setVisible(has_data)
-        self._count_label.setVisible(has_data)
-        if has_data:
-            self._count_label.setText(f"共 {len(self._questions)} 条")
 
         if not has_data:
-            self.scroll_area.setMaximumHeight(0)
             return
 
-        display_questions = self._questions
-        if len(display_questions) > 50:
-            display_questions = display_questions[-50:]
+        display = self._questions
+        if len(display) > 50:
+            display = display[-50:]
 
-        for idx, text in display_questions:
+        for idx, text in display:
             item = _QuestionItem(idx, text, self)
             item.clicked.connect(self._on_item_clicked)
             self._items.append(item)
-            self.scroll_layout.addWidget(item)
+            self.layout().addWidget(item)
 
-        # 自适应滚动区高度：最多 _MAX_VISIBLE_ITEMS 条
-        item_count = len(display_questions)
-        if item_count <= _MAX_VISIBLE_ITEMS:
-            self.scroll_area.setMaximumHeight(16777215)
-        else:
-            max_content = _MAX_VISIBLE_ITEMS * _ITEM_MIN_H + (_MAX_VISIBLE_ITEMS - 1) * _ITEM_SPACING + _SCROLL_PAD
-            self.scroll_area.setMaximumHeight(max_content)
+        self.layout().addStretch()
 
     def _on_item_clicked(self, index: int):
-        """条目被点击，发出信号并关闭卡片"""
+        """条目被点击，发出信号"""
         self.questionClicked.emit(index)
-        self.closed.emit()
