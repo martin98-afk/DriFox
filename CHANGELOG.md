@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - **Hook prompt 提示词清理**: 更新 `hooks.json` 的 prompt 文案，使意图更清晰
 - **更新检测信号重命名**: `update_checker` 的 `finished` 信号重命名为 `check_finished`，`thread_guard` 添加类型检查防止非 QThread 对象误处理
 - **字体与样式微调**: `OpenAIChatToolWindow` 字体族 CSS 与 README 星标历史链接更新
+- **工具运行折叠框不转为完成框并累积** (07-12): 当工具运行折叠框与工具结果写入不同卡片时，运行框无法原地转换为完成框并持续累积（消息内容仍正常更新）。修复：`main_widget` 用 `_tool_card_map` 关联 `tool_call_id` 与所属卡片，确保结果写入同一张卡片；`message_card` 的 `_perform_update` restore 兜底逻辑将已完成的运行框强制转为完成态（纵深防御）。新增回归测试 `tests/widgets/test_message_card_tool_streaming.py`
 
 ### 🐛 问题修复 (Bug Fixes) — 历史 [Unreleased] 归并
 

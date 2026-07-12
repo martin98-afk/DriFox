@@ -3734,6 +3734,10 @@ class CodeWebViewer(QWebEngineView):
             if not self.page():
                 return
 
+            # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
+            _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())
+            _safe_finished = json.dumps(_finished_ids).decode("utf-8")
+
             # ── 非流式模式（历史加载）：直接渲染，跳过所有增量比较逻辑 ──
             if not self._streaming:
                 self._refresh_viewer_font_css()
@@ -3758,6 +3762,7 @@ class CodeWebViewer(QWebEngineView):
                 # 不在 _content_data 中，不会被 markdown 重新生成，若不保存也会被抹掉。
                 js_code = (
                     "(function(){"
+                    "var _finished=" + _safe_finished + ";"
                     "var _sbs=[];"
                     "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
                     "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
@@ -3767,7 +3772,10 @@ class CodeWebViewer(QWebEngineView):
                     "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                    "var _bk=_t.firstElementChild;if(_bk){_c.appendChild(_bk);}}});}"
+                    "var _bk=_t.firstElementChild;if(_bk){"
+                    "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
+                    "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
+                    "_c.appendChild(_bk);}}});}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -3812,6 +3820,7 @@ class CodeWebViewer(QWebEngineView):
             # 因为 restore 前检查了 if(!document.querySelector(...))。
             js_code = (
                 "(function(){"
+                "var _finished=" + _safe_finished + ";"
                 "var _sbs=[];"
                 "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
                 "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
@@ -3822,6 +3831,8 @@ class CodeWebViewer(QWebEngineView):
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
+                "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
+                "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
                 "_c.appendChild(_bk);}}});}"
                 # 🐛 修复：工具块 restore 后 scrollHeight 可能增加（流式工具块推送新内容），
                 # 但 scrollTop 仍停留在 restore 前的位置，导致"滚不到底部"。
@@ -6116,6 +6127,9 @@ class MessageCard(SimpleCardWidget):
 
             self.viewer = CodeWebViewer(self)
             self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
+            # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
+            self.viewer._restore_finished_ids = self._finished_streaming_ids
             self.viewer.codeActionRequested.connect(self.actionRequested.emit)
             self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
             self.viewer.contentHeightChanged.connect(self._update_height)
@@ -6233,6 +6247,9 @@ class MessageCard(SimpleCardWidget):
         # 与 start_streaming_anim 中的恢复形成双重保险。
         if self.viewer and not self.viewer._streaming:
             self.viewer._streaming = True
+        # 同步已完成工具集合给 viewer，供 restore 逻辑判断运行框是否可复活
+        if self.viewer:
+            self.viewer._restore_finished_ids = self._finished_streaming_ids
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:

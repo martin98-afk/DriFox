@@ -10653,6 +10653,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._accumulated_content = ""
         # 每个新的流式轮次清空工具结果去重集合
         self._processed_tool_result_ids: set = set()
+        # tool_call_id -> 拥有其运行折叠框的卡片。
+        # 保证工具结果（append_tool_result）与运行折叠框落在同一张卡片上，
+        # 避免结果写入别的卡片导致运行框永远无法转换为完成框、并持续累积。
+        self._tool_card_map: dict = {}
         # 当 LLM 实际开始流式响应时切换为停止按钮
         # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
         self._toggle_send_stop(True)
@@ -10707,6 +10711,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注入到当前助手卡片的消息内容中（替代独立 ToolFloatingWidget）
         card = self._find_latest_assistant_card()
         if card and getattr(card, "update_tool_streaming", None):
+            # 记录 tool_call_id 归属的卡片，确保工具结果落在与运行折叠框同一张卡片上
+            self._tool_card_map[tool_call_id] = card
             card.update_tool_streaming(tool_call_id, tool_name, partial_args)
 
     def _on_tool_call_started(self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None):
@@ -10744,6 +10750,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 不可提前设为完成态 —— 此时工具尚未执行。
         card = self._find_latest_assistant_card()
         if card and getattr(card, "update_tool_streaming", None):
+            # 记录 tool_call_id 归属的卡片，确保工具结果落在与运行折叠框同一张卡片上
+            self._tool_card_map[tool_call_id] = card
             card.update_tool_streaming(tool_call_id, tool_name, arguments)
 
     def _on_sub_agent_compact_closed(self):
@@ -11616,7 +11624,10 @@ class OpenAIChatToolWindow(ToolWindow):
             echarts_val = getattr(result, "echarts", None) if result else None
 
         if self._current_assistant_card:
-            self._current_assistant_card.append_tool_result(
+            # 工具结果必须写入“拥有该运行折叠框”的卡片（与流式块同一张），
+            # 否则运行框无法被原地转换为完成框，并会不断累积。
+            target_card = self._tool_card_map.get(tool_call_id) or self._current_assistant_card
+            target_card.append_tool_result(
                 tool_name=tool_name,
                 arguments=arguments or {},
                 result=content,
