@@ -32,7 +32,7 @@ class SystemCardFrame(QFrame):
     tabChanged = pyqtSignal(str)
 
     # 高度模式：'proportional' = 随窗口缩放（默认），'content' = 按内容自适应
-    _height_mode: str = 'proportional'
+    _height_mode: str = "proportional"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,7 +49,7 @@ class SystemCardFrame(QFrame):
         'proportional': sizeHint 返回窗口高度的 85%（默认，适合有 ScrollArea 的卡片）
         'content':      sizeHint 返回内容自然高度（适合编辑器/配置表单等需完整展示的卡片）
         """
-        if mode not in ('proportional', 'content'):
+        if mode not in ("proportional", "content"):
             return
         self._height_mode = mode
         self.updateGeometry()
@@ -161,9 +161,9 @@ class SystemCardFrame(QFrame):
         if self.icon_label is not None:
             self.icon_label.setFont(get_unified_font(12))
         # 头部自定义图标 widget 同步缩放
-        icon_widget = getattr(self, '_icon_widget', None)
+        icon_widget = getattr(self, "_icon_widget", None)
         if icon_widget is not None:
-            base_size = getattr(self, '_icon_base_size', 20)
+            base_size = getattr(self, "_icon_base_size", 20)
             s = scale_icon_size(base_size)
             icon_widget.setFixedSize(s, s)
         self._count_label.setFont(get_unified_font(10))
@@ -172,7 +172,7 @@ class SystemCardFrame(QFrame):
         if hasattr(self, "_tab_buttons"):
             self._update_tab_styles()
         # 刷新搜索框样式（如果存在）
-        if hasattr(self, '_search_input') and self._search_input is not None:
+        if hasattr(self, "_search_input") and self._search_input is not None:
             self._search_input.setStyleSheet(f"""
                 QLineEdit {{
                     background: {Colors.HOVER_BG};
@@ -191,7 +191,7 @@ class SystemCardFrame(QFrame):
                 }}
             """)
         # 刷新头部粘性标签样式（如果存在）
-        if hasattr(self, '_header_sticky_label') and self._header_sticky_label.isVisible():
+        if hasattr(self, "_header_sticky_label") and self._header_sticky_label.isVisible():
             self._header_sticky_label.setStyleSheet(f"""
                 color: {Colors.ACCENT_WARM};
                 {font_size_css(11)}
@@ -207,7 +207,7 @@ class SystemCardFrame(QFrame):
             item = self._content_layout.itemAt(i)
             if item and item.widget():
                 w = item.widget()
-                if hasattr(w, 'refresh_style'):
+                if hasattr(w, "refresh_style"):
                     try:
                         w.refresh_style()
                     except Exception:
@@ -215,7 +215,8 @@ class SystemCardFrame(QFrame):
 
     @staticmethod
     def _scroll_style() -> str:
-        return """
+        return (
+            """
             QScrollArea {
                 border: none;
                 background: transparent;
@@ -223,8 +224,11 @@ class SystemCardFrame(QFrame):
             QScrollArea > QWidget > QWidget {
                 background: transparent;
             }
-            """ + get_unified_scrollbar_style(8) + """
+            """
+            + get_unified_scrollbar_style(8)
+            + """
         """
+        )
 
     # ── 公开控制 ───────────────────────────────────────
 
@@ -238,7 +242,7 @@ class SystemCardFrame(QFrame):
         图标大小随系统字体大小自适应。默认基准 20px，按 FONT_SIZE_OPTIONS.delta 缩放。
         子类如需使用其他基准尺寸，可在 set_icon_widget 之后手动 setFixedSize。
         """
-        old = getattr(self, '_icon_widget', None)
+        old = getattr(self, "_icon_widget", None)
         if old is not None:
             self._header_layout.replaceWidget(old, widget)
             old.deleteLater()
@@ -432,20 +436,35 @@ class SystemCardFrame(QFrame):
         """根据高度模式返回卡片期望高度
 
         'proportional': 窗口高度的 85%（默认）
-        'content':      内容自然高度（super().sizeHint()）
-        
+        'content':      内容自然高度（直接计算 header + 内容区实际高度，
+                        绕过 QScrollArea.sizeHint() 传播问题）
+
         CardContainer._do_expand() 读取此值进行展开动画。
         """
         from PyQt5.QtCore import QSize
+
         base = super().sizeHint()
-        # content 模式：直接返回内容自然高度
-        if self._height_mode == 'content':
-            return base
+        w = max(base.width(), 200)
+        # content 模式：直接计算 header + 内容区实际高度
+        if self._height_mode == "content":
+            self.layout().invalidate()
+            self.layout().activate()
+            # header 高度 + 边距 + spacing
+            h = self._header_layout.sizeHint().height()
+            h += self.layout().contentsMargins().top() + self.layout().contentsMargins().bottom()
+            h += self.layout().spacing()
+            # scroll_area 内部内容实际高度
+            if self.scroll_area and self.scroll_area.widget():
+                cw = self.scroll_area.widget()
+                if cw.layout():
+                    content_h = cw.layout().sizeHint().height()
+                    h += content_h + self.scroll_area.frameWidth() * 2
+            return QSize(w, max(h, self.minimumHeight()))
         # proportional 模式：按窗口比例缩放
         win = self.window()
         if win and win.height() > 0:
             target_h = max(self.minimumHeight(), int(win.height() * 0.85))
-            return QSize(max(base.width(), 200), target_h)
+            return QSize(w, target_h)
         return base
 
     def showEvent(self, event):
@@ -459,6 +478,7 @@ class SystemCardFrame(QFrame):
     def eventFilter(self, obj, event):
         """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
         from PyQt5.QtCore import QEvent
+
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
         return super().eventFilter(obj, event)

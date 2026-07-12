@@ -112,6 +112,7 @@ class HistoryQuestionsCardContent(QWidget):
     def sizeHint(self):
         """显式返回高度，确保 BaseSettingsCard 的 content 模式正确展开"""
         from PyQt5.QtCore import QSize
+
         if not self._items:
             return super().sizeHint()
         count = len(self._items)
