@@ -4611,6 +4611,10 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("compacted_tokens", 0),
             breakdown=snapshot.get("breakdown", []),
         )
+        # 卡片底部 token 显示与上下文圆环同步（同一快照 used_tokens）
+        card = getattr(self, "_current_assistant_card", None)
+        if card and snapshot.get("used_tokens", 0) > 0:
+            card.set_meta_info(token_usage={"total": snapshot["used_tokens"]})
         self._last_context_refresh_time = now
 
     def _update_balance_display(self):
@@ -12112,12 +12116,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session.set_messages(messages or [], preserve_compaction=False)
 
-        # 提取最新 assistant 消息的 token_usage 更新当前卡片 UI
-        if self._current_assistant_card:
-            for msg in reversed(messages):
-                if msg.get("role") == "assistant" and msg.get("token_usage"):
-                    self._current_assistant_card.set_meta_info(token_usage=msg["token_usage"])
-                    break
+        # 注：卡片底部 token 显示不再从这里驱动——统一由上下文圆环的快照
+        # （_refresh_context_usage_indicator）驱动，保证两者数字完全一致。
+        # 这里仍保留 msg["token_usage"] 落库，供历史卡片复现使用。
 
         # 刷新上下文指示器
         # 工具迭代（最后消息为 tool role）走本地估算以反映含 tool result 的累计上下文；
@@ -12148,6 +12149,10 @@ class OpenAIChatToolWindow(ToolWindow):
                         normal_tokens, compacted_tokens,
                         breakdown=getattr(ring, "_breakdown", None) or [],
                     )
+                    # 卡片底部 token 显示与上下文圆环同步（同一 last_tc）
+                    card = getattr(self, "_current_assistant_card", None)
+                    if card:
+                        card.set_meta_info(token_usage={"total": last_tc})
                     # 继续调度节流刷新，补全各类型上下文占比条（breakdown）
                     from PyQt5.QtCore import QTimer
 
@@ -12254,6 +12259,10 @@ class OpenAIChatToolWindow(ToolWindow):
             normal_tokens, compacted_tokens,
             breakdown=getattr(ring, "_breakdown", None) or [],
         )
+        # 卡片底部 token 显示与上下文圆环同步（同一 token_count）
+        card = getattr(self, "_current_assistant_card", None)
+        if card:
+            card.set_meta_info(token_usage={"total": token_count})
         # 流式期间也调度一次补全各类型占比 breakdown（_refresh_context_usage_indicator
         # 已不再在 _is_streaming 时拦截，0.5s 节流保护）
         from PyQt5.QtCore import QTimer

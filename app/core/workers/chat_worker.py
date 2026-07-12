@@ -1448,7 +1448,10 @@ class OpenAIChatWorker(QThread):
                 else:
                     try:
                         model_name = str(self.llm_config.get("model", "") or "gpt-4")
-                        ctx_count = count_messages_tokens(current_messages, model=model_name)
+                        # 传入 tools=self.tools，与上下文圆环快照的口径一致
+                        # （快照走 count_messages_tokens(..., tools=available_tools)，会含工具定义 tokens；
+                        #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
+                        ctx_count = count_messages_tokens(current_messages, model=model_name, tools=self.tools)
                     except (ValueError, TypeError, RuntimeError):
                         ctx_count = 0
                 self._last_context_token_count = ctx_count

@@ -576,12 +576,12 @@ class UIEngine(BaseEngine):
                 user_tokens += t
 
         breakdown = [
+            {"key": "tools", "label": "工具定义", "tokens": tools_tokens, "color": "#f472b6"},
             {"key": "system", "label": "系统提示", "tokens": system_tokens, "color": "#5aa9ff"},
             {"key": "user", "label": "用户消息", "tokens": user_tokens, "color": "#34d399"},
+            {"key": "hook", "label": "Hook 注入", "tokens": hook_tokens, "color": "#fb923c"},
             {"key": "assistant", "label": "助手消息", "tokens": assistant_tokens, "color": "#fbbf24"},
             {"key": "tool", "label": "工具结果", "tokens": tool_tokens, "color": "#a78bfa"},
-            {"key": "tools", "label": "工具定义", "tokens": tools_tokens, "color": "#f472b6"},
-            {"key": "hook", "label": "Hook 注入", "tokens": hook_tokens, "color": "#e879f9"},
         ]
         breakdown = [b for b in breakdown if b["tokens"] > 0]
 
