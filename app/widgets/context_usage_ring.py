@@ -14,7 +14,7 @@ class ContextUsageRing(QWidget):
         self._percent = 0
         self._ring_color = QColor("#5aa9ff")
         self._compacted_color = QColor("#9b59b6")
-        self._track_color = QColor(255, 255, 255, 40)
+        self._track_color = self._compute_track_color()
         self._normal_tokens = 0
         self._compacted_tokens = 0
 
@@ -184,6 +184,22 @@ class ContextUsageRing(QWidget):
             return luminance < 128
         except Exception:
             return True
+
+    @staticmethod
+    def _compute_track_color() -> QColor:
+        """计算轨道颜色：浅色主题用深色半透明，深色主题用白色半透明"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            if theme_manager.is_light_theme():
+                return QColor(0, 0, 0, 40)
+        except Exception:
+            pass
+        return QColor(255, 255, 255, 40)
+
+    def refresh_theme(self):
+        """主题切换后刷新轨道颜色"""
+        self._track_color = self._compute_track_color()
+        self.update()
 
     def enterEvent(self, event):
         self._tooltip_timer.start(300)

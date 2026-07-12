@@ -1,0 +1,125 @@
+name: 光感白
+id: lumia
+mode: light
+window:
+  gradient_start: rgba(245, 247, 250, 255)
+  gradient_end: rgba(235, 238, 243, 255)
+background:
+  window_bg:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+colors:
+  card_bg: rgba(255, 255, 255, 235)
+  card_bg_solid: rgba(255, 255, 255, 250)
+  content_bg: '#f0f2f5'
+  border: '#d0d5dd'
+  border_accent: '#2563eb'
+  text_primary: '#1a1a2e'
+  text_secondary: rgba(26, 26, 46, 0.60)
+  text_muted: '#6b7280'
+  accent: '#2563eb'
+  accent_warm: '#d97706'
+  hover_bg: rgba(37, 99, 235, 0.08)
+  selected_bg: rgba(37, 99, 235, 0.18)
+  capsule_bg: rgba(255, 255, 255, 210)
+  capsule_border: rgba(200, 205, 215, 200)
+
+  # ── 全局 UI 基底 ──────────────────────────────────
+  toolbar_bg: rgba(0, 0, 0, 0.04)
+  divider_color: rgba(0, 0, 0, 0.06)
+  hover_bg_strong: rgba(0, 0, 0, 0.06)
+  scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
+  scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
+  card_placeholder_text: '#9ca3af'
+
+  # ── 卡片级语义色 ──────────────────────────────────
+  button_text_on_accent: '#ffffff'
+  status_info: '#2563eb'
+  status_danger_bg: rgba(220, 38, 38, 0.8)
+  status_archive_bg: rgba(124, 58, 237, 0.8)
+  card_bg_dim: rgba(0, 0, 0, 0.03)
+  archived_card_bg: rgba(217, 119, 6, 0.08)
+  archived_card_border: rgba(217, 119, 6, 0.18)
+
+  # ── 语法高亮色 ────────────────────────────────────
+  syntax_step: '#059669'
+  syntax_tool: '#b45309'
+  syntax_success: '#16a34a'
+  syntax_error: '#dc2626'
+  syntax_result: '#7c3aed'
+
+  # ── 标签色 ────────────────────────────────────────
+  tag_accent: '#2563eb'
+  tag_accent_text: '#1d4ed8'
+  tag_purple: '#7c3aed'
+  tag_purple_text: '#6d28d9'
+  tag_orange: '#d97706'
+  tag_orange_text: '#b45309'
+  user_card_bg: rgba(219, 234, 254, 180)
+  user_card_accent: '#2563eb'
+  user_card_text: '#1e293b'
+  user_card_muted: '#64748b'
+  assistant_card_bg: rgba(255, 251, 230, 220)
+  assistant_card_accent: '#d97706'
+  assistant_card_text: '#451a03'
+  assistant_card_muted: '#64748b'
+  agent_btn_text: '#64748b'
+  agent_btn_text_active: '#2563eb'
+  agent_btn_bg_active: rgba(37, 99, 235, 0.12)
+  agent_btn_separator: rgba(180, 190, 200, 150)
+  input_bg_start: rgba(255, 255, 255, 200)
+  input_bg_end: rgba(248, 250, 252, 200)
+  input_focus_bg_start: rgba(255, 255, 255, 240)
+  input_focus_bg_end: rgba(248, 250, 252, 240)
+  input_text: '#1a1a2e'
+  input_focus_text: '#0f172a'
+  input_border: '#cbd5e1'
+  input_focus_border: '#2563eb'
+  input_placeholder: rgba(26, 26, 46, 0.35)
+  # 聚焦发光 halo cascade
+  glow_primary_alpha: 150
+  glow_primary_blur: 24
+  glow_ambient_alpha: 80
+  glow_ambient_blur: 32
+
+  # 底部工具栏条
+  toolbar_strip_bg: rgba(248, 250, 252, 200)
+  toolbar_strip_border: '#cbd5e1'
+  realtime_border: '#2563eb'
+  realtime_accent: '#3b82f6'
+  realtime_accent_warm: '#f59e0b'
+  realtime_success: '#10b981'
+  realtime_error: '#ef4444'
+  realtime_bg: rgba(248, 250, 252, 245)
+  realtime_text: '#1a1a2e'
+  realtime_text_secondary: rgba(26, 26, 46, 0.65)
+  realtime_tag_bg: rgba(37, 99, 235, 0.10)
+  realtime_tag_border: rgba(37, 99, 235, 0.22)
+  system_border: '#cbd5e1'
+  system_accent: '#2563eb'
+  send_btn_start: "#2563eb"
+  send_btn_end: "#1d4ed8"
+  send_btn_hover_start: "#3b82f6"
+  send_btn_hover_end: "#2563eb"
+  send_btn_radius: 17
+  timeline_node: '#94a3b8'
+  timeline_node_hover: '#2563eb'
+  timeline_node_visible: '#10b981'
+  timeline_node_selected: '#f59e0b'
+  timeline_line: '#e2e8f0'
+  timeline_line_progress: '#10b981'
+  ring_normal: '#2563eb'
+  ring_warning: '#f59e0b'
+  ring_danger: '#ef4444'
+  ring_compacted: '#7c3aed'
+  branch_label_bg: rgba(37, 99, 235, 0.10)
+  branch_label_border: rgba(37, 99, 235, 0.22)
+  window_bg: rgba(37, 99, 235, 0.03)
+
+  # ── 输入卡发光预设 ──
+  input_glow_preset: "subtle"

@@ -8,6 +8,7 @@
 - 参考技能加载模式设计（多层搜索 + 合并）
 """
 import logging
+import re
 import weakref
 from pathlib import Path
 from typing import Dict, Optional
@@ -183,6 +184,63 @@ class ThemeManager:
         )
         return {}
 
+    # ── 浅色/深色模式检测 ──────────────────────────────
+
+    # 缓存：上次检测的 theme_id 和结果
+    _cached_light_check: tuple = (None, None)
+
+    def is_light_theme(self, theme_id: str = None) -> bool:
+        """判断指定主题（或当前主题）是否为浅色模式。
+
+        优先级：
+        1. 主题 YAML 显式声明 `mode: light` → True
+        2. 主题 YAML 显式声明 `mode: dark` → False
+        3. 自动检测：text_primary 的亮度 > 128 → 浅色模式
+
+        结果会被缓存（按 theme_id），主题切换时自动失效。
+        """
+        if theme_id is None:
+            theme_id = self.get_current_theme_id()
+
+        # 缓存命中
+        if self._cached_light_check[0] == theme_id:
+            return self._cached_light_check[1]
+
+        theme = self.get_theme(theme_id) or {}
+
+        # 1. 显式声明
+        mode = theme.get("mode")
+        if mode == "light":
+            self._cached_light_check = (theme_id, True)
+            return True
+        if mode == "dark":
+            self._cached_light_check = (theme_id, False)
+            return False
+
+        # 2. 自动检测：text_primary 亮度
+        colors = theme.get("colors", {})
+        text_primary = colors.get("text_primary", "#ffffff")
+
+        m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)", text_primary)
+        if m:
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            # hex 格式
+            text_primary_hex = text_primary.lstrip("#")
+            if len(text_primary_hex) == 6:
+                r = int(text_primary_hex[0:2], 16)
+                g = int(text_primary_hex[2:4], 16)
+                b = int(text_primary_hex[4:6], 16)
+            else:
+                # fallback
+                r, g, b = 255, 255, 255
+
+        # 相对亮度公式 (感知亮度)
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        result = luminance < 128  # 暗文字 = 浅色模式
+        self._cached_light_check = (theme_id, result)
+        return result
+
     def is_user_theme(self, theme_id: str) -> bool:
         """判断是否为用户自定义主题（非内置）"""
         theme = self._themes.get(theme_id)
@@ -245,6 +303,14 @@ class ThemeManager:
             ref for ref in self._refresh_targets if ref() is not widget
         ]
 
+    def on_theme_changed(self):
+        """主题切换后调用：清除浅色检测缓存。
+
+        图标适配由 _ThemeIconEngine 自动处理（QIconEngine.key 随主题变化），
+        无需手动清图标缓存。
+        """
+        self._cached_light_check = (None, None)
+
     def dispatch_refresh(self) -> None:
         """向所有已注册的 widget 分发 refresh_theme() 调用
 
@@ -253,6 +319,8 @@ class ThemeManager:
         """
         from app.utils.design_tokens import Colors
         Colors.refresh()
+
+        self.on_theme_changed()
 
         alive = []
         for ref in self._refresh_targets:
@@ -271,6 +339,8 @@ class ThemeManager:
         """重新加载所有主题（修改文件后调用）"""
         self._themes.clear()
         self._load_themes()
+        # 清除浅色检测缓存
+        self._cached_light_check = (None, None)
         # 分发刷新给所有注册 widget
         self.dispatch_refresh()
         # 兼容旧回调

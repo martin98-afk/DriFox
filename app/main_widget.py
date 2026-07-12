@@ -6206,6 +6206,19 @@ class OpenAIChatToolWindow(ToolWindow):
     def _apply_runtime_ui_settings(self):
         Colors.refresh()
 
+        # 浅/深色模式切换 → 清除图标缓存和浅色检测缓存
+        theme_manager.on_theme_changed()
+
+        # 同步 qfluentwidgets 基础主题（浅色主题 → Theme.LIGHT）
+        try:
+            from qfluentwidgets import Theme, setTheme
+            if theme_manager.is_light_theme():
+                setTheme(Theme.LIGHT)
+            else:
+                setTheme(Theme.DARK)
+        except Exception:
+            pass
+
         colors = theme_manager.get_current_colors()
 
         # 窗口淡背景（保留原始 alpha）
@@ -6240,7 +6253,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 {font_css}
             }}
             QLabel:hover {{
-                background-color: rgba(255, 255, 255, 0.06);
+                background-color: {Colors.HOVER_BG};
             }}
             QLineEdit {{
                 color: {Colors.TEXT_PRIMARY};
@@ -6253,8 +6266,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 {font_css}
             }}
             QLineEdit:focus {{
-                background-color: rgba(255, 255, 255, 0.1);
-                border: 1px solid rgba(255, 255, 255, 0.3);
+                background-color: {Colors.HOVER_BG_STRONG};
+                border: 1px solid {Colors.BORDER};
             }}
             """
             self.title_edit.setStyleSheet(title_style)
@@ -6359,6 +6372,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新命令卡片主题（detail 模式参数列表 / 值选择列表的字体颜色需随主题变化）
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()
+        # 刷新上下文圆环 + 编码计划圆环主题（轨道颜色随深浅模式变化）
+        for ring_attr in ("context_usage_ring", "coding_plan_ring"):
+            ring = getattr(self, ring_attr, None)
+            if ring and hasattr(ring, "refresh_theme"):
+                ring.refresh_theme()
         # 刷新消息卡片主题
         for card in self.findChildren(MessageCard):
             if hasattr(card, "refresh_theme"):

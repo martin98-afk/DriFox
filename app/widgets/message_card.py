@@ -2373,7 +2373,7 @@ class CodeWebViewer(QWebEngineView):
                     margin: 8px 0;
                     object-fit: contain;
                 }}
-                h1, h2, h3, h4, h5, h6 {{ color: #FFFFFF !important; font-weight: 700; letter-spacing: 0.01em; }}
+                h1, h2, h3, h4, h5, h6 {{ color: var(--text) !important; font-weight: 700; letter-spacing: 0.01em; }}
                 h1 {{ font-size: 1.45em; margin: 12px 0 8px; }}
                 h2 {{ font-size: 1.25em; margin: 10px 0 6px; }}
                 h3 {{ font-size: 1.1em; margin: 8px 0 4px; }}
@@ -2382,8 +2382,8 @@ class CodeWebViewer(QWebEngineView):
                 a:hover {{ text-decoration: underline; }}
                 ul, ol {{ margin: 8px 0; padding-left: 24px; }}
                 li {{ margin: 4px 0; color: var(--text-secondary); }}
-                strong {{ color: #FFFFFF !important; font-weight: 600; }}
-                em {{ color: #c4cedd !important; font-style: italic; }}
+                strong {{ color: var(--text) !important; font-weight: 600; }}
+                em {{ color: var(--text-secondary) !important; font-style: italic; }}
                 code:not(.code-content *):not(pre code) {{ 
                     background: rgba(102, 198, 255, 0.12) !important; 
                     color: #9bddff !important;
@@ -4472,22 +4472,31 @@ class PlainTextViewer(QWidget):
         self.text_edit.setFrameShape(QTextEdit.NoFrame)
         self.text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
         self.text_edit.customContextMenuRequested.connect(self._show_context_menu)
+        self._apply_text_style()
+        layout.addWidget(self.text_edit)
+
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(40)
+
+    def _apply_text_style(self):
+        """应用文本样式（从 Colors token 读取颜色）"""
         font_css = get_font_family_css()
+        text_color = Colors.USER_CARD_TEXT
         self.text_edit.setStyleSheet(f"""
             QTextEdit {{
                 background: transparent;
                 border: none;
                 {font_css}
-                color: #F5F7FB;
+                color: {text_color};
                 font-size: {scale_font_size(14)}px;
                 line-height: 1.5;
                 selection-background-color: rgba(102, 198, 255, 0.28);
             }}
         """)
-        layout.addWidget(self.text_edit)
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(40)
+    def refresh_theme(self):
+        """主题切换后刷新文本颜色"""
+        self._apply_text_style()
 
     def append_chunk(self, text: str):
         self._text += text
@@ -4923,6 +4932,9 @@ class MessageCard(SimpleCardWidget):
         # 刷新富文本视图字体
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
             self.viewer._refresh_viewer_font()
+        # 刷新用户卡片纯文本视图颜色（PlainTextViewer 没有 _refresh_viewer_font）
+        if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
+            self.viewer.refresh_theme()
 
     def _get_footer_model_text(self) -> str:
         """根据 model_name 生成页脚显示文本（服务商名已隐藏，仅显示模型名）"""

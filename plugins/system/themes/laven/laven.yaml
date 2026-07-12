@@ -1,0 +1,117 @@
+name: 薰衣草紫
+id: laven
+mode: light
+window:
+  gradient_start: rgba(248, 244, 252, 255)
+  gradient_end: rgba(242, 236, 250, 255)
+background:
+  window_bg:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+colors:
+  card_bg: rgba(252, 248, 255, 235)
+  card_bg_solid: rgba(252, 248, 255, 250)
+  content_bg: '#f3eef8'
+  border: '#d0c4e0'
+  border_accent: '#7c3aed'
+  text_primary: '#1e1035'
+  text_secondary: rgba(30, 16, 53, 0.60)
+  text_muted: '#7a6898'
+  accent: '#7c3aed'
+  accent_warm: '#d97706'
+  hover_bg: rgba(124, 58, 237, 0.08)
+  selected_bg: rgba(124, 58, 237, 0.16)
+  capsule_bg: rgba(252, 248, 255, 210)
+  capsule_border: rgba(200, 188, 218, 200)
+
+  toolbar_bg: rgba(0, 0, 0, 0.04)
+  divider_color: rgba(0, 0, 0, 0.06)
+  hover_bg_strong: rgba(0, 0, 0, 0.06)
+  scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
+  scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
+  card_placeholder_text: '#9a8ab0'
+
+  button_text_on_accent: '#ffffff'
+  status_info: '#7c3aed'
+  status_danger_bg: rgba(200, 50, 50, 0.8)
+  status_archive_bg: rgba(124, 58, 237, 0.8)
+  card_bg_dim: rgba(0, 0, 0, 0.03)
+  archived_card_bg: rgba(124, 58, 237, 0.08)
+  archived_card_border: rgba(124, 58, 237, 0.18)
+
+  syntax_step: '#059669'
+  syntax_tool: '#b45309'
+  syntax_success: '#16a34a'
+  syntax_error: '#dc2626'
+  syntax_result: '#7c3aed'
+
+  tag_accent: '#7c3aed'
+  tag_accent_text: '#6d28d9'
+  tag_purple: '#a855f7'
+  tag_purple_text: '#9333ea'
+  tag_orange: '#d97706'
+  tag_orange_text: '#b45309'
+  user_card_bg: rgba(235, 225, 252, 180)
+  user_card_accent: '#7c3aed'
+  user_card_text: '#1e1035'
+  user_card_muted: '#7a6898'
+  assistant_card_bg: rgba(245, 240, 252, 220)
+  assistant_card_accent: '#6d28d9'
+  assistant_card_text: '#150828'
+  assistant_card_muted: '#7a6898'
+  agent_btn_text: '#7a6898'
+  agent_btn_text_active: '#7c3aed'
+  agent_btn_bg_active: rgba(124, 58, 237, 0.12)
+  agent_btn_separator: rgba(190, 178, 208, 150)
+  input_bg_start: rgba(252, 248, 255, 200)
+  input_bg_end: rgba(245, 240, 252, 200)
+  input_focus_bg_start: rgba(252, 248, 255, 240)
+  input_focus_bg_end: rgba(245, 240, 252, 240)
+  input_text: '#1e1035'
+  input_focus_text: '#0e0820'
+  input_border: '#d0c4e0'
+  input_focus_border: '#7c3aed'
+  input_placeholder: rgba(30, 16, 53, 0.35)
+  glow_primary_alpha: 150
+  glow_primary_blur: 24
+  glow_ambient_alpha: 80
+  glow_ambient_blur: 32
+
+  toolbar_strip_bg: rgba(245, 240, 252, 200)
+  toolbar_strip_border: '#d0c4e0'
+  realtime_border: '#7c3aed'
+  realtime_accent: '#a78bfa'
+  realtime_accent_warm: '#f59e0b'
+  realtime_success: '#10b981'
+  realtime_error: '#ef4444'
+  realtime_bg: rgba(245, 240, 252, 245)
+  realtime_text: '#1e1035'
+  realtime_text_secondary: rgba(30, 16, 53, 0.65)
+  realtime_tag_bg: rgba(124, 58, 237, 0.10)
+  realtime_tag_border: rgba(124, 58, 237, 0.22)
+  system_border: '#d0c4e0'
+  system_accent: '#7c3aed'
+  send_btn_start: "#7c3aed"
+  send_btn_end: "#6d28d9"
+  send_btn_hover_start: "#a78bfa"
+  send_btn_hover_end: "#7c3aed"
+  send_btn_radius: 17
+  timeline_node: '#c0b8d0'
+  timeline_node_hover: '#7c3aed'
+  timeline_node_visible: '#10b981'
+  timeline_node_selected: '#d97706'
+  timeline_line: '#e4dcee'
+  timeline_line_progress: '#10b981'
+  ring_normal: '#7c3aed'
+  ring_warning: '#d97706'
+  ring_danger: '#ef4444'
+  ring_compacted: '#7c3aed'
+  branch_label_bg: rgba(124, 58, 237, 0.10)
+  branch_label_border: rgba(124, 58, 237, 0.22)
+  window_bg: rgba(124, 58, 237, 0.03)
+  input_glow_preset: "subtle"

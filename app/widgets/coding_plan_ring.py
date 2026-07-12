@@ -111,6 +111,38 @@ class _PlanProgressBar(QWidget):
         self.setFixedHeight(18)
         self._percent = 0
         self._bar_color = QColor("#5aa9ff")
+        self._track_color = self._compute_track_color()
+
+    @staticmethod
+    def _compute_track_color() -> QColor:
+        """轨道颜色：浅色用深色半透明，深色用白色半透明"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            if theme_manager.is_light_theme():
+                return QColor(0, 0, 0, 28)
+        except Exception:
+            pass
+        return QColor(255, 255, 255, 28)
+
+    @staticmethod
+    def _compute_text_color(on_fill: bool) -> QColor:
+        """文字颜色"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            if theme_manager.is_light_theme():
+                if on_fill:
+                    return Qt.white  # 填充区上用白字不变
+                return QColor(0, 0, 0, 180)
+        except Exception:
+            pass
+        if on_fill:
+            return Qt.white
+        return QColor(255, 255, 255, 180)
+
+    def refresh_theme(self):
+        """主题切换后刷新轨道颜色"""
+        self._track_color = self._compute_track_color()
+        self.update()
 
     def set_data(self, percent: int, color: QColor):
         self._percent = max(0, min(100, percent))
@@ -127,7 +159,7 @@ class _PlanProgressBar(QWidget):
         r = h / 2.0
 
         # — 背景轨道 —
-        painter.setBrush(QColor(255, 255, 255, 28))
+        painter.setBrush(self._track_color)
         painter.drawRoundedRect(0, 0, w, h, r, r)
 
         # — 填充 —
@@ -154,11 +186,11 @@ class _PlanProgressBar(QWidget):
         text_x = w - text_w - 6  # 距右边缘 6px
         text_y = int((h + fm.ascent()) / 2) - 1
 
-        # 数字在进度条填充区上时用白字，否则用半透明白
+        # 数字在进度条填充区上时用白字，否则用半透明
         if text_x < fill_w and self._percent > 0:
-            painter.setPen(Qt.white)
+            painter.setPen(self._compute_text_color(on_fill=True))
         else:
-            painter.setPen(QColor(255, 255, 255, 180))
+            painter.setPen(self._compute_text_color(on_fill=False))
 
         painter.drawText(text_x, text_y, pct_text)
         painter.setPen(Qt.NoPen)
@@ -310,7 +342,7 @@ class CodingPlanRing(QWidget):
         self._has_data = False
 
         # 样式参数
-        self._track_color = QColor(255, 255, 255, 40)
+        self._track_color = self._compute_track_color()
         self._size = 26  # 比 ContextUsageRing(22) 稍大以容纳三层
         self.setFixedSize(self._size, self._size)
         self.setMouseTracking(True)
@@ -366,6 +398,22 @@ class CodingPlanRing(QWidget):
             self._layers[key] = {"percent": None, "reset_sec": None}
         self._tooltip.hide()
         self.setVisible(False)
+
+    @staticmethod
+    def _compute_track_color() -> QColor:
+        """轨道颜色：浅色用深色半透明，深色用白色半透明"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            if theme_manager.is_light_theme():
+                return QColor(0, 0, 0, 40)
+        except Exception:
+            pass
+        return QColor(255, 255, 255, 40)
+
+    def refresh_theme(self):
+        """主题切换后刷新轨道颜色"""
+        self._track_color = self._compute_track_color()
+        self.update()
 
     # ── 工具提示 ─────────────────────────────────────
 

@@ -24,8 +24,8 @@ import psutil
 import requests
 import yaml
 from loguru import logger
-from PyQt5.QtCore import QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QIcon, QIconEngine
 
 from app.utils.config import Settings
 
@@ -35,6 +35,22 @@ except ImportError:
     pinyin = None
 
 from app.utils.icon_name_map import ICON_NAME_TO_FILE
+
+# 浅色图标映射（按需导入，避免循环）
+_ICON_NAME_TO_FILE_LIGHT = None
+
+
+def _get_light_icon_map():
+    """懒加载浅色图标映射"""
+    global _ICON_NAME_TO_FILE_LIGHT
+    if _ICON_NAME_TO_FILE_LIGHT is None:
+        try:
+            from app.utils.icon_name_map_light import ICON_NAME_TO_FILE_LIGHT as m
+            _ICON_NAME_TO_FILE_LIGHT = m
+        except ImportError:
+            _ICON_NAME_TO_FILE_LIGHT = {}
+    return _ICON_NAME_TO_FILE_LIGHT
+
 
 # ANSI 颜色代码映射
 ANSI_COLOR_MAP = {
@@ -55,7 +71,6 @@ ANSI_COLOR_MAP = {
     "96": "#8be9fd",  # 亮青
     "97": "#ffffff",  # 亮白
 }
-_ICON_CACHE = {}  # 缓存图标名 → QIcon 实例
 
 
 def get_app_data_dir() -> Path:
@@ -269,9 +284,75 @@ def get_port_node(port):
     return node() if callable(node) else node
 
 
+# 图标缓存（仅按 icon_name 缓存 QIcon，theme 感知由 QIconEngine 处理）
+_ICON_CACHE: dict = {}
+
+
+class _ThemeIconEngine(QIconEngine):
+    """主题感知图标引擎 — 每次 paint 时自动根据当前主题加载对应颜色图标。
+
+    Qt 内部通过 key() 缓存 pixmap。key() 包含 light/dark 标识，
+    主题切换后 key 变化 → Qt 自动重新请求 pixmap → 图标自动适配。
+    """
+
+    def __init__(self, icon_name: str):
+        super().__init__()
+        self._icon_name = icon_name
+
+    def _load(self) -> QIcon:
+        """根据当前主题加载正确颜色的图标（无缓存，每次调用都检查）"""
+        is_light = _is_current_theme_light()
+        prefix = ":/icons_light" if is_light else ":/icons"
+
+        # 浅色模式：优先查浅色映射表
+        if is_light:
+            light_map = _get_light_icon_map()
+            if self._icon_name in light_map:
+                path = f"{prefix}/{light_map[self._icon_name]}"
+                icon = QIcon(path)
+                if not icon.isNull():
+                    return icon
+
+        # 通用映射表 / 浅色回退
+        filename = ICON_NAME_TO_FILE.get(self._icon_name)
+        if filename:
+            path = f":/icons/{filename}"
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+
+        # fallback
+        try:
+            from qfluentwidgets import FluentIcon
+            return FluentIcon.APPLICATION.icon()
+        except Exception:
+            pass
+        return QIcon()
+
+    def paint(self, painter, rect, mode, state):
+        self._load().paint(painter, rect, Qt.AlignmentFlag.AlignCenter, mode, state)
+
+    def pixmap(self, size, mode, state):
+        return self._load().pixmap(size, mode, state)
+
+    def clone(self):
+        return _ThemeIconEngine(self._icon_name)
+
+    def key(self):
+        # 主题切换后 key 变化 → Qt pixmap 缓存自动失效
+        is_light = _is_current_theme_light()
+        return f"_ThemeIconEngine:{self._icon_name}:{'light' if is_light else 'dark'}"
+
+    def iconName(self):
+        return self._icon_name
+
+
 def get_icon(icon_name: str) -> QIcon:
     """
-    从 Qt 资源系统加载图标（高性能、无磁盘 I/O）
+    从 Qt 资源系统加载图标（主题感知，自动适配浅色/深色）
+
+    使用 _ThemeIconEngine 实现：主题切换后无需刷新 widget，
+    Qt 内部 pixmap 缓存自动失效，下次 paint 时加载正确颜色。
 
     Args:
         icon_name: 图标名（不含扩展名），如 "copy"
@@ -282,28 +363,28 @@ def get_icon(icon_name: str) -> QIcon:
     if icon_name in _ICON_CACHE:
         return _ICON_CACHE[icon_name]
 
-    # 1. 从映射表中找真实文件名
-    filename = ICON_NAME_TO_FILE.get(icon_name)
-    if filename:
-        resource_path = f":/icons/{filename}"
-        icon = QIcon(resource_path)
-        # 可选：再做一次 null 检查（虽然理论上不会错）
-        if not icon.isNull():
-            _ICON_CACHE[icon_name] = icon
-            return icon
+    icon = QIcon(_ThemeIconEngine(icon_name))
+    _ICON_CACHE[icon_name] = icon
+    return icon
 
-    # 2. fallback 到 FluentIcon
+
+def _is_current_theme_light() -> bool:
+    """判断当前主题是否为浅色模式"""
     try:
-        from qfluentwidgets import FluentIcon
+        from app.utils.theme_manager import theme_manager
+        return theme_manager.is_light_theme()
+    except Exception as e:
+        import logging
+        _log = logging.getLogger(__name__)
+        _log.warning(f"[utils] is_light_theme check failed, fallback to dark: {e}")
+        return False
 
-        icon = FluentIcon.APPLICATION.icon()
-        _ICON_CACHE[icon_name] = icon
-        return icon
-    except Exception:
-        pass
 
-    # 3. 最终 fallback
-    return QIcon()
+def invalidate_icon_cache():
+    """清除图标缓存（主题切换时调用，已不再必需——引擎自动感知）"""
+    global _ICON_CACHE
+    _ICON_CACHE.clear()
+
 
 
 def get_local_skills() -> list:

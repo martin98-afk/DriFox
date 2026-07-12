@@ -1,0 +1,117 @@
+name: 奶油黄
+id: crema
+mode: light
+window:
+  gradient_start: rgba(252, 250, 242, 255)
+  gradient_end: rgba(248, 244, 232, 255)
+background:
+  window_bg:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+colors:
+  card_bg: rgba(255, 253, 248, 235)
+  card_bg_solid: rgba(255, 253, 248, 250)
+  content_bg: '#f7f3e8'
+  border: '#ddd0b8'
+  border_accent: '#d4a017'
+  text_primary: '#2d2416'
+  text_secondary: rgba(45, 36, 22, 0.60)
+  text_muted: '#8c7a5e'
+  accent: '#b8860b'
+  accent_warm: '#d97706'
+  hover_bg: rgba(184, 134, 11, 0.08)
+  selected_bg: rgba(184, 134, 11, 0.16)
+  capsule_bg: rgba(255, 253, 248, 210)
+  capsule_border: rgba(210, 200, 175, 200)
+
+  toolbar_bg: rgba(0, 0, 0, 0.04)
+  divider_color: rgba(0, 0, 0, 0.06)
+  hover_bg_strong: rgba(0, 0, 0, 0.06)
+  scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
+  scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
+  card_placeholder_text: '#a89880'
+
+  button_text_on_accent: '#ffffff'
+  status_info: '#b8860b'
+  status_danger_bg: rgba(200, 50, 50, 0.8)
+  status_archive_bg: rgba(160, 120, 40, 0.8)
+  card_bg_dim: rgba(0, 0, 0, 0.03)
+  archived_card_bg: rgba(217, 119, 6, 0.08)
+  archived_card_border: rgba(217, 119, 6, 0.18)
+
+  syntax_step: '#059669'
+  syntax_tool: '#b45309'
+  syntax_success: '#16a34a'
+  syntax_error: '#dc2626'
+  syntax_result: '#7c3aed'
+
+  tag_accent: '#b8860b'
+  tag_accent_text: '#92600a'
+  tag_purple: '#7c3aed'
+  tag_purple_text: '#6d28d9'
+  tag_orange: '#d97706'
+  tag_orange_text: '#b45309'
+  user_card_bg: rgba(252, 245, 225, 180)
+  user_card_accent: '#b8860b'
+  user_card_text: '#2d2416'
+  user_card_muted: '#8c7a5e'
+  assistant_card_bg: rgba(255, 250, 238, 220)
+  assistant_card_accent: '#d4a017'
+  assistant_card_text: '#3d2e10'
+  assistant_card_muted: '#8c7a5e'
+  agent_btn_text: '#8c7a5e'
+  agent_btn_text_active: '#b8860b'
+  agent_btn_bg_active: rgba(184, 134, 11, 0.12)
+  agent_btn_separator: rgba(190, 180, 160, 150)
+  input_bg_start: rgba(255, 253, 248, 200)
+  input_bg_end: rgba(250, 246, 236, 200)
+  input_focus_bg_start: rgba(255, 253, 248, 240)
+  input_focus_bg_end: rgba(250, 246, 236, 240)
+  input_text: '#2d2416'
+  input_focus_text: '#1a1208'
+  input_border: '#ddd0b8'
+  input_focus_border: '#b8860b'
+  input_placeholder: rgba(45, 36, 22, 0.35)
+  glow_primary_alpha: 150
+  glow_primary_blur: 24
+  glow_ambient_alpha: 80
+  glow_ambient_blur: 32
+
+  toolbar_strip_bg: rgba(250, 246, 236, 200)
+  toolbar_strip_border: '#ddd0b8'
+  realtime_border: '#b8860b'
+  realtime_accent: '#c99c1a'
+  realtime_accent_warm: '#e5940a'
+  realtime_success: '#10b981'
+  realtime_error: '#ef4444'
+  realtime_bg: rgba(250, 246, 236, 245)
+  realtime_text: '#2d2416'
+  realtime_text_secondary: rgba(45, 36, 22, 0.65)
+  realtime_tag_bg: rgba(184, 134, 11, 0.10)
+  realtime_tag_border: rgba(184, 134, 11, 0.22)
+  system_border: '#ddd0b8'
+  system_accent: '#b8860b'
+  send_btn_start: "#b8860b"
+  send_btn_end: "#92600a"
+  send_btn_hover_start: "#d4a017"
+  send_btn_hover_end: "#b8860b"
+  send_btn_radius: 17
+  timeline_node: '#c4b99a'
+  timeline_node_hover: '#b8860b'
+  timeline_node_visible: '#10b981'
+  timeline_node_selected: '#d97706'
+  timeline_line: '#e8e0d0'
+  timeline_line_progress: '#10b981'
+  ring_normal: '#b8860b'
+  ring_warning: '#d97706'
+  ring_danger: '#ef4444'
+  ring_compacted: '#7c3aed'
+  branch_label_bg: rgba(184, 134, 11, 0.10)
+  branch_label_border: rgba(184, 134, 11, 0.22)
+  window_bg: rgba(184, 134, 11, 0.03)
+  input_glow_preset: "subtle"

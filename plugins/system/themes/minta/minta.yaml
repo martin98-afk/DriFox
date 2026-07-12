@@ -1,0 +1,117 @@
+name: 薄荷绿
+id: minta
+mode: light
+window:
+  gradient_start: rgba(240, 250, 245, 255)
+  gradient_end: rgba(232, 246, 238, 255)
+background:
+  window_bg:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+colors:
+  card_bg: rgba(248, 255, 250, 235)
+  card_bg_solid: rgba(248, 255, 250, 250)
+  content_bg: '#eef6f1'
+  border: '#c0d8c8'
+  border_accent: '#059669'
+  text_primary: '#0d3320'
+  text_secondary: rgba(13, 51, 32, 0.60)
+  text_muted: '#5c8a6e'
+  accent: '#059669'
+  accent_warm: '#b45309'
+  hover_bg: rgba(5, 150, 105, 0.08)
+  selected_bg: rgba(5, 150, 105, 0.16)
+  capsule_bg: rgba(248, 255, 250, 210)
+  capsule_border: rgba(185, 210, 195, 200)
+
+  toolbar_bg: rgba(0, 0, 0, 0.04)
+  divider_color: rgba(0, 0, 0, 0.06)
+  hover_bg_strong: rgba(0, 0, 0, 0.06)
+  scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
+  scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
+  card_placeholder_text: '#8aaa95'
+
+  button_text_on_accent: '#ffffff'
+  status_info: '#059669'
+  status_danger_bg: rgba(200, 50, 50, 0.8)
+  status_archive_bg: rgba(5, 150, 105, 0.8)
+  card_bg_dim: rgba(0, 0, 0, 0.03)
+  archived_card_bg: rgba(5, 150, 105, 0.08)
+  archived_card_border: rgba(5, 150, 105, 0.18)
+
+  syntax_step: '#059669'
+  syntax_tool: '#b45309'
+  syntax_success: '#16a34a'
+  syntax_error: '#dc2626'
+  syntax_result: '#7c3aed'
+
+  tag_accent: '#059669'
+  tag_accent_text: '#047857'
+  tag_purple: '#7c3aed'
+  tag_purple_text: '#6d28d9'
+  tag_orange: '#d97706'
+  tag_orange_text: '#b45309'
+  user_card_bg: rgba(220, 245, 230, 180)
+  user_card_accent: '#059669'
+  user_card_text: '#0d3320'
+  user_card_muted: '#5c8a6e'
+  assistant_card_bg: rgba(240, 250, 242, 220)
+  assistant_card_accent: '#047857'
+  assistant_card_text: '#0a2a18'
+  assistant_card_muted: '#5c8a6e'
+  agent_btn_text: '#5c8a6e'
+  agent_btn_text_active: '#059669'
+  agent_btn_bg_active: rgba(5, 150, 105, 0.12)
+  agent_btn_separator: rgba(175, 200, 185, 150)
+  input_bg_start: rgba(248, 255, 250, 200)
+  input_bg_end: rgba(240, 250, 244, 200)
+  input_focus_bg_start: rgba(248, 255, 250, 240)
+  input_focus_bg_end: rgba(240, 250, 244, 240)
+  input_text: '#0d3320'
+  input_focus_text: '#051a10'
+  input_border: '#c0d8c8'
+  input_focus_border: '#059669'
+  input_placeholder: rgba(13, 51, 32, 0.35)
+  glow_primary_alpha: 150
+  glow_primary_blur: 24
+  glow_ambient_alpha: 80
+  glow_ambient_blur: 32
+
+  toolbar_strip_bg: rgba(240, 250, 244, 200)
+  toolbar_strip_border: '#c0d8c8'
+  realtime_border: '#059669'
+  realtime_accent: '#10b981'
+  realtime_accent_warm: '#f59e0b'
+  realtime_success: '#059669'
+  realtime_error: '#ef4444'
+  realtime_bg: rgba(240, 250, 244, 245)
+  realtime_text: '#0d3320'
+  realtime_text_secondary: rgba(13, 51, 32, 0.65)
+  realtime_tag_bg: rgba(5, 150, 105, 0.10)
+  realtime_tag_border: rgba(5, 150, 105, 0.22)
+  system_border: '#c0d8c8'
+  system_accent: '#059669'
+  send_btn_start: "#059669"
+  send_btn_end: "#047857"
+  send_btn_hover_start: "#10b981"
+  send_btn_hover_end: "#059669"
+  send_btn_radius: 17
+  timeline_node: '#b0c8b8'
+  timeline_node_hover: '#059669'
+  timeline_node_visible: '#10b981'
+  timeline_node_selected: '#d97706'
+  timeline_line: '#dce8e0'
+  timeline_line_progress: '#10b981'
+  ring_normal: '#059669'
+  ring_warning: '#d97706'
+  ring_danger: '#ef4444'
+  ring_compacted: '#7c3aed'
+  branch_label_bg: rgba(5, 150, 105, 0.10)
+  branch_label_border: rgba(5, 150, 105, 0.22)
+  window_bg: rgba(5, 150, 105, 0.03)
+  input_glow_preset: "subtle"

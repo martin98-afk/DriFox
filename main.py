@@ -56,6 +56,7 @@ def main():
 
     # 注册 Qt 资源文件中的图标 — 尽早导入，确保 widget 能引用图标资源
     from app.utils import icons_rc  # noqa: F401
+    from app.utils import icons_light_rc  # noqa: F401
 
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
@@ -146,14 +147,21 @@ def main():
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
     _guard = SingleInstanceGuard("Drifox")
-    if not _guard.try_lock():
-        _guard.request_show_window()
-        _guard.cleanup()
-        return
+    # if not _guard.try_lock():
+    #     _guard.request_show_window()
+    #     _guard.cleanup()
+    #     return
 
-    # 设置主题
+    # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
-    setTheme(Theme.DARK)
+    try:
+        from app.utils.theme_manager import theme_manager
+        if theme_manager.is_light_theme():
+            setTheme(Theme.LIGHT)
+        else:
+            setTheme(Theme.DARK)
+    except Exception:
+        setTheme(Theme.DARK)
 
     # 初始化共享 WebEngine Profile
     from app.core.webengine_profile import init_shared_web_profile
