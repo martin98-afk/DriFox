@@ -47,6 +47,7 @@ class ChatSession:
         self.metadata: Dict[str, Any] = {}  # 扩展元数据（如模型/Agent 覆盖）
         self.context_usage: int = 0  # 消息列表估算 token 总数，保存时计算
         self.last_api_prompt_tokens: int = 0  # 最近一次 API 返回的 prompt_tokens，作为上下文占用权威值
+        self.last_api_message_count: int = 0  # 上次 API 调用时的 session.messages 长度，用于增量估算
         # 🛡️ 首发项目快照：用户在哪个项目下首发的对话。
         # 用于"对话进行中切换项目导致落盘错存"bug 的兜底：
         # 一旦锁定不再改变，即使后续切换项目，会话仍归属首发项目。

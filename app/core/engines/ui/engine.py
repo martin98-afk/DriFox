@@ -21,7 +21,7 @@ from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.message_content import content_to_text
-from app.core.token_estimator import count_messages_tokens, count_tools_tokens
+from app.core.token_estimator import count_messages_tokens, count_tools_tokens, get_model_token_ratio
 from app.tools import get_builtin_tools_schema
 
 
@@ -551,7 +551,7 @@ class UIEngine(BaseEngine):
             if system_prompt
             else 0
         )
-        tools_tokens = count_tools_tokens(available_tools, model) if available_tools else 0
+        tools_tokens = int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model)) if available_tools else 0
 
         # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
         # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
@@ -585,12 +585,19 @@ class UIEngine(BaseEngine):
         ]
         breakdown = [b for b in breakdown if b["tokens"] > 0]
 
-        # ---- 直接按消息列表计算（用户明确要求）----
-        # 各分段（系统提示 / 用户消息 / 助手消息 / 工具结果 / 工具定义）都是
-        # count_messages_tokens 对消息列表逐条、按角色实打实算出来的 token 数，
-        # 不做任何 API 真实占用缩放/覆盖。它们之和 = est_total，进度条按
-        # est_total / budget 填充，比例与数值都是消息列表的真实情况。
-        used_tokens = est_total
+        # ---- 确定上下文占用量 ----
+        # 优先使用 API 返回的精确 prompt_tokens 作为权威值；
+        # 若无 API 返回值（冷启动、无活跃对话），回退到本地估算。
+        if api_prompt_tokens > 0:
+            used_tokens = api_prompt_tokens
+            # 按 API 真实值与本地估算的比例，等比缩放各 breakdown 分量，
+            # 保持视觉占比关系不变，总量锚定 API 真实值。
+            if est_total > 0:
+                scale = used_tokens / est_total
+                for b in breakdown:
+                    b["tokens"] = max(1, int(b["tokens"] * scale))
+        else:
+            used_tokens = est_total
 
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 

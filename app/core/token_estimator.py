@@ -73,6 +73,11 @@ def _get_model_token_ratio(model: str) -> float:
     return _MODEL_TOKEN_RATIOS["default"]
 
 
+def get_model_token_ratio(model: str) -> float:
+    """获取模型 token 校正系数（公开接口）"""
+    return _get_model_token_ratio(model)
+
+
 def _get_encoding_name(model: str = "gpt-4") -> str:
     """根据模型名称获取编码名称"""
     model = model.lower()
