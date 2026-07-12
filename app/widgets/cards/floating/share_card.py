@@ -7,6 +7,7 @@
 """
 
 import json
+import markdown
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,8 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import InfoBar, InfoBarPosition
 
-from app.utils.design_tokens import Colors, get_unified_scrollbar_style
+from app.utils.design_tokens import Colors, current_theme, get_unified_scrollbar_style
+from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_unified_font
 
 
@@ -39,7 +41,7 @@ def _format_timestamp(msg: Dict[str, Any]) -> str:
         try:
             dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return dt.strftime("%m-%d %H:%M")
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return ts
     return ""
 
@@ -88,9 +90,20 @@ def _get_session_title(messages: List[Dict]) -> str:
 # ── Markdown 导出 ─────────────────────────────────────────────────
 
 
-def _export_markdown(messages: List[Dict]) -> str:
-    title = _get_session_title(messages)
+def _export_markdown(messages: List[Dict], record: Dict = None) -> str:
+    record = record or {}
+    title = record.get("title") or _get_session_title(messages)
     lines = [f"# 对话分享 — {title}", ""]
+    if record.get("project") or record.get("last_time"):
+        meta_bits = []
+        if record.get("project"):
+            meta_bits.append(f"项目：{record['project']}")
+        if record.get("last_time"):
+            meta_bits.append(f"时间：{record['last_time']}")
+        if record.get("message_count") is not None:
+            meta_bits.append(f"共 {record['message_count']} 轮")
+        lines.append("> " + "　".join(meta_bits))
+        lines.append("")
     for msg in messages:
         role = msg.get("role", "unknown")
         ts = _format_timestamp(msg)
@@ -117,15 +130,9 @@ def _export_markdown(messages: List[Dict]) -> str:
 # ── JSON 导出 ──────────────────────────────────────────────────────
 
 
-def _export_json(messages: List[Dict]) -> str:
-    clean = []
-    for msg in messages:
-        entry = {"role": msg.get("role", ""), "content": msg.get("content", "")}
-        for key in ("name", "model_name", "timestamp", "tool_call_id", "tool_calls"):
-            if msg.get(key):
-                entry[key] = msg[key]
-        clean.append(entry)
-    return json.dumps(clean, ensure_ascii=False, indent=2)
+def _export_json(record: Dict) -> str:
+    """导出与归档（archive）一致的完整 session 记录（含全部元信息），而非仅消息列表"""
+    return json.dumps(record, ensure_ascii=False, indent=2)
 
 
 # ── HTML 导出 ──────────────────────────────────────────────────────
@@ -135,44 +142,129 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def _export_html(messages: List[Dict]) -> str:
-    title = _escape_html(_get_session_title(messages))
-    bubbles = []
-    for msg in messages:
-        role = msg.get("role", "unknown")
-        ts = _format_timestamp(msg)
-        blocks = _ensure_content_blocks(msg.get("content", ""))
-        content_html = ""
-        for block in blocks:
-            bt = block.get("type", "text")
-            if bt == "text":
-                paragraphs = str(block.get("text", "")).split("\n")
-                p_html = "</p><p>".join(_escape_html(p) for p in paragraphs)
-                content_html += f"<p>{p_html}</p>"
-            elif bt == "reasoning":
-                rc = _escape_html(str(block.get("content", "")))
-                content_html += f'<details class="reasoning"><summary>思考过程</summary><pre>{rc}</pre></details>'
-            elif bt in ("image_url", "input_image", "image"):
-                content_html += '<div class="image-placeholder">[图片]</div>'
-            elif bt == "tool_result":
-                name = block.get("name", "tool")
-                result = _escape_html(str(block.get("result", ""))[:500])
-                content_html += (
-                    f'<div class="tool-result"><strong>工具: {_escape_html(name)}</strong><pre>{result}</pre></div>'
-                )
-            else:
-                content_html += f"<p>{_escape_html(str(block.get('text', block.get('content', ''))))}</p>"
+def _md_to_html(text: str) -> str:
+    """用与 in-app 一致的 markdown 扩展渲染正文"""
+    try:
+        md = markdown.Markdown(extensions=["fenced_code", "nl2br", "tables"])
+        return md.convert(text or "")
+    except Exception:
+        return f"<p>{_escape_html(text or '')}</p>"
 
-        role_icons = {"user": "User", "assistant": "Assistant", "tool": "Tool"}
-        role_label = role_icons.get(role, role)
-        bubble_class = f"bubble-{role}" if role in ("user", "assistant", "tool") else "bubble-other"
-        ts_html = f'<span class="ts">{_escape_html(ts)}</span>' if ts else ""
-        bubbles.append(
-            f'<div class="bubble {bubble_class}">'
-            f'<div class="meta">{_escape_html(role_label)} {ts_html}</div>'
-            f'<div class="body">{content_html}</div>'
-            f"</div>"
-        )
+
+def _role_meta(role: str, msg: Dict) -> tuple:
+    if role == "user":
+        return "👤", "User", "avatar-user"
+    if role == "assistant":
+        return "🤖", "Assistant", "avatar-assistant"
+    if role == "tool":
+        name = msg.get("name", "tool")
+        return "🔧", f"Tool · {name}", "avatar-tool"
+    if role == "system":
+        return "⚙️", "System", "avatar-system"
+    return "💬", role, "avatar-other"
+
+
+def _render_message_body(blocks: List[Dict]) -> str:
+    parts = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            parts.append(f'<div class="md">{_md_to_html(_escape_html(str(block)))}</div>')
+            continue
+        bt = block.get("type", "text")
+        if bt == "text":
+            parts.append(f'<div class="md">{_md_to_html(block.get("text", ""))}</div>')
+        elif bt == "reasoning":
+            content = block.get("content", "") or block.get("text", "")
+            parts.append(
+                '<details class="reasoning" open>'
+                '<summary>💭 思考过程</summary>'
+                f'<div class="reasoning-body md">{_md_to_html(content)}</div>'
+                "</details>"
+            )
+        elif bt in ("image_url", "input_image", "image"):
+            parts.append('<div class="image-block">🖼️ 图片内容</div>')
+        elif bt == "tool_result":
+            name = block.get("name", "tool")
+            result = block.get("result", "") or block.get("content", "")
+            parts.append(
+                '<div class="tool-block">'
+                f'<div class="tool-head">🔧 工具调用 · {_escape_html(name)}</div>'
+                f'<div class="tool-body md">{_md_to_html(str(result))}</div>'
+                "</div>"
+            )
+        else:
+            parts.append(f'<div class="md">{_md_to_html(str(block.get("text", block.get("content", ""))))}</div>')
+    return "".join(parts)
+
+
+def _render_message_card(msg: Dict) -> str:
+    role = msg.get("role", "unknown")
+    ts = _format_timestamp(msg)
+    blocks = _ensure_content_blocks(msg.get("content", ""))
+    body = _render_message_body(blocks)
+    icon, label, avatar_cls = _role_meta(role, msg)
+    ts_html = f'<span class="ts">{_escape_html(ts)}</span>' if ts else ""
+    return (
+        f'<div class="msg-card msg-{role}">'
+        f'<div class="msg-head">'
+        f'<div class="avatar {avatar_cls}">{icon}</div>'
+        f'<div class="role-name">{_escape_html(label)}</div>'
+        f"{ts_html}"
+        f"</div>"
+        f'<div class="msg-body">{body}</div>'
+        f"</div>"
+    )
+
+
+def _export_html(messages: List[Dict], record: Dict = None) -> str:
+    record = record or {}
+    title = _escape_html(record.get("title") or _get_session_title(messages))
+
+    # ── 主题色（与 in-app 消息卡片一致）──
+    theme = current_theme()
+    c = {
+        "panel": theme.get("card_bg_solid", "rgba(33, 33, 38, 0.96)"),
+        "panel_soft": theme.get("content_bg", "#2a2a2e"),
+        "border": theme.get("border", "#3d3d3d"),
+        "border_strong": theme.get("border_accent", "#f59e0b"),
+        "text": theme.get("text_primary", "#ffffff"),
+        "text_secondary": theme.get("text_secondary", "rgba(255, 255, 255, 0.5)"),
+        "text_muted": theme.get("text_muted", "#888888"),
+        "accent": theme.get("accent", "#66c6ff"),
+        "accent_warm": theme.get("accent_warm", "#f59e0b"),
+    }
+    win = {}
+    try:
+        win = theme_manager.get_current_theme().get("window", {})
+    except Exception:
+        win = {}
+    grad_start = win.get("gradient_start", "rgba(10, 14, 22, 255)")
+    grad_end = win.get("gradient_end", "rgba(15, 20, 30, 255)")
+    page_bg = f"linear-gradient(135deg, {grad_start} 0%, {grad_end} 100%)"
+
+    # ── 会话元信息头部 ──
+    meta_chips = []
+    if record.get("project"):
+        meta_chips.append(("项目", str(record["project"])))
+    if record.get("last_time"):
+        meta_chips.append(("时间", str(record["last_time"])))
+    if record.get("message_count") is not None:
+        meta_chips.append(("消息", f'{record["message_count"]} 轮'))
+    model_name = next((m.get("model_name") for m in messages if m.get("model_name")), None)
+    if model_name:
+        meta_chips.append(("模型", str(model_name)))
+    chips_html = "".join(
+        f'<span class="chip"><span class="chip-k">{_escape_html(k)}</span>{_escape_html(v)}</span>'
+        for k, v in meta_chips
+    )
+    header_html = (
+        f'<div class="session-header">'
+        f'<h1 class="session-title">{title}</h1>'
+        f'<div class="session-meta">{chips_html}</div>'
+        f"</div>"
+    )
+
+    cards_html = "".join(_render_message_card(m) for m in messages)
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -181,40 +273,176 @@ def _export_html(messages: List[Dict]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title}</title>
 <style>
+:root {{
+    --panel: {c["panel"]};
+    --panel-soft: {c["panel_soft"]};
+    --border: {c["border"]};
+    --border-strong: {c["border_strong"]};
+    --text: {c["text"]};
+    --text-secondary: {c["text_secondary"]};
+    --text-muted: {c["text_muted"]};
+    --accent: {c["accent"]};
+    --accent-warm: {c["accent_warm"]};
+}}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #222; padding: 24px; max-width: 900px; margin: 0 auto; line-height: 1.7; }}
-h1 {{ font-size: 22px; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid #ddd; color: #333; }}
-.bubble {{ margin-bottom: 14px; padding: 12px 16px; border-radius: 10px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-.bubble-user {{ border-left: 4px solid #3b82f6; }}
-.bubble-assistant {{ border-left: 4px solid #f59e0b; }}
-.bubble-tool {{ border-left: 4px solid #10b981; }}
-.bubble-other {{ border-left: 4px solid #9ca3af; }}
-.meta {{ font-size: 13px; font-weight: 600; color: #555; margin-bottom: 6px; }}
-.ts {{ font-weight: 400; color: #999; font-size: 12px; margin-left: 8px; }}
-.body p {{ margin-bottom: 6px; }}
-.body pre {{ background: #f0f0f0; padding: 8px 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; margin: 6px 0; }}
-.tool-result {{ background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 6px; padding: 8px 12px; margin: 6px 0; }}
-.tool-result strong {{ display: block; margin-bottom: 4px; color: #059669; }}
-.tool-result pre {{ background: transparent; padding: 0; font-size: 13px; white-space: pre-wrap; }}
-details.reasoning {{ background: #fef9c3; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px; margin: 6px 0; }}
-details.reasoning summary {{ font-weight: 600; color: #a16207; cursor: pointer; }}
-details.reasoning pre {{ background: transparent; padding: 6px 0 0; font-size: 13px; white-space: pre-wrap; color: #713f12; }}
-.image-placeholder {{ display: inline-block; background: #f0f0f0; padding: 16px 24px; border-radius: 6px; color: #999; }}
-@media (prefers-color-scheme: dark) {{
-    body {{ background: #1a1a2e; color: #e0e0e0; }}
-    h1 {{ color: #eee; border-bottom-color: #333; }}
-    .bubble {{ background: #16213e; }}
-    .meta {{ color: #aaa; }}
-    .ts {{ color: #777; }}
-    .body pre {{ background: #0f3460; }}
-    .tool-result {{ background: #0a2e1a; border-color: #14532d; }}
-    details.reasoning {{ background: #2e250a; border-color: #713f12; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", Roboto, sans-serif;
+    background: {page_bg};
+    background-attachment: fixed;
+    color: var(--text);
+    line-height: 1.7;
+    padding: 28px 16px 60px;
+    -webkit-font-smoothing: antialiased;
+}}
+.container {{ max-width: 820px; margin: 0 auto; }}
+
+/* ── 会话头部 ── */
+.session-header {{ margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }}
+.session-title {{ font-size: 22px; font-weight: 700; color: #fff; letter-spacing: .01em; }}
+.session-meta {{ margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }}
+.chip {{
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}}
+.chip-k {{ color: var(--text-muted); }}
+
+/* ── 消息卡片（对齐 in-app CardWidget）── */
+.msg-card {{
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 14px;
+}}
+.msg-card.msg-user {{ border-left: 3px solid var(--accent); }}
+.msg-card.msg-assistant {{ border-left: 3px solid var(--accent-warm); }}
+.msg-card.msg-tool {{ border-left: 3px solid #5fd18c; }}
+.msg-card.msg-system {{ border-left: 3px solid var(--text-muted); }}
+.msg-head {{ display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }}
+.avatar {{
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+}}
+.avatar-user {{ background: rgba(102, 198, 255, 0.16); }}
+.avatar-assistant {{ background: rgba(245, 158, 11, 0.16); }}
+.avatar-tool {{ background: rgba(95, 209, 140, 0.16); }}
+.avatar-system {{ background: rgba(255, 255, 255, 0.10); }}
+.avatar-other {{ background: rgba(255, 255, 255, 0.10); }}
+.role-name {{ font-weight: 600; color: var(--text); font-size: 14px; }}
+.ts {{ color: var(--text-muted); font-size: 12px; margin-left: auto; }}
+
+/* ── markdown 正文 ── */
+.msg-body .md > :first-child {{ margin-top: 0; }}
+.msg-body .md > :last-child {{ margin-bottom: 0; }}
+.msg-body p {{ margin: 8px 0; color: var(--text-secondary); }}
+.msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 {{ color: #fff; font-weight: 700; margin: 12px 0 6px; }}
+.msg-body h1 {{ font-size: 1.35em; }}
+.msg-body h2 {{ font-size: 1.2em; }}
+.msg-body h3 {{ font-size: 1.08em; }}
+.msg-body a {{ color: var(--accent); text-decoration: none; }}
+.msg-body a:hover {{ text-decoration: underline; }}
+.msg-body ul, .msg-body ol {{ margin: 8px 0; padding-left: 24px; }}
+.msg-body li {{ margin: 4px 0; color: var(--text-secondary); }}
+.msg-body strong {{ color: #fff; font-weight: 600; }}
+.msg-body em {{ color: #c4cedd; }}
+.msg-body code {{
+    background: rgba(102, 198, 255, 0.12);
+    color: #9bddff;
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.88em;
+}}
+.msg-body pre {{
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 10px 0;
+}}
+.msg-body pre code {{
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 0;
+    font-size: 0.85em;
+    line-height: 1.5;
+}}
+.msg-body blockquote {{
+    border-left: 3px solid var(--border-strong);
+    margin: 10px 0;
+    padding: 4px 14px;
+    color: var(--text-muted);
+}}
+.msg-body hr {{ border: none; border-top: 1px solid var(--border); margin: 14px 0; }}
+.msg-body table {{
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 0.92em;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}}
+.msg-body th {{
+    background: rgba(255, 255, 255, 0.04);
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #fff;
+    border-bottom: 1px solid var(--border-strong);
+}}
+.msg-body td {{
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+}}
+.msg-body tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
+
+/* ── 思考过程 ── */
+details.reasoning {{
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 12px;
+    margin: 8px 0;
+}}
+details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor: pointer; }}
+.reasoning-body {{ margin-top: 6px; color: var(--text-muted); }}
+
+/* ── 工具调用 ── */
+.tool-block {{
+    background: rgba(95, 209, 140, 0.06);
+    border: 1px solid rgba(95, 209, 140, 0.25);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 8px 0;
+}}
+.tool-head {{ font-weight: 600; color: #5fd18c; margin-bottom: 4px; font-size: 13px; }}
+.tool-body {{ font-size: 0.92em; }}
+
+/* ── 图片占位 ── */
+.image-block {{
+    display: inline-block;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 18px 26px;
+    color: var(--text-muted);
 }}
 </style>
 </head>
 <body>
-<h1>{title}</h1>
-{"".join(bubbles)}
+<div class="container">
+{header_html}
+{cards_html}
+</div>
 </body>
 </html>"""
 
@@ -228,6 +456,7 @@ class ShareCardContent(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._messages: List[Dict] = []
+        self._record: Dict = {}
         self._selected_format = "markdown"
         self._setup_ui()
 
@@ -358,23 +587,31 @@ class ShareCardContent(QWidget):
         self._empty_label.hide()
 
         try:
-            text = self._get_export_text(fmt_id)
-            self._preview_content.setText(text[:400] + ("…" if len(text) > 400 else ""))
+            if fmt_id == "html":
+                self._preview_content.setText(
+                    f"🌐 HTML 文档　·　{len(self._messages)} 条消息\n"
+                    f"标题：{self._record.get('title') or _get_session_title(self._messages)}\n"
+                    f"已套用当前主题卡片样式，复制/保存后在浏览器查看完整效果。"
+                )
+            else:
+                text = self._get_export_text(fmt_id)
+                self._preview_content.setText(text[:400] + ("…" if len(text) > 400 else ""))
         except Exception as e:
             self._preview_content.setText(f"生成预览失败: {e}")
 
     def _get_export_text(self, fmt: str = None) -> str:
         fmt = fmt or self._selected_format
         if fmt == "markdown":
-            return _export_markdown(self._messages)
+            return _export_markdown(self._messages, self._record)
         elif fmt == "json":
-            return _export_json(self._messages)
+            return _export_json(self._record)
         elif fmt == "html":
-            return _export_html(self._messages)
+            return _export_html(self._messages, self._record)
         return ""
 
-    def set_messages(self, messages: List[Dict], title: str = ""):
-        self._messages = messages
+    def set_messages(self, record: Dict, title: str = ""):
+        self._record = record or {}
+        self._messages = self._record.get("messages", []) or []
         self._select_format(self._selected_format)
 
     def _on_copy(self):

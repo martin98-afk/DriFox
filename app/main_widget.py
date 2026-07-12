@@ -641,6 +641,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 stop_llm_api_service()
 
+        # 锁屏远程：若配置开启则自动生效（保持自动化任务持续运行），并注册 /lock-remote 命令
+        try:
+            from app.core.system.lock_screen_remote import (
+                get_lock_screen_remote_manager,
+                register_command_handler,
+            )
+
+            register_command_handler()
+            if self.cfg.lock_screen_remote_enabled.value:
+                get_lock_screen_remote_manager().enable(lock_now=True, keep_display_on=True)
+        except Exception as e:
+            logger.warning(f"[MainWidget] 锁屏远程初始化失败: {e}")
+
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager 并添加到容器
 
@@ -5972,7 +5985,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6037,7 +6050,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6048,7 +6061,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
@@ -6065,7 +6078,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6099,7 +6112,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6140,7 +6153,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6167,7 +6180,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -8762,9 +8775,45 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 注入消息数据后显示
-        self._share_card_content.set_messages(messages, session.name or "")
+        # 注入消息数据后显示（构建与归档一致的完整 session 记录）
+        record = self._build_share_record(session, messages)
+        self._share_card_content.set_messages(record, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
+
+    def _build_share_record(self, session, merged_messages: list) -> dict:
+        """构建与归档（archive）一致的完整 session 记录字典，供分享导出（JSON/HTML）使用。
+
+        与 history_manager._build_session_record 产出相同的字段结构，
+        因此分享的 JSON 即为「归档生成的完整 JSON」，而非仅消息列表。
+        """
+        if self.history_manager is not None:
+            try:
+                return self.history_manager._build_session_record(
+                    merged_messages=merged_messages,
+                    title=session.name or "",
+                    session_id=session.session_id,
+                    compaction_state=session.compaction_state,
+                    compaction_cache=session.compaction_cache,
+                    system_prompt=session.system_prompt,
+                    project=session.originating_project or "默认项目",
+                    worktree_path=(session.metadata or {}).get("worktree_path", ""),
+                )
+            except Exception:
+                pass
+        # 兜底：history_manager 不可用时构造基础记录
+        return {
+            "session_id": getattr(session, "session_id", ""),
+            "title": getattr(session, "name", "") or "",
+            "project": getattr(session, "originating_project", "") or "默认项目",
+            "last_time": getattr(session, "last_updated", ""),
+            "messages": merged_messages,
+            "message_count": len(merged_messages),
+            "compaction_state": getattr(session, "compaction_state", {}) or {},
+            "compaction_cache": getattr(session, "compaction_cache", {}) or {},
+            "system_prompt": getattr(session, "system_prompt", "") or "",
+            "user_edited_title": getattr(session, "user_edited_title", False),
+            "context_usage": getattr(session, "context_usage", 0) or 0,
+        }
 
     def _toggle_history_questions_popup(self):
         """切换历史问题卡片的显示"""
@@ -13531,6 +13580,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
 
+        # 关闭锁屏远程：恢复系统正常休眠策略，避免电脑一直无法休眠
+        try:
+            from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
+
+            get_lock_screen_remote_manager().disable()
+        except Exception:
+            pass
+
         # 显式停止所有窗口级 timer，避免在 closeEvent 之后还触发回调
         # 访问已删除的 widget（_is_destroyed 守卫是第二道防线）
         for timer_attr in (
@@ -13587,7 +13644,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -13614,7 +13671,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

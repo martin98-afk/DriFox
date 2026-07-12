@@ -60,7 +60,7 @@ def format_relative_time(time_str: str) -> str:
             return f"{diff.days}天前"
         else:
             return time_str[5:10] if len(time_str) >= 10 else time_str
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return time_str[5:10] if time_str and len(time_str) >= 10 else "更早"
 
 
@@ -845,7 +845,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return "更早"
 
     def _clear_content(self):

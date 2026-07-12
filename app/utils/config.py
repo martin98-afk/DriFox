@@ -400,6 +400,10 @@ class Settings(QConfig):
     tool_toggles = ConfigItem("Tools", "Toggles", {})
     tool_off_behavior = ConfigItem("Tools", "OffBehavior", "deny")
 
+    # ========== 锁屏远程 ==========
+    # 开启后锁屏状态下也保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行
+    lock_screen_remote_enabled = ConfigItem("System", "LockScreenRemote", False, BoolValidator())
+
 
 def update_theme_options():
     """从 ThemeManager 动态更新主题选项验证器"""

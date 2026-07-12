@@ -145,7 +145,7 @@ def _try_load_cache(key: str) -> Optional[dict]:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
         if data.get("cache_key") == key:
             return data
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):
         pass
     return None
 
@@ -629,7 +629,7 @@ def reload_all_commands():
         from app.core.ui_plugin_registry import UIPluginRegistry
 
         UIPluginRegistry.get_instance().re_register_all_commands()
-    except ImportError, Exception:
+    except (ImportError, Exception):
         pass
 
     _registered = True

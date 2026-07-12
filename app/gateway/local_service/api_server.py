@@ -238,6 +238,47 @@ class LLMAPIService:
 
             raise HTTPException(status_code=503, detail="配置不可用")
 
+        # ==================== 锁屏远程 ====================
+        @self.app.post("/system/lock-remote/enable")
+        async def lock_remote_enable(request: Optional[Dict[str, Any]] = None):
+            """开启锁屏远程：保持系统 / 屏幕唤醒，可选立即锁屏"""
+            try:
+                from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"模块不可用: {e}")
+
+            lock_now = True
+            keep_display_on = True
+            if request:
+                lock_now = bool(request.get("lock_now", True))
+                keep_display_on = bool(request.get("keep_display_on", True))
+
+            result = get_lock_screen_remote_manager().enable(
+                lock_now=lock_now, keep_display_on=keep_display_on
+            )
+            return {"success": True, "status": result}
+
+        @self.app.post("/system/lock-remote/disable")
+        async def lock_remote_disable():
+            """关闭锁屏远程，恢复系统正常休眠策略"""
+            try:
+                from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"模块不可用: {e}")
+
+            result = get_lock_screen_remote_manager().disable()
+            return {"success": True, "status": result}
+
+        @self.app.get("/system/lock-remote/status")
+        async def lock_remote_status():
+            """查询锁屏远程状态"""
+            try:
+                from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"模块不可用: {e}")
+
+            return {"success": True, "status": get_lock_screen_remote_manager().status()}
+
     def start(self, background: bool = True):
         """启动服务"""
         if self._running:

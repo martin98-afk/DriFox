@@ -298,6 +298,17 @@ class LLMSettingsCard(SystemCardFrame):
         )
         content_layout.addWidget(self.gatewayCard)
 
+        # 锁屏远程
+        self.lockRemoteCard = SwitchSettingCard(
+            FluentIcon.SYNC,
+            "锁屏远程",
+            "锁屏后保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行",
+            configItem=self.cfg.lock_screen_remote_enabled,
+            parent=self,
+        )
+        self.lockRemoteCard.checkedChanged.connect(self._on_lock_remote_toggled)
+        content_layout.addWidget(self.lockRemoteCard)
+
         # 开机自启
         self.autoStartCard = SwitchSettingCard(
             get_icon("开机自动启动"),
@@ -823,6 +834,33 @@ class LLMSettingsCard(SystemCardFrame):
             service.start(background=True)
         if hasattr(self, "llmApiEnabledCard"):
             self.llmApiEnabledCard.setContent(f"http://localhost:{port}/docs")
+
+    def _on_lock_remote_toggled(self, enabled: bool):
+        """锁屏远程开关：开启时保持系统/屏幕唤醒并锁屏，关闭时恢复休眠策略"""
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
+
+        mgr = get_lock_screen_remote_manager()
+        if enabled:
+            mgr.enable(lock_now=True, keep_display_on=True)
+            InfoBar.success(
+                title="锁屏远程",
+                content="已开启：系统保持唤醒，屏幕常亮并锁屏。",
+                position=InfoBarPosition.BOTTOM,
+                duration=2500,
+                parent=self,
+            ).show()
+        else:
+            mgr.disable()
+            InfoBar.info(
+                title="锁屏远程",
+                content="已关闭，恢复系统正常休眠策略。",
+                position=InfoBarPosition.BOTTOM,
+                duration=2500,
+                parent=self,
+            ).show()
+        self._on_settings_changed()
 
     def showEvent(self, event):
         if hasattr(self, "llmProviderCard"):

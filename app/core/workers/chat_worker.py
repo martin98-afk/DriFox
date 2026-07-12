@@ -690,7 +690,7 @@ class OpenAIChatWorker(QThread):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except json.JSONDecodeError, ValueError, TypeError:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
     @staticmethod
@@ -725,7 +725,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except json.JSONDecodeError, TypeError, ValueError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
         # 优先级 4: raw output 兜底
@@ -1437,7 +1437,7 @@ class OpenAIChatWorker(QThread):
                     try:
                         model_name = str(self.llm_config.get("model", "") or "gpt-4")
                         ctx_count = count_messages_tokens(current_messages, model=model_name)
-                    except ValueError, TypeError, RuntimeError:
+                    except (ValueError, TypeError, RuntimeError):
                         ctx_count = 0
                 if ctx_count > 0 and budget > 0:
                     self.context_updated.emit(ctx_count, budget)
@@ -2080,7 +2080,7 @@ class OpenAIChatWorker(QThread):
                                 d = ast.literal_eval(content)
                                 if isinstance(d, dict):
                                     img_path = d.get("absolute_path") or d.get("path")
-                            except ValueError, SyntaxError:
+                            except (ValueError, SyntaxError):
                                 pass
                         if not img_path:
                             m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -2360,7 +2360,7 @@ class OpenAIChatWorker(QThread):
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
                     return self._process_response(response)
-                except httpx.ReadError, httpcore.ReadError:
+                except (httpx.ReadError, httpcore.ReadError):
                     # 用户取消（cancel()关闭HTTP连接），不是真正的错误
                     return False, False
             except BadRequestError as e:
