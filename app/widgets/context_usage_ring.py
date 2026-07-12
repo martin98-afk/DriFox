@@ -57,6 +57,7 @@ class ContextUsageRing(QWidget):
         self._compacted_tokens = compacted_tokens
 
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         ring_normal = QColor(Colors.RING_NORMAL)
         ring_warning = QColor(Colors.RING_WARNING)
@@ -84,24 +85,26 @@ class ContextUsageRing(QWidget):
             if total_tokens > 0:
                 compact_ratio = int(compacted_tokens / total_tokens * 100)
                 actual_ratio = int(normal_tokens / total_tokens * 100)
-                lines.extend([
-                    "",
-                    f"普通上下文: {normal_tokens:,} tokens ({actual_ratio}%)",
-                    f"压缩上下文: {compacted_tokens:,} tokens ({compact_ratio}%)",
-                    f"压缩条数: {compaction.get('summarized_count', 0)}",
-                    f"保留条数: {compaction.get('kept_count', 0)}",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        f"普通上下文: {normal_tokens:,} tokens ({actual_ratio}%)",
+                        f"压缩上下文: {compacted_tokens:,} tokens ({compact_ratio}%)",
+                        f"压缩条数: {compaction.get('summarized_count', 0)}",
+                        f"保留条数: {compaction.get('kept_count', 0)}",
+                    ]
+                )
             else:
-                lines.extend([
-                    "",
-                    f"压缩条数: {compaction.get('summarized_count', 0)}",
-                    f"保留条数: {compaction.get('kept_count', 0)}",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        f"压缩条数: {compaction.get('summarized_count', 0)}",
+                        f"保留条数: {compaction.get('kept_count', 0)}",
+                    ]
+                )
             note = str(compaction.get("note", "") or "").strip()
             if note:
                 lines.append(note)
-        elif total_tokens > 0:
-            lines.append(f"实际消息: {normal_tokens:,} tokens")
 
         self._context_lines = lines
         self._rebuild_tooltip()
@@ -213,18 +216,29 @@ class ContextUsageRing(QWidget):
             tooltip_width = 220
             tooltip_height = len(lines) * 20 + 16
 
-        # 用窗口右沿定位：圆环在右上角，tooltip 显示在它左侧
-        window = self.window()
-        window_right = window.x() + window.width()
-        widget_top_global = self.mapToGlobal(QPoint(0, 0)).y()
+        # tooltip 定位：紧贴 widget 上方或下方显示
+        widget_global = self.mapToGlobal(QPoint(0, 0))
+        widget_center_x = widget_global.x() + self.width() // 2
         # 限制定位用的宽度不超过 280px（避免字体度量高估导致偏左）
         pos_width = min(tooltip_width, 280)
-        x = window_right - pos_width - 16
-        y = widget_top_global + 10
+
+        # 判断 widget 是否在窗口下半区 → tooltip 显示在上方
+        window = self.window()
+        window_center = window.y() + window.height() / 2
+        if widget_global.y() > window_center:
+            # 下半区：tooltip 显示在 widget 正上方
+            x = widget_center_x - pos_width // 2
+            y = widget_global.y() - tooltip_height - 4
+        else:
+            # 上半区：tooltip 显示在 widget 正下方
+            x = widget_center_x - pos_width // 2
+            y = widget_global.y() + self.height() + 4
 
         screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
         if x < screen_geom.left():
             x = screen_geom.left() + 5
+        if x + tooltip_width > screen_geom.right():
+            x = screen_geom.right() - tooltip_width - 5
         if y < screen_geom.top():
             y = screen_geom.top() + 5
         if y + tooltip_height > screen_geom.bottom():
@@ -272,8 +286,7 @@ class ContextUsageRing(QWidget):
 
             # 渐变填充 (从底部向上)
             grad = QLinearGradient(
-                inner_rect.center().x(), inner_rect.bottom(),
-                inner_rect.center().x(), inner_rect.top()
+                inner_rect.center().x(), inner_rect.bottom(), inner_rect.center().x(), inner_rect.top()
             )
             if self._cache_hit_rate >= 0.8:
                 grad.setColorAt(0.0, QColor(74, 222, 128, 160))
@@ -288,8 +301,7 @@ class ContextUsageRing(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(grad)
             painter.drawRect(
-                int(inner_rect.left()), int(inner_rect.bottom() - fill_h),
-                int(inner_rect.width()), int(fill_h) + 1
+                int(inner_rect.left()), int(inner_rect.bottom() - fill_h), int(inner_rect.width()), int(fill_h) + 1
             )
 
             painter.setClipping(False)

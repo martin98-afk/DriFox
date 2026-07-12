@@ -6,6 +6,7 @@
 三层同心圆弧，类似 ContextUsageRing 风格。
 只有数据可用时才显示。
 """
+
 from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import QApplication, QToolTip, QWidget
@@ -14,9 +15,9 @@ from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 
 # 各层对应的标签和颜色基调
 LAYER_CONFIG = [
-    {"key": "rolling",  "label": "5小时用量", "hue": "#5aa9ff"},   # 蓝色系
-    {"key": "weekly",   "label": "每周用量",  "hue": "#9b59b6"},   # 紫色系
-    {"key": "monthly",  "label": "每月用量",  "hue": "#2ecc71"},   # 绿色系
+    {"key": "rolling", "label": "5小时用量", "hue": "#5aa9ff"},  # 蓝色系
+    {"key": "weekly", "label": "每周用量", "hue": "#9b59b6"},  # 紫色系
+    {"key": "monthly", "label": "每月用量", "hue": "#2ecc71"},  # 绿色系
 ]
 
 
@@ -53,9 +54,9 @@ class CodingPlanRing(QWidget):
 
         # 三层数据
         self._layers = {
-            "rolling":  {"percent": None, "reset_sec": None},
-            "weekly":   {"percent": None, "reset_sec": None},
-            "monthly":  {"percent": None, "reset_sec": None},
+            "rolling": {"percent": None, "reset_sec": None},
+            "weekly": {"percent": None, "reset_sec": None},
+            "monthly": {"percent": None, "reset_sec": None},
         }
         self._has_data = False
 
@@ -74,8 +75,7 @@ class CodingPlanRing(QWidget):
         # 初始隐藏
         self.setVisible(False)
 
-    def set_usage(self, rolling: dict = None, weekly: dict = None,
-                  monthly: dict = None) -> bool:
+    def set_usage(self, rolling: dict = None, weekly: dict = None, monthly: dict = None) -> bool:
         """设置三层用量数据。
 
         Args:
@@ -199,18 +199,29 @@ class CodingPlanRing(QWidget):
             tooltip_width = 220
             tooltip_height = len(lines) * 20 + 16
 
-        # 用窗口右沿定位：圆环在右上角，tooltip 显示在它左侧
-        window = self.window()
-        window_right = window.x() + window.width()
-        widget_top_global = self.mapToGlobal(QPoint(0, 0)).y()
+        # tooltip 定位：紧贴 widget 上方或下方显示
+        widget_global = self.mapToGlobal(QPoint(0, 0))
+        widget_center_x = widget_global.x() + self.width() // 2
         # 限制定位用的宽度不超过 280px（避免字体度量高估导致偏左）
         pos_width = min(tooltip_width, 280)
-        x = window_right - pos_width - 20
-        y = widget_top_global + 10
+
+        # 判断 widget 是否在窗口下半区 → tooltip 显示在上方
+        window = self.window()
+        window_center = window.y() + window.height() / 2
+        if widget_global.y() > window_center:
+            # 下半区：tooltip 显示在 widget 正上方
+            x = widget_center_x - pos_width // 2
+            y = widget_global.y() - tooltip_height - 4
+        else:
+            # 上半区：tooltip 显示在 widget 正下方
+            x = widget_center_x - pos_width // 2
+            y = widget_global.y() + self.height() + 4
 
         screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
         if x < screen_geom.left():
             x = screen_geom.left() + 5
+        if x + tooltip_width > screen_geom.right():
+            x = screen_geom.right() - tooltip_width - 5
         if y < screen_geom.top():
             y = screen_geom.top() + 5
         if y + tooltip_height > screen_geom.bottom():

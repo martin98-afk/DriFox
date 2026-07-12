@@ -730,12 +730,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         mgr.register_card(
             self._window_id,
-            ContainerType.BOTTOM,
+            ContainerType.TOP,
             "history",
             self._history_card,
             system_card=True,
         )
-        self._bottom_card_container.add_card("history", self._history_card)
+        self._top_card_container.add_card("history", self._history_card)
 
         mgr.register_card(
             self._window_id,
@@ -1443,7 +1443,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 1, 1)
-        layout.setSpacing(1)
+        layout.setSpacing(0)
 
         # 创建卡片容器
         self._top_card_container = TopCardContainer()
@@ -1576,34 +1576,53 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
-        # 标题栏分组分隔线：[标题] │ [余额+圆环]
-        # session_bar_layout.addWidget(_make_vdivider())
+        # 先创建余额/用量/上下文组件（稍后添加到底部工具栏，模型选择右侧）
+        self.balance_display = BalanceDisplay(self)
+        self.coding_plan_ring = CodingPlanRing(self)
+        self.context_usage_ring = ContextUsageRing(self)
 
-        # right_layout 保持简化，显示余额和 context_usage_ring
+        # 标题栏右侧：分享按钮 + 当前会话历史问题按钮（替代时间线节点）
         right_layout = QHBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(2)
+        right_layout.setAlignment(Qt.AlignVCenter)
 
-        # 余额显示
-        self.balance_display = BalanceDisplay(self)
-        right_layout.addWidget(self.balance_display)
+        # 分享按钮
+        self._share_btn = TransparentToolButton(FluentIcon.SHARE, self)
+        self._share_btn.setFixedSize(28, 28)
+        self._share_btn.setToolTip("分享当前对话")
+        right_layout.addWidget(self._share_btn)
 
-        # 套餐用量同心圆（3层：5小时/每周/每月），仅 OpenCode Go 有数据时显示
-        self.coding_plan_ring = CodingPlanRing(self)
-        right_layout.addWidget(self.coding_plan_ring)
+        # 历史问题按钮（点击弹窗显示当前会话所有用户提问，支持快速跳转）
+        self._history_questions_btn = TransparentToolButton(FluentIcon.MESSAGE, self)
+        self._history_questions_btn.setFixedSize(28, 28)
+        self._history_questions_btn.setToolTip("当前会话的用户提问历史")
+        self._history_questions_btn.clicked.connect(self._toggle_history_questions_popup)
+        right_layout.addWidget(self._history_questions_btn)
 
-        # 上下文占用圆环
-        self.context_usage_ring = ContextUsageRing(self)
-        right_layout.addWidget(self.context_usage_ring)
-        right_layout.addSpacing(10)
+        # 历史会话按钮
+        self.history_btn = TransparentToolButton(get_icon("历史对话"), self)
+        self.history_btn.setFixedSize(28, 28)
+        self.history_btn.setToolTip("历史会话")
+        self.history_btn.clicked.connect(self._toggle_history_card)
+        right_layout.addWidget(self.history_btn)
+
+        # 新建对话按钮
+        self.new_session_btn = TransparentToolButton(get_icon("新会话"), self)
+        self.new_session_btn.setFixedSize(28, 28)
+        self.new_session_btn.setToolTip("新建对话")
+        self.new_session_btn.clicked.connect(self._create_new_session)
+        right_layout.addWidget(self.new_session_btn)
+
+        right_layout.addSpacing(8)  # 右侧留白
 
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
 
-        # 时间线节点
+        # 时间线节点不再显示为 UI 元素，但保留 widget 及其内部逻辑供历史问题弹窗使用
         self.node_preview = ConversationNodePreview(self)
         self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
-        layout.addWidget(self.node_preview)
+        self.node_preview.setVisible(False)
 
         # 监听服务商配置变更，确保多窗口同步（全局监听，需尽早连接）
         self.cfg.llm_saved_providers.valueChanged.connect(self._on_providers_config_changed)
@@ -1768,7 +1787,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "🔍 搜索会话...",
             lambda text: self._history_popup_card.set_search_filter(text),
         )
-        self._bottom_card_container.add_card("history", self._history_card)
+        self._top_card_container.add_card("history", self._history_card)
 
         # 记忆管理卡片
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
@@ -1852,10 +1871,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card_content.set_search_filter,
         )
         # 操作按钮移到标题栏
-        from qfluentwidgets import FluentIcon
-
-        from app.utils.utils import get_icon
-
         self._model_selector_card.add_header_button(
             FluentIcon.ADD,
             "添加服务商",
@@ -2213,6 +2228,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self.settings_btn.setToolTip("模型参数配置")
         self.settings_btn.clicked.connect(self._toggle_model_config_card)
         model_layout.addWidget(self.settings_btn)
+
+        # 余额/用量/上下文放入模型选择胶囊内
+        model_layout.addSpacing(4)
+        model_layout.addWidget(self.balance_display)
+        model_layout.addWidget(self.coding_plan_ring)
+        model_layout.addWidget(self.context_usage_ring)
+        model_layout.addSpacing(2)
+
         toolbar_layout.addWidget(self._model_btn_container)
 
         self._current_provider_name = ""
@@ -2284,9 +2307,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_restore_btn.clicked.connect(lambda: self._on_tool_restore())
         tt_layout.addWidget(self._tool_restore_btn)
 
-        toolbar_layout.addWidget(self._tool_toggle_btn)
-
+        # 工具权限按钮移到右侧（右对齐）
         toolbar_layout.addStretch(1)
+
+        toolbar_layout.addWidget(self._tool_toggle_btn)
 
         # 右侧功能按钮组（无边框，间距加宽）
         self._toolbar_capsule = QWidget(toolbar_widget)
@@ -2327,20 +2351,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.memory_btn.setToolTip("长期记忆")
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
-
-        self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
-        self.history_btn.setFixedSize(24, 24)
-        self.history_btn.setStyleSheet(btn_capsule_style)
-        self.history_btn.setToolTip("历史会话")
-        self.history_btn.clicked.connect(self._toggle_history_card)
-        capsule_layout.addWidget(self.history_btn)
-
-        self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
-        self.new_session_btn.setFixedSize(24, 24)
-        self.new_session_btn.setStyleSheet(btn_capsule_style)
-        self.new_session_btn.setToolTip("新建对话")
-        self.new_session_btn.clicked.connect(self._create_new_session)
-        capsule_layout.addWidget(self.new_session_btn)
 
         toolbar_layout.addWidget(self._toolbar_capsule)
 
@@ -3415,8 +3425,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 src_label = source_labels.get(source, source)
                 InfoBar.warning(
                     "只读模板",
-                    f"模板「{name}」来自 {src_label}，只读不可删除。\n"
-                    f"仅用户保存的模板（来源: user）可删除。",
+                    f"模板「{name}」来自 {src_label}，只读不可删除。\n仅用户保存的模板（来源: user）可删除。",
                     parent=self,
                     duration=5000,
                     position=InfoBarPosition.BOTTOM,
@@ -3594,7 +3603,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 恢复默认字体颜色：清除行内颜色样式 + 刷新标题栏样式
             if self._title_bar:
                 self._title_bar.set_title_color("")
-                if hasattr(self._title_bar, 'refresh_style'):
+                if hasattr(self._title_bar, "refresh_style"):
                     self._title_bar.refresh_style()
 
         try:
@@ -4200,6 +4209,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """获取所有已保存的团队模板名称列表"""
         try:
             from app.core.team.template_manager import TemplateManager
+
             templates = TemplateManager.get_instance().list_templates()
             return sorted([t["name"] for t in templates])
         except Exception:
@@ -5917,7 +5927,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -5982,7 +5992,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -5993,7 +6003,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
@@ -6010,7 +6020,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6044,7 +6054,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6085,7 +6095,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6112,7 +6122,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -8667,6 +8677,47 @@ class OpenAIChatToolWindow(ToolWindow):
             return mapping[node_index]
         return -1
 
+    def _toggle_history_questions_popup(self):
+        """切换历史问题弹窗的显示"""
+        # 延迟导入避免循环
+        from app.widgets.cards.floating.session_history_questions_popup import (
+            SessionHistoryQuestionsPopup,
+        )
+
+        if hasattr(self, "_history_questions_popup") and self._history_questions_popup.isVisible():
+            self._history_questions_popup.hide()
+            return
+
+        # 获取当前会话的用户问题
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        from app.core import consolidate_messages, content_to_text
+
+        messages = consolidate_messages(session.messages)
+        questions = []
+        for msg in messages:
+            if msg.get("role") == "user":
+                if msg.get("_hook_event"):
+                    continue
+                text = content_to_text(msg.get("content", ""))
+                if len(text) > 60:
+                    text = text[:60] + "…"
+                questions.append((len(questions), text))
+
+        # 创建或复用弹窗
+        if not hasattr(self, "_history_questions_popup") or self._history_questions_popup is None:
+            self._history_questions_popup = SessionHistoryQuestionsPopup(self.window())
+            self._history_questions_popup.questionClicked.connect(self._on_history_question_clicked)
+
+        self._history_questions_popup.set_questions(questions)
+        self._history_questions_popup.show_at(self._history_questions_btn)
+
+    def _on_history_question_clicked(self, index: int):
+        """历史问题弹窗条目点击，跳转到对应位置（复用时间线节点跳转逻辑）"""
+        self._on_node_preview_clicked(index)
+
     def _on_node_preview_clicked(self, index: int):
         """
         点击时间线节点，滚动到对应的 user 卡片。
@@ -9618,8 +9669,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 last_bp = ops[-1].get("backup_path", "")
                 try:
                     old_content, _, _ = read_backup_files(first_bp)
-                    last_after = str(Path(last_bp).with_suffix('.after.bak'))
-                    with open(last_after, 'r', encoding='utf-8', errors='replace') as f:
+                    last_after = str(Path(last_bp).with_suffix(".after.bak"))
+                    with open(last_after, "r", encoding="utf-8", errors="replace") as f:
                         new_content = f.read()
                 except Exception as exc:
                     logger.warning(f"[card-review] 跳过文件 {file_key}: 读取备份失败 {exc}")
@@ -10552,6 +10603,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 3. 通知用户
         from qfluentwidgets import InfoBar, InfoBarPosition
+
         InfoBar.info(
             title="子智能体已中止",
             content=f"已手动中止子智能体「{agent_name}」: {task_description[:40]}{'...' if len(task_description) > 40 else ''}",
@@ -13087,7 +13139,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from pathlib import Path
 
-            base_dir = str(Path.home() / '.drifox')
+            base_dir = str(Path.home() / ".drifox")
             temp_dir = os.path.join(base_dir, "workspaces", project)
             os.makedirs(temp_dir, exist_ok=True)
             self._current_workdir[project] = temp_dir
@@ -13453,7 +13505,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -13480,7 +13532,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
