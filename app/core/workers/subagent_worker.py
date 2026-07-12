@@ -640,6 +640,10 @@ class SubAgentExecutor(QThread):
                         cur_msg = c
                     break
 
+            # 记录 trigger_event 前的队列大小，用于后续精确 drain
+            _q = getattr(backend, "_hook_message_queue", None)
+            qsize_before = _q.qsize() if _q is not None else 0
+
             results = backend.hook_manager.trigger_event(
                 event_name,
                 context=ctx,
@@ -647,20 +651,20 @@ class SubAgentExecutor(QThread):
                 trigger_async=False,
             )
 
-            # 🛡️ 排出同步执行中 _execute_hook 通过 on_hook_finished 入队的消息，
+            # 🛡️ 精确排出同步执行中 _execute_hook 通过 on_hook_finished 入队的消息，
             # 避免 _inject_pending_hook_messages（_drain_hook_queues）重复注入。
-            _q = getattr(backend, "_hook_message_queue", None)
+            # ★ 只排出本轮 trigger_event 新增的消息，不误伤其他路径放入的消息。
             if _q is not None:
-                _drained = 0
-                while True:
+                qsize_after = _q.qsize()
+                to_drain = qsize_after - qsize_before
+                for _ in range(to_drain):
                     try:
                         _q.get_nowait()
-                        _drained += 1
                     except Exception:
                         break
-                if _drained:
+                if to_drain > 0:
                     logger.debug(
-                        f"[SubAgent] Drained {_drained} msg(s) from hook queue after sync trigger_event({event_name})"
+                        f"[SubAgent] Drained {to_drain} msg(s) from hook queue after sync trigger_event({event_name})"
                     )
 
             # 收集成功执行的 hook 输出，注入 messages
