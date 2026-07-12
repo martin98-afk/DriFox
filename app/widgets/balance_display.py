@@ -208,19 +208,17 @@ class BalanceDisplay(QWidget):
         if balance < 0:
             # 欠费或余额为负 - 红色
             color = "#ff6b6b"
-            display_text = f"{self._currency}{balance:.2f}"
         elif balance < 1:
-            # 小余额，显示更多小数 - 黄色警告
+            # 小余额 - 黄色警告
             color = "#f6c453"
-            display_text = f"{self._currency}{balance:.3f}"
         elif balance < 10:
             # 低于10元 - 橙色
             color = "#ff9f43"
-            display_text = f"{self._currency}{balance:.2f}"
         else:
             # 正常余额 - 蓝色
             color = "#5aa9ff"
-            display_text = f"{self._currency}{balance:.2f}"
+        # 统一保留 1 位小数
+        display_text = f"{self._currency}{balance:.1f}"
 
         self._balance_label.setStyleSheet(f"""
             QLabel {{

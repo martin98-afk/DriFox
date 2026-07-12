@@ -249,3 +249,39 @@ class TestCommandCardDivider:
         assert card.height() == expected, (
             f"多 items 高度 {card.height()} != {expected}"
         )
+
+    def test_short_window_hides_tooltip_and_compresses(self):
+        """矮窗口下：命令卡片进入预算压缩，隐藏次要 tooltip 并减少可见项
+
+        回归：窗口很矮时，tooltip + 至多 8 项会超过可用空间，挤掉输入框/聊天区。
+        预期：_available_card_budget 远小于自然高度时，_apply_list_height 隐藏
+        tooltip，并把可见项压缩到预算内（剩余项在滚动区滚动）。
+        """
+        _ensure_qapp()
+        from app.widgets.cards.floating.command_card import (
+            MAX_VISIBLE_ITEMS, ITEM_HEIGHT,
+        )
+        card = _card_with_tooltip()  # 600px 窗口，tooltip 可见，25 items
+        # 压扁窗口到 150px，触发预算压缩（测试无 _input_card，预留仅 CARD_RESIZE_RESERVE）
+        top = card.window()
+        top.resize(600, 150)
+        app = QApplication.instance()
+        for _ in range(15):
+            app.processEvents()
+
+        # 矮窗口：次要的 tooltip 应被隐藏，腾出空间给列表
+        assert not card._desc_tooltip_label.isVisible(), "矮窗口下 tooltip 应被隐藏"
+        assert not card._desc_tooltip_divider.isVisible(), "矮窗口下分隔线应被隐藏"
+
+        # 卡片高度应远小于"完整 8 项 + tooltip"的自然高度
+        full_natural = (
+            MAX_VISIBLE_ITEMS * ITEM_HEIGHT
+            + len(card._dividers)
+            + card._tooltip_natural_height
+            + 1
+        )
+        assert card.height() < full_natural, (
+            f"矮窗口未压缩: card {card.height()} 应 < 自然高度 {full_natural}"
+        )
+        # 至少仍保留可见项（不为 0）
+        assert card.height() >= ITEM_HEIGHT, "矮窗口下至少保留 1 个 item"

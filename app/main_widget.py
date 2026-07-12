@@ -45,6 +45,8 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     FluentIcon,
+    InfoBadge,
+    InfoBadgePosition,
     InfoBar,
     InfoBarPosition,
     PushButton,
@@ -110,6 +112,8 @@ from app.widgets.cards.floating.sub_agent_compact_widget import (
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
+from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
+from app.widgets.cards.floating.share_card import ShareCardContent
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
@@ -302,6 +306,8 @@ class OpenAIChatToolWindow(ToolWindow):
         "hook_edit",
         "project_selector",
         "tool_control",
+        "share",
+        "history_questions",
     )
     # AutoLoop 状态
     _is_auto_loop_running: bool = False
@@ -637,6 +643,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 stop_llm_api_service()
 
+        # 锁屏远程：若配置开启则自动生效（保持自动化任务持续运行），并注册 /lock-remote 命令
+        try:
+            from app.core.system.lock_screen_remote import (
+                get_lock_screen_remote_manager,
+                register_command_handler,
+            )
+
+            register_command_handler()
+            if self.cfg.lock_screen_remote_enabled.value:
+                get_lock_screen_remote_manager().enable(lock_now=True, keep_display_on=True)
+        except Exception as e:
+            logger.warning(f"[MainWidget] 锁屏远程初始化失败: {e}")
+
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager 并添加到容器
 
@@ -736,6 +755,22 @@ class OpenAIChatToolWindow(ToolWindow):
             system_card=True,
         )
         self._bottom_card_container.add_card("history", self._history_card)
+
+        mgr.register_card(
+            self._window_id,
+            ContainerType.TOP,
+            "share",
+            self._share_card,
+            system_card=True,
+        )
+
+        mgr.register_card(
+            self._window_id,
+            ContainerType.TOP,
+            "history_questions",
+            self._history_questions_card,
+            system_card=True,
+        )
 
         mgr.register_card(
             self._window_id,
@@ -1443,7 +1478,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 1, 1)
-        layout.setSpacing(1)
+        layout.setSpacing(0)
 
         # 创建卡片容器
         self._top_card_container = TopCardContainer()
@@ -1576,34 +1611,52 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
 
-        # 标题栏分组分隔线：[标题] │ [余额+圆环]
-        # session_bar_layout.addWidget(_make_vdivider())
+        # 先创建余额/用量/上下文组件（稍后添加到底部工具栏，模型选择右侧）
+        self.balance_display = BalanceDisplay(self)
+        self.coding_plan_ring = CodingPlanRing(self)
+        self.context_usage_ring = ContextUsageRing(self)
 
-        # right_layout 保持简化，显示余额和 context_usage_ring
+        # 标题栏右侧：分享按钮 + 当前会话历史问题按钮（替代时间线节点）
         right_layout = QHBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(2)
+        right_layout.setAlignment(Qt.AlignVCenter)
 
-        # 余额显示
-        self.balance_display = BalanceDisplay(self)
-        right_layout.addWidget(self.balance_display)
+        # 历史问题按钮（点击弹窗显示当前会话所有用户提问，支持快速跳转）
+        self._history_questions_btn = TransparentToolButton(FluentIcon.MESSAGE, self)
+        self._history_questions_btn.setFixedSize(28, 28)
+        self._history_questions_btn.setToolTip("当前会话的用户提问历史")
+        self._history_questions_btn.clicked.connect(self._toggle_history_questions_popup)
+        right_layout.addWidget(self._history_questions_btn)
+        # 右上角 InfoBadge，显示用户问题总数（自动跟随按钮位置）
+        self._history_questions_badge = InfoBadge.attension(
+            0, parent=self, target=self._history_questions_btn, position=InfoBadgePosition.LEFT
+        )
+        self._history_questions_badge.setVisible(False)
 
-        # 套餐用量同心圆（3层：5小时/每周/每月），仅 OpenCode Go 有数据时显示
-        self.coding_plan_ring = CodingPlanRing(self)
-        right_layout.addWidget(self.coding_plan_ring)
+        # 分享按钮
+        self._share_btn = TransparentToolButton(FluentIcon.SHARE, self)
+        self._share_btn.setFixedSize(28, 28)
+        self._share_btn.setToolTip("分享当前对话")
+        self._share_btn.clicked.connect(self._on_share_clicked)
+        right_layout.addWidget(self._share_btn)
 
-        # 上下文占用圆环
-        self.context_usage_ring = ContextUsageRing(self)
-        right_layout.addWidget(self.context_usage_ring)
-        right_layout.addSpacing(10)
+        # 差异对比按钮（从右下移到右上）
+        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self)
+        self.diff_btn.setFixedSize(28, 28)
+        self.diff_btn.setToolTip("差异对比")
+        self.diff_btn.clicked.connect(self._open_diff_viewer)
+        right_layout.addWidget(self.diff_btn)
+
+        right_layout.addSpacing(8)  # 右侧留白
 
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
 
-        # 时间线节点
+        # 时间线节点不再显示为 UI 元素，但保留 widget 及其内部逻辑供历史问题弹窗使用
         self.node_preview = ConversationNodePreview(self)
         self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
-        layout.addWidget(self.node_preview)
+        self.node_preview.setVisible(False)
 
         # 监听服务商配置变更，确保多窗口同步（全局监听，需尽早连接）
         self.cfg.llm_saved_providers.valueChanged.connect(self._on_providers_config_changed)
@@ -1770,6 +1823,30 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("history", self._history_card)
 
+        # 分享卡片（BaseSettingsCard 包裹，按内容自适应高度）
+        self._share_card_content = ShareCardContent(self)
+        self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
+        self._share_card.content_layout.addWidget(self._share_card_content)
+        self._share_card.set_height_mode("content")
+        self._share_card.setVisible(False)
+        self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
+        self._top_card_container.add_card("share", self._share_card)
+
+        # 历史问题卡片（BaseSettingsCard 包裹，按内容自适应高度）
+        self._history_questions_card_content = HistoryQuestionsCardContent(self)
+        self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
+        self._history_questions_card_content.questionClicked.connect(
+            lambda: self._card_manager.hide_card("history_questions", self._window_id)
+        )
+        self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
+        self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
+        self._history_questions_card.set_height_mode("content")
+        self._history_questions_card.setVisible(False)
+        self._history_questions_card.closed.connect(
+            lambda: self._card_manager.hide_card("history_questions", self._window_id)
+        )
+        self._top_card_container.add_card("history_questions", self._history_questions_card)
+
         # 记忆管理卡片
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
         self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
@@ -1852,10 +1929,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card_content.set_search_filter,
         )
         # 操作按钮移到标题栏
-        from qfluentwidgets import FluentIcon
-
-        from app.utils.utils import get_icon
-
         self._model_selector_card.add_header_button(
             FluentIcon.ADD,
             "添加服务商",
@@ -2213,6 +2286,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self.settings_btn.setToolTip("模型参数配置")
         self.settings_btn.clicked.connect(self._toggle_model_config_card)
         model_layout.addWidget(self.settings_btn)
+
+        # 余额/用量/上下文放入模型选择胶囊内
+        model_layout.addSpacing(4)
+        model_layout.addWidget(self.balance_display)
+        model_layout.addWidget(self.coding_plan_ring)
+        model_layout.addWidget(self.context_usage_ring)
+        model_layout.addSpacing(2)
+
         toolbar_layout.addWidget(self._model_btn_container)
 
         self._current_provider_name = ""
@@ -2284,9 +2365,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_restore_btn.clicked.connect(lambda: self._on_tool_restore())
         tt_layout.addWidget(self._tool_restore_btn)
 
-        toolbar_layout.addWidget(self._tool_toggle_btn)
-
+        # 工具权限按钮移到右侧（右对齐）
         toolbar_layout.addStretch(1)
+
+        toolbar_layout.addWidget(self._tool_toggle_btn)
 
         # 右侧功能按钮组（无边框，间距加宽）
         self._toolbar_capsule = QWidget(toolbar_widget)
@@ -2314,13 +2396,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
         capsule_layout.addWidget(self.auto_loop_btn)
 
-        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
-        self.diff_btn.setFixedSize(24, 24)
-        self.diff_btn.setStyleSheet(btn_capsule_style)
-        self.diff_btn.setToolTip("差异对比")
-        self.diff_btn.clicked.connect(self._open_diff_viewer)
-        capsule_layout.addWidget(self.diff_btn)
-
         self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
         self.memory_btn.setFixedSize(24, 24)
         self.memory_btn.setStyleSheet(btn_capsule_style)
@@ -2328,6 +2403,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
 
+        # 历史会话按钮（从右上移到右下）
         self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
         self.history_btn.setFixedSize(24, 24)
         self.history_btn.setStyleSheet(btn_capsule_style)
@@ -2335,6 +2411,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.history_btn.clicked.connect(self._toggle_history_card)
         capsule_layout.addWidget(self.history_btn)
 
+        # 新建对话按钮（从右上移到右下）
         self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
         self.new_session_btn.setFixedSize(24, 24)
         self.new_session_btn.setStyleSheet(btn_capsule_style)
@@ -3415,8 +3492,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 src_label = source_labels.get(source, source)
                 InfoBar.warning(
                     "只读模板",
-                    f"模板「{name}」来自 {src_label}，只读不可删除。\n"
-                    f"仅用户保存的模板（来源: user）可删除。",
+                    f"模板「{name}」来自 {src_label}，只读不可删除。\n仅用户保存的模板（来源: user）可删除。",
                     parent=self,
                     duration=5000,
                     position=InfoBarPosition.BOTTOM,
@@ -3594,7 +3670,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 恢复默认字体颜色：清除行内颜色样式 + 刷新标题栏样式
             if self._title_bar:
                 self._title_bar.set_title_color("")
-                if hasattr(self._title_bar, 'refresh_style'):
+                if hasattr(self._title_bar, "refresh_style"):
                     self._title_bar.refresh_style()
 
         try:
@@ -4200,6 +4276,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """获取所有已保存的团队模板名称列表"""
         try:
             from app.core.team.template_manager import TemplateManager
+
             templates = TemplateManager.get_instance().list_templates()
             return sorted([t["name"] for t in templates])
         except Exception:
@@ -4514,16 +4591,17 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
-        # 🛡️ 流式(工具迭代)中跳过，避免每次 finished_with_messages 都触发
-        # build_messages → compactor.compact 阻塞主线程。
-        # 流式结束后 _on_stream_finished 会将 _is_streaming 置 False，
-        # 此时 deferred QTimer 触发本方法会正常刷新。
-        if self._is_streaming:
-            return
-
+        # 注：历史上这里在 _is_streaming 时直接 return，以避免 build_messages →
+        # compactor.compact 阻塞主线程。但 engine.get_context_usage_snapshot 现在走
+        # 快速路径（仅用 session.system_prompt + session.messages + 缓存的 tools 估算，
+        # 不触发 build_messages/compact），不再阻塞；故移除该守卫。0.5s 节流已足以
+        # 限制刷新频率，使流式(工具迭代)期间也能实时补全各类型上下文占比 breakdown。
         session = self.session_manager.get_current_session()
         llm_config = self._get_current_model_config()
-        snapshot = self.backend.get_context_usage_snapshot(session, llm_config)
+        api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+        snapshot = self.backend.get_context_usage_snapshot(
+            session, llm_config, api_prompt_tokens=api_prompt_tokens
+        )
         ring.set_usage(
             snapshot.get("percent", 0),
             snapshot.get("used_tokens", 0),
@@ -4531,6 +4609,7 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("compaction", {}),
             snapshot.get("normal_tokens", 0),
             snapshot.get("compacted_tokens", 0),
+            breakdown=snapshot.get("breakdown", []),
         )
         self._last_context_refresh_time = now
 
@@ -5605,7 +5684,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     messages = data.get("messages", [])
                     msg_count = data.get(
                         "message_count",
-                        len([m for m in messages if m.get("role") == "user"]),
+                        len([m for m in messages if m.get("role") == "user" and not m.get("_hook_event")]),
                     )
                     last_time = data.get("last_time", data.get("saved_at", ""))
                     preview = get_message_preview(messages) if messages else ""
@@ -6251,6 +6330,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget,
             self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
+            self._share_card_content,
+            self._history_questions_card_content,
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
@@ -6607,6 +6688,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._clear_chat_area()
         self.title_edit.setText("新对话")
         self.node_preview.clear_nodes()
+        # 新会话无用户消息，徽章应隐藏（clear_nodes 绕过了 _update_node_preview）
+        self._update_history_questions_badge()
         if self._todo_floating_widget:
             self._todo_floating_widget.clear()
         self.backend.clear_todo_list()
@@ -7560,7 +7643,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         session = self.session_manager.get_current_session()
         if session:
-            return sum(1 for msg in session.messages if msg.get("role") == "user")
+            return sum(1 for msg in session.messages if msg.get("role") == "user" and not msg.get("_hook_event"))
         # fallback: 从布局计数
         return count_user_cards_in_layout(self.chat_layout)
 
@@ -8301,6 +8384,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.node_preview.update_nodes(node_data)
         self._sync_node_preview_to_scroll()
+        # 同步更新历史问题徽章
+        self._update_history_questions_badge()
 
     def _sync_node_preview_to_scroll(self):
         """根据当前滚动位置同步时间线节点的高亮和进度条
@@ -8666,6 +8751,145 @@ class OpenAIChatToolWindow(ToolWindow):
         if 0 <= node_index < len(mapping):
             return mapping[node_index]
         return -1
+
+    def _on_share_clicked(self):
+        """分享当前对话：切换分享卡片显示"""
+        if not hasattr(self, "_share_card") or not self._share_card:
+            return
+
+        # 如果卡片正在关闭中（状态为 visible），直接 toggle 关闭
+        if self._card_manager.is_card_visible("share", self._window_id):
+            self._card_manager.hide_card("share", self._window_id)
+            return
+
+        session = self.session_manager.get_current_session()
+        if not session:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.warning(
+                title="",
+                content="没有当前会话，无法分享",
+                duration=2000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self.window(),
+            )
+            return
+
+        from app.core import consolidate_messages
+
+        messages = consolidate_messages(session.messages)
+        if not messages:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.warning(
+                title="",
+                content="当前会话无消息，无法分享",
+                duration=2000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self.window(),
+            )
+            return
+
+        # 注入消息数据后显示（构建与归档一致的完整 session 记录）
+        record = self._build_share_record(session, messages)
+        self._share_card_content.set_messages(record, session.name or "")
+        self._card_manager.toggle_card("share", self._window_id)
+
+    def _build_share_record(self, session, merged_messages: list) -> dict:
+        """构建与归档（archive）一致的完整 session 记录字典，供分享导出（JSON/HTML）使用。
+
+        与 history_manager._build_session_record 产出相同的字段结构，
+        因此分享的 JSON 即为「归档生成的完整 JSON」，而非仅消息列表。
+        """
+        if self.history_manager is not None:
+            try:
+                return self.history_manager._build_session_record(
+                    merged_messages=merged_messages,
+                    title=session.name or "",
+                    session_id=session.session_id,
+                    compaction_state=session.compaction_state,
+                    compaction_cache=session.compaction_cache,
+                    system_prompt=session.system_prompt,
+                    project=session.originating_project or "默认项目",
+                    worktree_path=(session.metadata or {}).get("worktree_path", ""),
+                )
+            except Exception:
+                pass
+        # 兜底：history_manager 不可用时构造基础记录
+        return {
+            "session_id": getattr(session, "session_id", ""),
+            "title": getattr(session, "name", "") or "",
+            "project": getattr(session, "originating_project", "") or "默认项目",
+            "last_time": getattr(session, "last_updated", ""),
+            "messages": merged_messages,
+            "message_count": len(merged_messages),
+            "compaction_state": getattr(session, "compaction_state", {}) or {},
+            "compaction_cache": getattr(session, "compaction_cache", {}) or {},
+            "system_prompt": getattr(session, "system_prompt", "") or "",
+            "user_edited_title": getattr(session, "user_edited_title", False),
+            "context_usage": getattr(session, "context_usage", 0) or 0,
+        }
+
+    def _toggle_history_questions_popup(self):
+        """切换历史问题卡片的显示"""
+        if not hasattr(self, "_history_questions_card") or not self._history_questions_card:
+            return
+
+        if self._card_manager.is_card_visible("history_questions", self._window_id):
+            self._card_manager.hide_card("history_questions", self._window_id)
+            return
+
+        # 获取当前会话的用户问题
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        from app.core import consolidate_messages, content_to_text
+
+        messages = consolidate_messages(session.messages)
+        questions = []
+        for msg in messages:
+            if msg.get("role") == "user":
+                if msg.get("_hook_event"):
+                    continue
+                text = content_to_text(msg.get("content", ""))
+                if len(text) > 60:
+                    text = text[:60] + "…"
+                questions.append((len(questions), text))
+
+        self._history_questions_card_content.set_questions(questions)
+        self._card_manager.toggle_card("history_questions", self._window_id)
+
+    def _update_history_questions_badge(self):
+        """更新历史问题徽章计数（当前会话用户问题总数）"""
+        if not hasattr(self, "_history_questions_badge"):
+            return
+        session = self.session_manager.get_current_session()
+        if not session:
+            self._history_questions_badge.setVisible(False)
+            return
+
+        messages = consolidate_messages(session.messages)
+        count = sum(
+            1 for msg in messages
+            if msg.get("role") == "user" and not msg.get("_hook_event")
+        )
+
+        if count > 0:
+            self._history_questions_badge.setNum(count)
+            self._history_questions_badge.adjustSize()
+            # 重新定位（badge 尺寸变化后需刷新位置）
+            if self._history_questions_badge.manager:
+                self._history_questions_badge.move(
+                    self._history_questions_badge.manager.position()
+                )
+            self._history_questions_badge.setVisible(True)
+        else:
+            self._history_questions_badge.setVisible(False)
+
+    def _on_history_question_clicked(self, index: int):
+        """历史问题弹窗条目点击，跳转到对应位置（复用时间线节点跳转逻辑）"""
+        self._on_node_preview_clicked(index)
 
     def _on_node_preview_clicked(self, index: int):
         """
@@ -9618,8 +9842,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 last_bp = ops[-1].get("backup_path", "")
                 try:
                     old_content, _, _ = read_backup_files(first_bp)
-                    last_after = str(Path(last_bp).with_suffix('.after.bak'))
-                    with open(last_after, 'r', encoding='utf-8', errors='replace') as f:
+                    last_after = str(Path(last_bp).with_suffix(".after.bak"))
+                    with open(last_after, "r", encoding="utf-8", errors="replace") as f:
                         new_content = f.read()
                 except Exception as exc:
                     logger.warning(f"[card-review] 跳过文件 {file_key}: 读取备份失败 {exc}")
@@ -10410,9 +10634,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
             if session:
-                user_msg_count = sum(1 for m in session.messages if m.get("role") == "user")
+                user_msg_count = sum(1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event"))
                 if user_msg_count == 1:
                     self._maybe_generate_topic_summary()
+            # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
+            self._update_history_questions_badge()
 
         QTimer.singleShot(0, _do_deferred_send)
 
@@ -10552,6 +10778,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 3. 通知用户
         from qfluentwidgets import InfoBar, InfoBarPosition
+
         InfoBar.info(
             title="子智能体已中止",
             content=f"已手动中止子智能体「{agent_name}」: {task_description[:40]}{'...' if len(task_description) > 40 else ''}",
@@ -11905,7 +12132,15 @@ class OpenAIChatToolWindow(ToolWindow):
                             content = str(summary_msg.get("content", "") or "")
                             compacted_tokens = max(10, len(content) // 4)
                             normal_tokens = max(0, last_tc - compacted_tokens)
-                    ring.set_usage(percent, last_tc, last_lim, compaction_state, normal_tokens, compacted_tokens)
+                    ring.set_usage(
+                        percent, last_tc, last_lim, compaction_state,
+                        normal_tokens, compacted_tokens,
+                        breakdown=getattr(ring, "_breakdown", None) or [],
+                    )
+                    # 继续调度节流刷新，补全各类型上下文占比条（breakdown）
+                    from PyQt5.QtCore import QTimer
+
+                    QTimer.singleShot(0, self._refresh_context_usage_indicator)
                     return
 
         # 工具迭代中或没有 API 数据时：本地估算 + compaction 信息
@@ -11978,14 +12213,20 @@ class OpenAIChatToolWindow(ToolWindow):
         """实时上下文占用更新回调"""
         self._last_ctx_token_count = token_count
         self._last_ctx_limit = limit
+        # 记录最近一次 API 返回的 prompt_tokens，供快照作为权威占用值
+        session = self.session_manager.get_current_session()
+        if session is not None:
+            try:
+                session.last_api_prompt_tokens = token_count
+            except Exception:
+                pass
         ring = getattr(self, "context_usage_ring", None)
         if not ring or limit <= 0:
             return
         percent = min(100, int((token_count / limit) * 100))
 
         # 获取压缩状态，以便圆环 tooltip 显示压缩信息
-        session = self.session_manager.get_current_session()
-        compaction_state = dict(getattr(session, "compaction_state", {}) or {})
+        compaction_state = dict(getattr(session, "compaction_state", {}) or {}) if session else {}
         normal_tokens = token_count
         compacted_tokens = 0
         if compaction_state.get("active"):
@@ -11997,7 +12238,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 compacted_tokens = max(10, len(content) // 4)
                 normal_tokens = max(0, token_count - compacted_tokens)
 
-        ring.set_usage(percent, token_count, limit, compaction_state, normal_tokens, compacted_tokens)
+        ring.set_usage(
+            percent, token_count, limit, compaction_state,
+            normal_tokens, compacted_tokens,
+            breakdown=getattr(ring, "_breakdown", None) or [],
+        )
+        # 流式期间也调度一次补全各类型占比 breakdown（_refresh_context_usage_indicator
+        # 已不再在 _is_streaming 时拦截，0.5s 节流保护）
+        from PyQt5.QtCore import QTimer
+
+        QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
@@ -12288,7 +12538,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info("[Topic Summary] User edited title, skipping auto generation")
             return
 
-        user_messages = [m for m in session.messages if m.get("role") == "user"]
+        user_messages = [m for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")]
         if not user_messages:
             logger.warning("[Topic Summary] No user messages found, skipping")
             return
@@ -13075,18 +13325,20 @@ class OpenAIChatToolWindow(ToolWindow):
     def _ensure_temp_workdir(self, project: str) -> str:
         """确保项目有临时工作目录
 
-        当项目未设置根目录时，在应用数据目录下创建 .drifox/workspaces/{project}/
-        作为临时工作目录，确保文件操作总有安全的基础目录。
+        当项目未设置根目录时，在 ~/.drifox/workspaces/{project}/ 下创建
+        临时工作目录，确保文件操作总有安全的基础目录。
 
-        使用 resource_path("")（应用数据目录）而非 os.getcwd()，原因：
+        使用 Path.home() / '.drifox'（用户家目录）而非 resource_path("")，原因：
+        - 用户数据归属：工作区数据应归属用户数据目录而非项目目录
+        - 持久性：~/.drifox 在开发和打包环境下始终可写、路径固定
         - 多窗口隔离：所有窗口统一使用同一基准，避免进程 cwd 飘移导致混乱
-        - 稳定性：os.getcwd() 可能被外部工具/IDE 改变，resource_path 是固定路径
+        - 稳定性：os.getcwd() 可能被外部工具/IDE 改变，家目录是固定路径
         """
         try:
-            from app.utils.utils import resource_path
+            from pathlib import Path
 
-            base_dir = resource_path("")
-            temp_dir = os.path.join(base_dir, ".drifox", "workspaces", project)
+            base_dir = str(Path.home() / ".drifox")
+            temp_dir = os.path.join(base_dir, "workspaces", project)
             os.makedirs(temp_dir, exist_ok=True)
             self._current_workdir[project] = temp_dir
 
@@ -13299,7 +13551,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
-        has_user_message = any(msg.get("role") == "user" for msg in session.messages)
+        has_user_message = any(msg.get("role") == "user" and not msg.get("_hook_event") for msg in session.messages)
         if not has_user_message:
             return
 
@@ -13394,6 +13646,14 @@ class OpenAIChatToolWindow(ToolWindow):
     def closeEvent(self, event):
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
+
+        # 关闭锁屏远程：恢复系统正常休眠策略，避免电脑一直无法休眠
+        try:
+            from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
+
+            get_lock_screen_remote_manager().disable()
+        except Exception:
+            pass
 
         # 显式停止所有窗口级 timer，避免在 closeEvent 之后还触发回调
         # 访问已删除的 widget（_is_destroyed 守卫是第二道防线）
@@ -14101,8 +14361,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 包含 on_messages_updated 收集的完整消息（含 user + assistant + tool_calls）
         auto_loop_messages = list(messages or [])
 
-        # 确保 user 消息存在（第一条 user 消息）
-        has_user = any(msg.get("role") == "user" for msg in auto_loop_messages)
+        # 确保 user 消息存在（第一条 user 消息，排除 hook 消息）
+        has_user = any(msg.get("role") == "user" and not msg.get("_hook_event") for msg in auto_loop_messages)
         if not has_user and self._auto_loop_worker:
             task_prompt = self._auto_loop_worker.get_task_prompt()
             if task_prompt:

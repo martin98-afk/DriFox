@@ -3747,16 +3747,19 @@ class CodeWebViewer(QWebEngineView):
                 self._height_report_pending = True
                 # 🐛 修复：非流式路径也会在"流式结束但工具仍在并行执行"时触发
                 # （finish_streaming 将 _streaming 置 False 后走此分支）。
-                # 此时 DOM 中存在 JS 增量注入的"工具运行折叠框"（data-tool-call-id +
-                # data-streaming="true"），它不在 _content_data 中、也不会被 markdown 重新生成。
+                # 此时 DOM 中存在 JS 增量注入的"工具运行折叠框"（data-tool-call-id），
+                # 它不在 _content_data 中、也不会被 markdown 重新生成。
                 # 若直接 updateContent 会整体替换 content-placeholder 的 innerHTML，
                 # 把所有运行框连同已完成的工具结果块一并抹掉，导致
                 # "一堆运行框出现后又立马消失，只剩个别框" 的闪灭现象。
-                # 因此与流式分支保持一致：先 save 活跃运行块，updateContent 后用 restore 还原。
+                # 因此与流式分支保持一致：先 save 活跃+已完成运行块，updateContent 后用 restore 还原。
+                # ♻️ 修复：保存所有 [data-tool-call-id] 块，不仅 data-streaming="true"。
+                # 因为 finish_tool_streaming 注入的已完成块 (data-streaming="false")
+                # 不在 _content_data 中，不会被 markdown 重新生成，若不保存也会被抹掉。
                 js_code = (
                     "(function(){"
                     "var _sbs=[];"
-                    "document.querySelectorAll('[data-tool-call-id][data-streaming=\"true\"]').forEach(function(el){"
+                    "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
                     "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                     "});"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
@@ -3801,13 +3804,16 @@ class CodeWebViewer(QWebEngineView):
             self._last_rendered_markdown = self._markdown_text
             self._last_rendered_html = html_content
             self._height_report_pending = True
-            # [PERF] 只保存活跃流式块（data-streaming="true"），已完成块由 markdown 重新生成。
-            # 活跃块是 JS 增量注入的、不在 markdown 中的块，必须 save/restore 避免丢失。
-            # 跳过已完成块的 outerHTML 序列化，减少 O(块数×块大小) 开销
+            # ♻️ 修复：保存所有 [data-tool-call-id] 块（含已完成块 data-streaming="false"），
+            # 不仅 data-streaming="true"。因为 finish_tool_streaming 注入的已完成块不在
+            # _content_data 中、不会被 markdown 重新生成，若只保存活跃流式块，会被
+            # updateContent 抹掉导致预览文本一闪而没。
+            # 已在 markdown 中的块（来自 _content_data 的 tool result）不会被重复恢复，
+            # 因为 restore 前检查了 if(!document.querySelector(...))。
             js_code = (
                 "(function(){"
                 "var _sbs=[];"
-                "document.querySelectorAll('[data-tool-call-id][data-streaming=\"true\"]').forEach(function(el){"
+                "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
                 "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
                 "});"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"

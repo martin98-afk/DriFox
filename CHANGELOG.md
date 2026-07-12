@@ -34,8 +34,6 @@ All notable changes to this project will be documented in this file.
 - **依赖升级**: `pyproject.toml` 升级 `codegraph-py` 依赖至 1.3.4（提升代码语义探索能力）
 - 更新版本号至 v0.3.5
 
-## [Unreleased]
-
 ## [v0.3.4] - 2026-07-09
 
 自上一版本以来的变更 | 提交数：30 · 文件变更：32 · +2914/-627 | 贡献者：dingma, mading

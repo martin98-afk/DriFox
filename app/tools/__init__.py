@@ -7,6 +7,7 @@ and aggregates tools from separate tool modules, eliminating the need
 for manual method forwarding in a shallow facade.
 """
 
+import copy
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -1119,8 +1120,12 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         except Exception:
             pass
 
-    # Make a copy to avoid modifying the original
-    schemas = [s.copy() for s in TOOL_SCHEMAS]
+    # 深拷贝，避免后续对 function.description 的 `+=` 改写污染全局 TOOL_SCHEMAS。
+    # ⚠️ 旧实现用 s.copy() 浅拷贝：外层 dict 是新对象，但内层的 function dict 仍与
+    # 全局 TOOL_SCHEMAS 共享同一对象。get_builtin_tools_schema 每次被调用（上下文刷新
+    # 频繁触发）都会对 subagent_dag / lsp 的 description 做 `+=`，导致全局工具描述被一遍
+    # 遍追加，工具定义 token 随对话过程持续增长（用户实测「工具定义 token 数在增加」）。
+    schemas = [copy.deepcopy(s) for s in TOOL_SCHEMAS]
 
     # 动态生成 subagent_para 工具描述
     subagent_para_desc = "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。完成后系统发[后台任务状态]，届时用subagent_status查。"

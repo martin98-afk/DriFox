@@ -144,9 +144,9 @@ def _calc_dir_size(path: Path, dir_mode: bool) -> int:
                 if entry.is_file():
                     try:
                         total += entry.stat().st_size
-                    except OSError, PermissionError:
+                    except (OSError, PermissionError):
                         pass
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         pass
     return total
 
@@ -159,9 +159,9 @@ def _walk_dir_size(path: Path) -> int:
             for f in files:
                 try:
                     total += os.path.getsize(os.path.join(root, f))
-                except OSError, PermissionError:
+                except (OSError, PermissionError):
                     pass
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         pass
     return total
 
@@ -244,9 +244,9 @@ def _delete_cache(path: Path, dir_mode: bool):
                 if entry.is_file():
                     try:
                         entry.unlink()
-                    except OSError, PermissionError:
+                    except (OSError, PermissionError):
                         pass
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         pass
 
 

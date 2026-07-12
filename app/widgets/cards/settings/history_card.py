@@ -60,7 +60,7 @@ def format_relative_time(time_str: str) -> str:
             return f"{diff.days}天前"
         else:
             return time_str[5:10] if len(time_str) >= 10 else time_str
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return time_str[5:10] if time_str and len(time_str) >= 10 else "更早"
 
 
@@ -71,6 +71,9 @@ def get_message_preview(messages: List[Dict], max_len: int = 50) -> str:
     for msg in reversed(messages):
         role = msg.get("role", "")
         content = msg.get("content", "")
+        # 跳过 hook 消息（role=user 但带 _hook_event 标记），避免预览显示 hook 内容
+        if msg.get("_hook_event"):
+            continue
         if role == "user" and content:
             if isinstance(content, list):
                 content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
@@ -845,7 +848,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return "更早"
 
     def _clear_content(self):

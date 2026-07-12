@@ -21,7 +21,7 @@ from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.message_content import content_to_text
-from app.core.token_estimator import count_messages_tokens
+from app.core.token_estimator import count_messages_tokens, count_tools_tokens
 from app.tools import get_builtin_tools_schema
 
 
@@ -479,7 +479,10 @@ class UIEngine(BaseEngine):
         return messages
 
     def get_context_usage_snapshot(
-        self, session: Optional[ChatSession] = None, llm_config: Optional[Dict] = None
+        self,
+        session: Optional[ChatSession] = None,
+        llm_config: Optional[Dict] = None,
+        api_prompt_tokens: int = 0,
     ) -> Dict[str, int]:
         session = session or self._session_manager.get_current_session()
         llm_config = llm_config or self._get_model_config()
@@ -491,6 +494,7 @@ class UIEngine(BaseEngine):
                 "compaction": self._conversation_core.compactor._make_state(),
                 "normal_tokens": 0,
                 "compacted_tokens": 0,
+                "breakdown": [],
             }
 
         # 快速路径：直接用 session.messages + system prompt 算 token
@@ -498,15 +502,35 @@ class UIEngine(BaseEngine):
         # 避免在主线程上阻塞 UI 事件循环（anyio.run(to_thread.run_sync, compactor.compact)）。
         # session.system_prompt 已在 context_builder.build_messages 中缓存，
         # session.messages 由 _on_messages_updated → set_messages 更新，两者都是现成的。
-        # 精度：当 compaction 已被触发时，会高估用量（显示原始而非压缩后大小），
-        # 但对上下文指示器而言，高估比阻塞 UI 好，且超限本身也是有效信号。
         system_prompt = getattr(session, "system_prompt", "") or ""
+        # 若 session 尚未缓存 system prompt（如刚创建、尚未 build_messages），
+        # 主动从 agent_manager 取当前 agent 的 system prompt，确保「系统提示」类别
+        # 始终被统计并显示，避免系统提示既不出现在 breakdown 也不计入总量。
+        if not system_prompt:
+            try:
+                am = self._get_agent_manager()
+                if am:
+                    system_prompt = am.get_agent_system_prompt(
+                        self._current_agent, is_subagent_call=False
+                    ) or ""
+                    # 缓存回 session，与 context_builder.build_messages 行为一致
+                    if system_prompt and not getattr(session, "system_prompt", ""):
+                        try:
+                            session.system_prompt = system_prompt
+                        except Exception:
+                            pass
+            except Exception:
+                system_prompt = ""
+        model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
+
         approx_messages: List[Dict] = []
         if system_prompt:
             approx_messages.append({"role": "system", "content": system_prompt})
         approx_messages.extend(session.messages)
 
-        # 获取工具 schema（与实际 API 请求一致），计入上下文占用
+        # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
+        # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
+        # 是本地估算与 API 返回的 prompt_tokens 差异巨大的主因之一。
         if self._current_agent:
             available_tools = self._get_agent_manager().get_agent_tools_schema(
                 self._current_agent
@@ -516,14 +540,55 @@ class UIEngine(BaseEngine):
                 self._get_agent_manager(),
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
             )
-        # 获取当前模型名用于 token 编码选择
-        model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
 
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
-        used_tokens = count_messages_tokens(approx_messages)
+        # 估算总量：系统提示 + 全部消息 + 工具定义（含模型分词校正系数）
+        est_total = count_messages_tokens(approx_messages, model, tools=available_tools)
+
+        # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
+        system_tokens = (
+            count_messages_tokens([{"role": "system", "content": system_prompt}], model)
+            if system_prompt
+            else 0
+        )
+        tools_tokens = count_tools_tokens(available_tools, model) if available_tools else 0
+
+        # 按消息角色拆分：用户消息 / 助手消息 / 工具结果
+        # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
+        # 避免与下面的 工具定义 重复计入。
+        user_tokens = assistant_tokens = tool_tokens = 0
+        for msg in session.messages:
+            role = msg.get("role", "")
+            t = count_messages_tokens([msg], model)  # 不含 tools
+            if role == "user":
+                user_tokens += t
+            elif role == "assistant":
+                assistant_tokens += t
+            elif role == "tool":
+                tool_tokens += t
+            else:
+                # 其它角色（如内联 system 消息）兜底归入用户侧
+                user_tokens += t
+
+        breakdown = [
+            {"key": "system", "label": "系统提示", "tokens": system_tokens, "color": "#5aa9ff"},
+            {"key": "user", "label": "用户消息", "tokens": user_tokens, "color": "#34d399"},
+            {"key": "assistant", "label": "助手消息", "tokens": assistant_tokens, "color": "#fbbf24"},
+            {"key": "tool", "label": "工具结果", "tokens": tool_tokens, "color": "#a78bfa"},
+            {"key": "tools", "label": "工具定义", "tokens": tools_tokens, "color": "#f472b6"},
+        ]
+        breakdown = [b for b in breakdown if b["tokens"] > 0]
+
+        # ---- 直接按消息列表计算（用户明确要求）----
+        # 各分段（系统提示 / 用户消息 / 助手消息 / 工具结果 / 工具定义）都是
+        # count_messages_tokens 对消息列表逐条、按角色实打实算出来的 token 数，
+        # 不做任何 API 真实占用缩放/覆盖。它们之和 = est_total，进度条按
+        # est_total / budget 填充，比例与数值都是消息列表的真实情况。
+        used_tokens = est_total
+
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 
-        # 计算普通上下文和压缩上下文的 token 分解
+        # 计算普通上下文和压缩上下文的 token 分解（供圆环绘制压缩段）
         compaction = dict(getattr(session, "compaction_state", {}) or {})
         normal_tokens = used_tokens
         compacted_tokens = 0
@@ -532,7 +597,7 @@ class UIEngine(BaseEngine):
             compaction_cache = getattr(session, "compaction_cache", {}) or {}
             summary_msg = compaction_cache.get("summary_message")
             if summary_msg:
-                compacted_tokens = count_messages_tokens([summary_msg])
+                compacted_tokens = count_messages_tokens([summary_msg], model)
                 normal_tokens = used_tokens - compacted_tokens
             else:
                 summarized_count = compaction.get("summarized_count", 0)
@@ -549,6 +614,7 @@ class UIEngine(BaseEngine):
             "compaction": compaction,
             "normal_tokens": normal_tokens,
             "compacted_tokens": compacted_tokens,
+            "breakdown": breakdown,
         }
 
     def _start_worker(

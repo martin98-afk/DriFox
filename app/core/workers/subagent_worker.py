@@ -531,7 +531,7 @@ class SubAgentExecutor(QThread):
                 continue
 
             # 先 extend tool_results（纯 role="tool" 消息，紧跟在 assistant(tool_calls) 之后），
-            # 再 extend hook_messages（role="assistant" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
+            # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
             current_messages.extend(tool_results)
             current_messages.extend(hook_messages)
             QCoreApplication.processEvents()
@@ -600,7 +600,7 @@ class SubAgentExecutor(QThread):
 
         与 chat_worker._trigger_worker_hook 行为一致：
         - 使用 trigger_event(sync) 同步执行 hook
-        - 用 _make_hook_message 包装成 assistant 消息（role=assistant，避免破坏 prompt cache prefix）
+        - 用 _make_hook_message 包装成 user 消息（role=user，与 Claude Code 官方行为对齐）
         - 直接 append 到 current_messages，下次 API 调用时 LLM 即可看到
         """
         try:
@@ -933,13 +933,13 @@ class SubAgentExecutor(QThread):
 
         返回 (tool_results, hook_messages) 元组。
         - tool_results: 纯 role="tool" 消息列表，可安全 extend 到 assistant(tool_calls) 之后
-        - hook_messages: PreToolUse/PostToolUse 的 role="assistant" 消息列表，
+        - hook_messages: PreToolUse/PostToolUse 的 role="user" 消息列表，
           应在所有 tool_results 被 extend 之后再 extend，避免插入 assistant(tool_calls)
           和 tool 消息之间导致 API 2013 错误
 
         同步执行所有 tool_executor.execute()，并在末尾消费 backend 的 hook 队列：
-        - _pre_tool_message_queue → PreToolUse 消息（role="assistant"）
-        - _hook_message_queue    → PostToolUse 消息（role="assistant"）
+        - _pre_tool_message_queue → PreToolUse 消息（role="user"）
+        - _hook_message_queue    → PostToolUse 消息（role="user"）
         """
         if not tool_calls or not self.tool_executor:
             return [], []
@@ -987,7 +987,7 @@ class SubAgentExecutor(QThread):
             self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
             QCoreApplication.processEvents()
 
-            # 消费 PreToolUse 队列（role="assistant" 消息），放入 hook_messages 而非 tool_results
+            # 消费 PreToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
             pretool_msgs = self._drain_pretool_queue()
             if pretool_msgs:
                 hook_messages.extend(pretool_msgs)
@@ -1006,7 +1006,7 @@ class SubAgentExecutor(QThread):
             # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
             tool_results.append(to_api_message(raw_result) or raw_result)
 
-            # 消费 PostToolUse 队列（role="assistant" 消息），放入 hook_messages 而非 tool_results
+            # 消费 PostToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
             posttool_msgs = self._drain_posttool_queue()
             if posttool_msgs:
                 hook_messages.extend(posttool_msgs)

@@ -97,13 +97,15 @@ def _get_encoder(encoding_name: str):
 def _fast_estimate_tokens(text: str) -> int:
     """
     快速估算算法 - 当 tiktoken 不可用时的降级方案
-    
-    基于 OpenAI 的经验公式 (保守估计):
-    - 1 token ≈ 4 字符 (英文/混合)
-    - 1 token ≈ 2 字符 (中文)
-    - 使用 min() 避免过度估算
-    
-    适用于 tiktoken 不可用时的降级
+
+    基于 cl100k_base 类分词器的经验近似（覆盖 GPT / DeepSeek / Qwen / Claude 等的近似行为）:
+    - 中文（CJK）约 1.2 token/字（实测区间 1.0~1.6，取略偏高的中值以避免低估触发上下文溢出）
+    - 英文/代码/符号约 1 token / 4 字符
+
+    ⚠️ 旧实现按「中文 2 字符 = 1 token」估算，对中文严重低估约 3 倍，
+    导致本地上下文占用与 API 返回的 prompt_tokens 相差数万 token。现已修正。
+
+    适用于 tiktoken 不可用时的降级。
     """
     if not text:
         return 0
@@ -114,15 +116,10 @@ def _fast_estimate_tokens(text: str) -> int:
     chinese_chars = len(_CHINESE_PATTERN.findall(text))
     non_chinese = text_len - chinese_chars
 
-    # 中文每2字符算1 token，英文/其他每4字符算1 token
-    # 同时与实际长度比较，取较小值保守估算
-    estimated = chinese_chars // 2 + non_chinese // 4
+    # 中文 ~1.2 token/字；英文/其他 ~1 token/4 字符
+    estimated = int(chinese_chars * 1.2 + non_chinese / 4.0)
 
-    # 保守：确保不会超过原始文本长度太多
-    # 对于中文，我们认为1:1是上限；对于英文，1:3是上限
-    max_estimate = max(chinese_chars, non_chinese // 3)
-    estimated = min(estimated, max_estimate)
-
+    # 极短文本至少 1 token，避免 0 值
     return max(1, estimated)
 
 
@@ -174,14 +171,14 @@ _token_count_cache_local = threading.local()
 def _get_token_cache() -> dict:
     cache = getattr(_token_count_cache_local, "cache", None)
     if cache is None:
-        cache = {"key": None, "result": 0}
+        cache = {"obj": None, "result": 0}
         _token_count_cache_local.cache = cache
     return cache
 
 
-def _set_token_cache(list_id: int, list_len: int, model: str, result: int):
+def _set_token_cache(obj, result: int):
     cache = _get_token_cache()
-    cache["key"] = (list_id, list_len, model)
+    cache["obj"] = obj
     cache["result"] = result
 # ==========
 
@@ -212,10 +209,13 @@ def count_messages_tokens(
     if not messages:
         return 0
 
-    # 脏标记缓存：仅对完整列表且 model 相同时命中（tools 几乎总为 None）
-    cache_key = (id(messages), len(messages), model)
+    # 脏标记缓存：仅对「完全相同的列表对象」命中。
+    # ⚠️ 旧实现用 id(messages) 作缓存键，但循环里频繁新建的临时列表
+    # （如 [msg]）在上一轮被 GC 后 id 会被复用，导致命中上一条消息的旧结果，
+    # 使逐条统计的 token 数全部串味、各角色占比失真。改用对象身份 `is` 比较，
+    # 只有真的是同一个列表对象才命中，彻底规避 id 复用导致的脏命中。
     _cache = _get_token_cache()
-    if _cache["key"] == cache_key:
+    if _cache["obj"] is messages:
         return _cache["result"]
 
     total = 0
@@ -284,7 +284,7 @@ def count_messages_tokens(
 
     # 确保返回值非负（防御性编程）
     result = max(0, total)
-    _set_token_cache(id(messages), len(messages), model, result)
+    _set_token_cache(messages, result)
     return result
 
 

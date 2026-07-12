@@ -11,8 +11,8 @@ import html
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtCore import QEvent, QRect, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QMouseEvent, QTextDocument
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -32,6 +32,17 @@ from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36  # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
+
+# ── 矮窗口自适应参数 ──
+# 命令卡片高度本身不受窗口约束（tooltip + 至多 MAX_VISIBLE_ITEMS 项）。
+# 当窗口很矮时，自然高度会超过可用空间，挤掉聊天区/输入框导致整体显示很差。
+# 策略：预算 = 顶层窗口高度 - 输入区实际高度 - 工具栏/最小聊天区预留；
+# 仅当自然高度 > 预算时进入"压缩"——优先保留列表（主内容），牺牲次要的
+# 顶部描述 tooltip；若仍放不下则减少可见项数量（剩余项在滚动区内滚动）。
+# 正常/高窗口下不约束。无窗口环境（单元测试构造的无父 CommandCard）返回极大值。
+CARD_MIN_VISIBLE_ITEMS = 1  # 矮到极致时仍保留的最少可见 item 数
+CARD_MIN_HEIGHT = ITEM_HEIGHT * 2 + 1  # 矮到极致时至少保留 2 行 item 的高度
+CARD_RESIZE_RESERVE = 120  # 顶部工具栏 + 最小聊天区预留高度（px）
 
 
 class CommandItemWidget(QWidget):
@@ -692,6 +703,13 @@ class CommandCard(QWidget):
         self._desc_tooltip_divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(self._desc_tooltip_divider)
         self._apply_desc_tooltip_style()
+        # 记录上次用于计算 tooltip 高度的卡片宽度，窗口/卡片宽度变化时触发重算
+        self._last_tip_width = -1
+        # 矮窗口自适应相关状态
+        self._has_tooltip_text = False  # 当前选中项是否有可展示的描述文本
+        self._tooltip_natural_height = 0  # 描述 tooltip 的自然高度（px），供预算判断
+        self._window_resize_hooked = False  # 是否已给顶层窗口安装 resize 事件过滤器
+        self._resize_recompute_timer: Optional[QTimer] = None  # 窗口 resize 防抖重算
 
         # 滚动区域
         self._scroll_area = QScrollArea(self)
@@ -908,30 +926,48 @@ class CommandCard(QWidget):
         if hasattr(self, "_desc_tooltip_divider") and self._desc_tooltip_divider is not None:
             self._desc_tooltip_divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
 
-    def _compute_desc_tooltip_height(self, max_lines: int = 4) -> int:
+    def _compute_desc_tooltip_height(self, max_lines: int = 16) -> int:
         """计算描述 tooltip 的高度（像素）
 
-        - 根据当前 selected item 的 description 文本 + 卡片宽度 + 最大行数计算
-        - 卡片宽度未初始化（首次构造）时返回保守默认值 0 —— 由调用方下次重试
-        - 上限 max_lines 行防止长描述占用过多屏幕空间
+        - 用 QTextDocument 以 QLabel 自身相同的字体/富文本引擎精确测量换行后高度，
+          与最终渲染结果一致，避免旧实现用 QFontMetrics.boundingRect 估算时
+          （未计入富文本行高、宽度取值偏差、HTML 高亮标签被当作正文等）导致高度偏小、
+          文字被裁切（包括首行只显示半截）的问题。
+        - 优先使用 label 的实际宽度（已布局）；卡片尚未布局时退回 card 宽度估算。
+        - max_lines 仅作为极端长描述的兜底上限，正常描述会完整展示。
         """
         if not hasattr(self, "_desc_tooltip_label") or self._desc_tooltip_label is None:
             return 0
         text = self._desc_tooltip_label.text()
         if not text.strip():
             return 0
-        card_w = self.width()
-        if card_w <= 0:
+        # 实际可用宽度：优先 label 已布局宽度，否则退回卡片宽度 - 左右边框(2px)
+        label_w = self._desc_tooltip_label.width()
+        if label_w <= 0:
+            label_w = self.width() - 2
+        if label_w <= 0:
             return 0
-        # 边距（与样式表中的 margin 6px top + 4px bottom = 10px，左右 8px*2 = 16px）
-        inner_w = max(1, card_w - 16 - 20)  # 左右 margin + padding 安全余量
-        fm = self._desc_tooltip_label.fontMetrics()
-        line_height = fm.lineSpacing()
-        bounding = fm.boundingRect(QRect(0, 0, inner_w, 0), Qt.TextWordWrap, text)
-        line_count = max(1, (bounding.height() + line_height - 1) // line_height)
-        line_count = min(line_count, max_lines)
-        # 总高 = 上下 margin 10px + 上下 padding 12px + N*line_height
-        return 10 + 12 + int(line_count * line_height)
+        # 样式表：margin 6px 8px 4px 8px + padding 6px 10px
+        # → 文本实际渲染宽度 = label 宽度 - 左右 margin(8*2) - 左右 padding(10*2)
+        inner_w = max(1, label_w - 36)
+        # 用 QTextDocument 复现 QLabel 的换行高度（documentMargin=0 表示只量文本本身，
+        # 外层 margin/padding 由下方手动累加，数值完全可控）。
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(self._desc_tooltip_label.font())
+        if self._desc_tooltip_label.textFormat() == Qt.RichText:
+            doc.setHtml(text)
+        else:
+            doc.setPlainText(text)
+        doc.setTextWidth(inner_w)
+        text_h = int(doc.size().height())
+        # 上下 margin(6+4) + 上下 padding(6+6) = 22px；+2 作为子像素安全余量，避免裁切
+        total = 22 + text_h + 2
+        if max_lines and max_lines > 0:
+            fm = self._desc_tooltip_label.fontMetrics()
+            line_h = fm.lineSpacing()
+            total = min(total, 22 + int(max_lines * line_h))
+        return total
 
     def _update_desc_tooltip(self, item: Optional[Dict[str, str]] = None):
         """根据当前选中项更新 tooltip 文本与可见性
@@ -955,6 +991,8 @@ class CommandCard(QWidget):
         desc = (item or {}).get("description", "") if item else ""
         if not desc.strip():
             # 空描述：隐藏（不显示空白 tooltip），并刷新卡片高度（清除旧 tooltip 占用空间）
+            self._has_tooltip_text = False
+            self._tooltip_natural_height = 0
             self._desc_tooltip_label.setVisible(False)
             self._desc_tooltip_divider.setVisible(False)
             self._apply_list_height()
@@ -995,10 +1033,17 @@ class CommandCard(QWidget):
         self._desc_tooltip_label.setText(safe)
         self._desc_tooltip_label.setVisible(True)
         self._desc_tooltip_divider.setVisible(True)
-        # 文本更新后重新计算 tooltip 自身高度，再统一刷新卡片总高度
+        # 文本更新后重算 tooltip 自然高度（供 _apply_list_height 做矮窗口预算判断），
+        # 再由 _apply_list_height 统一决定 tooltip 可见性与卡片总高度
         tip_h = self._compute_desc_tooltip_height()
+        self._has_tooltip_text = True
+        self._tooltip_natural_height = tip_h
         if tip_h > 0:
             self._desc_tooltip_label.setFixedHeight(tip_h)
+        if self.width() <= 0:
+            # 宽度尚未就绪（首次布局前）：label 为 Fixed 垂直策略，若不设高度会按单行
+            # sizeHint 折叠导致文字裁切。延后到下一轮布局完成再测算。
+            QTimer.singleShot(0, self._update_desc_tooltip)
         self._apply_list_height()
 
     def _apply_list_height(self):
@@ -1006,6 +1051,12 @@ class CommandCard(QWidget):
 
         由 _render / 选中变更 / detail→list 切换等多个入口复用。
         当卡片空列表时直接置 0（卡片可见性由 _filtered_items 控制，调用方负责）。
+
+        矮窗口自适应：若自然高度（tooltip + 至多 MAX_VISIBLE_ITEMS 项）超过可用
+        预算（见 _available_card_budget），则优先保留列表（主内容）、牺牲次要的
+        描述 tooltip；若仍放不下则减少可见项数量（剩余项在滚动区滚动）。
+        正常/高窗口下预算充足，行为与旧版一致。detail 模式由 _adjust_detail_height
+        控制高度，此处不干预。
         """
         item_count = len(self._item_widgets)
         divider_count = len(self._dividers)
@@ -1013,31 +1064,140 @@ class CommandCard(QWidget):
         if total_items == 0:
             self.setFixedHeight(0)
             return
+        if self._detail_mode:
+            return
+
+        # 顶部描述 tooltip：仅列表模式 + 有描述文本时"希望"显示
+        want_tooltip = self._has_tooltip_text
+        tip_h = 0
+        if want_tooltip and self.width() > 0:
+            # 以当前宽度重新测量，保证矮窗口放宽/窗口缩放后高度是最新的
+            tip_h = self._compute_desc_tooltip_height()
+            self._tooltip_natural_height = tip_h
+            if tip_h > 0:
+                self._desc_tooltip_label.setFixedHeight(tip_h)
+        div_h = 1 if tip_h > 0 else 0
+
         visible = min(total_items, MAX_VISIBLE_ITEMS)
-        list_height = visible * ITEM_HEIGHT + divider_count * 1
-        # 顶部 tooltip 仅在列表模式可见；detail 模式自带描述区，不重复显示
-        # 注：tooltip label 和其下的 1px 分隔线共同占 layout 空间，
-        # setFixedHeight 必须包含两者，否则 scroll_area 被挤少 1px → 少显示一个 item
-        # 注：判据用 isHidden() 而非 isVisible()。
-        # Qt 的 isVisible() 要求自身+所有祖先可见。show_card 中
-        # card.setVisible(True) 在 load_items 之后执行，此时卡片自身不可见，
-        # tooltip label 即使 setVisible(True) 也返回 False → tooltip_h=0。
-        tooltip_h = 0
+        list_full = visible * ITEM_HEIGHT + divider_count * 1
+        natural = list_full + tip_h + div_h
+
+        budget = self._available_card_budget()
+        if natural <= budget:
+            # 正常/高窗口：完整展示 tooltip + 至多 MAX_VISIBLE_ITEMS 项
+            self._set_tooltip_visible(tip_h > 0)
+            self.setFixedHeight(natural)
+            return
+
+        # ── 矮窗口自适应压缩 ──
+        if want_tooltip and tip_h > 0:
+            tip_total = tip_h + div_h
+            # 优先保留 tooltip，仅压缩可见项数量
+            list_budget_with_tip = budget - tip_total
+            if list_budget_with_tip >= ITEM_HEIGHT:
+                visible_fit = max(
+                    CARD_MIN_VISIBLE_ITEMS,
+                    min(total_items, MAX_VISIBLE_ITEMS, list_budget_with_tip // ITEM_HEIGHT),
+                )
+                list_h = visible_fit * ITEM_HEIGHT + divider_count * 1
+                if list_h + tip_total <= budget:
+                    self._set_tooltip_visible(True)
+                    self.setFixedHeight(list_h + tip_total)
+                    return
+            # tooltip 与任何列表都无法共存：隐藏 tooltip，把空间全给列表
+            self._set_tooltip_visible(False)
+            visible_fit = max(
+                CARD_MIN_VISIBLE_ITEMS,
+                min(total_items, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
+            )
+            self.setFixedHeight(visible_fit * ITEM_HEIGHT + divider_count * 1)
+            return
+
+        # 无 tooltip：直接按预算压缩可见项数量
+        visible_fit = max(
+            CARD_MIN_VISIBLE_ITEMS,
+            min(total_items, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
+        )
+        self.setFixedHeight(visible_fit * ITEM_HEIGHT + divider_count * 1)
+
+    def _available_card_budget(self) -> int:
+        """命令卡片在矮窗口下允许占用的最大高度（px）
+
+        预算 = 顶层窗口高度 - 输入区实际高度 - 工具栏/最小聊天区预留。
+        仅在自然高度超过预算时进入压缩（见 _apply_list_height）。
+        无窗口环境（单元测试构造的无父 CommandCard）返回极大值，即不约束——
+        保持与旧行为一致，确保现有高度测试不受影响。
+        """
+        top = self.window()
+        if top is None or top.height() <= 0:
+            return 16777215
+        reserve = CARD_RESIZE_RESERVE
+        # 输入区实际高度（_input_card 在 _bottom_input_container 内，可能随内容增高）
+        p = self.parent()
+        if p is not None:
+            inp = p.findChild(QWidget, "_input_card")
+            if inp is not None:
+                reserve += inp.height()
+        budget = top.height() - reserve
+        return max(CARD_MIN_HEIGHT, budget)
+
+    def _set_tooltip_visible(self, show: bool):
+        """统一控制顶部描述 tooltip 与其分隔线的可见性"""
+        if getattr(self, "_desc_tooltip_label", None) is not None:
+            self._desc_tooltip_label.setVisible(show)
+        if getattr(self, "_desc_tooltip_divider", None) is not None:
+            self._desc_tooltip_divider.setVisible(show)
+
+    def _ensure_window_resize_hook(self):
+        """给顶层窗口安装一次性的 resize 事件过滤器，窗口高度变化时按预算重算卡片高度"""
+        if self._window_resize_hooked:
+            return
+        top = self.window()
+        if top is None:
+            return
+        top.installEventFilter(self)
+        self._window_resize_hooked = True
+
+    def eventFilter(self, obj, event):
+        """监听顶层窗口 resize：高度变化（宽度可能不变，卡片自身收不到 resizeEvent）
+        时按最新预算重算卡片高度，保证矮窗口压缩/放宽实时生效。
+        """
+        if obj is self.window() and event.type() == QEvent.Resize:
+            if self._resize_recompute_timer is None:
+                self._resize_recompute_timer = QTimer(self)
+                self._resize_recompute_timer.setSingleShot(True)
+                self._resize_recompute_timer.setInterval(0)
+                self._resize_recompute_timer.timeout.connect(self._apply_list_height)
+            self._resize_recompute_timer.start()
+            return False
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        """卡片宽度变化（或首帧布局）时，重算顶部描述 tooltip 高度与卡片总高度。
+
+        描述 tooltip 是固定高度、按宽度换行的 QLabel。若卡片宽度改变
+        （如窗口缩放）而 tooltip 高度未同步，换行行数会变但高度不变，
+        导致文字被裁切（首行也可能只显示半截）。此处按宽度变化重算，
+        并同步按矮窗口预算（_available_card_budget）刷新卡片高度。
+        窗口纯高度变化（宽度不变，卡片自身收不到 resizeEvent）由
+        eventFilter 监听顶层窗口 resize 处理。
+        仅当宽度真正变化时才重入 tooltip 重算，避免 setFixedHeight 触发的
+        高度变化再次进入本方法形成自激。
+        """
+        super().resizeEvent(event)
+        self._ensure_window_resize_hook()
+        new_w = self.width()
+        if new_w == getattr(self, "_last_tip_width", -1):
+            return
+        self._last_tip_width = new_w
         if (
-            not self._detail_mode
-            and hasattr(self, "_desc_tooltip_label")
-            and self._desc_tooltip_label is not None
+            getattr(self, "_desc_tooltip_label", None) is not None
             and not self._desc_tooltip_label.isHidden()
         ):
-            # 注：必须用 minimumHeight()，避免 layout pass 延迟。
-            tooltip_h = self._desc_tooltip_label.minimumHeight()
-            if (
-                hasattr(self, "_desc_tooltip_divider")
-                and self._desc_tooltip_divider is not None
-                and not self._desc_tooltip_divider.isHidden()
-            ):
-                tooltip_h += self._desc_tooltip_divider.minimumHeight()
-        self.setFixedHeight(list_height + tooltip_h)
+            self._update_desc_tooltip()
+        else:
+            # tooltip 当前因预算被隐藏：仍按新宽度/新预算重算卡片高度
+            self._apply_list_height()
 
     def _apply_detail_positional_hint_style(self):
         """刷新 detail 模式位置参数提示标签的样式"""

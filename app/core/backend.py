@@ -99,7 +99,7 @@ def _make_hook_message(event_name: str, output: str, status_message: str = "") -
     import datetime as _dt
 
     return {
-        "role": "assistant",
+        "role": "user",
         "content": _format_hook_output(event_name, output, status_message),
         "_hook_event": event_name,
         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -414,7 +414,7 @@ class ChatBackend(QObject):
                 hook_output = _format_hook_output(event_name, output, status_message)
                 self._pre_tool_message_queue.put(
                     {
-                        "role": "assistant",
+                        "role": "user",
                         "content": hook_output,
                         "_hook_event": event_name,
                     }
@@ -424,7 +424,7 @@ class ChatBackend(QObject):
                 hook_output = _format_hook_output(event_name, output, status_message)
                 self._hook_message_queue.put(
                     {
-                        "role": "assistant",
+                        "role": "user",
                         "content": hook_output,
                         "_hook_event": event_name,
                     }
@@ -1839,10 +1839,12 @@ class ChatBackend(QObject):
         """保存最后一次的缓存统计"""
         self._last_cache_stats = stats
 
-    def get_context_usage_snapshot(self, session, llm_config) -> Dict:
+    def get_context_usage_snapshot(self, session, llm_config, api_prompt_tokens: int = 0) -> Dict:
         """获取上下文使用快照"""
         if self._chat_engine:
-            return self._chat_engine.get_context_usage_snapshot(session, llm_config)
+            return self._chat_engine.get_context_usage_snapshot(
+                session, llm_config, api_prompt_tokens=api_prompt_tokens
+            )
         return {}
 
     def switch_agent(self, agent_name: str):
