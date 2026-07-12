@@ -110,6 +110,8 @@ from app.widgets.cards.floating.sub_agent_compact_widget import (
 from app.widgets.cards.floating.sub_agent_floating_widget import (
     SubAgentFloatingWidget,
 )
+from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCard
+from app.widgets.cards.floating.share_card import ShareCard
 from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
@@ -302,6 +304,8 @@ class OpenAIChatToolWindow(ToolWindow):
         "hook_edit",
         "project_selector",
         "tool_control",
+        "share",
+        "history_questions",
     )
     # AutoLoop 状态
     _is_auto_loop_running: bool = False
@@ -736,6 +740,22 @@ class OpenAIChatToolWindow(ToolWindow):
             system_card=True,
         )
         self._top_card_container.add_card("history", self._history_card)
+
+        mgr.register_card(
+            self._window_id,
+            ContainerType.TOP,
+            "share",
+            self._share_card,
+            system_card=True,
+        )
+
+        mgr.register_card(
+            self._window_id,
+            ContainerType.TOP,
+            "history_questions",
+            self._history_questions_card,
+            system_card=True,
+        )
 
         mgr.register_card(
             self._window_id,
@@ -1591,6 +1611,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._share_btn = TransparentToolButton(FluentIcon.SHARE, self)
         self._share_btn.setFixedSize(28, 28)
         self._share_btn.setToolTip("分享当前对话")
+        self._share_btn.clicked.connect(self._on_share_clicked)
         right_layout.addWidget(self._share_btn)
 
         # 历史问题按钮（点击弹窗显示当前会话所有用户提问，支持快速跳转）
@@ -1788,6 +1809,21 @@ class OpenAIChatToolWindow(ToolWindow):
             lambda text: self._history_popup_card.set_search_filter(text),
         )
         self._top_card_container.add_card("history", self._history_card)
+
+        # 分享卡片
+        self._share_card = ShareCard(self)
+        self._share_card.setVisible(False)
+        self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
+        self._top_card_container.add_card("share", self._share_card)
+
+        # 历史问题卡片
+        self._history_questions_card = HistoryQuestionsCard(self)
+        self._history_questions_card.setVisible(False)
+        self._history_questions_card.questionClicked.connect(self._on_history_question_clicked)
+        self._history_questions_card.closed.connect(
+            lambda: self._card_manager.hide_card("history_questions", self._window_id)
+        )
+        self._top_card_container.add_card("history_questions", self._history_questions_card)
 
         # 记忆管理卡片
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
@@ -6261,6 +6297,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget,
             self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
+            self._share_card,
+            self._history_questions_card,
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
@@ -8677,15 +8715,55 @@ class OpenAIChatToolWindow(ToolWindow):
             return mapping[node_index]
         return -1
 
-    def _toggle_history_questions_popup(self):
-        """切换历史问题弹窗的显示"""
-        # 延迟导入避免循环
-        from app.widgets.cards.floating.session_history_questions_popup import (
-            SessionHistoryQuestionsPopup,
-        )
+    def _on_share_clicked(self):
+        """分享当前对话：切换分享卡片显示"""
+        if not hasattr(self, "_share_card") or not self._share_card:
+            return
 
-        if hasattr(self, "_history_questions_popup") and self._history_questions_popup.isVisible():
-            self._history_questions_popup.hide()
+        # 如果卡片正在关闭中（状态为 visible），直接 toggle 关闭
+        if self._card_manager.is_card_visible("share", self._window_id):
+            self._card_manager.hide_card("share", self._window_id)
+            return
+
+        session = self.session_manager.get_current_session()
+        if not session:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.warning(
+                title="",
+                content="没有当前会话，无法分享",
+                duration=2000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self.window(),
+            )
+            return
+
+        from app.core import consolidate_messages
+
+        messages = consolidate_messages(session.messages)
+        if not messages:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.warning(
+                title="",
+                content="当前会话无消息，无法分享",
+                duration=2000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self.window(),
+            )
+            return
+
+        # 注入消息数据后显示
+        self._share_card.set_messages(messages, session.name or "")
+        self._card_manager.toggle_card("share", self._window_id)
+
+    def _toggle_history_questions_popup(self):
+        """切换历史问题卡片的显示"""
+        if not hasattr(self, "_history_questions_card") or not self._history_questions_card:
+            return
+
+        if self._card_manager.is_card_visible("history_questions", self._window_id):
+            self._card_manager.hide_card("history_questions", self._window_id)
             return
 
         # 获取当前会话的用户问题
@@ -8706,13 +8784,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     text = text[:60] + "…"
                 questions.append((len(questions), text))
 
-        # 创建或复用弹窗
-        if not hasattr(self, "_history_questions_popup") or self._history_questions_popup is None:
-            self._history_questions_popup = SessionHistoryQuestionsPopup(self.window())
-            self._history_questions_popup.questionClicked.connect(self._on_history_question_clicked)
-
-        self._history_questions_popup.set_questions(questions)
-        self._history_questions_popup.show_at(self._history_questions_btn)
+        self._history_questions_card.set_questions(questions)
+        self._card_manager.toggle_card("history_questions", self._window_id)
 
     def _on_history_question_clicked(self, index: int):
         """历史问题弹窗条目点击，跳转到对应位置（复用时间线节点跳转逻辑）"""

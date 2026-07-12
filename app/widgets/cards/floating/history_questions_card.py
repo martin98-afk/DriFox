@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-当前会话历史问题弹窗
+历史问题卡片
 
 展示当前会话中所有用户提问，点击可快速跳转到对应位置。
-替代原有的时间线节点交互。
+以卡片形式嵌入 TopCardContainer，与分享卡片一致。
 """
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPen
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -23,13 +23,13 @@ from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar
 from app.utils.utils import get_font_family_css, get_unified_font
 
 _MAX_VISIBLE_ITEMS = 8
-_ITEM_MIN_H = 46          # 单条目最小高度（高度自适应，长问题可换行）
-_ITEM_SPACING = 6         # 条目间距
-_SCROLL_PAD = 6           # 滚动内容区上下内边距合计（top2 + bottom4）
+_ITEM_MIN_H = 46
+_ITEM_SPACING = 6
+_SCROLL_PAD = 6
 
 
 class _QuestionItem(QWidget):
-    """单个历史问题条目 — 优化样式：更大字号、清晰可读、现代悬停反馈"""
+    """单个历史问题条目"""
 
     clicked = pyqtSignal(int)
 
@@ -47,14 +47,12 @@ class _QuestionItem(QWidget):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(10)
 
-        # 序号圆形标签
         self._dot = QLabel(f"{self._index + 1}")
         self._dot.setFont(get_unified_font(11, bold=True))
         self._dot.setFixedSize(22, 22)
         self._dot.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._dot)
 
-        # 问题文本（可换行，垂直居中，确保长问题也清晰可读）
         self._label = QLabel(self._text)
         self._label.setFont(get_unified_font(13))
         self._label.setWordWrap(True)
@@ -62,7 +60,6 @@ class _QuestionItem(QWidget):
         self._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self._label, 1)
 
-        # 跳转指示箭头（悬停显示）
         self._arrow = QLabel("›")
         self._arrow.setFont(get_unified_font(16, bold=True))
         self._arrow.setFixedWidth(18)
@@ -77,33 +74,19 @@ class _QuestionItem(QWidget):
         bg = Colors.HOVER_BG_STRONG if self._hovered else "transparent"
         dot_bg = Colors.TEXT_ACCENT if self._hovered else "rgba(255, 255, 255, 0.10)"
         dot_text = "#ffffff"
-        # 始终保持高对比度，确保用户问题清晰可读
         text_color = Colors.TEXT_PRIMARY
         arrow_color = Colors.TEXT_ACCENT
 
-        self.setStyleSheet(f"""
-            background: {bg};
-            border-radius: 8px;
-        """)
-        self._dot.setStyleSheet(f"""
-            background: {dot_bg};
-            color: {dot_text};
-            border-radius: 11px;
-            {get_font_family_css()}
-            {font_size_css(11)}
-        """)
-        self._label.setStyleSheet(f"""
-            color: {text_color};
-            background: transparent;
-            {get_font_family_css()}
-            {font_size_css(13)}
-        """)
-        self._arrow.setStyleSheet(f"""
-            color: {arrow_color};
-            background: transparent;
-            {get_font_family_css()}
-            {font_size_css(16)}
-        """)
+        self.setStyleSheet(f"background: {bg}; border-radius: 8px;")
+        self._dot.setStyleSheet(
+            f"background: {dot_bg}; color: {dot_text}; border-radius: 11px;{get_font_family_css()} {font_size_css(11)}"
+        )
+        self._label.setStyleSheet(
+            f"color: {text_color}; background: transparent;{get_font_family_css()} {font_size_css(13)}"
+        )
+        self._arrow.setStyleSheet(
+            f"color: {arrow_color}; background: transparent;{get_font_family_css()} {font_size_css(16)}"
+        )
 
     def enterEvent(self, event):
         self._hovered = True
@@ -123,46 +106,41 @@ class _QuestionItem(QWidget):
         super().mousePressEvent(event)
 
 
-class SessionHistoryQuestionsPopup(QFrame):
-    """历史问题弹窗"""
+class HistoryQuestionsCard(QFrame):
+    """历史问题卡片：展示当前会话所有用户提问，点击跳转"""
 
-    questionClicked = pyqtSignal(int)  # 问题索引
+    questionClicked = pyqtSignal(int)
+    closed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._questions = []
         self._items = []
-        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setMinimumWidth(340)
-        self.setMaximumWidth(480)
         self._setup_ui()
 
     def _setup_ui(self):
-        self._apply_frame_style()
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self._apply_card_style()
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setContentsMargins(10, 8, 10, 10)
         main_layout.setSpacing(6)
 
         # ── 标题栏 ──
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(6)
 
         title_icon = QLabel("💬")
-        title_icon.setFont(get_unified_font(15))
+        title_icon.setFont(get_unified_font(13))
 
-        title = QLabel("历史问题", self)
-        title.setFont(get_unified_font(13, bold=True))
+        title = QLabel("历史问题")
+        title.setFont(get_unified_font(11, bold=True))
         Colors.refresh()
         title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent;")
 
-        self._count_label = QLabel("", self)
-        self._count_label.setFont(get_unified_font(11))
-        self._count_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; background: transparent;"
-        )
+        self._count_label = QLabel("")
+        self._count_label.setFont(get_unified_font(10))
+        self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent;")
 
         header.addWidget(title_icon)
         header.addWidget(title)
@@ -171,8 +149,8 @@ class SessionHistoryQuestionsPopup(QFrame):
         header.addStretch()
 
         self.close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
-        self.close_btn.setFixedSize(24, 24)
-        self.close_btn.clicked.connect(self.hide)
+        self.close_btn.setFixedSize(22, 22)
+        self.close_btn.clicked.connect(lambda: self.closed.emit())
         header.addWidget(self.close_btn)
 
         main_layout.addLayout(header)
@@ -190,6 +168,7 @@ class SessionHistoryQuestionsPopup(QFrame):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setFrameShape(QScrollArea.NoFrame)
         self._apply_scroll_style()
 
         self.scroll_content = QWidget()
@@ -201,30 +180,28 @@ class SessionHistoryQuestionsPopup(QFrame):
 
         main_layout.addWidget(self.scroll_area, 1)
 
-        # 初始无数据时显示空状态
+        # 空状态
         self._empty_label = QLabel("当前会话暂无历史问题", self)
         self._empty_label.setAlignment(Qt.AlignCenter)
-        self._empty_label.setFont(get_unified_font(12))
-        self._empty_label.setStyleSheet(f"""
-            color: {Colors.INPUT_PLACEHOLDER};
-            background: transparent;
-            padding: 24px 12px;
-        """)
+        self._empty_label.setFont(get_unified_font(11))
+        self._empty_label.setStyleSheet(f"color: {Colors.INPUT_PLACEHOLDER}; background: transparent; padding: 20px;")
         main_layout.addWidget(self._empty_label)
 
-    def _apply_frame_style(self):
+    def _apply_card_style(self):
         Colors.refresh()
-        self.setStyleSheet(f"""
-            SessionHistoryQuestionsPopup {{
-                background: {Colors.CARD_BG_SOLID};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 12px;
+        self.setStyleSheet(
+            f"""
+            HistoryQuestionsCard {{
+                background-color: {Colors.REALTIME_BG};
+                border: 1px solid {Colors.REALTIME_BORDER};
+                border-radius: 10px;
             }}
-        """)
+            """
+        )
 
     def _apply_scroll_style(self):
-        """套用软件统一的滚动条样式（与设置卡片 system_card_frame 一致）"""
-        self.scroll_area.setStyleSheet(f"""
+        self.scroll_area.setStyleSheet(
+            f"""
             QScrollArea {{
                 background: transparent;
                 border: none;
@@ -233,10 +210,12 @@ class SessionHistoryQuestionsPopup(QFrame):
                 background: transparent;
             }}
             {get_unified_scrollbar_style(8)}
-        """)
+            """
+        )
 
-    def refresh_theme(self):
-        self._apply_frame_style()
+    def refresh_style(self):
+        """响应主题切换"""
+        self._apply_card_style()
         self._apply_scroll_style()
         for item in self._items:
             item._apply_style()
@@ -251,14 +230,12 @@ class SessionHistoryQuestionsPopup(QFrame):
         self._rebuild_items()
 
     def _rebuild_items(self):
-        """重建条目，并精确计算弹窗高度，消除底部空白"""
-        # 清除旧条目
+        """重建条目，滚动区自适应高度"""
         for item in self._items:
             self.scroll_layout.removeWidget(item)
             item.deleteLater()
         self._items.clear()
 
-        # 显示空状态
         has_data = len(self._questions) > 0
         self._empty_label.setVisible(not has_data)
         self.scroll_area.setVisible(has_data)
@@ -267,15 +244,9 @@ class SessionHistoryQuestionsPopup(QFrame):
             self._count_label.setText(f"共 {len(self._questions)} 条")
 
         if not has_data:
-            # 空状态：直接贴合内容高度
-            self.setMinimumHeight(0)
-            self.setMaximumHeight(16777215)
-            self.adjustSize()
-            natural = self.sizeHint().height()
-            self.setFixedHeight(natural)
+            self.scroll_area.setMaximumHeight(0)
             return
 
-        # 限制最多显示条目数，避免弹窗过高
         display_questions = self._questions
         if len(display_questions) > 50:
             display_questions = display_questions[-50:]
@@ -286,72 +257,15 @@ class SessionHistoryQuestionsPopup(QFrame):
             self._items.append(item)
             self.scroll_layout.addWidget(item)
 
-        # 动态测量自然高度，避免手动估算导致底部留白
-        self.scroll_area.setMaximumHeight(16777215)
-        self.setMinimumHeight(0)
-        self.setMaximumHeight(16777215)
-        self.scroll_content.adjustSize()
-        if self.layout():
-            self.layout().activate()
-        self.adjustSize()
-
-        natural_h = self.sizeHint().height()
-        content_h = self.scroll_area.sizeHint().height()
-
-        # 最多展示 _MAX_VISIBLE_ITEMS 条，超出则滚动
-        max_content = _MAX_VISIBLE_ITEMS * _ITEM_MIN_H + (_MAX_VISIBLE_ITEMS - 1) * _ITEM_SPACING + _SCROLL_PAD
-        if content_h <= max_content:
-            # 内容不多：完全贴合，无空白
-            self.setFixedHeight(natural_h)
+        # 自适应滚动区高度：最多 _MAX_VISIBLE_ITEMS 条
+        item_count = len(display_questions)
+        if item_count <= _MAX_VISIBLE_ITEMS:
+            self.scroll_area.setMaximumHeight(16777215)
         else:
-            # 内容过多：固定到上限高度，滚动区自然出现滚动条
-            header_sep = natural_h - content_h
-            target = header_sep + max_content
-            self.setFixedHeight(target)
+            max_content = _MAX_VISIBLE_ITEMS * _ITEM_MIN_H + (_MAX_VISIBLE_ITEMS - 1) * _ITEM_SPACING + _SCROLL_PAD
+            self.scroll_area.setMaximumHeight(max_content)
 
     def _on_item_clicked(self, index: int):
-        """条目被点击，发出信号并关闭弹窗"""
+        """条目被点击，发出信号并关闭卡片"""
         self.questionClicked.emit(index)
-        self.hide()
-
-    def show_at(self, anchor_widget):
-        """在锚点按钮下方弹出，右对齐
-
-        Args:
-            anchor_widget: 触发弹窗的按钮 widget（用于定位）
-        """
-        # 先设置数据和尺寸
-        self.adjustSize()
-
-        # 获取锚点按钮的全局坐标
-        btn_global = anchor_widget.mapToGlobal(anchor_widget.rect().topRight())
-        popup_width = self.width()
-        popup_height = self.height()
-
-        # 定位：按钮右下方，右对齐
-        x = btn_global.x() - popup_width + anchor_widget.width()
-        y = btn_global.y() + anchor_widget.height() + 4
-
-        # 屏幕边界约束
-        screen = self.screen()
-        if screen:
-            screen_geom = screen.geometry()
-            x = max(screen_geom.left() + 4, min(x, screen_geom.right() - popup_width - 4))
-            y = max(screen_geom.top() + 4, min(y, screen_geom.bottom() - popup_height - 4))
-
-        self.move(x, y)
-        self.show()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-
-    def paintEvent(self, event):
-        """自定义绘制阴影边框"""
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(Colors.BORDER))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.setBrush(QColor(0, 0, 0, 0))
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
+        self.closed.emit()
