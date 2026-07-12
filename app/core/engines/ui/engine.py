@@ -553,14 +553,19 @@ class UIEngine(BaseEngine):
         )
         tools_tokens = count_tools_tokens(available_tools, model) if available_tools else 0
 
-        # 按消息角色拆分：用户消息 / 助手消息 / 工具结果
+        # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
         # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
         # 避免与下面的 工具定义 重复计入。
-        user_tokens = assistant_tokens = tool_tokens = 0
+        # 带 _hook_event 标记的消息是 hook 注入的动态上下文（如长期记忆、系统时间等），
+        # 独立统计以便用户直观了解 hook 机制对上下文的占用。
+        user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
         for msg in session.messages:
             role = msg.get("role", "")
             t = count_messages_tokens([msg], model)  # 不含 tools
-            if role == "user":
+            # 分离 hook 注入消息（带 _hook_event 标记），独立统计
+            if msg.get("_hook_event"):
+                hook_tokens += t
+            elif role == "user":
                 user_tokens += t
             elif role == "assistant":
                 assistant_tokens += t
@@ -576,6 +581,7 @@ class UIEngine(BaseEngine):
             {"key": "assistant", "label": "助手消息", "tokens": assistant_tokens, "color": "#fbbf24"},
             {"key": "tool", "label": "工具结果", "tokens": tool_tokens, "color": "#a78bfa"},
             {"key": "tools", "label": "工具定义", "tokens": tools_tokens, "color": "#f472b6"},
+            {"key": "hook", "label": "Hook 注入", "tokens": hook_tokens, "color": "#e879f9"},
         ]
         breakdown = [b for b in breakdown if b["tokens"] > 0]
 
