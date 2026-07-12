@@ -1,6 +1,23 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.3.6] - 2026-07-12
+
+自上一版本以来的变更 | 提交数：5 · 文件变更：15 · +556/-136 | 贡献者：dingma
+
+### ✨ 新功能 (New Features)
+
+- **上下文用量统计增强**: 当 API 未返回 usage 时，使用本地上下文计数补全消息 token 用量，确保上下文圆环和消息卡片中的统计保持准确；新增缺失 usage 场景的回归测试
+- **历史问题计数提示优化**: 为用户问题数量增加 InfoBadge，并在新建会话和输入用户消息时正确更新可见性；同步优化相关 tooltip 样式与上下文用量展示
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **工具运行折叠框状态修复**: 修复工具调用与工具结果写入不同消息卡片时，运行折叠框偶尔无法转为完成态并持续累积的问题；通过 `tool_call_id` 关联所属卡片，并增加完成态恢复兜底与回归测试
+
+### 🔧 其他 (Chores & Build)
+
+- 更新版本号至 v0.3.6
+
 ## [v0.3.5] - 2026-07-11
 
 自上一版本以来的变更 | 提交数：17 · 文件变更：25 · +1199/-744 | 贡献者：dingma, mading
@@ -19,7 +36,6 @@ All notable changes to this project will be documented in this file.
 - **Hook prompt 提示词清理**: 更新 `hooks.json` 的 prompt 文案，使意图更清晰
 - **更新检测信号重命名**: `update_checker` 的 `finished` 信号重命名为 `check_finished`，`thread_guard` 添加类型检查防止非 QThread 对象误处理
 - **字体与样式微调**: `OpenAIChatToolWindow` 字体族 CSS 与 README 星标历史链接更新
-- **工具运行折叠框不转为完成框并累积** (07-12): 当工具运行折叠框与工具结果写入不同卡片时，运行框无法原地转换为完成框并持续累积（消息内容仍正常更新）。修复：`main_widget` 用 `_tool_card_map` 关联 `tool_call_id` 与所属卡片，确保结果写入同一张卡片；`message_card` 的 `_perform_update` restore 兜底逻辑将已完成的运行框强制转为完成态（纵深防御）。新增回归测试 `tests/widgets/test_message_card_tool_streaming.py`
 
 ### 🐛 问题修复 (Bug Fixes) — 历史 [Unreleased] 归并
 
