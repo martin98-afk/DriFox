@@ -3,12 +3,14 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.6] - 2026-07-12
 
-自上一版本以来的变更 | 提交数：5 · 文件变更：15 · +556/-136 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：7 · 文件变更：16 · +620/-154 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
 - **上下文用量统计增强**: 当 API 未返回 usage 时，使用本地上下文计数补全消息 token 用量，确保上下文圆环和消息卡片中的统计保持准确；新增缺失 usage 场景的回归测试
 - **历史问题计数提示优化**: 为用户问题数量增加 InfoBadge，并在新建会话和输入用户消息时正确更新可见性；同步优化相关 tooltip 样式与上下文用量展示
+- **Hook Token 追踪与上下文用量堆叠图优化**: UIEngine 新增 hook token 追踪，并在上下文用量 Tooltip 的堆叠柱状图末尾显示占比百分比
+- **跨组件 Token 显示同步**: UIEngine、ChatWorker 与主窗口三组件的 token 显示统一同步，避免多处 UI 数字不一致并增强上下文处理
 
 ### 🐛 问题修复 (Bug Fixes)
 
