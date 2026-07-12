@@ -2,8 +2,8 @@ name: 天空蓝
 id: azure
 mode: light
 window:
-  gradient_start: rgba(240, 245, 252, 255)
-  gradient_end: rgba(232, 240, 250, 255)
+  gradient_start: rgba(225, 235, 250, 255)
+  gradient_end: rgba(215, 228, 246, 255)
 background:
   window_bg:
     image: :/icons/fox_bg.png
@@ -14,35 +14,35 @@ background:
     opacity: 0.04
     enabled: true
 colors:
-  card_bg: rgba(248, 251, 255, 235)
-  card_bg_solid: rgba(248, 251, 255, 250)
-  content_bg: '#eef3fa'
-  border: '#c5d5e8'
+  card_bg: rgba(240, 247, 254, 238)
+  card_bg_solid: rgba(240, 247, 254, 252)
+  content_bg: '#d6e2f2'
+  border: '#b0c4da'
   border_accent: '#1d4ed8'
-  text_primary: '#0f1b3a'
-  text_secondary: rgba(15, 27, 58, 0.60)
+  text_primary: '#0a1830'
+  text_secondary: rgba(10, 24, 48, 0.60)
   text_muted: '#5b6e8e'
   accent: '#1d4ed8'
   accent_warm: '#d97706'
   hover_bg: rgba(29, 78, 216, 0.08)
-  selected_bg: rgba(29, 78, 216, 0.16)
-  capsule_bg: rgba(248, 251, 255, 210)
-  capsule_border: rgba(190, 205, 228, 200)
+  selected_bg: rgba(29, 78, 216, 0.18)
+  capsule_bg: rgba(234, 243, 252, 215)
+  capsule_border: rgba(168, 190, 215, 200)
 
-  toolbar_bg: rgba(0, 0, 0, 0.04)
-  divider_color: rgba(0, 0, 0, 0.06)
-  hover_bg_strong: rgba(0, 0, 0, 0.06)
+  toolbar_bg: rgba(20, 60, 180, 0.06)
+  divider_color: rgba(0, 0, 0, 0.08)
+  hover_bg_strong: rgba(20, 60, 180, 0.08)
   scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
   scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
-  card_placeholder_text: '#90a0ba'
+  card_placeholder_text: '#8a9cba'
 
   button_text_on_accent: '#ffffff'
   status_info: '#1d4ed8'
   status_danger_bg: rgba(200, 50, 50, 0.8)
   status_archive_bg: rgba(29, 78, 216, 0.8)
-  card_bg_dim: rgba(0, 0, 0, 0.03)
-  archived_card_bg: rgba(29, 78, 216, 0.08)
-  archived_card_border: rgba(29, 78, 216, 0.18)
+  card_bg_dim: rgba(20, 60, 180, 0.04)
+  archived_card_bg: rgba(29, 78, 216, 0.10)
+  archived_card_border: rgba(29, 78, 216, 0.20)
 
   syntax_step: '#059669'
   syntax_tool: '#b45309'
@@ -56,56 +56,56 @@ colors:
   tag_purple_text: '#6d28d9'
   tag_orange: '#d97706'
   tag_orange_text: '#b45309'
-  user_card_bg: rgba(220, 235, 252, 180)
+  user_card_bg: rgba(205, 225, 248, 195)
   user_card_accent: '#1d4ed8'
-  user_card_text: '#0f1b3a'
+  user_card_text: '#0a1830'
   user_card_muted: '#5b6e8e'
-  assistant_card_bg: rgba(240, 248, 254, 220)
+  assistant_card_bg: rgba(238, 246, 252, 225)
   assistant_card_accent: '#1e40af'
-  assistant_card_text: '#0a1430'
+  assistant_card_text: '#060e20'
   assistant_card_muted: '#5b6e8e'
   agent_btn_text: '#5b6e8e'
   agent_btn_text_active: '#1d4ed8'
   agent_btn_bg_active: rgba(29, 78, 216, 0.12)
-  agent_btn_separator: rgba(180, 195, 218, 150)
-  input_bg_start: rgba(248, 251, 255, 200)
-  input_bg_end: rgba(240, 246, 252, 200)
-  input_focus_bg_start: rgba(248, 251, 255, 240)
-  input_focus_bg_end: rgba(240, 246, 252, 240)
-  input_text: '#0f1b3a'
-  input_focus_text: '#060e22'
-  input_border: '#c5d5e8'
+  agent_btn_separator: rgba(165, 185, 212, 150)
+  input_bg_start: rgba(234, 243, 252, 210)
+  input_bg_end: rgba(225, 237, 250, 210)
+  input_focus_bg_start: rgba(234, 243, 252, 245)
+  input_focus_bg_end: rgba(225, 237, 250, 245)
+  input_text: '#0a1830'
+  input_focus_text: '#040a18'
+  input_border: '#b0c4da'
   input_focus_border: '#1d4ed8'
-  input_placeholder: rgba(15, 27, 58, 0.35)
+  input_placeholder: rgba(10, 24, 48, 0.35)
   glow_primary_alpha: 150
   glow_primary_blur: 24
   glow_ambient_alpha: 80
   glow_ambient_blur: 32
 
-  toolbar_strip_bg: rgba(240, 246, 252, 200)
-  toolbar_strip_border: '#c5d5e8'
+  toolbar_strip_bg: rgba(225, 237, 250, 210)
+  toolbar_strip_border: '#b0c4da'
   realtime_border: '#1d4ed8'
   realtime_accent: '#3b82f6'
   realtime_accent_warm: '#f59e0b'
   realtime_success: '#10b981'
   realtime_error: '#ef4444'
-  realtime_bg: rgba(240, 246, 252, 245)
-  realtime_text: '#0f1b3a'
-  realtime_text_secondary: rgba(15, 27, 58, 0.65)
+  realtime_bg: rgba(225, 237, 250, 248)
+  realtime_text: '#0a1830'
+  realtime_text_secondary: rgba(10, 24, 48, 0.65)
   realtime_tag_bg: rgba(29, 78, 216, 0.10)
   realtime_tag_border: rgba(29, 78, 216, 0.22)
-  system_border: '#c5d5e8'
+  system_border: '#b0c4da'
   system_accent: '#1d4ed8'
   send_btn_start: "#1d4ed8"
   send_btn_end: "#1e40af"
   send_btn_hover_start: "#3b82f6"
   send_btn_hover_end: "#1d4ed8"
   send_btn_radius: 17
-  timeline_node: '#b0c0d8'
+  timeline_node: '#a0b8d4'
   timeline_node_hover: '#1d4ed8'
   timeline_node_visible: '#10b981'
   timeline_node_selected: '#d97706'
-  timeline_line: '#dce4f0'
+  timeline_line: '#d6e0ee'
   timeline_line_progress: '#10b981'
   ring_normal: '#1d4ed8'
   ring_warning: '#d97706'
@@ -113,5 +113,5 @@ colors:
   ring_compacted: '#7c3aed'
   branch_label_bg: rgba(29, 78, 216, 0.10)
   branch_label_border: rgba(29, 78, 216, 0.22)
-  window_bg: rgba(29, 78, 216, 0.03)
+  window_bg: rgba(29, 78, 216, 0.04)
   input_glow_preset: "subtle"
