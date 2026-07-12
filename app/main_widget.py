@@ -4597,8 +4597,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+        api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
         snapshot = self.backend.get_context_usage_snapshot(
-            session, llm_config, api_prompt_tokens=api_prompt_tokens
+            session, llm_config,
+            api_prompt_tokens=api_prompt_tokens,
+            api_message_count=api_message_count,
         )
         ring.set_usage(
             snapshot.get("percent", 0),
@@ -12270,6 +12273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if session is not None:
             try:
                 session.last_api_prompt_tokens = token_count
+                session.last_api_message_count = len(session.messages)
             except Exception:
                 pass
         ring = getattr(self, "context_usage_ring", None)

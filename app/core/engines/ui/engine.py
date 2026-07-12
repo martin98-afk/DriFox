@@ -483,6 +483,7 @@ class UIEngine(BaseEngine):
         session: Optional[ChatSession] = None,
         llm_config: Optional[Dict] = None,
         api_prompt_tokens: int = 0,
+        api_message_count: int = 0,
     ) -> Dict[str, int]:
         session = session or self._session_manager.get_current_session()
         llm_config = llm_config or self._get_model_config()
@@ -587,11 +588,19 @@ class UIEngine(BaseEngine):
 
         # ---- 确定上下文占用量 ----
         # 优先使用 API 返回的精确 prompt_tokens 作为权威值；
+        # 若有 message_count 且新增了消息，估算增量：API值 + 新增消息估算
         # 若无 API 返回值（冷启动、无活跃对话），回退到本地估算。
         if api_prompt_tokens > 0:
-            used_tokens = api_prompt_tokens
-            # 按 API 真实值与本地估算的比例，等比缩放各 breakdown 分量，
-            # 保持视觉占比关系不变，总量锚定 API 真实值。
+            current_msg_count = len(session.messages)
+            if api_message_count > 0 and current_msg_count > api_message_count:
+                # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算
+                new_msgs = session.messages[api_message_count:]
+                delta = count_messages_tokens(new_msgs, model)
+                used_tokens = api_prompt_tokens + delta
+            else:
+                used_tokens = api_prompt_tokens
+            # 按最终总量与本地估算的比例，等比缩放 breakdown 分量，
+            # 保持视觉占比关系不变，总量锚定最终值。
             if est_total > 0:
                 scale = used_tokens / est_total
                 for b in breakdown:
