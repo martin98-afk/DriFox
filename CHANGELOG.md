@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.6] - 2026-07-12
 
-自上一版本以来的变更 | 提交数：10 · 文件变更：18 · +662/-188 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：11 · 文件变更：18 · +669/-188 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
