@@ -643,14 +643,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 stop_llm_api_service()
 
-        # 锁屏远程：若配置开启则自动生效（保持自动化任务持续运行），并注册 /lock-remote 命令
+        # 锁屏远程：若配置开启则自动生效（保持自动化任务持续运行），开关由设置 UI 控制
         try:
             from app.core.system.lock_screen_remote import (
                 get_lock_screen_remote_manager,
-                register_command_handler,
             )
 
-            register_command_handler()
             if self.cfg.lock_screen_remote_enabled.value:
                 get_lock_screen_remote_manager().enable(lock_now=True, keep_display_on=True)
         except Exception as e:
@@ -4611,10 +4609,16 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("compacted_tokens", 0),
             breakdown=snapshot.get("breakdown", []),
         )
-        # 卡片底部 token 显示与上下文圆环同步（同一快照 used_tokens）
+        # 防闪：流式期间 session.messages 可能尚未包含本轮新增消息（陈旧），快照
+        # used_tokens 会远小于 worker 实时 token_count，导致圆环/卡片闪现异常小的数值。
+        # 以 worker 实时值（last_api_prompt_tokens）作为权威总量下限，避免闪现。
+        used_for_display = snapshot.get("used_tokens", 0)
+        if api_prompt_tokens and used_for_display < api_prompt_tokens:
+            used_for_display = api_prompt_tokens
+        # 卡片底部 token 显示与上下文圆环同步（同一 used_tokens）
         card = getattr(self, "_current_assistant_card", None)
-        if card and snapshot.get("used_tokens", 0) > 0:
-            card.set_meta_info(token_usage={"total": snapshot["used_tokens"]})
+        if card and used_for_display > 0:
+            card.set_meta_info(token_usage={"total": used_for_display})
         self._last_context_refresh_time = now
 
     def _update_balance_display(self):
@@ -7462,13 +7466,27 @@ class OpenAIChatToolWindow(ToolWindow):
         if card.role != "assistant":
             return
         elapsed = None
-        token_usage = None
         for msg in batch:
             if msg.get("role") == "assistant":
                 if msg.get("elapsed") is not None:
                     elapsed = msg["elapsed"]
-                if msg.get("token_usage"):
-                    token_usage = msg["token_usage"]
+        # 卡片 token 显示与上下文圆环同步：直接用圆环快照的 used_tokens（同一来源），
+        # 不再读取落库的 msg["token_usage"]——后者是 worker 侧估算（可能基于压缩后的
+        # current_messages），会远小于圆环真实占用，导致重载后卡片显示异常小的数值。
+        used = getattr(self, "_reload_ctx_used_tokens", None)
+        _reload_sid = getattr(self, "_reload_ctx_sid", None)
+        session = self.session_manager.get_current_session()
+        sid = getattr(session, "session_id", None) if session else None
+        if used is None or _reload_sid != sid:
+            try:
+                used = self.backend.get_context_usage_snapshot(
+                    session, self._get_current_model_config()
+                ).get("used_tokens", 0)
+            except Exception:
+                used = 0
+            self._reload_ctx_used_tokens = used
+            self._reload_ctx_sid = sid
+        token_usage = {"total": used} if used > 0 else None
         if elapsed is not None or token_usage is not None:
             card.set_meta_info(elapsed=elapsed, token_usage=token_usage)
         # 延迟刷新分隔点：等父级布局完成后再检查 isVisible()，避免加载时父级隐藏导致误判

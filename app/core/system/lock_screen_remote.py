@@ -275,7 +275,7 @@ class LockScreenRemoteManager:
             self._reassert_timer = None
 
 
-# ───────────────────────── 单例与命令注册 ─────────────────────────
+# ───────────────────────── 单例 ─────────────────────────
 _manager_instance: Optional[LockScreenRemoteManager] = None
 
 
@@ -285,29 +285,3 @@ def get_lock_screen_remote_manager() -> LockScreenRemoteManager:
     if _manager_instance is None:
         _manager_instance = LockScreenRemoteManager()
     return _manager_instance
-
-
-def register_command_handler() -> None:
-    """注册 /lock-remote 命令，使其可通过 Gateway（手机）触发。"""
-    try:
-        from app.core.builtin_commands import FunctionCommandHandlers
-    except Exception as e:
-        logger.warning(f"[LockScreenRemote] 无法注册命令处理器: {e}")
-        return
-
-    def _handler(args: str) -> None:
-        mgr = get_lock_screen_remote_manager()
-        a = (args or "").strip().lower()
-        if a in ("", "on", "开", "开启", "enable", "start"):
-            mgr.enable(lock_now=True, keep_display_on=True)
-            logger.info("[LockScreenRemote] 命令触发：已开启")
-        elif a in ("off", "关", "关闭", "disable", "stop"):
-            mgr.disable()
-            logger.info("[LockScreenRemote] 命令触发：已关闭")
-        elif a in ("status", "状态"):
-            logger.info(f"[LockScreenRemote] 状态: {mgr.status()}")
-        else:
-            logger.info("[LockScreenRemote] 未知参数，用法: /lock-remote on|off|status")
-
-    FunctionCommandHandlers.register("lock-remote", _handler)
-    logger.info("[LockScreenRemote] 已注册 /lock-remote 命令")
